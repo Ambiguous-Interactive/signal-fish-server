@@ -22,7 +22,7 @@ struct RuntimeServerValidation<'a> {
     max_room_creations: u32,
     max_join_attempts: u32,
     max_signals: u32,
-    max_inbound_messages: u32,
+    max_inbound_error_replies: u32,
     inactive_room_timeout: Duration,
     max_message_size: usize,
     max_outbound_message_size: usize,
@@ -50,7 +50,7 @@ impl<'a> RuntimeServerValidation<'a> {
             max_room_creations: config.rate_limit.max_room_creations,
             max_join_attempts: config.rate_limit.max_join_attempts,
             max_signals: config.rate_limit.max_signals,
-            max_inbound_messages: config.rate_limit.max_inbound_messages,
+            max_inbound_error_replies: config.rate_limit.max_inbound_error_replies,
             inactive_room_timeout: Duration::from_secs(config.server.inactive_room_timeout),
             max_message_size: config.security.max_message_size,
             max_outbound_message_size: config.security.max_outbound_message_size,
@@ -78,7 +78,7 @@ impl<'a> RuntimeServerValidation<'a> {
             max_room_creations: config.rate_limit_config.max_room_creations,
             max_join_attempts: config.rate_limit_config.max_join_attempts,
             max_signals: config.rate_limit_config.max_signals,
-            max_inbound_messages: config.rate_limit_config.max_inbound_messages,
+            max_inbound_error_replies: config.rate_limit_config.max_inbound_error_replies,
             inactive_room_timeout: config.inactive_room_timeout,
             max_message_size: config.max_message_size,
             max_outbound_message_size: config.max_outbound_message_size,
@@ -274,10 +274,10 @@ impl<'a> RuntimeServerValidation<'a> {
                      WebRTC Signal message, so peers can never exchange connection candidates"
                 );
             }
-            if self.max_inbound_messages == 0 {
+            if self.max_inbound_error_replies == 0 {
                 anyhow::bail!(
-                    "rate_limit.max_inbound_messages must be greater than 0: a zero budget \
-                     closes every connection on its first inbound message"
+                    "rate_limit.max_inbound_error_replies must be greater than 0: a zero \
+                     budget closes every connection on its first rejected frame"
                 );
             }
             if self.max_relay_bytes == 0 {
@@ -1893,9 +1893,9 @@ mod tests {
                 |config| config.rate_limit.max_signals = 0,
             ),
             (
-                "rate_limit.max_inbound_messages",
-                "closes every connection on its first inbound message",
-                |config| config.rate_limit.max_inbound_messages = 0,
+                "rate_limit.max_inbound_error_replies",
+                "closes every connection on its first rejected frame",
+                |config| config.rate_limit.max_inbound_error_replies = 0,
             ),
             (
                 "server.max_rooms_per_game",

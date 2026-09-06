@@ -10,7 +10,7 @@ use crate::protocol::{
     ProtocolInfoPayload, RateLimitInfo, ServerMessage, Topology, Transport,
     PROTOCOL_INFO_TRANSPORT_WEBSOCKET, ROOM_OPERATION_IDS_CAPABILITY,
 };
-use crate::rate_limit::InboundMessageGate;
+use crate::rate_limit::ErrorReplyGate;
 use crate::server::{EnhancedGameServer, NegotiatedProtocol, RegisterClientError};
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
@@ -684,6 +684,48 @@ fn resolve_final_close_reason(
         Some(CloseReason::Shutdown) => Some(CloseReason::Shutdown),
         current_reason => observed_reason.or(current_reason),
     }
+}
+
+/// Charge the per-connection error-reply budget for one polite `Error` reply
+/// (issue #518). Returns `false` when the fixed window is exhausted: the
+/// caller must stop processing the frame — the farewell has been enqueued and
+/// the semantic `4006 inbound_rate_limited` close requested.
+fn charge_error_reply_budget(
+    gate: &mut ErrorReplyGate,
+    now: Instant,
+    server: &EnhancedGameServer,
+    tx: &OutboundSender,
+    close_signal: &ConnectionCloseSignal,
+    player_id: &PlayerId,
+    rate_config: &crate::rate_limit::RateLimitConfig,
+) -> bool {
+    if gate.charge(now) {
+        return true;
+    }
+    tracing::warn!(
+        %player_id,
+        budget = rate_config.max_inbound_error_replies,
+        window_secs = rate_config.time_window.as_secs(),
+        "Inbound error-reply rate limit exceeded, closing connection"
+    );
+    server
+        .metrics()
+        .record_rate_limit_rejection(crate::metrics::RateLimitRejection::InboundErrorReply);
+    // The budget-exhaustion farewell uses this connection's own outbound
+    // channel and never waits for capacity. The semantic close reason is
+    // pinned before generic unregistration can win.
+    enqueue_farewell_message(
+        tx,
+        close_signal,
+        player_id,
+        ServerMessage::Error {
+            message: "Inbound error-reply rate limit exceeded".to_string(),
+            error_code: Some(ErrorCode::RateLimitExceeded),
+        },
+        "inbound error-reply rate limit error",
+    );
+    close_signal.request_close(CloseReason::InboundRateLimited);
+    false
 }
 
 fn close_frame_reason_for_server(
@@ -1967,12 +2009,15 @@ pub(super) async fn handle_socket(
         let idle_timeout_secs = server_clone.config().websocket_config.idle_timeout_secs;
         let idle_timeout = (idle_timeout_secs > 0).then(|| Duration::from_secs(idle_timeout_secs));
 
-        // Per-connection inbound budget (issue #518): every text/binary frame
-        // charges before parsing, so garbage frames cannot buy unbounded
-        // error replies or CPU on this connection.
+        // Per-connection error-reply budget (issue #518): every inbound frame
+        // the loop answers with a polite `Error` reply charges the gate, so
+        // one attacker write cannot buy unbounded replies; admitted traffic
+        // never touches it (each message kind carries its own budget).
         let rate_config = server_clone.config().rate_limit_config.clone();
-        let mut inbound_gate =
-            InboundMessageGate::new(rate_config.max_inbound_messages, rate_config.time_window);
+        let mut error_reply_gate = ErrorReplyGate::new(
+            rate_config.max_inbound_error_replies,
+            rate_config.time_window,
+        );
 
         loop {
             let inbound_deadline = InboundDeadline::for_connection(
@@ -2042,40 +2087,22 @@ pub(super) async fn handle_socket(
                 None
             };
 
-            if matches!(msg, Message::Text(_) | Message::Binary(_))
-                && !inbound_gate.admit(received_at)
-            {
-                tracing::warn!(
-                    %active_player_id,
-                    budget = rate_config.max_inbound_messages,
-                    window_secs = rate_config.time_window.as_secs(),
-                    "Inbound message rate limit exceeded, closing connection"
-                );
-                server_clone.metrics().record_rate_limit_rejection(
-                    crate::metrics::RateLimitRejection::InboundMessage,
-                );
-                // The budget-exhaustion farewell uses this connection's own
-                // outbound channel and never waits for capacity. The semantic
-                // close reason is pinned before generic unregistration can win.
-                enqueue_farewell_message(
-                    &tx_clone,
-                    &close_signal,
-                    &active_player_id,
-                    ServerMessage::Error {
-                        message: "Inbound message rate limit exceeded".to_string(),
-                        error_code: Some(ErrorCode::RateLimitExceeded),
-                    },
-                    "inbound rate limit error",
-                );
-                close_signal.request_close(CloseReason::InboundRateLimited);
-                break;
-            }
-
             match msg {
                 Message::Text(text) => {
                     // Check message size limit
                     let max_size = server_clone.config().max_message_size;
                     if text.len() > max_size {
+                        if !charge_error_reply_budget(
+                            &mut error_reply_gate,
+                            received_at,
+                            &server_clone,
+                            &tx_clone,
+                            &close_signal,
+                            &active_player_id,
+                            &rate_config,
+                        ) {
+                            break;
+                        }
                         tracing::warn!(
                             %active_player_id,
                             size = text.len(),
@@ -2121,6 +2148,17 @@ pub(super) async fn handle_socket(
                             }
                             // Connection stays alive: the rejection notice
                             // rides the reliable delivery path.
+                            if !charge_error_reply_budget(
+                                &mut error_reply_gate,
+                                received_at,
+                                &server_clone,
+                                &tx_clone,
+                                &close_signal,
+                                &active_player_id,
+                                &rate_config,
+                            ) {
+                                break;
+                            }
                             let _ = server_clone
                                 .send_error_to_player(
                                     &active_player_id,
@@ -2146,6 +2184,17 @@ pub(super) async fn handle_socket(
                             if server_clone.config().app_id_allowlist_enabled
                                 && app_handshake_complete
                             {
+                                if !charge_error_reply_budget(
+                                    &mut error_reply_gate,
+                                    received_at,
+                                    &server_clone,
+                                    &tx_clone,
+                                    &close_signal,
+                                    &active_player_id,
+                                    &rate_config,
+                                ) {
+                                    break;
+                                }
                                 tracing::warn!(%active_player_id, "App-ID handshake already completed");
                                 let _ = server_clone
                                     .send_error_to_player(
@@ -2167,6 +2216,17 @@ pub(super) async fn handle_socket(
                                 // `authenticate_processed` survives a reconnect
                                 // identity swap, so this refusal also covers a
                                 // re-Authenticate on an already-swapped socket.
+                                if !charge_error_reply_budget(
+                                    &mut error_reply_gate,
+                                    received_at,
+                                    &server_clone,
+                                    &tx_clone,
+                                    &close_signal,
+                                    &active_player_id,
+                                    &rate_config,
+                                ) {
+                                    break;
+                                }
                                 let refusal = if authenticate_processed {
                                     "Authenticate already completed on this connection"
                                 } else {
@@ -2635,6 +2695,17 @@ pub(super) async fn handle_socket(
                             %active_player_id,
                             "Client negotiated JSON game data but sent binary payload; dropping"
                         );
+                        if !charge_error_reply_budget(
+                            &mut error_reply_gate,
+                            received_at,
+                            &server_clone,
+                            &tx_clone,
+                            &close_signal,
+                            &active_player_id,
+                            &rate_config,
+                        ) {
+                            break;
+                        }
                         let _ = server_clone
                             .send_error_to_player(
                                 &active_player_id,

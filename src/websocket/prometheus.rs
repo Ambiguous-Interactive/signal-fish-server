@@ -359,9 +359,9 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     );
     counter(
         &mut buf,
-        "signal_fish_rate_limit_inbound_message_rejections_total",
-        "Connections closed for exhausting their per-window inbound application-message budget",
-        snapshot.rate_limiting.inbound_message_rejections,
+        "signal_fish_rate_limit_inbound_error_reply_rejections_total",
+        "Connections closed for exhausting their per-window inbound error-reply budget",
+        snapshot.rate_limiting.inbound_error_reply_rejections,
     );
     counter(
         &mut buf,

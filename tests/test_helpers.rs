@@ -199,7 +199,7 @@ pub fn test_server_config() -> ServerConfig {
             max_join_attempts: 20,
             max_signals: 600,
             max_signal_errors: 60,
-            max_inbound_messages: 10_000, // Generous for tests
+            max_inbound_error_replies: 10_000, // Generous for tests
             max_relay_bytes: 256 * 1024 * 1024,
             max_room_relay_bytes: 1024 * 1024 * 1024,
         },

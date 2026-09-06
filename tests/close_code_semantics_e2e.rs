@@ -393,25 +393,26 @@ async fn idle_timeout_closes_with_4004() {
     running_server.shutdown().await;
 }
 
-/// A connection that exhausts `rate_limit.max_inbound_messages` inside one
-/// window is closed with `4006 inbound_rate_limited` (issue #518). Frames
-/// are counted before parsing, so garbage frames spend the same budget as
-/// valid ones: one connection can no longer buy unbounded 1:1 error replies.
+/// A connection that exhausts `rate_limit.max_inbound_error_replies` inside
+/// one window is closed with `4006 inbound_rate_limited` (issue #518). Only
+/// frames the server answers with a polite `Error` reply charge the gate, so
+/// one attacker write can no longer buy unbounded 1:1 error replies — while
+/// admitted traffic (which carries its own budgets) is never gated.
 #[tokio::test]
 async fn inbound_rate_limit_exhaustion_closes_with_4006() {
     let mut config = base_config();
-    config.rate_limit_config.max_inbound_messages = 3;
+    config.rate_limit_config.max_inbound_error_replies = 3;
     let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
     let running_server = start_server(server).await;
     let addr = running_server.addr();
 
     let mut ws = connect(addr).await;
-    // The Authenticate frame itself spends the first budget slot: every
-    // application frame counts, valid or not.
+    // A successful Authenticate produces no error reply, so it does NOT
+    // charge the gate; only rejected frames do.
     authenticate(&mut ws).await;
 
     let garbage = Message::Text("not json at all".into());
-    for _ in 0..2 {
+    for _ in 0..3 {
         ws.send(garbage.clone())
             .await
             .expect("send garbage frame while budget admits it");
@@ -429,12 +430,12 @@ async fn inbound_rate_limit_exhaustion_closes_with_4006() {
     running_server.shutdown().await;
 }
 
-/// A connection under its inbound budget is never disconnected by the gate:
-/// the cap bounds nuisance traffic, not honest clients.
+/// A connection under its error-reply budget is never disconnected by the
+/// gate: the cap bounds amplified rejections, not honest clients.
 #[tokio::test]
 async fn inbound_frames_under_the_budget_leave_the_connection_open() {
     let mut config = base_config();
-    config.rate_limit_config.max_inbound_messages = 5;
+    config.rate_limit_config.max_inbound_error_replies = 5;
     let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
     let running_server = start_server(server).await;
     let addr = running_server.addr();

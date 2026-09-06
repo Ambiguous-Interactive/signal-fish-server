@@ -1819,7 +1819,7 @@ Fields:
 - `deadline_ms` - Unix epoch millisecond time at or before which the server will
   close the socket with `4000 server_shutdown`.
 - `retry_after_secs` - optional operator hint: the earliest safe reconnect
-  attempt against the *deployment*, not this instance. It is
+  attempt against the _deployment_, not this instance. It is
   omitted when the drain is configured for immediate close.
 
 The close frame is authoritative. A v3 client may miss `GoingAway` if its socket

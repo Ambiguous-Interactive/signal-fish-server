@@ -22,7 +22,7 @@
     "max_join_attempts": 20,
     "max_signals": 600,
     "max_signal_errors": 60,
-    "max_inbound_messages": 3000
+    "max_inbound_error_replies": 3000
   },
   "protocol": {
     "max_game_name_length": 64,

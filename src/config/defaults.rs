@@ -47,14 +47,14 @@ pub const fn default_max_rooms_per_game() -> usize {
     1000
 }
 
-/// Per-connection inbound application-message budget per 60-second window
-/// (issue #518). Bounds the 1:1 malformed-frame error-reply amplification and
-/// per-frame CPU a single connection can force: every text/binary frame is
-/// counted before parsing, and an exhausted budget closes the connection
-/// (`4006 inbound_rate_limited`). 3,000 per window (~50/s sustained) is
-/// generous for honest game clients -- the signal budget alone is 600 -- while
-/// still bounding nuisance traffic.
-pub const fn default_max_inbound_messages() -> u32 {
+/// Per-connection inbound error-reply budget per 60-second window
+/// (issue #518). Bounds the 1:1 amplification where one attacker frame buys
+/// one polite server error reply (malformed JSON, oversized text, wrong-state
+/// refusals); admitted traffic never touches this gate because every message
+/// kind carries its own budget. 3,000 per window (~50 rejected frames/s
+/// sustained) is unreachable for any honest client while still bounding
+/// nuisance amplification.
+pub const fn default_max_inbound_error_replies() -> u32 {
     3000
 }
 

@@ -78,7 +78,7 @@ pub(crate) fn configure_accepted_socket(stream: &TcpStream) {
 /// `axum::serve` consumers; the production server, `run_server`, and the
 /// integration-test harness instead use
 /// [`serve_with_http_header_deadline`], which applies the identical
-/// [`configure_accepted_socket`] per accepted stream — so every path shares
+/// `configure_accepted_socket` per accepted stream — so every path shares
 /// accepted-socket semantics and a regression in the nodelay wiring fails
 /// tests instead of silently shipping (issue #197).
 pub fn bind_serve_listener(

@@ -82,8 +82,8 @@ credentials. Native remote configurations relied on those inherited values, and
 the old diagnostic stopped before the notification failure reported by Codex.
 The inherited key matched `.env.local` during this investigation, so missing
 credentials do not explain the reported failure in this session. That key passed
-the complete direct HTTP handshake and all four shared launcher checks; the original frontend transport failure was not independently
-reproduced. The shared launcher removes both the stale environment dependency
+the complete direct HTTP handshake and all four shared launcher checks; the original frontend transport failure was not
+independently reproduced. The shared launcher removes both the stale environment dependency
 and frontend-specific HTTP handling. A valid key and Z.AI account access remain
 required.
 

@@ -14,12 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Denials reuse the `MAX_ROOMS_PER_GAME_EXCEEDED` wire code.
   **Breaking (Rust API):** `Database` implementors must now override the new
   fail-closed `get_total_room_count` query for room creation to work.
-- `rate_limit.max_inbound_messages` (default 3000 per window): per-connection
-  inbound application-message budget counted before parsing, closing
-  budget-exhausted connections with the new close code `4006
-  inbound_rate_limited` after a best-effort `RATE_LIMIT_EXCEEDED` error
-  frame; rejections export as
-  `signal_fish_rate_limit_inbound_message_rejections_total`.
+- `rate_limit.max_inbound_error_replies` (default 3000 per window):
+  per-connection budget on polite error replies (malformed, oversized, or
+  wrong-state inbound frames), closing budget-exhausted connections with the
+  new close code `4006 inbound_rate_limited` after a best-effort
+  `RATE_LIMIT_EXCEEDED` error frame. Admitted traffic is untouched — every
+  message kind keeps its own budget — so honest high-throughput clients are
+  never gated; rejections export as
+  `signal_fish_rate_limit_inbound_error_reply_rejections_total`.
 - `websocket.http_header_read_timeout_secs` (default 10): pre-upgrade HTTP
   header-read deadline, now armed explicitly on both the plain and TLS serve
   paths (hyper's 30s default was silently inert without an explicit timer).

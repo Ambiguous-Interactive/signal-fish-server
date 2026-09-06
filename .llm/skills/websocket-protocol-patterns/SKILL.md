@@ -251,7 +251,8 @@ Real-time relay frames are small and latency-sensitive. Two defaults protect the
 
 ## Agent Checklist
 
-- [ ] Accepted sockets set `TCP_NODELAY` via `serve_with_http_header_deadline` / `bind_serve_listener` / `ConfiguredAcceptor` (no Nagle stalls)
+- [ ] Accepted sockets set `TCP_NODELAY` via the shared `configure_accepted_socket` seam
+      (`serve_with_http_header_deadline`, `bind_serve_listener`, `ConfiguredAcceptor`; no Nagle stalls)
 - [ ] Batching is opt-in; the batch timer never delays latency-sensitive traffic — only `Latest` waits to coalesce
 - [ ] WebSocket upgrade validates auth before upgrading when possible
 - [ ] Heartbeat ping-pong runs at regular intervals with client timeout

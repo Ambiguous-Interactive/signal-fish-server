@@ -3,7 +3,7 @@
 use super::defaults::{
     default_drain_grace_secs, default_empty_room_timeout, default_enable_reconnection,
     default_event_buffer_size, default_heartbeat_throttle_secs, default_inactive_room_timeout,
-    default_max_inbound_messages, default_max_join_attempts, default_max_players,
+    default_max_inbound_error_replies, default_max_join_attempts, default_max_players,
     default_max_relay_bytes, default_max_room_creations, default_max_room_relay_bytes,
     default_max_rooms, default_max_rooms_per_game, default_max_signal_errors, default_max_signals,
     default_ping_timeout, default_rate_limit_time_window, default_reconnection_window,
@@ -118,13 +118,16 @@ pub struct RateLimitConfig {
     /// zero): a zero budget suppresses every detailed rejection immediately.
     #[serde(default = "default_max_signal_errors")]
     pub max_signal_errors: u32,
-    /// Per-connection inbound application-message budget per time window
-    /// (text or binary, counted before parsing so malformed frames count).
-    /// Exceeding it closes the connection with `4006 inbound_rate_limited`.
-    /// Must be `> 0` on the binary config path (startup validation rejects
-    /// zero): a zero budget closes every connection on its first message.
-    #[serde(default = "default_max_inbound_messages")]
-    pub max_inbound_messages: u32,
+    /// Per-connection inbound error-reply budget per time window: how many
+    /// inbound frames the server will answer with a polite `Error` reply
+    /// (malformed, oversized, wrong-state) before closing the connection
+    /// with `4006 inbound_rate_limited`. Admitted traffic is bounded by its
+    /// own per-kind budgets, so this gate only ever binds amplified
+    /// rejections. Must be `> 0` on the binary config path (startup
+    /// validation rejects zero): a zero budget closes every connection on
+    /// its first rejected frame.
+    #[serde(default = "default_max_inbound_error_replies")]
+    pub max_inbound_error_replies: u32,
     /// Per-sender game-data relay byte budget per time window. Must be `> 0`
     /// on the binary config path (startup validation rejects zero): a zero
     /// budget rejects every relayed game-data frame, so peers can never
@@ -146,7 +149,7 @@ impl Default for RateLimitConfig {
             max_join_attempts: default_max_join_attempts(),
             max_signals: default_max_signals(),
             max_signal_errors: default_max_signal_errors(),
-            max_inbound_messages: default_max_inbound_messages(),
+            max_inbound_error_replies: default_max_inbound_error_replies(),
             max_relay_bytes: default_max_relay_bytes(),
             max_room_relay_bytes: default_max_room_relay_bytes(),
         }

@@ -4526,7 +4526,7 @@ mod relay_projection_cache_tests {
                 max_join_attempts: 0,
                 max_signals: 0,
                 max_signal_errors: 0,
-                max_inbound_messages: 0,
+                max_inbound_error_replies: 0,
                 time_window: Duration::from_secs(60),
                 max_relay_bytes: 0,
                 max_room_relay_bytes: 0,

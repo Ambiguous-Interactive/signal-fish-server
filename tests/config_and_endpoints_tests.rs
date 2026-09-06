@@ -158,8 +158,8 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("60"),
     },
     ConfigReferenceRow {
-        env: "SIGNAL_FISH__RATE_LIMIT__MAX_INBOUND_MESSAGES",
-        path: "rate_limit.max_inbound_messages",
+        env: "SIGNAL_FISH__RATE_LIMIT__MAX_INBOUND_ERROR_REPLIES",
+        path: "rate_limit.max_inbound_error_replies",
         default: Some("3000"),
     },
     ConfigReferenceRow {
@@ -1011,7 +1011,7 @@ fn test_config_example_includes_all_rate_limit_fields() {
         "max_join_attempts",
         "max_signals",
         "max_signal_errors",
-        "max_inbound_messages",
+        "max_inbound_error_replies",
     ] {
         assert!(
             rate_limit.contains_key(key),
@@ -1023,7 +1023,7 @@ fn test_config_example_includes_all_rate_limit_fields() {
         serde_json::from_str(&content).expect("config.example.json must parse as Config");
     assert_eq!(config.rate_limit.max_signals, 600);
     assert_eq!(config.rate_limit.max_signal_errors, 60);
-    assert_eq!(config.rate_limit.max_inbound_messages, 3000);
+    assert_eq!(config.rate_limit.max_inbound_error_replies, 3000);
     assert_eq!(config.logging.format, LogFormat::Json);
     assert_eq!(
         value.pointer("/logging/format"),
@@ -1607,7 +1607,7 @@ async fn test_metrics_endpoint_no_auth_required() {
         dashboard_keys,
         [
             "auth_rejections",
-            "inbound_message_rejections",
+            "inbound_error_reply_rejections",
             "join_attempt_rejections",
             "relay_bandwidth_rejections",
             "relay_room_bandwidth_rejections",
@@ -1627,7 +1627,7 @@ async fn test_metrics_endpoint_no_auth_required() {
         snapshot_keys,
         [
             "auth_rejections",
-            "inbound_message_rejections",
+            "inbound_error_reply_rejections",
             "join_attempt_rejections",
             "rate_limit_rejections",
             "relay_bandwidth_rejections",

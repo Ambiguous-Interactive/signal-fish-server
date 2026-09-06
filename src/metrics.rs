@@ -203,7 +203,7 @@ pub struct ServerMetrics {
     pub rate_limit_signal_error_rejections: AtomicU64,
     pub rate_limit_relay_bandwidth_rejections: AtomicU64,
     pub rate_limit_relay_room_bandwidth_rejections: AtomicU64,
-    pub rate_limit_inbound_message_rejections: AtomicU64,
+    pub rate_limit_inbound_error_reply_rejections: AtomicU64,
 
     // Player activity metrics
     pub players_joined: AtomicU64,
@@ -336,9 +336,9 @@ pub enum RateLimitRejection {
     /// per-window byte ceiling (`rate_limit.max_room_relay_bytes`,
     /// issue #530).
     RelayRoomBandwidth,
-    /// A connection exhausted its per-window inbound application-message
-    /// budget (`rate_limit.max_inbound_messages`, issue #518) and was closed.
-    InboundMessage,
+    /// A connection exhausted its per-window inbound error-reply budget
+    /// (`rate_limit.max_inbound_error_replies`, issue #518) and was closed.
+    InboundErrorReply,
 }
 
 #[derive(Debug, Clone)]
@@ -522,9 +522,9 @@ pub struct RateLimitingMetrics {
     /// Frames rejected because the relaying room's aggregate byte ceiling
     /// was exhausted (issue #530).
     pub relay_room_bandwidth_rejections: u64,
-    /// Connections closed for exhausting their inbound application-message
-    /// budget (issue #518).
-    pub inbound_message_rejections: u64,
+    /// Connections closed for exhausting their inbound error-reply budget
+    /// (issue #518).
+    pub inbound_error_reply_rejections: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -670,7 +670,7 @@ impl ServerMetrics {
             rate_limit_signal_error_rejections: AtomicU64::new(0),
             rate_limit_relay_bandwidth_rejections: AtomicU64::new(0),
             rate_limit_relay_room_bandwidth_rejections: AtomicU64::new(0),
-            rate_limit_inbound_message_rejections: AtomicU64::new(0),
+            rate_limit_inbound_error_reply_rejections: AtomicU64::new(0),
             players_joined: AtomicU64::new(0),
             players_left: AtomicU64::new(0),
             authority_transfers: AtomicU64::new(0),
@@ -1170,7 +1170,9 @@ impl ServerMetrics {
             RateLimitRejection::RelayRoomBandwidth => {
                 &self.rate_limit_relay_room_bandwidth_rejections
             }
-            RateLimitRejection::InboundMessage => &self.rate_limit_inbound_message_rejections,
+            RateLimitRejection::InboundErrorReply => {
+                &self.rate_limit_inbound_error_reply_rejections
+            }
         };
         counter.fetch_add(1, Ordering::Relaxed);
     }
@@ -1571,8 +1573,8 @@ impl ServerMetrics {
                 let relay_room_bandwidth_rejections = self
                     .rate_limit_relay_room_bandwidth_rejections
                     .load(Ordering::Relaxed);
-                let inbound_message_rejections = self
-                    .rate_limit_inbound_message_rejections
+                let inbound_error_reply_rejections = self
+                    .rate_limit_inbound_error_reply_rejections
                     .load(Ordering::Relaxed);
                 let rate_limit_rejections = auth_rejections
                     .saturating_add(room_creation_rejections)
@@ -1581,7 +1583,7 @@ impl ServerMetrics {
                     .saturating_add(signal_error_rejections)
                     .saturating_add(relay_bandwidth_rejections)
                     .saturating_add(relay_room_bandwidth_rejections)
-                    .saturating_add(inbound_message_rejections);
+                    .saturating_add(inbound_error_reply_rejections);
 
                 RateLimitingMetrics {
                     rate_limit_rejections,
@@ -1592,7 +1594,7 @@ impl ServerMetrics {
                     signal_error_rejections,
                     relay_bandwidth_rejections,
                     relay_room_bandwidth_rejections,
-                    inbound_message_rejections,
+                    inbound_error_reply_rejections,
                 }
             },
             players: PlayerMetrics {

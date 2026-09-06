@@ -224,7 +224,7 @@ async fn main() -> anyhow::Result<()> {
             max_join_attempts: cfg.rate_limit.max_join_attempts,
             max_signals: cfg.rate_limit.max_signals,
             max_signal_errors: cfg.rate_limit.max_signal_errors,
-            max_inbound_messages: cfg.rate_limit.max_inbound_messages,
+            max_inbound_error_replies: cfg.rate_limit.max_inbound_error_replies,
             max_relay_bytes: cfg.rate_limit.max_relay_bytes,
             max_room_relay_bytes: cfg.rate_limit.max_room_relay_bytes,
         },

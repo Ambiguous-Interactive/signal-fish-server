@@ -129,7 +129,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__RATE_LIMIT__TIME_WINDOW` | `rate_limit.time_window` | `60` | Rate limit window in seconds (must be > 0) |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_JOIN_ATTEMPTS` | `rate_limit.max_join_attempts` | `20` | Shared max room-creation, seated-join, and spectator-join attempts per player per window (must be > 0) |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNALS` | `rate_limit.max_signals` | `600` | Max validated WebRTC Signal dispatch attempts per player per window (must be > 0) |
-| `SIGNAL_FISH__RATE_LIMIT__MAX_INBOUND_MESSAGES` | `rate_limit.max_inbound_messages` | `3000` | Per-connection inbound application-message budget per window; exhausting it closes the connection with `4006 inbound_rate_limited` (must be > 0) |
+| `SIGNAL_FISH__RATE_LIMIT__MAX_INBOUND_ERROR_REPLIES` | `rate_limit.max_inbound_error_replies` | `3000` | Per-connection inbound error-reply budget per window; exhausting it closes the connection with `4006 inbound_rate_limited` (must be > 0) |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_SIGNAL_ERRORS` | `rate_limit.max_signal_errors` | `60` | Detailed WebRTC rejection errors per player per window before generic rate-limit errors |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_RELAY_BYTES` | `rate_limit.max_relay_bytes` | `268435456` | Per-sender game-data relay byte budget per window (sender-controlled payload bytes; must be > 0) |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_ROOM_RELAY_BYTES` | `rate_limit.max_room_relay_bytes` | `1073741824` | Per-room aggregate game-data relay byte ceiling per window (sender-controlled payload bytes; must be > 0) |
@@ -257,7 +257,7 @@ and the authenticated WebSocket relay floor remains available independently.
     "max_join_attempts": 20,
     "max_signals": 600,
     "max_signal_errors": 60,
-    "max_inbound_messages": 3000
+    "max_inbound_error_replies": 3000
   },
   "logging": {
     "enable_file_logging": true,
@@ -294,9 +294,10 @@ and the authenticated WebSocket relay floor remains available independently.
   per player per time window (must be > 0)
 - `max_signals` - Max validated WebRTC Signal dispatch attempts per player per time window (must be > 0)
 - `max_signal_errors` - Detailed rejected-signal errors per player per window before generic rate-limit errors
-- `max_inbound_messages` - Per-connection inbound application-message budget per time window,
-  counted before parsing (malformed frames count). Exhausting it closes the connection with
-  `4006 inbound_rate_limited` (must be > 0)
+- `max_inbound_error_replies` - Per-connection inbound error-reply budget per time window:
+  how many inbound frames the server answers with a polite `Error` reply (malformed, oversized,
+  wrong-state) before closing the connection with `4006 inbound_rate_limited`. Admitted traffic
+  is bounded by its own per-kind budgets, so only amplified rejections hit this gate (must be > 0)
 - `time_window` - Rate limit window in seconds
 
 These budgets use **fixed-window** accounting: a player's counters reset to

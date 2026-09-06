@@ -940,7 +940,7 @@ async fn test_custom_rate_limiting() {
             max_join_attempts: 2,
             max_signals: 600,
             max_signal_errors: 60,
-            max_inbound_messages: 10_000,
+            max_inbound_error_replies: 10_000,
             max_relay_bytes: 256 * 1024 * 1024,
             max_room_relay_bytes: 1024 * 1024 * 1024,
         },

@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
             max_join_attempts: cfg.rate_limit.max_join_attempts,
             max_signals: cfg.rate_limit.max_signals,
             max_signal_errors: cfg.rate_limit.max_signal_errors,
-            max_inbound_messages: cfg.rate_limit.max_inbound_messages,
+            max_inbound_error_replies: cfg.rate_limit.max_inbound_error_replies,
         },
         empty_room_timeout: Duration::from_secs(cfg.server.empty_room_timeout),
         inactive_room_timeout: Duration::from_secs(cfg.server.inactive_room_timeout),
