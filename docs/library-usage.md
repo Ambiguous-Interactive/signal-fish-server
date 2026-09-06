@@ -330,7 +330,12 @@ signal-fish-server = { version = "0.8.0", features = ["tls", "legacy-fullmesh"] 
 Available features:
 
 - `tls` - Built-in TLS/mTLS support
-- `legacy-fullmesh` - Upstream matchbox full-mesh signaling mode
+- `legacy-fullmesh` - Upstream matchbox full-mesh signaling mode. **Dangerous
+  if exposed**: it carries none of the main service's controls — no
+  authentication, no app allowlist, no rate limits, no telemetry, and no
+  graceful shutdown (a matchbox 0.14 limitation). It binds the main port + 1.
+  It must never face the public internet in hosted deployments; use it only
+  for local interop testing against legacy matchbox clients.
 
 ## Testing
 

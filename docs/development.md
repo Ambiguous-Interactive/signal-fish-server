@@ -126,7 +126,8 @@ Optimized and stripped for production.
 # TLS support
 cargo build --features tls
 
-# Legacy full-mesh mode
+# Legacy full-mesh mode (UNAUTHENTICATED, unguarded; local interop testing only,
+# never expose to the public internet)
 cargo build --features legacy-fullmesh
 
 # All features

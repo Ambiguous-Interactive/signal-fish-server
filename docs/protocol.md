@@ -16,6 +16,22 @@ Illustrative v2 examples and canonical, machine-checked v3 wire samples:
 - v3 server messages (canonical wire frames):
   <https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/.llm/code-samples/protocol/v3-server-messages.jsonl>
 
+## Protocol Version Lifecycle
+
+- **v2 (relay floor)** — supported. New protocol features are v3-only and are
+  never required for a v2 client to connect, signal, and relay. Some v3
+  capabilities have no v2 surface at all: reconnection tokens, for example,
+  are pre-issued only to v3+ recipients, so a v2 `Reconnect` frame cannot
+  succeed against an honest client state (the message stays in the v2 floor
+  for envelope compatibility only).
+- **v3 (current)** — the current protocol version, negotiated through the
+  optional `Authenticate.protocol_version` handshake with capability flags.
+  All new features ship here.
+- **End-of-life policy** — a protocol version is deprecated only by an
+  explicit, documented release-notes announcement that names the removal
+  release (or release window) and the migration path. No version is removed
+  silently, and no deprecation exists today.
+
 ## Client Messages
 
 ### Authenticate
@@ -1541,7 +1557,11 @@ Generate a UUID that is unique among live and recently completed operations on t
 The `operation_id` text must use lowercase hyphenated canonical UUID form; any other encoding is rejected as a
 malformed frame.
 The scope continues across a successful `Reconnect` on that socket, while a new physical connection starts a new
-scope. The server echoes IDs but does not deduplicate requests or make them idempotent. Autonomous lifecycle events
+scope. The server echoes IDs but does not deduplicate requests or make them idempotent: duplicate operations MAY
+re-execute and re-apply their effects, so senders SHOULD correlate `operation_id` values and deduplicate on their
+side, and every new operation added to `RoomOperationRequest` MUST establish its own server-side replay guard
+(today: `ALREADY_IN_ROOM` and the seat-fill gate).
+Autonomous lifecycle events
 (for example, disconnect-driven `SpectatorLeft`) remain top-level and never impersonate an operation result.
 As with every WebSocket response, a connection close, shutdown drain, or terminal slow-consumer eviction can prevent
 the envelope from reaching the client; a missing result is not permission to reuse the UUID or assume the command did
@@ -1798,7 +1818,8 @@ Fields:
 
 - `deadline_ms` - Unix epoch millisecond time at or before which the server will
   close the socket with `4000 server_shutdown`.
-- `retry_after_secs` - optional operator hint for reconnect backoff. It is
+- `retry_after_secs` - optional operator hint: the earliest safe reconnect
+  attempt against the *deployment*, not this instance. It is
   omitted when the drain is configured for immediate close.
 
 The close frame is authoritative. A v3 client may miss `GoingAway` if its socket
@@ -1806,6 +1827,9 @@ is already congested, and v2 clients never receive the advisory. In both cases,
 `4000 server_shutdown` is the shutdown signal. A shutdown drain does not preserve
 room/reconnect state on this single-instance server; clients should not attempt
 to claim a stored reconnection token after observing `GoingAway` or `4000`.
+Because state does not survive a restart, `retry_after_secs` must not be read
+as "sleep, then reconnect to this same instance": reconnect to another healthy
+instance of the deployment and build a fresh room.
 
 ### Topology / transport selection ladder
 

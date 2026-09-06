@@ -325,6 +325,15 @@ async fn main() -> anyhow::Result<()> {
         // port with a loud error and a working main server instead.
         match legacy_fullmesh_addr(port) {
             Some(legacy_addr) => {
+                // Guardrail (#526): the legacy plane carries none of the main
+                // service's admission controls. Say so at startup so an
+                // operator who compiled it in cannot miss what they exposed.
+                tracing::warn!(
+                    %legacy_addr,
+                    "legacy fullmesh: UNAUTHENTICATED full-mesh relay on a permissive CORS \
+                     surface — no app allowlist, no rate limits, no telemetry, no graceful \
+                     shutdown; it must never face the public internet in hosted deployments"
+                );
                 let legacy_server =
                     matchbox_signaling::SignalingServer::full_mesh_builder(legacy_addr)
                         .cors()
