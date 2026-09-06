@@ -467,7 +467,9 @@ pub struct EnhancedGameServer {
     metrics_rejection_log: crate::websocket::RejectionLogThrottle,
     /// Rate-limits metrics-response truncation warnings so a persistently
     /// oversized snapshot or game-name map cannot log per dashboard poll
-    /// (issue #518).
+    /// (issue #518). One quiet period is shared across truncation sites by
+    /// design: events are rare, the response markers carry the details, and
+    /// each site logs a distinct reason string.
     metrics_truncation_log: crate::websocket::RejectionLogThrottle,
     /// Rate-limits rejected-upgrade warnings per source so anonymous request
     /// loops cannot amplify operator log volume (issue #411).

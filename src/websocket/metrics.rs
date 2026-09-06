@@ -142,20 +142,21 @@ pub struct MetricsQuery {
 /// The raw snapshot includes per-identity maps (slow-consumer eviction
 /// attributions, per-app relay bytes) whose size grows with live traffic. The
 /// endpoint is bearer-token-gated, but if metrics auth is ever relaxed the
-/// snapshot echo must not become an information-disclosure firehose or an
-/// unbounded response-size amplifier (issue #518). A snapshot above this cap
-/// is replaced by a small truncation marker; the rest of the response is
-/// bounded separately (the dashboard history is capped, and the game-name
-/// maps below are entry-capped).
+/// snapshot echo must not become an unbounded disclosure and response-size
+/// amplifier (issue #518). A snapshot above this cap is replaced by a small
+/// truncation marker. The rest of the response is bounded too: dashboard
+/// history is capped in sample count by config, and every game-name map
+/// (current view and per-sample) is entry-capped below.
 const METRICS_SNAPSHOT_MAX_BYTES: usize = 128 * 1024;
 
 /// Maximum number of game-name entries kept in a game-name-keyed map of the
-/// `/metrics` response (`roomsByGame`, `gamePercentiles`).
+/// `/metrics` response (`roomsByGame`, `gamePercentiles`, and the same fields
+/// in each `dashboardCache.history` sample).
 ///
 /// Game names are client-chosen, so these maps can grow to one entry per live
 /// game name. When more entries exist, the map keeps the first
 /// [`METRICS_GAME_MAP_ENTRY_CAP`] entries in ascending game-name order and the
-/// response gains a `<field>Truncated: true` marker (issue #518).
+/// containing object gains a `<field>Truncated: true` marker (issue #518).
 const METRICS_GAME_MAP_ENTRY_CAP: usize = 256;
 
 /// Bound a game-name-keyed response map (see [`METRICS_GAME_MAP_ENTRY_CAP`]).
@@ -164,33 +165,35 @@ const METRICS_GAME_MAP_ENTRY_CAP: usize = 256;
 /// Survivors are the lexicographically first game names, so truncation is
 /// deterministic across requests.
 fn bounded_game_name_map(
-    map: serde_json::Map<String, serde_json::Value>,
+    mut map: serde_json::Map<String, serde_json::Value>,
 ) -> (serde_json::Map<String, serde_json::Value>, bool) {
     if map.len() <= METRICS_GAME_MAP_ENTRY_CAP {
         return (map, false);
     }
-    let mut names: Vec<&String> = map.keys().collect();
+    let mut names: Vec<String> = map.keys().cloned().collect();
     names.sort_unstable();
     let bounded = names
         .into_iter()
         .take(METRICS_GAME_MAP_ENTRY_CAP)
-        .map(|name| {
-            let value = map.get(name).cloned().unwrap_or(serde_json::Value::Null);
-            (name.clone(), value)
-        })
+        .filter_map(|name| map.remove(&name).map(|value| (name, value)))
         .collect();
     (bounded, true)
 }
 
 /// Replace `map_field` in `response` with its bounded form, inserting
 /// `marker_field: true` when entries were dropped and throttled-logging the
-/// truncation through `log`.
+/// truncation with `reason` through `log`.
 fn bound_response_game_map(
     response: &mut serde_json::Value,
     map_field: &str,
     marker_field: &str,
+    reason: &'static str,
     log: &RejectionLogThrottle,
 ) {
+    debug_assert!(
+        response.is_object(),
+        "bound_response_game_map expects the handler-built response object"
+    );
     let Some(taken) = response.get_mut(map_field).map(std::mem::take) else {
         return;
     };
@@ -206,7 +209,7 @@ fn bound_response_game_map(
         obj.insert(map_field.to_string(), serde_json::Value::Object(bounded));
         if truncated {
             obj.insert(marker_field.to_string(), serde_json::Value::Bool(true));
-            log.record("metrics response game-name map truncated");
+            log.record(reason);
         }
     }
 }
@@ -266,13 +269,30 @@ pub async fn metrics_handler(
         .history
         .into_iter()
         .map(|entry| {
-            serde_json::json!({
+            let mut sample = serde_json::json!({
                 "fetchedAt": entry.fetched_at.to_rfc3339(),
                 "activeRooms": entry.active_rooms,
                 "roomsByGame": entry.rooms_by_game,
                 "playerPercentiles": entry.player_percentiles,
                 "gamePercentiles": entry.game_percentiles,
-            })
+            });
+            // Each history sample carries the same client-chosen game-name
+            // maps as the current view; bound them identically (issue #518).
+            bound_response_game_map(
+                &mut sample,
+                "roomsByGame",
+                "roomsByGameTruncated",
+                "roomsByGame history map truncated",
+                server.metrics_truncation_log(),
+            );
+            bound_response_game_map(
+                &mut sample,
+                "gamePercentiles",
+                "gamePercentilesTruncated",
+                "gamePercentiles history map truncated",
+                server.metrics_truncation_log(),
+            );
+            sample
         })
         .collect();
 
@@ -342,12 +362,14 @@ pub async fn metrics_handler(
         &mut response,
         "roomsByGame",
         "roomsByGameTruncated",
+        "roomsByGame map truncated",
         server.metrics_truncation_log(),
     );
     bound_response_game_map(
         &mut response,
         "gamePercentiles",
         "gamePercentilesTruncated",
+        "gamePercentiles map truncated",
         server.metrics_truncation_log(),
     );
 
@@ -473,11 +495,18 @@ mod tests {
             "activeRooms": 3,
         });
         let log = RejectionLogThrottle::new();
-        bound_response_game_map(&mut response, "roomsByGame", "roomsByGameTruncated", &log);
+        bound_response_game_map(
+            &mut response,
+            "roomsByGame",
+            "roomsByGameTruncated",
+            "roomsByGame map truncated",
+            &log,
+        );
         bound_response_game_map(
             &mut response,
             "gamePercentiles",
             "gamePercentilesTruncated",
+            "gamePercentiles map truncated",
             &log,
         );
         assert_eq!(response["roomsByGame"], small_map);
@@ -491,7 +520,13 @@ mod tests {
             .map(|index| (format!("game-{index:04}"), serde_json::json!(index)))
             .collect();
         let mut response = serde_json::json!({ "roomsByGame": oversized });
-        bound_response_game_map(&mut response, "roomsByGame", "roomsByGameTruncated", &log);
+        bound_response_game_map(
+            &mut response,
+            "roomsByGame",
+            "roomsByGameTruncated",
+            "roomsByGame map truncated",
+            &log,
+        );
         assert_eq!(
             response["roomsByGame"]
                 .as_object()

@@ -174,15 +174,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configured application's derived UUID. The derivation stays deterministic in
   the label: the same label keeps the same UUID, and room-membership behavior
   is unchanged. Only the resulting UUID values differ.
-- The `/metrics` response is now size-bounded (issue #518). Three guards:
+- The `/metrics` response is now bounded against traffic-sized growth
+  (issue #518). Guards:
   the `metricsSnapshot` field is capped at 128 KiB of serialized JSON and
-  replaced by a `truncated`/`sizeBytes`/`capBytes` marker when larger; the
-  `roomsByGame` and `gamePercentiles` maps are capped at 256 entries each
-  (lexicographically first names kept) with a `<field>Truncated: true` marker
-  when entries are dropped; truncation warnings are throttled. These maps grow
-  with live traffic (per-identity attribution maps, client-chosen game names),
-  so an unauthenticated or misconfigured metrics endpoint was an
-  information-disclosure firehose and a response-size amplifier.
+  replaced by a `truncated`/`sizeBytes`/`capBytes` marker when larger.
+  The `roomsByGame` and `gamePercentiles` maps are capped at 256 entries each
+  (lexicographically first names kept), in the current view and in every
+  `dashboardCache.history` sample, with a `<field>Truncated: true` marker when
+  entries are dropped. Truncation warnings are throttled. These maps and the
+  snapshot's per-identity maps grow with live traffic and client-chosen names,
+  so a metrics endpoint without auth was a disclosure and response-size risk.
 - CI cost cohort (issue #513): the macOS `Lint`/`Nextest` lanes moved from
   every push/pull request to the daily noon cron against `main` (macOS bills
   at 10x Linux per minute while deployments are Linux containers), so macOS
