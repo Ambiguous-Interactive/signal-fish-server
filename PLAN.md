@@ -59,16 +59,17 @@ These items remain live but are not active phases. Re-rank them whenever new
 correctness evidence appears.
 
 - #396 — standing correctness/perf sweep. Session 208 closed the
-  admission-vs-consumption divergence class: a padded metrics auth token and
-  padded TLS paths (admission checked the trimmed view while the runtime
-  compared/loaded the raw value), a dead `client_ca_cert_path` under
-  `client_auth=none`, and unbounded relay labels echoed into room-state
-  metadata are now rejected at admission; `trace_validation.rs` ends its
-  projection at the first divergence label so rejected traces carry one
-  precise label plus an attributed raw tail (#509). Remaining frontier:
-  continue seam sweeps; the parked-state (`senderState`) producers are
-  same-thread program-ordered behind their `SendFull` record (verified,
-  no race window).
+  admission-vs-consumption divergence class (padded metrics auth token, padded
+  TLS paths, dead `client_ca_cert_path`, unbounded relay labels — #509);
+  session 213 closed the open-mode DoS surface class from #518: a server-wide
+  room ceiling (`server.max_rooms` under a server-global cap lock), a
+  pre-parse per-connection inbound-message budget closing with new close code
+  `4006 inbound_rate_limited`, and an explicitly armed pre-upgrade HTTP
+  header-read deadline on both serve paths (hyper's 30 s default was inert
+  without a Timer). Remaining frontier: continue seam sweeps; the parked-state
+  (`senderState`) producers are same-thread program-ordered behind their
+  `SendFull` record (verified, no race window). #518 items 4-5 (client-chosen
+  app UUID namespacing in open mode, metrics-snapshot size guard) remain.
 - #378 — consolidate duplicate hosted link validation only with an atomic
   branch-protection migration and equivalent-or-broader coverage evidence.
   (The #513 migration confirmed main's branch protection carries no required

@@ -3,10 +3,49 @@
     "mcp": {
         "github": {
             "type": "local",
-            "command": ["github-mcp-server", "stdio"],
+            "command": [
+                "github-mcp-server",
+                "stdio"
+            ],
             "environment": {
                 "GITHUB_PERSONAL_ACCESS_TOKEN": "{env:GITHUB_PERSONAL_ACCESS_TOKEN}"
             },
+            "enabled": true
+        },
+        "zai-vision": {
+            "type": "local",
+            "command": [
+                "node",
+                ".devcontainer/zai-mcp.mjs",
+                "vision"
+            ],
+            "enabled": true
+        },
+        "zai-web-search": {
+            "type": "local",
+            "command": [
+                "node",
+                ".devcontainer/zai-mcp.mjs",
+                "web-search"
+            ],
+            "enabled": true
+        },
+        "zai-web-reader": {
+            "type": "local",
+            "command": [
+                "node",
+                ".devcontainer/zai-mcp.mjs",
+                "web-reader"
+            ],
+            "enabled": true
+        },
+        "zai-zread": {
+            "type": "local",
+            "command": [
+                "node",
+                ".devcontainer/zai-mcp.mjs",
+                "zread"
+            ],
             "enabled": true
         }
     }

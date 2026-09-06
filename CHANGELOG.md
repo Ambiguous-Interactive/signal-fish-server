@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `server.max_rooms` (default 10000): server-wide ceiling on total live rooms
+  across every game name, enforced atomically under a server-global cap lock.
+  Denials reuse the `MAX_ROOMS_PER_GAME_EXCEEDED` wire code.
+  **Breaking (Rust API):** `Database` implementors must now override the new
+  fail-closed `get_total_room_count` query for room creation to work.
+- `rate_limit.max_inbound_error_replies` (default 3000 per window):
+  per-connection budget on polite error replies (malformed, oversized, or
+  wrong-state inbound frames), closing budget-exhausted connections with the
+  new close code `4006 inbound_rate_limited` after a best-effort
+  `RATE_LIMIT_EXCEEDED` error frame. Admitted traffic is untouched — every
+  message kind keeps its own budget — so honest high-throughput clients are
+  never gated; rejections export as
+  `signal_fish_rate_limit_inbound_error_reply_rejections_total`.
+- `websocket.http_header_read_timeout_secs` (default 10): pre-upgrade HTTP
+  header-read deadline, now armed explicitly on both the plain and TLS serve
+  paths (hyper's 30s default was silently inert without an explicit timer).
+- Devcontainer agent tooling now keeps Codex, OpenCode, Nanocoder, and the
+  Z.AI Vision MCP server current on create and launch without blocking editor
+  attachment; configures GitHub plus Z.AI Vision, Web Search, Web Reader, and
+  Zread MCP servers for Codex, Claude Code, Copilot/VS Code, OpenCode, and
+  Nanocoder, loading `.env.local` at Z.AI MCP startup so credential updates
+  take effect after restarting MCP servers; and verifies that user-owned global npm installs work without
+  `sudo` across fresh clones and full rebuilds.
 - `security.allowed_apps[].max_relay_bytes` (optional per-app override of
   `rate_limit.max_relay_bytes`): allowlisted deployments can replace the
   server-wide per-sender relay byte budget per tenant, so hosted tiers can
