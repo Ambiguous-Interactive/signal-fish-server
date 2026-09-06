@@ -149,6 +149,13 @@ pub struct MyCustomDatabase {
 
 #[async_trait]
 impl GameDatabase for MyCustomDatabase {
+    // Required for the server-wide room ceiling (server.max_rooms): the
+    // trait default fails closed and refuses every room creation.
+    async fn get_total_room_count(&self) -> anyhow::Result<usize> {
+        // Return the exact live-room row count from your storage.
+        todo!("sum the live rooms your storage holds")
+    }
+
     async fn initialize(&self) -> Result<()> {
         // Initialize database connection and run migrations
         Ok(())

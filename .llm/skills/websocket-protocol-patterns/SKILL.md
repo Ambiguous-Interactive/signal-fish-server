@@ -238,7 +238,8 @@ Real-time relay frames are small and latency-sensitive. Two defaults protect the
   can stall small bidirectional frames ~40-90 ms on loopback. `TCP_NODELAY` is
   per-connection and not reliably inherited from the listen socket, so set it on
   each accepted stream. Both serve paths funnel through one seam
-  (`websocket::bind_serve_listener` for plain `axum::serve`,
+  (`websocket::serve_with_http_header_deadline` for the production plain path,
+  `bind_serve_listener` for plain `axum::serve` consumers,
   `websocket::ConfiguredAcceptor` for the TLS stack), so tests and production
   share identical socket semantics. A WebSocket sink flush does NOT disable
   Nagle — the option must be set explicitly.
@@ -250,7 +251,7 @@ Real-time relay frames are small and latency-sensitive. Two defaults protect the
 
 ## Agent Checklist
 
-- [ ] Accepted sockets set `TCP_NODELAY` via `bind_serve_listener` / `ConfiguredAcceptor` (no Nagle stalls)
+- [ ] Accepted sockets set `TCP_NODELAY` via `serve_with_http_header_deadline` / `bind_serve_listener` / `ConfiguredAcceptor` (no Nagle stalls)
 - [ ] Batching is opt-in; the batch timer never delays latency-sensitive traffic — only `Latest` waits to coalesce
 - [ ] WebSocket upgrade validates auth before upgrading when possible
 - [ ] Heartbeat ping-pong runs at regular intervals with client timeout

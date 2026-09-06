@@ -164,6 +164,16 @@ pub async fn serve_with_http_header_deadline(
                     }
                 };
                 configure_accepted_socket(&stream);
+                // Reap completed tasks opportunistically: a JoinSet retains
+                // every finished task until it is joined, so without this the
+                // long-lived server would grow unboundedly with total
+                // connections served. Join failures (handler panics) become
+                // visible here instead of vanishing into the shutdown drain.
+                while let Some(join_result) = connections.try_join_next() {
+                    if let Err(join_error) = join_result {
+                        tracing::warn!(error = %join_error, "connection task failed");
+                    }
+                }
                 let tower_service = make_service
                     .call(remote_addr)
                     .await
@@ -745,9 +755,11 @@ mod tests {
     /// algorithm (`TCP_NODELAY`) so small bidirectional relay frames are not
     /// stalled ~40-90 ms by the Nagle × delayed-ACK interaction on loopback.
     ///
-    /// Exercises the real production seam [`bind_serve_listener`] (used by the
-    /// server, `run_server`, and the test harness), so deleting the nodelay
-    /// wiring fails this test rather than shipping silently.
+    /// Exercises the [`bind_serve_listener`] tap_io seam directly, so
+    /// deleting the nodelay wiring fails this test rather than shipping
+    /// silently. The header-deadline serve loop shares the same
+    /// [`configure_accepted_socket`] call, pinned by
+    /// [`serve_loop_configures_accepted_sockets_with_the_shared_helper`].
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
     async fn regression_197_accepted_socket_disables_nagle() {
@@ -808,6 +820,32 @@ mod tests {
         assert!(
             nodelay,
             "TLS ConfiguredAcceptor must enable TCP_NODELAY on the raw stream (issue #197)"
+        );
+    }
+
+    /// The header-deadline serve loop must configure accepted sockets through
+    /// the same shared [`configure_accepted_socket`] helper the tap_io and TLS
+    /// seams use (issue #197 invariant). Source-pinned: the loop consumes the
+    /// stream inside its own task, so the behavior-level assertion lives in
+    /// the seam tests above.
+    #[test]
+    fn serve_loop_configures_accepted_sockets_with_the_shared_helper() {
+        let source = include_str!("routes.rs");
+        let serve_fn = source
+            .split("pub async fn serve_with_http_header_deadline")
+            .nth(1)
+            .expect("serve_with_http_header_deadline must exist");
+        let serve_body = serve_fn
+            .split("\n}")
+            .next()
+            .expect("serve fn body delimited");
+        assert!(
+            serve_body.contains("configure_accepted_socket(&stream);"),
+            "the header-deadline serve loop must call configure_accepted_socket on every              accepted stream so both plain paths share identical nodelay semantics"
+        );
+        assert!(
+            serve_body.contains("try_join_next()"),
+            "the serve loop must reap completed connection tasks; a JoinSet that only              joins at shutdown grows unboundedly with total connections served"
         );
     }
 }

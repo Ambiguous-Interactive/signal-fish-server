@@ -11,9 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `server.max_rooms` (default 10000): server-wide ceiling on total live rooms
   across every game name, enforced atomically under a server-global cap lock.
-  Denials reuse the `MAX_ROOMS_PER_GAME_EXCEEDED` wire code. `Database`
-  implementors must now override the new fail-closed
-  `get_total_room_count` query for room creation to work.
+  Denials reuse the `MAX_ROOMS_PER_GAME_EXCEEDED` wire code.
+  **Breaking (Rust API):** `Database` implementors must now override the new
+  fail-closed `get_total_room_count` query for room creation to work.
 - `rate_limit.max_inbound_messages` (default 3000 per window): per-connection
   inbound application-message budget counted before parsing, closing
   budget-exhausted connections with the new close code `4006
