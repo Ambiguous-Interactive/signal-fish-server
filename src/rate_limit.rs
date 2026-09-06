@@ -204,10 +204,10 @@ impl RateLimitEntry {
     /// the cap, so observability reflects exactly what was admitted. An
     /// arithmetic overflow of the counter (only reachable with a `u64::MAX`
     /// budget) rejects rather than wrapping.
-    fn try_relay_bytes(&mut self, config: &RateLimitConfig, bytes: u64) -> bool {
+    fn try_relay_bytes(&mut self, config: &RateLimitConfig, budget: u64, bytes: u64) -> bool {
         self.maybe_reset_window(config);
         match self.relay_bytes.checked_add(bytes) {
-            Some(total) if total <= config.max_relay_bytes => {
+            Some(total) if total <= budget => {
                 self.relay_bytes = total;
                 true
             }
@@ -232,6 +232,28 @@ impl RateLimitEntry {
         // Use saturating_sub to handle potential Duration underflow safely
         config.time_window.saturating_sub(elapsed)
     }
+}
+
+/// Per-application relay policy resolved from an authenticated allowlist
+/// entry (issue #530).
+///
+/// [`AppRelayPolicy::max_relay_bytes`] is `Some` only when the allowlist
+/// entry overrides the server-wide `rate_limit.max_relay_bytes` default.
+/// Open-policy application contexts never carry an override: their
+/// application identity is a client-chosen, unauthenticated label, so it
+/// must not be able to move the server-wide budget.
+///
+/// The override changes only the budget **value** applied to a sender's
+/// charge. The fixed window itself stays anchored to the sender's player ID,
+/// so rotating application identities cannot reset or fork a sender's
+/// window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppRelayPolicy {
+    /// The authenticated application's resolved UUID (attribution key for
+    /// the admitted-bytes surface).
+    pub app_id: Uuid,
+    /// Per-app override of the server-wide `rate_limit.max_relay_bytes`.
+    pub max_relay_bytes: Option<u64>,
 }
 
 /// Rate limiter for room operations.
@@ -398,17 +420,26 @@ impl RoomRateLimiter {
     /// Called once per accepted relayed frame with the sender-controlled
     /// payload size, before the fan-out is dispatched. A rejection means the
     /// frame is not relayed at all; the caller owns the wire error.
+    ///
+    /// `app` carries the sender's resolved allowlist policy (issue #530):
+    /// when it overrides `max_relay_bytes`, that budget is enforced for this
+    /// sender's charges instead of the server-wide default. The fixed window
+    /// is anchored to `player_id` either way.
     pub async fn check_relay_bytes(
         &self,
         player_id: &Uuid,
         bytes: u64,
+        app: Option<AppRelayPolicy>,
     ) -> Result<(), RateLimitError> {
+        let budget = app
+            .and_then(|policy| policy.max_relay_bytes)
+            .unwrap_or(self.config.max_relay_bytes);
         let mut entries = self.entries.write().await;
         let entry = entries
             .entry(*player_id)
             .or_insert_with(RateLimitEntry::new);
 
-        if entry.try_relay_bytes(&self.config, bytes) {
+        if entry.try_relay_bytes(&self.config, budget, bytes) {
             Ok(())
         } else {
             let reset_time = entry.time_until_reset(&self.config);
@@ -774,12 +805,18 @@ mod tests {
         let player_id = Uuid::new_v4();
 
         // Fill the 1000-byte window to exactly the cap.
-        assert!(limiter.check_relay_bytes(&player_id, 600).await.is_ok());
-        assert!(limiter.check_relay_bytes(&player_id, 400).await.is_ok());
+        assert!(limiter
+            .check_relay_bytes(&player_id, 600, None)
+            .await
+            .is_ok());
+        assert!(limiter
+            .check_relay_bytes(&player_id, 400, None)
+            .await
+            .is_ok());
 
         // One more byte is rejected without consuming anything.
         assert!(matches!(
-            limiter.check_relay_bytes(&player_id, 1).await,
+            limiter.check_relay_bytes(&player_id, 1, None).await,
             Err(RateLimitError::RelayLimitExceeded { .. })
         ));
         assert_eq!(
@@ -794,7 +831,10 @@ mod tests {
 
         // The window reset restores the full budget.
         tokio::time::advance(Duration::from_millis(150)).await;
-        assert!(limiter.check_relay_bytes(&player_id, 1000).await.is_ok());
+        assert!(limiter
+            .check_relay_bytes(&player_id, 1000, None)
+            .await
+            .is_ok());
         assert_eq!(
             metrics
                 .snapshot()
@@ -812,12 +852,12 @@ mod tests {
         let sender = Uuid::new_v4();
         let other = Uuid::new_v4();
 
-        assert!(limiter.check_relay_bytes(&sender, 1000).await.is_ok());
-        assert!(limiter.check_relay_bytes(&sender, 1).await.is_err());
+        assert!(limiter.check_relay_bytes(&sender, 1000, None).await.is_ok());
+        assert!(limiter.check_relay_bytes(&sender, 1, None).await.is_err());
 
         // Another sender's budget is untouched, and neither counting budget
         // moved for either player.
-        assert!(limiter.check_relay_bytes(&other, 1).await.is_ok());
+        assert!(limiter.check_relay_bytes(&other, 1, None).await.is_ok());
         assert!(limiter.check_signal(&sender).await.is_ok());
         let stats = limiter
             .get_player_stats(&other)
@@ -835,7 +875,7 @@ mod tests {
         let player_id = Uuid::new_v4();
 
         assert!(matches!(
-            limiter.check_relay_bytes(&player_id, 1).await,
+            limiter.check_relay_bytes(&player_id, 1, None).await,
             Err(RateLimitError::RelayLimitExceeded { .. })
         ));
         assert!(!RateLimitError::RelayLimitExceeded {
@@ -843,6 +883,99 @@ mod tests {
         }
         .to_string()
         .is_empty());
+    }
+
+    /// A per-app override (#530) replaces the server-wide budget value for
+    /// that app's senders: a tighter override rejects under the global cap,
+    /// a looser one admits past it, and senders without an override keep the
+    /// global budget.
+    #[tokio::test(start_paused = true)]
+    async fn per_app_relay_budget_override_replaces_the_global_budget_value() {
+        let limiter = RoomRateLimiter::new(create_test_config());
+        let tiered = Uuid::new_v4();
+        let premium = Uuid::new_v4();
+        let default = Uuid::new_v4();
+        let trial_policy = AppRelayPolicy {
+            app_id: Uuid::new_v4(),
+            max_relay_bytes: Some(300),
+        };
+        let premium_policy = AppRelayPolicy {
+            app_id: Uuid::new_v4(),
+            max_relay_bytes: Some(5000),
+        };
+
+        // The trial tier's tighter override rejects at 300 of the global 1000.
+        assert!(limiter
+            .check_relay_bytes(&tiered, 300, Some(trial_policy))
+            .await
+            .is_ok());
+        assert!(matches!(
+            limiter
+                .check_relay_bytes(&tiered, 1, Some(trial_policy))
+                .await,
+            Err(RateLimitError::RelayLimitExceeded { .. })
+        ));
+
+        // The premium tier's looser override admits past the global 1000.
+        assert!(limiter
+            .check_relay_bytes(&premium, 5000, Some(premium_policy))
+            .await
+            .is_ok());
+        assert!(matches!(
+            limiter
+                .check_relay_bytes(&premium, 1, Some(premium_policy))
+                .await,
+            Err(RateLimitError::RelayLimitExceeded { .. })
+        ));
+
+        // No override keeps the global budget.
+        assert!(limiter
+            .check_relay_bytes(&default, 1000, None)
+            .await
+            .is_ok());
+        assert!(limiter.check_relay_bytes(&default, 1, None).await.is_err());
+    }
+
+    /// The override changes only the budget value: the fixed window stays
+    /// anchored to the player, so switching to a looser app identity cannot
+    /// reset or fork a sender's already-charged window.
+    #[tokio::test(start_paused = true)]
+    async fn per_app_override_never_resets_or_forks_the_sender_window() {
+        let limiter = RoomRateLimiter::new(create_test_config());
+        let player_id = Uuid::new_v4();
+        let tight = AppRelayPolicy {
+            app_id: Uuid::new_v4(),
+            max_relay_bytes: Some(300),
+        };
+        let loose = AppRelayPolicy {
+            app_id: Uuid::new_v4(),
+            max_relay_bytes: Some(5000),
+        };
+
+        assert!(limiter
+            .check_relay_bytes(&player_id, 300, Some(tight))
+            .await
+            .is_ok());
+
+        // The same player under a looser app identity still owns the 300
+        // already charged: the window admits 4700 more (to the loose
+        // override's 5000), not a fresh 5000-byte window.
+        assert!(limiter
+            .check_relay_bytes(&player_id, 4700, Some(loose))
+            .await
+            .is_ok());
+        assert!(limiter
+            .check_relay_bytes(&player_id, 1, Some(loose))
+            .await
+            .is_err());
+        assert_eq!(
+            limiter
+                .get_player_stats(&player_id)
+                .await
+                .expect("stats entry exists")
+                .relay_bytes,
+            5000
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -854,10 +987,13 @@ mod tests {
         let player_id = Uuid::new_v4();
 
         assert!(limiter
-            .check_relay_bytes(&player_id, u64::MAX)
+            .check_relay_bytes(&player_id, u64::MAX, None)
             .await
             .is_ok());
-        assert!(limiter.check_relay_bytes(&player_id, 1).await.is_err());
+        assert!(limiter
+            .check_relay_bytes(&player_id, 1, None)
+            .await
+            .is_err());
         assert_eq!(
             limiter
                 .get_player_stats(&player_id)
@@ -914,7 +1050,7 @@ mod tests {
         // Another room's ceiling is untouched, and the sender's own byte
         // budget did not move.
         assert!(limiter.check_room_relay_bytes(&room_b, 1).await.is_ok());
-        assert!(limiter.check_relay_bytes(&sender, 1000).await.is_ok());
+        assert!(limiter.check_relay_bytes(&sender, 1000, None).await.is_ok());
     }
 
     #[tokio::test(start_paused = true)]

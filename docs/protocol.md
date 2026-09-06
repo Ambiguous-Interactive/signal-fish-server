@@ -170,7 +170,11 @@ JSON length for the text lane). An over-budget frame is answered with
 `RATE_LIMIT_EXCEEDED` and is not relayed; the budget resets with the shared
 fixed window. This bounds a flooding sender to a metered share of the host's
 egress instead of letting one player run up the bandwidth bill at line rate
-(issue #519). The relaying room's aggregate per-window ceiling
+(issue #519). Allowlisted deployments can replace the server-wide budget per
+tenant with `security.allowed_apps[].max_relay_bytes` (issue #530): the
+override changes only the budget value — the fixed window stays anchored to
+the sender — and open-mode deployments (client-chosen app labels) never carry
+one. The relaying room's aggregate per-window ceiling
 (`rate_limit.max_room_relay_bytes`, default 1 GiB per window) is charged on
 every accepted relay as well, so many individually under-budget senders
 cannot multiply a room's egress without bound (issue #530). Per-recipient
@@ -866,7 +870,13 @@ Practical consequences:
   evicted. Operators can watch the
   `signal_fish_websocket_backpressure_events_total` and
   `signal_fish_websocket_slow_consumer_disconnects_total` Prometheus
-  counters to spot backpressure and slow-consumer evictions in production. The
+  counters to spot backpressure and slow-consumer evictions in production.
+  When an eviction was caused by a member flooding reliable frames, the
+  labeled `signal_fish_websocket_slow_consumer_eviction_attributions_total{sender}`
+  counter (JSON `metricsSnapshot.connections.slow_consumer_eviction_attributions`)
+  attributes the close to the sender of the triggering frame (issue #530):
+  series appear at a sender's first eviction and disappear when that sender
+  disconnects. The
   labeled `signal_fish_websocket_delivery_class_outcomes_total{class,outcome}`
   counter and JSON
   `metricsSnapshot.connections.delivery_by_class` (`connections.delivery_by_class`

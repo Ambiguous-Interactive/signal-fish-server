@@ -36,6 +36,7 @@ fn sample_app_entry() -> AppRegistrationEntry {
         max_rooms: Some(50),
         max_players_per_room: Some(8),
         rate_limit_per_minute: Some(60),
+        max_relay_bytes: None,
     }
 }
 
@@ -46,6 +47,7 @@ fn secondary_app_entry() -> AppRegistrationEntry {
         max_rooms: None,
         max_players_per_room: None,
         rate_limit_per_minute: None,
+        max_relay_bytes: None,
     }
 }
 
@@ -56,6 +58,7 @@ fn rate_limited_app_entry(limit: u32) -> AppRegistrationEntry {
         max_rooms: Some(10),
         max_players_per_room: Some(4),
         rate_limit_per_minute: Some(limit),
+        max_relay_bytes: None,
     }
 }
 
@@ -264,6 +267,7 @@ async fn test_rate_limits_are_per_app() {
             max_rooms: None,
             max_players_per_room: None,
             rate_limit_per_minute: Some(2),
+            max_relay_bytes: None,
         },
     ];
     let mw = AppIdAllowlist::new(entries).expect("unique app IDs");
@@ -326,6 +330,7 @@ async fn test_app_context_rate_limits_are_computed_correctly() {
         max_rooms: None,
         max_players_per_room: None,
         rate_limit_per_minute: Some(10),
+        max_relay_bytes: None,
     };
     let mw = AppIdAllowlist::new(vec![entry]).expect("unique app IDs");
 
@@ -463,6 +468,7 @@ async fn real_websocket_handshake_binds_room_and_spectator_policy_to_public_app_
             max_rooms: Some(10),
             max_players_per_room: Some(8),
             rate_limit_per_minute: None,
+            max_relay_bytes: None,
         },
         AppRegistrationEntry {
             app_id: "app-b".to_string(),
@@ -470,6 +476,7 @@ async fn real_websocket_handshake_binds_room_and_spectator_policy_to_public_app_
             max_rooms: Some(10),
             max_players_per_room: Some(8),
             rate_limit_per_minute: None,
+            max_relay_bytes: None,
         },
     ];
     let server = signal_fish_server::server::EnhancedGameServer::new(

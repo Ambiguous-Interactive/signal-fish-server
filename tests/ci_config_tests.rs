@@ -1151,10 +1151,10 @@ fn validate_workflow_has_required_jobs(
 // Current stable validation checks (Phase 1-2):
 //   - CI / Lint (ubuntu-latest)
 //   - CI / Lint (windows-latest)
-//   - CI / Lint (macos-latest)
+//   - CI / Lint (macos-latest)       — daily cron cohort only (issue #513)
 //   - CI / Nextest (ubuntu-latest)
 //   - CI / Nextest (windows-latest)
-//   - CI / Nextest (macos-latest)
+//   - CI / Nextest (macos-latest)    — daily cron cohort only (issue #513)
 //   - CI / Relay Allocation Ceilings
 //   - CI / Dependency Audit
 //   - CI / MSRV Verification
@@ -1263,8 +1263,36 @@ const REQUIRED_DOC_VALIDATION_JOBS: &[(&str, &str, &str)] = &[
 const MATRIX_OS_PLACEHOLDER: &str = "${{ matrix.os }}";
 
 /// OS values that `matrix.os` expands to in ci.yml.
-/// This must match the `strategy.matrix.os` list in the workflow file.
+///
+/// Since issue #513 the lint/nextest matrices are event-dependent (the
+/// `ci-matrix` cohort job emits ubuntu+windows per push/PR, macOS-only on
+/// the daily cron), so this constant is the union inventory of both cohorts:
+/// it drives check-name expansion for the stable naming contract, where the
+/// macOS names keep existing (produced by the cron).
 const MATRIX_OS_VALUES: &[&str] = &["ubuntu-latest", "windows-latest", "macos-latest"];
+
+/// CI jobs whose macOS matrix legs run only on the daily schedule cohort
+/// (issue #513: macOS bills at 10x Linux per minute, so macOS lint/nextest
+/// signal moves from every push/PR to the daily cron against main).
+const SCHEDULE_ONLY_MACOS_JOBS: &[&str] = &["lint", "nextest"];
+
+/// The cohort job that feeds the event-dependent lint/nextest matrices.
+const CI_MATRIX_JOB: &str = "ci-matrix";
+
+/// The matrix expression the gated jobs must consume verbatim (the value
+/// of the `os:` key; `extract_yaml_field_values` strips the prefix).
+const CI_MATRIX_OUTPUT_OS: &str = "${{ fromJSON(needs.ci-matrix.outputs.os) }}";
+
+/// The exact job-level `if` the gated jobs must use: a failed cohort job
+/// must not skip them silently red-less (`!cancelled()` keeps the run's
+/// failure visible) and a successful one must admit exactly the cohort's
+/// legs. (`matrix` is not an available context in a job-level `if`, which
+/// is why the cohort is a dynamic matrix rather than a per-leg guard.)
+const CI_MATRIX_GUARD: &str = "${{ !cancelled() && needs.ci-matrix.result == 'success' }}";
+
+/// The cohort script lines pinning which OS legs exist per event.
+const CI_MATRIX_SCHEDULE_OS: &str = "os=[\"macos-latest\"]";
+const CI_MATRIX_PUSH_OS: &str = "os=[\"ubuntu-latest\",\"windows-latest\"]";
 
 /// Expand a job display name template that may contain `${{ matrix.os }}` into
 /// concrete check names. If the template contains the placeholder, one name is
@@ -1910,17 +1938,35 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
             .find(&header)
             .unwrap_or_else(|| panic!("ci.yml must define the `{job}` job"));
         let block_end = (start + 300).min(workflow.len());
+        // lint/nextest also wait on the cohort job (issue #513); the other
+        // gated jobs need only the fail-fast gate.
+        let expected_needs = if matches!(job, "lint" | "nextest") {
+            "needs: [quick-check, ci-matrix]"
+        } else {
+            "needs: quick-check"
+        };
         assert!(
-            workflow[start..block_end].contains("needs: quick-check"),
-            "ci.yml `{job}` job must declare `needs: quick-check` so its result \
+            workflow[start..block_end].contains(expected_needs),
+            "ci.yml `{job}` job must declare `{expected_needs}` so its result \
              is available to the fail-closed status guard."
         );
         let block = extract_workflow_job_block(&workflow, job)
             .unwrap_or_else(|| panic!("ci.yml must define the `{job}` job"));
-        assert!(
-            block.contains("!cancelled() && github.event_name != 'schedule'"),
-            "ci.yml `{job}` must run after quick-check failure but not workflow cancellation"
-        );
+        if matches!(job, "lint" | "nextest") {
+            // Issue #513: these two wait on the event-dependent cohort job
+            // instead of a blanket schedule exclusion (pinned in full by
+            // test_ci_macos_lanes_run_only_on_the_daily_cron).
+            assert!(
+                block.contains("!cancelled() && needs.ci-matrix.result == 'success'"),
+                "ci.yml `{job}` must run after quick-check failure but not workflow \
+                 cancellation, and must admit exactly the cohort job's legs"
+            );
+        } else {
+            assert!(
+                block.contains("!cancelled() && github.event_name != 'schedule'"),
+                "ci.yml `{job}` must run after quick-check failure but not workflow cancellation"
+            );
+        }
         assert!(
             block.contains("QUICK_CHECK_RESULT: ${{ needs.quick-check.result }}")
                 && block.contains("test \"$QUICK_CHECK_RESULT\" = success"),
@@ -1930,9 +1976,14 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
         let job_config = jobs
             .as_mapping_get(job)
             .unwrap_or_else(|| panic!("parsed ci.yml must define `{job}`"));
+        let expected_if = if matches!(job, "lint" | "nextest") {
+            CI_MATRIX_GUARD
+        } else {
+            "${{ !cancelled() && github.event_name != 'schedule' }}"
+        };
         assert_eq!(
             job_config.as_mapping_get("if").and_then(Yaml::as_str),
-            Some("${{ !cancelled() && github.event_name != 'schedule' }}"),
+            Some(expected_if),
             "{job} must run after prerequisite failure but not workflow cancellation"
         );
         let first_step = job_config
@@ -2191,85 +2242,66 @@ exit "$status"
 
 #[test]
 fn test_ci_workflow_matrix_os_values_match_constant() {
-    // Validates that the MATRIX_OS_VALUES constant matches the actual
-    // strategy.matrix.os lists in ci.yml. If these drift apart, the
-    // bidirectional consistency test will silently produce wrong check names.
-    //
-    // Multiple jobs (lint, nextest) use matrix.os, so we validate ALL
-    // `os:` lines at 8-space indent to ensure consistency across jobs.
-
+    // Validates that MATRIX_OS_VALUES stays the full OS inventory of the
+    // lint/nextest check-name surface. Since issue #513, the lint/nextest
+    // matrices are event-dependent (a dynamic matrix fed by the `ci-matrix`
+    // cohort job), so there is no literal `os:` list left in ci.yml:
+    //   - every matrix must consume `needs.ci-matrix.outputs.os` verbatim
+    //   - `ci-matrix` must emit ubuntu+windows per push/PR and macOS-only on
+    //     the schedule
+    // If the workflow or the constant drift, the bidirectional consistency
+    // test will silently produce wrong check names.
     let root = repo_root();
     let ci_content = read_live_file(&root.join(".github/workflows/ci.yml"));
 
-    // Collect ALL "os: [...]" lines from matrix sections (8-space indent).
-    // Multiple jobs (lint, nextest) each have their own matrix.os list.
-    let os_lines: Vec<&str> = ci_content
+    // No literal `os:` lists remain: a literal list would silently fork the
+    // cohort contract (one static lane set, one dynamic).
+    let literal_os_lines: Vec<&str> = ci_content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("os: [") && line.starts_with("        ")
+        })
+        .collect();
+    assert!(
+        literal_os_lines.is_empty(),
+        "ci.yml must keep the lint/nextest matrices event-dependent via the \
+         `ci-matrix` cohort job (issue #513); found literal matrix lines: \
+         {literal_os_lines:?}"
+    );
+
+    // Every matrix consumes the cohort output verbatim, so the expanded
+    // check names are always a subset of MATRIX_OS_VALUES.
+    let matrix_os_lines: Vec<&str> = ci_content
         .lines()
         .filter(|line| {
             let trimmed = line.trim();
             trimmed.starts_with("os:") && line.starts_with("        ")
         })
         .collect();
-
     assert!(
-        !os_lines.is_empty(),
-        "Could not find any matrix os: lines in ci.yml.\n\
-         Expected lines like '        os: [ubuntu-latest, windows-latest, macos-latest]'"
+        !matrix_os_lines.is_empty(),
+        "ci.yml lint/nextest matrices disappeared: the check-name contract \
+         requires the templated `Lint (${{{{ matrix.os }}}})` / `Nextest \
+         (${{{{ matrix.os }}}})` names"
     );
-
-    for (i, os_line) in os_lines.iter().enumerate() {
-        // Parse the OS values from the YAML list: "os: [a, b, c]"
-        let list_str = os_line
-            .trim()
-            .strip_prefix("os:")
-            .expect("os: prefix missing")
-            .trim();
-        let inner = list_str
-            .strip_prefix('[')
-            .and_then(|s| s.strip_suffix(']'))
-            .unwrap_or_else(|| {
-                panic!(
-                    "Could not parse matrix os list #{} from ci.yml.\n\
-                     Found: {os_line}\n\
-                     Expected format: os: [ubuntu-latest, windows-latest, macos-latest]",
-                    i + 1
-                )
-            });
-
-        let yaml_os_values: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
-
+    for os_line in &matrix_os_lines {
         assert_eq!(
-            yaml_os_values.len(),
-            MATRIX_OS_VALUES.len(),
-            "MATRIX_OS_VALUES has {} entries but ci.yml matrix.os line #{} has {} entries.\n\
-             MATRIX_OS_VALUES: {:?}\n\
-             ci.yml matrix.os: {:?}\n\
-             To fix: Update MATRIX_OS_VALUES or the matrix in ci.yml so they match.",
-            MATRIX_OS_VALUES.len(),
-            i + 1,
-            yaml_os_values.len(),
-            MATRIX_OS_VALUES,
-            yaml_os_values
+            os_line.trim(),
+            "os: ${{ fromJSON(needs.ci-matrix.outputs.os) }}",
+            "ci.yml matrix line must consume the ci-matrix cohort output \
+             verbatim, found: {os_line}"
         );
-
-        for os in &yaml_os_values {
-            assert!(
-                MATRIX_OS_VALUES.contains(os),
-                "ci.yml matrix.os line #{} contains \"{os}\" but MATRIX_OS_VALUES does not.\n\
-                 To fix: Add \"{os}\" to MATRIX_OS_VALUES.",
-                i + 1
-            );
-        }
-
-        for os in MATRIX_OS_VALUES {
-            assert!(
-                yaml_os_values.contains(os),
-                "MATRIX_OS_VALUES contains \"{os}\" but ci.yml matrix.os line #{} does not.\n\
-                 To fix: Either add \"{os}\" to the matrix in ci.yml or remove it from MATRIX_OS_VALUES.",
-                i + 1
-            );
-        }
     }
+
+    // The full OS inventory stays exactly the cohort union.
+    assert_eq!(
+        MATRIX_OS_VALUES.to_vec(),
+        vec!["ubuntu-latest", "windows-latest", "macos-latest"],
+        "MATRIX_OS_VALUES must stay the union of both cohorts (ubuntu+windows \
+         per push/PR, macOS on the daily cron): REQUIRED_CHECK_NAMES promises \
+         all three OS check names"
+    );
 }
 
 #[test]
@@ -25840,7 +25872,13 @@ fn test_audit_job_covers_every_dependabot_managed_npm_graph() {
         .filter(|step| {
             step.as_mapping_get("run")
                 .and_then(Yaml::as_str)
-                .is_some_and(|run| run.lines().any(|line| line.trim() == "npm audit"))
+                .is_some_and(|run| {
+                    // Either the bare invocation or the transient-5xx retry
+                    // form (`if npm audit; then`) counts; the failure-echo
+                    // line must not match.
+                    run.lines()
+                        .any(|line| matches!(line.trim(), "npm audit" | "if npm audit; then"))
+                })
         })
         .map(|step| {
             step.as_mapping_get("working-directory")
@@ -25913,10 +25951,13 @@ fn test_audit_job_configuration() {
     let audit_section = extract_audit_section(&strip_comment_lines(&ci_content));
 
     assert!(
-        audit_section.contains("timeout-minutes: 10"),
-        "Audit job should have a 10-minute timeout.\n\
-         cargo-audit is a lightweight advisory database check and should complete quickly.\n\
-         A 10-minute budget provides margin without wasting CI resources on hangs."
+        audit_section.contains("timeout-minutes: 15"),
+        "Audit job should have a 15-minute timeout.\n\
+         cargo-audit is a lightweight advisory database check, but the lane runs \
+         five lockfile scans plus two npm audits whose transient-registry retry \
+         legitimately spends slack when the npm registry is degraded.\n\
+         A 15-minute budget absorbs the retry path without wasting CI resources \
+         on hangs."
     );
 
     assert!(
@@ -25927,17 +25968,20 @@ fn test_audit_job_configuration() {
 }
 
 /// The schedule guard condition that non-audit CI jobs must use.
-/// This ensures only the `deny` and `audit` (security audit) jobs run on the daily
-/// schedule trigger, preventing unnecessary CI resource consumption for scheduled runs.
+/// This ensures only the `deny` and `audit` (security audit) jobs plus the
+/// macOS lint/nextest legs (issue #513) run on the daily schedule trigger,
+/// preventing unnecessary CI resource consumption for scheduled runs.
 const SCHEDULE_EXCLUSION_GUARD: &str = "github.event_name != 'schedule'";
 
 /// CI jobs that must be excluded from scheduled runs via an `if:` guard.
-/// The `deny` and `audit` jobs are intentionally absent — they are the only
-/// jobs that should run on the daily schedule trigger (for CVE detection).
+/// The `deny` and `audit` jobs are intentionally absent — they run on the
+/// daily schedule trigger (for CVE detection). The `lint` and `nextest` jobs
+/// are also absent: their per-leg guards (`MACOS_SCHEDULE_GUARD`, issue #513)
+/// admit only their macOS legs on the schedule and are pinned separately.
+/// `quick-check` is absent by design: it gates the macOS cron legs.
 const SCHEDULE_EXCLUDED_CI_JOBS: &[&str] = &[
-    "lint",
-    "nextest",
     "relay-allocations",
+    "doc-consistency",
     "msrv",
     "docker",
     "coverage",
@@ -25947,18 +25991,22 @@ const SCHEDULE_EXCLUDED_CI_JOBS: &[&str] = &[
 
 #[test]
 fn test_ci_schedule_only_runs_security_jobs() {
-    // Validates that the daily scheduled trigger only runs the security audit
-    // jobs (`deny` and `audit`), and all other CI jobs are excluded from
-    // schedule runs.
+    // Validates the daily scheduled trigger's cost cohort (issue #513):
+    // only the security audit jobs (`deny` and `audit`), the `quick-check`
+    // gate, and the macOS legs of `lint`/`nextest` run on schedule; every
+    // job in `SCHEDULE_EXCLUDED_CI_JOBS` is excluded from schedule runs
+    // entirely, and `doc-consistency` — a Linux-only lane — keeps its own
+    // exclusion guard in that list.
     //
-    // The ci.yml workflow has a daily cron schedule for catching new CVEs.
-    // Only the `deny` and `audit` jobs should run on schedule — all other
-    // jobs waste CI resources when triggered by the cron schedule since they
-    // only need to run on push/PR events.
+    // The ci.yml workflow has a daily cron schedule for catching new CVEs and
+    // for the macOS lint/nextest cohort — macOS bills at 10x Linux per minute,
+    // so its lanes run daily against main instead of on every push/PR.
     //
     // This test ensures:
-    //   1. Every non-audit job has `if: github.event_name != 'schedule'`
+    //   1. Every job in `SCHEDULE_EXCLUDED_CI_JOBS` has a schedule-exclusion guard
     //   2. The `deny` and `audit` jobs do NOT have a schedule exclusion guard
+    //   3. The macOS lint/nextest per-leg cohort guard is pinned separately
+    //      (test_ci_macos_lanes_run_only_on_the_daily_cron)
 
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
@@ -25980,7 +26028,7 @@ fn test_ci_schedule_only_runs_security_jobs() {
         // condition being None is fine — no `if:` means it runs on all triggers
     }
 
-    // Verify all non-audit jobs HAVE the schedule exclusion guard
+    // Verify all remaining non-audit jobs HAVE the schedule exclusion guard
     let mut missing_guard = Vec::new();
     let mut wrong_guard = Vec::new();
 
@@ -26012,7 +26060,8 @@ fn test_ci_schedule_only_runs_security_jobs() {
     assert!(
         errors.is_empty(),
         "CI jobs are missing schedule exclusion guards.\n\n\
-         The daily schedule trigger should only run the `deny` and `audit` (security) jobs.\n\
+         The daily schedule trigger should only run the `deny` and `audit` (security) jobs \
+         plus the macOS lint/nextest cohort (issue #513).\n\
          All other jobs must have `if: {SCHEDULE_EXCLUSION_GUARD}` to avoid wasting \
          CI resources on scheduled runs.\n\n\
          Issues:\n{}\n\n\
@@ -26020,6 +26069,135 @@ fn test_ci_schedule_only_runs_security_jobs() {
          File: {}",
         errors.join("\n"),
         root.join(".github/workflows/ci.yml").display()
+    );
+}
+
+#[test]
+fn test_ci_macos_lanes_run_only_on_the_daily_cron() {
+    // Issue #513 cost cohort: macOS Lint/Nextest moved out of the per-PR/per-
+    // push hot path into the daily cron. macOS bills at 10x Linux per minute
+    // and the server deploys on Linux containers, so per-event macOS signal
+    // buys little; the daily cron keeps macOS coverage of main with next-day
+    // (instead of pre-merge) regression detection.
+    //
+    // The cohort is a dynamic matrix (`ci-matrix` emits the OS list per
+    // event) because `matrix` is not an available context in a job-level
+    // `if:` — a per-leg guard there is a workflow startup failure.
+    //
+    // Pins:
+    //   1. `ci-matrix` runs on every event (no schedule exclusion), emits
+    //      ubuntu+windows per push/PR and macOS-only on the schedule, and
+    //      exposes exactly the `os` output the matrices consume.
+    //   2. Per gated job: `needs: [quick-check, ci-matrix]`, the exact
+    //      cohort guard, the verbatim matrix expression, and the intact
+    //      fail-closed quick-check gate.
+    //   3. The full OS inventory stays intact in MATRIX_OS_VALUES — the
+    //      macOS check names must keep existing (produced by the cron), so
+    //      REQUIRED_CHECK_NAMES stays honest for external consumers.
+    use saphyr::LoadableYamlNode;
+
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let documents = Yaml::load_from_str(&workflow).expect("ci.yml must parse");
+    let jobs = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .expect("ci.yml jobs");
+
+    // The cohort job runs on all events and emits the two cohort lists.
+    let cohort = jobs
+        .as_mapping_get(CI_MATRIX_JOB)
+        .unwrap_or_else(|| panic!("parsed ci.yml must define `{CI_MATRIX_JOB}`"));
+    let cohort_condition = extract_job_if_condition(&workflow, CI_MATRIX_JOB);
+    assert!(
+        cohort_condition
+            .as_ref()
+            .is_none_or(|cond| !cond.contains("schedule")),
+        "`{CI_MATRIX_JOB}` must NOT exclude schedule runs: it is what produces \
+         the macOS cron cohort (issue #513)"
+    );
+    let outputs = cohort
+        .as_mapping_get("outputs")
+        .and_then(|o| o.as_mapping_get("os"))
+        .and_then(Yaml::as_str)
+        .unwrap_or_else(|| panic!("{CI_MATRIX_JOB} must expose the `os` output"));
+    assert_eq!(
+        outputs, "${{ steps.cohort.outputs.os }}",
+        "{CI_MATRIX_JOB} must forward the cohort step's `os` output"
+    );
+    let cohort_block = extract_workflow_job_block(&workflow, CI_MATRIX_JOB)
+        .unwrap_or_else(|| panic!("ci.yml must define the `{CI_MATRIX_JOB}` job"));
+    assert!(
+        cohort_block.contains(CI_MATRIX_SCHEDULE_OS) && cohort_block.contains(CI_MATRIX_PUSH_OS),
+        "`{CI_MATRIX_JOB}` must emit the macOS-only schedule cohort \
+         ({CI_MATRIX_SCHEDULE_OS}) and the ubuntu+windows push/PR cohort \
+         ({CI_MATRIX_PUSH_OS})"
+    );
+
+    for job in SCHEDULE_ONLY_MACOS_JOBS {
+        let job_config = jobs
+            .as_mapping_get(job)
+            .unwrap_or_else(|| panic!("parsed ci.yml must define `{job}`"));
+        assert_eq!(
+            job_config.as_mapping_get("if").and_then(Yaml::as_str),
+            Some(CI_MATRIX_GUARD),
+            "`{job}` must carry the cohort guard: a failed cohort job must keep \
+             the run visibly red, a successful one must admit exactly its legs"
+        );
+        let needs = job_config
+            .as_mapping_get("needs")
+            .and_then(|n| n.as_sequence())
+            .expect("`{job}` must declare a needs sequence");
+        let needs: Vec<&str> = needs.iter().filter_map(Yaml::as_str).collect();
+        assert_eq!(
+            needs,
+            vec!["quick-check", CI_MATRIX_JOB],
+            "`{job}` must gate on both the fail-closed quick-check gate and the \
+             cohort job"
+        );
+
+        let block = extract_workflow_job_block(&workflow, job)
+            .unwrap_or_else(|| panic!("ci.yml must define the `{job}` job"));
+        let matrix_oses = extract_yaml_field_values(&block, "os");
+        assert_eq!(
+            matrix_oses,
+            vec![CI_MATRIX_OUTPUT_OS],
+            "`{job}` must consume the cohort output verbatim; the macOS check \
+             names keep existing from the daily cron"
+        );
+
+        assert!(
+            block.contains("QUICK_CHECK_RESULT: ${{ needs.quick-check.result }}")
+                && block.contains("test \"$QUICK_CHECK_RESULT\" = success"),
+            "`{job}` must keep the fail-closed quick-check gate on its cron legs"
+        );
+    }
+
+    // The cohort union stays the stable check-name inventory.
+    let expanded_names: Vec<String> = ["Lint", "Nextest"]
+        .iter()
+        .flat_map(|job| {
+            MATRIX_OS_VALUES
+                .iter()
+                .map(move |os| format!("CI / {job} ({os})"))
+        })
+        .collect();
+    for name in expanded_names {
+        assert!(
+            REQUIRED_CHECK_NAMES.contains(&name.as_str()),
+            "check name `{name}` must stay in REQUIRED_CHECK_NAMES: the daily \
+             cron keeps producing it (issue #513)"
+        );
+    }
+
+    // quick-check gates the cron legs, so it must run on every event.
+    let quick_check_condition = extract_job_if_condition(&workflow, "quick-check");
+    assert!(
+        quick_check_condition
+            .as_ref()
+            .is_none_or(|cond| !cond.contains("schedule")),
+        "quick-check must NOT exclude schedule runs: the macOS lint/nextest cron \
+         legs (issue #513) depend on its fail-closed gate result"
     );
 }
 
@@ -30258,7 +30436,12 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // Total mutants generated by `cargo mutants --list` over the scoped modules in
 // .cargo/mutants.toml. Re-measure (and update mutation.yml's shard count if
 // needed) whenever the scope or the mutated code changes materially.
-const MUTATION_TOTAL_MUTANTS: u32 = 408;
+// 413 (was 408): session-212 (#530) added the `reliable_class_sender`
+// eviction-attribution classifier — 5 new mutable sites, all killed by the
+// attribution tests (`reliable_slow_consumer_eviction_is_attributed_to_the_
+// triggering_sender` + `reliable_class_sender_classifies_the_attribution_
+// surface`).
+const MUTATION_TOTAL_MUTANTS: u32 = 413;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.
@@ -30526,7 +30709,7 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
         .into_iter()
         .flat_map(str::lines)
         .any(|line| {
-            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/41"
+            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/42"
         })
     {
         violations.push(
