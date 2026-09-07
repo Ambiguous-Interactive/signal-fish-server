@@ -50,23 +50,18 @@ const PLAYER_A_STR: &str = "00000000-0000-0000-0000-00000000000a";
 const PLAYER_B_STR: &str = "00000000-0000-0000-0000-00000000000b";
 const ROOM_STR: &str = "11111111-1111-1111-1111-111111111111";
 
-/// Deterministic timestamp for `PlayerInfo` snapshot goldens (matches the
-/// `tests/v2_wire_golden.rs` fixture so the two files agree on the wire form).
-fn fixed_time() -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05Z")
-        .expect("valid RFC3339 fixture")
-        .with_timezone(&chrono::Utc)
-}
-
-const FIXED_TIME_STR: &str = "2024-01-02T03:04:05Z";
-
 fn player_info_a_with_epoch() -> PlayerInfo {
     PlayerInfo {
         id: player_a(),
         name: "Alice".to_string(),
         is_authority: true,
         is_ready: false,
-        connected_at: fixed_time(),
+        // Issue #529: the write layer strips the server-internal join
+        // timestamp (and any legacy `connection_info`) from every v3
+        // snapshot, so the v3 wire goldens pin the post-projection shape:
+        // no `connected_at`, no `connection_info`. The v2 shapes carrying
+        // both stay frozen in `tests/v2_wire_golden.rs`.
+        connected_at: None,
         connection_info: None,
         epoch: Some(4),
         seq: Some(42),
@@ -564,7 +559,6 @@ fn golden_reconnected_with_sender_watermarks() {
                     "name": "Alice",
                     "is_authority": true,
                     "is_ready": false,
-                    "connected_at": FIXED_TIME_STR,
                     "epoch": 4,
                     "seq": 42
                 }],
@@ -587,14 +581,15 @@ fn golden_reconnected_with_sender_watermarks() {
             }
         }),
         &format!(
-            r#"{{"type":"Reconnected","data":{{"room_id":"{ROOM_STR}","room_code":"ABC123","player_id":"{PLAYER_B_STR}","game_name":"test_game","max_players":4,"supports_authority":true,"current_players":[{{"id":"{PLAYER_A_STR}","name":"Alice","is_authority":true,"is_ready":false,"connected_at":"{FIXED_TIME_STR}","epoch":4,"seq":42}}],"is_authority":false,"lobby_state":"lobby","ready_players":["{PLAYER_A_STR}"],"relay_type":"matchbox","current_spectators":[],"missed_events":[],"replay":"complete","sender_watermarks":[{{"player_id":"{PLAYER_A_STR}","epoch":4,"seq":42}},{{"player_id":"{PLAYER_B_STR}","epoch":1,"seq":0}}]}}}}"#
+            r#"{{"type":"Reconnected","data":{{"room_id":"{ROOM_STR}","room_code":"ABC123","player_id":"{PLAYER_B_STR}","game_name":"test_game","max_players":4,"supports_authority":true,"current_players":[{{"id":"{PLAYER_A_STR}","name":"Alice","is_authority":true,"is_ready":false,"epoch":4,"seq":42}}],"is_authority":false,"lobby_state":"lobby","ready_players":["{PLAYER_A_STR}"],"relay_type":"matchbox","current_spectators":[],"missed_events":[],"replay":"complete","sender_watermarks":[{{"player_id":"{PLAYER_A_STR}","epoch":4,"seq":42}},{{"player_id":"{PLAYER_B_STR}","epoch":1,"seq":0}}]}}}}"#
         ),
     );
-    assert_msgpack(&msg, "82a474797065ab5265636f6e6e6563746564a4646174618fa7726f6f6d5f6964c41011111111111111111111111111111111a9726f6f6d5f636f6465a6414243313233a9706c617965725f6964c4100000000000000000000000000000000ba967616d655f6e616d65a9746573745f67616d65ab6d61785f706c617965727304b2737570706f7274735f617574686f72697479c3af63757272656e745f706c61796572739187a26964c4100000000000000000000000000000000aa46e616d65a5416c696365ac69735f617574686f72697479c3a869735f7265616479c2ac636f6e6e65637465645f6174b4323032342d30312d30325430333a30343a30355aa565706f636804a37365712aac69735f617574686f72697479c2ab6c6f6262795f7374617465a56c6f626279ad72656164795f706c617965727391c4100000000000000000000000000000000aaa72656c61795f74797065a86d61746368626f78b263757272656e745f737065637461746f727390ad6d69737365645f6576656e747390a67265706c6179a8636f6d706c657465b173656e6465725f77617465726d61726b739283a9706c617965725f6964c4100000000000000000000000000000000aa565706f636804a37365712a83a9706c617965725f6964c4100000000000000000000000000000000ba565706f636801a373657100");
+    assert_msgpack(&msg, "82a474797065ab5265636f6e6e6563746564a4646174618fa7726f6f6d5f6964c41011111111111111111111111111111111a9726f6f6d5f636f6465a6414243313233a9706c617965725f6964c4100000000000000000000000000000000ba967616d655f6e616d65a9746573745f67616d65ab6d61785f706c617965727304b2737570706f7274735f617574686f72697479c3af63757272656e745f706c61796572739186a26964c4100000000000000000000000000000000aa46e616d65a5416c696365ac69735f617574686f72697479c3a869735f7265616479c2a565706f636804a37365712aac69735f617574686f72697479c2ab6c6f6262795f7374617465a56c6f626279ad72656164795f706c617965727391c4100000000000000000000000000000000aaa72656c61795f74797065a86d61746368626f78b263757272656e745f737065637461746f727390ad6d69737365645f6576656e747390a67265706c6179a8636f6d706c657465b173656e6465725f77617465726d61726b739283a9706c617965725f6964c4100000000000000000000000000000000aa565706f636804a37365712a83a9706c617965725f6964c4100000000000000000000000000000000ba565706f636801a373657100");
 }
 
 /// A `PlayerInfo` inside a `PlayerJoined` snapshot carries the joiner's exact
-/// `(epoch, seq)` baseline (v3).
+/// `(epoch, seq)` baseline (v3), with the server-internal join timestamp
+/// stripped (issue #529).
 #[test]
 fn golden_player_joined_player_info_with_epoch() {
     let msg = ServerMessage::PlayerJoined {
@@ -603,7 +598,7 @@ fn golden_player_joined_player_info_with_epoch() {
             name: "P".to_string(),
             is_authority: false,
             is_ready: false,
-            connected_at: fixed_time(),
+            connected_at: None,
             connection_info: None,
             epoch: Some(4),
             seq: Some(0),
@@ -619,19 +614,18 @@ fn golden_player_joined_player_info_with_epoch() {
                 "name": "P",
                 "is_authority": false,
                 "is_ready": false,
-                "connected_at": FIXED_TIME_STR,
                 "epoch": 4,
                 "seq": 0
             } }
         }),
         &format!(
-            r#"{{"type":"PlayerJoined","data":{{"player":{{"id":"{PLAYER_A_STR}","name":"P","is_authority":false,"is_ready":false,"connected_at":"{FIXED_TIME_STR}","epoch":4,"seq":0}}}}}}"#
+            r#"{{"type":"PlayerJoined","data":{{"player":{{"id":"{PLAYER_A_STR}","name":"P","is_authority":false,"is_ready":false,"epoch":4,"seq":0}}}}}}"#
         ),
     );
     // Freeze the MessagePack encoding too (matching the other goldens here and
     // in `v2_wire_golden.rs`), so the production binary snapshot wire cannot
     // drift the paired baseline keys silently.
-    assert_msgpack(&msg, "82a474797065ac506c617965724a6f696e6564a46461746181a6706c6179657287a26964c4100000000000000000000000000000000aa46e616d65a150ac69735f617574686f72697479c2a869735f7265616479c2ac636f6e6e65637465645f6174b4323032342d30312d30325430333a30343a30355aa565706f636804a373657100");
+    assert_msgpack(&msg, "82a474797065ac506c617965724a6f696e6564a46461746181a6706c6179657286a26964c4100000000000000000000000000000000aa46e616d65a150ac69735f617574686f72697479c2a869735f7265616479c2a565706f636804a373657100");
 }
 
 #[test]

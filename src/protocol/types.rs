@@ -274,11 +274,24 @@ pub struct PlayerInfo {
     pub name: String,
     pub is_authority: bool,
     pub is_ready: bool,
-    pub connected_at: chrono::DateTime<chrono::Utc>,
-    /// Legacy self-declared peer metadata exposed in room snapshots and
-    /// `GameStarting`. A validated Direct value is also the host-readiness
-    /// input for v3 `host + direct` election; it remains self-declared and is
-    /// not reachability proof.
+    /// Server wall-clock join timestamp — a server-internal diagnostic.
+    ///
+    /// Stored for diagnostics (dashboard, reconnect identity restoration).
+    /// It is NOT sent to protocol-v3 peers: room snapshots omit it (issue
+    /// #529 — no peer has a protocol use for another member's join time).
+    /// Negotiated v2 connections keep the frozen legacy wire shape, which
+    /// includes this field; the send layer enforces the per-cohort split.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connected_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Legacy self-declared peer metadata.
+    ///
+    /// Server-internal storage feeds the legacy handoff surface
+    /// (`GameStarting` `PeerConnectionInfo`, both versions) and the v3
+    /// host+direct election. It is NOT echoed to protocol-v3 peers in room
+    /// snapshots (issue #529: the echo broadcast arbitrary `Custom` JSON and
+    /// unauthenticated credential-looking `relay.token` values to every
+    /// member with no snapshot protocol purpose). Negotiated v2 connections
+    /// keep the frozen legacy wire shape, which includes it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_info: Option<ConnectionInfo>,
     /// Server-tracked incarnation epoch (v3 only): this player's current
@@ -309,7 +322,13 @@ pub struct PlayerInfo {
 pub struct SpectatorInfo {
     pub id: PlayerId,
     pub name: String,
-    pub connected_at: chrono::DateTime<chrono::Utc>,
+    /// Server wall-clock join timestamp — a server-internal diagnostic.
+    ///
+    /// Stored for diagnostics only. It is NOT sent to protocol-v3 peers
+    /// (issue #529); negotiated v2 connections keep the frozen legacy wire
+    /// shape, which includes this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connected_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Describes why a spectator state change occurred.
@@ -577,7 +596,7 @@ mod tests {
             name: name.to_string(),
             is_authority,
             is_ready: true,
-            connected_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            connected_at: Some(Utc.timestamp_opt(1_700_000_000, 0).unwrap()),
             connection_info,
             epoch: None,
             seq: None,

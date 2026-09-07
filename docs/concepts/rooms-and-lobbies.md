@@ -54,6 +54,11 @@ A room is created when a player sends a `JoinRoom` message **without** a
 }
 ```
 
+The example shows the frozen v2 snapshot shape, which carries the
+`connected_at` join timestamp. Protocol-v3 snapshots omit it: it is a
+server-internal diagnostic, not peer data (issue #529), and v3 members
+instead carry `epoch`/`seq` relay baselines.
+
 Alice now shares the room code `HK7T3W` with other players (via your
 game's UI, a chat message, or any other channel).
 

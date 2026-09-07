@@ -69,7 +69,6 @@ and application state:
         "name": "Alice",
         "is_authority": false,
         "is_ready": true,
-        "connected_at": "2026-06-14T10:00:00Z",
         "epoch": 1
       },
       {
@@ -77,7 +76,6 @@ and application state:
         "name": "Bob",
         "is_authority": false,
         "is_ready": true,
-        "connected_at": "2026-06-14T10:00:30Z",
         "epoch": 2
       }
     ],

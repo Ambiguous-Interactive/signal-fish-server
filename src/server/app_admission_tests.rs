@@ -329,7 +329,7 @@ async fn successful_reconnect_but_not_spectator_adopts_pending_ownership_claim()
                 name: "FailedClaimant".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: chrono::Utc::now(),
+                connected_at: Some(chrono::Utc::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,

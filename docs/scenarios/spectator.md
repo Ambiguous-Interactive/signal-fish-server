@@ -16,7 +16,8 @@ Throughout this page:
 The spectator authenticates with the same `Authenticate` operation as a player
 (see step 1 of the [v2 two-player relay](v2-two-player-relay.md) flow). The
 examples below assume `/v3/ws` with protocol 3 negotiated. The lifecycle is the
-same in v2, but v2 omits player epochs.
+same in v2, but v2 omits player epochs and keeps the legacy `connected_at`
+field, which v3 snapshots never carry (issue #529).
 
 ## 1. Observer1 joins as a spectator
 
@@ -52,7 +53,6 @@ The server admits Observer1 and replies with the current room snapshot:
         "name": "Alice",
         "is_authority": false,
         "is_ready": true,
-        "connected_at": "2026-06-14T10:00:00Z",
         "epoch": 1
       },
       {
@@ -60,7 +60,6 @@ The server admits Observer1 and replies with the current room snapshot:
         "name": "Bob",
         "is_authority": false,
         "is_ready": true,
-        "connected_at": "2026-06-14T10:00:30Z",
         "epoch": 2
       }
     ],
@@ -68,7 +67,6 @@ The server admits Observer1 and replies with the current room snapshot:
       {
         "id": "00000000-0000-0000-0000-000000000051",
         "name": "Observer1",
-        "connected_at": "2026-06-14T10:05:00Z"
       }
     ],
     "lobby_state": "finalized",
@@ -107,18 +105,15 @@ full updated spectator list:
     "spectator": {
       "id": "00000000-0000-0000-0000-000000000052",
       "name": "Observer2",
-      "connected_at": "2026-06-14T10:06:00Z"
     },
     "current_spectators": [
       {
         "id": "00000000-0000-0000-0000-000000000051",
         "name": "Observer1",
-        "connected_at": "2026-06-14T10:05:00Z"
       },
       {
         "id": "00000000-0000-0000-0000-000000000052",
         "name": "Observer2",
-        "connected_at": "2026-06-14T10:06:00Z"
       }
     ],
     "reason": "joined"
@@ -154,7 +149,6 @@ The server confirms to **Observer1**:
       {
         "id": "00000000-0000-0000-0000-000000000052",
         "name": "Observer2",
-        "connected_at": "2026-06-14T10:06:00Z"
       }
     ]
   }
@@ -173,7 +167,6 @@ and tells Alice and Bob that Observer1 is gone:
       {
         "id": "00000000-0000-0000-0000-000000000052",
         "name": "Observer2",
-        "connected_at": "2026-06-14T10:06:00Z"
       }
     ]
   }

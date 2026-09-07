@@ -557,7 +557,7 @@ mod tests {
                     name: "P".to_string(),
                     is_authority: false,
                     is_ready: false,
-                    connected_at: last_activity,
+                    connected_at: Some(last_activity),
                     connection_info: None,
                     epoch: None,
                     seq: None,
@@ -576,7 +576,7 @@ mod tests {
                 SpectatorInfo {
                     id: spectator_id,
                     name: "Watcher".to_string(),
-                    connected_at: last_activity,
+                    connected_at: Some(last_activity),
                 },
             );
             room
@@ -654,7 +654,7 @@ mod tests {
         SpectatorInfo {
             id,
             name: "Watcher".to_string(),
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
         }
     }
 

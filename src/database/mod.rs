@@ -1009,7 +1009,7 @@ impl GameDatabase for InMemoryDatabase {
             is_ready: false,
             // Wall clock (durable record): membership stamp on a durable
             // room-state row.
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
             connection_info: None,
             // Room-state record, not a wire snapshot: the v3 incarnation epoch
             // is filled at snapshot-send time, so this stays `None`.
@@ -2310,7 +2310,7 @@ mod tests {
             name: name.to_string(),
             is_authority: false,
             is_ready: false,
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
             connection_info: None,
             epoch: None,
             seq: None,
@@ -2322,7 +2322,7 @@ mod tests {
         SpectatorInfo {
             id: Uuid::new_v4(),
             name: name.to_string(),
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
         }
     }
 
@@ -2776,7 +2776,7 @@ mod tests {
                 name: "Joiner".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: chrono::Utc::now(),
+                connected_at: Some(chrono::Utc::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -3140,7 +3140,7 @@ mod tests {
             name: "Member".to_string(),
             is_authority: false,
             is_ready: false,
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
             connection_info: None,
             epoch: None,
             seq: None,

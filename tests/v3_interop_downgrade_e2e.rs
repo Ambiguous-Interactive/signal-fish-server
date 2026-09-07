@@ -38,6 +38,11 @@
 //!    the ladder requires ALL members to support the rung, so the room floors to
 //!    relay (an explicit no-peer plan for every v3 member), which is the TRUE
 //!    contract verified from `src/server/session_policy.rs::all_support`.
+//! 7. `room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape`
+//!    — issue #529: v3 room snapshots (RoomJoined, PlayerJoined,
+//!    NewSpectatorJoined, Reconnected incl. nested replay events) carry no
+//!    server-internal `connected_at` and no legacy `connection_info` echo,
+//!    while v2 keeps the exact frozen shape including both.
 
 mod test_helpers;
 mod v3_conformance_helpers;
@@ -384,6 +389,38 @@ async fn next_matching_v2_only<T>(
         pick(message)
     })
     .await
+}
+
+/// Skip forward to the next frame of `expected_type` while preserving its raw
+/// JSON text (same skip-until-match contract as
+/// `next_matching_server_message_within`, at the raw-frame level).
+async fn next_matching_raw_server_message(
+    ws: &mut WsStream,
+    expected_type: &str,
+    context: &str,
+) -> String {
+    let deadline = deadline_after(SERVER_MESSAGE_TIMEOUT);
+    loop {
+        let frame = tokio::time::timeout_at(deadline, ws.next())
+            .await
+            .unwrap_or_else(|_| {
+                panic!("{context}: timed out waiting for a {expected_type} text frame")
+            })
+            .unwrap_or_else(|| panic!("{context}: websocket stream closed"))
+            .unwrap_or_else(|error| panic!("{context}: websocket error: {error}"));
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|error| panic!("{context}: invalid JSON frame: {error}; {text:?}"));
+        let actual_type = value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| panic!("{context}: text frame lacks a type tag: {text:?}"));
+        if actual_type == expected_type {
+            return text.to_string();
+        }
+    }
 }
 
 /// Assert the exact next protocol frame type while preserving raw JSON so v2
@@ -1482,4 +1519,306 @@ async fn non_mesh_v3_member_floors_room_to_relay() {
         .await;
     }
     running_server.shutdown().await;
+}
+
+/// Issue #529 red-green: room snapshots must NOT carry the server-internal
+/// `connected_at` join timestamp or the legacy self-declared
+/// `connection_info` echo (including a credential-looking `relay.token`) to
+/// protocol-v3 peers. The legacy handoff consumer is `GameStarting`
+/// (`PeerConnectionInfo`), which keeps the metadata for BOTH versions.
+/// Negotiated v2 peers keep the exact frozen legacy shape, which includes
+/// `connected_at` and `connection_info`.
+///
+/// Data-driven over the recipient cohort, observed through the real
+/// WebSocket stack at the raw-JSON frame level:
+/// 1. the joiner's own `RoomJoined` snapshot,
+/// 2. the `PlayerJoined` broadcast for a later joiner,
+/// 3. a later joiner's `RoomJoined` view of a member that stored a
+///    `relay`-variant entry with a credential-looking token, and
+/// 4. the `NewSpectatorJoined` broadcast's spectator shape.
+#[tokio::test(flavor = "multi_thread")]
+async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape() {
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Cohort {
+        V2,
+        V3,
+    }
+
+    let cases = [
+        (Cohort::V2, "interop-snapshot-trim-v2"),
+        (Cohort::V3, "interop-snapshot-trim-v3"),
+    ];
+    for (cohort, game) in cases {
+        let (running_server, server) = start_server_with_session(mesh_session_config()).await;
+        let addr = running_server.addr();
+
+        // Expected raw key sets per cohort.
+        let (expected_player_keys, expected_spectator_keys) = match cohort {
+            Cohort::V2 => (
+                BTreeSet::from(["id", "name", "is_authority", "is_ready", "connected_at"]),
+                BTreeSet::from(["id", "name", "connected_at"]),
+            ),
+            Cohort::V3 => (
+                BTreeSet::from(["id", "name", "is_authority", "is_ready", "epoch", "seq"]),
+                BTreeSet::from(["id", "name"]),
+            ),
+        };
+        let connect_and_authenticate = |label: &'static str| async move {
+            let mut ws = connect(addr).await;
+            match cohort {
+                Cohort::V2 => authenticate_v2(&mut ws).await,
+                Cohort::V3 => authenticate_v3_full(&mut ws).await,
+            }
+            (ws, label)
+        };
+
+        // 1. The observer creates the room (join_room consumes its own
+        // RoomJoined frame; the cohort's RoomJoined member shape is asserted
+        // from the late joiner's baseline below, which carries the same
+        // roster projection).
+        let (mut observer, _) = connect_and_authenticate("observer").await;
+        let joined = join_room(&mut observer, game, None, "Observer", 4).await;
+        let room_code = joined.room_code;
+
+        // 2. A member stores credential-looking legacy metadata.
+        let (mut provider, _) = connect_and_authenticate("provider").await;
+        join_room(&mut provider, game, Some(room_code.clone()), "Provider", 4).await;
+        send(
+            &mut provider,
+            &ClientMessage::ProvideConnectionInfo {
+                connection_info: signal_fish_server::protocol::ConnectionInfo::Relay {
+                    host: "relay.example.test".to_string(),
+                    port: 3478,
+                    transport: signal_fish_server::protocol::RelayTransport::Auto,
+                    allocation_id: "alloc-1".to_string(),
+                    token: "cred-looking-secret".to_string(),
+                    client_id: None,
+                },
+            },
+        )
+        .await;
+
+        // 3. A late joiner's RoomJoined must present the provider (and every
+        // member) in the cohort's exact shape, and the observer must receive
+        // the joiner's PlayerJoined in that shape too. The late joiner's own
+        // RoomJoined is read at the RAW level (not via `join_room`, which
+        // consumes the typed frame) because the member key-set contract is
+        // the thing under test.
+        let (mut late, _) = connect_and_authenticate("late").await;
+        send(
+            &mut late,
+            &ClientMessage::JoinRoom {
+                game_name: game.to_string(),
+                room_code: Some(room_code.clone()),
+                player_name: "Late".to_string(),
+                max_players: Some(4),
+                supports_authority: Some(false),
+                relay_transport: None,
+            },
+        )
+        .await;
+        let raw =
+            next_matching_raw_server_message(&mut late, "RoomJoined", "late joiner baseline").await;
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("RoomJoined is JSON");
+        let room_id: PlayerId = value
+            .pointer("/data/room_id")
+            .and_then(serde_json::Value::as_str)
+            .map(|id| id.parse().expect("room id is a UUID"))
+            .expect("RoomJoined carries /data/room_id");
+        let players = value
+            .get("data")
+            .and_then(|data| data.get("current_players"))
+            .and_then(serde_json::Value::as_array)
+            .expect("RoomJoined carries current_players");
+        for member in players {
+            let member = member.as_object().expect("snapshot member is an object");
+            let keys: BTreeSet<_> = member.keys().map(String::as_str).collect();
+            // `connection_info` is the one optional member field: present
+            // only for members that stored legacy metadata.
+            let allowed: BTreeSet<_> = expected_player_keys
+                .union(&BTreeSet::from(["connection_info"]))
+                .copied()
+                .collect();
+            assert!(
+                keys.is_subset(&allowed) && keys.is_superset(&expected_player_keys),
+                "{cohort:?} RoomJoined member must use the exact cohort key set \
+                 (plus optional connection_info): got {keys:?} in {raw}"
+            );
+        }
+        let provider_entry = players
+            .iter()
+            .find(|member| {
+                member.get("name").and_then(serde_json::Value::as_str) == Some("Provider")
+            })
+            .expect("provider appears in the late joiner's baseline")
+            .as_object()
+            .expect("provider entry is an object");
+        let raw = next_matching_raw_server_message(
+            &mut observer,
+            "PlayerJoined",
+            "observer sees the late joiner",
+        )
+        .await;
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("PlayerJoined is JSON");
+        let player = value
+            .pointer("/data/player")
+            .and_then(serde_json::Value::as_object)
+            .expect("PlayerJoined carries a player object");
+        let keys: BTreeSet<_> = player.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys, expected_player_keys,
+            "{cohort:?} PlayerJoined must use the exact cohort key set: {raw}"
+        );
+
+        match cohort {
+            Cohort::V2 => {
+                assert_eq!(
+                    provider_entry
+                        .get("connection_info")
+                        .and_then(|info| info.get("type"))
+                        .and_then(serde_json::Value::as_str),
+                    Some("relay"),
+                    "frozen v2 snapshot keeps the legacy connection_info echo: {raw}"
+                );
+                assert_eq!(
+                    provider_entry
+                        .get("connection_info")
+                        .and_then(|info| info.get("token"))
+                        .and_then(serde_json::Value::as_str),
+                    Some("cred-looking-secret"),
+                    "frozen v2 snapshot keeps the verbatim relay token echo: {raw}"
+                );
+            }
+            Cohort::V3 => {
+                assert!(
+                    !provider_entry.contains_key("connection_info"),
+                    "v3 snapshot must not echo legacy connection_info: {raw}"
+                );
+                let raw_text = raw.as_str();
+                assert!(
+                    !raw_text.contains("cred-looking-secret")
+                        && !raw_text.contains("relay.example.test"),
+                    "v3 snapshot must not leak the credential-looking relay entry: {raw}"
+                );
+            }
+        }
+
+        // 4. The late joiner disconnects BEFORE the spectator joins, so the
+        // spectator join lands in its replay buffer.
+        let late_id: PlayerId = players
+            .iter()
+            .find(|member| member.get("name").and_then(serde_json::Value::as_str) == Some("Late"))
+            .and_then(|member| member.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .map(|id| id.parse().expect("late joiner id is a UUID"))
+            .expect("late joiner appears in its own baseline");
+        let late_info = server
+            .database()
+            .get_room_by_id(&room_id)
+            .await
+            .expect("room lookup")
+            .expect("room exists")
+            .players
+            .get(&late_id)
+            .cloned()
+            .expect("late joiner is seated before disconnect");
+        server.disconnect_client(&late_id).await;
+        late.close(None).await.expect("close late socket");
+        let token = server
+            .reconnection_manager()
+            .expect("reconnection enabled")
+            .register_disconnection(late_id, room_id, false, Some(late_info), 0)
+            .await;
+
+        // 5. A spectator joins; the players' NewSpectatorJoined broadcast
+        // must use the cohort's exact spectator shape.
+        let (mut spectator, _) = connect_and_authenticate("spectator").await;
+        send(
+            &mut spectator,
+            &ClientMessage::JoinAsSpectator {
+                game_name: game.to_string(),
+                room_code: room_code.clone(),
+                spectator_name: "Watcher".to_string(),
+            },
+        )
+        .await;
+        let raw = next_matching_raw_server_message(
+            &mut observer,
+            "NewSpectatorJoined",
+            "observer sees the spectator join",
+        )
+        .await;
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).expect("NewSpectatorJoined is JSON");
+        let spectator_info = value
+            .pointer("/data/spectator")
+            .and_then(serde_json::Value::as_object)
+            .expect("NewSpectatorJoined carries the spectator info");
+        let keys: BTreeSet<_> = spectator_info.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys, expected_spectator_keys,
+            "{cohort:?} NewSpectatorJoined spectator must use the exact cohort key set: {raw}"
+        );
+
+        // 6. A same-cohort reconnect must receive cohort-shaped snapshot
+        // members AND — for v3 — a cohort-shaped nested replay event (issue
+        // #529: the replay ring records the live broadcast form, so the
+        // write layer must project the nested copies too).
+        let (mut reconnector, _) = connect_and_authenticate("reconnector").await;
+        send(
+            &mut reconnector,
+            &ClientMessage::Reconnect {
+                player_id: late_id,
+                room_id,
+                auth_token: token,
+            },
+        )
+        .await;
+        let raw =
+            next_matching_raw_server_message(&mut reconnector, "Reconnected", "cohort reconnect")
+                .await;
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("Reconnected is JSON");
+        let players = value
+            .pointer("/data/current_players")
+            .and_then(serde_json::Value::as_array)
+            .expect("Reconnected carries current_players");
+        for member in players {
+            let member = member.as_object().expect("snapshot member is an object");
+            let keys: BTreeSet<_> = member.keys().map(String::as_str).collect();
+            let allowed: BTreeSet<_> = expected_player_keys
+                .union(&BTreeSet::from(["connection_info"]))
+                .copied()
+                .collect();
+            assert!(
+                keys.is_subset(&allowed) && keys.is_superset(&expected_player_keys),
+                "{cohort:?} Reconnected member must use the exact cohort key set \
+                 (plus optional connection_info): got {keys:?} in {raw}"
+            );
+        }
+        // The replay ring records the live broadcast form; every nested
+        // replay event must use the RECIPIENT cohort's shape (frozen v2
+        // keeps `connected_at`, v3 is trimmed).
+        let replayed = value
+            .pointer("/data/missed_events")
+            .and_then(serde_json::Value::as_array)
+            .expect("Reconnected carries missed_events");
+        let spectator_event = replayed
+            .iter()
+            .find(|event| {
+                event.get("type").and_then(serde_json::Value::as_str) == Some("NewSpectatorJoined")
+            })
+            .expect("the spectator join was replayed to the reconnecting member");
+        let spectator = spectator_event
+            .pointer("/data/spectator")
+            .and_then(serde_json::Value::as_object)
+            .expect("replayed NewSpectatorJoined carries the spectator");
+        let keys: BTreeSet<_> = spectator.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys, expected_spectator_keys,
+            "{cohort:?} replayed NewSpectatorJoined must use the exact cohort \
+             spectator key set: {raw}"
+        );
+
+        running_server.shutdown().await;
+    }
 }

@@ -1333,7 +1333,11 @@ fn accountability_message_schemas_accept_rust_wire_shapes_and_reject_hybrids() {
         name: "Alice".to_string(),
         is_authority: true,
         is_ready: false,
-        connected_at,
+        // Cohort-shaped fixture (issue #529): a v2 snapshot carries the
+        // frozen legacy `connected_at`; the server strips it from every v3
+        // snapshot before the frame is written, so the v3 wire shape omits
+        // it.
+        connected_at: (!accountable).then_some(connected_at),
         connection_info: None,
         epoch: accountable.then_some(3),
         seq: accountable.then_some(7),
@@ -1567,6 +1571,38 @@ fn accountability_message_schemas_accept_rust_wire_shapes_and_reject_hybrids() {
         "SpectatorJoined",
         "mixed snapshot versions",
         mixed_spectator,
+    ));
+
+    // Issue #529: a v3 snapshot must never carry the server-internal join
+    // timestamp the write layer strips.
+    let mut v3_player_with_timestamp = serde_json::to_value(ServerMessage::PlayerJoined {
+        player: player(true),
+    })
+    .expect("serialize PlayerJoined");
+    v3_player_with_timestamp["data"]["player"]["connected_at"] =
+        serde_json::json!("2024-01-02T03:04:05Z");
+    invalid_cases.push((
+        "PlayerJoined",
+        "v3 snapshot carrying the server-internal join timestamp",
+        v3_player_with_timestamp,
+    ));
+
+    let mut v3_player_with_connection_info = serde_json::to_value(ServerMessage::PlayerJoined {
+        player: player(true),
+    })
+    .expect("serialize PlayerJoined");
+    v3_player_with_connection_info["data"]["player"]["connection_info"] = serde_json::json!({
+        "type": "relay",
+        "host": "relay.example.test",
+        "port": 3478,
+        "transport": "auto",
+        "allocation_id": "alloc-1",
+        "token": "cred-looking-secret"
+    });
+    invalid_cases.push((
+        "PlayerJoined",
+        "v3 snapshot echoing legacy self-declared connection metadata",
+        v3_player_with_connection_info,
     ));
 
     for (schema_name, case, value) in invalid_cases {

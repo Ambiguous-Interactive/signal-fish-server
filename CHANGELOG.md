@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Protocol v3 (unshipped) wire trim, issue #529:** room snapshots sent to
+  protocol-v3 recipients no longer carry `PlayerInfo.connected_at`,
+  `PlayerInfo.connection_info`, or `SpectatorInfo.connected_at`. The join
+  timestamp is a server-internal diagnostic; the self-declared
+  `connection_info` echo (including credential-looking `relay.token` values
+  and arbitrary `Custom` JSON) keeps its single consumer, the `GameStarting`
+  legacy handoff surface (`PeerConnectionInfo`, both versions). Frozen v2
+  snapshots are byte-identical and keep both fields. The AsyncAPI spec's
+  `V3PlayerInfo` drops both properties, and `SpectatorInfo` is split into
+  versioned `V2SpectatorInfo`/`V3SpectatorInfo` shapes (shared messages
+  reference the version union). The write layer projects nested
+  `Reconnected.missed_events` copies per recipient cohort.
+
 ### Added
 
 - `SIGHUP` reload of `security.allowed_apps` (issue #522): the server re-reads
