@@ -494,9 +494,12 @@ impl RoomRateLimiter {
     /// Check if a room creation request is allowed for the given player
     pub async fn check_room_creation(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
         let mut entries = self.begin_player_check(player_id).await;
+        // No-op re-entry: begin_player_check already created the entry. The
+        // limiter is a no-panic zone, so the invariant is expressed as an
+        // idempotent insert rather than a `get_mut().expect(...)`.
         let entry = entries
-            .get_mut(player_id)
-            .expect("begin_player_check inserted the player's entry");
+            .entry(*player_id)
+            .or_insert_with(RateLimitEntry::new);
 
         match entry.try_room_creation(&self.config) {
             Ok(()) => Ok(()),
@@ -528,9 +531,12 @@ impl RoomRateLimiter {
     /// Check if a seated or spectator join attempt is allowed for the player.
     pub async fn check_join_attempt(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
         let mut entries = self.begin_player_check(player_id).await;
+        // No-op re-entry: begin_player_check already created the entry. The
+        // limiter is a no-panic zone, so the invariant is expressed as an
+        // idempotent insert rather than a `get_mut().expect(...)`.
         let entry = entries
-            .get_mut(player_id)
-            .expect("begin_player_check inserted the player's entry");
+            .entry(*player_id)
+            .or_insert_with(RateLimitEntry::new);
 
         if entry.try_join_attempt(&self.config) {
             Ok(())
@@ -549,9 +555,12 @@ impl RoomRateLimiter {
     /// Check if a WebRTC signaling message is allowed for the given player
     pub async fn check_signal(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
         let mut entries = self.begin_player_check(player_id).await;
+        // No-op re-entry: begin_player_check already created the entry. The
+        // limiter is a no-panic zone, so the invariant is expressed as an
+        // idempotent insert rather than a `get_mut().expect(...)`.
         let entry = entries
-            .get_mut(player_id)
-            .expect("begin_player_check inserted the player's entry");
+            .entry(*player_id)
+            .or_insert_with(RateLimitEntry::new);
 
         if entry.try_signal(&self.config) {
             Ok(())
@@ -578,9 +587,12 @@ impl RoomRateLimiter {
     /// fan-out is counted exactly once.
     pub async fn check_signal_available(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
         let mut entries = self.begin_player_check(player_id).await;
+        // No-op re-entry: begin_player_check already created the entry. The
+        // limiter is a no-panic zone, so the invariant is expressed as an
+        // idempotent insert rather than a `get_mut().expect(...)`.
         let entry = entries
-            .get_mut(player_id)
-            .expect("begin_player_check inserted the player's entry");
+            .entry(*player_id)
+            .or_insert_with(RateLimitEntry::new);
 
         if entry.signal_available(&self.config) {
             Ok(())
@@ -599,9 +611,12 @@ impl RoomRateLimiter {
     /// Reserve a detailed rejected-signal response for the given player.
     pub async fn check_signal_error(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
         let mut entries = self.begin_player_check(player_id).await;
+        // No-op re-entry: begin_player_check already created the entry. The
+        // limiter is a no-panic zone, so the invariant is expressed as an
+        // idempotent insert rather than a `get_mut().expect(...)`.
         let entry = entries
-            .get_mut(player_id)
-            .expect("begin_player_check inserted the player's entry");
+            .entry(*player_id)
+            .or_insert_with(RateLimitEntry::new);
 
         if entry.try_signal_error(&self.config) {
             Ok(())
@@ -638,9 +653,12 @@ impl RoomRateLimiter {
             .and_then(|policy| policy.max_relay_bytes)
             .unwrap_or(self.config.max_relay_bytes);
         let mut entries = self.begin_player_check(player_id).await;
+        // No-op re-entry: begin_player_check already created the entry. The
+        // limiter is a no-panic zone, so the invariant is expressed as an
+        // idempotent insert rather than a `get_mut().expect(...)`.
         let entry = entries
-            .get_mut(player_id)
-            .expect("begin_player_check inserted the player's entry");
+            .entry(*player_id)
+            .or_insert_with(RateLimitEntry::new);
 
         if entry.try_relay_bytes(&self.config, budget, bytes) {
             Ok(())
