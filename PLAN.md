@@ -69,9 +69,16 @@ correctness evidence appears.
   without a Timer). Session 214 closed the last two #518 items: open-mode
   app UUIDs are now namespaced (no verbatim client-chosen identity) and the
   `/metrics` response is bounded (snapshot byte cap, game-name map entry caps
-  incl. history samples). Remaining frontier: continue seam sweeps; the
-  parked-state (`senderState`) producers are same-thread program-ordered
-  behind their `SendFull` record (verified, no race window).
+  incl. history samples). Session 215 closed the #529 credential-echo class
+  (v3 snapshots no longer rebroadcast `connection_info` — `relay.token` and
+  arbitrary `Custom` JSON — including nested replay events and correlated
+  result envelopes) and the #522 restart-to-change-allowlist constraint
+  (atomic SIGHUP reload of `security.allowed_apps`, incl. the
+  `app_auth_path` registry file). Remaining frontier: continue seam sweeps;
+  #539 tracks the coordinated-SDK path for the `connected_at` v3 trim
+  (released SDKs 0.8.0–0.12.0 require the field); the parked-state
+  (`senderState`) producers are same-thread program-ordered behind their
+  `SendFull` record (verified, no race window).
 - #378 — consolidate duplicate hosted link validation only with an atomic
   branch-protection migration and equivalent-or-broader coverage evidence.
   (The #513 migration confirmed main's branch protection carries no required

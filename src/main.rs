@@ -277,6 +277,36 @@ async fn main() -> anyhow::Result<()> {
             .await;
     });
 
+    // SIGHUP reloads the application allowlist from the same configuration
+    // sources as startup (issue #522). Only `security.allowed_apps` is
+    // applied live; every other field still requires a restart, and the
+    // reload log says so. A reload that fails to load or fails security
+    // validation keeps the running allowlist and logs the error.
+    #[cfg(unix)]
+    {
+        let reload_server = game_server.clone();
+        tokio::spawn(async move {
+            let mut sighup =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+                    Ok(signal) => signal,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "Failed to install SIGHUP allowlist reload handler; \
+                             restart is the only way to change the allowlist"
+                        );
+                        return;
+                    }
+                };
+            while sighup.recv().await.is_some() {
+                // `config::load()` does synchronous file (and, when enabled,
+                // stdin) reads: keep them off the async workers.
+                let loaded = tokio::task::spawn_blocking(config::load).await;
+                reload_allowed_apps_from_config(&reload_server, loaded).await;
+            }
+        });
+    }
+
     let shutdown_server = game_server.clone();
     // Signals choreography COMPLETION, not the process watch: the
     // choreography flips the process watch before its grace wait and coded
@@ -569,6 +599,76 @@ async fn wait_for_shutdown(mut shutdown_rx: watch::Receiver<bool>) {
         if shutdown_rx.changed().await.is_err() {
             return;
         }
+    }
+}
+
+/// Apply `security.allowed_apps` from a freshly loaded configuration to the
+/// running server (issue #522). Every failure mode keeps the running
+/// allowlist and logs loudly: a partially read or invalid configuration must
+/// never shrink or widen admission silently.
+#[cfg(unix)]
+async fn reload_allowed_apps_from_config(
+    server: &EnhancedGameServer,
+    loaded: Result<anyhow::Result<config::Config>, tokio::task::JoinError>,
+) {
+    let cfg = match loaded {
+        Ok(Ok(cfg)) => Arc::new(cfg),
+        Ok(Err(error)) => {
+            tracing::error!(
+                error = %error,
+                "SIGHUP reload: failed to read configuration; keeping the running app allowlist"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "SIGHUP reload: configuration reader failed; keeping the running app allowlist"
+            );
+            return;
+        }
+    };
+    if let Err(error) = config::validate_config_security(&cfg) {
+        tracing::error!(
+            error = %error,
+            "SIGHUP reload: configuration failed security validation; keeping the running \
+             app allowlist"
+        );
+        return;
+    }
+
+    let configured = cfg.security.allowed_apps.len();
+    let outcome = match server.reload_allowed_apps(cfg.security.allowed_apps.clone()) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "SIGHUP reload: replacement allowlist was rejected; keeping the running \
+                 app allowlist"
+            );
+            return;
+        }
+    };
+    if outcome.applied {
+        // The applied+diff log lives in `reload_allowed_apps`. One case needs
+        // an extra word: the NEW configuration turned enforcement off, but
+        // enforcement posture is fixed at startup — the running process is
+        // still enforcing, so the swapped set is LIVE and only a restart can
+        // turn enforcement off.
+        if !cfg.security.enforce_app_id_allowlist {
+            tracing::warn!(
+                configured_apps = configured,
+                "SIGHUP reload swapped the configured set; the new configuration disables \
+                 enforcement, but enforcement stays ON for the life of the process and the \
+                 swapped set is live — restart to turn enforcement off"
+            );
+        }
+    } else {
+        tracing::info!(
+            configured_apps = configured,
+            "SIGHUP reload is a no-op: allowlist enforcement is disabled (open mode), so \
+             there is no configured set to swap"
+        );
     }
 }
 

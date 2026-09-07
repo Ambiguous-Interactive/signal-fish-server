@@ -1333,6 +1333,9 @@ fn accountability_message_schemas_accept_rust_wire_shapes_and_reject_hybrids() {
         name: "Alice".to_string(),
         is_authority: true,
         is_ready: false,
+        // `connected_at` stays on the wire for BOTH cohorts: every released
+        // client SDK deserializes it as a required field (issue #529
+        // follow-up). The v3 trim covers `connection_info` only.
         connected_at,
         connection_info: None,
         epoch: accountable.then_some(3),
@@ -1567,6 +1570,26 @@ fn accountability_message_schemas_accept_rust_wire_shapes_and_reject_hybrids() {
         "SpectatorJoined",
         "mixed snapshot versions",
         mixed_spectator,
+    ));
+
+    // Issue #529: a v3 snapshot must never echo the legacy self-declared
+    // connection metadata the write layer strips.
+    let mut v3_player_with_connection_info = serde_json::to_value(ServerMessage::PlayerJoined {
+        player: player(true),
+    })
+    .expect("serialize PlayerJoined");
+    v3_player_with_connection_info["data"]["player"]["connection_info"] = serde_json::json!({
+        "type": "relay",
+        "host": "relay.example.test",
+        "port": 3478,
+        "transport": "auto",
+        "allocation_id": "alloc-1",
+        "token": "cred-looking-secret"
+    });
+    invalid_cases.push((
+        "PlayerJoined",
+        "v3 snapshot echoing legacy self-declared connection metadata",
+        v3_player_with_connection_info,
     ));
 
     for (schema_name, case, value) in invalid_cases {

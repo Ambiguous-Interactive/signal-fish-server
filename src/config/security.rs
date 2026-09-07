@@ -72,7 +72,8 @@ pub struct SecurityConfig {
     /// Lives in `[security]` beside `max_signal_bytes` because it bounds
     /// attacker-controlled payload *bytes*, not a request rate. The entry is
     /// stored and broadcast verbatim to every room member (`GameStarting`
-    /// `peer_connections` and room snapshots), so an oversized entry shared by
+    /// `peer_connections`, and room snapshots for v2 recipients), so an
+    /// oversized entry shared by
     /// a full roster can push those aggregate payloads past
     /// `security.max_outbound_message_size` and close every recipient
     /// (issue #524). Must be `> 0`, must not exceed `max_message_size` (a

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `SIGHUP` reload of `security.allowed_apps` (issue #522): the server re-reads
+  its configuration (including the `security.app_auth_path` registry file),
+  validates the new set with the startup rules, and swaps it atomically —
+  new handshakes resolve against the new set, in-flight handshakes keep the
+  one they resolved. A set that fails to load or validate keeps the running
+  allowlist and logs the error. Removing an application stops new handshakes
+  for that label immediately; live connections keep their resolved context.
+  Only the allowlist is applied live; every other field still requires a
+  restart. POSIX platforms only (no effect on Windows).
 - `server.max_rooms` (default 10000): server-wide ceiling on total live rooms
   across every game name, enforced atomically under a server-global cap lock.
   Denials reuse the `MAX_ROOMS_PER_GAME_EXCEEDED` wire code.
@@ -162,6 +171,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Protocol v3 snapshot trim, issue #529:** room snapshots sent to
+  protocol-v3 recipients no longer echo `PlayerInfo.connection_info`. The
+  self-declared metadata (including credential-looking `relay.token` values
+  and arbitrary `Custom` JSON) keeps its single consumer, the `GameStarting`
+  legacy handoff surface (`PeerConnectionInfo`, both versions). Frozen v2
+  snapshots are byte-identical and keep the field. `connected_at` stays on
+  the wire for BOTH versions: every released client SDK
+  (signal-fish-client 0.8.0 through 0.12.0) deserializes it as a required
+  field, so trimming it needs a coordinated SDK change. The AsyncAPI
+  spec's `V3PlayerInfo` drops `connection_info`. The write layer projects
+  nested `Reconnected.missed_events` copies and correlated
+  `RoomOperationResult` envelopes per recipient cohort.
 - `logging.enable_file_logging` now defaults to `false` (issue #526): stdout is
   the single log sink, and rolling files have no size cap, so the default
   container configuration wrote into the writable layer without bound between

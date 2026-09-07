@@ -202,13 +202,14 @@ pub struct SessionPlanPayload {
     pub fallback: Transport,
 }
 
-/// Legacy, self-declared peer metadata carried in room snapshots and
-/// `GameStarting`.
+/// Legacy, self-declared peer metadata carried in v2 room snapshots and
+/// `GameStarting` (both versions).
 ///
 /// This is preserved for the v2/back-compat handoff surface. It is not protocol
 /// v3 transport negotiation and must not be treated as proof of direct/WebRTC
 /// reachability. A validated Direct variant is also the execution-readiness
-/// input for electing a v3 `host + direct` host.
+/// input for electing a v3 `host + direct` host. Protocol-v3 room snapshots
+/// omit it (issue #529); the write layer enforces the per-cohort split.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ConnectionInfo {
@@ -274,11 +275,23 @@ pub struct PlayerInfo {
     pub name: String,
     pub is_authority: bool,
     pub is_ready: bool,
+    /// Server wall-clock join timestamp (frozen wire field, both versions).
+    ///
+    /// Every released client SDK (signal-fish-client 0.8.0 through 0.12.0)
+    /// deserializes snapshots with this field REQUIRED, so it cannot be
+    /// trimmed from the v3 wire without a coordinated SDK change (follow-up
+    /// of issue #529). The privacy-trim landed for v3 instead covers
+    /// `connection_info` — the credential-looking, arbitrary-JSON echo.
     pub connected_at: chrono::DateTime<chrono::Utc>,
-    /// Legacy self-declared peer metadata exposed in room snapshots and
-    /// `GameStarting`. A validated Direct value is also the host-readiness
-    /// input for v3 `host + direct` election; it remains self-declared and is
-    /// not reachability proof.
+    /// Legacy self-declared peer metadata.
+    ///
+    /// Server-internal storage feeds the legacy handoff surface
+    /// (`GameStarting` `PeerConnectionInfo`, both versions) and the v3
+    /// host+direct election. It is NOT echoed to protocol-v3 peers in room
+    /// snapshots (issue #529: the echo broadcast arbitrary `Custom` JSON and
+    /// unauthenticated credential-looking `relay.token` values to every
+    /// member with no snapshot protocol purpose). Negotiated v2 connections
+    /// keep the frozen legacy wire shape, which includes it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_info: Option<ConnectionInfo>,
     /// Server-tracked incarnation epoch (v3 only): this player's current
@@ -309,6 +322,10 @@ pub struct PlayerInfo {
 pub struct SpectatorInfo {
     pub id: PlayerId,
     pub name: String,
+    /// Server wall-clock join timestamp (frozen wire field, both versions).
+    ///
+    /// Kept on the wire for the same released-SDK compatibility reason as
+    /// `PlayerInfo::connected_at` (issue #529 follow-up).
     pub connected_at: chrono::DateTime<chrono::Utc>,
 }
 

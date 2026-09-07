@@ -691,6 +691,9 @@ components:
       type: object
       required: [id, name, is_authority, is_ready, connected_at]
       additionalProperties: false
+      description: >-
+        Frozen legacy v2 room-member snapshot shape (unchanged by issue
+        #529).
       properties:
         id: { $ref: '#/components/schemas/PlayerId' }
         name: { type: string }
@@ -702,13 +705,22 @@ components:
       type: object
       required: [id, name, is_authority, is_ready, connected_at, epoch, seq]
       additionalProperties: false
+      description: >-
+        Protocol v3 room-member snapshot. Deliberately excludes the legacy
+        `connection_info` echo: it is self-declared handoff metadata whose
+        consumer is `GameStarting` (PeerConnectionInfo) — v3 connectivity is
+        negotiated via SessionPlan — and its snapshot echo broadcast
+        arbitrary `Custom` JSON and unauthenticated credential-looking
+        `relay.token` values to every member (issue #529). `connected_at`
+        stays on the v3 wire: every released client SDK deserializes it as a
+        required field, so trimming it needs a coordinated SDK change
+        (issue #529 follow-up).
       properties:
         id: { $ref: '#/components/schemas/PlayerId' }
         name: { type: string }
         is_authority: { type: boolean }
         is_ready: { type: boolean }
         connected_at: { type: string, format: date-time }
-        connection_info: { $ref: '#/components/schemas/ConnectionInfo' }
         epoch:
           type: integer
           minimum: 1
@@ -751,6 +763,10 @@ components:
       type: object
       additionalProperties: false
       required: [id, name, connected_at]
+      description: >-
+        Shared v2/v3 spectator snapshot shape. `connected_at` stays on the
+        wire for both versions (released SDKs require it; issue #529
+        follow-up).
       properties:
         id: { $ref: '#/components/schemas/PlayerId' }
         name: { type: string }
@@ -779,8 +795,14 @@ components:
     ConnectionInfo:
       description: >-
         Legacy self-declared peer metadata (tagged by an inner `type` field:
-        direct | unity_relay | relay | webrtc | custom). Visible in room member
-        snapshots and GameStarting; not v3 capability negotiation. Values are
+        direct | unity_relay | relay | webrtc | custom). Visible at the legacy
+        handoff surface (`GameStarting` PeerConnectionInfo, both versions)
+        and in protocol-v2 room snapshots. Protocol-v3 room snapshots omit it
+        (issue #529): the echo broadcast arbitrary `Custom` JSON and
+        unauthenticated credential-looking `relay.token` values to every
+        member with no snapshot protocol purpose, and v3 connectivity is
+        negotiated via SessionPlan instead. Not v3 capability negotiation.
+        Values are
         stored and forwarded rather than authenticated. A syntactically
         validated direct value is also used to elect an executable Direct host,
         but remains self-declared and is not reachability proof. The serialized

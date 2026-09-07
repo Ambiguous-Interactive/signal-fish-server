@@ -1,5 +1,7 @@
 use crate::coordination::outbound_queue::{DataDeliveryMetadata, OutboundReceiver};
-use crate::protocol::{ErrorCode, GameDataEncoding, PlayerId, ServerMessage};
+use crate::protocol::{
+    ErrorCode, GameDataEncoding, PlayerId, PlayerInfo, RoomOperationResult, ServerMessage,
+};
 use crate::server::EnhancedGameServer;
 use axum::extract::ws::{Message, WebSocket};
 use bytes::Bytes;
@@ -667,6 +669,102 @@ pub(super) async fn send_single_message_ref(
             )
             .await?;
         }
+        // Issue #529 (v3 snapshot metadata trim) — the mirror image of the
+        // v2 arms above. Protocol-v3 recipients get room snapshots WITHOUT
+        // the legacy self-declared `connection_info` echo (its
+        // credential-looking `relay.token` and arbitrary `Custom` JSON must
+        // not be rebroadcast to every member). The legacy handoff surface is
+        // `GameStarting` (`PeerConnectionInfo`); v3 connectivity is
+        // negotiated via `SessionPlan`. `connected_at` stays on the wire for
+        // both versions: every released client SDK deserializes it as a
+        // required field, so trimming it needs a coordinated SDK change
+        // (issue #529 follow-up). Negotiated v2 recipients keep the frozen
+        // legacy wire shape, which includes `connection_info`.
+        ServerMessage::PlayerJoined { player }
+            if recipient_supports_v3 && player_has_v2_only_snapshot_metadata(player) =>
+        {
+            let mut player = player.clone();
+            strip_player_v2_only_snapshot_metadata(&mut player);
+            send_text_message(
+                sender,
+                &ServerMessage::PlayerJoined { player },
+                player_id,
+                max_outbound_message_size,
+            )
+            .await?;
+        }
+        ServerMessage::RoomJoined(payload)
+            if recipient_supports_v3
+                && roster_has_v2_only_snapshot_metadata(&payload.current_players) =>
+        {
+            let mut payload = payload.as_ref().clone();
+            strip_roster_v2_only_snapshot_metadata(&mut payload.current_players);
+            send_text_message(
+                sender,
+                &ServerMessage::RoomJoined(Box::new(payload)),
+                player_id,
+                max_outbound_message_size,
+            )
+            .await?;
+        }
+        ServerMessage::Reconnected(payload)
+            if recipient_supports_v3
+                && (roster_has_v2_only_snapshot_metadata(&payload.current_players)
+                    || payload
+                        .missed_events
+                        .iter()
+                        .any(replayed_event_has_v2_only_snapshot_metadata)) =>
+        {
+            let mut payload = payload.as_ref().clone();
+            strip_roster_v2_only_snapshot_metadata(&mut payload.current_players);
+            // Replayed room-uniform events are recorded verbatim from the
+            // live broadcast (where v2 recipients need the frozen shape), so
+            // the same projection applies to the nested copies.
+            for event in &mut payload.missed_events {
+                strip_replayed_event_v2_only_snapshot_metadata(event);
+            }
+            send_text_message(
+                sender,
+                &ServerMessage::Reconnected(Box::new(payload)),
+                player_id,
+                max_outbound_message_size,
+            )
+            .await?;
+        }
+        ServerMessage::SpectatorJoined(payload)
+            if recipient_supports_v3
+                && roster_has_v2_only_snapshot_metadata(&payload.current_players) =>
+        {
+            let mut payload = payload.as_ref().clone();
+            strip_roster_v2_only_snapshot_metadata(&mut payload.current_players);
+            send_text_message(
+                sender,
+                &ServerMessage::SpectatorJoined(Box::new(payload)),
+                player_id,
+                max_outbound_message_size,
+            )
+            .await?;
+        }
+        ServerMessage::SpectatorJoined(payload)
+            if payload
+                .current_players
+                .iter()
+                .any(|player| player.epoch.is_some() || player.seq.is_some())
+                && !recipient_supports_v3 =>
+        {
+            let mut payload = payload.as_ref().clone();
+            for player in &mut payload.current_players {
+                player.epoch = None;
+                player.seq = None;
+            }
+            send_text_message(
+                sender,
+                &ServerMessage::SpectatorJoined(Box::new(payload)),
+                player_id,
+                max_outbound_message_size,
+            )
+            .await?;
+        }
         ServerMessage::PlayerReconnected {
             player_id: reconnected,
             epoch: Some(_),
@@ -689,21 +787,26 @@ pub(super) async fn send_single_message_ref(
             };
             send_text_message(sender, &stripped, player_id, max_outbound_message_size).await?;
         }
-        ServerMessage::SpectatorJoined(payload)
-            if payload
-                .current_players
-                .iter()
-                .any(|player| player.epoch.is_some() || player.seq.is_some())
-                && !recipient_supports_v3 =>
+        // Issue #529: a correlated operation result (v3-only capability)
+        // NESTS the same snapshot payloads (`RoomJoined`, `Reconnected`,
+        // `SpectatorJoined`) that the arms above project at the top level,
+        // so the identical per-cohort projection must apply here — otherwise
+        // a correlated join/reconnect leaks the legacy `connection_info`
+        // echo to v3 peers inside the result envelope.
+        ServerMessage::RoomOperationResult {
+            operation_id,
+            result,
+        } if recipient_supports_v3
+            && room_operation_result_has_v2_only_snapshot_metadata(result) =>
         {
-            let mut payload = payload.as_ref().clone();
-            for player in &mut payload.current_players {
-                player.epoch = None;
-                player.seq = None;
-            }
+            let mut result = result.as_ref().clone();
+            strip_room_operation_result_v2_only_snapshot_metadata(&mut result);
             send_text_message(
                 sender,
-                &ServerMessage::SpectatorJoined(Box::new(payload)),
+                &ServerMessage::RoomOperationResult {
+                    operation_id: *operation_id,
+                    result: Box::new(result),
+                },
                 player_id,
                 max_outbound_message_size,
             )
@@ -765,6 +868,105 @@ fn v3_only_message_name(message: &ServerMessage) -> &'static str {
         ServerMessage::DeliveryReport { .. } => "DeliveryReport",
         ServerMessage::RoomOperationResult { .. } => "RoomOperationResult",
         _ => "",
+    }
+}
+
+/// Whether a room-member snapshot still carries the legacy `connection_info`
+/// echo that the frozen v2 wire contract includes but protocol v3 omits
+/// (issue #529). `connected_at` stays on the wire for BOTH versions: every
+/// released client SDK (signal-fish-client 0.8.0 through 0.12.0)
+/// deserializes snapshots with it as a REQUIRED field, so trimming it needs
+/// a coordinated SDK change (issue #529 follow-up).
+fn player_has_v2_only_snapshot_metadata(player: &PlayerInfo) -> bool {
+    player.connection_info.is_some()
+}
+
+fn players_have_v2_only_snapshot_metadata(players: &[PlayerInfo]) -> bool {
+    players.iter().any(player_has_v2_only_snapshot_metadata)
+}
+
+/// Whether a snapshot payload's player roster still carries v2-only metadata.
+fn roster_has_v2_only_snapshot_metadata(players: &[PlayerInfo]) -> bool {
+    players_have_v2_only_snapshot_metadata(players)
+}
+
+fn strip_player_v2_only_snapshot_metadata(player: &mut PlayerInfo) {
+    player.connection_info = None;
+}
+
+fn strip_roster_v2_only_snapshot_metadata(players: &mut [PlayerInfo]) {
+    for player in players {
+        strip_player_v2_only_snapshot_metadata(player);
+    }
+}
+
+/// Strip v2-only snapshot metadata from a replayed room-uniform event nested
+/// in `Reconnected.missed_events` (issue #529). Only `PlayerJoined` carries
+/// member metadata among the replayable variants; every other variant passes
+/// through untouched.
+fn strip_replayed_event_v2_only_snapshot_metadata(event: &mut ServerMessage) {
+    if let ServerMessage::PlayerJoined { player } = event {
+        strip_player_v2_only_snapshot_metadata(player);
+    }
+}
+
+/// Whether one nested replay event still carries v2-only metadata.
+fn replayed_event_has_v2_only_snapshot_metadata(event: &ServerMessage) -> bool {
+    matches!(event, ServerMessage::PlayerJoined { player }
+        if player_has_v2_only_snapshot_metadata(player))
+}
+
+/// Whether a correlated operation result nests snapshot payloads that still
+/// carry v2-only metadata (issue #529). Only the four success variants carry
+/// snapshot payloads; failure variants have nothing to project.
+fn room_operation_result_has_v2_only_snapshot_metadata(result: &RoomOperationResult) -> bool {
+    match result {
+        RoomOperationResult::RoomJoined(payload) => {
+            roster_has_v2_only_snapshot_metadata(&payload.current_players)
+        }
+        RoomOperationResult::Reconnected(payload) => {
+            roster_has_v2_only_snapshot_metadata(&payload.current_players)
+                || payload
+                    .missed_events
+                    .iter()
+                    .any(replayed_event_has_v2_only_snapshot_metadata)
+        }
+        RoomOperationResult::SpectatorJoined(payload) => {
+            roster_has_v2_only_snapshot_metadata(&payload.current_players)
+        }
+        RoomOperationResult::SpectatorLeft { .. } => false,
+        RoomOperationResult::RoomJoinFailed { .. }
+        | RoomOperationResult::RoomLeft
+        | RoomOperationResult::ReconnectionFailed { .. }
+        | RoomOperationResult::SpectatorJoinFailed { .. }
+        | RoomOperationResult::OperationFailed { .. } => false,
+    }
+}
+
+/// Apply the per-cohort projection to every snapshot payload nested in a
+/// correlated operation result (issue #529). The mirror of
+/// [`room_operation_result_has_v2_only_snapshot_metadata`]; keep the two
+/// exhaustive in lockstep.
+fn strip_room_operation_result_v2_only_snapshot_metadata(result: &mut RoomOperationResult) {
+    match result {
+        RoomOperationResult::RoomJoined(payload) => {
+            strip_roster_v2_only_snapshot_metadata(&mut payload.current_players);
+        }
+        RoomOperationResult::Reconnected(payload) => {
+            strip_roster_v2_only_snapshot_metadata(&mut payload.current_players);
+            for event in &mut payload.missed_events {
+                strip_replayed_event_v2_only_snapshot_metadata(event);
+            }
+        }
+        RoomOperationResult::SpectatorJoined(payload) => {
+            strip_roster_v2_only_snapshot_metadata(&mut payload.current_players);
+        }
+        RoomOperationResult::SpectatorLeft { .. } => {}
+        RoomOperationResult::RoomJoinFailed { .. }
+        | RoomOperationResult::RoomLeft
+        | RoomOperationResult::ReconnectionFailed { .. }
+        | RoomOperationResult::SpectatorJoinFailed { .. }
+        | RoomOperationResult::OperationFailed { .. } => {}
     }
 }
 

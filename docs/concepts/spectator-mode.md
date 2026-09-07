@@ -82,7 +82,10 @@ room state:
 
 The example shows negotiated v3: every `current_players` entry carries its
 current relay `epoch` and exact recipient-visible `seq` baseline. A pre-v3
-recipient receives the same snapshot without either field. The pair makes the
+recipient receives the same snapshot without either field, but with the
+frozen legacy `connection_info` field. Protocol v3 snapshots never echo
+`connection_info` (issue #529): the self-declared metadata keeps its single
+consumer, the `GameStarting` legacy handoff surface. The pair makes the
 snapshot usable as an accountability baseline if live spectator delivery is
 added later; spectators do not receive relayed gameplay today.
 
