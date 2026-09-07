@@ -299,7 +299,10 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
             while sighup.recv().await.is_some() {
-                reload_allowed_apps_from_config(&reload_server).await;
+                // `config::load()` does synchronous file (and, when enabled,
+                // stdin) reads: keep them off the async workers.
+                let loaded = tokio::task::spawn_blocking(config::load).await;
+                reload_allowed_apps_from_config(&reload_server, loaded).await;
             }
         });
     }
@@ -599,17 +602,28 @@ async fn wait_for_shutdown(mut shutdown_rx: watch::Receiver<bool>) {
     }
 }
 
-/// Re-read the configuration and apply `security.allowed_apps` to the running
-/// server (issue #522). Every failure mode keeps the running allowlist and
-/// logs loudly: a partially read or invalid configuration must never shrink
-/// or widen admission silently.
-async fn reload_allowed_apps_from_config(server: &EnhancedGameServer) {
-    let cfg = match config::load() {
-        Ok(cfg) => Arc::new(cfg),
-        Err(error) => {
+/// Apply `security.allowed_apps` from a freshly loaded configuration to the
+/// running server (issue #522). Every failure mode keeps the running
+/// allowlist and logs loudly: a partially read or invalid configuration must
+/// never shrink or widen admission silently.
+#[cfg(unix)]
+async fn reload_allowed_apps_from_config(
+    server: &EnhancedGameServer,
+    loaded: Result<anyhow::Result<config::Config>, tokio::task::JoinError>,
+) {
+    let cfg = match loaded {
+        Ok(Ok(cfg)) => Arc::new(cfg),
+        Ok(Err(error)) => {
             tracing::error!(
                 error = %error,
                 "SIGHUP reload: failed to read configuration; keeping the running app allowlist"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "SIGHUP reload: configuration reader failed; keeping the running app allowlist"
             );
             return;
         }
@@ -624,27 +638,20 @@ async fn reload_allowed_apps_from_config(server: &EnhancedGameServer) {
     }
 
     let configured = cfg.security.allowed_apps.len();
-    match server.reload_allowed_apps(cfg.security.allowed_apps.clone()) {
-        Ok(outcome) if outcome.applied => {
-            tracing::info!(
-                configured_apps = configured,
-                "SIGHUP reload applied; all other configuration changes still require a restart"
-            );
-        }
-        Ok(_) => {
-            tracing::info!(
-                configured_apps = configured,
-                "SIGHUP reload ignored: allowlist enforcement is disabled (open mode), so there \
-                 is no configured set to swap"
-            );
-        }
-        Err(error) => {
-            tracing::error!(
-                error = %error,
-                "SIGHUP reload: replacement allowlist was rejected; keeping the running \
-                 app allowlist"
-            );
-        }
+    if let Err(error) = server.reload_allowed_apps(cfg.security.allowed_apps.clone()) {
+        tracing::error!(
+            error = %error,
+            "SIGHUP reload: replacement allowlist was rejected; keeping the running \
+             app allowlist"
+        );
+        return;
+    }
+    if !cfg.security.enforce_app_id_allowlist {
+        tracing::info!(
+            configured_apps = configured,
+            "SIGHUP reload ignored: allowlist enforcement is disabled (open mode), so there \
+             is no configured set to swap"
+        );
     }
 }
 

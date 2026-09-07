@@ -54,8 +54,9 @@ use futures_util::StreamExt;
 use serde_json::json;
 use signal_fish_server::config::{AppRegistrationEntry, SessionConfig, TurnConfig};
 use signal_fish_server::protocol::{
-    ClientMessage, ErrorCode, IceServer, LobbyState, PlayerId, RoomJoinedPayload, ServerMessage,
-    SessionPlanPayload, Topology, Transport,
+    ClientMessage, ErrorCode, IceServer, LobbyState, PlayerId, RoomJoinedPayload, RoomOperationId,
+    RoomOperationRequest, ServerMessage, SessionPlanPayload, Topology, Transport,
+    ROOM_OPERATION_IDS_CAPABILITY,
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_route_v3};
@@ -1818,6 +1819,101 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
             "{cohort:?} replayed NewSpectatorJoined must use the exact cohort \
              spectator key set: {raw}"
         );
+
+        // 7. Correlated operations (v3-only `room_operation_ids` capability)
+        // nest the same snapshot payloads INSIDE the result envelope, so the
+        // correlated `RoomJoined` must carry the exact v3 member shape too
+        // (issue #529: the leak class applies one nesting level deeper).
+        if cohort == Cohort::V3 {
+            let mut correlated = connect(addr).await;
+            send(
+                &mut correlated,
+                &ClientMessage::Authenticate {
+                    app_id: APP_ID.to_string(),
+                    sdk_version: None,
+                    platform: None,
+                    game_data_format: None,
+                    protocol_version: Some(3),
+                    supported_transports: Some(vec![Transport::Relay]),
+                    supported_topologies: Some(vec![Topology::Relay]),
+                    requested_capabilities: Some(vec![ROOM_OPERATION_IDS_CAPABILITY.to_string()]),
+                },
+            )
+            .await;
+            next_matching_server_message_within(
+                &mut correlated,
+                SERVER_MESSAGE_TIMEOUT,
+                "Authenticated",
+                |message| matches!(message, ServerMessage::Authenticated { .. }).then_some(()),
+            )
+            .await;
+            let operation_id = RoomOperationId::new_v4();
+            send(
+                &mut correlated,
+                &ClientMessage::RoomOperation {
+                    operation_id,
+                    operation: Box::new(RoomOperationRequest::JoinRoom {
+                        game_name: game.to_string(),
+                        room_code: Some(room_code.clone()),
+                        player_name: "Correlated".to_string(),
+                        max_players: Some(4),
+                        supports_authority: Some(false),
+                        relay_transport: None,
+                    }),
+                },
+            )
+            .await;
+            let raw = next_matching_raw_server_message(
+                &mut correlated,
+                "RoomOperationResult",
+                "correlated join result",
+            )
+            .await;
+            let value: serde_json::Value =
+                serde_json::from_str(&raw).expect("RoomOperationResult is JSON");
+            assert_eq!(
+                value
+                    .pointer("/data/operation_id")
+                    .and_then(serde_json::Value::as_str),
+                Some(operation_id.to_string()).as_deref(),
+                "correlated result must carry the operation id: {raw}"
+            );
+            assert_eq!(
+                value
+                    .pointer("/data/result/type")
+                    .and_then(serde_json::Value::as_str),
+                Some("RoomJoined"),
+                "correlated join must succeed: {raw}"
+            );
+            let players = value
+                .pointer("/data/result/data/current_players")
+                .and_then(serde_json::Value::as_array)
+                .expect("correlated RoomJoined carries current_players");
+            for member in players {
+                let member = member.as_object().expect("snapshot member is an object");
+                let keys: BTreeSet<_> = member.keys().map(String::as_str).collect();
+                assert_eq!(
+                    keys, expected_player_keys,
+                    "{cohort:?} correlated RoomJoined member must use the exact cohort key \
+                     set: {raw}"
+                );
+            }
+            let joined_any = !players.is_empty();
+            assert!(
+                joined_any,
+                "correlated RoomJoined carries the joiner: {raw}"
+            );
+            let raw_text = raw.as_str();
+            assert!(
+                !raw_text.contains("cred-looking-secret")
+                    && !raw_text.contains("relay.example.test"),
+                "correlated RoomJoined must not leak the credential-looking relay entry: {raw}"
+            );
+            assert!(
+                !raw_text.contains("connected_at"),
+                "correlated RoomJoined must not leak server-internal join timestamps: {raw}"
+            );
+        }
 
         running_server.shutdown().await;
     }

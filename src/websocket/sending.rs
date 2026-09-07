@@ -1,6 +1,7 @@
 use crate::coordination::outbound_queue::{DataDeliveryMetadata, OutboundReceiver};
 use crate::protocol::{
-    ErrorCode, GameDataEncoding, PlayerId, PlayerInfo, ServerMessage, SpectatorInfo,
+    ErrorCode, GameDataEncoding, PlayerId, PlayerInfo, RoomOperationResult, ServerMessage,
+    SpectatorInfo,
 };
 use crate::server::EnhancedGameServer;
 use axum::extract::ws::{Message, WebSocket};
@@ -831,6 +832,32 @@ pub(super) async fn send_single_message_ref(
             )
             .await?;
         }
+        // Issue #529: a correlated operation result (v3-only capability)
+        // NESTS the same snapshot payloads (`RoomJoined`, `Reconnected`,
+        // `SpectatorJoined`, `SpectatorLeft`) that the arms above project at
+        // the top level, so the identical per-cohort projection must apply
+        // here — otherwise a correlated join/reconnect leaks the
+        // server-internal join timestamps and the legacy `connection_info`
+        // echo to v3 peers inside the result envelope.
+        ServerMessage::RoomOperationResult {
+            operation_id,
+            result,
+        } if recipient_supports_v3
+            && room_operation_result_has_v2_only_snapshot_metadata(result) =>
+        {
+            let mut result = result.as_ref().clone();
+            strip_room_operation_result_v2_only_snapshot_metadata(&mut result);
+            send_text_message(
+                sender,
+                &ServerMessage::RoomOperationResult {
+                    operation_id: *operation_id,
+                    result: Box::new(result),
+                },
+                player_id,
+                max_outbound_message_size,
+            )
+            .await?;
+        }
         ServerMessage::PlayerReconnected {
             player_id: reconnected,
             epoch: Some(_),
@@ -1014,6 +1041,101 @@ fn strip_replayed_event_v2_only_snapshot_metadata(event: &mut ServerMessage) {
             }
         }
         _ => {}
+    }
+}
+
+/// Whether a correlated operation result nests snapshot rosters that still
+/// carry v2-only metadata (issue #529). Only the four success variants carry
+/// snapshot payloads; failure variants have nothing to project.
+fn room_operation_result_has_v2_only_snapshot_metadata(result: &RoomOperationResult) -> bool {
+    match result {
+        RoomOperationResult::RoomJoined(payload) => roster_has_v2_only_snapshot_metadata(
+            &payload.current_players,
+            &payload.current_spectators,
+        ),
+        RoomOperationResult::Reconnected(payload) => {
+            roster_has_v2_only_snapshot_metadata(
+                &payload.current_players,
+                &payload.current_spectators,
+            ) || payload
+                .missed_events
+                .iter()
+                .any(replayed_event_has_v2_only_snapshot_metadata)
+        }
+        RoomOperationResult::SpectatorJoined(payload) => roster_has_v2_only_snapshot_metadata(
+            &payload.current_players,
+            &payload.current_spectators,
+        ),
+        RoomOperationResult::SpectatorLeft {
+            current_spectators, ..
+        } => spectators_have_v2_only_snapshot_metadata(current_spectators),
+        RoomOperationResult::RoomJoinFailed { .. }
+        | RoomOperationResult::RoomLeft
+        | RoomOperationResult::ReconnectionFailed { .. }
+        | RoomOperationResult::SpectatorJoinFailed { .. }
+        | RoomOperationResult::OperationFailed { .. } => false,
+    }
+}
+
+/// [`room_operation_result_has_v2_only_snapshot_metadata`] for one nested
+/// replay event.
+fn replayed_event_has_v2_only_snapshot_metadata(event: &ServerMessage) -> bool {
+    match event {
+        ServerMessage::PlayerJoined { player } => player_has_v2_only_snapshot_metadata(player),
+        ServerMessage::NewSpectatorJoined {
+            spectator,
+            current_spectators,
+            ..
+        } => {
+            spectator_has_v2_only_snapshot_metadata(spectator)
+                || spectators_have_v2_only_snapshot_metadata(current_spectators)
+        }
+        ServerMessage::SpectatorDisconnected {
+            current_spectators, ..
+        } => spectators_have_v2_only_snapshot_metadata(current_spectators),
+        _ => false,
+    }
+}
+
+/// Apply the per-cohort projection to every snapshot payload nested in a
+/// correlated operation result (issue #529). The mirror of
+/// [`room_operation_result_has_v2_only_snapshot_metadata`]; keep the two
+/// exhaustive in lockstep.
+fn strip_room_operation_result_v2_only_snapshot_metadata(result: &mut RoomOperationResult) {
+    match result {
+        RoomOperationResult::RoomJoined(payload) => {
+            strip_roster_v2_only_snapshot_metadata(
+                &mut payload.current_players,
+                &mut payload.current_spectators,
+            );
+        }
+        RoomOperationResult::Reconnected(payload) => {
+            strip_roster_v2_only_snapshot_metadata(
+                &mut payload.current_players,
+                &mut payload.current_spectators,
+            );
+            for event in &mut payload.missed_events {
+                strip_replayed_event_v2_only_snapshot_metadata(event);
+            }
+        }
+        RoomOperationResult::SpectatorJoined(payload) => {
+            strip_roster_v2_only_snapshot_metadata(
+                &mut payload.current_players,
+                &mut payload.current_spectators,
+            );
+        }
+        RoomOperationResult::SpectatorLeft {
+            current_spectators, ..
+        } => {
+            for member in &mut *current_spectators {
+                strip_spectator_v2_only_snapshot_metadata(member);
+            }
+        }
+        RoomOperationResult::RoomJoinFailed { .. }
+        | RoomOperationResult::RoomLeft
+        | RoomOperationResult::ReconnectionFailed { .. }
+        | RoomOperationResult::SpectatorJoinFailed { .. }
+        | RoomOperationResult::OperationFailed { .. } => {}
     }
 }
 

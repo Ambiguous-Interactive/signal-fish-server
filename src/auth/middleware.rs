@@ -346,15 +346,19 @@ impl AppIdAllowlist {
 
         let (new_apps, has_rate_limited_app) = Self::app_map_from_entries(entries)?;
 
+        // The diff is computed inside the write-lock critical section so a
+        // report can never describe any state but the one this swap
+        // publishes (issue #522; the production caller is a serialized
+        // SIGHUP loop, this just keeps concurrent callers honest too).
         let mut reload = AllowedAppsReload {
             added: Vec::new(),
             removed: Vec::new(),
             applied: true,
         };
         {
-            let current = self
+            let mut current = self
                 .apps
-                .read()
+                .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             reload.added.extend(
                 new_apps
@@ -368,20 +372,17 @@ impl AppIdAllowlist {
                     .filter(|app_id| !new_apps.contains_key(*app_id))
                     .cloned(),
             );
-        }
-        // Deterministic log ordering regardless of map iteration order.
-        reload.added.sort();
-        reload.removed.sort();
+            // Deterministic log ordering regardless of map iteration order.
+            reload.added.sort();
+            reload.removed.sort();
 
-        // Arm maintenance before publishing the set that needs it.
-        if has_rate_limited_app {
-            self.ensure_cleanup_task();
-        }
+            // Arm maintenance before publishing the set that needs it.
+            if has_rate_limited_app {
+                self.ensure_cleanup_task();
+            }
 
-        *self
-            .apps
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Arc::new(new_apps);
+            *current = Arc::new(new_apps);
+        }
 
         Ok(reload)
     }
