@@ -1,9 +1,11 @@
 //! In-memory application-ID allowlist for Signal Fish Server.
 //!
-//! Resolves public application IDs against static configuration loaded at
-//! startup. This module does not authenticate a client or validate a client
-//! secret: any client can replay a known app ID. When enforcement is disabled,
-//! every app ID receives a default [`AppContext`].
+//! Resolves public application IDs against configuration loaded at startup
+//! and replaceable at runtime through [`AppIdAllowlist::reload`] (issue #522:
+//! a SIGHUP re-reads the configuration and swaps the set atomically). This
+//! module does not authenticate a client or validate a client secret: any
+//! client can replay a known app ID. When enforcement is disabled, every app
+//! ID receives a default [`AppContext`].
 //!
 //! A configured per-minute limit is enforced as two sliding windows: the
 //! application-wide ceiling and a per-source (IP) share (see
@@ -17,7 +19,8 @@ use crate::config::AppRegistrationEntry;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -160,10 +163,30 @@ fn open_policy_app_uuid(app_id: &str) -> Uuid {
     deterministic_uuid(&format!("{OPEN_POLICY_APP_ID_NAMESPACE}{app_id}"))
 }
 
+/// Outcome of one allowed-apps reload (issue #522).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllowedAppsReload {
+    /// App IDs configured after the reload that were not configured before.
+    pub added: Vec<String>,
+    /// App IDs configured before the reload that are not configured after.
+    pub removed: Vec<String>,
+    /// Whether the new set was applied. `false` when allowlist enforcement is
+    /// disabled: open mode has no configured set to swap (every label is
+    /// accepted), so a reload is a no-op there.
+    pub applied: bool,
+}
+
 /// In-memory public app-ID allowlist backed by configured application entries.
+///
+/// The configured set is held behind an atomically swappable snapshot:
+/// [`AppIdAllowlist::reload`] builds and validates a replacement map, then
+/// swaps it in one step. A resolution that started before the swap keeps
+/// running against the old snapshot and a resolution after the swap sees the
+/// new one — no resolution observes a half-applied set (issue #522).
 pub struct AppIdAllowlist {
-    /// Map of public app ID to its accounting and quota context.
-    apps: HashMap<String, AppContext>,
+    /// Snapshot of the configured applications: public app ID to its
+    /// accounting and quota context.
+    apps: RwLock<Arc<HashMap<String, AppContext>>>,
     /// Sliding-window rate limiter holding both the application-wide windows
     /// and the per-(app, source) share windows (see [`source_rate_limit`]).
     rate_limiter: Arc<InMemoryRateLimiter>,
@@ -171,6 +194,10 @@ pub struct AppIdAllowlist {
     enforce: bool,
     /// Shared server metrics when constructed by `EnhancedGameServer`.
     metrics: Option<Arc<crate::metrics::ServerMetrics>>,
+    /// Whether the rate-limiter cleanup task has been started. The task is
+    /// idempotent-safe to request repeatedly but must only be spawned once;
+    /// a reload can introduce the first rate-limited app after startup.
+    cleanup_task_started: AtomicBool,
 }
 
 impl AppIdAllowlist {
@@ -189,10 +216,16 @@ impl AppIdAllowlist {
         Self::new_inner(entries, Some(metrics))
     }
 
-    fn new_inner(
+    /// Build the application map from configured entries, rejecting entries
+    /// the resolution gate could never accept (log-unsafe IDs, duplicates).
+    ///
+    /// Returns the map plus whether at least one entry configures an explicit
+    /// `rate_limit_per_minute` (the cleanup-task gate). Shared by startup
+    /// construction and runtime reload so a reloaded set can never pass a
+    /// gate startup would have refused.
+    fn app_map_from_entries(
         entries: Vec<AppRegistrationEntry>,
-        metrics: Option<Arc<crate::metrics::ServerMetrics>>,
-    ) -> Result<Self, AuthError> {
+    ) -> Result<(HashMap<String, AppContext>, bool), AuthError> {
         let has_rate_limited_app = entries.iter().any(|e| e.rate_limit_per_minute.is_some());
 
         let mut apps = HashMap::with_capacity(entries.len());
@@ -234,30 +267,123 @@ impl AppIdAllowlist {
             }
         }
 
+        Ok((apps, has_rate_limited_app))
+    }
+
+    fn new_inner(
+        entries: Vec<AppRegistrationEntry>,
+        metrics: Option<Arc<crate::metrics::ServerMetrics>>,
+    ) -> Result<Self, AuthError> {
+        let (apps, has_rate_limited_app) = Self::app_map_from_entries(entries)?;
+
         let rate_limiter = Arc::new(InMemoryRateLimiter::new(Duration::from_secs(60)));
 
-        if has_rate_limited_app {
-            if let Err(error) = rate_limiter.clone().start_cleanup_task() {
-                tracing::warn!(%error, "App-ID rate-limit cleanup requires an active Tokio runtime");
-            }
-        }
-
-        Ok(Self {
-            apps,
+        let allowlist = Self {
+            apps: RwLock::new(Arc::new(apps)),
             rate_limiter,
             enforce: true,
             metrics,
-        })
+            cleanup_task_started: AtomicBool::new(false),
+        };
+
+        if has_rate_limited_app {
+            allowlist.ensure_cleanup_task();
+        }
+
+        Ok(allowlist)
     }
 
     /// Create an open policy that accepts every app ID with default context.
     pub fn disabled() -> Self {
         Self {
-            apps: HashMap::new(),
+            apps: RwLock::new(Arc::new(HashMap::new())),
             rate_limiter: Arc::new(InMemoryRateLimiter::new(Duration::from_secs(60))),
             enforce: false,
             metrics: None,
+            cleanup_task_started: AtomicBool::new(false),
         }
+    }
+
+    /// Spawn the rate-limiter cleanup task at most once, retrying on a later
+    /// reload if construction or a previous reload ran without a Tokio
+    /// runtime (the same tolerance as the constructor's warning path).
+    fn ensure_cleanup_task(&self) {
+        if self
+            .cleanup_task_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            if let Err(error) = Arc::clone(&self.rate_limiter).start_cleanup_task() {
+                tracing::warn!(%error, "App-ID rate-limit cleanup requires an active Tokio runtime");
+                self.cleanup_task_started.store(false, Ordering::Release);
+            }
+        }
+    }
+
+    /// Atomically replace the configured application set (issue #522).
+    ///
+    /// The replacement is validated with the exact startup gate (log-safety,
+    /// duplicate IDs) before the swap, so a rejected reload cannot leave a
+    /// partially applied set: the previous set stays active and the error is
+    /// returned to the caller for logging. Applications removed by a reload
+    /// stop resolving for NEW handshakes immediately; connections that
+    /// already resolved a context keep it (revocation of a live connection
+    /// remains a restart/tenant-level action, matching the issue contract).
+    ///
+    /// Open-policy allowlists (enforcement disabled) have no configured set:
+    /// the call is a reported no-op.
+    pub fn reload(
+        &self,
+        entries: Vec<AppRegistrationEntry>,
+    ) -> Result<AllowedAppsReload, AuthError> {
+        if !self.enforce {
+            return Ok(AllowedAppsReload {
+                added: Vec::new(),
+                removed: Vec::new(),
+                applied: false,
+            });
+        }
+
+        let (new_apps, has_rate_limited_app) = Self::app_map_from_entries(entries)?;
+
+        let mut reload = AllowedAppsReload {
+            added: Vec::new(),
+            removed: Vec::new(),
+            applied: true,
+        };
+        {
+            let current = self
+                .apps
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            reload.added.extend(
+                new_apps
+                    .keys()
+                    .filter(|app_id| !current.contains_key(*app_id))
+                    .cloned(),
+            );
+            reload.removed.extend(
+                current
+                    .keys()
+                    .filter(|app_id| !new_apps.contains_key(*app_id))
+                    .cloned(),
+            );
+        }
+        // Deterministic log ordering regardless of map iteration order.
+        reload.added.sort();
+        reload.removed.sort();
+
+        // Arm maintenance before publishing the set that needs it.
+        if has_rate_limited_app {
+            self.ensure_cleanup_task();
+        }
+
+        *self
+            .apps
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Arc::new(new_apps);
+
+        Ok(reload)
     }
 
     /// Resolve a public app ID from the connection's source address. This is
@@ -301,7 +427,16 @@ impl AppIdAllowlist {
             return Ok(self.default_app_context(app_id));
         }
 
-        let info = self.apps.get(app_id).ok_or(AuthError::InvalidAppId)?;
+        // Snapshot the configured set: the resolution below runs against one
+        // consistent generation even if a reload swaps the map mid-flight
+        // (issue #522 atomic-swap contract).
+        let apps = Arc::clone(
+            &self
+                .apps
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        let info = apps.get(app_id).ok_or(AuthError::InvalidAppId)?;
 
         // Enforce per-app + per-source rate limits if configured.
         if let Some(limit) = info.rate_limit_per_minute {
@@ -880,5 +1015,118 @@ mod tests {
         let info1 = mw.resolve_app_id("my-game", LOCALHOST).await.unwrap();
         let info2 = mw.resolve_app_id("my-game", LOCALHOST).await.unwrap();
         assert_eq!(info1.id, info2.id);
+    }
+
+    fn entry(app_id: &str, rate_limit_per_minute: Option<u32>) -> AppRegistrationEntry {
+        AppRegistrationEntry {
+            app_id: app_id.to_string(),
+            app_name: format!("App {app_id}"),
+            max_rooms: None,
+            max_players_per_room: None,
+            rate_limit_per_minute,
+            max_relay_bytes: None,
+        }
+    }
+
+    /// The issue-#522 reload contract: a successful reload atomically swaps
+    /// the configured set, reports the added/removed diff, keeps the same
+    /// UUID for a label that stays configured, and applies the new set to
+    /// every subsequent resolution.
+    #[tokio::test]
+    async fn reload_swaps_the_configured_set_and_reports_the_diff() {
+        let mw = AppIdAllowlist::new(vec![entry("game-1", None), entry("game-2", None)])
+            .expect("unique app IDs");
+
+        let before = mw.resolve_app_id("game-2", LOCALHOST).await.unwrap();
+
+        let outcome = mw
+            .reload(vec![entry("game-2", None), entry("game-3", None)])
+            .expect("valid replacement set");
+        assert_eq!(outcome.added, ["game-3"]);
+        assert_eq!(outcome.removed, ["game-1"]);
+        assert!(outcome.applied);
+
+        let after = mw.resolve_app_id("game-2", LOCALHOST).await.unwrap();
+        assert_eq!(
+            before.id, after.id,
+            "a label that stays configured keeps its deterministic UUID across reloads"
+        );
+        assert_eq!(after.name, "App game-2");
+
+        assert!(mw.resolve_app_id("game-3", LOCALHOST).await.is_ok());
+        assert!(
+            matches!(
+                mw.resolve_app_id("game-1", LOCALHOST).await,
+                Err(AuthError::InvalidAppId)
+            ),
+            "a removed app must stop resolving for new handshakes"
+        );
+    }
+
+    /// A reload that fails the startup gate (duplicate or log-unsafe IDs) is
+    /// rejected whole: the previously configured set stays active and keeps
+    /// resolving, so a bad operator edit can never half-apply.
+    #[tokio::test]
+    async fn rejected_reload_keeps_the_previous_set_active() {
+        let mw = AppIdAllowlist::new(vec![entry("game-1", None)]).expect("unique app IDs");
+
+        for bad in [
+            // Duplicate IDs inside the replacement set.
+            vec![entry("game-2", None), entry("game-2", None)],
+            // Log-unsafe ID the resolution gate could never accept.
+            vec![entry("bad\nid", None)],
+        ] {
+            assert!(
+                matches!(
+                    mw.reload(bad),
+                    Err(AuthError::DuplicateAppId | AuthError::InvalidAppId)
+                ),
+                "the replacement set must fail the startup gate"
+            );
+            assert!(
+                mw.resolve_app_id("game-1", LOCALHOST).await.is_ok(),
+                "the previous set must stay active after a rejected reload"
+            );
+            assert!(matches!(
+                mw.resolve_app_id("game-2", LOCALHOST).await,
+                Err(AuthError::InvalidAppId)
+            ));
+        }
+    }
+
+    /// A reload can introduce the FIRST rate-limited application after
+    /// startup: its budget must then be enforced live, not just advertised.
+    #[tokio::test]
+    async fn reload_can_introduce_rate_limit_enforcement_after_startup() {
+        let mw = AppIdAllowlist::new(vec![entry("unlimited", None)]).expect("unique app IDs");
+
+        let outcome = mw
+            .reload(vec![entry("limited", Some(2))])
+            .expect("valid replacement set");
+        assert_eq!(outcome.added, ["limited"]);
+        assert_eq!(outcome.removed, ["unlimited"]);
+
+        // Per-source share of 2 is 1: the first handshake spends it, the
+        // second is rejected by the source window, and the app window keeps
+        // its remaining budget (issue-#502 conservation).
+        assert!(mw.resolve_app_id("limited", LOCALHOST).await.is_ok());
+        assert!(matches!(
+            mw.resolve_app_id("limited", LOCALHOST).await,
+            Err(AuthError::RateLimitExceeded)
+        ));
+        assert!(mw.resolve_app_id("limited", OTHER).await.is_ok());
+    }
+
+    /// Open-policy allowlists have no configured set to swap: a reload is a
+    /// reported no-op and resolution behavior is unchanged.
+    #[tokio::test]
+    async fn reload_in_open_mode_is_a_reported_noop() {
+        let open = AppIdAllowlist::disabled();
+        let outcome = open
+            .reload(vec![entry("game-1", None)])
+            .expect("open mode accepts the call");
+        assert!(!outcome.applied);
+        assert!(outcome.added.is_empty() && outcome.removed.is_empty());
+        assert!(open.resolve_app_id("game-1", LOCALHOST).await.is_ok());
     }
 }

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `SIGHUP` reload of `security.allowed_apps` (issue #522): the server re-reads
+  its configuration (including the `security.app_auth_path` registry file),
+  validates the new set with the startup rules, and swaps it atomically —
+  new handshakes resolve against the new set, in-flight handshakes keep the
+  one they resolved. A set that fails to load or validate keeps the running
+  allowlist and logs the error. Removing an application stops new handshakes
+  for that label immediately; live connections keep their resolved context.
+  Only the allowlist is applied live; every other field still requires a
+  restart. POSIX platforms only (no effect on Windows).
 - `server.max_rooms` (default 10000): server-wide ceiling on total live rooms
   across every game name, enforced atomically under a server-global cap lock.
   Denials reuse the `MAX_ROOMS_PER_GAME_EXCEEDED` wire code.

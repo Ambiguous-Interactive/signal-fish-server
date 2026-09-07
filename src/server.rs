@@ -1036,6 +1036,29 @@ impl EnhancedGameServer {
         self.connection_manager.app_context(player_id)
     }
 
+    /// Atomically replace the configured application allowlist (issue #522).
+    ///
+    /// The replacement set passes the exact startup gate before the swap; a
+    /// rejected set keeps the previous one active. Handshakes already in
+    /// flight complete against the set they resolved; every subsequent
+    /// handshake resolves against the new set. Revoking a live connection
+    /// stays a restart/tenant-level action by design. Open-mode deployments
+    /// (allowlist enforcement disabled) report the call as a no-op.
+    pub fn reload_allowed_apps(
+        &self,
+        entries: Vec<crate::config::AppRegistrationEntry>,
+    ) -> Result<crate::auth::AllowedAppsReload, crate::auth::AuthError> {
+        let reload = self.app_id_allowlist.reload(entries)?;
+        if reload.applied {
+            tracing::info!(
+                added = ?reload.added,
+                removed = ?reload.removed,
+                "App-ID allowlist reloaded; other configuration changes still require a restart"
+            );
+        }
+        Ok(reload)
+    }
+
     /// Resolve the sender's relay-relevant allowlist policy (issue #530), or
     /// `None` when the deployment runs open mode.
     ///

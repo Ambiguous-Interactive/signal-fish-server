@@ -141,6 +141,43 @@ entries, or the credential story tracked in issue #517.
   stays anchored to the sender, so a client cannot reset its window by
   switching app labels; must be `> 0` when set.
 
+## Reload the allowlist at runtime (SIGHUP)
+
+Allowlist enforcement is on or off for the life of the process, but the
+configured set of applications is reloadable without a restart (issue #522).
+Send `SIGHUP` to the server process:
+
+```bash
+kill -HUP "$(pgrep -f signal-fish-server)"
+```
+
+On each `SIGHUP` the server:
+
+1. Re-reads the configuration from the same sources as startup
+   (`config.json`, `security.app_auth_path`, `SIGNAL_FISH_CONFIG_JSON`,
+   environment overrides).
+2. Validates the new `security.allowed_apps` set with the exact startup
+   rules (unique IDs, log-safe IDs, registry-file contract).
+3. Swaps the set atomically. New handshakes resolve against the new set;
+   handshakes already in flight complete against the set they resolved.
+4. Logs the change (`added`/`removed` app IDs).
+
+Failure behavior:
+
+- A configuration that fails to load or fails security validation keeps the
+  running allowlist. The error is logged. To force fail-closed admission,
+  restart the process instead.
+- Removing an application stops NEW handshakes for that label immediately.
+  Connections that already resolved it keep their context; revoking a live
+  connection stays a restart or tenant-level action.
+- A reload can introduce rate limits for the first time; new budgets apply
+  to new handshakes at once.
+- In open mode (`enforce_app_id_allowlist: false`) the reload is a logged
+  no-op: there is no configured set to swap.
+
+Only `security.allowed_apps` is applied live. Port, TLS, limits, and every
+other configuration field still require a restart; the reload log says so.
+
 ## External app-registry file (`security.app_auth_path`)
 
 For deployments where a control plane owns the live app registry (onboarding,
@@ -190,9 +227,12 @@ SIGNAL_FISH__SECURITY__APP_AUTH_PATH=/etc/signal-fish/app-auth.json
 
 This is the intended contract for the cloud deployment's read-only-mounted
 `/etc/signal-fish/app-auth.json` file: the provisioner regenerates the file on
-its own schedule and the server picks it up at the next (re)start. The file is
-read once at startup; changing the live registry still requires a restart (see
-issue #522 for a reload path).
+its own schedule and the server picks it up at the next startup or at the
+next `SIGHUP` reload (see "Reload the allowlist at runtime"). At startup the
+fail-closed rule applies: a missing or unreadable registry refuses to boot.
+At reload time the running allowlist is kept and the error is logged, so a
+transiently missing mount cannot silently change admission; restart to force
+the fail-closed refusal.
 
 ## Legacy configuration
 
