@@ -508,7 +508,8 @@ who. Each limiter writes two info lines per affected player or room per window:
   `... rejections in the elapsed window` summary with the per-budget counts.
 
 This bound holds regardless of rejection volume: a flooding player costs at
-most two log lines per window. Rejections also stay visible per player through
+most one first-rejection line per exceeded budget plus one summary line per
+window. Rejections also stay visible per player through
 the library stats API (`RoomRateLimiter::get_player_stats`), which reports the
 current window's per-budget rejection counts.
 

@@ -4,6 +4,13 @@ use tokio::sync::RwLock;
 use tokio::time::{Duration, Instant};
 use uuid::Uuid;
 
+/// Ceiling of `duration` in whole seconds (retry-after fields and log hints).
+fn retry_after_secs(duration: &Duration) -> u64 {
+    duration
+        .as_secs()
+        .saturating_add(u64::from(duration.subsec_nanos() > 0))
+}
+
 /// Rate limiting configuration
 ///
 /// All budgets use **fixed-window** accounting: each player's counters reset
@@ -125,8 +132,8 @@ impl RoomRelayWindow {
 
     /// Count one ceiling rejection. Returns `true` on the window's first.
     fn record_rejection(&mut self) -> bool {
-        // The budget gate above bounds every increment, so saturation is
-        // unreachable; it keeps the panic-free arithmetic policy.
+        // Per-window rejections are far below u32::MAX in practice;
+        // saturating_add keeps the panic-free arithmetic policy.
         self.rejections = self.rejections.saturating_add(1);
         self.rejections == 1
     }
@@ -213,8 +220,8 @@ impl PlayerRejectionStats {
             BudgetKind::SignalError => &mut self.signal_errors,
             BudgetKind::RelayBandwidth => &mut self.relay_bandwidth,
         };
-        // The budget gate above bounds every increment, so saturation is
-        // unreachable; it keeps the panic-free arithmetic policy.
+        // Per-window rejections are far below u32::MAX in practice;
+        // saturating_add keeps the panic-free arithmetic policy.
         *count = count.saturating_add(1);
         *count == 1
     }
@@ -446,7 +453,7 @@ impl RoomRateLimiter {
         tracing::info!(
             player_id = %player_id,
             budget = kind.label(),
-            window_reset_in_secs = retry_after.as_secs().saturating_add(1),
+            window_reset_in_secs = retry_after_secs(&retry_after),
             "Player exceeded a rate budget"
         );
     }
@@ -454,8 +461,9 @@ impl RoomRateLimiter {
     /// Log one elapsed window's rejection summary at info level (issue #526).
     ///
     /// Emitted from the next enforcement call after the window rolls over,
-    /// so a flooding player costs at most two log lines per window and the
-    /// limiter needs no extra timers, maps, or cardinality budget.
+    /// so a flooding player costs at most one first-rejection line per
+    /// exceeded budget plus one summary line per window, and the limiter
+    /// needs no extra timers, maps, or cardinality budget.
     fn log_window_summary(&self, player_id: &Uuid, elapsed: &PlayerRejectionStats) {
         if elapsed.is_empty() {
             return;
@@ -487,8 +495,8 @@ impl RoomRateLimiter {
     pub async fn check_room_creation(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
         let mut entries = self.begin_player_check(player_id).await;
         let entry = entries
-            .entry(*player_id)
-            .or_insert_with(RateLimitEntry::new);
+            .get_mut(player_id)
+            .expect("begin_player_check inserted the player's entry");
 
         match entry.try_room_creation(&self.config) {
             Ok(()) => Ok(()),
@@ -521,8 +529,8 @@ impl RoomRateLimiter {
     pub async fn check_join_attempt(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
         let mut entries = self.begin_player_check(player_id).await;
         let entry = entries
-            .entry(*player_id)
-            .or_insert_with(RateLimitEntry::new);
+            .get_mut(player_id)
+            .expect("begin_player_check inserted the player's entry");
 
         if entry.try_join_attempt(&self.config) {
             Ok(())
@@ -542,8 +550,8 @@ impl RoomRateLimiter {
     pub async fn check_signal(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
         let mut entries = self.begin_player_check(player_id).await;
         let entry = entries
-            .entry(*player_id)
-            .or_insert_with(RateLimitEntry::new);
+            .get_mut(player_id)
+            .expect("begin_player_check inserted the player's entry");
 
         if entry.try_signal(&self.config) {
             Ok(())
@@ -571,8 +579,8 @@ impl RoomRateLimiter {
     pub async fn check_signal_available(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
         let mut entries = self.begin_player_check(player_id).await;
         let entry = entries
-            .entry(*player_id)
-            .or_insert_with(RateLimitEntry::new);
+            .get_mut(player_id)
+            .expect("begin_player_check inserted the player's entry");
 
         if entry.signal_available(&self.config) {
             Ok(())
@@ -592,8 +600,8 @@ impl RoomRateLimiter {
     pub async fn check_signal_error(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
         let mut entries = self.begin_player_check(player_id).await;
         let entry = entries
-            .entry(*player_id)
-            .or_insert_with(RateLimitEntry::new);
+            .get_mut(player_id)
+            .expect("begin_player_check inserted the player's entry");
 
         if entry.try_signal_error(&self.config) {
             Ok(())
@@ -631,8 +639,8 @@ impl RoomRateLimiter {
             .unwrap_or(self.config.max_relay_bytes);
         let mut entries = self.begin_player_check(player_id).await;
         let entry = entries
-            .entry(*player_id)
-            .or_insert_with(RateLimitEntry::new);
+            .get_mut(player_id)
+            .expect("begin_player_check inserted the player's entry");
 
         if entry.try_relay_bytes(&self.config, budget, bytes) {
             Ok(())
@@ -680,7 +688,7 @@ impl RoomRateLimiter {
                 tracing::info!(
                     room_id = %room_id,
                     budget = "room_relay_bytes",
-                    window_reset_in_secs = reset_time.as_secs().saturating_add(1),
+                    window_reset_in_secs = retry_after_secs(&reset_time),
                     "Room exceeded the aggregate relay byte ceiling"
                 );
             }
@@ -791,12 +799,6 @@ pub enum RateLimitError {
 
 impl std::fmt::Display for RateLimitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fn retry_after_secs(duration: &Duration) -> u64 {
-            duration
-                .as_secs()
-                .saturating_add(u64::from(duration.subsec_nanos() > 0))
-        }
-
         match self {
             Self::RoomCreationLimitExceeded { retry_after } => {
                 write!(

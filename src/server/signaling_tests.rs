@@ -464,6 +464,69 @@ async fn finalized_join_counts_its_mixed_membership_once_per_publication() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn finalized_join_counts_its_mixed_membership_once_across_routing_retries() {
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let mut fixture = setup_finalized_join_publication(&server).await;
+    let incumbent = fixture
+        .room
+        .players
+        .keys()
+        .copied()
+        .find(|player_id| *player_id != fixture.joiner)
+        .expect("fixture has one incumbent");
+    server.set_client_protocol(&incumbent, v3_relay_only());
+    let observed_before = server
+        .metrics
+        .snapshot()
+        .await
+        .transport
+        .mixed_path_members_observed;
+    // One routing change forces the publication through its retry loop; the
+    // observation must stay anchored to the publication event, so the retried
+    // attempt must not count the same mixed membership again.
+    server
+        .message_coordinator
+        .fail_room_transactions_with_routing_changed_for_test(1);
+
+    let guard = server
+        .message_coordinator
+        .lock_room_event_mutation(&fixture.room.id)
+        .await;
+    assert!(
+        server
+            .publish_finalized_join_membership(
+                &fixture.room,
+                fixture.joiner,
+                fixture.joined_player.clone(),
+                guard,
+            )
+            .await,
+        "one routing change must be retried, not degrade the publication"
+    );
+
+    assert_eq!(
+        server
+            .metrics
+            .snapshot()
+            .await
+            .transport
+            .mixed_path_members_observed,
+        observed_before + 1,
+        "a retried publication counts its mixed membership exactly once, not once per attempt"
+    );
+    assert!(matches!(
+        recv(&mut fixture.incumbent_rx).await.as_ref(),
+        ServerMessage::PlayerJoined { player } if player.id == fixture.joiner
+    ));
+    assert!(matches!(
+        recv(&mut fixture.incumbent_rx).await.as_ref(),
+        ServerMessage::SessionPlan(_)
+    ));
+    assert_silent(&mut fixture.incumbent_rx).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn finalized_join_rejects_a_refresh_that_lost_the_joiner() {
     let server = create_test_server_with_session(mesh_session_config()).await;
     let mut fixture = setup_finalized_join_publication(&server).await;

@@ -22,7 +22,7 @@ use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, AtomicU8};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8};
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -1529,6 +1529,8 @@ pub struct InMemoryMessageCoordinator {
     room_event_sequencer: Arc<RoomEventSequencer>,
     #[cfg(test)]
     fail_room_transactions: AtomicBool,
+    #[cfg(test)]
+    routing_changed_injections: AtomicU32,
     #[allow(dead_code)]
     instance_id: Uuid,
 }
@@ -1876,6 +1878,8 @@ impl InMemoryMessageCoordinator {
             room_event_sequencer: Arc::new(RoomEventSequencer::default()),
             #[cfg(test)]
             fail_room_transactions: AtomicBool::new(false),
+            #[cfg(test)]
+            routing_changed_injections: AtomicU32::new(0),
             instance_id: Uuid::new_v4(),
         }
     }
@@ -3128,6 +3132,12 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             .store(fail, std::sync::atomic::Ordering::Release);
     }
 
+    #[cfg(test)]
+    fn fail_room_transactions_with_routing_changed_for_test(&self, times: u32) {
+        self.routing_changed_injections
+            .store(times, std::sync::atomic::Ordering::Release);
+    }
+
     async fn send_to_player(
         &self,
         player_id: &PlayerId,
@@ -3457,6 +3467,16 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             .load(std::sync::atomic::Ordering::Acquire)
         {
             anyhow::bail!("injected room message transaction failure");
+        }
+        #[cfg(test)]
+        if self
+            .routing_changed_injections
+            .load(std::sync::atomic::Ordering::Acquire)
+            > 0
+        {
+            self.routing_changed_injections
+                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            return Ok(RoomMessageTransactionOutcome::RoutingChanged);
         }
 
         let mut expected = expected_members.to_vec();
