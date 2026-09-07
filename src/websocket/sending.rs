@@ -745,6 +745,26 @@ pub(super) async fn send_single_message_ref(
             )
             .await?;
         }
+        ServerMessage::SpectatorJoined(payload)
+            if payload
+                .current_players
+                .iter()
+                .any(|player| player.epoch.is_some() || player.seq.is_some())
+                && !recipient_supports_v3 =>
+        {
+            let mut payload = payload.as_ref().clone();
+            for player in &mut payload.current_players {
+                player.epoch = None;
+                player.seq = None;
+            }
+            send_text_message(
+                sender,
+                &ServerMessage::SpectatorJoined(Box::new(payload)),
+                player_id,
+                max_outbound_message_size,
+            )
+            .await?;
+        }
         ServerMessage::PlayerReconnected {
             player_id: reconnected,
             epoch: Some(_),

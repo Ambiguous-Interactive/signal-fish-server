@@ -1593,7 +1593,9 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
         // from the late joiner's baseline below, which carries the same
         // roster projection).
         let (mut observer, _) = connect_and_authenticate("observer").await;
-        let joined = join_room(&mut observer, game, None, "Observer", 4).await;
+        // Five seats: observer + provider + late + chatter (replay leg) +
+        // the correlated joiner.
+        let joined = join_room(&mut observer, game, None, "Observer", 5).await;
         let room_code = joined.room_code;
 
         // 2. A member stores credential-looking legacy metadata.
@@ -1750,6 +1752,34 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
             .register_disconnection(late_id, room_id, false, Some(late_info), 0)
             .await;
 
+        // 4b. A fourth member joins while `late` is disconnected, so a
+        // replayed `PlayerJoined` lands in its missed_events. (By
+        // construction the join-time snapshot carries no connection_info —
+        // metadata arrives only after joining — so this leg pins that the
+        // nested projection walk applies the exact cohort member shape and
+        // corrupts nothing, including inside the correlated Reconnected
+        // result.)
+        let (mut chatter, _) = connect_and_authenticate("chatter").await;
+        send(
+            &mut chatter,
+            &ClientMessage::JoinRoom {
+                game_name: game.to_string(),
+                room_code: Some(room_code.clone()),
+                player_name: "Chatter".to_string(),
+                max_players: Some(4),
+                supports_authority: Some(false),
+                relay_transport: None,
+            },
+        )
+        .await;
+        next_matching_server_message_within(
+            &mut chatter,
+            SERVER_MESSAGE_TIMEOUT,
+            "chatter join response",
+            |message| matches!(message, ServerMessage::RoomJoined(_)).then_some(()),
+        )
+        .await;
+
         // 5. A spectator joins; the players' NewSpectatorJoined broadcast
         // must use the cohort's exact spectator shape.
         let (mut spectator, _) = connect_and_authenticate("spectator").await;
@@ -1837,6 +1867,21 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
             keys, expected_spectator_keys,
             "{cohort:?} replayed NewSpectatorJoined must use the exact cohort \
              spectator key set: {raw}"
+        );
+        let replayed_join = replayed
+            .iter()
+            .find(|event| {
+                event.get("type").and_then(serde_json::Value::as_str) == Some("PlayerJoined")
+            })
+            .expect("the fourth member's join was replayed to the reconnecting member");
+        let replayed_player = replayed_join
+            .pointer("/data/player")
+            .and_then(serde_json::Value::as_object)
+            .expect("replayed PlayerJoined carries the player");
+        let keys: BTreeSet<_> = replayed_player.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys, expected_player_keys,
+            "{cohort:?} replayed PlayerJoined must use the exact cohort member key set: {raw}"
         );
 
         // 7. Correlated operations (v3-only `room_operation_ids` capability)

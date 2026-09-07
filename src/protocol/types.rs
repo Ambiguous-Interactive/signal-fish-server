@@ -202,13 +202,14 @@ pub struct SessionPlanPayload {
     pub fallback: Transport,
 }
 
-/// Legacy, self-declared peer metadata carried in room snapshots and
-/// `GameStarting`.
+/// Legacy, self-declared peer metadata carried in v2 room snapshots and
+/// `GameStarting` (both versions).
 ///
 /// This is preserved for the v2/back-compat handoff surface. It is not protocol
 /// v3 transport negotiation and must not be treated as proof of direct/WebRTC
 /// reachability. A validated Direct variant is also the execution-readiness
-/// input for electing a v3 `host + direct` host.
+/// input for electing a v3 `host + direct` host. Protocol-v3 room snapshots
+/// omit it (issue #529); the write layer enforces the per-cohort split.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ConnectionInfo {

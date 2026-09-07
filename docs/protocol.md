@@ -1643,9 +1643,11 @@ the endpoint is reachable, so the relay fallback remains mandatory.
 
 Endpoint visibility follows the existing room-member metadata boundary, not the
 v3 plan boundary. `PlayerInfo.connection_info` can expose the self-declared
-host/port to v2 or v3 players through `RoomJoined`, `PlayerJoined`, and
-`Reconnected`, and to spectators through `SpectatorJoined.current_players`.
-`GameStarting.peer_connections` repeats it to players. A finalized v3 room also
+host/port to v2 players through `RoomJoined`, `PlayerJoined`, and
+`Reconnected`, and to spectators through `SpectatorJoined.current_players`;
+protocol-v3 room snapshots omit it (issue #529).
+`GameStarting.peer_connections` repeats it to players (both versions). A
+finalized v3 room also
 repeats the elected endpoint in `SessionPlan.direct_endpoint`. Clients should
 therefore advertise only an address they intend room players and spectators to
 observe and players to attempt. The server does not publish it through room

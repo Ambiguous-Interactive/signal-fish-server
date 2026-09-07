@@ -638,19 +638,34 @@ async fn reload_allowed_apps_from_config(
     }
 
     let configured = cfg.security.allowed_apps.len();
-    if let Err(error) = server.reload_allowed_apps(cfg.security.allowed_apps.clone()) {
-        tracing::error!(
-            error = %error,
-            "SIGHUP reload: replacement allowlist was rejected; keeping the running \
-             app allowlist"
-        );
-        return;
-    }
-    if !cfg.security.enforce_app_id_allowlist {
+    let outcome = match server.reload_allowed_apps(cfg.security.allowed_apps.clone()) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "SIGHUP reload: replacement allowlist was rejected; keeping the running \
+                 app allowlist"
+            );
+            return;
+        }
+    };
+    if outcome.applied {
+        // The applied+diff log lives in `reload_allowed_apps`. One case needs
+        // an extra word: the NEW configuration turned enforcement off, but
+        // enforcement posture is fixed at startup, so the swapped set is
+        // inert until a restart.
+        if !cfg.security.enforce_app_id_allowlist {
+            tracing::info!(
+                configured_apps = configured,
+                "SIGHUP reload swapped the configured set; enforcement stays OFF for the \
+                 life of the process, so the set is inert until a restart turns it on"
+            );
+        }
+    } else {
         tracing::info!(
             configured_apps = configured,
-            "SIGHUP reload ignored: allowlist enforcement is disabled (open mode), so there \
-             is no configured set to swap"
+            "SIGHUP reload is a no-op: allowlist enforcement is disabled (open mode), so \
+             there is no configured set to swap"
         );
     }
 }

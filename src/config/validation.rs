@@ -185,7 +185,8 @@ impl<'a> RuntimeServerValidation<'a> {
                  protocol.max_players_limit ({}) can produce a roster payload of {} bytes \
                  (the entry payloads alone), exceeding security.max_outbound_message_size \
                  ({}): every member's metadata entry is broadcast to every other member in \
-                 `GameStarting.peer_connections` and room snapshots, and an aggregate payload \
+                 `GameStarting.peer_connections` and room snapshots (the latter for v2 \
+                 recipients), and an aggregate payload \
                  past the outbound cap would close every recipient with \
                  `1009 outbound_message_too_large` (issue #524)",
                 self.max_connection_info_bytes,

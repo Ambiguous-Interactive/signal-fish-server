@@ -329,7 +329,8 @@ pub const fn default_max_signal_bytes() -> usize {
 /// entry (`ProvideConnectionInfo`, 8 KiB).
 ///
 /// The entry is stored and broadcast verbatim to every room member (in
-/// `GameStarting.peer_connections` and room snapshots), so an unbounded entry
+/// `GameStarting.peer_connections`, and in room snapshots for v2
+/// recipients), so an unbounded entry
 /// is a peer-eviction primitive: a full roster of oversized entries can push
 /// the aggregate payload past `security.max_outbound_message_size`, closing
 /// every recipient with `1009 outbound_message_too_large` (issue #524). The
