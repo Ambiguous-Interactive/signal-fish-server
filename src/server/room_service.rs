@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 
-const ROOM_JOIN_LOCK_TTL: Duration = Duration::from_secs(10);
+pub(super) const ROOM_JOIN_LOCK_TTL: Duration = Duration::from_secs(10);
 const APPLICATION_ROOM_CAP_LOCK_TTL: Duration = Duration::from_secs(10);
 const GAME_ROOM_CAP_LOCK_TTL: Duration = Duration::from_secs(10);
 const SERVER_ROOM_CAP_LOCK_TTL: Duration = Duration::from_secs(10);
@@ -1049,6 +1049,18 @@ impl EnhancedGameServer {
                     )
                     .await;
             }
+        }
+    }
+
+    /// Resolve the creation-time spectator capacity for a room with the given
+    /// player ceiling (issue #525). `None` means unlimited.
+    fn default_max_spectators(&self, max_players: u8) -> Option<u8> {
+        match self.config.default_max_spectators {
+            // Explicit operator opt-out: unlimited spectators.
+            Some(0) => None,
+            Some(fixed) => Some(fixed),
+            // Auto (default): roster-bound capacity of 2× the player ceiling.
+            None => Some(max_players.saturating_mul(2).max(1)),
         }
     }
 
@@ -2241,7 +2253,7 @@ impl EnhancedGameServer {
 
                         let relay_type = self.resolve_relay_type(game_name);
                         let region_id = self.region_id().to_string();
-                        let room = match self
+                        let mut room = match self
                             .database
                             .create_room_classified(
                                 game_name.to_string(),
@@ -2316,6 +2328,38 @@ impl EnhancedGameServer {
                                 }
                             }
                             return Err(JoinRoomError::ServerDraining);
+                        }
+
+                        // Creation-time spectator capacity (issue #525):
+                        // apply the deployment default while the room is
+                        // still inside its join critical section. The room
+                        // mutation gate is taken first so a spectator
+                        // admission that already resolved the code
+                        // serializes behind the cap instead of observing the
+                        // unlimited default. A storage backend that cannot
+                        // persist the cap logs loudly and keeps the room
+                        // unlimited (the local row stays consistent with
+                        // storage) rather than failing an already-committed
+                        // admission.
+                        let spectator_cap = self.default_max_spectators(max_players);
+                        let cap_event_guard = self
+                            .message_coordinator
+                            .lock_room_event_mutation(&room.id)
+                            .await;
+                        let cap_applied = self
+                            .database
+                            .set_room_max_spectators(&room.id, spectator_cap)
+                            .await;
+                        drop(cap_event_guard);
+                        match cap_applied {
+                            Ok(()) => room.max_spectators = spectator_cap,
+                            Err(error) => {
+                                tracing::error!(
+                                    room_id = %room.id,
+                                    %error,
+                                    "Failed to apply default spectator capacity"
+                                );
+                            }
                         }
 
                         Ok(room)

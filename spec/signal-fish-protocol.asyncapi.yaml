@@ -600,6 +600,9 @@ components:
         - INVALID_DELIVERY_CLASS
         - UNSUPPORTED_PROTOCOL_VERSION
         - ROOM_SESSION_INCOMPATIBLE
+        - NOT_ROOM_AUTHORITY
+        - KICK_TARGET_NOT_FOUND
+        - KICKED
 
     ReliableDeliveryCounters:
       type: object
@@ -1084,6 +1087,37 @@ components:
       properties:
         type: { const: LeaveSpectator }
       required: [type]
+    KickPlayer:
+      type: object
+      description: >-
+        Authority-only: remove a seated player from the room. Only the room's
+        designated authority is accepted; the target must be a current seated
+        member and cannot be the sender. The server removes the seat,
+        broadcasts the usual PlayerLeft roster delta to the remaining members,
+        closes the target's connection with private close code 4007
+        (`kicked`), and never arms reconnection for a kicked seat. Success
+        responses use the PlayerKicked result.
+      properties:
+        type: { const: KickPlayer }
+        data:
+          type: object
+          required: [player_id]
+          properties:
+            player_id: { type: string, format: uuid }
+      required: [type, data]
+    RegenerateRoomCode:
+      type: object
+      description: >-
+        Authority-only: replace the room code with a freshly generated one.
+        The old code stops resolving to this room immediately; joins that name
+        it behave like any unknown code (join-creates-room may open a fresh,
+        unrelated room under it). Existing members stay connected and
+        reconnection tokens are unaffected. Success responses use the
+        RoomCodeRegenerated result, which carries the new code for the
+        authority to distribute to future invitees.
+      properties:
+        type: { const: RegenerateRoomCode }
+      required: [type]
     RoomOperation:
       type: object
       description: >-
@@ -1111,6 +1145,8 @@ components:
                 - { $ref: '#/components/schemas/Reconnect' }
                 - { $ref: '#/components/schemas/JoinAsSpectator' }
                 - { $ref: '#/components/schemas/LeaveSpectator' }
+                - { $ref: '#/components/schemas/KickPlayer' }
+                - { $ref: '#/components/schemas/RegenerateRoomCode' }
       required: [type, data]
     TransportStatus:
       type: object
@@ -2120,6 +2156,35 @@ components:
             reason: { type: string }
             error_code: { $ref: '#/components/schemas/ErrorCode' }
       required: [type, data]
+    PlayerKicked:
+      type: object
+      description: >-
+        The requested KickPlayer operation succeeded: the target seat was
+        removed and its connection is being closed with close code 4007
+        (`kicked`). The remaining members receive the usual PlayerLeft roster
+        delta.
+      properties:
+        type: { const: PlayerKicked }
+        data:
+          type: object
+          required: [player_id]
+          properties:
+            player_id: { type: string, format: uuid }
+      required: [type, data]
+    RoomCodeRegenerated:
+      type: object
+      description: >-
+        The requested RegenerateRoomCode operation succeeded. Distribute the
+        new code to future invitees; the old code no longer resolves to this
+        room.
+      properties:
+        type: { const: RoomCodeRegenerated }
+        data:
+          type: object
+          required: [room_code]
+          properties:
+            room_code: { type: string }
+      required: [type, data]
     RoomOperationResult:
       type: object
       description: >-
@@ -2148,6 +2213,8 @@ components:
                 - { $ref: '#/components/schemas/SpectatorJoinFailed' }
                 - { $ref: '#/components/schemas/SpectatorLeft' }
                 - { $ref: '#/components/schemas/OperationFailed' }
+                - { $ref: '#/components/schemas/PlayerKicked' }
+                - { $ref: '#/components/schemas/RoomCodeRegenerated' }
       required: [type, data]
     NewSpectatorJoined:
       type: object

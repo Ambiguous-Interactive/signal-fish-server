@@ -184,6 +184,24 @@ If the departed member reconnects while another player has since claimed the
 role, the successor keeps it: the returning member is restored as an ordinary,
 non-authority member.
 
+### Moderation Powers: Kick and Room-Code Rotation
+
+The authority holds two moderation operations (v3 only, via the
+`room_operation_ids` capability; see [Protocol Reference](../protocol.md)):
+
+- **`KickPlayer`** removes a seated player from the room. The target's
+  connection closes with close code `4007` (`kicked`), the remaining members
+  see the usual `PlayerLeft` roster delta, and the kicked seat is never
+  reconnectable. Use it to evict a disruptive player instead of waiting for
+  them to leave.
+- **`RegenerateRoomCode`** replaces the room code with a fresh one. Existing
+  members stay connected; the old code stops resolving immediately. Use it
+  when an invite code leaks: the room survives, and only holders of the new
+  code can send new joiners.
+
+Both are authority-only: a member that is not the authority receives
+`NOT_ROOM_AUTHORITY`. The kicked player cannot be the authority itself.
+
 ## Key Rules
 
 - Only **one player** can hold authority at a time per room.
@@ -194,6 +212,9 @@ non-authority member.
 - **Disconnection clears** authority with no auto-reassignment.
 - Authority status is included in the legacy `GameStarting` peer metadata
   so clients know who the authority is at game start.
+- **Moderation is authority-only**: `KickPlayer` and `RegenerateRoomCode`
+  are refused with `NOT_ROOM_AUTHORITY` for every other member, and rooms
+  created with `supports_authority: false` have no moderator at all.
 
 ## Use Cases
 

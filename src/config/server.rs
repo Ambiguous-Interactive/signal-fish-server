@@ -71,6 +71,16 @@ pub struct ServerConfig {
     /// Optional prefix prepended to generated room codes.
     #[serde(default)]
     pub room_code_prefix: Option<String>,
+    /// Default spectator capacity for newly created rooms (issue #525).
+    ///
+    /// `null` (the default) derives each room's capacity from its player
+    /// ceiling: `2 * max_players` (saturating). A positive value fixes the
+    /// capacity for every created room. `0` restores unlimited spectators —
+    /// not recommended for multi-tenant deployments, because spectator
+    /// fan-out cost grows with the roster and `TOO_MANY_SPECTATORS` becomes
+    /// unreachable.
+    #[serde(default)]
+    pub default_max_spectators: Option<u8>,
 }
 
 impl Default for ServerConfig {
@@ -90,6 +100,7 @@ impl Default for ServerConfig {
             heartbeat_throttle_secs: default_heartbeat_throttle_secs(),
             region_id: default_region_id(),
             room_code_prefix: None,
+            default_max_spectators: None,
         }
     }
 }

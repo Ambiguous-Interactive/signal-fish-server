@@ -229,12 +229,13 @@ exhausted shared admission budgets use `RATE_LIMIT_EXCEEDED`.
 
 ## Spectator Limits
 
-Rooms accept an unlimited number of spectators -- there is currently no
-configuration option to cap spectator count per room. The protocol does
-reserve a `TOO_MANY_SPECTATORS` error code: if a per-room limit is ever
-introduced, an admission past it would be refused before any room mutation and
-surfaced through the terminal `SpectatorJoinFailed` response carrying that
-code. Until then, the limit is never reached.
+New rooms get a spectator capacity by default. `server.default_max_spectators`
+is `null` by default, which derives each room's capacity from its player
+ceiling (`2 * max_players`). Set a positive value to fix the capacity for
+every created room, or `0` to restore unlimited spectators (not recommended
+for multi-tenant deployments). A join past the capacity is refused before any
+room mutation and surfaces through the terminal `SpectatorJoinFailed`
+response carrying the `TOO_MANY_SPECTATORS` error code.
 
 ## Next Steps
 

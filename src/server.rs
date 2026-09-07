@@ -346,6 +346,10 @@ mod message_router;
 #[cfg(signal_fish_repository_tests)]
 mod message_router_tests;
 mod messaging;
+mod moderation;
+#[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
+mod moderation_tests;
 mod ready_state;
 #[cfg(test)]
 #[cfg(signal_fish_repository_tests)]
@@ -595,6 +599,11 @@ pub struct ServerConfig {
     pub region_id: String,
     /// Optional prefix prepended to generated room codes.
     pub room_code_prefix: Option<String>,
+    /// Default spectator capacity for newly created rooms (issue #525).
+    /// Mirrors validated `server.default_max_spectators`: `None` derives
+    /// `2 * max_players` per room, `Some(0)` is unlimited, `Some(n > 0)`
+    /// fixes the capacity.
+    pub default_max_spectators: Option<u8>,
 }
 
 impl Default for ServerConfig {
@@ -625,6 +634,7 @@ impl Default for ServerConfig {
             heartbeat_throttle: Duration::from_secs(30), // 30 second update throttle by default
             region_id: "default".to_string(),
             room_code_prefix: None,
+            default_max_spectators: None,
         }
     }
 }

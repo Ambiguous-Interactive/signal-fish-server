@@ -125,6 +125,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SERVER__HEARTBEAT_THROTTLE_SECS` | `server.heartbeat_throttle_secs` | `30` | Min seconds between `last_seen` heartbeat writes |
 | `SIGNAL_FISH__SERVER__REGION_ID` | `server.region_id` | `default` | Deployment region identifier; recorded in internal player and room state (not serialized to clients) |
 | `SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX` | `server.room_code_prefix` | `null` | Optional ASCII-alphanumeric generated-code prefix; must be shorter than `protocol.room_code_length` |
+| `SIGNAL_FISH__SERVER__DEFAULT_MAX_SPECTATORS` | `server.default_max_spectators` | `null` | Spectator capacity for newly created rooms; `null` derives `2 * max_players` per room, a positive value fixes the cap, `0` is unlimited (not recommended) |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_ROOM_CREATIONS` | `rate_limit.max_room_creations` | `5` | Max room creations per player per window (must be > 0) |
 | `SIGNAL_FISH__RATE_LIMIT__TIME_WINDOW` | `rate_limit.time_window` | `60` | Rate limit window in seconds (must be > 0) |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_JOIN_ATTEMPTS` | `rate_limit.max_join_attempts` | `20` | Shared max room-creation, seated-join, and spectator-join attempts per player per window (must be > 0) |

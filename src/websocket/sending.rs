@@ -939,7 +939,9 @@ fn room_operation_result_has_v2_only_snapshot_metadata(result: &RoomOperationRes
         | RoomOperationResult::RoomLeft
         | RoomOperationResult::ReconnectionFailed { .. }
         | RoomOperationResult::SpectatorJoinFailed { .. }
-        | RoomOperationResult::OperationFailed { .. } => false,
+        | RoomOperationResult::OperationFailed { .. }
+        | RoomOperationResult::PlayerKicked { .. }
+        | RoomOperationResult::RoomCodeRegenerated { .. } => false,
     }
 }
 
@@ -966,7 +968,9 @@ fn strip_room_operation_result_v2_only_snapshot_metadata(result: &mut RoomOperat
         | RoomOperationResult::RoomLeft
         | RoomOperationResult::ReconnectionFailed { .. }
         | RoomOperationResult::SpectatorJoinFailed { .. }
-        | RoomOperationResult::OperationFailed { .. } => {}
+        | RoomOperationResult::OperationFailed { .. }
+        | RoomOperationResult::PlayerKicked { .. }
+        | RoomOperationResult::RoomCodeRegenerated { .. } => {}
     }
 }
 

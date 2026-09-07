@@ -177,6 +177,12 @@ pub struct ServerMetrics {
     pub room_code_retry_successes: AtomicU64,
     pub room_code_retry_exhaustions: AtomicU64,
     pub authority_transfer_conflicts: AtomicU64,
+    /// Authority-initiated seat removals (`KickPlayer` room operation,
+    /// issue #525).
+    pub room_kicks: AtomicU64,
+    /// Authority-initiated room-code rotations (`RegenerateRoomCode` room
+    /// operation, issue #525).
+    pub room_code_regenerations: AtomicU64,
     pub retry_attempts: AtomicU64,
     pub retry_successes: AtomicU64,
 
@@ -477,6 +483,11 @@ pub struct RaceConditionMetrics {
     /// read a fabricated 100% success rate from an idle server.
     pub room_code_retry_success_rate: Option<f64>,
     pub authority_transfer_conflicts: u64,
+    /// Authority-initiated seat removals (`KickPlayer`, issue #525).
+    pub room_kicks: u64,
+    /// Authority-initiated room-code rotations (`RegenerateRoomCode`,
+    /// issue #525).
+    pub room_code_regenerations: u64,
     pub retry_attempts: u64,
     pub retry_successes: u64,
     /// Success fraction of retry attempts; `null` (not `1.0`) while no attempt
@@ -650,6 +661,8 @@ impl ServerMetrics {
             room_code_retry_successes: AtomicU64::new(0),
             room_code_retry_exhaustions: AtomicU64::new(0),
             authority_transfer_conflicts: AtomicU64::new(0),
+            room_kicks: AtomicU64::new(0),
+            room_code_regenerations: AtomicU64::new(0),
             retry_attempts: AtomicU64::new(0),
             retry_successes: AtomicU64::new(0),
             cross_instance_messages: AtomicU64::new(0),
@@ -1092,6 +1105,17 @@ impl ServerMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// One authority-initiated seat removal (`KickPlayer`, issue #525).
+    pub fn increment_room_kicks(&self) {
+        self.room_kicks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One authority-initiated room-code rotation (`RegenerateRoomCode`,
+    /// issue #525).
+    pub fn increment_room_code_regenerations(&self) {
+        self.room_code_regenerations.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn increment_retry_attempts(&self) {
         self.retry_attempts.fetch_add(1, Ordering::Relaxed);
     }
@@ -1519,6 +1543,8 @@ impl ServerMetrics {
                 authority_transfer_conflicts: self
                     .authority_transfer_conflicts
                     .load(Ordering::Relaxed),
+                room_kicks: self.room_kicks.load(Ordering::Relaxed),
+                room_code_regenerations: self.room_code_regenerations.load(Ordering::Relaxed),
                 retry_attempts,
                 retry_successes,
                 retry_success_rate,

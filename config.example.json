@@ -14,7 +14,8 @@
     "enable_reconnection": true,
     "heartbeat_throttle_secs": 30,
     "region_id": "default",
-    "room_code_prefix": null
+    "room_code_prefix": null,
+    "default_max_spectators": null
   },
   "rate_limit": {
     "max_room_creations": 5,

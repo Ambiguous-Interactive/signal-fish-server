@@ -132,6 +132,19 @@ pub enum ErrorCode {
     // signaling-errors note above.
     /// The client cannot speak this deployment's minimum protocol version.
     UnsupportedProtocolVersion,
+
+    // Moderation errors (4xxx category). Appended at the END; see the
+    // signaling-errors note above. Raised by the authority-only
+    // `KickPlayer` / `RegenerateRoomCode` room operations (issue #525).
+    /// A moderation operation (`KickPlayer` / `RegenerateRoomCode`) was sent
+    /// by a connection that is not the room's designated authority player.
+    NotRoomAuthority,
+    /// The player named by `KickPlayer` is not a seated member of the room.
+    KickTargetNotFound,
+    /// This connection was removed from its room by the room's authority
+    /// player. The WebSocket closed with private close code `4007`
+    /// (`kicked`); reconnection is not offered.
+    Kicked,
 }
 
 impl ErrorCode {
@@ -339,6 +352,17 @@ impl ErrorCode {
             Self::UnsupportedProtocolVersion => {
                 "The client's highest supported protocol version is below this server's configured minimum. Upgrade the client or connect to a compatible deployment."
             }
+
+            // Moderation errors (4xxx)
+            Self::NotRoomAuthority => {
+                "Only the room's authority player may perform this moderation operation."
+            }
+            Self::KickTargetNotFound => {
+                "The player to kick is not a current member of this room."
+            }
+            Self::Kicked => {
+                "You were removed from the room by its authority player. Reconnection is not offered; join again with a valid room code."
+            }
         }
     }
 }
@@ -411,6 +435,9 @@ mod tests {
             ErrorCode::InvalidDeliveryClass,
             ErrorCode::UnsupportedProtocolVersion,
             ErrorCode::RoomSessionIncompatible,
+            ErrorCode::NotRoomAuthority,
+            ErrorCode::KickTargetNotFound,
+            ErrorCode::Kicked,
         ];
 
         for error_code in &error_codes {

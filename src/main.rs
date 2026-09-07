@@ -246,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
         heartbeat_throttle: tokio::time::Duration::from_secs(cfg.server.heartbeat_throttle_secs),
         region_id: cfg.server.region_id.clone(),
         room_code_prefix: cfg.server.room_code_prefix.clone(),
+        default_max_spectators: cfg.server.default_max_spectators,
     };
 
     // Always use in-memory storage

@@ -961,6 +961,28 @@ impl EnhancedGameServer {
             }
         };
 
+        // A kick that raced this claim serialized on the same room mutation
+        // gate: it tombstones the record and removes the seat as one step, so
+        // a tombstone observed here means the seat was removed by the room
+        // authority and must NOT be restored from the membership snapshot
+        // (issue #525).
+        let reconnection_kicked = match &self.reconnection_manager {
+            Some(manager) => manager.is_reconnection_kicked(reconnect_player_id).await,
+            None => false,
+        };
+        if reconnection_kicked {
+            return self
+                .reject_claimed_reconnect(
+                    current_player_id,
+                    claim_guard,
+                    &restore,
+                    "Seat removed by the room authority",
+                    ErrorCode::Kicked,
+                    operation_id,
+                )
+                .await;
+        }
+
         // Reconnection tokens prove the prior player identity, not the
         // application principal on this new socket. Re-authorize against the
         // persisted room owner before restoring membership (the owner gate

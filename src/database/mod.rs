@@ -24,6 +24,24 @@ pub enum CreateRoomError {
 /// database failures.
 pub type CreateRoomResult = std::result::Result<Room, CreateRoomError>;
 
+/// Classified room-code rotation failure (issue #525). Keeps a candidate-code
+/// collision distinct from unrelated storage faults so the caller can retry
+/// fresh candidates without masking a lost room.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum UpdateRoomCodeError {
+    #[error("Room code {room_code} already exists for game {game_name}")]
+    RoomCodeCollision {
+        game_name: String,
+        room_code: String,
+    },
+    #[error(transparent)]
+    Storage(#[from] anyhow::Error),
+}
+
+/// Room-code rotation result.
+pub type UpdateRoomCodeResult = std::result::Result<Room, UpdateRoomCodeError>;
+
 /// Summary describing how many rooms were removed by the cleanup routine.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RoomCleanupOutcome {
@@ -230,6 +248,35 @@ pub trait GameDatabase: Send + Sync {
         _application_id: Uuid,
     ) -> Result<bool> {
         anyhow::bail!("conditional room application ownership persistence is not supported")
+    }
+
+    /// Replace a room's code atomically (authority-initiated rotation,
+    /// issue #525).
+    ///
+    /// Implementations must swap the stored `Room.code` and the
+    /// `(game_name, room_code) -> RoomId` registry entry as one action under
+    /// the same lock order as [`Self::create_room`] (rooms, then room_codes),
+    /// and must classify a `new_code` that already resolves to another room
+    /// as [`UpdateRoomCodeError::RoomCodeCollision`]. A missing room is a
+    /// storage error; the caller treats it as a lost race.
+    async fn update_room_code(&self, _room_id: &RoomId, _new_code: String) -> UpdateRoomCodeResult {
+        Err(UpdateRoomCodeError::Storage(anyhow::anyhow!(
+            "room code rotation persistence is not supported"
+        )))
+    }
+
+    /// Apply a room's spectator capacity (creation-time default,
+    /// issue #525).
+    ///
+    /// `None` means unlimited. Callers apply the deployment default while the
+    /// room is still inside its creation critical section, so a missing room
+    /// is an error but cannot otherwise race admission.
+    async fn set_room_max_spectators(
+        &self,
+        _room_id: &RoomId,
+        _max_spectators: Option<u8>,
+    ) -> Result<()> {
+        anyhow::bail!("spectator capacity persistence is not supported")
     }
 
     /// Get room by game name and room code
@@ -1090,6 +1137,54 @@ impl GameDatabase for InMemoryDatabase {
         liveness.insert(room_id, RoomLiveness::Live(tokio::time::Instant::now()));
 
         Ok(room)
+    }
+
+    async fn update_room_code(&self, room_id: &RoomId, new_code: String) -> UpdateRoomCodeResult {
+        // Lock order matches `create_room`: rooms first, then room_codes. Both
+        // writes commit under one set of guards so the code registry can never
+        // disagree with the stored room about which code owns this id.
+        let mut rooms = self.rooms.write().await;
+        let mut room_codes = self.room_codes.write().await;
+
+        let room = rooms.get_mut(room_id).ok_or_else(|| {
+            UpdateRoomCodeError::Storage(anyhow::anyhow!(
+                "Room {room_id} not found during code rotation"
+            ))
+        })?;
+
+        let old_key = (room.game_name.clone(), room.code.clone());
+        let new_key = (room.game_name.clone(), new_code.clone());
+        if room_codes
+            .get(&new_key)
+            .is_some_and(|owner| owner != room_id)
+        {
+            return Err(UpdateRoomCodeError::RoomCodeCollision {
+                game_name: room.game_name.clone(),
+                room_code: new_code,
+            });
+        }
+
+        // A rotation is room activity: refresh the reaper clocks so a lobby
+        // that rotates its code is not GC'd off a stale stamp (BUG-1).
+        room.code = new_code;
+        room.last_activity = chrono::Utc::now();
+        room_codes.remove(&old_key);
+        room_codes.insert(new_key, *room_id);
+
+        Ok(room.clone())
+    }
+
+    async fn set_room_max_spectators(
+        &self,
+        room_id: &RoomId,
+        max_spectators: Option<u8>,
+    ) -> Result<()> {
+        let mut rooms = self.rooms.write().await;
+        let room = rooms.get_mut(room_id).ok_or_else(|| {
+            anyhow::anyhow!("Room {room_id} not found while setting spectator cap")
+        })?;
+        room.max_spectators = max_spectators;
+        Ok(())
     }
 
     async fn get_room(&self, game_name: &str, room_code: &str) -> Result<Option<Room>> {
