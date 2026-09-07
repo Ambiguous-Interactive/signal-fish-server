@@ -1140,11 +1140,14 @@ impl GameDatabase for InMemoryDatabase {
     }
 
     async fn update_room_code(&self, room_id: &RoomId, new_code: String) -> UpdateRoomCodeResult {
-        // Lock order matches `create_room`: rooms first, then room_codes. Both
-        // writes commit under one set of guards so the code registry can never
-        // disagree with the stored room about which code owns this id.
+        // Lock order matches `create_room`: rooms first, then room_codes,
+        // then liveness. All writes commit under one set of guards so the
+        // code registry can never disagree with the stored room about which
+        // code owns this id, and the rotation's activity stamps are atomic
+        // with the code swap.
         let mut rooms = self.rooms.write().await;
         let mut room_codes = self.room_codes.write().await;
+        let mut liveness = self.room_liveness_monotonic.write().await;
 
         let room = rooms.get_mut(room_id).ok_or_else(|| {
             UpdateRoomCodeError::Storage(anyhow::anyhow!(
@@ -1164,12 +1167,16 @@ impl GameDatabase for InMemoryDatabase {
             });
         }
 
-        // A rotation is room activity: refresh the reaper clocks so a lobby
-        // that rotates its code is not GC'd off a stale stamp (BUG-1).
+        // A rotation is room activity on BOTH clocks: `last_activity` is the
+        // durable wall-clock record, and the monotonic liveness stamp is what
+        // the in-process GC decides idle time from when one exists —
+        // refreshing only the wall clock would leave the reaper working from
+        // a stale instant (BUG-1 clock pairing).
         room.code = new_code;
         room.last_activity = chrono::Utc::now();
         room_codes.remove(&old_key);
         room_codes.insert(new_key, *room_id);
+        liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
 
         Ok(room.clone())
     }
