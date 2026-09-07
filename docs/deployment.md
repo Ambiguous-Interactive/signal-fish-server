@@ -494,6 +494,24 @@ corresponding raw JSON snapshot is available with
 `abandoned`, `dropped_full`, or `unsupported_format` values deserve operator
 attention, while `superseded` and `dropped` may be intentional class policy.
 
+### Rate-Limit Rejection Forensics
+
+The global rejection counters say that the server rejects. The server log says
+who. Each limiter writes two info lines per affected player or room per window:
+
+- The first rejection of a budget in a window logs `Player exceeded a rate
+  budget` with `player_id`, `budget` (`signal`, `relay_bandwidth`,
+  `join_attempt`, `room_creation`, or `signal_error`), and
+  `window_reset_in_secs`. The room aggregate ceiling logs the same shape with
+  `room_id`.
+- The next enforcement call after the window rolls over logs the
+  `... rejections in the elapsed window` summary with the per-budget counts.
+
+This bound holds regardless of rejection volume: a flooding player costs at
+most two log lines per window. Rejections also stay visible per player through
+the library stats API (`RoomRateLimiter::get_player_stats`), which reports the
+current window's per-budget rejection counts.
+
 ### Prometheus Configuration
 
 ```yaml
