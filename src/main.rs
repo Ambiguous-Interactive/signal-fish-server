@@ -652,13 +652,15 @@ async fn reload_allowed_apps_from_config(
     if outcome.applied {
         // The applied+diff log lives in `reload_allowed_apps`. One case needs
         // an extra word: the NEW configuration turned enforcement off, but
-        // enforcement posture is fixed at startup, so the swapped set is
-        // inert until a restart.
+        // enforcement posture is fixed at startup — the running process is
+        // still enforcing, so the swapped set is LIVE and only a restart can
+        // turn enforcement off.
         if !cfg.security.enforce_app_id_allowlist {
-            tracing::info!(
+            tracing::warn!(
                 configured_apps = configured,
-                "SIGHUP reload swapped the configured set; enforcement stays OFF for the \
-                 life of the process, so the set is inert until a restart turns it on"
+                "SIGHUP reload swapped the configured set; the new configuration disables \
+                 enforcement, but enforcement stays ON for the life of the process and the \
+                 swapped set is live — restart to turn enforcement off"
             );
         }
     } else {
