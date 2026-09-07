@@ -3469,14 +3469,24 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             anyhow::bail!("injected room message transaction failure");
         }
         #[cfg(test)]
-        if self
-            .routing_changed_injections
-            .load(std::sync::atomic::Ordering::Acquire)
-            > 0
         {
-            self.routing_changed_injections
-                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-            return Ok(RoomMessageTransactionOutcome::RoutingChanged);
+            // Exact ticket consumption: decrement only when positive, so a
+            // concurrent commit can never wrap the counter into permanent
+            // routing-change injections.
+            let mut current = self
+                .routing_changed_injections
+                .load(std::sync::atomic::Ordering::Acquire);
+            while current > 0 {
+                match self.routing_changed_injections.compare_exchange(
+                    current,
+                    current - 1,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                ) {
+                    Ok(_) => return Ok(RoomMessageTransactionOutcome::RoutingChanged),
+                    Err(observed) => current = observed,
+                }
+            }
         }
 
         let mut expected = expected_members.to_vec();

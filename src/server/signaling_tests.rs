@@ -522,6 +522,14 @@ async fn finalized_join_counts_its_mixed_membership_once_across_routing_retries(
         recv(&mut fixture.incumbent_rx).await.as_ref(),
         ServerMessage::SessionPlan(_)
     ));
+    assert!(
+        matches!(
+            recv(&mut fixture.joiner_rx).await.as_ref(),
+            ServerMessage::SessionPlan(_)
+        ),
+        "the committed retry delivers the joiner's plan exactly once"
+    );
+    assert_silent(&mut fixture.joiner_rx).await;
     assert_silent(&mut fixture.incumbent_rx).await;
 }
 
