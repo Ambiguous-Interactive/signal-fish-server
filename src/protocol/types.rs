@@ -274,15 +274,14 @@ pub struct PlayerInfo {
     pub name: String,
     pub is_authority: bool,
     pub is_ready: bool,
-    /// Server wall-clock join timestamp — a server-internal diagnostic.
+    /// Server wall-clock join timestamp (frozen wire field, both versions).
     ///
-    /// Stored for diagnostics (dashboard, reconnect identity restoration).
-    /// It is NOT sent to protocol-v3 peers: room snapshots omit it (issue
-    /// #529 — no peer has a protocol use for another member's join time).
-    /// Negotiated v2 connections keep the frozen legacy wire shape, which
-    /// includes this field; the send layer enforces the per-cohort split.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connected_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Every released client SDK (signal-fish-client 0.8.0 through 0.12.0)
+    /// deserializes snapshots with this field REQUIRED, so it cannot be
+    /// trimmed from the v3 wire without a coordinated SDK change (follow-up
+    /// of issue #529). The privacy-trim landed for v3 instead covers
+    /// `connection_info` — the credential-looking, arbitrary-JSON echo.
+    pub connected_at: chrono::DateTime<chrono::Utc>,
     /// Legacy self-declared peer metadata.
     ///
     /// Server-internal storage feeds the legacy handoff surface
@@ -322,13 +321,11 @@ pub struct PlayerInfo {
 pub struct SpectatorInfo {
     pub id: PlayerId,
     pub name: String,
-    /// Server wall-clock join timestamp — a server-internal diagnostic.
+    /// Server wall-clock join timestamp (frozen wire field, both versions).
     ///
-    /// Stored for diagnostics only. It is NOT sent to protocol-v3 peers
-    /// (issue #529); negotiated v2 connections keep the frozen legacy wire
-    /// shape, which includes this field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connected_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Kept on the wire for the same released-SDK compatibility reason as
+    /// `PlayerInfo::connected_at` (issue #529 follow-up).
+    pub connected_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Describes why a spectator state change occurred.
@@ -596,7 +593,7 @@ mod tests {
             name: name.to_string(),
             is_authority,
             is_ready: true,
-            connected_at: Some(Utc.timestamp_opt(1_700_000_000, 0).unwrap()),
+            connected_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             connection_info,
             epoch: None,
             seq: None,

@@ -988,7 +988,7 @@ mod tests {
             name: "sender".to_string(),
             is_authority: false,
             is_ready: false,
-            connected_at: Some("1970-01-01T00:00:00Z".parse().unwrap()),
+            connected_at: "1970-01-01T00:00:00Z".parse().unwrap(),
             connection_info: None,
             epoch: Some(epoch),
             seq: Some(0),

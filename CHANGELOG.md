@@ -7,21 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- **Protocol v3 (unshipped) wire trim, issue #529:** room snapshots sent to
-  protocol-v3 recipients no longer carry `PlayerInfo.connected_at`,
-  `PlayerInfo.connection_info`, or `SpectatorInfo.connected_at`. The join
-  timestamp is a server-internal diagnostic; the self-declared
-  `connection_info` echo (including credential-looking `relay.token` values
-  and arbitrary `Custom` JSON) keeps its single consumer, the `GameStarting`
-  legacy handoff surface (`PeerConnectionInfo`, both versions). Frozen v2
-  snapshots are byte-identical and keep both fields. The AsyncAPI spec's
-  `V3PlayerInfo` drops both properties, and `SpectatorInfo` is split into
-  versioned `V2SpectatorInfo`/`V3SpectatorInfo` shapes (shared messages
-  reference the version union). The write layer projects nested
-  `Reconnected.missed_events` copies per recipient cohort.
-
 ### Added
 
 - `SIGHUP` reload of `security.allowed_apps` (issue #522): the server re-reads
@@ -186,6 +171,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Protocol v3 snapshot trim, issue #529:** room snapshots sent to
+  protocol-v3 recipients no longer echo `PlayerInfo.connection_info`. The
+  self-declared metadata (including credential-looking `relay.token` values
+  and arbitrary `Custom` JSON) keeps its single consumer, the `GameStarting`
+  legacy handoff surface (`PeerConnectionInfo`, both versions). Frozen v2
+  snapshots are byte-identical and keep the field. `connected_at` stays on
+  the wire for BOTH versions: every released client SDK
+  (signal-fish-client 0.8.0 through 0.12.0) deserializes it as a required
+  field, so trimming it needs a coordinated SDK change. The AsyncAPI
+  spec's `V3PlayerInfo` drops `connection_info`. The write layer projects
+  nested `Reconnected.missed_events` copies and correlated
+  `RoomOperationResult` envelopes per recipient cohort.
 - `logging.enable_file_logging` now defaults to `false` (issue #526): stdout is
   the single log sink, and rolling files have no size cap, so the default
   container configuration wrote into the writable layer without bound between

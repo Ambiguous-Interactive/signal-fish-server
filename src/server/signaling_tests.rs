@@ -173,7 +173,7 @@ fn player_info(id: PlayerId, name: &str) -> PlayerInfo {
         name: name.to_string(),
         is_authority: false,
         is_ready: false,
-        connected_at: Some(chrono::Utc::now()),
+        connected_at: chrono::Utc::now(),
         connection_info: None,
         epoch: None,
         seq: None,
@@ -2963,8 +2963,7 @@ async fn reconnect_restores_original_connected_at() {
 
     let room_id = create_db_room(&server, existing).await;
     let mut reconnecting_info = player_info(reconnecting, "reconnecting");
-    reconnecting_info.connected_at =
-        Some(reconnecting_info.connected_at.unwrap() - chrono::Duration::hours(1));
+    reconnecting_info.connected_at -= chrono::Duration::hours(1);
     let original_connected_at = reconnecting_info.connected_at;
     server
         .database

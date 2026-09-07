@@ -692,9 +692,8 @@ components:
       required: [id, name, is_authority, is_ready, connected_at]
       additionalProperties: false
       description: >-
-        Frozen legacy v2 room-member snapshot shape. `connected_at` and
-        `connection_info` are v2-only wire metadata: protocol v3 strips both
-        from snapshots (issue #529).
+        Frozen legacy v2 room-member snapshot shape (unchanged by issue
+        #529).
       properties:
         id: { $ref: '#/components/schemas/PlayerId' }
         name: { type: string }
@@ -704,21 +703,24 @@ components:
         connection_info: { $ref: '#/components/schemas/ConnectionInfo' }
     V3PlayerInfo:
       type: object
-      required: [id, name, is_authority, is_ready, epoch, seq]
+      required: [id, name, is_authority, is_ready, connected_at, epoch, seq]
       additionalProperties: false
       description: >-
-        Protocol v3 room-member snapshot. Deliberately excludes the v2-only
-        metadata: `connected_at` is a server-internal diagnostic with no peer
-        protocol purpose, and `connection_info` is legacy self-declared
-        handoff metadata whose consumer is `GameStarting`
-        (PeerConnectionInfo) — v3 connectivity is negotiated via
-        SessionPlan. The server strips both fields from every v3 snapshot
-        (issue #529).
+        Protocol v3 room-member snapshot. Deliberately excludes the legacy
+        `connection_info` echo: it is self-declared handoff metadata whose
+        consumer is `GameStarting` (PeerConnectionInfo) — v3 connectivity is
+        negotiated via SessionPlan — and its snapshot echo broadcast
+        arbitrary `Custom` JSON and unauthenticated credential-looking
+        `relay.token` values to every member (issue #529). `connected_at`
+        stays on the v3 wire: every released client SDK deserializes it as a
+        required field, so trimming it needs a coordinated SDK change
+        (issue #529 follow-up).
       properties:
         id: { $ref: '#/components/schemas/PlayerId' }
         name: { type: string }
         is_authority: { type: boolean }
         is_ready: { type: boolean }
+        connected_at: { type: string, format: date-time }
         epoch:
           type: integer
           minimum: 1
@@ -758,33 +760,17 @@ components:
           type: integer
           minimum: 0
     SpectatorInfo:
-      oneOf:
-        - { $ref: '#/components/schemas/V2SpectatorInfo' }
-        - { $ref: '#/components/schemas/V3SpectatorInfo' }
-      description: >-
-        Version-disjoint spectator snapshot. Protocol v2 keeps the frozen
-        legacy join timestamp; protocol v3 omits it (issue #529): a
-        server-internal join time has no peer protocol purpose. Shared,
-        non-version-split messages reference this union because a v2
-        recipient observes the V2 shape and a v3 recipient the V3 shape.
-    V2SpectatorInfo:
       type: object
       additionalProperties: false
       required: [id, name, connected_at]
+      description: >-
+        Shared v2/v3 spectator snapshot shape. `connected_at` stays on the
+        wire for both versions (released SDKs require it; issue #529
+        follow-up).
       properties:
         id: { $ref: '#/components/schemas/PlayerId' }
         name: { type: string }
         connected_at: { type: string, format: date-time }
-    V3SpectatorInfo:
-      type: object
-      additionalProperties: false
-      required: [id, name]
-      description: >-
-        Protocol v3 spectator snapshot: the server-internal join timestamp is
-        omitted (issue #529).
-      properties:
-        id: { $ref: '#/components/schemas/PlayerId' }
-        name: { type: string }
     SessionPeer:
       type: object
       required: [player_id, player_name, is_authority, initiate]
@@ -814,8 +800,9 @@ components:
         and in protocol-v2 room snapshots. Protocol-v3 room snapshots omit it
         (issue #529): the echo broadcast arbitrary `Custom` JSON and
         unauthenticated credential-looking `relay.token` values to every
-        member, and v3 connectivity is negotiated via SessionPlan instead.
-        Not v3 capability negotiation. Values are
+        member with no snapshot protocol purpose, and v3 connectivity is
+        negotiated via SessionPlan instead. Not v3 capability negotiation.
+        Values are
         stored and forwarded rather than authenticated. A syntactically
         validated direct value is also used to elect an executable Direct host,
         but remains self-declared and is not reachability proof. The serialized
@@ -1350,7 +1337,7 @@ components:
             relay_type: { $ref: '#/components/schemas/RelayTypeLabel' }
             current_spectators:
               type: array
-              items: { $ref: '#/components/schemas/V2SpectatorInfo' }
+              items: { $ref: '#/components/schemas/SpectatorInfo' }
       required: [type, data]
     V3RoomJoined:
       type: object
@@ -1393,7 +1380,7 @@ components:
             relay_type: { $ref: '#/components/schemas/RelayTypeLabel' }
             current_spectators:
               type: array
-              items: { $ref: '#/components/schemas/V3SpectatorInfo' }
+              items: { $ref: '#/components/schemas/SpectatorInfo' }
             ice_servers:
               type: array
               minItems: 1
@@ -1860,7 +1847,7 @@ components:
             relay_type: { $ref: '#/components/schemas/RelayTypeLabel' }
             current_spectators:
               type: array
-              items: { $ref: '#/components/schemas/V2SpectatorInfo' }
+              items: { $ref: '#/components/schemas/SpectatorInfo' }
             missed_events:
               type: array
               items: { $ref: '#/components/schemas/V2ReplayableServerMessageEnvelope' }
@@ -1910,7 +1897,7 @@ components:
             relay_type: { $ref: '#/components/schemas/RelayTypeLabel' }
             current_spectators:
               type: array
-              items: { $ref: '#/components/schemas/V3SpectatorInfo' }
+              items: { $ref: '#/components/schemas/SpectatorInfo' }
             ice_servers:
               type: array
               minItems: 1
@@ -2022,7 +2009,7 @@ components:
               items: { $ref: '#/components/schemas/V2PlayerInfo' }
             current_spectators:
               type: array
-              items: { $ref: '#/components/schemas/V2SpectatorInfo' }
+              items: { $ref: '#/components/schemas/SpectatorInfo' }
             lobby_state: { $ref: '#/components/schemas/LobbyState' }
             reason: { $ref: '#/components/schemas/SpectatorStateChangeReason' }
       required: [type, data]
@@ -2054,7 +2041,7 @@ components:
               items: { $ref: '#/components/schemas/V3PlayerInfo' }
             current_spectators:
               type: array
-              items: { $ref: '#/components/schemas/V3SpectatorInfo' }
+              items: { $ref: '#/components/schemas/SpectatorInfo' }
             lobby_state: { $ref: '#/components/schemas/LobbyState' }
             reason: { $ref: '#/components/schemas/SpectatorStateChangeReason' }
       required: [type, data]

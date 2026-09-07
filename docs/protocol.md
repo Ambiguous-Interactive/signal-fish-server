@@ -605,6 +605,7 @@ room-created response type.
         "name": "Player 1",
         "is_authority": false,
         "is_ready": false,
+        "connected_at": "2024-01-01T00:00:00Z",
         "epoch": 1,
         "seq": 0
       }
@@ -639,6 +640,7 @@ Another player joined the room.
       "name": "Player 2",
       "is_authority": false,
       "is_ready": false,
+      "connected_at": "2024-01-01T00:00:00Z",
       "epoch": 1,
       "seq": 0
     }
@@ -1129,6 +1131,7 @@ must resynchronize application state after any reconnect, especially when
         "name": "Player 1",
         "is_authority": false,
         "is_ready": false,
+        "connected_at": "2024-01-01T00:00:00Z",
         "epoch": 1,
         "seq": 42
       }
@@ -1205,6 +1208,7 @@ Successfully joined a room as spectator.
         "name": "Player 1",
         "is_authority": false,
         "is_ready": false,
+        "connected_at": "2024-01-01T00:00:00Z",
         "epoch": 1,
         "seq": 42
       }
@@ -1212,7 +1216,8 @@ Successfully joined a room as spectator.
     "current_spectators": [
       {
         "id": "spectator-id",
-        "name": "Observer1"
+        "name": "Observer1",
+        "connected_at": "2025-01-15T10:35:00Z"
       }
     ],
     "lobby_state": "lobby",
@@ -1225,10 +1230,10 @@ Successfully joined a room as spectator.
 Note: The `reason` field is optional. On a negotiated-v3 connection, every
 `current_players` entry carries its current `epoch` and exact recipient-visible
 `seq` baseline, as shown above. Pre-v3 recipients receive the same snapshot
-without either field, but with the frozen legacy `connected_at` field.
-Protocol v3 snapshots never carry `connected_at`: it is a server-internal
-diagnostic (issue #529). The same cohort split applies to every spectator
-list and to the nested replay events in `Reconnected.missed_events`.
+without either field, but with the frozen legacy `connection_info` field.
+Protocol v3 snapshots never echo `connection_info` (issue #529): the
+self-declared metadata keeps its single consumer, the `GameStarting`
+legacy handoff surface.
 
 ### SpectatorJoinFailed
 
@@ -1283,16 +1288,19 @@ Another spectator joined the room.
   "data": {
     "spectator": {
       "id": "spectator-id",
-      "name": "Observer2"
+      "name": "Observer2",
+      "connected_at": "2025-01-15T10:36:00Z"
     },
     "current_spectators": [
       {
         "id": "spectator-id-1",
-        "name": "Observer1"
+        "name": "Observer1",
+        "connected_at": "2025-01-15T10:35:00Z"
       },
       {
         "id": "spectator-id-2",
-        "name": "Observer2"
+        "name": "Observer2",
+        "connected_at": "2025-01-15T10:36:00Z"
       }
     ],
     "reason": "joined"

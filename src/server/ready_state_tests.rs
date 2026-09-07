@@ -87,7 +87,7 @@ fn player_info(id: PlayerId, name: &str) -> PlayerInfo {
         name: name.to_string(),
         is_authority: false,
         is_ready: false,
-        connected_at: Some(chrono::Utc::now()),
+        connected_at: chrono::Utc::now(),
         connection_info: None,
         epoch: None,
         seq: None,

@@ -1333,11 +1333,10 @@ fn accountability_message_schemas_accept_rust_wire_shapes_and_reject_hybrids() {
         name: "Alice".to_string(),
         is_authority: true,
         is_ready: false,
-        // Cohort-shaped fixture (issue #529): a v2 snapshot carries the
-        // frozen legacy `connected_at`; the server strips it from every v3
-        // snapshot before the frame is written, so the v3 wire shape omits
-        // it.
-        connected_at: (!accountable).then_some(connected_at),
+        // `connected_at` stays on the wire for BOTH cohorts: every released
+        // client SDK deserializes it as a required field (issue #529
+        // follow-up). The v3 trim covers `connection_info` only.
+        connected_at,
         connection_info: None,
         epoch: accountable.then_some(3),
         seq: accountable.then_some(7),
@@ -1573,20 +1572,8 @@ fn accountability_message_schemas_accept_rust_wire_shapes_and_reject_hybrids() {
         mixed_spectator,
     ));
 
-    // Issue #529: a v3 snapshot must never carry the server-internal join
-    // timestamp the write layer strips.
-    let mut v3_player_with_timestamp = serde_json::to_value(ServerMessage::PlayerJoined {
-        player: player(true),
-    })
-    .expect("serialize PlayerJoined");
-    v3_player_with_timestamp["data"]["player"]["connected_at"] =
-        serde_json::json!("2024-01-02T03:04:05Z");
-    invalid_cases.push((
-        "PlayerJoined",
-        "v3 snapshot carrying the server-internal join timestamp",
-        v3_player_with_timestamp,
-    ));
-
+    // Issue #529: a v3 snapshot must never echo the legacy self-declared
+    // connection metadata the write layer strips.
     let mut v3_player_with_connection_info = serde_json::to_value(ServerMessage::PlayerJoined {
         player: player(true),
     })

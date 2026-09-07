@@ -29,9 +29,9 @@ chrono = { version = "0.4", features = ["serde"] }
 - **serde + serde_json** -- JSON serialization matching the server protocol
 - **uuid** -- player and room identifiers are UUIDs
 - **url** -- URL parsing for the WebSocket endpoint
-- **chrono** -- timestamps (`connected_at` on `PlayerInfo`/`SpectatorInfo`, a
-  v2-only snapshot field); the `serde` feature is required so the
-  `DateTime<Utc>` fields round-trip with the server protocol
+- **chrono** -- timestamps (`connected_at` on `PlayerInfo`/`SpectatorInfo`); the
+  `serde` feature is required so the `DateTime<Utc>` fields round-trip with the
+  server protocol
 
 ## Connecting
 
@@ -170,9 +170,7 @@ pub struct PlayerInfo {
     pub name: String,
     pub is_authority: bool,
     pub is_ready: bool,
-    /// v2 snapshots only; the server never sends it to v3 clients.
-    #[serde(default)]
-    pub connected_at: Option<DateTime<Utc>>,
+    pub connected_at: DateTime<Utc>,
     #[serde(default)]
     pub epoch: Option<u32>,
     #[serde(default)]
@@ -192,9 +190,7 @@ pub struct SenderWatermark {
 pub struct SpectatorInfo {
     pub id: PlayerId,
     pub name: String,
-    /// v2 snapshots only; the server never sends it to v3 clients.
-    #[serde(default)]
-    pub connected_at: Option<DateTime<Utc>>,
+    pub connected_at: DateTime<Utc>,
 }
 
 /// Legacy, self-declared peer metadata provided when the game starts.
@@ -1335,9 +1331,7 @@ pub struct PlayerInfo {
     pub name: String,
     pub is_authority: bool,
     pub is_ready: bool,
-    /// v2 snapshots only; the server never sends it to v3 clients.
-    #[serde(default)]
-    pub connected_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub connected_at: chrono::DateTime<chrono::Utc>,
     #[serde(default)]
     pub epoch: Option<u32>,
     #[serde(default)]
@@ -1355,9 +1349,7 @@ pub struct SenderWatermark {
 pub struct SpectatorInfo {
     pub id: PlayerId,
     pub name: String,
-    /// v2 snapshots only; the server never sends it to v3 clients.
-    #[serde(default)]
-    pub connected_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub connected_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

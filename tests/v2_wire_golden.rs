@@ -63,7 +63,7 @@ fn player_info_a() -> PlayerInfo {
         name: "Alice".to_string(),
         is_authority: true,
         is_ready: false,
-        connected_at: Some(fixed_time()),
+        connected_at: fixed_time(),
         connection_info: None,
         // v3-only incarnation epoch: `None` is skipped, so the v2 snapshot
         // goldens below stay byte-identical.
@@ -79,7 +79,7 @@ fn player_info_b() -> PlayerInfo {
         name: "Bob".to_string(),
         is_authority: false,
         is_ready: true,
-        connected_at: Some(fixed_time()),
+        connected_at: fixed_time(),
         connection_info: Some(ConnectionInfo::Direct {
             host: "10.0.0.5".to_string(),
             port: 7777,
@@ -94,7 +94,7 @@ fn spectator() -> SpectatorInfo {
     SpectatorInfo {
         id: player_b(),
         name: "Watcher".to_string(),
-        connected_at: Some(fixed_time()),
+        connected_at: fixed_time(),
     }
 }
 

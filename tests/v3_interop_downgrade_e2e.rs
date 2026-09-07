@@ -40,9 +40,12 @@
 //!    contract verified from `src/server/session_policy.rs::all_support`.
 //! 7. `room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape`
 //!    — issue #529: v3 room snapshots (RoomJoined, PlayerJoined,
-//!    NewSpectatorJoined, Reconnected incl. nested replay events) carry no
-//!    server-internal `connected_at` and no legacy `connection_info` echo,
-//!    while v2 keeps the exact frozen shape including both.
+//!    SpectatorJoined, Reconnected incl. nested replay events, and
+//!    correlated RoomOperationResult envelopes) carry no legacy
+//!    `connection_info` echo (no `relay.token`, no arbitrary `Custom` JSON),
+//!    while `connected_at` stays on the wire for BOTH cohorts (released
+//!    SDKs deserialize it as a required field) and v2 keeps the exact
+//!    frozen shape.
 
 mod test_helpers;
 mod v3_conformance_helpers;
@@ -1522,13 +1525,14 @@ async fn non_mesh_v3_member_floors_room_to_relay() {
     running_server.shutdown().await;
 }
 
-/// Issue #529 red-green: room snapshots must NOT carry the server-internal
-/// `connected_at` join timestamp or the legacy self-declared
-/// `connection_info` echo (including a credential-looking `relay.token`) to
-/// protocol-v3 peers. The legacy handoff consumer is `GameStarting`
-/// (`PeerConnectionInfo`), which keeps the metadata for BOTH versions.
-/// Negotiated v2 peers keep the exact frozen legacy shape, which includes
-/// `connected_at` and `connection_info`.
+/// Issue #529 red-green: room snapshots must NOT carry the legacy
+/// self-declared `connection_info` echo (including a credential-looking
+/// `relay.token`) to protocol-v3 peers. The legacy handoff consumer is
+/// `GameStarting` (`PeerConnectionInfo`), which keeps the metadata for BOTH
+/// versions. `connected_at` stays on the wire for BOTH cohorts (every
+/// released client SDK deserializes it as a required field). Negotiated v2
+/// peers keep the exact frozen legacy shape, which includes
+/// `connection_info`.
 ///
 /// Data-driven over the recipient cohort, observed through the real
 /// WebSocket stack at the raw-JSON frame level:
@@ -1553,15 +1557,26 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
         let (running_server, server) = start_server_with_session(mesh_session_config()).await;
         let addr = running_server.addr();
 
-        // Expected raw key sets per cohort.
+        // Expected raw key sets per cohort. `connected_at` stays on the wire
+        // for BOTH cohorts (released SDKs require it; issue #529
+        // follow-up); the v3 trim covers `connection_info` only, which is
+        // the one optional member field. Spectators have no trim.
         let (expected_player_keys, expected_spectator_keys) = match cohort {
             Cohort::V2 => (
                 BTreeSet::from(["id", "name", "is_authority", "is_ready", "connected_at"]),
                 BTreeSet::from(["id", "name", "connected_at"]),
             ),
             Cohort::V3 => (
-                BTreeSet::from(["id", "name", "is_authority", "is_ready", "epoch", "seq"]),
-                BTreeSet::from(["id", "name"]),
+                BTreeSet::from([
+                    "id",
+                    "name",
+                    "is_authority",
+                    "is_ready",
+                    "connected_at",
+                    "epoch",
+                    "seq",
+                ]),
+                BTreeSet::from(["id", "name", "connected_at"]),
             ),
         };
         let connect_and_authenticate = |label: &'static str| async move {
@@ -1700,6 +1715,10 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
                     !raw_text.contains("cred-looking-secret")
                         && !raw_text.contains("relay.example.test"),
                     "v3 snapshot must not leak the credential-looking relay entry: {raw}"
+                );
+                assert!(
+                    provider_entry.contains_key("connected_at"),
+                    "connected_at stays on the v3 wire (released SDKs require it): {raw}"
                 );
             }
         }
@@ -1908,10 +1927,6 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
                 !raw_text.contains("cred-looking-secret")
                     && !raw_text.contains("relay.example.test"),
                 "correlated RoomJoined must not leak the credential-looking relay entry: {raw}"
-            );
-            assert!(
-                !raw_text.contains("connected_at"),
-                "correlated RoomJoined must not leak server-internal join timestamps: {raw}"
             );
         }
 

@@ -53,6 +53,7 @@ room state:
         "name": "Alice",
         "is_authority": false,
         "is_ready": true,
+        "connected_at": "2025-01-15T10:30:00Z",
         "epoch": 1,
         "seq": 17
       },
@@ -82,8 +83,9 @@ room state:
 The example shows negotiated v3: every `current_players` entry carries its
 current relay `epoch` and exact recipient-visible `seq` baseline. A pre-v3
 recipient receives the same snapshot without either field, but with the
-frozen legacy `connected_at` field; v3 snapshots never carry `connected_at`
-(issue #529). The pair makes the
+frozen legacy `connection_info` field. Protocol v3 snapshots never echo
+`connection_info` (issue #529): the self-declared metadata keeps its single
+consumer, the `GameStarting` legacy handoff surface. The pair makes the
 snapshot usable as an accountability baseline if live spectator delivery is
 added later; spectators do not receive relayed gameplay today.
 
