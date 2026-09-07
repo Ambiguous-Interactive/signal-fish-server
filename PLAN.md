@@ -82,11 +82,18 @@ correctness evidence appears.
   the `connected_at` v3 trim (released SDKs 0.8.0–0.12.0 require the field);
   the parked-state (`senderState`) producers are same-thread program-ordered
   behind their `SendFull` record (verified, no race window).
-- #378 — consolidate duplicate hosted link validation only with an atomic
-  branch-protection migration and equivalent-or-broader coverage evidence.
-  (The #513 migration confirmed main's branch protection carries no required
-  status checks and no ruleset does either — the atomic-settings-change
-  prerequisite is already satisfied repo-side.)
+- #525 — session 217 landed the minimal viable moderation set: authority
+  kick (close code `4007 kicked`, no reconnect), authority room-code
+  regeneration, and a shipped default spectator cap
+  (`server.default_max_spectators`, auto `2× max_players`). Remaining:
+  room password / invite-only mode, per-room ban list, host-transfer
+  election, spectator roster slimming (counts + deltas instead of full
+  lists), and the companion room-namespace authority-squat fix.
+- #378 — CLOSED by the session-217 canonical-gate migration: `Link Check`
+  owns offline lychee + internal-link validation, the duplicate
+  `Documentation Link Check` job is retired, the strict MkDocs build moved to
+  the `Markdown Code Validation` job, and branch protection (no required
+  checks, per #513) needed no settings migration.
 - #379 — make verification-nightly pull-request fan-out path-aware only after
   an owner exports the required-check/ruleset inventory and a historical
   changed-file replay proves net allocation and runner-time savings. On the

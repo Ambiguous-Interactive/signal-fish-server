@@ -64,8 +64,10 @@ Config and binary wire-format drift rules:
   `^```+[Rr]ust([[:space:],]|$)` or delegate to the canonical extractor.
   The AWK/Python extractor parity fixture must stay wired into `doc-validation.yml`,
   and release preflight path filters must include every doc-validation trigger path
-  so fixture, tooling, or internal-link-checker-only release commits do not bypass
-  Documentation Validation.
+  so fixture, tooling, or docs-content-only release commits do not bypass
+  Documentation Validation. Offline link validation (lychee + the internal link
+  checker) is owned by the canonical `Link Check` workflow (#378), not by
+  `doc-validation.yml`.
 - **Dependabot auto-merge gating must be CI-aware and squash-only** -- never enable
   Dependabot auto-merge while pull request CI workflows are pending or failing; require
   completed workflow runs with `success`/`skipped` conclusions, then use

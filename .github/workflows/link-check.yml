@@ -1,8 +1,10 @@
-# Link Checking Workflow
+# Link Checking Workflow (canonical offline link gate, issue #378)
 #
-# Validates repository-owned links in documentation and code on every run.
-# External URLs are audited separately on the weekly schedule because availability
-# of unowned hosts must never make a required pull-request check flaky.
+# Validates repository-owned links in documentation and code on every run:
+# offline lychee over Markdown/Rust/TOML plus the internal markdown link
+# checker. External URLs are audited separately on the weekly schedule because
+# availability of unowned hosts must never make a required pull-request check
+# flaky.
 #
 # Configuration:
 #   - .lychee.toml: Link checker configuration and exclusions
@@ -31,6 +33,9 @@ on:
       - 'scripts/install-lychee.sh'
       - 'scripts/download-verified.sh'
       - 'scripts/run-lychee.sh'
+      - 'scripts/check-internal-links.sh'
+      - 'docs/**'
+      - '.github/test-fixtures/**'
       - '.github/workflows/link-check.yml'
   pull_request:
     branches: [main]
@@ -42,6 +47,9 @@ on:
       - 'scripts/install-lychee.sh'
       - 'scripts/download-verified.sh'
       - 'scripts/run-lychee.sh'
+      - 'scripts/check-internal-links.sh'
+      - 'docs/**'
+      - '.github/test-fixtures/**'
       - '.github/workflows/link-check.yml'
   schedule:
     # Run weekly on Monday at 00:00 UTC to catch link rot
@@ -87,6 +95,12 @@ jobs:
             --exclude-path site/
             --
             './**/*.md' './**/*.rs' './**/*.toml'
+      - name: Check internal markdown links
+        # Canonical internal-link validation (issue #378): verifies every
+        # inline Markdown target exists and is tracked by git, so a
+        # "works locally, untracked in CI" file cannot pass.
+        shell: bash
+        run: bash scripts/check-internal-links.sh --all
       - name: External Link Audit (scheduled, non-gating)
         id: external-links
         if: github.event_name == 'schedule'

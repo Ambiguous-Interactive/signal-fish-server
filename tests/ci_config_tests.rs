@@ -1165,7 +1165,9 @@ fn validate_workflow_has_required_jobs(
 //   - Documentation Validation / Rustdoc Validation
 //   - Documentation Validation / Documentation Tests
 //   - Documentation Validation / Markdown Code Validation
-//   - Documentation Validation / Documentation Link Check
+//
+// Offline link validation is the canonical `Link Check / Check Links` check
+// (issue #378); the duplicate Documentation Link Check job was retired.
 
 /// Workflow file -> workflow display name mapping for workflows covered by the
 /// repository-owned stable check-name policy.
@@ -1248,12 +1250,7 @@ const REQUIRED_DOC_VALIDATION_JOBS: &[(&str, &str, &str)] = &[
     (
         "markdown-code-samples",
         "Markdown Code Validation",
-        "Validates code blocks in markdown",
-    ),
-    (
-        "link-check",
-        "Documentation Link Check",
-        "Internal documentation link checking",
+        "Validates code blocks in markdown; strict MkDocs build",
     ),
 ];
 
@@ -1344,7 +1341,6 @@ const REQUIRED_CHECK_NAMES: &[&str] = &[
     "Documentation Validation / Rustdoc Validation",
     "Documentation Validation / Documentation Tests",
     "Documentation Validation / Markdown Code Validation",
-    "Documentation Validation / Documentation Link Check",
 ];
 
 /// All workflow files that must exist for CI hygiene.
@@ -1379,7 +1375,7 @@ const REQUIRED_WORKFLOW_FILES: &[(&str, &str)] = &[
     ("spellcheck.yml", "Spell checking (typos)"),
     (
         "link-check.yml",
-        "Deterministic repository link validation plus scheduled external audit (lychee)",
+        "Canonical offline link gate: lychee + internal link checker, plus the scheduled external audit",
     ),
     (
         "h14-pr.yml",
@@ -8499,16 +8495,8 @@ fn test_doc_validation_path_filters_cover_critical_paths() {
             "Rustdoc jobs read the pinned toolchain",
         ),
         (
-            ".lychee.toml",
-            "Link validation consumes the shared Lychee policy",
-        ),
-        (
             "scripts/read-toml-string.sh",
             "Rustdoc jobs use the shared toolchain reader",
-        ),
-        (
-            "scripts/check-internal-links.sh",
-            "Detailed internal link checker run by the workflow",
         ),
         (
             ".github/workflows/doc-validation.yml",
@@ -8554,12 +8542,23 @@ fn test_doc_validation_builds_mkdocs_in_strict_mode() {
     let workflow_path = repo_root().join(".github/workflows/doc-validation.yml");
     let content = read_live_file(&workflow_path);
 
+    // Scoped to the job that owns rendered-documentation validation (#378):
+    // the strict MkDocs build moved here from the retired duplicate link job.
+    let job_body: String = content
+        .split("  markdown-code-samples:")
+        .nth(1)
+        .expect("doc-validation.yml must define the markdown-code-samples job")
+        .lines()
+        .take_while(|line| line.is_empty() || line.starts_with("    "))
+        .collect::<Vec<_>>()
+        .join("\n");
+
     assert!(
-        content.contains("pip install -r requirements-docs.txt")
-            && content.contains("mkdocs build --strict"),
-        "doc-validation.yml must install the pinned documentation dependencies and run \
-         `mkdocs build --strict` on pull requests. Reuse one of the four stable documentation \
-         jobs instead of allocating a new runner.\nFile: {}",
+        job_body.contains("pip install -r requirements-docs.txt")
+            && job_body.contains("mkdocs build --strict"),
+        "doc-validation.yml's markdown-code-samples job must install the pinned \
+         documentation dependencies and run `mkdocs build --strict` on pull requests.\n\
+         File: {}",
         workflow_path.display()
     );
 }
@@ -11166,6 +11165,30 @@ fn test_link_check_workflow_exists_and_is_configured() {
         content.contains("schedule:") || content.contains("cron:"),
         "link-check.yml should run on a schedule (e.g., weekly) to catch link rot"
     );
+
+    // Fail-closed trigger coverage for the canonical gate (issue #378): every
+    // link-relevant input class must re-trigger validation, including the
+    // checker script itself, non-markdown rendered assets under docs/, and
+    // the fixture markdown (dot-directories are invisible to GitHub path
+    // globs, so `.github/test-fixtures/**` must be listed explicitly).
+    for required_trigger in [
+        "'**/*.md'",
+        "'**/*.rs'",
+        "'**/*.toml'",
+        "'.lychee.toml'",
+        "'scripts/check-internal-links.sh'",
+        "'docs/**'",
+        "'.github/test-fixtures/**'",
+        "'.github/workflows/link-check.yml'",
+    ] {
+        let occurrences = content.matches(required_trigger).count();
+        assert!(
+            occurrences >= 2,
+            "link-check.yml path triggers must include {required_trigger} for BOTH push \
+             and pull_request (found {occurrences} occurrence(s)); a missing trigger \
+             silently bypasses the canonical link gate"
+        );
+    }
 }
 
 #[test]
@@ -11175,8 +11198,9 @@ fn test_required_link_checks_are_offline_and_external_audit_is_non_gating() {
     // a scheduled audit, but that network-dependent step cannot fail the job.
     let root = repo_root();
     let link_check = read_live_file(&root.join(".github/workflows/link-check.yml"));
-    let doc_validation = read_live_file(&root.join(".github/workflows/doc-validation.yml"));
 
+    // link-check.yml is the single canonical offline pull-request link gate
+    // (issue #378); the duplicate Documentation Link Check job was retired.
     let link_required_step = link_check
         .split("- name: Repository Link Checker (offline)")
         .nth(1)
@@ -11185,24 +11209,30 @@ fn test_required_link_checks_are_offline_and_external_audit_is_non_gating() {
                 .next()
         })
         .expect("link-check.yml must define the named offline repository-link step");
-    let doc_required_step = doc_validation
-        .split("- name: Check repository links with lychee (offline)")
+    assert!(
+        link_required_step
+            .lines()
+            .any(|line| line.split_whitespace().any(|word| word == "--offline")),
+        "the canonical lychee validation must use --offline so pull-request results \
+         cannot depend on unowned network services"
+    );
+    let internal_step = link_check
+        .split("- name: Check internal markdown links")
         .nth(1)
-        .and_then(|rest| rest.split("\n        env:").next())
-        .expect("doc-validation.yml must define the named offline repository-link step");
-
-    for (workflow, required_step) in [
-        ("link-check.yml", link_required_step),
-        ("doc-validation.yml", doc_required_step),
-    ] {
-        assert!(
-            required_step
-                .lines()
-                .any(|line| line.split_whitespace().any(|word| word == "--offline")),
-            "{workflow} required lychee validation must use --offline so pull-request \
-             results cannot depend on unowned network services"
-        );
-    }
+        .and_then(|rest| {
+            rest.split("- name: External Link Audit (scheduled, non-gating)")
+                .next()
+        })
+        .expect("link-check.yml must define the named internal-link step");
+    assert!(
+        internal_step.contains("scripts/check-internal-links.sh --all"),
+        "the canonical gate must also own repository-internal link validation"
+    );
+    assert!(
+        !read_live_file(&root.join(".github/workflows/doc-validation.yml"))
+            .contains("run-lychee.sh"),
+        "doc-validation.yml must not duplicate the canonical offline lychee gate"
+    );
 
     let external_step = link_check
         .split("- name: External Link Audit (scheduled, non-gating)")
@@ -16840,7 +16870,6 @@ fn test_internal_link_validators_check_tracked_targets() {
     let script_content_live = strip_comment_lines(&script_content);
     let fast_link_content = read_live_file(&root.join("scripts/check-links-fast.sh"));
     let validate_ci_content = read_live_file(&root.join("scripts/validate-ci.sh"));
-    let doc_validation_content = read_live_file(&root.join(".github/workflows/doc-validation.yml"));
 
     assert!(
         script_content_live.contains("git ls-files"),
@@ -16895,10 +16924,12 @@ fn test_internal_link_validators_check_tracked_targets() {
          Local validation should use the same tracked-target diagnostics as CI."
     );
 
+    let link_check_content = read_live_file(&root.join(".github/workflows/link-check.yml"));
     assert!(
-        doc_validation_content.contains("bash scripts/check-internal-links.sh --all"),
-        "doc-validation.yml must run scripts/check-internal-links.sh for detailed \
-         file:line diagnostics and tracked-target checks."
+        link_check_content.contains("bash scripts/check-internal-links.sh --all"),
+        "link-check.yml is the canonical offline link gate (issue #378) and must run \
+         scripts/check-internal-links.sh for detailed file:line diagnostics and \
+         tracked-target checks."
     );
 
     for (pattern, reason) in [
@@ -17657,17 +17688,15 @@ fn test_lychee_setup_is_retrying_checksum_verified_and_shared() {
         );
     }
 
-    for workflow_name in ["link-check.yml", "doc-validation.yml"] {
-        let workflow = read_live_file(&root.join(".github/workflows").join(workflow_name));
-        assert!(
-            workflow.contains("run: bash scripts/install-lychee.sh"),
-            "{workflow_name} must use the shared retrying Lychee installer"
-        );
-        assert!(
-            !workflow.contains("lycheeverse/lychee-action"),
-            "{workflow_name} must not retain lychee-action's single-attempt release download"
-        );
-    }
+    let link_check_workflow = read_live_file(&root.join(".github/workflows/link-check.yml"));
+    assert!(
+        link_check_workflow.contains("run: bash scripts/install-lychee.sh"),
+        "link-check.yml must use the shared retrying Lychee installer"
+    );
+    assert!(
+        !link_check_workflow.contains("lycheeverse/lychee-action"),
+        "link-check.yml must not retain lychee-action's single-attempt release download"
+    );
 
     for shared_pin in [
         "0.24.2",
@@ -17885,20 +17914,6 @@ fn test_lychee_workflows_use_hardened_args_data_driven() {
                 "--exclude-path third_party/",
                 "--exclude-path '\\.github/test-fixtures/'",
                 "--exclude-path 'test-fixtures/'",
-                "--exclude-path '\\.lychee\\.toml'",
-                "--",
-            ],
-        ),
-        (
-            root.join(".github/workflows/doc-validation.yml"),
-            vec![
-                "--config .lychee.toml",
-                "--remap 'https://crates\\.io/crates/signal-fish-server https://index.crates.io/si/gn/signal-fish-server'",
-                "--remap 'https://img\\.shields\\.io/crates/v/signal-fish-server\\?style=for-the-badge https://index.crates.io/si/gn/signal-fish-server'",
-                "--exclude-path './target/*'",
-                "--exclude-path './third_party/*'",
-                "--exclude-path './.github/test-fixtures/*'",
-                "--exclude-path './test-fixtures/*'",
                 "--exclude-path '\\.lychee\\.toml'",
                 "--",
             ],
