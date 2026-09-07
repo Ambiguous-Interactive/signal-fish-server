@@ -4,6 +4,13 @@ use tokio::sync::RwLock;
 use tokio::time::{Duration, Instant};
 use uuid::Uuid;
 
+/// Ceiling of `duration` in whole seconds (retry-after fields and log hints).
+fn retry_after_secs(duration: &Duration) -> u64 {
+    duration
+        .as_secs()
+        .saturating_add(u64::from(duration.subsec_nanos() > 0))
+}
+
 /// Rate limiting configuration
 ///
 /// All budgets use **fixed-window** accounting: each player's counters reset
@@ -79,6 +86,9 @@ struct RateLimitEntry {
     signal_errors: u32,
     /// Game-data relay bytes charged in the current window.
     relay_bytes: u64,
+    /// Budget rejections counted in the current window (issue #526
+    /// forensics): feeds the first-rejection and window-summary log lines.
+    rejections: PlayerRejectionStats,
     /// Window start time
     window_start: Instant,
 }
@@ -88,6 +98,9 @@ struct RateLimitEntry {
 struct RoomRelayWindow {
     /// Room-aggregate relay bytes charged in the current window.
     relay_bytes: u64,
+    /// Ceiling rejections counted in the current window (issue #526
+    /// forensics): feeds the room-attributed log lines.
+    rejections: u32,
     /// Window start time
     window_start: Instant,
 }
@@ -96,17 +109,33 @@ impl RoomRelayWindow {
     fn new() -> Self {
         Self {
             relay_bytes: 0,
+            rejections: 0,
             window_start: Instant::now(),
         }
     }
 
     /// Reset the window if enough time has passed (same fixed-window
     /// semantics and boundary-burst trade-off as the per-player budgets).
-    fn maybe_reset_window(&mut self, config: &RateLimitConfig) {
+    ///
+    /// Returns the elapsed window's rejection count so the caller can log
+    /// the forensics summary before the count is discarded.
+    fn maybe_reset_window(&mut self, config: &RateLimitConfig) -> u32 {
         if self.window_start.elapsed() >= config.time_window {
+            let rejections = std::mem::take(&mut self.rejections);
             self.relay_bytes = 0;
             self.window_start = Instant::now();
+            rejections
+        } else {
+            0
         }
+    }
+
+    /// Count one ceiling rejection. Returns `true` on the window's first.
+    fn record_rejection(&mut self) -> bool {
+        // Per-window rejections are far below u32::MAX in practice;
+        // saturating_add keeps the panic-free arithmetic policy.
+        self.rejections = self.rejections.saturating_add(1);
+        self.rejections == 1
     }
 
     /// Charge `bytes` against the room's aggregate relay budget,
@@ -135,6 +164,89 @@ enum RoomCreationLimit {
     Joins,
 }
 
+/// The player-keyed budgets [`RoomRateLimiter`] enforces (issue #526).
+///
+/// The room-aggregate relay ceiling is keyed by room, not player, so it keeps
+/// its own tally on [`RoomRelayWindow`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BudgetKind {
+    RoomCreation,
+    JoinAttempt,
+    Signal,
+    SignalError,
+    RelayBandwidth,
+}
+
+impl BudgetKind {
+    /// Stable lowercase label for log fields and stats.
+    fn label(self) -> &'static str {
+        match self {
+            BudgetKind::RoomCreation => "room_creation",
+            BudgetKind::JoinAttempt => "join_attempt",
+            BudgetKind::Signal => "signal",
+            BudgetKind::SignalError => "signal_error",
+            BudgetKind::RelayBandwidth => "relay_bandwidth",
+        }
+    }
+}
+
+/// Per-budget rejection counts for one fixed window (issue #526).
+///
+/// This is the forensics datum: the limiter's global per-kind counters say
+/// *that* the server is rejecting, this tally says *who* and *how often*.
+/// It lives on the limiter's existing per-player entry, so its cardinality
+/// is bounded by the same entry set and cleanup sweep as the budgets
+/// themselves — no new unbounded map.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlayerRejectionStats {
+    /// Room-creation budget rejections in the current window.
+    pub room_creations: u32,
+    /// Seated/spectator join budget rejections in the current window.
+    pub join_attempts: u32,
+    /// Signal budget rejections in the current window.
+    pub signals: u32,
+    /// Detailed-rejection budget rejections in the current window.
+    pub signal_errors: u32,
+    /// Relay byte budget rejections in the current window.
+    pub relay_bandwidth: u32,
+}
+
+impl PlayerRejectionStats {
+    fn bump(&mut self, kind: BudgetKind) -> bool {
+        let count = match kind {
+            BudgetKind::RoomCreation => &mut self.room_creations,
+            BudgetKind::JoinAttempt => &mut self.join_attempts,
+            BudgetKind::Signal => &mut self.signals,
+            BudgetKind::SignalError => &mut self.signal_errors,
+            BudgetKind::RelayBandwidth => &mut self.relay_bandwidth,
+        };
+        // Per-window rejections are far below u32::MAX in practice;
+        // saturating_add keeps the panic-free arithmetic policy.
+        *count = count.saturating_add(1);
+        *count == 1
+    }
+
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Compact `"kind=count"` summary of the nonzero kinds (log field).
+    fn summary(&self) -> String {
+        let pairs: Vec<String> = [
+            (BudgetKind::RoomCreation, self.room_creations),
+            (BudgetKind::JoinAttempt, self.join_attempts),
+            (BudgetKind::Signal, self.signals),
+            (BudgetKind::SignalError, self.signal_errors),
+            (BudgetKind::RelayBandwidth, self.relay_bandwidth),
+        ]
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(kind, count)| format!("{}={count}", kind.label()))
+        .collect();
+        pairs.join(", ")
+    }
+}
+
 impl RateLimitEntry {
     fn new() -> Self {
         Self {
@@ -143,6 +255,7 @@ impl RateLimitEntry {
             signals: 0,
             signal_errors: 0,
             relay_bytes: 0,
+            rejections: PlayerRejectionStats::default(),
             window_start: Instant::now(),
         }
     }
@@ -152,15 +265,28 @@ impl RateLimitEntry {
     /// Fixed-window semantics: every budget resets together, so a client can
     /// burst up to twice the configured count across a window boundary
     /// (documented trade-off, not a bug).
-    fn maybe_reset_window(&mut self, config: &RateLimitConfig) {
+    ///
+    /// Returns the elapsed window's rejection tally so the caller can log
+    /// the forensics summary before the counts are discarded.
+    fn maybe_reset_window(&mut self, config: &RateLimitConfig) -> PlayerRejectionStats {
         if self.window_start.elapsed() >= config.time_window {
+            let rejections = std::mem::take(&mut self.rejections);
             self.room_creations = 0;
             self.join_attempts = 0;
             self.signals = 0;
             self.signal_errors = 0;
             self.relay_bytes = 0;
             self.window_start = Instant::now();
+            rejections
+        } else {
+            PlayerRejectionStats::default()
         }
+    }
+
+    /// Count one budget rejection. Returns `true` on the window's first
+    /// rejection of `kind` (the caller logs that threshold crossing).
+    fn record_rejection(&mut self, kind: BudgetKind) -> bool {
+        self.rejections.bump(kind)
     }
 
     /// Check if room creation is allowed and increment counter
@@ -316,9 +442,61 @@ impl RoomRateLimiter {
         }
     }
 
+    /// Log the first budget rejection of a window at info level (issue #526).
+    ///
+    /// Rate-limit rejections otherwise surface only as global per-kind
+    /// counters and client-visible errors, so "this player is flooding
+    /// signals" could not be attributed in a default-verbosity incident
+    /// review. The first rejection crosses that threshold; repeats stay
+    /// silent and are summarized when the window rolls over.
+    fn log_first_rejection(&self, player_id: &Uuid, kind: BudgetKind, retry_after: Duration) {
+        tracing::info!(
+            player_id = %player_id,
+            budget = kind.label(),
+            window_reset_in_secs = retry_after_secs(&retry_after),
+            "Player exceeded a rate budget"
+        );
+    }
+
+    /// Log one elapsed window's rejection summary at info level (issue #526).
+    ///
+    /// Emitted from the next enforcement call after the window rolls over,
+    /// so a flooding player costs at most one first-rejection line per
+    /// exceeded budget plus one summary line per window, and the limiter
+    /// needs no extra timers, maps, or cardinality budget.
+    fn log_window_summary(&self, player_id: &Uuid, elapsed: &PlayerRejectionStats) {
+        if elapsed.is_empty() {
+            return;
+        }
+        tracing::info!(
+            player_id = %player_id,
+            budgets = %elapsed.summary(),
+            "Player rate budget rejections in the elapsed window"
+        );
+    }
+
+    /// Run the fixed-window rollover for `player_id`'s entry and log the
+    /// elapsed window's rejection summary. Every enforcement path starts
+    /// here so summaries never fire outside the limiter's own lock step.
+    async fn begin_player_check(
+        &self,
+        player_id: &Uuid,
+    ) -> tokio::sync::RwLockWriteGuard<'_, HashMap<Uuid, RateLimitEntry>> {
+        let mut entries = self.entries.write().await;
+        let entry = entries
+            .entry(*player_id)
+            .or_insert_with(RateLimitEntry::new);
+        let elapsed = entry.maybe_reset_window(&self.config);
+        self.log_window_summary(player_id, &elapsed);
+        entries
+    }
+
     /// Check if a room creation request is allowed for the given player
     pub async fn check_room_creation(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
-        let mut entries = self.entries.write().await;
+        let mut entries = self.begin_player_check(player_id).await;
+        // No-op re-entry: begin_player_check already created the entry. The
+        // limiter is a no-panic zone, so the invariant is expressed as an
+        // idempotent insert rather than a `get_mut().expect(...)`.
         let entry = entries
             .entry(*player_id)
             .or_insert_with(RateLimitEntry::new);
@@ -337,6 +515,13 @@ impl RoomRateLimiter {
                         RateLimitError::JoinLimitExceeded { retry_after },
                     ),
                 };
+                let budget = match limit {
+                    RoomCreationLimit::Creations => BudgetKind::RoomCreation,
+                    RoomCreationLimit::Joins => BudgetKind::JoinAttempt,
+                };
+                if entry.record_rejection(budget) {
+                    self.log_first_rejection(player_id, budget, retry_after);
+                }
                 self.record_rejection(kind);
                 Err(error)
             }
@@ -345,7 +530,10 @@ impl RoomRateLimiter {
 
     /// Check if a seated or spectator join attempt is allowed for the player.
     pub async fn check_join_attempt(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
-        let mut entries = self.entries.write().await;
+        let mut entries = self.begin_player_check(player_id).await;
+        // No-op re-entry: begin_player_check already created the entry. The
+        // limiter is a no-panic zone, so the invariant is expressed as an
+        // idempotent insert rather than a `get_mut().expect(...)`.
         let entry = entries
             .entry(*player_id)
             .or_insert_with(RateLimitEntry::new);
@@ -354,6 +542,9 @@ impl RoomRateLimiter {
             Ok(())
         } else {
             let reset_time = entry.time_until_reset(&self.config);
+            if entry.record_rejection(BudgetKind::JoinAttempt) {
+                self.log_first_rejection(player_id, BudgetKind::JoinAttempt, reset_time);
+            }
             self.record_rejection(crate::metrics::RateLimitRejection::JoinAttempt);
             Err(RateLimitError::JoinLimitExceeded {
                 retry_after: reset_time,
@@ -363,7 +554,10 @@ impl RoomRateLimiter {
 
     /// Check if a WebRTC signaling message is allowed for the given player
     pub async fn check_signal(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
-        let mut entries = self.entries.write().await;
+        let mut entries = self.begin_player_check(player_id).await;
+        // No-op re-entry: begin_player_check already created the entry. The
+        // limiter is a no-panic zone, so the invariant is expressed as an
+        // idempotent insert rather than a `get_mut().expect(...)`.
         let entry = entries
             .entry(*player_id)
             .or_insert_with(RateLimitEntry::new);
@@ -372,6 +566,9 @@ impl RoomRateLimiter {
             Ok(())
         } else {
             let reset_time = entry.time_until_reset(&self.config);
+            if entry.record_rejection(BudgetKind::Signal) {
+                self.log_first_rejection(player_id, BudgetKind::Signal, reset_time);
+            }
             self.record_rejection(crate::metrics::RateLimitRejection::Signal);
             Err(RateLimitError::SignalLimitExceeded {
                 retry_after: reset_time,
@@ -389,7 +586,10 @@ impl RoomRateLimiter {
     /// this gate owns that drop's attribution. Whichever gate fires, a dropped
     /// fan-out is counted exactly once.
     pub async fn check_signal_available(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
-        let mut entries = self.entries.write().await;
+        let mut entries = self.begin_player_check(player_id).await;
+        // No-op re-entry: begin_player_check already created the entry. The
+        // limiter is a no-panic zone, so the invariant is expressed as an
+        // idempotent insert rather than a `get_mut().expect(...)`.
         let entry = entries
             .entry(*player_id)
             .or_insert_with(RateLimitEntry::new);
@@ -398,6 +598,9 @@ impl RoomRateLimiter {
             Ok(())
         } else {
             let reset_time = entry.time_until_reset(&self.config);
+            if entry.record_rejection(BudgetKind::Signal) {
+                self.log_first_rejection(player_id, BudgetKind::Signal, reset_time);
+            }
             self.record_rejection(crate::metrics::RateLimitRejection::Signal);
             Err(RateLimitError::SignalLimitExceeded {
                 retry_after: reset_time,
@@ -407,7 +610,10 @@ impl RoomRateLimiter {
 
     /// Reserve a detailed rejected-signal response for the given player.
     pub async fn check_signal_error(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
-        let mut entries = self.entries.write().await;
+        let mut entries = self.begin_player_check(player_id).await;
+        // No-op re-entry: begin_player_check already created the entry. The
+        // limiter is a no-panic zone, so the invariant is expressed as an
+        // idempotent insert rather than a `get_mut().expect(...)`.
         let entry = entries
             .entry(*player_id)
             .or_insert_with(RateLimitEntry::new);
@@ -416,6 +622,9 @@ impl RoomRateLimiter {
             Ok(())
         } else {
             let reset_time = entry.time_until_reset(&self.config);
+            if entry.record_rejection(BudgetKind::SignalError) {
+                self.log_first_rejection(player_id, BudgetKind::SignalError, reset_time);
+            }
             self.record_rejection(crate::metrics::RateLimitRejection::SignalError);
             Err(RateLimitError::SignalErrorLimitExceeded {
                 retry_after: reset_time,
@@ -443,7 +652,10 @@ impl RoomRateLimiter {
         let budget = app
             .and_then(|policy| policy.max_relay_bytes)
             .unwrap_or(self.config.max_relay_bytes);
-        let mut entries = self.entries.write().await;
+        let mut entries = self.begin_player_check(player_id).await;
+        // No-op re-entry: begin_player_check already created the entry. The
+        // limiter is a no-panic zone, so the invariant is expressed as an
+        // idempotent insert rather than a `get_mut().expect(...)`.
         let entry = entries
             .entry(*player_id)
             .or_insert_with(RateLimitEntry::new);
@@ -452,6 +664,9 @@ impl RoomRateLimiter {
             Ok(())
         } else {
             let reset_time = entry.time_until_reset(&self.config);
+            if entry.record_rejection(BudgetKind::RelayBandwidth) {
+                self.log_first_rejection(player_id, BudgetKind::RelayBandwidth, reset_time);
+            }
             self.record_rejection(crate::metrics::RateLimitRejection::RelayBandwidth);
             Err(RateLimitError::RelayLimitExceeded {
                 retry_after: reset_time,
@@ -473,11 +688,28 @@ impl RoomRateLimiter {
     ) -> Result<(), RateLimitError> {
         let mut entries = self.room_entries.write().await;
         let entry = entries.entry(*room_id).or_insert_with(RoomRelayWindow::new);
+        let elapsed_rejections = entry.maybe_reset_window(&self.config);
+        if elapsed_rejections > 0 {
+            tracing::info!(
+                room_id = %room_id,
+                budget = "room_relay_bytes",
+                rejections = elapsed_rejections,
+                "Room relay ceiling rejections in the elapsed window"
+            );
+        }
 
         if entry.try_relay_bytes(&self.config, bytes) {
             Ok(())
         } else {
             let reset_time = entry.time_until_reset(&self.config);
+            if entry.record_rejection() {
+                tracing::info!(
+                    room_id = %room_id,
+                    budget = "room_relay_bytes",
+                    window_reset_in_secs = retry_after_secs(&reset_time),
+                    "Room exceeded the aggregate relay byte ceiling"
+                );
+            }
             self.record_rejection(crate::metrics::RateLimitRejection::RelayRoomBandwidth);
             Err(RateLimitError::RoomRelayLimitExceeded {
                 retry_after: reset_time,
@@ -540,6 +772,7 @@ impl RoomRateLimiter {
                     signals: 0,
                     signal_errors: 0,
                     relay_bytes: 0,
+                    rejections: PlayerRejectionStats::default(),
                     time_until_reset: Duration::ZERO,
                 }
             } else {
@@ -549,6 +782,7 @@ impl RoomRateLimiter {
                     signals: entry.signals,
                     signal_errors: entry.signal_errors,
                     relay_bytes: entry.relay_bytes,
+                    rejections: entry.rejections,
                     time_until_reset: entry.time_until_reset(&self.config),
                 }
             }
@@ -583,12 +817,6 @@ pub enum RateLimitError {
 
 impl std::fmt::Display for RateLimitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fn retry_after_secs(duration: &Duration) -> u64 {
-            duration
-                .as_secs()
-                .saturating_add(u64::from(duration.subsec_nanos() > 0))
-        }
-
         match self {
             Self::RoomCreationLimitExceeded { retry_after } => {
                 write!(
@@ -648,6 +876,9 @@ pub struct PlayerRateStats {
     pub signals: u32,
     pub signal_errors: u32,
     pub relay_bytes: u64,
+    /// Budget rejections recorded in the player's current fixed window
+    /// (issue #526 forensics), per budget kind.
+    pub rejections: PlayerRejectionStats,
     pub time_until_reset: Duration,
 }
 
@@ -1550,5 +1781,106 @@ mod tests {
         );
         assert!(gate.charge(later));
         assert!(!gate.charge(later));
+    }
+
+    /// Forensics tallies (issue #526) count every rejection per budget kind
+    /// in the player's window, survive repeats, and are consumed — with the
+    /// window-summary log decision — by the first enforcement call after the
+    /// window rolls over. The stats surface exposes the same tally.
+    #[tokio::test(start_paused = true)]
+    async fn rejection_tallies_count_per_kind_and_reset_with_the_window() {
+        let limiter = RoomRateLimiter::new(RateLimitConfig {
+            max_signals: 1,
+            max_signal_errors: 1,
+            max_join_attempts: 1,
+            ..create_test_config()
+        });
+        let player_id = Uuid::new_v4();
+
+        // Admit one of each kind, then reject one of each.
+        assert!(limiter.check_signal(&player_id).await.is_ok());
+        assert!(limiter.check_signal_error(&player_id).await.is_ok());
+        assert!(limiter.check_join_attempt(&player_id).await.is_ok());
+        assert!(limiter.check_signal(&player_id).await.is_err());
+        assert!(limiter.check_signal(&player_id).await.is_err());
+        assert!(limiter.check_signal_error(&player_id).await.is_err());
+        assert!(limiter.check_join_attempt(&player_id).await.is_err());
+
+        let stats = limiter
+            .get_player_stats(&player_id)
+            .await
+            .expect("the enforced player has a stats entry");
+        assert_eq!(
+            stats.rejections.signals, 2,
+            "every signal rejection is tallied, not only the first"
+        );
+        assert_eq!(stats.rejections.signal_errors, 1);
+        assert_eq!(stats.rejections.join_attempts, 1);
+        assert_eq!(
+            (
+                stats.rejections.room_creations,
+                stats.rejections.relay_bandwidth
+            ),
+            (0, 0),
+            "untouched budgets stay zero"
+        );
+
+        // The window rollover consumes the tally (the caller logs its
+        // summary): a post-reset player starts forensics from zero.
+        tokio::time::advance(Duration::from_millis(150)).await;
+        assert!(limiter.check_signal(&player_id).await.is_ok());
+        let stats = limiter
+            .get_player_stats(&player_id)
+            .await
+            .expect("stats entry remains");
+        assert!(
+            stats.rejections.is_empty(),
+            "the rollover must discard the elapsed window's tallies, got {:?}",
+            stats.rejections
+        );
+    }
+
+    /// The room ceiling tallies its own rejections against the room (issue
+    /// #526), consumed the same way at the window rollover.
+    #[tokio::test(start_paused = true)]
+    async fn room_ceiling_rejections_tally_and_reset_with_the_window() {
+        let limiter = RoomRateLimiter::new(create_test_config());
+        let room_id = Uuid::new_v4();
+
+        assert!(limiter.check_room_relay_bytes(&room_id, 1000).await.is_ok());
+        assert!(limiter.check_room_relay_bytes(&room_id, 1).await.is_err());
+        assert!(limiter.check_room_relay_bytes(&room_id, 1).await.is_err());
+        assert_eq!(
+            limiter.room_entries.read().await[&room_id].rejections,
+            2,
+            "every ceiling rejection is tallied against the room"
+        );
+
+        tokio::time::advance(Duration::from_millis(150)).await;
+        assert!(
+            limiter.check_room_relay_bytes(&room_id, 1000).await.is_ok(),
+            "the restored ceiling proves the window rolled over"
+        );
+        assert_eq!(
+            limiter.room_entries.read().await[&room_id].rejections,
+            0,
+            "the rollover must discard the elapsed window's tally"
+        );
+    }
+
+    /// The summary formatting keeps stable `kind=count` labels and omits
+    /// zero kinds, so operators can alert on the log field's shape.
+    #[test]
+    fn rejection_summary_lists_only_nonzero_budgets_with_stable_labels() {
+        let empty = PlayerRejectionStats::default();
+        assert!(empty.is_empty());
+        assert_eq!(empty.summary(), "", "an empty tally summarizes to nothing");
+
+        let tally = PlayerRejectionStats {
+            signals: 12,
+            relay_bandwidth: 1,
+            ..PlayerRejectionStats::default()
+        };
+        assert_eq!(tally.summary(), "signal=12, relay_bandwidth=1");
     }
 }

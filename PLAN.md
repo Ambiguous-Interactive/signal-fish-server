@@ -74,20 +74,19 @@ correctness evidence appears.
   arbitrary `Custom` JSON — including nested replay events and correlated
   result envelopes) and the #522 restart-to-change-allowlist constraint
   (atomic SIGHUP reload of `security.allowed_apps`, incl. the
-  `app_auth_path` registry file). Remaining frontier: continue seam sweeps;
-  #539 tracks the coordinated-SDK path for the `connected_at` v3 trim
-  (released SDKs 0.8.0–0.12.0 require the field); the parked-state
-  (`senderState`) producers are same-thread program-ordered behind their
-  `SendFull` record (verified, no race window).
+  `app_auth_path` registry file). Session 216 killed the nightly
+  mutation-testing miss on the finalized-join mixed-path observation guard
+  and closed the #526 griefing-forensics item (per-player and per-room
+  rejection tallies with throttled info-level attribution). Remaining
+  frontier: continue seam sweeps; #539 tracks the coordinated-SDK path for
+  the `connected_at` v3 trim (released SDKs 0.8.0–0.12.0 require the field);
+  the parked-state (`senderState`) producers are same-thread program-ordered
+  behind their `SendFull` record (verified, no race window).
 - #378 — consolidate duplicate hosted link validation only with an atomic
   branch-protection migration and equivalent-or-broader coverage evidence.
   (The #513 migration confirmed main's branch protection carries no required
   status checks and no ruleset does either — the atomic-settings-change
   prerequisite is already satisfied repo-side.)
-- #513 — macOS Lint/Nextest moved to the daily cron cohort (workflow,
-  contract tests, docs landed together). Remaining: post-merge verification
-  that one PR run and one cron run produce the expected check sets, and
-  billed-minute before/after evidence on the issue.
 - #379 — make verification-nightly pull-request fan-out path-aware only after
   an owner exports the required-check/ruleset inventory and a historical
   changed-file replay proves net allocation and runner-time savings. On the

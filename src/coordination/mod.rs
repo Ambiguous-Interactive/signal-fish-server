@@ -2077,6 +2077,13 @@ pub trait MessageCoordinator: Send + Sync {
     #[cfg(test)]
     fn fail_room_transactions_for_test(&self, _fail: bool) {}
 
+    /// Inject a bounded number of `RoutingChanged` transaction outcomes in
+    /// unit tests that verify publication retry-loop behavior (the next that
+    /// many commits report a routing change, then commits proceed normally).
+    /// Production implementations never expose or consult this hook.
+    #[cfg(test)]
+    fn fail_room_transactions_with_routing_changed_for_test(&self, _times: u32) {}
+
     /// Conditionally broadcast a committed room event after running a replay hook.
     ///
     /// Production implementations may run `before_send` while holding routing

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Rate-limit rejection forensics (issue #526): each limiter now tallies
+  budget rejections per player (and relay-ceiling rejections per room) over
+  its existing fixed window. The first rejection of a window logs an info
+  line naming the player or room and the budget; the next enforcement call
+  after the window rolls over logs a per-budget summary. Log volume stays
+  bounded regardless of rejection volume (one first-rejection line per
+  exceeded budget plus one summary per window). `PlayerRateStats` now
+  reports the current window's per-budget rejection counts via
+  `RoomRateLimiter::get_player_stats`.
 - `SIGHUP` reload of `security.allowed_apps` (issue #522): the server re-reads
   its configuration (including the `security.app_auth_path` registry file),
   validates the new set with the startup rules, and swaps it atomically —
