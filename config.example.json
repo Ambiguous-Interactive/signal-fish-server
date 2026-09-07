@@ -37,7 +37,7 @@
     "dir": "logs",
     "filename": "server.log",
     "rotation": "daily",
-    "enable_file_logging": true,
+    "enable_file_logging": false,
     "format": "json"
   },
   "security": {

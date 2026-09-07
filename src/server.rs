@@ -465,6 +465,12 @@ pub struct EnhancedGameServer {
     /// Rate-limits unauthorized-metrics-access warnings so anonymous request
     /// loops cannot amplify operator log volume (issue #407).
     metrics_rejection_log: crate::websocket::RejectionLogThrottle,
+    /// Rate-limits metrics-response truncation warnings so a persistently
+    /// oversized snapshot or game-name map cannot log per dashboard poll
+    /// (issue #518). One quiet period is shared across truncation sites by
+    /// design: events are rare, the response markers carry the details, and
+    /// each site logs a distinct reason string.
+    metrics_truncation_log: crate::websocket::RejectionLogThrottle,
     /// Rate-limits rejected-upgrade warnings per source so anonymous request
     /// loops cannot amplify operator log volume (issue #411).
     upgrade_rejection_log: crate::websocket::UpgradeRejectionLogThrottle,
@@ -800,6 +806,7 @@ impl EnhancedGameServer {
             shutdown_drain_deadline_ms: AtomicU64::new(0),
             shutdown_drain_tx,
             metrics_rejection_log: crate::websocket::RejectionLogThrottle::new(),
+            metrics_truncation_log: crate::websocket::RejectionLogThrottle::new(),
             upgrade_rejection_log: crate::websocket::UpgradeRejectionLogThrottle::new(),
             active_socket_tasks: AtomicUsize::new(0),
             active_socket_tasks_notify: Notify::new(),
@@ -820,6 +827,11 @@ impl EnhancedGameServer {
     /// Throttled warning channel for unauthorized metrics-scrape attempts.
     pub(crate) fn metrics_rejection_log(&self) -> &crate::websocket::RejectionLogThrottle {
         &self.metrics_rejection_log
+    }
+
+    /// Throttled warning channel for metrics-response truncation events.
+    pub(crate) fn metrics_truncation_log(&self) -> &crate::websocket::RejectionLogThrottle {
+        &self.metrics_truncation_log
     }
 
     /// Throttled warning channel for rejected WebSocket upgrades, keyed per

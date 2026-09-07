@@ -97,8 +97,12 @@ does not turn the public label into a credential.
 The connection-bound application context carries an internal UUID, and its
 provenance differs by policy. Under the enforced allowlist it is always a
 deterministic SHA-256 derivative of the public app ID string, so nothing about
-it is client-chosen. Under the open policy, a well-formed UUID sent as
-`app_id` is used verbatim, so the client chooses the application UUID.
+it is client-chosen. Under the open policy it is derived the same way but
+hashed under an open-policy-only namespace (issue #518), so an open-mode UUID
+does not equal a configured application's UUID and a client cannot claim
+another application's identity by sending that application's UUID as its
+`app_id`. The same label still always yields the same UUID, so attribution and
+room membership stay stable across handshakes and restarts.
 
 Open-mode application identity does scope room admission (issue #520): a
 created room is stamped with the creator's application UUID, and an owned

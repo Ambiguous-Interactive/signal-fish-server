@@ -154,7 +154,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__LOGGING__FILENAME` | `logging.filename` | `server.log` | Rolling log filename |
 | `SIGNAL_FISH__LOGGING__ROTATION` | `logging.rotation` | `daily` | File rotation policy (`daily`, `hourly`, `never`; any other value is rejected at startup instead of silently falling back to daily) |
 | `SIGNAL_FISH__LOGGING__LEVEL` | `logging.level` | `null` | Log level override (`trace`, `debug`, `info`, `warn`, `error`) |
-| `SIGNAL_FISH__LOGGING__ENABLE_FILE_LOGGING` | `logging.enable_file_logging` | `true` | Enable rolling file logs |
+| `SIGNAL_FISH__LOGGING__ENABLE_FILE_LOGGING` | `logging.enable_file_logging` | `false` | Enable rolling file logs in addition to stdout (off by default: file logs have no size cap, and in a container they grow the writable layer) |
 | `SIGNAL_FISH__LOGGING__FORMAT` | `logging.format` | `json` | Log output format (`json` or `text`) |
 | `SIGNAL_FISH__SECURITY__CORS_ORIGINS` | `security.cors_origins` | `http://localhost:3000,http://localhost:5173` | Allowed HTTP and browser WebSocket origins (comma-separated or `*`) |
 | `SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST` | `security.enforce_app_id_allowlist` | `true` | Require the public client app ID to appear in `allowed_apps` |

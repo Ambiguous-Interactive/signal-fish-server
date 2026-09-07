@@ -7,27 +7,33 @@ use std::time::{Duration, Instant};
 
 use super::prometheus::render_prometheus_metrics;
 
-/// Minimum quiet period between emitted unauthorized-metrics-access warnings.
+/// Minimum quiet period between emitted metrics-endpoint warnings.
 ///
-/// Unauthenticated endpoints are a log-disk amplification vector: file logging
-/// defaults on, there is no HTTP rate limiter on these routes, and one JSON
-/// log line per rejection would let an anonymous request loop grow the log
-/// indefinitely before any credential guess matters. Sixty seconds keeps the
-/// first signal and a periodic suppressed-count summary at negligible volume.
+/// These endpoints are log-volume amplification vectors: every admitted log
+/// line reaches the operator's sink(s), there is no HTTP rate limiter on the
+/// routes, and one JSON log line per event would let a request loop grow log
+/// volume indefinitely (anonymous rejection loops before any credential guess
+/// matters; dashboard polls against a persistently oversized response). Sixty
+/// seconds keeps the first signal and a periodic suppressed-count summary at
+/// negligible volume.
 const REJECTION_LOG_MIN_INTERVAL: Duration = Duration::from_secs(60);
 
-/// One decision to emit a rejected-metrics-access warning.
+/// One decision to emit a throttled metrics-endpoint warning.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum RejectionLogEmission<'a> {
-    /// The first rejection after a quiet period (or ever).
+    /// The first event after a quiet period (or ever).
     First { reason: &'a str },
-    /// A quiet-period boundary reached while earlier rejections were
+    /// A quiet-period boundary reached while earlier same-reason events were
     /// suppressed; the count summarizes them.
     WithSuppressedCount { reason: &'a str, suppressed: u64 },
 }
 
-/// Emits at most one unauthorized-access warning per [`REJECTION_LOG_MIN_INTERVAL`],
+/// Emits at most one warning per [`REJECTION_LOG_MIN_INTERVAL`] per instance,
 /// counting suppressed repeats so the next emission carries their number.
+///
+/// Instances exist for unauthorized-access rejections and for response
+/// truncation events; each call supplies its own event message, so one
+/// throttle type serves both without conflating their log lines.
 ///
 /// The decision logic is pure (tests drive it with synthetic instants); the
 /// handler maps a returned [`RejectionLogEmission`] to the actual `tracing::warn!`.
@@ -70,18 +76,18 @@ impl RejectionLogThrottle {
     }
 
     /// Production entry point: decide and emit the warning in one step.
-    pub(crate) fn record(&self, reason: &'static str) {
+    ///
+    /// `message` is the human-readable event line (it must fit every event
+    /// class sharing this throttle instance); `reason` is the structured
+    /// per-event field.
+    pub(crate) fn record(&self, message: &'static str, reason: &'static str) {
         if let Some(emission) = self.record_at(reason, Instant::now()) {
             match emission {
                 RejectionLogEmission::First { reason } => {
-                    tracing::warn!(reason, "Unauthorized metrics access attempt");
+                    tracing::warn!(reason, message);
                 }
                 RejectionLogEmission::WithSuppressedCount { reason, suppressed } => {
-                    tracing::warn!(
-                        reason,
-                        suppressed_repeats = suppressed,
-                        "Unauthorized metrics access attempts (throttled)"
-                    );
+                    tracing::warn!(reason, suppressed_repeats = suppressed, message);
                 }
             }
         }
@@ -97,16 +103,18 @@ async fn enforce_metrics_auth(
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
     else {
-        server
-            .metrics_rejection_log()
-            .record("missing Authorization header");
+        server.metrics_rejection_log().record(
+            "Unauthorized metrics access attempt",
+            "missing Authorization header",
+        );
         return Err(StatusCode::UNAUTHORIZED);
     };
 
     let Some(token) = raw_header.strip_prefix("Bearer ") else {
-        server
-            .metrics_rejection_log()
-            .record("invalid Authorization scheme");
+        server.metrics_rejection_log().record(
+            "Unauthorized metrics access attempt",
+            "invalid Authorization scheme",
+        );
         return Err(StatusCode::UNAUTHORIZED);
     };
 
@@ -119,7 +127,9 @@ async fn enforce_metrics_auth(
         }
     }
 
-    server.metrics_rejection_log().record("token rejected");
+    server
+        .metrics_rejection_log()
+        .record("Unauthorized metrics access attempt", "token rejected");
     Err(StatusCode::UNAUTHORIZED)
 }
 
@@ -134,6 +144,109 @@ async fn enforce_metrics_auth(
 pub struct MetricsQuery {
     #[serde(default, rename = "includeSnapshot")]
     include_snapshot: bool,
+}
+
+/// Maximum serialized size of the `metricsSnapshot` response field.
+///
+/// The raw snapshot includes per-identity maps (slow-consumer eviction
+/// attributions, per-app relay bytes) whose size grows with live traffic. The
+/// endpoint is bearer-token-gated, but if metrics auth is ever relaxed the
+/// snapshot echo must not become an unbounded disclosure and response-size
+/// amplifier (issue #518). A snapshot above this cap is replaced by a small
+/// truncation marker. The rest of the response is bounded too: dashboard
+/// history is capped in sample count by config, and every game-name map
+/// (current view and per-sample) is entry-capped below.
+const METRICS_SNAPSHOT_MAX_BYTES: usize = 128 * 1024;
+
+/// Maximum number of game-name entries kept in a game-name-keyed map of the
+/// `/metrics` response (`roomsByGame`, `gamePercentiles`, and the same fields
+/// in each `dashboardCache.history` sample).
+///
+/// Game names are client-chosen, so these maps can grow to one entry per live
+/// game name. When more entries exist, the map keeps the first
+/// [`METRICS_GAME_MAP_ENTRY_CAP`] entries in ascending game-name order and the
+/// containing object gains a `<field>Truncated: true` marker (issue #518).
+const METRICS_GAME_MAP_ENTRY_CAP: usize = 256;
+
+/// Bound a game-name-keyed response map (see [`METRICS_GAME_MAP_ENTRY_CAP`]).
+///
+/// Returns the (possibly smaller) map and whether entries were dropped.
+/// Survivors are the lexicographically first game names, so truncation is
+/// deterministic across requests.
+fn bounded_game_name_map(
+    mut map: serde_json::Map<String, serde_json::Value>,
+) -> (serde_json::Map<String, serde_json::Value>, bool) {
+    if map.len() <= METRICS_GAME_MAP_ENTRY_CAP {
+        return (map, false);
+    }
+    let mut names: Vec<String> = map.keys().cloned().collect();
+    names.sort_unstable();
+    let bounded = names
+        .into_iter()
+        .take(METRICS_GAME_MAP_ENTRY_CAP)
+        .filter_map(|name| map.remove(&name).map(|value| (name, value)))
+        .collect();
+    (bounded, true)
+}
+
+/// Replace `map_field` in `response` with its bounded form, inserting
+/// `marker_field: true` when entries were dropped and throttled-logging the
+/// truncation with `reason` through `log`.
+///
+/// The handler always passes a top-level object and map-typed fields; any
+/// other shape is restored verbatim (fail-open to the previous behavior).
+fn bound_response_game_map(
+    response: &mut serde_json::Value,
+    map_field: &str,
+    marker_field: &str,
+    reason: &'static str,
+    log: &RejectionLogThrottle,
+) {
+    let Some(taken) = response.get_mut(map_field).map(std::mem::take) else {
+        return;
+    };
+    let serde_json::Value::Object(map) = taken else {
+        // Not a map (the handler always builds objects here); restore it.
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert(map_field.to_string(), taken);
+        }
+        return;
+    };
+    let (bounded, truncated) = bounded_game_name_map(map);
+    if let Some(obj) = response.as_object_mut() {
+        obj.insert(map_field.to_string(), serde_json::Value::Object(bounded));
+        if truncated {
+            obj.insert(marker_field.to_string(), serde_json::Value::Bool(true));
+            log.record("Metrics response game-name map truncated", reason);
+        }
+    }
+}
+
+/// Bound the serialized `metricsSnapshot` response field.
+///
+/// Returns `value` unchanged when it serializes within
+/// [`METRICS_SNAPSHOT_MAX_BYTES`]; otherwise returns a small truncation marker
+/// carrying the measured size, so oversized snapshots fail visibly instead of
+/// silently disappearing.
+fn bounded_metrics_snapshot(
+    server: &EnhancedGameServer,
+    value: serde_json::Value,
+) -> serde_json::Value {
+    // Serializing a `serde_json::Value` cannot fail; the `0` fallback is dead
+    // and degrades to pass-through.
+    let size_bytes = serde_json::to_vec(&value).map_or(0, |bytes| bytes.len());
+    if size_bytes <= METRICS_SNAPSHOT_MAX_BYTES {
+        return value;
+    }
+    server.metrics_truncation_log().record(
+        "Metrics snapshot truncated",
+        "metricsSnapshot exceeded the response cap",
+    );
+    serde_json::json!({
+        "truncated": true,
+        "sizeBytes": size_bytes,
+        "capBytes": METRICS_SNAPSHOT_MAX_BYTES,
+    })
 }
 
 /// Metrics API endpoint - returns real data from server metrics
@@ -165,13 +278,30 @@ pub async fn metrics_handler(
         .history
         .into_iter()
         .map(|entry| {
-            serde_json::json!({
+            let mut sample = serde_json::json!({
                 "fetchedAt": entry.fetched_at.to_rfc3339(),
                 "activeRooms": entry.active_rooms,
                 "roomsByGame": entry.rooms_by_game,
                 "playerPercentiles": entry.player_percentiles,
                 "gamePercentiles": entry.game_percentiles,
-            })
+            });
+            // Each history sample carries the same client-chosen game-name
+            // maps as the current view; bound them identically (issue #518).
+            bound_response_game_map(
+                &mut sample,
+                "roomsByGame",
+                "roomsByGameTruncated",
+                "roomsByGame history map truncated",
+                server.metrics_truncation_log(),
+            );
+            bound_response_game_map(
+                &mut sample,
+                "gamePercentiles",
+                "gamePercentilesTruncated",
+                "gamePercentiles history map truncated",
+                server.metrics_truncation_log(),
+            );
+            sample
         })
         .collect();
 
@@ -227,10 +357,30 @@ pub async fn metrics_handler(
     if query.include_snapshot {
         if let Ok(snapshot_value) = serde_json::to_value(&metrics_snapshot) {
             if let Some(obj) = response.as_object_mut() {
-                obj.insert("metricsSnapshot".to_string(), snapshot_value);
+                obj.insert(
+                    "metricsSnapshot".to_string(),
+                    bounded_metrics_snapshot(&server, snapshot_value),
+                );
             }
         }
     }
+
+    // Game names are client-chosen, so both maps can grow to one entry per
+    // live game name; bound them before the response leaves the server.
+    bound_response_game_map(
+        &mut response,
+        "roomsByGame",
+        "roomsByGameTruncated",
+        "roomsByGame map truncated",
+        server.metrics_truncation_log(),
+    );
+    bound_response_game_map(
+        &mut response,
+        "gamePercentiles",
+        "gamePercentilesTruncated",
+        "gamePercentiles map truncated",
+        server.metrics_truncation_log(),
+    );
 
     Ok(axum::response::Json(response))
 }
@@ -264,6 +414,139 @@ mod tests {
     use crate::server::ServerConfig;
     use axum::http::header::AUTHORIZATION;
     use axum::http::HeaderMap;
+
+    /// Data-driven: a snapshot within the cap passes through byte-identical;
+    /// an oversized snapshot is replaced by a truncation marker that is small,
+    /// fail-visible (carries the measured size), and itself within the cap.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn bounded_metrics_snapshot_passes_through_or_truncates_visibly() {
+        let server = build_metrics_test_server(ServerConfig::default()).await;
+        let small = serde_json::json!({ "connections": { "total": 7_u64 } });
+        assert_eq!(
+            bounded_metrics_snapshot(&server, small.clone()),
+            small,
+            "a snapshot within the cap must be returned unchanged"
+        );
+
+        let oversized = serde_json::Value::Array(vec![
+            serde_json::json!({ "padding": "x".repeat(64) });
+            (METRICS_SNAPSHOT_MAX_BYTES / 32) + 1
+        ]);
+        let serialized_size = serde_json::to_vec(&oversized)
+            .expect("a constructed value always serializes")
+            .len();
+        assert!(serialized_size > METRICS_SNAPSHOT_MAX_BYTES);
+
+        let bounded = bounded_metrics_snapshot(&server, oversized);
+        let bounded_size = serde_json::to_vec(&bounded)
+            .expect("a constructed value always serializes")
+            .len();
+        assert!(
+            bounded_size <= METRICS_SNAPSHOT_MAX_BYTES,
+            "the replacement marker must itself respect the cap"
+        );
+        assert_eq!(bounded["truncated"], serde_json::Value::Bool(true));
+        assert_eq!(
+            bounded["sizeBytes"],
+            serde_json::json!(serialized_size),
+            "the marker must report the measured pre-truncation size"
+        );
+        assert_eq!(
+            bounded["capBytes"],
+            serde_json::json!(METRICS_SNAPSHOT_MAX_BYTES)
+        );
+    }
+
+    /// Data-driven: a map within the entry cap passes through unchanged; a
+    /// larger map keeps the lexicographically first names (deterministic
+    /// across requests) and reports that entries were dropped.
+    #[test]
+    fn bounded_game_name_map_keeps_deterministic_prefix_and_reports_truncation() {
+        let small: serde_json::Map<String, serde_json::Value> = [("b", 1), ("a", 2)]
+            .into_iter()
+            .map(|(name, rooms)| (name.to_string(), serde_json::json!(rooms)))
+            .collect();
+        let (bounded, truncated) = bounded_game_name_map(small.clone());
+        assert!(!truncated);
+        assert_eq!(bounded, small, "a map within the cap must be unchanged");
+
+        let oversized: serde_json::Map<String, serde_json::Value> = (0
+            ..(METRICS_GAME_MAP_ENTRY_CAP + 1))
+            .map(|index| {
+                let name = format!("game-{index:04}");
+                (name, serde_json::json!(index))
+            })
+            .collect();
+        let (bounded, truncated) = bounded_game_name_map(oversized);
+        assert!(truncated, "an over-cap map must report truncation");
+        assert_eq!(bounded.len(), METRICS_GAME_MAP_ENTRY_CAP);
+        assert_eq!(
+            bounded.get("game-0000"),
+            Some(&serde_json::json!(0)),
+            "the lexicographic prefix must survive"
+        );
+        assert!(
+            !bounded.contains_key(&format!("game-{:04}", METRICS_GAME_MAP_ENTRY_CAP)),
+            "entries beyond the cap must be dropped"
+        );
+    }
+
+    /// `bound_response_game_map` must replace the named field in place, add
+    /// the `Truncated` marker only when entries were dropped, and leave
+    /// unrelated response fields untouched.
+    #[test]
+    fn bound_response_game_map_trims_field_and_sets_marker_only_when_truncated() {
+        let small_map = serde_json::json!({ "game": 1 });
+        let mut response = serde_json::json!({
+            "roomsByGame": small_map,
+            "gamePercentiles": small_map,
+            "activeRooms": 3,
+        });
+        let log = RejectionLogThrottle::new();
+        bound_response_game_map(
+            &mut response,
+            "roomsByGame",
+            "roomsByGameTruncated",
+            "roomsByGame map truncated",
+            &log,
+        );
+        bound_response_game_map(
+            &mut response,
+            "gamePercentiles",
+            "gamePercentilesTruncated",
+            "gamePercentiles map truncated",
+            &log,
+        );
+        assert_eq!(response["roomsByGame"], small_map);
+        assert_eq!(response["gamePercentiles"], small_map);
+        assert!(response.get("roomsByGameTruncated").is_none());
+        assert!(response.get("gamePercentilesTruncated").is_none());
+        assert_eq!(response["activeRooms"], 3, "unrelated fields are untouched");
+
+        let oversized: serde_json::Map<String, serde_json::Value> = (0
+            ..(METRICS_GAME_MAP_ENTRY_CAP + 1))
+            .map(|index| (format!("game-{index:04}"), serde_json::json!(index)))
+            .collect();
+        let mut response = serde_json::json!({ "roomsByGame": oversized });
+        bound_response_game_map(
+            &mut response,
+            "roomsByGame",
+            "roomsByGameTruncated",
+            "roomsByGame map truncated",
+            &log,
+        );
+        assert_eq!(
+            response["roomsByGame"]
+                .as_object()
+                .map(serde_json::Map::len),
+            Some(METRICS_GAME_MAP_ENTRY_CAP)
+        );
+        assert_eq!(
+            response["roomsByGameTruncated"],
+            serde_json::Value::Bool(true)
+        );
+    }
 
     /// Data-driven, sleep-free: the throttle emits the first rejection,
     /// suppresses everything inside the quiet period (counting the

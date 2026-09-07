@@ -162,6 +162,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `logging.enable_file_logging` now defaults to `false` (issue #526): stdout is
+  the single log sink, and rolling files have no size cap, so the default
+  container configuration wrote into the writable layer without bound between
+  stdout shipments. Deployments that want rolling files set the flag (and
+  `logging.dir`) explicitly and manage retention themselves.
+- Open-policy application UUIDs are now derived under an open-policy-only
+  namespace (issue #518). Previously a well-formed UUID sent as `app_id`
+  became the application UUID verbatim. A client could therefore forge any
+  application's identity in per-app metrics and attribution, including a
+  configured application's derived UUID. The derivation stays deterministic in
+  the label: the same label keeps the same UUID, and room-membership behavior
+  is unchanged. Only the resulting UUID values differ.
+- The `/metrics` response is now bounded against traffic-sized growth
+  (issue #518). Guards:
+  the `metricsSnapshot` field is capped at 128 KiB of serialized JSON and
+  replaced by a `truncated`/`sizeBytes`/`capBytes` marker when larger.
+  The `roomsByGame` and `gamePercentiles` maps are capped at 256 entries each
+  (lexicographically first names kept), in the current view and in every
+  `dashboardCache.history` sample, with a `<field>Truncated: true` marker when
+  entries are dropped. Truncation warnings are throttled. These maps and the
+  snapshot's per-identity maps grow with live traffic and client-chosen names,
+  so a metrics endpoint without auth was a disclosure and response-size risk.
 - CI cost cohort (issue #513): the macOS `Lint`/`Nextest` lanes moved from
   every push/pull request to the daily noon cron against `main` (macOS bills
   at 10x Linux per minute while deployments are Linux containers), so macOS
