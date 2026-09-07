@@ -324,7 +324,7 @@ jobs:
         run: cargo publish --locked --all-features --quiet
 
       - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2.87.0
+        uses: taiki-e/install-action@v2.87.5
         with:
           tool: cargo-sbom
 
@@ -382,7 +382,7 @@ jobs:
 
       - name: Create GitHub Release
         if: steps.existing-release.outputs.exists != 'true'
-        uses: softprops/action-gh-release@v3.0.2
+        uses: softprops/action-gh-release@v3.0.3
         with:
           # ensure-tag already created or verified this immutable annotated tag.
           # Do not pass target_commitish here: GitHub only needs it when the tag
