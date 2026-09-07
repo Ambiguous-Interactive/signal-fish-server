@@ -434,10 +434,14 @@ async fn creation_applies_the_default_spectator_capacity() {
                 None,
             )
             .await;
-        timeout(Duration::from_secs(1), rx.recv())
+        let joined = timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("join should finish")
             .expect("join should respond");
+        assert!(
+            matches!(joined.as_ref(), ServerMessage::RoomJoined(_)),
+            "expected RoomJoined, got {joined:?}"
+        );
 
         let room = server
             .database
