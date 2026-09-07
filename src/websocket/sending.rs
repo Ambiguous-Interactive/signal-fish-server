@@ -714,10 +714,13 @@ pub(super) async fn send_single_message_ref(
         }
         ServerMessage::Reconnected(payload)
             if recipient_supports_v3
-                && roster_has_v2_only_snapshot_metadata(
+                && (roster_has_v2_only_snapshot_metadata(
                     &payload.current_players,
                     &payload.current_spectators,
-                ) =>
+                ) || payload
+                    .missed_events
+                    .iter()
+                    .any(replayed_event_has_v2_only_snapshot_metadata)) =>
         {
             let mut payload = payload.as_ref().clone();
             strip_roster_v2_only_snapshot_metadata(
