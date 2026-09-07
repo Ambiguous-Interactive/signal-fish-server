@@ -155,6 +155,26 @@ fn correlated_client_operations_have_exact_nested_shapes() {
             json!({"type":"RoomOperation","data":{"operation_id":OPERATION_ID_STR,"operation":{"type":"LeaveSpectator"}}}),
             "82a474797065ad526f6f6d4f7065726174696f6ea46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa96f7065726174696f6e81a474797065ae4c65617665537065637461746f72",
         ),
+        (
+            "kick_player",
+            ClientMessage::RoomOperation {
+                operation_id: OPERATION_ID,
+                operation: Box::new(RoomOperationRequest::KickPlayer {
+                    player_id: PLAYER_ID,
+                }),
+            },
+            json!({"type":"RoomOperation","data":{"operation_id":OPERATION_ID_STR,"operation":{"type":"KickPlayer","data":{"player_id":PLAYER_ID_STR}}}}),
+            "82a474797065ad526f6f6d4f7065726174696f6ea46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa96f7065726174696f6e82a474797065aa4b69636b506c61796572a46461746181a9706c617965725f6964c410bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ),
+        (
+            "regenerate_room_code",
+            ClientMessage::RoomOperation {
+                operation_id: OPERATION_ID,
+                operation: Box::new(RoomOperationRequest::RegenerateRoomCode),
+            },
+            json!({"type":"RoomOperation","data":{"operation_id":OPERATION_ID_STR,"operation":{"type":"RegenerateRoomCode"}}}),
+            "82a474797065ad526f6f6d4f7065726174696f6ea46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa96f7065726174696f6e81a474797065b2526567656e6572617465526f6f6d436f6465",
+        ),
     ];
 
     for (name, message, expected, expected_msgpack) in cases {
@@ -333,6 +353,22 @@ fn correlated_server_results_have_exact_nested_shapes() {
             },
             json!({"type":"OperationFailed","data":{"reason":"Not in room","error_code":"NOT_IN_ROOM"}}),
             "82a474797065b3526f6f6d4f7065726174696f6e526573756c74a46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa6726573756c7482a474797065af4f7065726174696f6e4661696c6564a46461746182a6726561736f6eab4e6f7420696e20726f6f6daa6572726f725f636f6465ab4e4f545f494e5f524f4f4d",
+        ),
+        (
+            "player_kicked",
+            RoomOperationResult::PlayerKicked {
+                player_id: PLAYER_ID,
+            },
+            json!({"type":"PlayerKicked","data":{"player_id":PLAYER_ID_STR}}),
+            "82a474797065b3526f6f6d4f7065726174696f6e526573756c74a46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa6726573756c7482a474797065ac506c617965724b69636b6564a46461746181a9706c617965725f6964c410bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ),
+        (
+            "room_code_regenerated",
+            RoomOperationResult::RoomCodeRegenerated {
+                room_code: "USE4XP".to_string(),
+            },
+            json!({"type":"RoomCodeRegenerated","data":{"room_code":"USE4XP"}}),
+            "82a474797065b3526f6f6d4f7065726174696f6e526573756c74a46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa6726573756c7482a474797065b3526f6f6d436f6465526567656e657261746564a46461746181a9726f6f6d5f636f6465a6555345345850",
         ),
     ];
 

@@ -939,6 +939,7 @@ assignments that are never renumbered:
 | `4004` | `idle_timeout` | No inbound frame was observed strictly before the `websocket.idle_timeout_secs` deadline |
 | `4005` | `room_inactive` | The assigned room exceeded `server.inactive_room_timeout` and was deleted; the client must join or create a new room |
 | `4006` | `inbound_rate_limited` | The connection exhausted its per-window inbound application-message budget (`rate_limit.max_inbound_messages`); reconnect and stay within the budget |
+| `4007` | `kicked` | The room's authority removed this seated member via the `KickPlayer` room operation; the seat is gone and reconnection is not offered. Join again with a valid room code |
 | `1000` | `unregistered` | Normal closure (leave, replaced connection, ordinary teardown) |
 | `1009` | `outbound_message_too_large` | A complete encoded server application message exceeded the advertised outbound payload limit; no prefix of that message was written |
 
@@ -1551,10 +1552,23 @@ operation and echoes the same UUID:
 }
 ```
 
-The nested request types are `JoinRoom`, `LeaveRoom`, `Reconnect`, `JoinAsSpectator`, and `LeaveSpectator`.
+The nested request types are `JoinRoom`, `LeaveRoom`, `Reconnect`, `JoinAsSpectator`, `LeaveSpectator`,
+`KickPlayer`, and `RegenerateRoomCode`.
 Their success/failure result types retain the legacy payloads; `OperationFailed` covers a valid correlated command
 that cannot produce its operation-specific success result. A malformed top-level frame may still receive an
 uncorrelated top-level `Error`, because the server cannot safely trust an operation ID from undecodable input.
+
+The two moderation operations are authority-only (v3 only):
+
+- `KickPlayer` names a seated `player_id`. The server removes the seat, broadcasts the usual `PlayerLeft` roster
+  delta to the remaining members, closes the target's connection with close code `4007` (`kicked`), and never arms
+  reconnection for a kicked seat. The requester receives `PlayerKicked` on success; refusals use
+  `NOT_ROOM_AUTHORITY` (sender is not the authority), `KICK_TARGET_NOT_FOUND` (target is not a seated member), or
+  `INVALID_INPUT` (the authority cannot kick itself).
+- `RegenerateRoomCode` replaces the room code with a freshly generated one. Existing members stay connected and
+  reconnection tokens are unaffected. The requester receives `RoomCodeRegenerated` carrying the new code; the old
+  code stops resolving to the room immediately, and a join that names it behaves like any unknown code
+  (join-creates-room may open a fresh, unrelated room under it).
 
 Generate a UUID that is unique among live and recently completed operations on the current physical WebSocket.
 The `operation_id` text must use lowercase hyphenated canonical UUID form; any other encoding is rejected as a

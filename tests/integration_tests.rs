@@ -962,6 +962,7 @@ async fn test_custom_rate_limiting() {
         heartbeat_throttle: Duration::ZERO, // No throttling for tests
         region_id: "test".to_string(),
         room_code_prefix: None,
+        default_max_spectators: None,
     };
 
     let server = create_test_server_with_config(

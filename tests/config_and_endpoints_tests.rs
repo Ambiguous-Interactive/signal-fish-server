@@ -133,6 +133,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("null"),
     },
     ConfigReferenceRow {
+        env: "SIGNAL_FISH__SERVER__DEFAULT_MAX_SPECTATORS",
+        path: "server.default_max_spectators",
+        default: Some("null"),
+    },
+    ConfigReferenceRow {
         env: "SIGNAL_FISH__RATE_LIMIT__MAX_ROOM_CREATIONS",
         path: "rate_limit.max_room_creations",
         default: Some("5"),

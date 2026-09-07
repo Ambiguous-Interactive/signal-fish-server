@@ -34,19 +34,24 @@ pub enum ReconnectionError {
     TokenInvalid,
     /// The reconnection window elapsed.
     WindowExpired,
+    /// The seat behind this record was removed by the room's authority
+    /// (`KickPlayer`, issue #525). Reconnection is never offered for a
+    /// kicked seat.
+    Kicked,
 }
 
 impl ReconnectionError {
     /// The client-facing [`ErrorCode`] for this rejection.
     ///
     /// A bad/mismatched token is a `RECONNECTION_TOKEN_INVALID`; only an elapsed
-    /// *window* is `RECONNECTION_EXPIRED`; everything else is the generic
-    /// `RECONNECTION_FAILED`.
+    /// *window* is `RECONNECTION_EXPIRED`; only an authority-kicked seat is
+    /// `KICKED`; everything else is the generic `RECONNECTION_FAILED`.
     pub fn error_code(&self) -> ErrorCode {
         match self {
             Self::NoRecord | Self::AlreadyInProgress => ErrorCode::ReconnectionFailed,
             Self::TokenMismatch | Self::TokenInvalid => ErrorCode::ReconnectionTokenInvalid,
             Self::WindowExpired => ErrorCode::ReconnectionExpired,
+            Self::Kicked => ErrorCode::Kicked,
         }
     }
 }
@@ -59,6 +64,7 @@ impl std::fmt::Display for ReconnectionError {
             Self::TokenMismatch => "Invalid reconnection token",
             Self::TokenInvalid => "Reconnection token is invalid or expired",
             Self::WindowExpired => "Reconnection window has expired",
+            Self::Kicked => "The seat was removed by the room authority",
         };
         f.write_str(reason)
     }
@@ -314,6 +320,9 @@ struct PreservedPending {
     /// The monotonic reconnect deadline captured at the FIRST disconnect. A
     /// duplicate teardown is not a new disconnect, so it must not restart it.
     deadline: Instant,
+    /// The authority kick tombstone, preserved across a defensive merge (see
+    /// `ReconnectionRecord::kicked`).
+    kicked: bool,
 }
 
 impl DisconnectedPlayer {
@@ -340,6 +349,15 @@ struct ReconnectionRecord {
     /// through duplicate same-room registration, so a repeated teardown cannot
     /// extend it and a wall-clock jump cannot move it.
     deadline: Instant,
+    /// Authority tombstone (issue #525): the seat behind this record was
+    /// removed by the room's authority (`KickPlayer`). A claim against a
+    /// kicked record must be refused — including a claim already in flight
+    /// when the kick landed — because the reconnection restore path would
+    /// otherwise resurrect the removed seat from its membership snapshot.
+    /// Set under the room event mutation gate together with the durable seat
+    /// removal, so a restore decision serialized after the kick always sees
+    /// it.
+    kicked: bool,
 }
 
 impl ReconnectionRecord {
@@ -607,6 +625,49 @@ impl ReconnectionManager {
         removed.is_some()
     }
 
+    /// Tombstone a pending reconnection record as authority-kicked
+    /// (issue #525).
+    ///
+    /// Unlike [`Self::discard_pending_reconnection`], this also marks a
+    /// CLAIMED record: its in-flight reconnect transaction re-checks the
+    /// tombstone under the room mutation gate before restoring membership,
+    /// so a kick that races the claim still wins. Returns whether a record
+    /// was marked.
+    pub async fn mark_reconnection_kicked(&self, player_id: &PlayerId) -> bool {
+        let mut state = self.replay_state.write().await;
+        match state.disconnected_players.get_mut(player_id) {
+            Some(record) => {
+                record.kicked = true;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether the pending record for `player_id` carries the authority-kick
+    /// tombstone. Consulted by the reconnect restore path under the room
+    /// mutation gate (see [`Self::mark_reconnection_kicked`]).
+    pub async fn is_reconnection_kicked(&self, player_id: &PlayerId) -> bool {
+        self.replay_state
+            .read()
+            .await
+            .disconnected_players
+            .get(player_id)
+            .is_some_and(|record| record.kicked)
+    }
+
+    /// The room a pending reconnection record would restore into, if one
+    /// exists. Used by the kick path to tombstone only the record that
+    /// belongs to the room being moderated (issue #525).
+    pub async fn pending_reconnection_room(&self, player_id: &PlayerId) -> Option<RoomId> {
+        self.replay_state
+            .read()
+            .await
+            .disconnected_players
+            .get(player_id)
+            .map(|record| record.disconnected.room_id)
+    }
+
     /// Register a player disconnection.
     ///
     /// `last_epoch` is the disconnecting connection's game-data incarnation
@@ -672,6 +733,7 @@ impl ReconnectionManager {
                 was_authority: existing.disconnected.was_authority,
                 player_info: existing.disconnected.player_info.clone(),
                 deadline: existing.deadline,
+                kicked: existing.kicked,
             });
 
         // A late teardown from the replaced socket may overlap an in-flight
@@ -812,6 +874,14 @@ impl ReconnectionManager {
                 || monotonic_deadline(monotonic_now, self.reconnection_window),
                 |existing| existing.deadline,
             ),
+            // A re-registration can only observe a seated snapshot, and it
+            // runs under the disconnect path's connection lifecycle gate —
+            // the same gate a concurrent kick holds across seat removal — so
+            // a fresh record can never overwrite a tombstone. The preserved
+            // flag below only covers the defensive merge path.
+            kicked: existing_same_room
+                .as_ref()
+                .is_some_and(|existing| existing.kicked),
         };
         let previous = state.disconnected_players.insert(player_id, record);
         // A re-registration from a NEW room replaces the old pending record.
@@ -960,6 +1030,15 @@ impl ReconnectionManager {
                 "Reconnection claim already in progress"
             );
             return Err(ReconnectionError::AlreadyInProgress);
+        }
+
+        if record.kicked {
+            self.metrics.increment_reconnection_validation_failure();
+            tracing::info!(
+                %player_id,
+                "Refusing reconnection: the seat was removed by the room authority"
+            );
+            return Err(ReconnectionError::Kicked);
         }
 
         let player = &record.disconnected;

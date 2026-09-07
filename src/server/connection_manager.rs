@@ -258,8 +258,10 @@ fn is_transient_socket_close_reason(reason: crate::coordination::CloseReason) ->
         | CloseReason::InboundRateLimited
         | CloseReason::Unregistered => true,
         // Identity/room-scoped: a drain must close restored connections, and
-        // a room pin reflects the room the claim just verified.
-        CloseReason::Shutdown | CloseReason::RoomInactive => false,
+        // a room pin reflects the room the claim just verified. A kick
+        // removes the seat behind the identity, so a restored connection
+        // must observe it too.
+        CloseReason::Shutdown | CloseReason::RoomInactive | CloseReason::Kicked => false,
     }
 }
 

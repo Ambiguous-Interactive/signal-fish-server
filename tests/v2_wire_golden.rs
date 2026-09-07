@@ -1282,6 +1282,9 @@ fn golden_enum_error_code_all_variants() {
             ErrorCode::RoomSessionIncompatible,
             r#""ROOM_SESSION_INCOMPATIBLE""#,
         ),
+        (ErrorCode::NotRoomAuthority, r#""NOT_ROOM_AUTHORITY""#),
+        (ErrorCode::KickTargetNotFound, r#""KICK_TARGET_NOT_FOUND""#),
+        (ErrorCode::Kicked, r#""KICKED""#),
     ];
     for (code, expected) in cases {
         assert_json_str(code, expected);
@@ -1344,12 +1347,15 @@ fn golden_enum_error_code_all_variants() {
         | ErrorCode::ServerDraining
         | ErrorCode::InvalidDeliveryClass
         | ErrorCode::UnsupportedProtocolVersion
-        | ErrorCode::RoomSessionIncompatible => (),
+        | ErrorCode::RoomSessionIncompatible
+        | ErrorCode::NotRoomAuthority
+        | ErrorCode::KickTargetNotFound
+        | ErrorCode::Kicked => (),
     };
     covered(ErrorCode::Unauthorized);
     assert_eq!(
         cases.len(),
-        54,
+        57,
         "golden table entry count must track the ErrorCode variant count \
          (update alongside the exhaustive guard above)"
     );

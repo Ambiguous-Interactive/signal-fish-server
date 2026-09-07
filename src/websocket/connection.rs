@@ -986,6 +986,7 @@ async fn finalize_closed_connection(
             | CloseReason::IdleTimeout
             | CloseReason::RoomInactive
             | CloseReason::InboundRateLimited
+            | CloseReason::Kicked
             | CloseReason::Unregistered,
         )
         | None => {

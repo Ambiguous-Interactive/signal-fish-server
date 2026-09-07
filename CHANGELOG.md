@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Authority moderation surface (issue #525, v3 only): two new
+  `room_operation_ids` operations. `KickPlayer` lets the room's authority
+  remove a seated player: the seat is removed with the ordinary departure
+  machinery (replay-recorded `PlayerLeft` roster delta, reconnection token
+  discarded), the kicked connection receives a best-effort `KICKED` error
+  frame and closes with new private close code `4007 kicked`, and
+  reconnection is never armed for a kicked seat. `RegenerateRoomCode` lets
+  the authority rotate the room code: existing members and reconnection
+  tokens are unaffected, the old code stops resolving immediately, and the
+  success result carries the fresh code. Refusals use the new
+  `NOT_ROOM_AUTHORITY` and `KICK_TARGET_NOT_FOUND` error codes.
+- Default spectator capacity (issue #525): `server.default_max_spectators`
+  (`null` by default) derives each created room's capacity from its player
+  ceiling (`2 * max_players`); a positive value fixes the cap for every
+  created room; `0` restores unlimited spectators. This makes
+  `TOO_MANY_SPECTATORS` reachable on defaults instead of having unbounded
+  spectator fan-out.
 - Rate-limit rejection forensics (issue #526): each limiter now tallies
   budget rejections per player (and relay-ceiling rejections per room) over
   its existing fixed window. The first rejection of a window logs an info

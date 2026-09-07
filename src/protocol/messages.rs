@@ -239,6 +239,31 @@ pub enum RoomOperationRequest {
         spectator_name: String,
     },
     LeaveSpectator,
+    /// Authority-only: remove a seated player from the room (v3 only).
+    ///
+    /// Only the room's designated authority may kick. The target must be a
+    /// current seated member and cannot be the sender. The server removes the
+    /// seat, broadcasts the usual `PlayerLeft` roster delta to the remaining
+    /// members, closes the target's connection with private close code
+    /// `4007` (`kicked`), and never arms reconnection for a kicked seat.
+    /// The requester receives [`RoomOperationResult::PlayerKicked`] on
+    /// success.
+    KickPlayer {
+        /// Seated player to remove. Must be a current room member other than
+        /// the sender.
+        player_id: PlayerId,
+    },
+    /// Authority-only: replace the room code with a freshly generated one
+    /// (v3 only).
+    ///
+    /// Only the room's designated authority may rotate the code. The old code
+    /// stops resolving to this room immediately; joins that name it behave
+    /// like any unknown code (join-creates-room may open a fresh, unrelated
+    /// room under it). Existing members stay connected and reconnection
+    /// tokens are unaffected; the success response
+    /// ([`RoomOperationResult::RoomCodeRegenerated`]) carries the new code,
+    /// which the authority distributes to future invitees.
+    RegenerateRoomCode,
 }
 
 /// A terminal response to a correlated room-membership command.
@@ -280,6 +305,21 @@ pub enum RoomOperationResult {
         reason: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         error_code: Option<ErrorCode>,
+    },
+    /// The requested [`RoomOperationRequest::KickPlayer`] succeeded: the
+    /// target seat was removed and its connection is being closed with close
+    /// code `4007` (`kicked`). The remaining members receive the usual
+    /// `PlayerLeft` roster delta.
+    PlayerKicked {
+        /// The removed player.
+        player_id: PlayerId,
+    },
+    /// The requested [`RoomOperationRequest::RegenerateRoomCode`] succeeded.
+    /// Distribute the new code to future invitees; the old code no longer
+    /// resolves to this room.
+    RoomCodeRegenerated {
+        /// The fresh room code.
+        room_code: String,
     },
 }
 

@@ -278,6 +278,14 @@ impl EnhancedGameServer {
                         self.handle_leave_spectator_operation(player_id, Some(operation_id))
                             .await;
                     }
+                    RoomOperationRequest::KickPlayer { player_id: target } => {
+                        self.handle_kick_player_operation(player_id, operation_id, target)
+                            .await;
+                    }
+                    RoomOperationRequest::RegenerateRoomCode => {
+                        self.handle_regenerate_room_code_operation(player_id, operation_id)
+                            .await;
+                    }
                 }
             }
             ClientMessage::TransportStatus {

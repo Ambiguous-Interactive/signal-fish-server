@@ -221,6 +221,7 @@ pub fn test_server_config() -> ServerConfig {
         heartbeat_throttle: Duration::ZERO, // No throttling in tests for predictable behavior
         region_id: "test".to_string(),
         room_code_prefix: None,
+        default_max_spectators: None,
     }
 }
 

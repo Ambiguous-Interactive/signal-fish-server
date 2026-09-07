@@ -695,3 +695,153 @@ async fn join_split(
         }
     }
 }
+
+/// An authority-initiated `KickPlayer` room operation closes the kicked
+/// seat with the dedicated `4007 kicked` code (issue #525). The kicked
+/// connection first receives a best-effort farewell `Error` frame carrying
+/// `KICKED`; the remaining members observe the ordinary `PlayerLeft` roster
+/// delta; the authority receives the correlated `PlayerKicked` result.
+#[tokio::test]
+async fn authority_kick_closes_target_with_4007() {
+    use signal_fish_server::protocol::{
+        RoomOperationId, RoomOperationRequest, RoomOperationResult,
+    };
+
+    let server = create_test_server_with_config(base_config(), ProtocolConfig::default()).await;
+    let running = start_server(server).await;
+    let url = format!("ws://{}/ws", running.addr());
+
+    async fn connect_v3(url: &str, request_operation_ids: bool) -> WsStream {
+        let (mut ws, _) = tokio::time::timeout(CLOSE_DEADLINE, connect_async(url))
+            .await
+            .expect("connect timed out")
+            .expect("connect failed");
+        let auth = ClientMessage::Authenticate {
+            app_id: "close-code-test".to_string(),
+            sdk_version: None,
+            platform: None,
+            game_data_format: None,
+            protocol_version: Some(3),
+            supported_transports: None,
+            supported_topologies: None,
+            requested_capabilities: request_operation_ids
+                .then(|| vec!["room_operation_ids".to_string()]),
+        };
+        let json = serde_json::to_string(&auth).expect("serialize Authenticate");
+        ws.send(Message::Text(json.into()))
+            .await
+            .expect("send Authenticate");
+        ws
+    }
+
+    async fn join_authority_room(ws: &mut WsStream, player_name: &str) -> Box<RoomJoinedPayload> {
+        let join = ClientMessage::JoinRoom {
+            game_name: "close_code_game".to_string(),
+            room_code: Some("KICKED".to_string()),
+            player_name: player_name.to_string(),
+            max_players: Some(4),
+            supports_authority: Some(true),
+            relay_transport: None,
+        };
+        let json = serde_json::to_string(&join).expect("serialize JoinRoom");
+        ws.send(Message::Text(json.into()))
+            .await
+            .expect("send JoinRoom");
+        loop {
+            let frame = tokio::time::timeout(CLOSE_DEADLINE, ws.next())
+                .await
+                .expect("timed out waiting for RoomJoined")
+                .expect("connection closed while joining")
+                .expect("websocket error while joining");
+            let Message::Text(text) = frame else { continue };
+            let message: ServerMessage = serde_json::from_str(&text).expect("valid ServerMessage");
+            match message {
+                ServerMessage::RoomJoined(payload) => return payload,
+                ServerMessage::RoomJoinFailed { reason, error_code } => {
+                    panic!("join failed for {player_name}: {reason} ({error_code:?})")
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    let mut authority = connect_v3(&url, true).await;
+    let mut target = connect_v3(&url, false).await;
+    let authority_payload = join_authority_room(&mut authority, "host").await;
+    let target_payload = join_authority_room(&mut target, "guest").await;
+    assert!(
+        authority_payload.is_authority,
+        "the first joiner must hold authority"
+    );
+
+    // The authority kicks the target by player id.
+    let kick = ClientMessage::RoomOperation {
+        operation_id: RoomOperationId::new_v4(),
+        operation: Box::new(RoomOperationRequest::KickPlayer {
+            player_id: target_payload.player_id,
+        }),
+    };
+    let json = serde_json::to_string(&kick).expect("serialize KickPlayer");
+    authority
+        .send(Message::Text(json.into()))
+        .await
+        .expect("send KickPlayer");
+
+    // The kicked seat sees the farewell error and then the 4007 close frame.
+    let mut saw_farewell = false;
+    let (code, reason): (u16, String) = loop {
+        let frame = tokio::time::timeout(CLOSE_DEADLINE, target.next())
+            .await
+            .expect("timed out waiting for the kicked close")
+            .expect("kicked connection closed with no close frame")
+            .expect("transport error on the kicked connection");
+        if let Message::Text(text) = &frame {
+            let message: ServerMessage = serde_json::from_str(text).expect("valid ServerMessage");
+            if let ServerMessage::Error { error_code, .. } = message {
+                assert_eq!(
+                    error_code,
+                    Some(signal_fish_server::protocol::ErrorCode::Kicked),
+                    "the kicked seat must receive the KICKED farewell"
+                );
+                saw_farewell = true;
+            }
+            continue;
+        }
+        if let Message::Close(Some(frame)) = frame {
+            break (frame.code.into(), frame.reason.to_string());
+        }
+    };
+    assert!(
+        saw_farewell,
+        "the farewell Error frame must be flushed before the close"
+    );
+    assert_eq!(code, 4007, "a kicked seat must close with 4007");
+    assert_eq!(reason, "kicked");
+
+    // The authority receives the correlated success result.
+    loop {
+        let frame = tokio::time::timeout(CLOSE_DEADLINE, authority.next())
+            .await
+            .expect("timed out waiting for the kick result")
+            .expect("authority connection closed early")
+            .expect("transport error on the authority connection");
+        let Message::Text(text) = frame else { continue };
+        let message: ServerMessage = serde_json::from_str(&text).expect("valid ServerMessage");
+        match message {
+            ServerMessage::RoomOperationResult { result, .. } => {
+                assert!(
+                    matches!(result.as_ref(), RoomOperationResult::PlayerKicked { player_id }
+                        if *player_id == target_payload.player_id),
+                    "expected PlayerKicked for the target, got {result:?}"
+                );
+                break;
+            }
+            ServerMessage::PlayerLeft { player_id, .. } => {
+                assert_eq!(player_id, target_payload.player_id);
+            }
+            _ => continue,
+        }
+    }
+
+    running.shutdown().await;
+}

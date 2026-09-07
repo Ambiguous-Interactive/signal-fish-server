@@ -358,6 +358,11 @@ pub enum CloseReason {
     /// aggregate payload limit. No prefix of that application message was
     /// handed to the WebSocket sink.
     OutboundMessageTooLarge,
+    /// The room's authority player removed this seated member via the
+    /// `KickPlayer` room operation (issue #525). Terminal like `RoomInactive`:
+    /// the seat is gone and its reconnection eligibility was discarded, so a
+    /// kicked client must rejoin with a valid room code.
+    Kicked,
     /// The connection was unregistered server-side (explicit disconnect,
     /// normal teardown). Socket tasks should flush whatever is already
     /// queued and exit instead of lingering until a socket timeout.
@@ -383,6 +388,7 @@ impl CloseReason {
             Self::IdleTimeout => 4004,
             Self::RoomInactive => 4005,
             Self::InboundRateLimited => 4006,
+            Self::Kicked => 4007,
             // RFC 6455's standard "message too big" code. Unlike the private
             // operational reasons above, this condition has an exact standard
             // close-code meaning clients already understand.
@@ -404,6 +410,7 @@ impl CloseReason {
             Self::IdleTimeout => "idle_timeout",
             Self::RoomInactive => "room_inactive",
             Self::InboundRateLimited => "inbound_rate_limited",
+            Self::Kicked => "kicked",
             Self::OutboundMessageTooLarge => "outbound_message_too_large",
             Self::Unregistered => "unregistered",
         }
@@ -5429,6 +5436,12 @@ mod tests {
             (CloseReason::ActivityTimeout, 4003, "activity_timeout"),
             (CloseReason::IdleTimeout, 4004, "idle_timeout"),
             (CloseReason::RoomInactive, 4005, "room_inactive"),
+            (
+                CloseReason::InboundRateLimited,
+                4006,
+                "inbound_rate_limited",
+            ),
+            (CloseReason::Kicked, 4007, "kicked"),
             (
                 CloseReason::OutboundMessageTooLarge,
                 1009,
