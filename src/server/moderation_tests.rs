@@ -598,7 +598,7 @@ async fn set_room_access_seals_and_reopens_the_room() {
     let (latecomer, mut latecomer_rx) =
         register_client(&server, "127.0.0.1:48141".parse().unwrap()).await;
 
-    join_seated_player(&server, &authority, &mut authority_rx, "ACCES1", "host").await;
+    join_seated_player(&server, &authority, &mut authority_rx, "SECRET", "host").await;
 
     // Seal the room.
     server
@@ -619,7 +619,7 @@ async fn set_room_access_seals_and_reopens_the_room() {
     );
     let room = server
         .database
-        .get_room("moderation-game", "ACCES1")
+        .get_room("moderation-game", "SECRET")
         .await
         .expect("room lookup succeeds")
         .expect("room exists");
@@ -632,7 +632,7 @@ async fn set_room_access_seals_and_reopens_the_room() {
             &server,
             &latecomer,
             &mut latecomer_rx,
-            "ACCES1",
+            "SECRET",
             "late",
             None
         )
@@ -645,7 +645,7 @@ async fn set_room_access_seals_and_reopens_the_room() {
             &server,
             &latecomer,
             &mut latecomer_rx,
-            "ACCES1",
+            "SECRET",
             "late",
             Some("wrong")
         )
@@ -670,7 +670,7 @@ async fn set_room_access_seals_and_reopens_the_room() {
         &server,
         &latecomer,
         &mut latecomer_rx,
-        "ACCES1",
+        "SECRET",
         "late",
         Some("open sesame"),
     )
@@ -692,7 +692,7 @@ async fn set_room_access_seals_and_reopens_the_room() {
     );
     let (another, mut another_rx) =
         register_client(&server, "127.0.0.1:48142".parse().unwrap()).await;
-    join_with_password(&server, &another, &mut another_rx, "ACCES1", "fresh", None)
+    join_with_password(&server, &another, &mut another_rx, "SECRET", "fresh", None)
         .await
         .expect("an open room must admit without a password");
 }
