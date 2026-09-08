@@ -515,6 +515,8 @@ async fn transport_status_is_ordered_before_concurrent_leave() {
                 max_players: Some(3),
                 supports_authority: Some(false),
                 relay_transport: None,
+
+                password: None,
             },
         )
         .await;
@@ -545,6 +547,8 @@ async fn transport_status_is_ordered_before_concurrent_leave() {
         max_players: Some(3),
         supports_authority: Some(false),
         relay_transport: None,
+
+        password: None,
     };
     server
         .handle_client_message(&reporter, join_message())
@@ -651,6 +655,8 @@ async fn join_room_request_is_forwarded_to_room_service() {
                 max_players: Some(2),
                 supports_authority: Some(true),
                 relay_transport: None,
+
+                password: None,
             },
         )
         .await;
@@ -699,6 +705,8 @@ async fn correlated_room_operations_echo_ids_and_reject_stale_responses() {
                     max_players: Some(2),
                     supports_authority: Some(true),
                     relay_transport: None,
+
+                    password: None,
                 }),
             },
         )
@@ -744,6 +752,8 @@ async fn correlated_room_operations_echo_ids_and_reject_stale_responses() {
                             max_players: Some(2),
                             supports_authority: Some(true),
                             relay_transport: None,
+
+                            password: None,
                         }),
                     },
                 )
@@ -895,6 +905,8 @@ async fn correlated_spectator_operations_echo_success_and_failure_ids() {
                 max_players: Some(2),
                 supports_authority: Some(true),
                 relay_transport: None,
+
+                password: None,
             },
         )
         .await;
@@ -929,6 +941,8 @@ async fn correlated_spectator_operations_echo_success_and_failure_ids() {
                     game_name: "spectator-operations".to_string(),
                     room_code: "ZZZZZZ".to_string(),
                     spectator_name: "Watcher".to_string(),
+
+                    password: None,
                 }),
             },
         )
@@ -950,6 +964,8 @@ async fn correlated_spectator_operations_echo_success_and_failure_ids() {
                     game_name: "spectator-operations".to_string(),
                     room_code,
                     spectator_name: "Watcher".to_string(),
+
+                    password: None,
                 }),
             },
         )

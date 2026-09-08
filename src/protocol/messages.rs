@@ -111,6 +111,13 @@ pub enum ClientMessage {
         /// Omission and every accepted token have identical behavior.
         #[serde(default)]
         relay_transport: Option<RelayTransport>,
+        /// Join password for password-protected rooms (issue #525).
+        ///
+        /// Required when the target room carries an authority-set password;
+        /// ignored otherwise. When the join creates the room, this password
+        /// seals it from birth. Never logged by the server.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
     },
     /// Leave the current room
     LeaveRoom,
@@ -188,6 +195,10 @@ pub enum ClientMessage {
         game_name: String,
         room_code: String,
         spectator_name: String,
+        /// Join password for password-protected rooms (issue #525). Required
+        /// when the room carries an authority-set password. Never logged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
     },
     /// Leave spectator mode
     LeaveSpectator,
@@ -226,6 +237,10 @@ pub enum RoomOperationRequest {
         /// Omission and every accepted token have identical behavior.
         #[serde(default)]
         relay_transport: Option<RelayTransport>,
+        /// Join password for password-protected rooms (issue #525). See
+        /// [`ClientMessage::JoinRoom`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
     },
     LeaveRoom,
     Reconnect {
@@ -237,6 +252,10 @@ pub enum RoomOperationRequest {
         game_name: String,
         room_code: String,
         spectator_name: String,
+        /// Join password for password-protected rooms (issue #525). See
+        /// [`ClientMessage::JoinAsSpectator`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        password: Option<String>,
     },
     LeaveSpectator,
     /// Authority-only: remove a seated player from the room (v3 only).
@@ -264,6 +283,51 @@ pub enum RoomOperationRequest {
     /// ([`RoomOperationResult::RoomCodeRegenerated`]) carries the new code,
     /// which the authority distributes to future invitees.
     RegenerateRoomCode,
+    /// Authority-only: set or clear the room's join password (v3 only).
+    ///
+    /// `Some(password)` seals the room: every later seated or spectator join
+    /// must present the same password or is refused with
+    /// `PASSWORD_REQUIRED` (the server never distinguishes a missing from a
+    /// mismatched password). `None` reopens the room. Current members and
+    /// their reconnection tokens are unaffected. The password is stored only
+    /// as a salted hash and is never logged or echoed.
+    SetRoomAccess {
+        /// `None` opens the room; a non-empty value (max 256 bytes) sets the
+        /// join password.
+        password: Option<String>,
+    },
+    /// Authority-only: ban a seated player from the room (v3 only).
+    ///
+    /// The target is removed exactly as by [`RoomOperationRequest::KickPlayer`]
+    /// (close code `4007`, no reconnection) and additionally recorded in the
+    /// room's in-memory ban list: while this room lives, the banned player id
+    /// cannot rejoin it as a player or spectator (`BANNED`). The ban is
+    /// room-scoped and dies with the room.
+    BanPlayer {
+        /// Seated player to ban. Must be a current room member other than
+        /// the sender.
+        player_id: PlayerId,
+    },
+    /// Authority-only: lift a room ban (v3 only). The named player may join
+    /// the room again. Idempotent: unbanning an id that is not banned
+    /// succeeds.
+    UnbanPlayer {
+        /// Player id whose ban should be lifted.
+        player_id: PlayerId,
+    },
+    /// Authority-only: hand the authority role to a seated member (v3
+    /// only).
+    ///
+    /// Only the room's designated authority may transfer, the target must be
+    /// a seated member other than the sender, and the room must be an
+    /// authority room. Every member receives the usual `AuthorityChanged`
+    /// broadcast (personalized `you_are_authority` per recipient); the
+    /// sender receives [`RoomOperationResult::AuthorityTransferred`] and
+    /// loses the ability to start the game or moderate the room.
+    TransferAuthority {
+        /// Seated member that becomes the room's authority.
+        player_id: PlayerId,
+    },
 }
 
 /// A terminal response to a correlated room-membership command.
@@ -320,6 +384,32 @@ pub enum RoomOperationResult {
     RoomCodeRegenerated {
         /// The fresh room code.
         room_code: String,
+    },
+    /// The requested [`RoomOperationRequest::SetRoomAccess`] succeeded.
+    RoomAccessUpdated {
+        /// Whether the room now requires a join password (`true`) or is open
+        /// (`false`).
+        requires_password: bool,
+    },
+    /// The requested [`RoomOperationRequest::BanPlayer`] succeeded: the
+    /// target seat was removed (as by `PlayerKicked`) and the player id was
+    /// recorded in the room's ban list for the room's remaining lifetime.
+    PlayerBanned {
+        /// The banned player.
+        player_id: PlayerId,
+    },
+    /// The requested [`RoomOperationRequest::UnbanPlayer`] succeeded: the
+    /// player may join the room again. Idempotent.
+    PlayerUnbanned {
+        /// The unbanned player.
+        player_id: PlayerId,
+    },
+    /// The requested [`RoomOperationRequest::TransferAuthority`] succeeded:
+    /// the named member now holds the authority role. All members received
+    /// the usual `AuthorityChanged` broadcast.
+    AuthorityTransferred {
+        /// The member that now holds the authority role.
+        player_id: PlayerId,
     },
 }
 

@@ -209,6 +209,8 @@ fn golden_client_join_room() {
         max_players: Some(4),
         supports_authority: Some(true),
         relay_transport: Some(RelayTransport::Udp),
+
+        password: None,
     };
     assert_json(
         &msg,
@@ -240,6 +242,8 @@ fn golden_client_join_room_minimal() {
         max_players: None,
         supports_authority: None,
         relay_transport: None,
+
+        password: None,
     };
     assert_json(
         &msg,
@@ -384,6 +388,8 @@ fn golden_client_join_as_spectator() {
         game_name: "test_game".to_string(),
         room_code: "ABC123".to_string(),
         spectator_name: "Watcher".to_string(),
+
+        password: None,
     };
     assert_json(
         &msg,
@@ -1285,6 +1291,12 @@ fn golden_enum_error_code_all_variants() {
         (ErrorCode::NotRoomAuthority, r#""NOT_ROOM_AUTHORITY""#),
         (ErrorCode::KickTargetNotFound, r#""KICK_TARGET_NOT_FOUND""#),
         (ErrorCode::Kicked, r#""KICKED""#),
+        (ErrorCode::PasswordRequired, r#""PASSWORD_REQUIRED""#),
+        (ErrorCode::Banned, r#""BANNED""#),
+        (
+            ErrorCode::TransferTargetNotFound,
+            r#""TRANSFER_TARGET_NOT_FOUND""#,
+        ),
     ];
     for (code, expected) in cases {
         assert_json_str(code, expected);
@@ -1350,12 +1362,15 @@ fn golden_enum_error_code_all_variants() {
         | ErrorCode::RoomSessionIncompatible
         | ErrorCode::NotRoomAuthority
         | ErrorCode::KickTargetNotFound
-        | ErrorCode::Kicked => (),
+        | ErrorCode::Kicked
+        | ErrorCode::PasswordRequired
+        | ErrorCode::Banned
+        | ErrorCode::TransferTargetNotFound => (),
     };
     covered(ErrorCode::Unauthorized);
     assert_eq!(
         cases.len(),
-        57,
+        60,
         "golden table entry count must track the ErrorCode variant count \
          (update alongside the exhaustive guard above)"
     );

@@ -172,6 +172,8 @@ async fn outbound_message_over_configured_limit_closes_with_1009() {
             max_players: Some(24),
             supports_authority: None,
             relay_transport: None,
+
+            password: None,
         };
         Message::Text(
             serde_json::to_string(&join)
@@ -581,6 +583,8 @@ async fn join(ws: &mut WsStream, player_name: &str) {
         max_players: Some(4),
         supports_authority: Some(false),
         relay_transport: None,
+
+        password: None,
     };
     let json = serde_json::to_string(&join).expect("serialize JoinRoom");
     ws.send(Message::Text(json.into()))
@@ -597,6 +601,8 @@ async fn join_payload(ws: &mut WsStream, player_name: &str) -> Box<RoomJoinedPay
         max_players: Some(4),
         supports_authority: Some(false),
         relay_transport: None,
+
+        password: None,
     };
     let json = serde_json::to_string(&join).expect("serialize JoinRoom");
     ws.send(Message::Text(json.into()))
@@ -672,6 +678,8 @@ async fn join_split(
         max_players: Some(4),
         supports_authority: Some(false),
         relay_transport: None,
+
+        password: None,
     };
     let json = serde_json::to_string(&join).expect("serialize JoinRoom");
     sink.send(Message::Text(json.into()))
@@ -742,6 +750,8 @@ async fn authority_kick_closes_target_with_4007() {
             max_players: Some(4),
             supports_authority: Some(true),
             relay_transport: None,
+
+            password: None,
         };
         let json = serde_json::to_string(&join).expect("serialize JoinRoom");
         ws.send(Message::Text(json.into()))

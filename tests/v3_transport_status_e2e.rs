@@ -255,6 +255,8 @@ async fn join_room(
             max_players: Some(max_players),
             supports_authority: Some(false),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await;
@@ -418,6 +420,8 @@ async fn v2_join_and_settle(
             max_players: Some(max_players),
             supports_authority: Some(false),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await;
@@ -806,6 +810,8 @@ async fn spectator_transitions_reset_status_without_room_fan_out() {
             game_name: "tstatus-spectator".to_string(),
             room_code: room.room_code.clone(),
             spectator_name: "Watcher".to_string(),
+
+            password: None,
         },
     )
     .await;

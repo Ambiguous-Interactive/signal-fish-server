@@ -207,6 +207,7 @@ async fn generated_room_code_collision_retries_instead_of_joining_existing_room(
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
 
@@ -254,6 +255,7 @@ async fn room_join_rejects_unicode_case_fold_equivalent_player_name() {
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
     let created = timeout(Duration::from_secs(1), creator_rx.recv())
@@ -275,6 +277,7 @@ async fn room_join_rejects_unicode_case_fold_equivalent_player_name() {
             "STRASSE".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -332,6 +335,7 @@ async fn legacy_adapter_untyped_atomic_collision_is_confirmed_and_retried() {
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
 
@@ -388,6 +392,7 @@ async fn legacy_adapter_ambiguous_success_is_adopted_without_duplicate_room() {
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
 
@@ -443,6 +448,7 @@ async fn generated_room_code_retry_budget_exhaustion_is_bounded_and_observable()
             "creator".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -513,6 +519,7 @@ async fn explicit_room_code_keeps_existing_join_semantics_without_retry() {
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
 
@@ -548,6 +555,7 @@ async fn concurrent_generated_creators_retry_shared_candidate_without_cross_join
             Some(4),
             Some(true),
             None,
+            None,
         ),
         server.handle_join_room(
             &second,
@@ -556,6 +564,7 @@ async fn concurrent_generated_creators_retry_shared_candidate_without_cross_join
             "second".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
     );
@@ -1630,6 +1639,7 @@ async fn setup_joined_pair_with_reconnection() -> JoinedPairFixture {
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
     let initial_messages = drain_queued_messages(&mut leaver_rx);
@@ -1653,6 +1663,7 @@ async fn setup_joined_pair_with_reconnection() -> JoinedPairFixture {
             "survivor".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -1788,6 +1799,7 @@ async fn seated_room_join_rejects_an_existing_spectator_role() {
             "Dual Role".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -2138,6 +2150,7 @@ async fn aborting_join_while_baseline_is_backpressured_still_completes_admission
                     Some(4),
                     Some(true),
                     None,
+                    None,
                 )
                 .await;
         })
@@ -2203,6 +2216,7 @@ async fn correlated_join_baseline_failure_rolls_back_and_returns_terminal_failur
             "joiner".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -2345,6 +2359,7 @@ async fn correlated_reconnect_panic_fixture() -> CorrelatedReconnectPanicFixture
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
     let peer_baseline = timeout(Duration::from_secs(1), peer_receiver.recv())
@@ -2419,6 +2434,7 @@ async fn correlated_join_panic_returns_terminal_internal_failure() {
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
 
@@ -2439,6 +2455,7 @@ async fn correlated_join_panic_after_admission_rolls_back_the_prepared_generatio
             "creator".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -2464,6 +2481,7 @@ async fn correlated_join_panic_after_admission_rolls_back_the_prepared_generatio
             "joiner".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -2525,6 +2543,7 @@ async fn correlated_leave_event_panic_with_fallback_failure_has_one_terminal_and
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
     let join_baseline = timeout(Duration::from_secs(1), receiver.recv())
@@ -2545,6 +2564,7 @@ async fn correlated_leave_event_panic_with_fallback_failure_has_one_terminal_and
             "peer".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -2629,6 +2649,7 @@ async fn correlated_leave_repairs_an_ordinary_authority_publication_failure_in_l
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
     let room_code = match timeout(Duration::from_secs(1), receiver.recv())
@@ -2650,6 +2671,7 @@ async fn correlated_leave_repairs_an_ordinary_authority_publication_failure_in_l
             "peer".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -2838,6 +2860,7 @@ async fn correlated_leave_retains_room_gate_across_outer_completion_failure() {
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
     let room_code = match timeout(Duration::from_secs(1), receiver.recv())
@@ -2863,6 +2886,7 @@ async fn correlated_leave_retains_room_gate_across_outer_completion_failure() {
             "peer".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -2978,6 +3002,7 @@ async fn correlated_join_panic_after_terminal_does_not_send_a_second_result() {
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
     let creator_baseline = timeout(Duration::from_secs(1), creator_receiver.recv())
@@ -3002,6 +3027,7 @@ async fn correlated_join_panic_after_terminal_does_not_send_a_second_result() {
             "joiner".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -3073,6 +3099,7 @@ async fn correlated_leave_panic_after_terminal_does_not_send_a_second_result() {
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
     let join_baseline = timeout(Duration::from_secs(1), receiver.recv())
@@ -3093,6 +3120,7 @@ async fn correlated_leave_panic_after_terminal_does_not_send_a_second_result() {
             "peer".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -3317,6 +3345,7 @@ async fn stalled_incumbent_does_not_hide_fresh_join_or_evict_healthy_peers() {
                 name.to_string(),
                 Some(8),
                 Some(false),
+                None,
                 None,
             )
             .await;
@@ -3998,6 +4027,7 @@ async fn delayed_ready_event_commits_before_a_concurrent_join_mutates_membership
                     Some(4),
                     Some(true),
                     None,
+                    None,
                 )
                 .await
         })
@@ -4105,6 +4135,7 @@ async fn two_concurrent_joins_publish_in_database_mutation_order() {
                     name.to_string(),
                     Some(4),
                     Some(true),
+                    None,
                     None,
                 )
                 .await
@@ -4245,6 +4276,7 @@ async fn delayed_leave_terminal_event_commits_before_a_concurrent_join() {
                     Some(4),
                     Some(true),
                     None,
+                    None,
                 )
                 .await
         })
@@ -4358,6 +4390,7 @@ async fn room_join_snapshot_baselines_preexisting_relay_tail_before_player_left(
             "late-joiner".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -4759,6 +4792,7 @@ async fn disconnect_storage_error_retries_without_reconnection_support() {
             Some(4),
             Some(false),
             None,
+            None,
         )
         .await;
     drain_queued_messages(&mut leaver_rx);
@@ -4774,6 +4808,7 @@ async fn disconnect_storage_error_retries_without_reconnection_support() {
             "survivor".to_string(),
             Some(4),
             Some(false),
+            None,
             None,
         )
         .await;
@@ -4836,6 +4871,7 @@ async fn unpublished_join_rollback_retries_storage_and_conserves_activity() {
             Some(4),
             Some(false),
             None,
+            None,
         )
         .await;
     drain_queued_messages(&mut survivor_rx);
@@ -4863,6 +4899,7 @@ async fn unpublished_join_rollback_retries_storage_and_conserves_activity() {
             "joiner".to_string(),
             Some(4),
             Some(false),
+            None,
             None,
         )
         .await;
@@ -5257,6 +5294,7 @@ async fn max_room_cap_denial_releases_join_coordination_locks() {
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
 
@@ -5326,6 +5364,7 @@ async fn server_room_cap_denial_releases_join_coordination_locks() {
             "player".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -5407,6 +5446,7 @@ async fn server_room_cap_is_atomic_across_games() {
                 Some(4),
                 Some(true),
                 None,
+                None,
             )
             .await;
     });
@@ -5425,6 +5465,7 @@ async fn server_room_cap_is_atomic_across_games() {
                 "two".to_string(),
                 Some(4),
                 Some(true),
+                None,
                 None,
             )
             .await;
@@ -5467,6 +5508,7 @@ async fn server_room_cap_is_atomic_across_games() {
             "three".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -5511,6 +5553,7 @@ async fn draining_server_rejects_room_creation_without_consuming_join_locks() {
                 "player".to_string(),
                 Some(4),
                 Some(true),
+                None,
                 None,
             )
             .await;
@@ -5591,6 +5634,7 @@ async fn draining_room_creation_rechecks_after_cap_lock_race() {
             "player".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -5673,6 +5717,7 @@ async fn draining_room_creation_rolls_back_after_create_race() {
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
 
@@ -5746,6 +5791,7 @@ async fn unpublished_created_room_rollback_counts_rooms_deleted() {
             "creator".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -5873,6 +5919,7 @@ async fn draining_room_creation_rejection_does_not_wait_on_full_queue() {
             "player".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         ),
     )
@@ -6664,6 +6711,7 @@ async fn draining_server_allows_existing_room_join() {
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
 
@@ -6726,6 +6774,7 @@ async fn join_into_full_room_classifies_as_room_full_not_creation_failed() {
             Some(1),
             Some(false),
             None,
+            None,
         )
         .await;
     match timeout(Duration::from_secs(1), creator_rx.recv())
@@ -6749,6 +6798,7 @@ async fn join_into_full_room_classifies_as_room_full_not_creation_failed() {
             "joiner".to_string(),
             Some(1),
             Some(false),
+            None,
             None,
         )
         .await;
@@ -6860,6 +6910,7 @@ async fn empty_room_cleanup_preserves_reconnect_registered_during_its_snapshot()
             "player".to_string(),
             Some(2),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -7005,6 +7056,7 @@ async fn inactive_cleanup_winner_discards_reconnect_for_deleted_room() {
             Some(2),
             Some(true),
             None,
+            None,
         )
         .await;
     let joined = timeout(Duration::from_secs(1), receiver.recv())
@@ -7123,6 +7175,7 @@ async fn inactive_room_cleanup_terminally_unroutes_seated_players() {
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
     server
@@ -7133,6 +7186,7 @@ async fn inactive_room_cleanup_terminally_unroutes_seated_players() {
             "peer".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -7157,6 +7211,7 @@ async fn inactive_room_cleanup_terminally_unroutes_seated_players() {
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
     server
@@ -7167,6 +7222,7 @@ async fn inactive_room_cleanup_terminally_unroutes_seated_players() {
             "active peer".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -7801,6 +7857,7 @@ async fn join_racing_room_deletion_reports_room_not_found() {
                 Some(4),
                 Some(true),
                 None,
+                None,
             )
             .await;
     });
@@ -7966,6 +8023,7 @@ async fn test_join_flow_counts_backend_release_errors() {
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
 
@@ -8011,6 +8069,7 @@ async fn test_join_flow_releases_do_not_count_as_release_failures() {
             "creator".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -8133,6 +8192,7 @@ async fn creator_name_failure_keeps_published_snapshot_consistent_with_storage()
             None,
             None,
             None,
+            None,
         )
         .await;
     let room_id = server
@@ -8186,6 +8246,7 @@ async fn creator_name_failure_keeps_published_snapshot_consistent_with_storage()
             "rename-integrity".to_string(),
             Some("RNM001".to_string()),
             "Joiner".to_string(),
+            None,
             None,
             None,
             None,

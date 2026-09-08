@@ -269,6 +269,8 @@ async fn join_room(
             max_players: Some(max_players),
             supports_authority: Some(false),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await;
@@ -592,6 +594,8 @@ async fn incompatible_seat_fills_of_a_running_session_are_rejected() {
             max_players: Some(3),
             supports_authority: Some(false),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await;
@@ -615,6 +619,8 @@ async fn incompatible_seat_fills_of_a_running_session_are_rejected() {
             max_players: Some(3),
             supports_authority: Some(false),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await;
@@ -720,6 +726,8 @@ async fn sticky_relay_floor_survives_v2_leave_then_v3_full_join() {
             max_players: Some(2),
             supports_authority: Some(false),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await;
@@ -1309,6 +1317,8 @@ async fn v2_member_leaves_relay_floored_session_no_replan() {
             max_players: Some(3),
             supports_authority: Some(false),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await;
@@ -1632,6 +1642,8 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
                 max_players: Some(4),
                 supports_authority: Some(false),
                 relay_transport: None,
+
+                password: None,
             },
         )
         .await;
@@ -1769,6 +1781,8 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
                 max_players: Some(4),
                 supports_authority: Some(false),
                 relay_transport: None,
+
+                password: None,
             },
         )
         .await;
@@ -1789,6 +1803,8 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
                 game_name: game.to_string(),
                 room_code: room_code.clone(),
                 spectator_name: "Watcher".to_string(),
+
+                password: None,
             },
         )
         .await;
@@ -1923,6 +1939,8 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
                         max_players: Some(4),
                         supports_authority: Some(false),
                         relay_transport: None,
+
+                        password: None,
                     }),
                 },
             )

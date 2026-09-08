@@ -145,6 +145,8 @@ fn join_message(room_code: &str, player_name: &str) -> ClientMessage {
         max_players: Some(8),
         supports_authority: Some(false),
         relay_transport: None,
+
+        password: None,
     }
 }
 
@@ -1171,6 +1173,8 @@ async fn v3_room_snapshots_carry_epoch_pre_v3_omit_it() {
             game_name: "v3_seq_game".to_string(),
             room_code: "SNAPEP".to_string(),
             spectator_name: "SnapSpecV2".to_string(),
+
+            password: None,
         },
     )
     .await;
@@ -1195,6 +1199,8 @@ async fn v3_room_snapshots_carry_epoch_pre_v3_omit_it() {
             game_name: "v3_seq_game".to_string(),
             room_code: "SNAPEP".to_string(),
             spectator_name: "SnapSpecV3".to_string(),
+
+            password: None,
         },
     )
     .await;

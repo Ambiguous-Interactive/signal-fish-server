@@ -85,10 +85,15 @@ correctness evidence appears.
 - #525 — session 217 landed the minimal viable moderation set: authority
   kick (close code `4007 kicked`, no reconnect), authority room-code
   regeneration, and a shipped default spectator cap
-  (`server.default_max_spectators`, auto `2× max_players`). Remaining:
-  room password / invite-only mode, per-room ban list, host-transfer
-  election, spectator roster slimming (counts + deltas instead of full
-  lists), and the companion room-namespace authority-squat fix.
+  (`server.default_max_spectators`, auto `2× max_players`). Session 218
+  completed the access-control tier: `SetRoomAccess` (salted-hash room
+  password, checked ahead of every other admission signal, sealable at
+  creation), `BanPlayer`/`UnbanPlayer` (room-scoped in-memory ban list,
+  TTL = room TTL), and `TransferAuthority` (atomic authority hand-off
+  under the room mutation gate, sequenced replay-recorded
+  `AuthorityChanged`). Remaining: spectator roster slimming (counts +
+  deltas instead of full lists) and the companion room-namespace
+  authority-squat design (#546).
 - #378 — CLOSED by the session-217 canonical-gate migration: `Link Check`
   owns offline lychee + internal-link validation, the duplicate
   `Documentation Link Check` job is retired, the strict MkDocs build moved to

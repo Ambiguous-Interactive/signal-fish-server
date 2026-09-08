@@ -42,7 +42,7 @@ pub use messages::{
 };
 
 // From room_state
-pub use room_state::{LobbyState, Room};
+pub use room_state::{LobbyState, Room, RoomPasswordCredential, MAX_ROOM_PASSWORD_LENGTH};
 
 #[cfg(test)]
 mod tests {

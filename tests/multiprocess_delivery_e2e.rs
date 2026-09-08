@@ -293,6 +293,8 @@ async fn join_room_raw(
         max_players: Some(8),
         supports_authority: Some(false),
         relay_transport: None,
+
+        password: None,
     };
     let json = serde_json::to_string(&join).expect("serialize JoinRoom");
     sink.send(Message::Text(json.into()))

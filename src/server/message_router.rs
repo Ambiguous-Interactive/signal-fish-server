@@ -111,6 +111,7 @@ impl EnhancedGameServer {
                 max_players,
                 supports_authority,
                 relay_transport,
+                password,
             } => {
                 self.handle_join_room(
                     player_id,
@@ -120,6 +121,7 @@ impl EnhancedGameServer {
                     max_players,
                     supports_authority,
                     relay_transport,
+                    password,
                 )
                 .await;
             }
@@ -181,9 +183,16 @@ impl EnhancedGameServer {
                 game_name,
                 room_code,
                 spectator_name,
+                password,
             } => {
-                self.handle_join_as_spectator(player_id, game_name, room_code, spectator_name)
-                    .await;
+                self.handle_join_as_spectator(
+                    player_id,
+                    game_name,
+                    room_code,
+                    spectator_name,
+                    password,
+                )
+                .await;
             }
             ClientMessage::LeaveSpectator => {
                 self.handle_leave_spectator(player_id).await;
@@ -221,6 +230,7 @@ impl EnhancedGameServer {
                         max_players,
                         supports_authority,
                         relay_transport,
+                        password,
                     } => {
                         self.handle_join_room_operation(
                             player_id,
@@ -231,6 +241,7 @@ impl EnhancedGameServer {
                             max_players,
                             supports_authority,
                             relay_transport,
+                            password,
                         )
                         .await;
                     }
@@ -264,6 +275,7 @@ impl EnhancedGameServer {
                         game_name,
                         room_code,
                         spectator_name,
+                        password,
                     } => {
                         self.handle_join_as_spectator_operation(
                             player_id,
@@ -271,6 +283,7 @@ impl EnhancedGameServer {
                             game_name,
                             room_code,
                             spectator_name,
+                            password,
                         )
                         .await;
                     }
@@ -284,6 +297,22 @@ impl EnhancedGameServer {
                     }
                     RoomOperationRequest::RegenerateRoomCode => {
                         self.handle_regenerate_room_code_operation(player_id, operation_id)
+                            .await;
+                    }
+                    RoomOperationRequest::SetRoomAccess { password } => {
+                        self.handle_set_room_access_operation(player_id, operation_id, password)
+                            .await;
+                    }
+                    RoomOperationRequest::BanPlayer { player_id: target } => {
+                        self.handle_ban_player_operation(player_id, operation_id, target)
+                            .await;
+                    }
+                    RoomOperationRequest::UnbanPlayer { player_id: target } => {
+                        self.handle_unban_player_operation(player_id, operation_id, target)
+                            .await;
+                    }
+                    RoomOperationRequest::TransferAuthority { player_id: target } => {
+                        self.handle_transfer_authority_operation(player_id, operation_id, target)
                             .await;
                     }
                 }

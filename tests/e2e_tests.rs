@@ -481,6 +481,8 @@ async fn test_room_creation_and_joining() {
         max_players: Some(2),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
 
     let response1 = send_and_receive(&mut sender1, &mut receiver1, join_msg1)
@@ -505,6 +507,8 @@ async fn test_room_creation_and_joining() {
         max_players: Some(2),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
 
     let response2 = send_and_receive(&mut sender2, &mut receiver2, join_msg2)
@@ -679,6 +683,8 @@ async fn test_binary_game_data_broadcasting_preserves_v2_and_stamps_v3() {
             max_players: Some(2),
             supports_authority: Some(true),
             relay_transport: None,
+
+            password: None,
         };
         let player1_id = match send_and_receive(&mut sender1, &mut receiver1, join_msg)
             .await
@@ -695,6 +701,8 @@ async fn test_binary_game_data_broadcasting_preserves_v2_and_stamps_v3() {
             max_players: Some(2),
             supports_authority: Some(true),
             relay_transport: None,
+
+            password: None,
         };
         let _ = send_and_receive(&mut sender2, &mut receiver2, join_msg2)
             .await
@@ -753,6 +761,8 @@ async fn test_room_capacity_limit() {
         max_players: Some(2),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
     let _ = send_and_receive(&mut sender1, &mut receiver1, join_msg1)
         .await
@@ -766,6 +776,8 @@ async fn test_room_capacity_limit() {
         max_players: Some(2),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
     let _ = send_and_receive(&mut sender2, &mut receiver2, join_msg2)
         .await
@@ -779,6 +791,8 @@ async fn test_room_capacity_limit() {
         max_players: Some(2),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
 
     let response3 = send_and_receive(&mut sender3, &mut receiver3, join_msg3)
@@ -807,6 +821,8 @@ async fn test_validation_errors() {
         max_players: Some(4),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, invalid_join)
@@ -846,6 +862,8 @@ async fn test_e2e_custom_protocol_limits() {
         max_players: Some(4),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, long_name_msg)
@@ -866,6 +884,8 @@ async fn test_e2e_custom_protocol_limits() {
         max_players: Some(4),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, wrong_length_msg)
@@ -886,6 +906,8 @@ async fn test_e2e_custom_protocol_limits() {
         max_players: Some(4),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, long_player_msg)
@@ -906,6 +928,8 @@ async fn test_e2e_custom_protocol_limits() {
         max_players: Some(16), // Exceeds our custom limit of 8
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, too_many_players_msg)
@@ -926,6 +950,8 @@ async fn test_e2e_custom_protocol_limits() {
         max_players: Some(6),                // Within limit
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, valid_msg)
@@ -1007,6 +1033,8 @@ async fn test_e2e_config_with_file_and_env() {
         max_players: Some(4),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, test_msg)
@@ -1027,6 +1055,8 @@ async fn test_e2e_config_with_file_and_env() {
         max_players: Some(4),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, valid_msg)
@@ -1061,6 +1091,8 @@ async fn test_e2e_authority_protocol_enforcement() {
         max_players: Some(4),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
 
     let response1 = send_and_receive(&mut sender1, &mut receiver1, create_msg)
@@ -1085,6 +1117,8 @@ async fn test_e2e_authority_protocol_enforcement() {
         max_players: Some(4),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
 
     let response2 = send_and_receive(&mut sender2, &mut receiver2, join_msg)
@@ -1281,6 +1315,8 @@ async fn test_simple_authority_release() {
         max_players: Some(2),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, join_msg)
@@ -1348,6 +1384,8 @@ async fn test_two_player_authority_release() {
         max_players: Some(2),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
 
     let response1 = send_and_receive(&mut sender1, &mut receiver1, join_msg1)
@@ -1368,6 +1406,8 @@ async fn test_two_player_authority_release() {
         max_players: Some(2),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
 
     let response2 = send_and_receive(&mut sender2, &mut receiver2, join_msg2)
@@ -1451,6 +1491,8 @@ async fn test_e2e_authority_disabled_rooms() {
         max_players: Some(4),
         supports_authority: Some(false), // Authority disabled
         relay_transport: None,
+
+        password: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, create_msg)
@@ -1524,6 +1566,8 @@ async fn test_e2e_room_code_generation_with_custom_length() {
         max_players: Some(4),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
 
     let response = send_and_receive(&mut creator_sender, &mut creator_receiver, auto_room_msg)
@@ -1560,6 +1604,8 @@ async fn test_e2e_room_code_generation_with_custom_length() {
             max_players: None,
             supports_authority: Some(true),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await
@@ -1612,6 +1658,8 @@ async fn test_e2e_invalid_inline_config_is_a_hard_error() {
         max_players: Some(4),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, test_msg)
@@ -1697,6 +1745,8 @@ async fn test_idle_client_is_disconnected_after_idle_timeout() {
             max_players: Some(4),
             supports_authority: Some(false),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await
@@ -1772,6 +1822,8 @@ async fn test_silent_client_is_reaped_with_activity_timeout() {
             max_players: Some(4),
             supports_authority: Some(false),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await
@@ -1844,6 +1896,8 @@ async fn test_active_client_survives_past_idle_timeout_window() {
             max_players: Some(4),
             supports_authority: Some(false),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await
@@ -1878,6 +1932,8 @@ async fn test_idle_timeout_zero_disables_idle_enforcement() {
             max_players: Some(4),
             supports_authority: Some(false),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await

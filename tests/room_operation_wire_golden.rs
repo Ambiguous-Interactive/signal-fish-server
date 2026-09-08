@@ -106,10 +106,28 @@ fn correlated_client_operations_have_exact_nested_shapes() {
                     max_players: Some(4),
                     supports_authority: Some(true),
                     relay_transport: None,
+                    password: None,
                 }),
             },
             json!({"type":"RoomOperation","data":{"operation_id":OPERATION_ID_STR,"operation":{"type":"JoinRoom","data":{"game_name":"game","room_code":"ABC123","player_name":"Alice","max_players":4,"supports_authority":true,"relay_transport":null}}}}),
             "82a474797065ad526f6f6d4f7065726174696f6ea46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa96f7065726174696f6e82a474797065a84a6f696e526f6f6da46461746186a967616d655f6e616d65a467616d65a9726f6f6d5f636f6465a6414243313233ab706c617965725f6e616d65a5416c696365ab6d61785f706c617965727304b2737570706f7274735f617574686f72697479c3af72656c61795f7472616e73706f7274c0",
+        ),
+        (
+            "join_room_with_password",
+            ClientMessage::RoomOperation {
+                operation_id: OPERATION_ID,
+                operation: Box::new(RoomOperationRequest::JoinRoom {
+                    game_name: "game".to_string(),
+                    room_code: Some("ABC123".to_string()),
+                    player_name: "Alice".to_string(),
+                    max_players: Some(4),
+                    supports_authority: Some(true),
+                    relay_transport: None,
+                    password: Some("open sesame".to_string()),
+                }),
+            },
+            json!({"type":"RoomOperation","data":{"operation_id":OPERATION_ID_STR,"operation":{"type":"JoinRoom","data":{"game_name":"game","room_code":"ABC123","player_name":"Alice","max_players":4,"supports_authority":true,"relay_transport":null,"password":"open sesame"}}}}),
+            "82a474797065ad526f6f6d4f7065726174696f6ea46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa96f7065726174696f6e82a474797065a84a6f696e526f6f6da46461746187a967616d655f6e616d65a467616d65a9726f6f6d5f636f6465a6414243313233ab706c617965725f6e616d65a5416c696365ab6d61785f706c617965727304b2737570706f7274735f617574686f72697479c3af72656c61795f7472616e73706f7274c0a870617373776f7264ab6f70656e20736573616d65",
         ),
         (
             "leave_room",
@@ -141,7 +159,8 @@ fn correlated_client_operations_have_exact_nested_shapes() {
                     game_name: "game".to_string(),
                     room_code: "ABC123".to_string(),
                     spectator_name: "Watcher".to_string(),
-                }),
+
+            password: None,}),
             },
             json!({"type":"RoomOperation","data":{"operation_id":OPERATION_ID_STR,"operation":{"type":"JoinAsSpectator","data":{"game_name":"game","room_code":"ABC123","spectator_name":"Watcher"}}}}),
             "82a474797065ad526f6f6d4f7065726174696f6ea46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa96f7065726174696f6e82a474797065af4a6f696e4173537065637461746f72a46461746183a967616d655f6e616d65a467616d65a9726f6f6d5f636f6465a6414243313233ae737065637461746f725f6e616d65a757617463686572",
@@ -174,6 +193,59 @@ fn correlated_client_operations_have_exact_nested_shapes() {
             },
             json!({"type":"RoomOperation","data":{"operation_id":OPERATION_ID_STR,"operation":{"type":"RegenerateRoomCode"}}}),
             "82a474797065ad526f6f6d4f7065726174696f6ea46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa96f7065726174696f6e81a474797065b2526567656e6572617465526f6f6d436f6465",
+        ),
+        (
+            "set_room_access_password",
+            ClientMessage::RoomOperation {
+                operation_id: OPERATION_ID,
+                operation: Box::new(RoomOperationRequest::SetRoomAccess {
+                    password: Some("open sesame".to_string()),
+                }),
+            },
+            json!({"type":"RoomOperation","data":{"operation_id":OPERATION_ID_STR,"operation":{"type":"SetRoomAccess","data":{"password":"open sesame"}}}}),
+            "82a474797065ad526f6f6d4f7065726174696f6ea46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa96f7065726174696f6e82a474797065ad536574526f6f6d416363657373a46461746181a870617373776f7264ab6f70656e20736573616d65",
+        ),
+        (
+            "set_room_access_open",
+            ClientMessage::RoomOperation {
+                operation_id: OPERATION_ID,
+                operation: Box::new(RoomOperationRequest::SetRoomAccess { password: None }),
+            },
+            json!({"type":"RoomOperation","data":{"operation_id":OPERATION_ID_STR,"operation":{"type":"SetRoomAccess","data":{"password":null}}}}),
+            "82a474797065ad526f6f6d4f7065726174696f6ea46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa96f7065726174696f6e82a474797065ad536574526f6f6d416363657373a46461746181a870617373776f7264c0",
+        ),
+        (
+            "ban_player",
+            ClientMessage::RoomOperation {
+                operation_id: OPERATION_ID,
+                operation: Box::new(RoomOperationRequest::BanPlayer {
+                    player_id: PLAYER_ID,
+                }),
+            },
+            json!({"type":"RoomOperation","data":{"operation_id":OPERATION_ID_STR,"operation":{"type":"BanPlayer","data":{"player_id":PLAYER_ID_STR}}}}),
+            "82a474797065ad526f6f6d4f7065726174696f6ea46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa96f7065726174696f6e82a474797065a942616e506c61796572a46461746181a9706c617965725f6964c410bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ),
+        (
+            "unban_player",
+            ClientMessage::RoomOperation {
+                operation_id: OPERATION_ID,
+                operation: Box::new(RoomOperationRequest::UnbanPlayer {
+                    player_id: PLAYER_ID,
+                }),
+            },
+            json!({"type":"RoomOperation","data":{"operation_id":OPERATION_ID_STR,"operation":{"type":"UnbanPlayer","data":{"player_id":PLAYER_ID_STR}}}}),
+            "82a474797065ad526f6f6d4f7065726174696f6ea46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa96f7065726174696f6e82a474797065ab556e62616e506c61796572a46461746181a9706c617965725f6964c410bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ),
+        (
+            "transfer_authority",
+            ClientMessage::RoomOperation {
+                operation_id: OPERATION_ID,
+                operation: Box::new(RoomOperationRequest::TransferAuthority {
+                    player_id: PLAYER_ID,
+                }),
+            },
+            json!({"type":"RoomOperation","data":{"operation_id":OPERATION_ID_STR,"operation":{"type":"TransferAuthority","data":{"player_id":PLAYER_ID_STR}}}}),
+            "82a474797065ad526f6f6d4f7065726174696f6ea46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa96f7065726174696f6e82a474797065b15472616e73666572417574686f72697479a46461746181a9706c617965725f6964c410bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         ),
     ];
 
@@ -369,6 +441,46 @@ fn correlated_server_results_have_exact_nested_shapes() {
             },
             json!({"type":"RoomCodeRegenerated","data":{"room_code":"USE4XP"}}),
             "82a474797065b3526f6f6d4f7065726174696f6e526573756c74a46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa6726573756c7482a474797065b3526f6f6d436f6465526567656e657261746564a46461746181a9726f6f6d5f636f6465a6555345345850",
+        ),
+        (
+            "room_access_updated_protected",
+            RoomOperationResult::RoomAccessUpdated {
+                requires_password: true,
+            },
+            json!({"type":"RoomAccessUpdated","data":{"requires_password":true}}),
+            "82a474797065b3526f6f6d4f7065726174696f6e526573756c74a46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa6726573756c7482a474797065b1526f6f6d41636365737355706461746564a46461746181b172657175697265735f70617373776f7264c3",
+        ),
+        (
+            "room_access_updated_open",
+            RoomOperationResult::RoomAccessUpdated {
+                requires_password: false,
+            },
+            json!({"type":"RoomAccessUpdated","data":{"requires_password":false}}),
+            "82a474797065b3526f6f6d4f7065726174696f6e526573756c74a46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa6726573756c7482a474797065b1526f6f6d41636365737355706461746564a46461746181b172657175697265735f70617373776f7264c2",
+        ),
+        (
+            "player_banned",
+            RoomOperationResult::PlayerBanned {
+                player_id: PLAYER_ID,
+            },
+            json!({"type":"PlayerBanned","data":{"player_id":PLAYER_ID_STR}}),
+            "82a474797065b3526f6f6d4f7065726174696f6e526573756c74a46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa6726573756c7482a474797065ac506c6179657242616e6e6564a46461746181a9706c617965725f6964c410bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ),
+        (
+            "player_unbanned",
+            RoomOperationResult::PlayerUnbanned {
+                player_id: PLAYER_ID,
+            },
+            json!({"type":"PlayerUnbanned","data":{"player_id":PLAYER_ID_STR}}),
+            "82a474797065b3526f6f6d4f7065726174696f6e526573756c74a46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa6726573756c7482a474797065ae506c61796572556e62616e6e6564a46461746181a9706c617965725f6964c410bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ),
+        (
+            "authority_transferred",
+            RoomOperationResult::AuthorityTransferred {
+                player_id: PLAYER_ID,
+            },
+            json!({"type":"AuthorityTransferred","data":{"player_id":PLAYER_ID_STR}}),
+            "82a474797065b3526f6f6d4f7065726174696f6e526573756c74a46461746182ac6f7065726174696f6e5f6964c410aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa6726573756c7482a474797065b4417574686f726974795472616e73666572726564a46461746181a9706c617965725f6964c410bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         ),
     ];
 

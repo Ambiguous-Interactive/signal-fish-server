@@ -183,6 +183,11 @@ pub struct ServerMetrics {
     /// Authority-initiated room-code rotations (`RegenerateRoomCode` room
     /// operation, issue #525).
     pub room_code_regenerations: AtomicU64,
+    /// Authority-initiated bans (`BanPlayer` room operation, issue #525).
+    pub room_bans: AtomicU64,
+    /// Authority-initiated ban lifts (`UnbanPlayer` room operation,
+    /// issue #525).
+    pub room_unbans: AtomicU64,
     pub retry_attempts: AtomicU64,
     pub retry_successes: AtomicU64,
 
@@ -488,6 +493,10 @@ pub struct RaceConditionMetrics {
     /// Authority-initiated room-code rotations (`RegenerateRoomCode`,
     /// issue #525).
     pub room_code_regenerations: u64,
+    /// Authority-initiated bans (`BanPlayer`, issue #525).
+    pub room_bans: u64,
+    /// Authority-initiated ban lifts (`UnbanPlayer`, issue #525).
+    pub room_unbans: u64,
     pub retry_attempts: u64,
     pub retry_successes: u64,
     /// Success fraction of retry attempts; `null` (not `1.0`) while no attempt
@@ -663,6 +672,8 @@ impl ServerMetrics {
             authority_transfer_conflicts: AtomicU64::new(0),
             room_kicks: AtomicU64::new(0),
             room_code_regenerations: AtomicU64::new(0),
+            room_bans: AtomicU64::new(0),
+            room_unbans: AtomicU64::new(0),
             retry_attempts: AtomicU64::new(0),
             retry_successes: AtomicU64::new(0),
             cross_instance_messages: AtomicU64::new(0),
@@ -1099,7 +1110,7 @@ impl ServerMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    #[allow(dead_code)]
+    /// One refused authority transfer (`TransferAuthority`, issue #525).
     pub fn increment_authority_transfer_conflicts(&self) {
         self.authority_transfer_conflicts
             .fetch_add(1, Ordering::Relaxed);
@@ -1114,6 +1125,16 @@ impl ServerMetrics {
     /// issue #525).
     pub fn increment_room_code_regenerations(&self) {
         self.room_code_regenerations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One authority-initiated ban (`BanPlayer`, issue #525).
+    pub fn increment_room_bans(&self) {
+        self.room_bans.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One authority-initiated ban lift (`UnbanPlayer`, issue #525).
+    pub fn increment_room_unbans(&self) {
+        self.room_unbans.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn increment_retry_attempts(&self) {
@@ -1210,7 +1231,8 @@ impl ServerMetrics {
         self.players_left.fetch_add(1, Ordering::Relaxed);
     }
 
-    #[allow(dead_code)]
+    /// One authority-initiated transfer of the authority role
+    /// (`TransferAuthority`, issue #525).
     pub fn increment_authority_transfers(&self) {
         self.authority_transfers.fetch_add(1, Ordering::Relaxed);
     }
@@ -1545,6 +1567,8 @@ impl ServerMetrics {
                     .load(Ordering::Relaxed),
                 room_kicks: self.room_kicks.load(Ordering::Relaxed),
                 room_code_regenerations: self.room_code_regenerations.load(Ordering::Relaxed),
+                room_bans: self.room_bans.load(Ordering::Relaxed),
+                room_unbans: self.room_unbans.load(Ordering::Relaxed),
                 retry_attempts,
                 retry_successes,
                 retry_success_rate,

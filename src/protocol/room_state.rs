@@ -1,10 +1,58 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use super::types::{
     PeerConnectionInfo, PlayerId, PlayerInfo, RoomId, SpectatorInfo, DEFAULT_REGION_ID,
 };
+
+/// Maximum accepted join-password length in bytes (issue #525). The password
+/// is a room-scoped convenience secret, not an account credential; the bound
+/// keeps hashed storage and comparison bounded.
+pub const MAX_ROOM_PASSWORD_LENGTH: usize = 256;
+
+/// Salted hash of a room's join password (issue #525).
+///
+/// The plaintext password never lands in room state, logs, or metrics: the
+/// server hashes it once with a per-room random salt and keeps only this
+/// credential. Verification is constant-time.
+#[derive(Clone, Debug)]
+pub struct RoomPasswordCredential {
+    salt: [u8; 16],
+    hash: [u8; 32],
+}
+
+impl RoomPasswordCredential {
+    /// Hash a plaintext join password with a fresh random salt.
+    pub fn new(password: &str) -> Self {
+        use sha2::{Digest, Sha256};
+        let salt = *Uuid::new_v4().as_bytes();
+        let mut hasher = Sha256::new();
+        hasher.update(salt);
+        hasher.update(password.as_bytes());
+        Self {
+            salt,
+            hash: hasher.finalize().into(),
+        }
+    }
+
+    /// Constant-time comparison of a candidate plaintext against this
+    /// credential.
+    pub fn matches(&self, password: &str) -> bool {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(self.salt);
+        hasher.update(password.as_bytes());
+        let candidate: [u8; 32] = hasher.finalize().into();
+        subtle_ct_eq(&self.hash, &candidate)
+    }
+}
+
+/// Constant-time byte-slice equality (`subtle`), for secret comparisons.
+fn subtle_ct_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    a.ct_eq(b).into()
+}
 
 // ============================================================================
 // ROOM LIFECYCLE DOCUMENTATION
@@ -211,6 +259,13 @@ pub struct Room {
     pub spectators: HashMap<PlayerId, SpectatorInfo>,
     /// Maximum number of spectators allowed (None = unlimited)
     pub max_spectators: Option<u8>,
+    /// Hashed join password set by the authority (issue #525). `None` = the
+    /// room is open; `Some` = every later seated or spectator join must
+    /// present the password.
+    pub password: Option<RoomPasswordCredential>,
+    /// Player ids banned by the authority (issue #525). In-memory and
+    /// room-scoped: the ban list dies with the room.
+    pub banned_players: HashSet<PlayerId>,
 }
 
 impl Room {
@@ -244,6 +299,8 @@ impl Room {
             last_activity: now,
             spectators: HashMap::new(),
             max_spectators: None, // Unlimited spectators by default
+            password: None,
+            banned_players: HashSet::new(),
         }
     }
 
@@ -515,6 +572,32 @@ impl Room {
     pub fn get_spectators(&self) -> Vec<SpectatorInfo> {
         self.spectators.values().cloned().collect()
     }
+
+    /// Whether this join request satisfies the room's join-password policy
+    /// (issue #525). An open room admits everyone; a password-protected room
+    /// admits only requests presenting the matching password. A missing and a
+    /// mismatched password are deliberately indistinguishable.
+    pub fn admits_join_password(&self, provided: Option<&str>) -> bool {
+        match &self.password {
+            None => true,
+            Some(credential) => provided.is_some_and(|password| credential.matches(password)),
+        }
+    }
+
+    /// Whether this player id is banned from the room (issue #525).
+    pub fn is_banned(&self, player_id: &PlayerId) -> bool {
+        self.banned_players.contains(player_id)
+    }
+
+    /// Whether the requested password is acceptable for `SetRoomAccess`
+    /// (issue #525): `None` opens the room, `Some` must be non-empty and
+    /// within [`MAX_ROOM_PASSWORD_LENGTH`].
+    pub fn is_valid_room_password(password: Option<&str>) -> bool {
+        match password {
+            None => true,
+            Some(password) => !password.is_empty() && password.len() <= MAX_ROOM_PASSWORD_LENGTH,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -685,4 +768,62 @@ mod tests {
         assert!(room.can_spectate(), "departure frees exactly one seat");
         assert!(room.add_spectator(watcher(departed)));
     }
+}
+
+#[test]
+fn join_password_credential_and_policy_are_data_driven() {
+    let cases: &[(&str, Option<&str>, Option<&str>, bool)] = &[
+        // (name, room password, presented password, admitted)
+        ("open room admits a password-less join", None, None, true),
+        ("open room admits a stray password", None, Some("x"), true),
+        ("protected room refuses nothing", Some("pw"), None, false),
+        (
+            "protected room refuses wrong",
+            Some("pw"),
+            Some("wrong"),
+            false,
+        ),
+        ("protected room admits match", Some("pw"), Some("pw"), true),
+    ];
+    for (name, room_password, presented, admitted) in cases {
+        let mut room = Room::new(
+            "game".to_string(),
+            "POLICY".to_string(),
+            4,
+            true,
+            "relay".to_string(),
+        );
+        room.password = room_password.map(RoomPasswordCredential::new);
+        assert_eq!(room.admits_join_password(*presented), *admitted, "{name}");
+    }
+
+    // The hashed credential never round-trips to plaintext and verifies
+    // constant-time (the API contract, exercised here for behavior).
+    let credential = RoomPasswordCredential::new("hunter2");
+    assert!(credential.matches("hunter2"));
+    assert!(!credential.matches("Hunter2"));
+    assert!(!credential.matches("hunter2 "));
+
+    // SetRoomAccess payload validation.
+    let valid: &[(&str, bool)] = &[
+        ("non-empty", true),
+        ("max length", true),
+        ("empty", false),
+        ("over max", false),
+    ];
+    let max = MAX_ROOM_PASSWORD_LENGTH;
+    let payloads: &[(&str, &str)] = &[
+        ("non-empty", "secret"),
+        ("max length", &"a".repeat(max)),
+        ("empty", ""),
+        ("over max", &"a".repeat(max + 1)),
+    ];
+    for ((name, payload), (_, expected)) in payloads.iter().zip(valid.iter()) {
+        assert_eq!(
+            Room::is_valid_room_password(Some(payload)),
+            *expected,
+            "{name}"
+        );
+    }
+    assert!(Room::is_valid_room_password(None));
 }

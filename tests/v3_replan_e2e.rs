@@ -220,6 +220,8 @@ async fn join_room(
             max_players: Some(max_players),
             supports_authority: Some(false),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await;

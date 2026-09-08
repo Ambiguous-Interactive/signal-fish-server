@@ -80,6 +80,8 @@ async fn join_room(sink: &mut WsSink, receiver: &mut WsReceiver, player_name: &s
         max_players: Some(4),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
     let json = serde_json::to_string(&join).expect("serialize JoinRoom");
     sink.send(Message::Text(json.into()))
@@ -835,6 +837,7 @@ async fn join_room_direct(server: &Arc<EnhancedGameServer>, player_id: &PlayerId
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
 }
@@ -852,6 +855,8 @@ async fn join_room_returning_id(
         max_players: Some(4),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
     let json = serde_json::to_string(&join).expect("serialize JoinRoom");
     sink.send(Message::Text(json.into()))

@@ -10,7 +10,7 @@ use crate::distributed::LockHandle;
 use crate::protocol::validation;
 use crate::protocol::{
     ErrorCode, LobbyState, PlayerId, PlayerInfo, RelayTransport, Room, RoomId, RoomJoinedPayload,
-    ServerMessage,
+    RoomPasswordCredential, ServerMessage,
 };
 use futures_util::FutureExt;
 use std::collections::HashSet;
@@ -106,6 +106,15 @@ pub(super) enum JoinRoomError {
     /// Both cases intentionally share one non-enumerating wire outcome.
     #[error("Room not found")]
     RoomNotFound,
+    /// The room is password-protected and the join presented no password or
+    /// the wrong one — a business rejection (→ `PASSWORD_REQUIRED`,
+    /// issue #525). The two cases share one non-enumerating outcome.
+    #[error("Room requires the join password set by its authority")]
+    PasswordRequired,
+    /// The joining player id is on the room's authority ban list — a
+    /// business rejection (→ `BANNED`, issue #525).
+    #[error("Player is banned from this room")]
+    Banned,
     /// The server is draining for shutdown and must not create new rooms
     /// (→ `SERVER_DRAINING`).
     #[error("Server is draining for shutdown")]
@@ -136,6 +145,8 @@ impl JoinRoomError {
             Self::MaxRoomsExceeded(_) => ErrorCode::MaxRoomsPerGameExceeded,
             Self::MaxPlayersPerApplicationExceeded(_) => ErrorCode::InvalidMaxPlayers,
             Self::RoomNotFound => ErrorCode::RoomNotFound,
+            Self::PasswordRequired => ErrorCode::PasswordRequired,
+            Self::Banned => ErrorCode::Banned,
             Self::ServerDraining => ErrorCode::ServerDraining,
             Self::RoomCodeCollision | Self::RoomCodeRetryExhausted { .. } => {
                 ErrorCode::RoomCreationFailed
@@ -308,6 +319,7 @@ impl EnhancedGameServer {
         max_players: Option<u8>,
         supports_authority: Option<bool>,
         relay_transport: Option<RelayTransport>,
+        password: Option<String>,
     ) {
         self.handle_join_room_operation(
             player_id,
@@ -318,6 +330,7 @@ impl EnhancedGameServer {
             max_players,
             supports_authority,
             relay_transport,
+            password,
         )
         .await;
     }
@@ -333,6 +346,7 @@ impl EnhancedGameServer {
         max_players: Option<u8>,
         supports_authority: Option<bool>,
         relay_transport: Option<RelayTransport>,
+        password: Option<String>,
     ) {
         let server = Arc::clone(self);
         let player_id = *player_id;
@@ -362,6 +376,7 @@ impl EnhancedGameServer {
                 max_players,
                 supports_authority,
                 relay_transport,
+                password,
                 operation_id,
                 terminal_response_committed_in_task,
                 lifecycle_finalized_in_task,
@@ -441,6 +456,7 @@ impl EnhancedGameServer {
         max_players: Option<u8>,
         supports_authority: Option<bool>,
         _relay_transport: Option<RelayTransport>,
+        password: Option<String>,
         operation_id: Option<crate::protocol::RoomOperationId>,
         terminal_response_committed: Arc<AtomicBool>,
         lifecycle_finalized: Arc<AtomicBool>,
@@ -564,6 +580,33 @@ impl EnhancedGameServer {
             return;
         }
 
+        // Join-password shape check (issue #525): an empty or oversized
+        // password is a malformed request, rejected before any admission
+        // work. The per-room policy check itself happens later, against
+        // fresh room state inside the join critical section.
+        if let Some(password) = password.as_deref() {
+            if !Room::is_valid_room_password(Some(password)) {
+                let _ = self
+                    .message_coordinator
+                    .send_to_player(
+                        player_id,
+                        Arc::new(
+                            (ServerMessage::RoomJoinFailed {
+                                reason: format!(
+                                    "Join password must be non-empty and at most {} bytes",
+                                    crate::protocol::MAX_ROOM_PASSWORD_LENGTH
+                                ),
+                                error_code: Some(crate::protocol::ErrorCode::InvalidInput),
+                            })
+                            .correlate_room_operation(operation_id),
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        }
+        let join_password = password.as_deref();
+
         let supports_authority = supports_authority.unwrap_or(true);
 
         // One physical connection has exactly one room role. Spectator
@@ -621,6 +664,7 @@ impl EnhancedGameServer {
                     max_players,
                     supports_authority,
                     RoomAdmissionIntent::ExistingOrCreate,
+                    join_password,
                 )
                 .await
             }
@@ -631,6 +675,7 @@ impl EnhancedGameServer {
                     &player_name,
                     max_players,
                     supports_authority,
+                    join_password,
                 )
                 .await
             }
@@ -1071,6 +1116,7 @@ impl EnhancedGameServer {
         player_name: &str,
         max_players: u8,
         supports_authority: bool,
+        password: Option<&str>,
     ) -> Result<
         (
             Room,
@@ -1090,6 +1136,7 @@ impl EnhancedGameServer {
                     max_players,
                     supports_authority,
                     RoomAdmissionIntent::CreateOnly,
+                    password,
                 )
                 .await
             {
@@ -1920,6 +1967,7 @@ impl EnhancedGameServer {
         max_players: u8,
         supports_authority: bool,
         admission_intent: RoomAdmissionIntent,
+        password: Option<&str>,
     ) -> Result<
         (
             Room,
@@ -2002,6 +2050,16 @@ impl EnhancedGameServer {
                     .is_some_and(|owner| Some(owner) != client_app_id)
                 {
                     Err(JoinRoomError::RoomNotFound)
+                } else if !room.admits_join_password(password) {
+                    // Join-password perimeter (issue #525): checked before
+                    // anything else about the room leaks — name conflicts,
+                    // capacity, session compatibility. A missing and a
+                    // mismatched password share one non-enumerating outcome.
+                    Err(JoinRoomError::PasswordRequired)
+                } else if room.is_banned(player_id) {
+                    // Authority ban list (issue #525): room-scoped, in-memory,
+                    // dies with the room.
+                    Err(JoinRoomError::Banned)
                 } else if let Err(reason) =
                     validation::validate_player_name_uniqueness(player_name, &room.players)
                 {
@@ -2359,6 +2417,52 @@ impl EnhancedGameServer {
                                     %error,
                                     "Failed to apply default spectator capacity"
                                 );
+                            }
+                        }
+
+                        // Creation-time join password (issue #525): seal the
+                        // room while it is still inside its join critical
+                        // section, under the same gate discipline as the
+                        // spectator cap above, so no joiner can slip through
+                        // an unlocked window. Unlike the cap, a storage
+                        // failure must not silently leave a room the creator
+                        // asked to protect: roll the fresh room back and fail
+                        // the join honestly.
+                        if let Some(creation_password) = password {
+                            let credential = RoomPasswordCredential::new(creation_password);
+                            let password_event_guard = self
+                                .message_coordinator
+                                .lock_room_event_mutation(&room.id)
+                                .await;
+                            let applied = self
+                                .database
+                                .set_room_password(&room.id, Some(credential.clone()))
+                                .await;
+                            drop(password_event_guard);
+                            match applied {
+                                Ok(()) => room.password = Some(credential),
+                                Err(error) => {
+                                    tracing::error!(
+                                        room_id = %room.id,
+                                        %error,
+                                        "Failed to apply creation-time join password; rolling back the protected room"
+                                    );
+                                    match self.database.delete_room(&room.id).await {
+                                        Ok(true) => {
+                                            self.metrics.add_rooms_deleted(1);
+                                        }
+                                        Ok(false) => tracing::warn!(
+                                            room_id = %room.id,
+                                            "Room vanished while rolling back a failed password write"
+                                        ),
+                                        Err(delete_error) => tracing::error!(
+                                            room_id = %room.id,
+                                            %delete_error,
+                                            "Failed to roll back room after password write failure"
+                                        ),
+                                    }
+                                    return Err(JoinRoomError::Internal(error));
+                                }
                             }
                         }
 

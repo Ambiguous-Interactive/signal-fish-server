@@ -342,11 +342,40 @@ Reconnection is enabled by default. Relevant server settings:
 
 ## Security Notes
 
-- Reconnection tokens are single-use UUIDs with short validity windows.
-- Tokens are validated against both the player ID and room ID to prevent
-  reuse across sessions.
-- A duplicate connection guard prevents a player from being connected
-  twice simultaneously.
+The reconnection token is a **bearer credential for a player's seat**
+(issue #523). The identity swap is authorized by the token alone by
+default: anyone who learns it -- screenshare, client log, memory dump, a
+leaked `Custom` relay blob -- can take over that player's seat for the
+whole reconnection window, receive their game-data stream, and inherit
+their rate-limit budget. Treat it like a password:
+
+- **Never log it, never screenshare it, never embed it in game state that
+  leaves the process.** SDK-side redaction is the client's responsibility;
+  server-side, tokens are only echoed back to the connection that received
+  them and never written to logs or metrics.
+- **Shrink the window** (`reconnection_window`) to the minimum your game
+  tolerates. The 300 s default is generous for a bearer secret; a fast
+  lobby game may only need 30-60 s.
+- **Hosted and multi-tenant deployments should require the fingerprint
+  second factor**: enable the mTLS token-binding subprotocol with
+  `security.transport.token_binding.require_client_fingerprint` (see
+  [Authentication](../authentication.md)), so the reconnection identity is
+  the client certificate fingerprint rather than the token alone. An
+  operator checklist entry reiterates this;
+  [Pre-deployment Checklist](../pre-deployment-checklist.md).
+
+Token _mechanics_ are strong:
+
+- Tokens are validated with constant-time comparison against both the
+  player ID and room ID, so a claim cannot be reused across sessions, and
+  the window deadline is armed from a monotonic clock once per genuine
+  disconnect (wall-clock steps cannot extend a window).
+- A token is consumed exactly once on a **successful** claim; a failed
+  restore releases the claim for retry within the window. Rotation hands
+  the reconnecting client a fresh token.
+- A duplicate-connection guard prevents a player from being connected
+  twice simultaneously, and a kick tombstones every pending or in-flight
+  reconnection path, so a removed seat is never resurrectable.
 
 ## Next Steps
 

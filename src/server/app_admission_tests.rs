@@ -101,6 +101,7 @@ async fn join_room(
             Some(max_players),
             Some(true),
             None,
+            None,
         )
         .await;
 }
@@ -258,6 +259,7 @@ async fn app_bound_room_owner_gates_seated_spectator_and_reconnect_admission() {
             "owner-game".to_string(),
             room_code.clone(),
             "SameSpectator".to_string(),
+            None,
         )
         .await;
     assert!(matches!(
@@ -273,6 +275,7 @@ async fn app_bound_room_owner_gates_seated_spectator_and_reconnect_admission() {
             "owner-game".to_string(),
             room_code,
             "OtherSpectator".to_string(),
+            None,
         )
         .await;
     let other_spectator_result = receive(&mut other_spectator_rx).await;
@@ -352,6 +355,7 @@ async fn successful_reconnect_but_not_spectator_adopts_pending_ownership_claim()
             "adopt-reconnect".to_string(),
             room_code,
             "Spectator".to_string(),
+            None,
         )
         .await;
     assert!(matches!(
@@ -458,6 +462,7 @@ async fn legacy_room_claims_only_on_app_bound_seated_admission() {
             "legacy-game".to_string(),
             "LEGACY".to_string(),
             "Spectator".to_string(),
+            None,
         )
         .await;
     assert!(matches!(
@@ -969,6 +974,7 @@ async fn open_policy_rooms_are_scoped_to_their_application() {
             "scoped-game".to_string(),
             room_code.clone(),
             "OtherSpectator".to_string(),
+            None,
         )
         .await;
     let spectator_result = receive(&mut other_spectator_rx).await;

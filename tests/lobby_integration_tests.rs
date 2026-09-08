@@ -32,6 +32,7 @@ async fn test_lobby_integration_full_flow() {
                 Some(3),
                 Some(true),
                 None,
+                None,
             )
             .await;
     }
@@ -145,6 +146,7 @@ async fn test_lobby_player_leaves_during_ready_phase() {
                 Some(2),
                 Some(true),
                 None,
+                None,
             )
             .await;
     }
@@ -236,6 +238,7 @@ async fn test_lobby_ready_toggle_resets_ready_state() {
                 Some(2),
                 Some(true),
                 None,
+                None,
             )
             .await;
     }
@@ -286,6 +289,7 @@ async fn test_lobby_room_authority_preservation() {
             Some(2),
             Some(true),
             None,
+            None,
         )
         .await;
 
@@ -297,6 +301,7 @@ async fn test_lobby_room_authority_preservation() {
             "Regular".to_string(),
             Some(2),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -387,6 +392,7 @@ async fn test_spectator_state_updates_include_snapshots_and_reasons() {
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
 
@@ -410,6 +416,7 @@ async fn test_spectator_state_updates_include_snapshots_and_reasons() {
             game_name.to_string(),
             room_code.to_ascii_lowercase(),
             "ViewerOne".to_string(),
+            None,
         )
         .await;
 
@@ -494,6 +501,7 @@ async fn test_spectator_state_updates_include_snapshots_and_reasons() {
             game_name.to_string(),
             room_code.to_string(),
             "ViewerOne".to_string(),
+            None,
         )
         .await;
     expect_spectator_joined(
@@ -542,6 +550,7 @@ async fn spectator_and_seated_joins_share_the_attempt_budget() {
                 "rate_limit_spectator".to_string(),
                 "MISS01".to_string(),
                 "Viewer".to_string(),
+                None,
             )
             .await;
         match recv_now(&mut spectator_rx, "spectator rate-limit outcome").as_ref() {
@@ -565,6 +574,7 @@ async fn spectator_and_seated_joins_share_the_attempt_budget() {
             "rate_limit_spectator".to_string(),
             "MISS01".to_string(),
             "Viewer".to_string(),
+            None,
         )
         .await;
     match recv_now(&mut spectator_rx, "spectator budget after reset").as_ref() {
@@ -593,6 +603,7 @@ async fn spectator_and_seated_joins_share_the_attempt_budget() {
             Some(2),
             Some(true),
             None,
+            None,
         )
         .await;
     expect_room_joined(&mut player_rx, "seated attempt consumes shared budget");
@@ -604,6 +615,7 @@ async fn spectator_and_seated_joins_share_the_attempt_budget() {
             "rate_limit_shared".to_string(),
             "SHARE1".to_string(),
             "Viewer".to_string(),
+            None,
         )
         .await;
     match recv_now(&mut player_rx, "cross-role rate-limit outcome").as_ref() {
@@ -629,6 +641,7 @@ async fn spectator_and_seated_joins_share_the_attempt_budget() {
             "rate_limit_reverse".to_string(),
             "MISS02".to_string(),
             "Viewer".to_string(),
+            None,
         )
         .await;
     match recv_now(&mut player_rx, "spectator attempt consumes shared budget").as_ref() {
@@ -645,6 +658,7 @@ async fn spectator_and_seated_joins_share_the_attempt_budget() {
             "Player".to_string(),
             Some(2),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -682,6 +696,7 @@ async fn spectator_and_seated_joins_share_the_attempt_budget() {
                 game_name.to_string(),
                 room_code.to_string(),
                 "Viewer".to_string(),
+                None,
             )
             .await;
         match recv_now(&mut rx, context).as_ref() {
@@ -696,6 +711,7 @@ async fn spectator_and_seated_joins_share_the_attempt_budget() {
                 "rate_limit_invalid".to_string(),
                 "MISS03".to_string(),
                 "Viewer".to_string(),
+                None,
             )
             .await;
         match recv_now(&mut rx, "quota after invalid spectator input").as_ref() {
@@ -717,6 +733,7 @@ async fn spectator_and_seated_joins_share_the_attempt_budget() {
             "rate_limit_invalid".to_string(),
             "MISS04".to_string(),
             "".to_string(),
+            None,
         )
         .await;
     match recv_now(&mut rx, "invalid spectator name consumes quota").as_ref() {
@@ -731,6 +748,7 @@ async fn spectator_and_seated_joins_share_the_attempt_budget() {
             "rate_limit_invalid".to_string(),
             "MISS04".to_string(),
             "Viewer".to_string(),
+            None,
         )
         .await;
     match recv_now(&mut rx, "quota after invalid spectator name").as_ref() {
@@ -762,6 +780,7 @@ async fn spectator_join_during_shutdown_drain_is_rejected_with_server_draining()
             Some(2),
             Some(true),
             None,
+            None,
         )
         .await;
     let _room = expect_room_joined(&mut host_rx, "host join before drain");
@@ -777,6 +796,7 @@ async fn spectator_join_during_shutdown_drain_is_rejected_with_server_draining()
             "drain_spectator".to_string(),
             "DRN101".to_string(),
             "Viewer".to_string(),
+            None,
         )
         .await;
     match recv_now(&mut spectator_rx, "spectator drain outcome").as_ref() {
@@ -811,6 +831,7 @@ async fn spectator_admission_uses_configured_name_and_room_code_boundaries() {
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
     let room_id = match expect_room_joined(&mut host_rx, "custom-boundary host join").as_ref() {
@@ -827,6 +848,7 @@ async fn spectator_admission_uses_configured_name_and_room_code_boundaries() {
             "G123".to_string(),
             "abcd".to_string(),
             "Viewer".to_string(),
+            None,
         )
         .await;
     match recv_now(&mut accepted_rx, "configured-boundary spectator join").as_ref() {
@@ -861,6 +883,7 @@ async fn spectator_admission_uses_configured_name_and_room_code_boundaries() {
                 game_name.to_string(),
                 room_code.to_string(),
                 "Viewer".to_string(),
+                None,
             )
             .await;
         match recv_now(&mut rx, context).as_ref() {
@@ -880,6 +903,7 @@ async fn spectator_admission_uses_configured_name_and_room_code_boundaries() {
             "G123".to_string(),
             "ABCD".to_string(),
             "".to_string(),
+            None,
         )
         .await;
     match recv_now(&mut accepted_rx, "role precedes invalid spectator name").as_ref() {
@@ -910,6 +934,7 @@ async fn spectator_join_failures_answer_with_spectator_join_failed() {
             "Host".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -957,6 +982,7 @@ async fn spectator_join_failures_answer_with_spectator_join_failed() {
                     game_name.to_string(),
                     room_code.to_string(),
                     "Viewer".to_string(),
+                    None,
                 )
                 .await;
             expect_spectator_joined(&mut rx, spectator_id, context);
@@ -968,6 +994,7 @@ async fn spectator_join_failures_answer_with_spectator_join_failed() {
                 game_name.to_string(),
                 room_code.to_string(),
                 "Viewer".to_string(),
+                None,
             )
             .await;
 

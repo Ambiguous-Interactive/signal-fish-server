@@ -1,4 +1,6 @@
-use crate::protocol::{ConnectionInfo, PlayerId, PlayerInfo, Room, RoomId, SpectatorInfo};
+use crate::protocol::{
+    ConnectionInfo, PlayerId, PlayerInfo, Room, RoomId, RoomPasswordCredential, SpectatorInfo,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::any::Any;
@@ -277,6 +279,36 @@ pub trait GameDatabase: Send + Sync {
         _max_spectators: Option<u8>,
     ) -> Result<()> {
         anyhow::bail!("spectator capacity persistence is not supported")
+    }
+
+    /// Store a room's hashed join password (authority-initiated access
+    /// control, issue #525).
+    ///
+    /// `None` opens the room. Callers pass the already-hashed credential —
+    /// the plaintext password never reaches storage. Callers hold the room
+    /// mutation gate across the write, so a missing room is an error but
+    /// cannot otherwise race admission.
+    async fn set_room_password(
+        &self,
+        _room_id: &RoomId,
+        _password: Option<RoomPasswordCredential>,
+    ) -> Result<()> {
+        anyhow::bail!("room password persistence is not supported")
+    }
+
+    /// Add or lift a room-scoped player ban (authority-initiated moderation,
+    /// issue #525).
+    ///
+    /// The ban lives on the room row, so it expires with the room. Callers
+    /// hold the room mutation gate across the write, so a missing room is an
+    /// error but cannot otherwise race admission.
+    async fn set_room_ban(
+        &self,
+        _room_id: &RoomId,
+        _player_id: &PlayerId,
+        _banned: bool,
+    ) -> Result<()> {
+        anyhow::bail!("room ban persistence is not supported")
     }
 
     /// Get room by game name and room code
@@ -1127,6 +1159,8 @@ impl GameDatabase for InMemoryDatabase {
             last_activity: now,
             spectators: HashMap::new(),
             max_spectators: None,
+            password: None,
+            banned_players: HashSet::new(),
         };
 
         // Insert into all three maps under one set of guards, so a dropped
@@ -1191,6 +1225,37 @@ impl GameDatabase for InMemoryDatabase {
             anyhow::anyhow!("Room {room_id} not found while setting spectator cap")
         })?;
         room.max_spectators = max_spectators;
+        Ok(())
+    }
+
+    async fn set_room_password(
+        &self,
+        room_id: &RoomId,
+        password: Option<RoomPasswordCredential>,
+    ) -> Result<()> {
+        let mut rooms = self.rooms.write().await;
+        let room = rooms.get_mut(room_id).ok_or_else(|| {
+            anyhow::anyhow!("Room {room_id} not found while setting room password")
+        })?;
+        room.password = password;
+        Ok(())
+    }
+
+    async fn set_room_ban(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+        banned: bool,
+    ) -> Result<()> {
+        let mut rooms = self.rooms.write().await;
+        let room = rooms
+            .get_mut(room_id)
+            .ok_or_else(|| anyhow::anyhow!("Room {room_id} not found while setting room ban"))?;
+        if banned {
+            room.banned_players.insert(*player_id);
+        } else {
+            room.banned_players.remove(player_id);
+        }
         Ok(())
     }
 

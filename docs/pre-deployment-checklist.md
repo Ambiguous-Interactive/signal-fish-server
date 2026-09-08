@@ -104,6 +104,22 @@ cargo run -- --print-config
 - [ ] coturn's relay port range is published/reachable (see the
   [TURN quick start](deployment-turn.md#self-hosted-coturn-quick-start)).
 
+## Reconnection token exposure bounded
+
+The reconnection token is a bearer seat credential: possession authorizes
+seat takeover within the window (see
+[Reconnection security notes](concepts/reconnection.md#security-notes)).
+
+- [ ] `server.reconnection_window` is the minimum your game tolerates rather
+  than the 300 s default (a bearer secret should not outlive the need).
+- [ ] For hosted or multi-tenant deployments: the mTLS token-binding second
+  factor is on (`security.transport.token_binding.enabled=true` with
+  `require_client_fingerprint=true`), so the reconnection identity is the
+  client certificate fingerprint rather than the token alone.
+- [ ] Clients are built/audited to redact tokens from logs, screenshares,
+  and persisted game state; you have communicated the "treat it like a
+  password" contract to every SDK consumer.
+
 ## Log rotation
 
 - [ ] File logging configured for production —

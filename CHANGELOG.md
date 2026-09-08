@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Room access control and expanded moderation surface (issue #525, v3 only):
+  four new `room_operation_ids` operations alongside the existing kick and
+  rotation. `SetRoomAccess { password }` seals a room behind a join password
+  (salted-hash storage, never logged or echoed; `null` reopens it) — sealed
+  rooms refuse every seated or spectator join that does not present the
+  password with the new `PASSWORD_REQUIRED` code, a missing and a mismatched
+  password are indistinguishable, the check runs before any other room
+  information is evaluated, and a password on the **creating** `JoinRoom`
+  seals the room from birth (a storage failure rolls the protected room back
+  instead of silently leaving it open). `BanPlayer` evicts a seated member
+  exactly like a kick and additionally records the id on the room's
+  in-memory ban list: while the room lives, the banned id cannot rejoin as a
+  player or spectator (`BANNED`); `UnbanPlayer` lifts a ban idempotently.
+  `TransferAuthority` hands the authority role to a seated member atomically
+  (validated and granted under the room mutation gate, so the successor
+  cannot depart between check and grant): every member receives the usual
+  replay-recorded `AuthorityChanged` broadcast, and the sender loses every
+  authority capability. New append-only error codes `PASSWORD_REQUIRED`,
+  `BANNED`, and `TRANSFER_TARGET_NOT_FOUND`; optional additive
+  `password` fields on `JoinRoom` / `JoinAsSpectator` (legacy top-level and
+  correlated forms); success results `RoomAccessUpdated`, `PlayerBanned`,
+  `PlayerUnbanned`, `AuthorityTransferred`; new counters
+  `room_bans` / `room_unbans` and the now-live `authority_transfers` /
+  `authority_transfer_conflicts`.
+- Loud reconnection-token credential documentation (issue #523): the
+  [Reconnection security notes](docs/concepts/reconnection.md) now state the
+  bearer-credential property up front — possession authorizes seat takeover
+  within the window — with operator guidance to shrink `reconnection_window`
+  and to require the mTLS fingerprint second factor
+  (`security.transport.token_binding.require_client_fingerprint`) in hosted
+  deployments, plus a "Reconnection token exposure bounded" section in the
+  pre-deployment checklist.
 - Authority moderation surface (issue #525, v3 only): two new
   `room_operation_ids` operations. `KickPlayer` lets the room's authority
   remove a seated player: the seat is removed with the ordinary departure

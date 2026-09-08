@@ -941,7 +941,11 @@ fn room_operation_result_has_v2_only_snapshot_metadata(result: &RoomOperationRes
         | RoomOperationResult::SpectatorJoinFailed { .. }
         | RoomOperationResult::OperationFailed { .. }
         | RoomOperationResult::PlayerKicked { .. }
-        | RoomOperationResult::RoomCodeRegenerated { .. } => false,
+        | RoomOperationResult::RoomCodeRegenerated { .. }
+        | RoomOperationResult::RoomAccessUpdated { .. }
+        | RoomOperationResult::PlayerBanned { .. }
+        | RoomOperationResult::PlayerUnbanned { .. }
+        | RoomOperationResult::AuthorityTransferred { .. } => false,
     }
 }
 
@@ -970,7 +974,11 @@ fn strip_room_operation_result_v2_only_snapshot_metadata(result: &mut RoomOperat
         | RoomOperationResult::SpectatorJoinFailed { .. }
         | RoomOperationResult::OperationFailed { .. }
         | RoomOperationResult::PlayerKicked { .. }
-        | RoomOperationResult::RoomCodeRegenerated { .. } => {}
+        | RoomOperationResult::RoomCodeRegenerated { .. }
+        | RoomOperationResult::RoomAccessUpdated { .. }
+        | RoomOperationResult::PlayerBanned { .. }
+        | RoomOperationResult::PlayerUnbanned { .. }
+        | RoomOperationResult::AuthorityTransferred { .. } => {}
     }
 }
 
