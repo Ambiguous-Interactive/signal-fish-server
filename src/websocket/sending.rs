@@ -802,14 +802,15 @@ pub(super) async fn send_single_message_ref(
             current_spectators,
             spectator_count,
             reason,
-        } if recipient_supports_v3 && !current_spectators.is_empty() => {
-            debug_assert!(
-                spectator_count.is_some(),
-                "v3 spectator fan-out requires spectator_count"
-            );
+        } if recipient_supports_v3
+            && !current_spectators.is_empty()
+            && spectator_count.is_some() =>
+        {
             // Rebuild instead of clone-then-clear: the roster payload is the
             // term this projection exists to drop, so cloning it per
-            // recipient would halve the win.
+            // recipient would halve the win. A constructor that omitted the
+            // count fails open — the guard delivers the parseable full-roster
+            // shape instead of a countless slim one.
             let slim = ServerMessage::NewSpectatorJoined {
                 spectator: spectator.clone(),
                 current_spectators: Vec::new(),
@@ -823,11 +824,10 @@ pub(super) async fn send_single_message_ref(
             reason,
             current_spectators,
             spectator_count,
-        } if recipient_supports_v3 && !current_spectators.is_empty() => {
-            debug_assert!(
-                spectator_count.is_some(),
-                "v3 spectator fan-out requires spectator_count"
-            );
+        } if recipient_supports_v3
+            && !current_spectators.is_empty()
+            && spectator_count.is_some() =>
+        {
             let slim = ServerMessage::SpectatorDisconnected {
                 spectator_id: *spectator_id,
                 reason: reason.clone(),
@@ -1005,24 +1005,20 @@ fn replayed_event_needs_v3_projection(event: &ServerMessage) -> bool {
 /// (issue #525): the roster clears and `spectator_count` carries the
 /// post-change total. The roster field itself stays present — released SDK
 /// parsers require it — so the slim shape is wire-compatible by construction.
+/// An event without a count fails open: it is left untouched (the parseable
+/// full-roster shape) instead of slimmed to a countless delta.
 fn slim_spectator_fan_out_for_v3(message: &mut ServerMessage) {
     match message {
         ServerMessage::NewSpectatorJoined {
             current_spectators,
-            spectator_count,
+            spectator_count: Some(_),
             ..
         }
         | ServerMessage::SpectatorDisconnected {
             current_spectators,
-            spectator_count,
+            spectator_count: Some(_),
             ..
-        } => {
-            debug_assert!(
-                spectator_count.is_some(),
-                "v3 spectator fan-out requires spectator_count"
-            );
-            current_spectators.clear();
-        }
+        } => current_spectators.clear(),
         _ => {}
     }
 }
@@ -2265,6 +2261,50 @@ mod tests {
             serialize_json_text_limited(&message, size - 1, 0, "spectator"),
             Err(BoundedSerializationError::MessageTooLarge { size: attempted, max })
                 if attempted > max && max == size - 1
+        ));
+    }
+
+    /// Issue #525: a fan-out constructor that forgot `spectator_count`
+    /// fails open — the event keeps the parseable full-roster shape instead
+    /// of being slimmed to a countless delta.
+    #[test]
+    fn spectator_fan_out_without_a_count_fails_open_to_the_full_roster() {
+        let spectator = SpectatorInfo {
+            id: player_a(),
+            name: "Watcher".to_string(),
+            connected_at: Utc::now(),
+        };
+        let countless = ServerMessage::NewSpectatorJoined {
+            spectator: spectator.clone(),
+            current_spectators: vec![spectator.clone()],
+            spectator_count: None,
+            reason: None,
+        };
+        let mut event = countless;
+        slim_spectator_fan_out_for_v3(&mut event);
+        assert!(matches!(
+            &event,
+            ServerMessage::NewSpectatorJoined {
+                current_spectators,
+                spectator_count: None,
+                ..
+            } if current_spectators.len() == 1
+        ));
+
+        let mut counted = ServerMessage::SpectatorDisconnected {
+            spectator_id: spectator.id,
+            reason: None,
+            current_spectators: vec![spectator],
+            spectator_count: Some(1),
+        };
+        slim_spectator_fan_out_for_v3(&mut counted);
+        assert!(matches!(
+            &counted,
+            ServerMessage::SpectatorDisconnected {
+                current_spectators,
+                spectator_count: Some(1),
+                ..
+            } if current_spectators.is_empty()
         ));
     }
 
