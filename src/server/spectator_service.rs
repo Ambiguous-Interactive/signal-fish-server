@@ -649,6 +649,9 @@ impl SpectatorService {
                 let notification = Arc::new(ServerMessage::NewSpectatorJoined {
                     spectator: spectator.clone(),
                     current_spectators: spectator_snapshot.clone(),
+                    // The roster is u8-capped (`max_spectators`), so the
+                    // saturating fallback is unreachable; it keeps the
+                    // explicit-narrowing lint honest without a panic path.
                     spectator_count: Some(
                         u32::try_from(spectator_snapshot.len()).unwrap_or(u32::MAX),
                     ),
@@ -1205,6 +1208,9 @@ impl SpectatorService {
         let notification = Arc::new(ServerMessage::SpectatorDisconnected {
             spectator_id: *player_id,
             reason: Some(reason.clone()),
+            // The roster is u8-capped (`max_spectators`), so the saturating
+            // fallback is unreachable; it keeps the explicit-narrowing lint
+            // honest without a panic path.
             spectator_count: Some(u32::try_from(current_spectators.len()).unwrap_or(u32::MAX)),
             current_spectators,
         });

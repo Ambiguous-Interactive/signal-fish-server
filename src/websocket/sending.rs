@@ -797,12 +797,44 @@ pub(super) async fn send_single_message_ref(
         // recorded verbatim from the live broadcast, so the same slimming
         // applies to the nested copies (see
         // [`project_replayed_event_for_v3`]).
-        ServerMessage::NewSpectatorJoined { .. } | ServerMessage::SpectatorDisconnected { .. }
-            if recipient_supports_v3 && spectator_fan_out_needs_v3_slim(message) =>
-        {
-            let mut message = message.clone();
-            slim_spectator_fan_out_for_v3(&mut message);
-            send_text_message(sender, &message, player_id, max_outbound_message_size).await?;
+        ServerMessage::NewSpectatorJoined {
+            spectator,
+            current_spectators,
+            spectator_count,
+            reason,
+        } if recipient_supports_v3 && !current_spectators.is_empty() => {
+            debug_assert!(
+                spectator_count.is_some(),
+                "v3 spectator fan-out requires spectator_count"
+            );
+            // Rebuild instead of clone-then-clear: the roster payload is the
+            // term this projection exists to drop, so cloning it per
+            // recipient would halve the win.
+            let slim = ServerMessage::NewSpectatorJoined {
+                spectator: spectator.clone(),
+                current_spectators: Vec::new(),
+                spectator_count: *spectator_count,
+                reason: reason.clone(),
+            };
+            send_text_message(sender, &slim, player_id, max_outbound_message_size).await?;
+        }
+        ServerMessage::SpectatorDisconnected {
+            spectator_id,
+            reason,
+            current_spectators,
+            spectator_count,
+        } if recipient_supports_v3 && !current_spectators.is_empty() => {
+            debug_assert!(
+                spectator_count.is_some(),
+                "v3 spectator fan-out requires spectator_count"
+            );
+            let slim = ServerMessage::SpectatorDisconnected {
+                spectator_id: *spectator_id,
+                reason: reason.clone(),
+                current_spectators: Vec::new(),
+                spectator_count: *spectator_count,
+            };
+            send_text_message(sender, &slim, player_id, max_outbound_message_size).await?;
         }
         // The frozen v2 bytes never carried `spectator_count`, so the count
         // is stripped for pre-v3 recipients while they keep the full roster.
@@ -976,27 +1008,22 @@ fn replayed_event_needs_v3_projection(event: &ServerMessage) -> bool {
 fn slim_spectator_fan_out_for_v3(message: &mut ServerMessage) {
     match message {
         ServerMessage::NewSpectatorJoined {
-            current_spectators, ..
+            current_spectators,
+            spectator_count,
+            ..
         }
         | ServerMessage::SpectatorDisconnected {
-            current_spectators, ..
-        } => current_spectators.clear(),
+            current_spectators,
+            spectator_count,
+            ..
+        } => {
+            debug_assert!(
+                spectator_count.is_some(),
+                "v3 spectator fan-out requires spectator_count"
+            );
+            current_spectators.clear();
+        }
         _ => {}
-    }
-}
-
-/// Whether a room-uniform spectator fan-out still carries a full roster that
-/// a v3 recipient should receive in slim form (the mirror of
-/// [`slim_spectator_fan_out_for_v3`]; keep the two exhaustive in lockstep).
-fn spectator_fan_out_needs_v3_slim(message: &ServerMessage) -> bool {
-    match message {
-        ServerMessage::NewSpectatorJoined {
-            current_spectators, ..
-        }
-        | ServerMessage::SpectatorDisconnected {
-            current_spectators, ..
-        } => !current_spectators.is_empty(),
-        _ => false,
     }
 }
 
