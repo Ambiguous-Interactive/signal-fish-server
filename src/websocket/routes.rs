@@ -23,6 +23,51 @@ use super::metrics::{metrics_handler, prometheus_metrics_handler};
 
 const LISTENER_BACKLOG: u32 = 1_024;
 
+/// HTTP/2 keep-alive PING interval for the serve stacks (issue #553).
+///
+/// hyper arms the HTTP/1 header-read deadline but exposes no header deadline
+/// for HTTP/2: a direct-TCP client that sends the h2 preface plus SETTINGS and
+/// then parks otherwise holds an fd, a task, and buffers forever. The
+/// keep-alive cycle reaps such connections: a PING every
+/// [`H2_KEEP_ALIVE_INTERVAL`], and the connection is closed when no PING
+/// acknowledgement arrives within [`H2_KEEP_ALIVE_TIMEOUT`]. A client that
+/// answers PINGs still holds its connection, so an h2-terminating reverse
+/// proxy with its own idle timeout remains the stronger mitigation for
+/// direct-TCP deployments (see the deployment guide).
+pub const H2_KEEP_ALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// HTTP/2 keep-alive PING acknowledgement deadline; see
+/// [`H2_KEEP_ALIVE_INTERVAL`].
+pub const H2_KEEP_ALIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Explicit HTTP timeouts for the plain-TCP serve path.
+///
+/// Production construction arms the configured header-read deadline (issue
+/// #518) and the shared HTTP/2 keep-alive pair (issue #553); tests may build
+/// one with tighter values to observe the same semantics quickly.
+#[derive(Clone, Copy, Debug)]
+pub struct HttpServeTimeouts {
+    /// HTTP/1.1 pre-upgrade header-read deadline.
+    pub header_read_timeout: std::time::Duration,
+    /// HTTP/2 keep-alive PING interval; see [`H2_KEEP_ALIVE_INTERVAL`].
+    pub h2_keep_alive_interval: std::time::Duration,
+    /// HTTP/2 keep-alive PING acknowledgement deadline; see
+    /// [`H2_KEEP_ALIVE_TIMEOUT`].
+    pub h2_keep_alive_timeout: std::time::Duration,
+}
+
+impl HttpServeTimeouts {
+    /// Production timeouts: the operator-configured header-read deadline plus
+    /// the shared HTTP/2 keep-alive constants.
+    pub fn production(header_read_timeout: std::time::Duration) -> Self {
+        Self {
+            header_read_timeout,
+            h2_keep_alive_interval: H2_KEEP_ALIVE_INTERVAL,
+            h2_keep_alive_timeout: H2_KEEP_ALIVE_TIMEOUT,
+        }
+    }
+}
+
 /// Bind a TCP listener whose accepted sockets inherit a bounded send buffer.
 ///
 /// A bounded kernel handoff is part of the WebSocket control-priority
@@ -105,24 +150,27 @@ use hyper_util::service::TowerToHyperService;
 // connection reproduces exactly what axum::serve does internally.
 use tower_service::Service;
 
-/// Serve the plain-TCP path with an explicitly armed HTTP header-read deadline.
+/// Serve the plain-TCP path with explicitly armed HTTP deadlines.
 ///
 /// `axum::serve` leaves hyper's `Timer` unset, which silently disables
 /// hyper's own (30-second) header-read timeout: a raw-HTTP client can park a
 /// partial request forever before any application handler or WebSocket
-/// deadline sees it (issue #518). This path drives the same hyper-util auto
-/// builder axum drives, but arms `timer` + `header_read_timeout`, applies the
-/// same accepted-socket configuration as [`bind_serve_listener`], preserves
-/// axum's graceful-shutdown semantics for in-flight connections (same trigger
-/// semantics as `axum::serve::with_graceful_shutdown` over the shutdown
-/// watch), and keeps HTTP/2 CONNECT so WebSocket-over-HTTP/2 keeps working.
+/// deadline sees it (issue #518). HTTP/2 has no header deadline at all, so
+/// this path also arms the h2 keep-alive cycle to reap parked h2 connections
+/// (issue #553). This path drives the same hyper-util auto builder axum
+/// drives, but arms `timer` + `header_read_timeout` + h2 keep-alive, applies
+/// the same accepted-socket configuration as [`bind_serve_listener`],
+/// preserves axum's graceful-shutdown semantics for in-flight connections
+/// (same trigger semantics as `axum::serve::with_graceful_shutdown` over the
+/// shutdown watch), and keeps HTTP/2 CONNECT so WebSocket-over-HTTP/2 keeps
+/// working.
 pub async fn serve_with_http_header_deadline(
     listener: TcpListener,
     mut make_service: axum::extract::connect_info::IntoMakeServiceWithConnectInfo<
         axum::Router,
         SocketAddr,
     >,
-    header_read_timeout: std::time::Duration,
+    timeouts: HttpServeTimeouts,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> std::io::Result<()> {
     /// Resolves once the shared shutdown watch flips (or its sender drops) —
@@ -189,10 +237,17 @@ pub async fn serve_with_http_header_deadline(
                     builder
                         .http1()
                         .timer(TokioTimer::new())
-                        .header_read_timeout(header_read_timeout);
+                        .header_read_timeout(timeouts.header_read_timeout);
                     // CONNECT protocol needed for HTTP/2 WebSockets (RFC
-                    // 8441), matching axum::serve's http2 configuration.
-                    builder.http2().enable_connect_protocol();
+                    // 8441), matching axum::serve's http2 configuration. The
+                    // keep-alive cycle reaps h2 connections parked after the
+                    // preface (issue #553), which hyper's h2 path otherwise
+                    // holds forever.
+                    builder
+                        .http2()
+                        .enable_connect_protocol()
+                        .keep_alive_interval(Some(timeouts.h2_keep_alive_interval))
+                        .keep_alive_timeout(timeouts.h2_keep_alive_timeout);
 
                     let shutdown_for_task = shutdown_resolved(shutdown_rx_clone.clone());
                     tokio::pin!(shutdown_for_task);
@@ -500,9 +555,9 @@ pub async fn run_server(
     // detached task retaining the server. The header-read deadline serve path
     // applies the same accepted-socket configuration as bind_serve_listener.
     let listener = bind_tcp_listener(addr, socket_send_buffer_bytes)?;
-    let http_header_read_timeout = std::time::Duration::from_secs(
+    let timeouts = HttpServeTimeouts::production(std::time::Duration::from_secs(
         server_config.websocket_config.http_header_read_timeout_secs,
-    );
+    ));
 
     // Keep cleanup scoped to this serving future. Normal return signals and
     // joins it; cancellation drops the guard and aborts it.
@@ -536,7 +591,7 @@ pub async fn run_server(
         serve_with_http_header_deadline(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
-            http_header_read_timeout,
+            timeouts,
             never_shutdown_rx,
         ),
         cleanup_shutdown_tx,
@@ -847,5 +902,69 @@ mod tests {
             serve_body.contains("try_join_next()"),
             "the serve loop must reap completed connection tasks; a JoinSet that only              joins at shutdown grows unboundedly with total connections served"
         );
+    }
+
+    /// Issue #553: an HTTP/2 client that completes the connection preface and
+    /// then parks must be reaped by the keep-alive cycle. hyper applies no
+    /// header-read deadline to h2, so without keep-alive such a connection
+    /// holds its fd, task, and buffers forever. Behavior-level: the reaping
+    /// lives inside hyper, so only a real socket test observes it; short
+    /// injected keep-alive values keep the test fast and deterministic.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn parked_h2_connection_is_reaped_by_the_keep_alive_cycle() {
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral test listener");
+        let addr = listener.local_addr().expect("read test listener address");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let serve_task = tokio::spawn(serve_with_http_header_deadline(
+            listener,
+            axum::Router::new().into_make_service_with_connect_info::<SocketAddr>(),
+            HttpServeTimeouts {
+                header_read_timeout: Duration::from_secs(60),
+                h2_keep_alive_interval: Duration::from_millis(50),
+                h2_keep_alive_timeout: Duration::from_millis(100),
+            },
+            shutdown_rx,
+        ));
+
+        let mut client = TcpStream::connect(addr)
+            .await
+            .expect("connect loopback client");
+        // HTTP/2 connection preface (RFC 9113 section 3.4): the fixed octet
+        // sequence followed by an empty SETTINGS frame.
+        client
+            .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+            .await
+            .expect("write h2 preface");
+        client
+            .write_all(&[0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00])
+            .await
+            .expect("write empty SETTINGS frame");
+        // Park without answering keep-alive PINGs: the server must close the
+        // connection once the PING acknowledgement deadline passes.
+        let mut drained = Vec::new();
+        let reaped =
+            tokio::time::timeout(Duration::from_secs(10), client.read_to_end(&mut drained)).await;
+        assert!(
+            reaped.is_ok(),
+            "the parked h2 connection must be reaped by the keep-alive cycle"
+        );
+        assert!(
+            !drained.is_empty(),
+            "the server must have spoken h2 first (SETTINGS/PING frames) before closing"
+        );
+
+        shutdown_tx
+            .send(true)
+            .expect("serve shutdown signal accepted");
+        serve_task
+            .await
+            .expect("serve task joined")
+            .expect("serve task stopped cleanly");
     }
 }

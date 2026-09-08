@@ -1054,15 +1054,28 @@ impl EnhancedGameServer {
     /// handshake resolves against the new set. Revoking a live connection
     /// stays a restart/tenant-level action by design. Open-mode deployments
     /// (allowlist enforcement disabled) report the call as a no-op.
+    ///
+    /// The per-app `app_relay_bytes` series of revoked IDs is pruned with the
+    /// swap (issue #552), so departed tenants leave no forever-resident
+    /// observability residue.
     pub fn reload_allowed_apps(
         &self,
         entries: Vec<crate::config::AppRegistrationEntry>,
     ) -> Result<crate::auth::AllowedAppsReload, crate::auth::AuthError> {
         let reload = self.app_id_allowlist.reload(entries)?;
         if reload.applied {
+            // App UUIDs derive deterministically from the configured ID
+            // strings, so the revoked set maps 1:1 onto metric series keys.
+            let revoked: Vec<Uuid> = reload
+                .removed
+                .iter()
+                .map(|app_id| crate::auth::middleware::deterministic_uuid(app_id))
+                .collect();
+            let pruned = self.metrics.prune_app_relay_series(&revoked);
             tracing::info!(
                 added = ?reload.added,
                 removed = ?reload.removed,
+                pruned_relay_series = pruned,
                 "App-ID allowlist reloaded; other configuration changes still require a restart"
             );
         }
@@ -4702,6 +4715,102 @@ mod relay_projection_cache_tests {
         ] {
             assert!(!rendered.contains(removed), "stale series {removed}");
         }
+    }
+
+    /// Issue #552: an allowlist reload must prune the `app_relay_bytes`
+    /// series of revoked app IDs — a departed tenant must not keep surfacing
+    /// in the snapshot and Prometheus output for the life of the process —
+    /// while surviving series keep their counts, and a re-added app ID starts
+    /// fresh only when new traffic arrives.
+    #[tokio::test]
+    async fn allowlist_reload_prunes_revoked_app_relay_series() {
+        fn app_entry(app_id: &str) -> crate::config::AppRegistrationEntry {
+            crate::config::AppRegistrationEntry {
+                app_id: app_id.to_string(),
+                app_name: app_id.to_string(),
+                max_rooms: None,
+                max_players_per_room: None,
+                rate_limit_per_minute: None,
+                max_relay_bytes: None,
+            }
+        }
+
+        let config = super::ServerConfig {
+            app_id_allowlist_enabled: true,
+            ..super::ServerConfig::default()
+        };
+        let server = super::EnhancedGameServer::new(
+            config,
+            crate::config::ProtocolConfig::default(),
+            crate::config::RelayTypeConfig::default(),
+            crate::config::SessionConfig::default(),
+            crate::config::TurnConfig::default(),
+            crate::database::DatabaseConfig::InMemory,
+            crate::config::MetricsConfig::default(),
+            crate::config::CoordinationConfig::default(),
+            crate::config::TransportSecurityConfig::default(),
+            vec![app_entry("kept-app"), app_entry("revoked-app")],
+        )
+        .await
+        .expect("construct server with allowlist");
+
+        let kept_id = crate::auth::middleware::deterministic_uuid("kept-app");
+        let revoked_id = crate::auth::middleware::deterministic_uuid("revoked-app");
+        server.metrics.record_app_relay_bytes(&kept_id, 500);
+        server.metrics.record_app_relay_bytes(&revoked_id, 900);
+        assert!(server
+            .metrics
+            .app_relay_bytes_snapshot()
+            .contains_key(&revoked_id));
+
+        let reload = server
+            .reload_allowed_apps(vec![app_entry("kept-app")])
+            .expect("reload applies");
+        assert!(reload.applied);
+        assert_eq!(reload.removed, vec!["revoked-app".to_string()]);
+
+        let snapshot = server.metrics.app_relay_bytes_snapshot();
+        assert!(
+            !snapshot.contains_key(&revoked_id),
+            "the revoked app's series must be pruned on reload"
+        );
+        assert_eq!(
+            snapshot.get(&kept_id),
+            Some(&500),
+            "a surviving app's series must keep its counts"
+        );
+
+        // Prometheus output agrees with the snapshot.
+        let rendered = crate::websocket::prometheus::render_prometheus_metrics(
+            &server.metrics.snapshot().await,
+        );
+        assert!(
+            !rendered.contains(&format!("app_id=\"{revoked_id}\"")),
+            "the revoked app's Prometheus series must be gone"
+        );
+        assert!(
+            rendered.contains(&format!("app_id=\"{kept_id}\"}} 500")),
+            "the surviving app's Prometheus series must remain"
+        );
+
+        // Re-adding the same app ID must not resurrect old counts: the series
+        // only exists once new traffic is recorded.
+        server
+            .reload_allowed_apps(vec![app_entry("kept-app"), app_entry("revoked-app")])
+            .expect("reload applies");
+        assert!(
+            !server
+                .metrics
+                .app_relay_bytes_snapshot()
+                .contains_key(&revoked_id),
+            "re-adding a revoked app must start from no series"
+        );
+        server.metrics.record_app_relay_bytes(&revoked_id, 1);
+        assert_eq!(
+            server.metrics.app_relay_bytes_snapshot().get(&revoked_id),
+            Some(&1),
+            "new traffic after re-adding starts a fresh series"
+        );
     }
 
     #[tokio::test]

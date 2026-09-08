@@ -481,7 +481,15 @@ async fn main() -> anyhow::Result<()> {
                 .header_read_timeout(std::time::Duration::from_secs(
                     cfg.websocket.http_header_read_timeout_secs,
                 ));
-            server.http_builder().http2().enable_connect_protocol();
+            // Keep-alive mirrors the plain path (routes.rs): h2 has no header
+            // deadline, so parked pre-upgrade h2 connections are reaped by the
+            // PING cycle instead (issue #553).
+            server
+                .http_builder()
+                .http2()
+                .enable_connect_protocol()
+                .keep_alive_interval(Some(websocket::H2_KEEP_ALIVE_INTERVAL))
+                .keep_alive_timeout(websocket::H2_KEEP_ALIVE_TIMEOUT);
         }
         // Log "started" only after the bind and TLS setup have actually
         // succeeded: a log scraper reading the earlier placement would see a
@@ -506,8 +514,9 @@ async fn main() -> anyhow::Result<()> {
     // hyper's Timer unset, silently disabling hyper's header-read timeout
     // (issue #518).
     let listener = websocket::bind_tcp_listener(addr, cfg.websocket.socket_send_buffer_bytes)?;
-    let http_header_read_timeout =
-        std::time::Duration::from_secs(cfg.websocket.http_header_read_timeout_secs);
+    let timeouts = websocket::HttpServeTimeouts::production(std::time::Duration::from_secs(
+        cfg.websocket.http_header_read_timeout_secs,
+    ));
     tracing::info!(
         %addr,
         cors_origins = %cfg.security.cors_origins,
@@ -519,7 +528,7 @@ async fn main() -> anyhow::Result<()> {
         websocket::serve_with_http_header_deadline(
             listener,
             make_service,
-            http_header_read_timeout,
+            timeouts,
             shutdown_rx.clone(),
         ),
         drain_done_rx,
@@ -939,14 +948,60 @@ mod serve_stack_parity_tests {
             .next()
             .expect("TLS serve block delimited");
         assert!(
-            tls_body.contains(".http2().enable_connect_protocol()"),
+            tls_body.contains(".enable_connect_protocol()"),
             "the TLS serve stack must enable RFC 8441 extended CONNECT to match its h2 ALPN advertisement"
         );
 
         let routes_source = include_str!("websocket/routes.rs");
         assert!(
-            routes_source.contains(".http2().enable_connect_protocol()"),
+            routes_source.contains(".enable_connect_protocol()"),
             "the plain serve stack must keep RFC 8441 extended CONNECT enabled"
+        );
+    }
+
+    /// Issue #553: both serve stacks must arm the HTTP/2 keep-alive cycle —
+    /// the only reaper for parked pre-upgrade h2 connections, since hyper's
+    /// `header_read_timeout` never applies to h2. Source-pinned: the reaping
+    /// behavior on the plain path is covered by a live-socket test
+    /// (`parked_h2_connection_is_reaped_by_the_keep_alive_cycle` in
+    /// `websocket/routes.rs`), but the TLS builder inside `axum_server` is
+    /// only observable at this level.
+    #[test]
+    fn both_serve_stacks_arm_http2_keep_alive() {
+        let main_source = include_str!("main.rs");
+        let tls_block = main_source
+            .split("Arm the pre-upgrade header-read deadline on the TLS path too")
+            .nth(1)
+            .expect("the TLS serve configuration block must exist");
+        let tls_body = tls_block
+            .split("\n        }")
+            .next()
+            .expect("TLS serve block delimited");
+        assert!(
+            tls_body.contains(".keep_alive_interval(Some(websocket::H2_KEEP_ALIVE_INTERVAL))"),
+            "the TLS serve stack must arm the h2 keep-alive PING interval"
+        );
+        assert!(
+            tls_body.contains(".keep_alive_timeout(websocket::H2_KEEP_ALIVE_TIMEOUT)"),
+            "the TLS serve stack must arm the h2 keep-alive PING deadline"
+        );
+
+        let routes_source = include_str!("websocket/routes.rs");
+        let serve_fn = routes_source
+            .split("pub async fn serve_with_http_header_deadline")
+            .nth(1)
+            .expect("serve_with_http_header_deadline must exist");
+        let serve_body = serve_fn
+            .split("\n}")
+            .next()
+            .expect("serve fn body delimited");
+        assert!(
+            serve_body.contains(".keep_alive_interval(Some(timeouts.h2_keep_alive_interval))"),
+            "the plain serve stack must arm the h2 keep-alive PING interval"
+        );
+        assert!(
+            serve_body.contains(".keep_alive_timeout(timeouts.h2_keep_alive_timeout)"),
+            "the plain serve stack must arm the h2 keep-alive PING deadline"
         );
     }
 }

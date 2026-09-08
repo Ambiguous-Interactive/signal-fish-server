@@ -249,6 +249,11 @@ pub struct ServerMetrics {
 
     // Distributed lock metrics
     pub distributed_lock_release_failures: AtomicU64,
+    /// Lease renewals that found the lease expired or stolen mid-hold
+    /// (issue #550): the critical section continued without coordination, so
+    /// cap checks in that window were best-effort. Any sustained non-zero
+    /// rate means holds exceed the lease TTL and must be investigated.
+    pub distributed_lock_renewal_failures: AtomicU64,
     pub distributed_lock_cleanup_runs: AtomicU64,
     pub distributed_lock_cleanup_removed: AtomicU64,
 
@@ -582,6 +587,7 @@ pub struct ReconnectionMetrics {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DistributedLockMetrics {
     pub release_failures: u64,
+    pub renewal_failures: u64,
     pub cleanup_runs: u64,
     pub cleanup_removed: u64,
 }
@@ -709,6 +715,7 @@ impl ServerMetrics {
             reconnection_events_buffered: AtomicU64::new(0),
             reconnection_events_evicted: AtomicU64::new(0),
             distributed_lock_release_failures: AtomicU64::new(0),
+            distributed_lock_renewal_failures: AtomicU64::new(0),
             distributed_lock_cleanup_runs: AtomicU64::new(0),
             distributed_lock_cleanup_removed: AtomicU64::new(0),
             empty_rooms_cleaned: AtomicU64::new(0),
@@ -987,6 +994,23 @@ impl ServerMetrics {
             .iter()
             .map(|entry| (*entry.key(), entry.value().load(Ordering::Relaxed)))
             .collect()
+    }
+
+    /// Remove the per-app relay-byte series of application IDs that an
+    /// allowlist reload revoked (issue #552), returning the number of series
+    /// removed.
+    ///
+    /// Without this, every app ID ever configured keeps surfacing in the JSON
+    /// snapshot and `signal_fish_relay_app_bytes_total` for the life of the
+    /// process. A still-connected client whose app was revoked keeps its
+    /// context by design (live revocation is a restart-level action), so its
+    /// series legitimately re-appears if it relays again — the pruning only
+    /// clears the residue of departed tenants.
+    pub fn prune_app_relay_series(&self, revoked: &[uuid::Uuid]) -> usize {
+        revoked
+            .iter()
+            .filter_map(|app_id| self.app_relay_bytes.remove(app_id))
+            .count()
     }
 
     /// Register the eviction-attribution ledger for a live sender
@@ -1314,6 +1338,11 @@ impl ServerMetrics {
     // Distributed lock metrics
     pub fn increment_distributed_lock_release_failures(&self) {
         self.distributed_lock_release_failures
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn increment_distributed_lock_renewal_failures(&self) {
+        self.distributed_lock_renewal_failures
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -1673,6 +1702,9 @@ impl ServerMetrics {
             distributed_lock: DistributedLockMetrics {
                 release_failures: self
                     .distributed_lock_release_failures
+                    .load(Ordering::Relaxed),
+                renewal_failures: self
+                    .distributed_lock_renewal_failures
                     .load(Ordering::Relaxed),
                 cleanup_runs: self.distributed_lock_cleanup_runs.load(Ordering::Relaxed),
                 cleanup_removed: self

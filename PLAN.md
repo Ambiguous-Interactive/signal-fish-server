@@ -85,7 +85,17 @@ correctness evidence appears.
   residue — never the target's live membership in another room — with the
   farewell, reconnection credential, and `4007` close gated on a fresh
   post-tombstone route read; the TLS serve stack also gained RFC 8441
-  extended CONNECT to match its `h2` ALPN advertisement. Remaining
+  extended CONNECT to match its `h2` ALPN advertisement. Session 222 closed
+  the session-221 follow-up wave (#550–#554): admission locks renew their
+  leases mid-hold (`LeaseRenewalGuard`, so a stalled storage can no longer
+  void the cap guarantee; lost leases are fail-visible via
+  `signal_fish_distributed_lock_renewal_failures_total`), both serve stacks
+  arm an HTTP/2 keep-alive cycle that reaps parked h2 connections (hyper has
+  no h2 header deadline), the whole `/metrics` response carries a 1 MiB byte
+  budget with oldest-first history truncation, allowlist reloads prune the
+  relay-byte series of revoked app IDs, and the mid-game
+  `TransferAuthority` semantics are decided and pinned (role moves, the
+  finalize-time transport host does not). Remaining
   frontier: continue seam sweeps; #539 tracks the coordinated-SDK path for
   the `connected_at` v3 trim (released SDKs 0.8.0–0.12.0 require the field);
   the parked-state (`senderState`) producers are same-thread program-ordered

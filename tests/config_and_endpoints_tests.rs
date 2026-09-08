@@ -1658,7 +1658,7 @@ async fn test_metrics_endpoint_no_auth_required() {
     distributed_lock_keys.sort_unstable();
     assert_eq!(
         distributed_lock_keys,
-        ["cleanup_removed", "cleanup_runs", "release_failures"],
+        ["cleanup_removed", "cleanup_runs", "release_failures", "renewal_failures"],
         "the JSON snapshot must expose only wired distributed-lock metrics"
     );
 

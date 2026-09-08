@@ -479,6 +479,12 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     );
     counter(
         &mut buf,
+        "signal_fish_distributed_lock_renewal_failures_total",
+        "Total lease renewals that found the lease expired or stolen mid-hold (cap checks ran best-effort in that window)",
+        snapshot.distributed_lock.renewal_failures,
+    );
+    counter(
+        &mut buf,
         "signal_fish_distributed_lock_cleanup_runs_total",
         "Total successful cleanup executions for distributed locks",
         snapshot.distributed_lock.cleanup_runs,

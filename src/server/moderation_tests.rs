@@ -1303,3 +1303,157 @@ async fn transfer_authority_refusals_are_classified_per_failure() {
         );
     }
 }
+
+/// Build a server with the given session policy, so the finalize path can
+/// resolve to a host-topology plan (same shape as `ready_state_tests`).
+async fn create_test_server_with_session(session: SessionConfig) -> Arc<EnhancedGameServer> {
+    EnhancedGameServer::new(
+        ServerConfig::default(),
+        ProtocolConfig::default(),
+        RelayTypeConfig::default(),
+        session,
+        TurnConfig::default(),
+        crate::database::DatabaseConfig::InMemory,
+        MetricsConfig::default(),
+        CoordinationConfig::default(),
+        TransportSecurityConfig::default(),
+        Vec::new(),
+    )
+    .await
+    .expect("failed to construct test server")
+}
+
+/// Issue #554, decided semantics ("the role follows the plan, not vice
+/// versa"): a mid-game `TransferAuthority` moves the moderation and
+/// start-game role, but the running session's transport host stays pinned to
+/// its finalize-time election. Only a departure (host failover) re-plans the
+/// session. Documented in `docs/concepts/authority.md` ("The Role and the
+/// Transport Host Are Not the Same Thing").
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn mid_game_transfer_moves_the_role_but_not_the_session_host() {
+    let server = create_test_server_with_session(SessionConfig {
+        default_topology: crate::protocol::Topology::Host,
+        ..SessionConfig::default()
+    })
+    .await;
+    let (authority, mut authority_rx) =
+        register_client(&server, "127.0.0.1:48161".parse().unwrap()).await;
+    let (successor, mut successor_rx) =
+        register_client(&server, "127.0.0.1:48162".parse().unwrap()).await;
+    let v3_host = crate::server::NegotiatedProtocol {
+        version: 3,
+        transports: vec![
+            crate::protocol::Transport::Relay,
+            crate::protocol::Transport::WebRtc,
+        ],
+        topologies: vec![
+            crate::protocol::Topology::Relay,
+            crate::protocol::Topology::Host,
+        ],
+    };
+    server.set_client_protocol(&authority, v3_host.clone());
+    server.set_client_protocol(&successor, v3_host);
+
+    // A 2-seat authority room, driven through the REAL finalize flow: both
+    // members join, the room moves to the lobby, both toggle ready, and an
+    // explicit StartGame finalizes with a host-topology session plan.
+    join_seated_player(&server, &authority, &mut authority_rx, "MIDGM1", "host").await;
+    join_seated_player(&server, &successor, &mut successor_rx, "MIDGM1", "guest").await;
+    let room = server
+        .database
+        .get_room("moderation-game", "MIDGM1")
+        .await
+        .expect("room lookup succeeds")
+        .expect("room exists");
+    server
+        .database
+        .transition_room_to_lobby(&room.id)
+        .await
+        .expect("lobby transition succeeds");
+    server.handle_player_ready(&authority).await;
+    server.handle_player_ready(&successor).await;
+    server.handle_start_game(&authority).await;
+
+    let plan_before = server
+        .active_session_plan(&room.id)
+        .expect("a finalized host-topology room must hold an active session plan");
+    assert_eq!(
+        plan_before.topology,
+        crate::protocol::Topology::Host,
+        "this test pins host-topology semantics"
+    );
+    assert!(
+        plan_before.host.is_some(),
+        "a host-topology plan must have elected a transport host"
+    );
+
+    drain_receiver(&mut authority_rx);
+    drain_receiver(&mut successor_rx);
+
+    // Mid-game transfer of the authority role.
+    server
+        .handle_transfer_authority_operation(&authority, RoomOperationId::new_v4(), successor)
+        .await;
+
+    // The moderation role moved, and the room is still mid-game.
+    let room_after = server
+        .database
+        .get_room_by_id(&room.id)
+        .await
+        .expect("room lookup succeeds")
+        .expect("room exists");
+    assert_eq!(
+        room_after.authority_player,
+        Some(successor),
+        "the transfer must grant the successor the authority role"
+    );
+    assert_eq!(
+        room_after.lobby_state,
+        crate::protocol::LobbyState::Finalized,
+        "the room must stay finalized across the transfer"
+    );
+
+    // The session plan did NOT follow the role: identical sticky decision.
+    let plan_after = server
+        .active_session_plan(&room.id)
+        .expect("the active plan must survive the transfer");
+    assert_eq!(
+        plan_after.topology, plan_before.topology,
+        "the session topology must not change on a transfer"
+    );
+    assert_eq!(
+        plan_after.transport, plan_before.transport,
+        "the session transport must not change on a transfer"
+    );
+    assert_eq!(
+        plan_after.host, plan_before.host,
+        "the transport host must not follow the moderation role"
+    );
+
+    // No re-plan traffic: members learn only the role change.
+    for (receiver, who) in [
+        (&mut authority_rx, "authority"),
+        (&mut successor_rx, "successor"),
+    ] {
+        let messages = drain_receiver(receiver);
+        assert!(
+            messages
+                .iter()
+                .any(|message| matches!(message.as_ref(), ServerMessage::AuthorityChanged { .. })),
+            "{who} must learn the role change"
+        );
+        assert!(
+            !messages
+                .iter()
+                .any(|message| matches!(message.as_ref(), ServerMessage::SessionPlan(_))),
+            "{who} must not receive a fresh SessionPlan on a mid-game transfer"
+        );
+        assert!(
+            !messages
+                .iter()
+                .any(|message| matches!(message.as_ref(), ServerMessage::GameStarting { .. })),
+            "{who} must not observe a re-start on a mid-game transfer"
+        );
+    }
+}
