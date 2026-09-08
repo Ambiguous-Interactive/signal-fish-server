@@ -182,9 +182,10 @@ spectator join must present the same password:
   birth -- there is no unlocked window between creation and `SetRoomAccess`.
 - `SetRoomAccess { password: null }` reopens the room. Current members and
   their reconnection tokens are unaffected either way.
-- Passwords are capped at 256 bytes and stored only as salted hashes: the
-  plaintext is never logged, echoed, or persisted. Treat the password as a
-  room-scoped convenience secret, not an account credential.
+- Passwords are capped at 256 bytes and stored only as salted hashes (a
+  single digest pass, no key-derivation work factor): the plaintext is
+  never logged, echoed, or persisted. Treat the password as a room-scoped
+  convenience secret guarding admission, not an account credential.
 
 ### Bans
 

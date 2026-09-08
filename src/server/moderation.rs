@@ -25,6 +25,11 @@ struct ModerationTarget {
     /// The room a pending reconnection record holds a seat for, if any.
     pending_record_room: Option<RoomId>,
     target_lifecycle_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    /// The acting authority's lifecycle gate, held across the whole
+    /// eviction so the authority's own disconnect/leave processing cannot
+    /// interleave with the removal it authorized (same scope as the
+    /// pre-refactor kick handler).
+    _authority_lifecycle_guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl EnhancedGameServer {
@@ -50,6 +55,7 @@ impl EnhancedGameServer {
             target_seated_in_row,
             pending_record_room,
             target_lifecycle_guard,
+            _authority_lifecycle_guard,
         }) = self
             .resolve_kick_style_target(authority_id, operation_id, &target_id)
             .await
@@ -64,6 +70,7 @@ impl EnhancedGameServer {
             target_seated_in_row,
             pending_record_room,
             target_lifecycle_guard,
+            _authority_lifecycle_guard,
         )
         .await;
 
@@ -102,6 +109,7 @@ impl EnhancedGameServer {
             target_seated_in_row,
             pending_record_room,
             target_lifecycle_guard,
+            _authority_lifecycle_guard,
         }) = self
             .resolve_kick_style_target(authority_id, operation_id, &target_id)
             .await
@@ -152,6 +160,7 @@ impl EnhancedGameServer {
             target_seated_in_row,
             pending_record_room,
             target_lifecycle_guard,
+            _authority_lifecycle_guard,
         )
         .await;
 
@@ -736,8 +745,11 @@ impl EnhancedGameServer {
     ) -> Option<ModerationTarget> {
         // Fix the authority's connection identity and membership with its
         // lifecycle gate (same prologue as every room operation handler).
+        // The guard is carried out through [`ModerationTarget`] so the
+        // eviction it authorizes cannot interleave with the authority's own
+        // disconnect/leave processing.
         let lifecycle = self.connection_manager.client_lifecycle(authority_id)?;
-        let _authority_lifecycle_guard = lifecycle.lock().await;
+        let authority_lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
         if lifecycle.player_id() != *authority_id
             || !self
                 .connection_manager
@@ -890,6 +902,7 @@ impl EnhancedGameServer {
             target_seated_in_row,
             pending_record_room,
             target_lifecycle_guard,
+            _authority_lifecycle_guard: authority_lifecycle_guard,
         })
     }
 
@@ -909,9 +922,10 @@ impl EnhancedGameServer {
         target_seated_in_row: bool,
         pending_record_room: Option<RoomId>,
         _target_lifecycle_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+        _authority_lifecycle_guard: tokio::sync::OwnedMutexGuard<()>,
     ) {
         // Best-effort farewell: the non-blocking send parks neither this
-        // handler (which holds two lifecycle gates) nor the target's writer,
+        // handler (which holds both lifecycle gates) nor the target's writer,
         // and a full queue must neither delay the removal nor reclassify the
         // close. The close frame (`4007 kicked`) remains the attribution
         // signal that always survives.
@@ -1007,6 +1021,7 @@ impl EnhancedGameServer {
                 .await;
         }
         drop(_target_lifecycle_guard);
+        drop(_authority_lifecycle_guard);
 
         self.connection_manager
             .request_close_for(target_id, CloseReason::Kicked);

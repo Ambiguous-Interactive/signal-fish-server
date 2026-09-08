@@ -961,15 +961,15 @@ components:
                 Reserved compatibility hint; currently ignored. Omission and
                 all accepted values have identical server behavior.
             password:
-              type: string
+              type: [string, 'null']
               maxLength: 256
               description: >-
                 Join password for password-protected rooms. Required when the
                 target room carries an authority-set password (else
                 PASSWORD_REQUIRED); ignored otherwise. When the join creates
                 the room, this password seals it from birth. A wrong and a
-                missing password are indistinguishable. Never logged by the
-                server.
+                missing password are indistinguishable. Non-empty, at most 256
+                bytes. Never logged by the server.
       required: [type, data]
     LeaveRoom:
       type: object
@@ -1094,13 +1094,13 @@ components:
             room_code: { type: string }
             spectator_name: { type: string }
             password:
-              type: string
+              type: [string, 'null']
               maxLength: 256
               description: >-
                 Join password for password-protected rooms. Required when the
                 room carries an authority-set password (else
-                PASSWORD_REQUIRED); ignored otherwise. Never logged by the
-                server.
+                PASSWORD_REQUIRED); ignored otherwise. Non-empty, at most 256
+                bytes. Never logged by the server.
       required: [type, data]
     LeaveSpectator:
       type: object

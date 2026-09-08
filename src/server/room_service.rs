@@ -2311,6 +2311,12 @@ impl EnhancedGameServer {
 
                         let relay_type = self.resolve_relay_type(game_name);
                         let region_id = self.region_id().to_string();
+                        // Creation-time join password (issue #525): the room
+                        // is born sealed — storage creates and seals under one
+                        // insert — so neither a seated joiner (serialized by
+                        // this join's room-code lock) nor a spectator (which
+                        // resolves by code) can observe an unlocked row.
+                        let creation_password = password.map(RoomPasswordCredential::new);
                         let mut room = match self
                             .database
                             .create_room_classified(
@@ -2322,6 +2328,7 @@ impl EnhancedGameServer {
                                 relay_type,
                                 region_id,
                                 client_app_id,
+                                creation_password,
                             )
                             .await
                         {
@@ -2417,52 +2424,6 @@ impl EnhancedGameServer {
                                     %error,
                                     "Failed to apply default spectator capacity"
                                 );
-                            }
-                        }
-
-                        // Creation-time join password (issue #525): seal the
-                        // room while it is still inside its join critical
-                        // section, under the same gate discipline as the
-                        // spectator cap above, so no joiner can slip through
-                        // an unlocked window. Unlike the cap, a storage
-                        // failure must not silently leave a room the creator
-                        // asked to protect: roll the fresh room back and fail
-                        // the join honestly.
-                        if let Some(creation_password) = password {
-                            let credential = RoomPasswordCredential::new(creation_password);
-                            let password_event_guard = self
-                                .message_coordinator
-                                .lock_room_event_mutation(&room.id)
-                                .await;
-                            let applied = self
-                                .database
-                                .set_room_password(&room.id, Some(credential.clone()))
-                                .await;
-                            drop(password_event_guard);
-                            match applied {
-                                Ok(()) => room.password = Some(credential),
-                                Err(error) => {
-                                    tracing::error!(
-                                        room_id = %room.id,
-                                        %error,
-                                        "Failed to apply creation-time join password; rolling back the protected room"
-                                    );
-                                    match self.database.delete_room(&room.id).await {
-                                        Ok(true) => {
-                                            self.metrics.add_rooms_deleted(1);
-                                        }
-                                        Ok(false) => tracing::warn!(
-                                            room_id = %room.id,
-                                            "Room vanished while rolling back a failed password write"
-                                        ),
-                                        Err(delete_error) => tracing::error!(
-                                            room_id = %room.id,
-                                            %delete_error,
-                                            "Failed to roll back room after password write failure"
-                                        ),
-                                    }
-                                    return Err(JoinRoomError::Internal(error));
-                                }
                             }
                         }
 

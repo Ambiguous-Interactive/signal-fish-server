@@ -15,7 +15,11 @@ pub const MAX_ROOM_PASSWORD_LENGTH: usize = 256;
 ///
 /// The plaintext password never lands in room state, logs, or metrics: the
 /// server hashes it once with a per-room random salt and keeps only this
-/// credential. Verification is constant-time.
+/// credential. Verification is constant-time. The hash is a single unsalted-
+/// work pass (no KDF): this is a room-scoped convenience secret guarding
+/// admission, not an account password — a process-memory dump (or a
+/// persistence adapter's storage) must be treated as exposing the
+/// credential to offline guessing.
 #[derive(Clone, Debug)]
 pub struct RoomPasswordCredential {
     salt: [u8; 16],

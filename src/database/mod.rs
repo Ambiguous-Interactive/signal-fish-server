@@ -205,6 +205,14 @@ pub trait GameDatabase: Send + Sync {
     /// Create a room while preserving collision identity for bounded generated
     /// code retries. Implementations should override this method when they can
     /// classify their storage backend's uniqueness violation.
+    ///
+    /// `join_password` (issue #525) seals the room from birth: the row must
+    /// become visible already carrying the credential, so no admission can
+    /// observe an unlocked room. The shipped in-memory implementation creates
+    /// and seals under one guard set; a source-compatible adapter that cannot
+    /// do this atomically must still seal before returning, and a failed seal
+    /// must surface as [`CreateRoomError::Storage`] rather than an unlocked
+    /// `Ok` room.
     #[allow(clippy::too_many_arguments)]
     async fn create_room_classified(
         &self,
@@ -216,19 +224,27 @@ pub trait GameDatabase: Send + Sync {
         relay_type: String,
         region_id: String,
         application_id: Option<Uuid>,
+        join_password: Option<RoomPasswordCredential>,
     ) -> CreateRoomResult {
-        self.create_room(
-            game_name,
-            room_code,
-            max_players,
-            supports_authority,
-            creator_id,
-            relay_type,
-            region_id,
-            application_id,
-        )
-        .await
-        .map_err(CreateRoomError::Storage)
+        let room = self
+            .create_room(
+                game_name,
+                room_code,
+                max_players,
+                supports_authority,
+                creator_id,
+                relay_type,
+                region_id,
+                application_id,
+            )
+            .await
+            .map_err(CreateRoomError::Storage)?;
+        if let Some(credential) = join_password {
+            if let Err(error) = self.set_room_password(&room.id, Some(credential)).await {
+                return Err(CreateRoomError::Storage(error));
+            }
+        }
+        Ok(room)
     }
     async fn set_room_application_id(
         &self,
@@ -1052,6 +1068,7 @@ impl GameDatabase for InMemoryDatabase {
             relay_type,
             region_id,
             application_id,
+            None,
         )
         .await
         .map_err(anyhow::Error::new)
@@ -1067,6 +1084,7 @@ impl GameDatabase for InMemoryDatabase {
         relay_type: String,
         region_id: String,
         application_id: Option<Uuid>,
+        join_password: Option<RoomPasswordCredential>,
     ) -> CreateRoomResult {
         let room_code =
             room_code.unwrap_or_else(crate::protocol::room_codes::generate_clean_room_code);
@@ -1159,13 +1177,15 @@ impl GameDatabase for InMemoryDatabase {
             last_activity: now,
             spectators: HashMap::new(),
             max_spectators: None,
-            password: None,
+            password: join_password,
             banned_players: HashSet::new(),
         };
 
         // Insert into all three maps under one set of guards, so a dropped
         // future can never commit the room without its monotonic GC stamp
         // (which would silently degrade the room to the wall-clock fallback).
+        // The join password rides the same insert: the room is born sealed,
+        // so no admission can observe an unlocked row (issue #525).
         rooms.insert(room_id, room.clone());
         room_codes.insert(game_room_key, room_id);
         liveness.insert(room_id, RoomLiveness::Live(tokio::time::Instant::now()));
@@ -2455,6 +2475,7 @@ mod tests {
                 Uuid::new_v4(),
                 "relay".to_string(),
                 "us-east-1".to_string(),
+                None,
                 None,
             )
             .await
