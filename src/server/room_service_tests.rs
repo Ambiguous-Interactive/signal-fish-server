@@ -364,6 +364,68 @@ async fn legacy_adapter_untyped_atomic_collision_is_confirmed_and_retried() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn ambiguous_commit_for_a_password_creation_is_refused_not_adopted_unlocked() {
+    let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
+    let message_coordinator: Arc<dyn MessageCoordinator> =
+        Arc::new(InMemoryMessageCoordinator::new());
+    let database = Arc::new(DrainAfterCreateDatabase::with_ambiguous_commit_once(
+        create_test_database().await,
+    ));
+    let server_database: Arc<dyn GameDatabase> = database.clone();
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        message_coordinator,
+        distributed_lock,
+        server_database,
+    )
+    .await;
+    server.script_room_codes_for_test(["AMBIPW"]);
+
+    let (creator, mut receiver) =
+        register_client(&server, "127.0.0.1:48039".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &creator,
+            "ambiguous-commit".to_string(),
+            None,
+            "creator".to_string(),
+            Some(4),
+            Some(true),
+            None,
+            Some("secret".to_string()),
+        )
+        .await;
+
+    // The adapter committed the row, then returned an untyped error before
+    // any seal could land (the classified trait default propagates the
+    // create error before its post-create seal). Adopting that row would
+    // hand the creator a "protected" room without its password, so the
+    // creation must fail honestly instead of reporting success.
+    let response = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("ambiguous commit recovery should finish")
+        .expect("ambiguous commit recovery should respond");
+    let ServerMessage::RoomJoinFailed { error_code, .. } = response.as_ref() else {
+        panic!("expected a refused join for the unsealed ambiguous room, got {response:?}");
+    };
+    assert_eq!(
+        error_code.as_ref(),
+        Some(&ErrorCode::RoomCreationFailed),
+        "the unsealed ambiguous room must not be adopted: got {response:?}"
+    );
+    assert_eq!(
+        server
+            .database
+            .get_game_room_count("ambiguous-commit")
+            .await
+            .expect("room count should succeed"),
+        0,
+        "the unsealed row must not survive as a protected creation"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn legacy_adapter_ambiguous_success_is_adopted_without_duplicate_room() {
     let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
     let message_coordinator: Arc<dyn MessageCoordinator> =

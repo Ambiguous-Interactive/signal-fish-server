@@ -17,8 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   password with the new `PASSWORD_REQUIRED` code, a missing and a mismatched
   password are indistinguishable, the check runs before any other room
   information is evaluated, and a password on the **creating** `JoinRoom`
-  seals the room from birth (a storage failure rolls the protected room back
-  instead of silently leaving it open). `BanPlayer` evicts a seated member
+  seals the room from birth: storage creates and seals the row under one
+  insert, and an ambiguous commit that produced an unlocked row is refused
+  rather than adopted.
+  **Breaking (Rust API):** `GameDatabase` implementors overriding
+  `create_room_classified` must accept the new trailing
+  `join_password: Option<RoomPasswordCredential>` parameter; the trait
+  contract is that the room becomes visible already sealed (the shipped
+  in-memory implementation creates and seals under one guard set, and the
+  trait default seals after creation, deleting the fresh room if the seal
+  write fails). `BanPlayer` evicts a seated member
   exactly like a kick and additionally records the id on the room's
   in-memory ban list: while the room lives, the banned id cannot rejoin as a
   player or spectator (`BANNED`); `UnbanPlayer` lifts a ban idempotently.
@@ -32,7 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   correlated forms); success results `RoomAccessUpdated`, `PlayerBanned`,
   `PlayerUnbanned`, `AuthorityTransferred`; new counters
   `room_bans` / `room_unbans` and the now-live `authority_transfers` /
-  `authority_transfer_conflicts`.
+  `authority_transfer_conflicts` (JSON snapshot fields, like the existing
+  moderation counters).
 - Loud reconnection-token credential documentation (issue #523): the
   [Reconnection security notes](docs/concepts/reconnection.md) now state the
   bearer-credential property up front — possession authorizes seat takeover

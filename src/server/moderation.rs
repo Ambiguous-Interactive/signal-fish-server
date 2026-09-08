@@ -25,10 +25,11 @@ struct ModerationTarget {
     /// The room a pending reconnection record holds a seat for, if any.
     pending_record_room: Option<RoomId>,
     target_lifecycle_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
-    /// The acting authority's lifecycle gate, held across the whole
-    /// eviction so the authority's own disconnect/leave processing cannot
-    /// interleave with the removal it authorized (same scope as the
-    /// pre-refactor kick handler).
+    /// The acting authority's lifecycle gate, held across validation and
+    /// every durable removal write so the authority's own
+    /// disconnect/leave processing cannot interleave with the removal it
+    /// authorized. Released before the best-effort close request and
+    /// terminal result, both of which tolerate a vanished authority.
     _authority_lifecycle_guard: tokio::sync::OwnedMutexGuard<()>,
 }
 

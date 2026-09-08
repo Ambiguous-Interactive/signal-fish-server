@@ -962,6 +962,7 @@ components:
                 all accepted values have identical server behavior.
             password:
               type: [string, 'null']
+              minLength: 1
               maxLength: 256
               description: >-
                 Join password for password-protected rooms. Required when the
@@ -1095,6 +1096,7 @@ components:
             spectator_name: { type: string }
             password:
               type: [string, 'null']
+              minLength: 1
               maxLength: 256
               description: >-
                 Join password for password-protected rooms. Required when the
@@ -1158,6 +1160,7 @@ components:
           properties:
             password:
               type: [string, 'null']
+              minLength: 1
               maxLength: 256
               description: The new join password, or null to open the room.
       required: [type, data]

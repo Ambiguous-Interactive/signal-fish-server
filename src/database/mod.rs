@@ -209,10 +209,14 @@ pub trait GameDatabase: Send + Sync {
     /// `join_password` (issue #525) seals the room from birth: the row must
     /// become visible already carrying the credential, so no admission can
     /// observe an unlocked room. The shipped in-memory implementation creates
-    /// and seals under one guard set; a source-compatible adapter that cannot
-    /// do this atomically must still seal before returning, and a failed seal
-    /// must surface as [`CreateRoomError::Storage`] rather than an unlocked
-    /// `Ok` room.
+    /// and seals under one guard set. This fallback is NOT atomic — it seals
+    /// after `create_room` returned, leaving a window in which an admission
+    /// that resolves the code (a spectator join resolves without the room-code
+    /// lock) can observe an unlocked row — so implementations that can create
+    /// atomically SHOULD override and do so. If the fallback's seal write
+    /// fails, the fresh room is deleted and the creation surfaces as
+    /// [`CreateRoomError::Storage`] rather than an unlocked `Ok` room; a
+    /// server joins nothing into a room whose creation reported an error.
     #[allow(clippy::too_many_arguments)]
     async fn create_room_classified(
         &self,
@@ -241,6 +245,18 @@ pub trait GameDatabase: Send + Sync {
             .map_err(CreateRoomError::Storage)?;
         if let Some(credential) = join_password {
             if let Err(error) = self.set_room_password(&room.id, Some(credential)).await {
+                // Never hand back a room the caller asked to protect: the
+                // failure must not surface as an unlocked `Ok` room. The
+                // caller aborts the join on this error, so the fresh row is
+                // deleted; if even the delete fails, the row leaks unlocked —
+                // log it loudly here, where the operator first learns of it.
+                if let Err(delete_error) = self.delete_room(&room.id).await {
+                    tracing::error!(
+                        room_id = %room.id,
+                        %delete_error,
+                        "Failed to roll back an unsealed room after a failed creation-time password write"
+                    );
+                }
                 return Err(CreateRoomError::Storage(error));
             }
         }
