@@ -2394,6 +2394,17 @@ components:
             current_spectators:
               type: array
               items: { $ref: '#/components/schemas/SpectatorInfo' }
+              description: >-
+                Full roster after the join on protocol v2 connections. On v3
+                connections this is [] — the event is a join delta and
+                spectator_count carries the room total.
+            spectator_count:
+              type: integer
+              minimum: 0
+              description: >-
+                Total spectators in the room after this join. Present on v3
+                connections only; pre-v3 connections receive the full roster
+                instead.
             reason: { $ref: '#/components/schemas/SpectatorStateChangeReason' }
       required: [type, data]
     SpectatorDisconnected:
@@ -2411,6 +2422,17 @@ components:
             current_spectators:
               type: array
               items: { $ref: '#/components/schemas/SpectatorInfo' }
+              description: >-
+                Full roster after the departure on protocol v2 connections.
+                On v3 connections this is [] — the event is a departure delta
+                and spectator_count carries the room total.
+            spectator_count:
+              type: integer
+              minimum: 0
+              description: >-
+                Total spectators in the room after this departure. Present on
+                v3 connections only; pre-v3 connections receive the full
+                roster instead.
       required: [type, data]
     Error:
       type: object

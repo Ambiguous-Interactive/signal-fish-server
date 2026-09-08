@@ -2944,12 +2944,14 @@ mod tests {
             ServerMessage::NewSpectatorJoined {
                 spectator: spectator.clone(),
                 current_spectators: vec![spectator.clone()],
+                spectator_count: None,
                 reason: None,
             },
             ServerMessage::SpectatorDisconnected {
                 spectator_id: player_id,
                 reason: None,
                 current_spectators: Vec::new(),
+                spectator_count: None,
             },
             ServerMessage::LobbyStateChanged {
                 lobby_state: LobbyState::Lobby,

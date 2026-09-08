@@ -807,6 +807,11 @@ pub enum ServerMessage {
         spectator: SpectatorInfo,
         #[serde(default)]
         current_spectators: Vec<SpectatorInfo>,
+        /// Total spectators in the room after this join (v3+ recipients only;
+        /// pre-v3 connections receive the full roster instead, so the count
+        /// is stripped before the frozen v2 bytes are written).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spectator_count: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<SpectatorStateChangeReason>,
     },
@@ -817,6 +822,11 @@ pub enum ServerMessage {
         reason: Option<SpectatorStateChangeReason>,
         #[serde(default)]
         current_spectators: Vec<SpectatorInfo>,
+        /// Total spectators in the room after this departure (v3+ recipients
+        /// only; pre-v3 connections receive the full roster instead, so the
+        /// count is stripped before the frozen v2 bytes are written).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spectator_count: Option<u32>,
     },
     /// Error message
     Error {

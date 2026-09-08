@@ -649,6 +649,9 @@ impl SpectatorService {
                 let notification = Arc::new(ServerMessage::NewSpectatorJoined {
                     spectator: spectator.clone(),
                     current_spectators: spectator_snapshot.clone(),
+                    spectator_count: Some(
+                        u32::try_from(spectator_snapshot.len()).unwrap_or(u32::MAX),
+                    ),
                     reason: Some(join_reason),
                 });
                 let replay_notification = Arc::clone(&notification);
@@ -1202,6 +1205,7 @@ impl SpectatorService {
         let notification = Arc::new(ServerMessage::SpectatorDisconnected {
             spectator_id: *player_id,
             reason: Some(reason.clone()),
+            spectator_count: Some(u32::try_from(current_spectators.len()).unwrap_or(u32::MAX)),
             current_spectators,
         });
         let replay_notification = Arc::clone(&notification);
@@ -2337,6 +2341,7 @@ mod tests {
                     spectator_id: sid,
                     reason: Some(SpectatorStateChangeReason::VoluntaryLeave),
                     current_spectators,
+                    ..
                 } if sid == spectator_id
                     && current_spectators.iter().map(|spectator| spectator.id).eq([remaining_id])
             )),

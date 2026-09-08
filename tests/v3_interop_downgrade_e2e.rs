@@ -1598,6 +1598,15 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
             (ws, label)
         };
 
+        // Issue #525: the room-uniform spectator fan-outs carry the full
+        // roster (and no count) to the frozen v2 shape, and the slim
+        // delta+count shape to v3 — the join event's roster includes the
+        // joiner, so the v3 count is 1.
+        let expected_fan_out = match cohort {
+            Cohort::V2 => (1_usize, None),
+            Cohort::V3 => (0_usize, Some(1_u64)),
+        };
+
         // 1. The observer creates the room (join_room consumes its own
         // RoomJoined frame; the cohort's RoomJoined member shape is asserted
         // from the late joiner's baseline below, which carries the same
@@ -1825,6 +1834,56 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
             keys, expected_spectator_keys,
             "{cohort:?} NewSpectatorJoined spectator must use the exact cohort key set: {raw}"
         );
+        let live_roster = value
+            .pointer("/data/current_spectators")
+            .and_then(serde_json::Value::as_array)
+            .expect("NewSpectatorJoined carries current_spectators");
+        assert_eq!(
+            live_roster.len(),
+            expected_fan_out.0,
+            "{cohort:?} NewSpectatorJoined must use the cohort roster shape: {raw}"
+        );
+        assert_eq!(
+            value
+                .pointer("/data/spectator_count")
+                .and_then(serde_json::Value::as_u64),
+            expected_fan_out.1,
+            "{cohort:?} NewSpectatorJoined must use the cohort spectator_count shape: {raw}"
+        );
+
+        // 5b. The spectator leaves; the players' SpectatorDisconnected
+        // broadcast must use the same cohort roster/count shape (issue
+        // #525). The departing spectator is the room's only one, so both
+        // cohorts observe an empty remaining roster; the v3 count is 0 and
+        // present, the v2 count key is absent.
+        send(&mut spectator, &ClientMessage::LeaveSpectator).await;
+        let raw = next_matching_raw_server_message(
+            &mut observer,
+            "SpectatorDisconnected",
+            "observer sees the spectator leave",
+        )
+        .await;
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).expect("SpectatorDisconnected is JSON");
+        let leave_roster = value
+            .pointer("/data/current_spectators")
+            .and_then(serde_json::Value::as_array)
+            .expect("SpectatorDisconnected carries current_spectators");
+        assert!(
+            leave_roster.is_empty(),
+            "{cohort:?} SpectatorDisconnected carries the post-departure roster: {raw}"
+        );
+        let expected_leave_count = match cohort {
+            Cohort::V2 => None,
+            Cohort::V3 => Some(0_u64),
+        };
+        assert_eq!(
+            value
+                .pointer("/data/spectator_count")
+                .and_then(serde_json::Value::as_u64),
+            expected_leave_count,
+            "{cohort:?} SpectatorDisconnected must use the cohort spectator_count shape: {raw}"
+        );
 
         // 6. A same-cohort reconnect must receive cohort-shaped snapshot
         // members AND — for v3 — a cohort-shaped nested replay event (issue
@@ -1883,6 +1942,25 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
             keys, expected_spectator_keys,
             "{cohort:?} replayed NewSpectatorJoined must use the exact cohort \
              spectator key set: {raw}"
+        );
+        // Issue #525: the nested replay copy is projected to the recipient's
+        // fan-out shape, exactly like the live broadcast.
+        let replay_roster = spectator_event
+            .pointer("/data/current_spectators")
+            .and_then(serde_json::Value::as_array)
+            .expect("replayed NewSpectatorJoined carries current_spectators");
+        assert_eq!(
+            replay_roster.len(),
+            expected_fan_out.0,
+            "{cohort:?} replayed NewSpectatorJoined must use the cohort roster shape: {raw}"
+        );
+        assert_eq!(
+            spectator_event
+                .pointer("/data/spectator_count")
+                .and_then(serde_json::Value::as_u64),
+            expected_fan_out.1,
+            "{cohort:?} replayed NewSpectatorJoined must use the cohort \
+             spectator_count shape: {raw}"
         );
         let replayed_join = replayed
             .iter()

@@ -1312,6 +1312,13 @@ Another spectator joined the room.
 
 Note: The `reason` field is optional.
 
+On protocol v3 connections this event carries the join delta plus a count
+instead of the full roster: `current_spectators` is `[]` and
+`spectator_count` holds the room's total after the join. Members keep their
+roster current by applying these deltas to the roster from their
+`RoomJoined`, `SpectatorJoined`, or `Reconnected` snapshot. Pre-v3
+connections keep the full roster and never receive `spectator_count`.
+
 ### SpectatorDisconnected
 
 Another spectator left the room.
@@ -1330,6 +1337,11 @@ Another spectator left the room.
 ```
 
 Note: The `reason` field is optional.
+
+On protocol v3 connections this event carries the departure delta plus a
+count instead of the full roster: `current_spectators` is `[]` and
+`spectator_count` holds the room's total after the departure. Pre-v3
+connections keep the full roster and never receive `spectator_count`.
 
 ## Session Flow
 

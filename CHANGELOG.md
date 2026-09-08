@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Spectator fan-out slimming (issue #525, v3 only): the room-uniform
+  `NewSpectatorJoined` and `SpectatorDisconnected` broadcasts no longer carry
+  the full spectator roster to protocol-v3 connections. On v3 they are
+  delta+count events — `current_spectators` is `[]` (the field stays present
+  because released SDK parsers require it) and the new additive optional
+  `spectator_count` field carries the room's total after the change. Members
+  keep the roster current by applying these deltas to the roster from their
+  `RoomJoined`, `SpectatorJoined`, or `Reconnected` snapshot, so per-join
+  fan-out bytes drop from O(recipients × spectators) to O(recipients).
+  Replayed copies (`Reconnected.missed_events`) are projected to the same
+  v3 shape. Pre-v3 connections keep the exact frozen v2 bytes (full roster,
+  no count field).
 - Room access control and expanded moderation surface (issue #525, v3 only):
   four new `room_operation_ids` operations alongside the existing kick and
   rotation. `SetRoomAccess { password }` seals a room behind a join password

@@ -447,6 +447,7 @@ async fn test_spectator_state_updates_include_snapshots_and_reasons() {
             spectator,
             current_spectators,
             reason,
+            ..
         } => {
             assert_eq!(spectator.id, spectator_id);
             assert_eq!(
@@ -487,6 +488,7 @@ async fn test_spectator_state_updates_include_snapshots_and_reasons() {
             spectator_id: disconnected_id,
             reason,
             current_spectators,
+            ..
         } => {
             assert_eq!(*disconnected_id, spectator_id);
             assert_eq!(*reason, Some(SpectatorStateChangeReason::VoluntaryLeave));

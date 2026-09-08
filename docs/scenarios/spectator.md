@@ -98,7 +98,9 @@ Observer2 receives its own `SpectatorJoined`; the room's **players** are told
 about the newcomer. Existing spectators are not broadcast recipients.
 
 Alice and Bob receive `NewSpectatorJoined`, carrying the new spectator and the
-full updated spectator list:
+full updated spectator list (protocol v2 connections; on v3 connections the
+event is a join delta — `current_spectators` is `[]` and `spectator_count`
+holds the room total):
 
 ```json
 {
@@ -161,7 +163,8 @@ The server confirms to **Observer1**:
 }
 ```
 
-and tells Alice and Bob that Observer1 is gone:
+and tells Alice and Bob that Observer1 is gone (protocol v2 shape; on v3
+connections `current_spectators` is `[]` and `spectator_count` is `1`):
 
 ```json
 {
