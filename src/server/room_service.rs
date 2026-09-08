@@ -2053,8 +2053,9 @@ impl EnhancedGameServer {
                 } else if !room.admits_join_password(password) {
                     // Join-password perimeter (issue #525): checked before
                     // anything else about the room leaks — name conflicts,
-                    // capacity, session compatibility. A missing and a
-                    // mismatched password share one non-enumerating outcome.
+                    // capacity, session compatibility. A missing, mismatched,
+                    // or stray (open-room) password share one non-enumerating
+                    // outcome (issue #546).
                     Err(JoinRoomError::PasswordRequired)
                 } else if room.is_banned(player_id) {
                     // Authority ban list (issue #525): room-scoped, in-memory,

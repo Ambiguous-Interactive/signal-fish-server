@@ -135,6 +135,31 @@ server generates another candidate instead. All internal attempts count as one
 client room-creation operation for rate limiting. Providing `room_code` retains
 the explicit join/create behavior described above.
 
+### Explicit codes and first-claim authority
+
+A `JoinRoom` with a `room_code` creates the room when the code is unused, and
+the creator becomes its authority (first-claim authority). The server cannot
+verify that a joiner "intended" a code: a room code works like a capability,
+and whoever joins an unused code first owns its room and authority. A player
+who learns or guesses another group's planned code can claim it first and
+withhold `StartGame`; the group's recourse is to pick another code.
+
+Operators should therefore:
+
+- Prefer auto-generated codes (omit `room_code`). They are random, and the
+  per-game room caps bound namespace enumeration.
+- Seal an explicit-code room at creation: make the **creating** join carry
+  the password (see below). A sealed room is born closed, and a later
+  password-carrying join into a squatted open room is refused (see the
+  password rules below), so the group learns the code is not theirs instead
+  of being seated under a hostile authority.
+- Treat server-side reservation of explicit codes (a claim token minted by a
+  trusted operator backend) as a hosted-tier feature; it is not part of the
+  current protocol surface.
+
+The per-game (`max_rooms_per_game`) and server-wide (`max_rooms`) room caps
+bound the cost of namespace enumeration in open mode.
+
 Let `s` be the random suffix length after the normalized prefix. The generator
 has `32^s` possible suffixes. With `r` occupied codes for one game, a candidate's
 collision probability is `r / 32^s`, and the probability that all eight uniform
@@ -175,6 +200,13 @@ spectator join must present the same password:
 - A join with a missing **or wrong** password is refused with
   `PASSWORD_REQUIRED`; the server never distinguishes the two, so a wrong
   guess leaks nothing beyond the refusal itself.
+- A password presented to an **open** room is refused with the same
+  `PASSWORD_REQUIRED` code. A join that carries a password states the intent
+  to enter a sealed room. If the code already exists as an open room, the
+  room under that code was created by someone else, and seating the joiner
+  would place them under that room's authority. The refusal keeps the
+  failure loud without revealing whether the room is open or sealed. Join an
+  open room without a password.
 - The check runs before anything else about the room is evaluated (name
   conflicts, capacity, session compatibility), so a sealed room reveals
   nothing to a request without its credential.

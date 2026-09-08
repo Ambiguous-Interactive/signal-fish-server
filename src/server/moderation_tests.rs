@@ -742,6 +742,77 @@ async fn creation_time_password_seals_the_room_from_birth() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn stray_password_join_into_open_room_fails_closed() {
+    // Issue #546 (authority squat): a password-carrying join states the
+    // intent to enter a sealed room. When the code already exists as an open
+    // room, the room under that code was created by someone else (the
+    // squatter), so seating the requester would deliver them to the
+    // squatter's authority. The refusal is the same non-enumerating
+    // `PASSWORD_REQUIRED` outcome a sealed-room mismatch produces.
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (squatter, mut squatter_rx) =
+        register_client(&server, "127.0.0.1:48150".parse().unwrap()).await;
+    let (victim, mut victim_rx) =
+        register_client(&server, "127.0.0.1:48151".parse().unwrap()).await;
+
+    join_seated_player(&server, &squatter, &mut squatter_rx, "SQUAT1", "squatter").await;
+
+    // Seated: the password-carrying join must not seat the victim into the
+    // squatter's open room.
+    assert_eq!(
+        join_with_password(
+            &server,
+            &victim,
+            &mut victim_rx,
+            "SQUAT1",
+            "victim",
+            Some("open sesame")
+        )
+        .await
+        .expect_err("stray-password join must be refused"),
+        ErrorCode::PasswordRequired
+    );
+    assert!(
+        !server
+            .database
+            .get_room("moderation-game", "SQUAT1")
+            .await
+            .expect("room lookup succeeds")
+            .expect("room exists")
+            .players
+            .contains_key(&victim),
+        "a refused join must not seat the player"
+    );
+
+    // The spectator path fails closed the same way.
+    let spectator_error = server
+        .spectator_service
+        .join_operation(
+            &victim,
+            None,
+            "moderation-game".to_string(),
+            "SQUAT1".to_string(),
+            "victim".to_string(),
+            Some("open sesame".to_string()),
+        )
+        .await
+        .expect_err("stray-password spectator join must be refused");
+    assert_eq!(
+        spectator_error.code,
+        Some(ErrorCode::PasswordRequired),
+        "spectator stray-password join must share the seated refusal: {spectator_error:?}"
+    );
+
+    // The open-room contract without a password is unchanged.
+    let (friend, mut friend_rx) =
+        register_client(&server, "127.0.0.1:48152".parse().unwrap()).await;
+    join_with_password(&server, &friend, &mut friend_rx, "SQUAT1", "friend", None)
+        .await
+        .expect("open rooms still admit password-less joins");
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn set_room_access_refusals_are_classified_per_failure() {
     let cases: &[(&str, Option<&str>, ErrorCode)] = &[
         ("empty password", Some(""), ErrorCode::InvalidInput),

@@ -578,13 +578,21 @@ impl Room {
     }
 
     /// Whether this join request satisfies the room's join-password policy
-    /// (issue #525). An open room admits everyone; a password-protected room
-    /// admits only requests presenting the matching password. A missing and a
-    /// mismatched password are deliberately indistinguishable.
+    /// (issue #525). A password-protected room admits only requests
+    /// presenting the matching password; a missing and a mismatched password
+    /// are deliberately indistinguishable. An open room admits only
+    /// password-less joins (issue #546): a join that presents a password
+    /// states the intent to enter a *sealed* room, so when the code already
+    /// exists as an open room the room under that code was created by someone
+    /// else (the squat) and seating the requester would deliver them to that
+    /// room's authority. Refusing keeps the failure loud and the outcome the
+    /// same non-enumerating one a sealed-room mismatch produces.
     pub fn admits_join_password(&self, provided: Option<&str>) -> bool {
-        match &self.password {
-            None => true,
-            Some(credential) => provided.is_some_and(|password| credential.matches(password)),
+        match (&self.password, provided) {
+            (None, None) => true,
+            (None, Some(_)) => false,
+            (Some(credential), Some(password)) => credential.matches(password),
+            (Some(_), None) => false,
         }
     }
 
@@ -779,7 +787,11 @@ fn join_password_credential_and_policy_are_data_driven() {
     let cases: &[(&str, Option<&str>, Option<&str>, bool)] = &[
         // (name, room password, presented password, admitted)
         ("open room admits a password-less join", None, None, true),
-        ("open room admits a stray password", None, Some("x"), true),
+        // Issue #546: a password-carrying join states the intent to enter a
+        // sealed room. When the code already exists as an open room, the room
+        // under that code was created by someone else (the squat), so
+        // seating the requester would deliver them to that room's authority.
+        ("open room refuses a stray password", None, Some("x"), false),
         ("protected room refuses nothing", Some("pw"), None, false),
         (
             "protected room refuses wrong",

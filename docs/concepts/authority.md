@@ -205,8 +205,9 @@ The authority holds a set of moderation operations (v3 only, via the
   code can send new joiners.
 - **`SetRoomAccess`** seals the room behind a join password (or reopens it
   with `null`). Sealed rooms refuse every join -- seated or spectator --
-  that does not present the password (`PASSWORD_REQUIRED`); a missing and a
-  mismatched password are indistinguishable. Current members and their
+  that does not present the password (`PASSWORD_REQUIRED`); a missing, a
+  mismatched, and a stray password into an open room are indistinguishable.
+  Current members and their
   reconnection tokens are unaffected. The password is stored only as a
   salted hash. See [Rooms and Lobbies](rooms-and-lobbies.md) for the
   client-side flow.

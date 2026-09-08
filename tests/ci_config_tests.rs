@@ -1150,11 +1150,11 @@ fn validate_workflow_has_required_jobs(
 //
 // Current stable validation checks (Phase 1-2):
 //   - CI / Lint (ubuntu-latest)
-//   - CI / Lint (windows-latest)
-//   - CI / Lint (macos-latest)       — daily cron cohort only (issue #513)
+//   - CI / Lint (windows-latest)     — daily cron cohort only (issues #513, #512)
+//   - CI / Lint (macos-latest)       — daily cron cohort only (issues #513, #512)
 //   - CI / Nextest (ubuntu-latest)
-//   - CI / Nextest (windows-latest)
-//   - CI / Nextest (macos-latest)    — daily cron cohort only (issue #513)
+//   - CI / Nextest (windows-latest)  — daily cron cohort only (issues #513, #512)
+//   - CI / Nextest (macos-latest)    — daily cron cohort only (issues #513, #512)
 //   - CI / Relay Allocation Ceilings
 //   - CI / Dependency Audit
 //   - CI / MSRV Verification
@@ -1262,16 +1262,19 @@ const MATRIX_OS_PLACEHOLDER: &str = "${{ matrix.os }}";
 /// OS values that `matrix.os` expands to in ci.yml.
 ///
 /// Since issue #513 the lint/nextest matrices are event-dependent (the
-/// `ci-matrix` cohort job emits ubuntu+windows per push/PR, macOS-only on
-/// the daily cron), so this constant is the union inventory of both cohorts:
-/// it drives check-name expansion for the stable naming contract, where the
-/// macOS names keep existing (produced by the cron).
+/// `ci-matrix` cohort job emits ubuntu-only per push/PR, macOS + Windows on
+/// the daily cron — #512 moved Windows into the cron cohort), so this
+/// constant is the union inventory of both cohorts: it drives check-name
+/// expansion for the stable naming contract, where the macOS and Windows
+/// names keep existing (produced by the cron).
 const MATRIX_OS_VALUES: &[&str] = &["ubuntu-latest", "windows-latest", "macos-latest"];
 
-/// CI jobs whose macOS matrix legs run only on the daily schedule cohort
-/// (issue #513: macOS bills at 10x Linux per minute, so macOS lint/nextest
-/// signal moves from every push/PR to the daily cron against main).
-const SCHEDULE_ONLY_MACOS_JOBS: &[&str] = &["lint", "nextest"];
+/// CI jobs whose macOS and Windows matrix legs run only on the daily schedule
+/// cohort (issue #513: macOS bills at 10x Linux per minute; issue #512:
+/// Windows bills at 2x Linux per minute — the server deploys on Linux, so
+/// cross-OS lint/nextest signal moves from every push/PR to the daily cron
+/// against main).
+const SCHEDULE_ONLY_OS_JOBS: &[&str] = &["lint", "nextest"];
 
 /// The cohort job that feeds the event-dependent lint/nextest matrices.
 const CI_MATRIX_JOB: &str = "ci-matrix";
@@ -1288,8 +1291,8 @@ const CI_MATRIX_OUTPUT_OS: &str = "${{ fromJSON(needs.ci-matrix.outputs.os) }}";
 const CI_MATRIX_GUARD: &str = "${{ !cancelled() && needs.ci-matrix.result == 'success' }}";
 
 /// The cohort script lines pinning which OS legs exist per event.
-const CI_MATRIX_SCHEDULE_OS: &str = "os=[\"macos-latest\"]";
-const CI_MATRIX_PUSH_OS: &str = "os=[\"ubuntu-latest\",\"windows-latest\"]";
+const CI_MATRIX_SCHEDULE_OS: &str = "os=[\"macos-latest\",\"windows-latest\"]";
+const CI_MATRIX_PUSH_OS: &str = "os=[\"ubuntu-latest\"]";
 
 /// Expand a job display name template that may contain `${{ matrix.os }}` into
 /// concrete check names. If the template contains the placeholder, one name is
@@ -1951,7 +1954,7 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
         if matches!(job, "lint" | "nextest") {
             // Issue #513: these two wait on the event-dependent cohort job
             // instead of a blanket schedule exclusion (pinned in full by
-            // test_ci_macos_lanes_run_only_on_the_daily_cron).
+            // test_ci_windows_and_macos_lanes_run_only_on_the_daily_cron).
             assert!(
                 block.contains("!cancelled() && needs.ci-matrix.result == 'success'"),
                 "ci.yml `{job}` must run after quick-check failure but not workflow \
@@ -2239,12 +2242,13 @@ exit "$status"
 #[test]
 fn test_ci_workflow_matrix_os_values_match_constant() {
     // Validates that MATRIX_OS_VALUES stays the full OS inventory of the
-    // lint/nextest check-name surface. Since issue #513, the lint/nextest
-    // matrices are event-dependent (a dynamic matrix fed by the `ci-matrix`
-    // cohort job), so there is no literal `os:` list left in ci.yml:
+    // lint/nextest check-name surface. Since issues #513 and #512, the
+    // lint/nextest matrices are event-dependent (a dynamic matrix fed by the
+    // `ci-matrix` cohort job), so there is no literal `os:` list left in
+    // ci.yml:
     //   - every matrix must consume `needs.ci-matrix.outputs.os` verbatim
-    //   - `ci-matrix` must emit ubuntu+windows per push/PR and macOS-only on
-    //     the schedule
+    //   - `ci-matrix` must emit ubuntu-only per push/PR and macOS + Windows
+    //     on the schedule
     // If the workflow or the constant drift, the bidirectional consistency
     // test will silently produce wrong check names.
     let root = repo_root();
@@ -2294,9 +2298,9 @@ fn test_ci_workflow_matrix_os_values_match_constant() {
     assert_eq!(
         MATRIX_OS_VALUES.to_vec(),
         vec!["ubuntu-latest", "windows-latest", "macos-latest"],
-        "MATRIX_OS_VALUES must stay the union of both cohorts (ubuntu+windows \
-         per push/PR, macOS on the daily cron): REQUIRED_CHECK_NAMES promises \
-         all three OS check names"
+        "MATRIX_OS_VALUES must stay the union of both cohorts (ubuntu per \
+         push/PR, macOS + Windows on the daily cron): REQUIRED_CHECK_NAMES \
+         promises all three OS check names"
     );
 }
 
@@ -25991,9 +25995,10 @@ const SCHEDULE_EXCLUSION_GUARD: &str = "github.event_name != 'schedule'";
 /// CI jobs that must be excluded from scheduled runs via an `if:` guard.
 /// The `deny` and `audit` jobs are intentionally absent — they run on the
 /// daily schedule trigger (for CVE detection). The `lint` and `nextest` jobs
-/// are also absent: their per-leg guards (`MACOS_SCHEDULE_GUARD`, issue #513)
-/// admit only their macOS legs on the schedule and are pinned separately.
-/// `quick-check` is absent by design: it gates the macOS cron legs.
+/// are also absent: their per-leg guards (`CI_MATRIX_GUARD`, issues #513 and
+/// #512) admit only their macOS + Windows legs on the schedule and are
+/// pinned separately. `quick-check` is absent by design: it gates the cron
+/// legs.
 const SCHEDULE_EXCLUDED_CI_JOBS: &[&str] = &[
     "relay-allocations",
     "doc-consistency",
@@ -26006,22 +26011,23 @@ const SCHEDULE_EXCLUDED_CI_JOBS: &[&str] = &[
 
 #[test]
 fn test_ci_schedule_only_runs_security_jobs() {
-    // Validates the daily scheduled trigger's cost cohort (issue #513):
-    // only the security audit jobs (`deny` and `audit`), the `quick-check`
-    // gate, and the macOS legs of `lint`/`nextest` run on schedule; every
-    // job in `SCHEDULE_EXCLUDED_CI_JOBS` is excluded from schedule runs
-    // entirely, and `doc-consistency` — a Linux-only lane — keeps its own
-    // exclusion guard in that list.
+    // Validates the daily scheduled trigger's cost cohort (issues #513 and
+    // #512): only the security audit jobs (`deny` and `audit`), the
+    // `quick-check` gate, and the macOS + Windows legs of `lint`/`nextest`
+    // run on schedule; every job in `SCHEDULE_EXCLUDED_CI_JOBS` is excluded
+    // from schedule runs entirely, and `doc-consistency` — a Linux-only
+    // lane — keeps its own exclusion guard in that list.
     //
     // The ci.yml workflow has a daily cron schedule for catching new CVEs and
-    // for the macOS lint/nextest cohort — macOS bills at 10x Linux per minute,
-    // so its lanes run daily against main instead of on every push/PR.
+    // for the macOS + Windows lint/nextest cohort — macOS bills at 10x and
+    // Windows at 2x Linux per minute, so those lanes run daily against main
+    // instead of on every push/PR.
     //
     // This test ensures:
     //   1. Every job in `SCHEDULE_EXCLUDED_CI_JOBS` has a schedule-exclusion guard
     //   2. The `deny` and `audit` jobs do NOT have a schedule exclusion guard
-    //   3. The macOS lint/nextest per-leg cohort guard is pinned separately
-    //      (test_ci_macos_lanes_run_only_on_the_daily_cron)
+    //   3. The macOS + Windows lint/nextest per-leg cohort guard is pinned
+    //      separately (test_ci_windows_and_macos_lanes_run_only_on_the_daily_cron)
 
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
@@ -26076,7 +26082,7 @@ fn test_ci_schedule_only_runs_security_jobs() {
         errors.is_empty(),
         "CI jobs are missing schedule exclusion guards.\n\n\
          The daily schedule trigger should only run the `deny` and `audit` (security) jobs \
-         plus the macOS lint/nextest cohort (issue #513).\n\
+         plus the macOS + Windows lint/nextest cohort (issues #513 and #512).\n\
          All other jobs must have `if: {SCHEDULE_EXCLUSION_GUARD}` to avoid wasting \
          CI resources on scheduled runs.\n\n\
          Issues:\n{}\n\n\
@@ -26088,11 +26094,12 @@ fn test_ci_schedule_only_runs_security_jobs() {
 }
 
 #[test]
-fn test_ci_macos_lanes_run_only_on_the_daily_cron() {
-    // Issue #513 cost cohort: macOS Lint/Nextest moved out of the per-PR/per-
-    // push hot path into the daily cron. macOS bills at 10x Linux per minute
-    // and the server deploys on Linux containers, so per-event macOS signal
-    // buys little; the daily cron keeps macOS coverage of main with next-day
+fn test_ci_windows_and_macos_lanes_run_only_on_the_daily_cron() {
+    // Issue #513 cost cohort, extended by #512: macOS and Windows
+    // Lint/Nextest moved out of the per-PR/per-push hot path into the daily
+    // cron. macOS bills at 10x and Windows at 2x Linux per minute and the
+    // server deploys on Linux containers, so per-event cross-OS signal buys
+    // little; the daily cron keeps cross-OS coverage of main with next-day
     // (instead of pre-merge) regression detection.
     //
     // The cohort is a dynamic matrix (`ci-matrix` emits the OS list per
@@ -26101,14 +26108,14 @@ fn test_ci_macos_lanes_run_only_on_the_daily_cron() {
     //
     // Pins:
     //   1. `ci-matrix` runs on every event (no schedule exclusion), emits
-    //      ubuntu+windows per push/PR and macOS-only on the schedule, and
+    //      ubuntu-only per push/PR and macOS + Windows on the schedule, and
     //      exposes exactly the `os` output the matrices consume.
     //   2. Per gated job: `needs: [quick-check, ci-matrix]`, the exact
     //      cohort guard, the verbatim matrix expression, and the intact
     //      fail-closed quick-check gate.
     //   3. The full OS inventory stays intact in MATRIX_OS_VALUES — the
-    //      macOS check names must keep existing (produced by the cron), so
-    //      REQUIRED_CHECK_NAMES stays honest for external consumers.
+    //      macOS and Windows check names must keep existing (produced by the
+    //      cron), so REQUIRED_CHECK_NAMES stays honest for external consumers.
     use saphyr::LoadableYamlNode;
 
     let root = repo_root();
@@ -26129,7 +26136,7 @@ fn test_ci_macos_lanes_run_only_on_the_daily_cron() {
             .as_ref()
             .is_none_or(|cond| !cond.contains("schedule")),
         "`{CI_MATRIX_JOB}` must NOT exclude schedule runs: it is what produces \
-         the macOS cron cohort (issue #513)"
+         the macOS + Windows cron cohort (issues #513 and #512)"
     );
     let outputs = cohort
         .as_mapping_get("outputs")
@@ -26144,12 +26151,12 @@ fn test_ci_macos_lanes_run_only_on_the_daily_cron() {
         .unwrap_or_else(|| panic!("ci.yml must define the `{CI_MATRIX_JOB}` job"));
     assert!(
         cohort_block.contains(CI_MATRIX_SCHEDULE_OS) && cohort_block.contains(CI_MATRIX_PUSH_OS),
-        "`{CI_MATRIX_JOB}` must emit the macOS-only schedule cohort \
-         ({CI_MATRIX_SCHEDULE_OS}) and the ubuntu+windows push/PR cohort \
+        "`{CI_MATRIX_JOB}` must emit the macOS + Windows schedule cohort \
+         ({CI_MATRIX_SCHEDULE_OS}) and the ubuntu-only push/PR cohort \
          ({CI_MATRIX_PUSH_OS})"
     );
 
-    for job in SCHEDULE_ONLY_MACOS_JOBS {
+    for job in SCHEDULE_ONLY_OS_JOBS {
         let job_config = jobs
             .as_mapping_get(job)
             .unwrap_or_else(|| panic!("parsed ci.yml must define `{job}`"));
@@ -26177,8 +26184,8 @@ fn test_ci_macos_lanes_run_only_on_the_daily_cron() {
         assert_eq!(
             matrix_oses,
             vec![CI_MATRIX_OUTPUT_OS],
-            "`{job}` must consume the cohort output verbatim; the macOS check \
-             names keep existing from the daily cron"
+            "`{job}` must consume the cohort output verbatim; the macOS and \
+             Windows check names keep existing from the daily cron"
         );
 
         assert!(
@@ -26201,7 +26208,7 @@ fn test_ci_macos_lanes_run_only_on_the_daily_cron() {
         assert!(
             REQUIRED_CHECK_NAMES.contains(&name.as_str()),
             "check name `{name}` must stay in REQUIRED_CHECK_NAMES: the daily \
-             cron keeps producing it (issue #513)"
+             cron keeps producing it (issues #513 and #512)"
         );
     }
 
@@ -26211,8 +26218,9 @@ fn test_ci_macos_lanes_run_only_on_the_daily_cron() {
         quick_check_condition
             .as_ref()
             .is_none_or(|cond| !cond.contains("schedule")),
-        "quick-check must NOT exclude schedule runs: the macOS lint/nextest cron \
-         legs (issue #513) depend on its fail-closed gate result"
+        "quick-check must NOT exclude schedule runs: the macOS + Windows \
+         lint/nextest cron legs (issues #513 and #512) depend on its \
+         fail-closed gate result"
     );
 }
 

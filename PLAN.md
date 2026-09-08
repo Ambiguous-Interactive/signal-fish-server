@@ -96,12 +96,25 @@ correctness evidence appears.
   `SpectatorDisconnected` as delta+count events (roster cleared,
   additive `spectator_count`), replayed copies project to the same shape,
   and the frozen v2 bytes are untouched (PR #545).
-  Remaining: the companion room-namespace authority-squat design (#546).
+  Session 220 closed the last thread (#546): the room-namespace
+  authority-squat design is resolved — codes are capability-ish and
+  first-claim authority is documented v2 behavior, so the shipped defense is
+  auto-generated codes plus seal-at-creation, now fail-closed: a
+  password-carrying join into an open room is refused with the same
+  non-enumerating `PASSWORD_REQUIRED` outcome instead of being seated under
+  the squatter's authority; hosted reservation tokens remain tracked by
+  #517.
 - #378 — CLOSED by the session-217 canonical-gate migration: `Link Check`
   owns offline lychee + internal-link validation, the duplicate
   `Documentation Link Check` job is retired, the strict MkDocs build moved to
   the `Markdown Code Validation` job, and branch protection (no required
   checks, per #513) needed no settings migration.
+- #512 — session 220 moved the Windows lint/nextest lanes into the #513
+  daily cron cohort (measured: the Windows pair averaged ~40 of ~92 billed
+  minutes per CI run, 43%; the cron gains one Windows pair per day, paid
+  back by a single CI-triggering event). Remaining levers need owner input:
+  self-hosted runner labels (owner comment excludes DAD-MACHINE and
+  ELI-MACHINE) and the #379 path-awareness inventory.
 - #379 — make verification-nightly pull-request fan-out path-aware only after
   an owner exports the required-check/ruleset inventory and a historical
   changed-file replay proves net allocation and runner-time savings. On the
