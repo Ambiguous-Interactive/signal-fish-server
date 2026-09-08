@@ -10,6 +10,20 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 
+/// Drain a receiver without discarding results: every drained frame stays
+/// available for assertions (same shape as the room-service drain helper).
+fn drain_receiver(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) -> Vec<Arc<ServerMessage>> {
+    let mut messages = Vec::new();
+    loop {
+        match receiver.try_recv() {
+            Ok(message) => messages.push(message),
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                return messages;
+            }
+        }
+    }
+}
+
 async fn create_test_server_with(config: ServerConfig) -> Arc<EnhancedGameServer> {
     EnhancedGameServer::new(
         config,
@@ -302,25 +316,15 @@ async fn kick_evicts_only_the_authoritys_room_not_a_rerouted_target() {
     // membership is untouched receives no kicked `Error` frame. Every
     // eviction send happens before the correlated result, so draining the
     // channel after the result observes the final state.
-    let mut unexpected_farewell = None;
-    loop {
-        match target_rx.try_recv() {
-            Ok(message) => {
-                if matches!(
-                    message.as_ref(),
-                    ServerMessage::Error {
-                        error_code: Some(ErrorCode::Kicked),
-                        ..
-                    }
-                ) {
-                    unexpected_farewell = Some(message);
-                }
+    let unexpected_farewell = drain_receiver(&mut target_rx).into_iter().find(|message| {
+        matches!(
+            message.as_ref(),
+            ServerMessage::Error {
+                error_code: Some(ErrorCode::Kicked),
+                ..
             }
-            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
-                break;
-            }
-        }
-    }
+        )
+    });
     assert!(
         unexpected_farewell.is_none(),
         "a kick of stale residue must not send the kicked farewell: got {unexpected_farewell:?}"
