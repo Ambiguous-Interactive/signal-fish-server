@@ -149,8 +149,9 @@ pub enum ErrorCode {
     // see the signaling-errors note above. Raised by the authority-only
     // `SetRoomAccess` / `BanPlayer` / `TransferAuthority` room operations
     // (issue #525).
-    /// The room requires a join password and the request presented none or
-    /// the wrong one. The server does not distinguish the two cases.
+    /// The room requires a join password and the request presented none, the
+    /// wrong one, or a password for an open room (issue #546). The server
+    /// does not distinguish the three cases.
     PasswordRequired,
     /// This player id is banned from the room by its authority player and
     /// cannot join it (as a player or spectator) while the room lives. The
