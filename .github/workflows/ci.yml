@@ -7,13 +7,13 @@
 #   - Push to main branch
 #   - Pull requests to main
 #   - Daily schedule (the `deny` and `audit` security-audit jobs, plus the
-#     macOS lint/nextest lanes — issue #513)
+#     macOS and Windows lint/nextest lanes — issues #513 and #512)
 #
 # Jobs:
 #   - lint: Cross-OS code formatting (rustfmt) and linting (clippy) matrix
-#     (ubuntu + windows per push/PR; macOS on the daily schedule only)
+#     (ubuntu per push/PR; macOS + Windows on the daily schedule only)
 #   - nextest: Cross-OS test execution via cargo-nextest (doc-tests in doc-validation.yml)
-#     (ubuntu + windows per push/PR; macOS on the daily schedule only)
+#     (ubuntu per push/PR; macOS + Windows on the daily schedule only)
 #   - relay-allocations: Deterministic production-seam allocation ceilings
 #   - doc-consistency: Version/changelog/doc drift checks (diff-aware changelog gate)
 #   - deny: Security audits, license checks, and dependency validation
@@ -38,10 +38,11 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    # Daily security audit at noon UTC to catch new CVEs, plus the macOS
-    # lint/nextest lanes (issue #513): macOS bills at 10x Linux per minute and
-    # the server is deployed on Linux, so macOS coverage runs daily against
-    # main instead of on every push/pull request.
+    # Daily security audit at noon UTC to catch new CVEs, plus the macOS and
+    # Windows lint/nextest lanes (issues #513 and #512): macOS bills at 10x
+    # and Windows at 2x Linux per minute, and the server is deployed on
+    # Linux, so cross-OS coverage runs daily against main instead of on every
+    # push/pull request.
     - cron: "0 12 * * *"
 
 concurrency:
@@ -66,9 +67,9 @@ jobs:
   # workflows such as ci-safety.yml and doc-validation.yml are out of scope here;
   # see test_ci_quick_check_gate_guards_expensive_jobs which pins this wiring.)
   #
-  # Runs on every event, including the daily schedule: the macOS lint/nextest
-  # cron lanes (issue #513) need the same fail-closed gate, and the remaining
-  # schedule cost is minutes of Linux time per day.
+  # Runs on every event, including the daily schedule: the macOS/Windows
+  # lint/nextest cron lanes (issues #513 and #512) need the same fail-closed
+  # gate, and the remaining schedule cost is minutes of Linux time per day.
   quick-check:
     name: Quick Check
     runs-on: ubuntu-latest
@@ -116,12 +117,13 @@ jobs:
       - name: Check fuzz crate compiles
         run: cargo check --manifest-path fuzz/Cargo.toml --bins --locked
 
-  # Event-dependent OS cohort for the lint/nextest matrices (issue #513):
-  # macOS bills at 10x Linux per minute and the server deploys on Linux, so
-  # the macOS legs exist only on the daily cron (next-day signal for macOS
-  # regressions) while ubuntu + windows cover every push and pull request.
-  # A dynamic matrix is required because `matrix` is not an available
-  # context in a job-level `if:`; this job costs seconds of Linux time.
+  # Event-dependent OS cohort for the lint/nextest matrices (issues #513 and
+  # #512): macOS bills at 10x and Windows at 2x Linux per minute and the
+  # server deploys on Linux, so the macOS and Windows legs exist only on the
+  # daily cron (next-day signal for cross-OS regressions) while ubuntu covers
+  # every push and pull request. A dynamic matrix is required because
+  # `matrix` is not an available context in a job-level `if:`; this job costs
+  # seconds of Linux time.
   ci-matrix:
     name: CI Matrix
     runs-on: ubuntu-latest
@@ -135,9 +137,9 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           if [ "$EVENT" = "schedule" ]; then
-            echo 'os=["macos-latest"]' >> "$GITHUB_OUTPUT"
+            echo 'os=["macos-latest","windows-latest"]' >> "$GITHUB_OUTPUT"
           else
-            echo 'os=["ubuntu-latest","windows-latest"]' >> "$GITHUB_OUTPUT"
+            echo 'os=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
           fi
 
   relay-allocations:

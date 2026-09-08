@@ -250,6 +250,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Windows CI lanes moved to the daily cron, issue #512:** the `Lint` and
+  `Nextest` windows legs no longer run on every push and pull request; they
+  join the macOS legs in the noon UTC daily cohort against `main`. Windows
+  bills at 2x Linux per minute and the server deploys on Linux containers,
+  so per-event Windows signal bought little: measured over the seven most
+  recent successful CI runs, the Windows pair averaged ~40 billed minutes of
+  the ~92 billed minutes per run (43%). Per-event CI billing drops by that
+  share; the daily cron gains one Windows lint/nextest pair, which one
+  CI-triggering event per day pays back (the repository averages several).
+  Cross-OS regressions now surface next-day instead of pre-merge, matching
+  the issue #513 macOS trade. The `CI / Lint (windows-latest)` and
+  `CI / Nextest (windows-latest)` check names are unchanged and keep being
+  produced by the cron.
 - **Stray join passwords now fail closed, issue #546:** a `JoinRoom` or
   `JoinAsSpectator` request that presents a password to an open (unsealed)
   room is refused with `PASSWORD_REQUIRED` instead of being silently seated.
