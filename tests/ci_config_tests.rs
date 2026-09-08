@@ -1923,14 +1923,32 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
     // Every expensive compile/test job must wait on the gate. `needs:` is declared
     // in the first few lines of a job block, so a bounded window after the header
     // is sufficient and avoids brittle full-block parsing.
-    for job in [
-        "lint",
-        "nextest",
-        "relay-allocations",
-        "msrv",
-        "docker",
-        "coverage",
-        "panic-policy",
+    //
+    // Event cohorts (issues #513/#512): the macOS/Windows legs are cron-only via
+    // the `ci-matrix` cohort job; coverage is cron-only (the instrumented run
+    // duplicates the per-event nextest suite); msrv verifies compilation on
+    // every event and runs its full test suite on the cron only; the rest run
+    // on push/PR and are excluded from the schedule.
+    for (job, cohort_guard) in [
+        ("lint", CI_MATRIX_GUARD),
+        ("nextest", CI_MATRIX_GUARD),
+        (
+            "relay-allocations",
+            "${{ !cancelled() && github.event_name != 'schedule' }}",
+        ),
+        ("msrv", "${{ !cancelled() }}"),
+        (
+            "docker",
+            "${{ !cancelled() && github.event_name != 'schedule' }}",
+        ),
+        (
+            "coverage",
+            "${{ !cancelled() && github.event_name == 'schedule' }}",
+        ),
+        (
+            "panic-policy",
+            "${{ !cancelled() && github.event_name != 'schedule' }}",
+        ),
     ] {
         let header = format!("\n  {job}:");
         let start = workflow
@@ -1960,6 +1978,11 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
                 "ci.yml `{job}` must run after quick-check failure but not workflow \
                  cancellation, and must admit exactly the cohort job's legs"
             );
+        } else if matches!(job, "msrv" | "coverage") {
+            assert!(
+                block.contains("!cancelled()"),
+                "ci.yml `{job}` must run after quick-check failure but not workflow cancellation"
+            );
         } else {
             assert!(
                 block.contains("!cancelled() && github.event_name != 'schedule'"),
@@ -1975,14 +1998,9 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
         let job_config = jobs
             .as_mapping_get(job)
             .unwrap_or_else(|| panic!("parsed ci.yml must define `{job}`"));
-        let expected_if = if matches!(job, "lint" | "nextest") {
-            CI_MATRIX_GUARD
-        } else {
-            "${{ !cancelled() && github.event_name != 'schedule' }}"
-        };
         assert_eq!(
             job_config.as_mapping_get("if").and_then(Yaml::as_str),
-            Some(expected_if),
+            Some(cohort_guard),
             "{job} must run after prerequisite failure but not workflow cancellation"
         );
         let first_step = job_config
@@ -22324,17 +22342,19 @@ fn test_ci_safety_shared_nightly_cache_prefix() {
 }
 
 #[test]
-fn test_msrv_job_uses_single_verification_step() {
-    // The MSRV job should combine build verification and test execution in a
-    // single step to avoid redundant compilation. `cargo test` implicitly
-    // compiles all targets, making a separate `cargo check` unnecessary.
+fn test_msrv_job_verification_steps_are_cohort_disjoint() {
+    // Issue #512 cohort: the MSRV job verifies COMPILATION on every
+    // push/PR (`cargo check` across all targets and features) and runs its
+    // full test suite on the daily cron only. Each event must run exactly
+    // one of the two steps: the suite step subsumes the compilation, so a
+    // check on the cron would double the compile, and a suite run per event
+    // would re-triple the per-event full-suite executions the cohort
+    // removed.
 
     let root = repo_root();
     let ci_yml = root.join(".github/workflows/ci.yml");
-    // Live view: a `#` comment in the MSRV job mentions `cargo test`/`cargo
-    // check`, so derive the step inventory from live config only — otherwise a
-    // commented mention could both satisfy the `cargo test` requirement and trip
-    // the "no separate cargo check" guard.
+    // Live view: comments in the MSRV job mention both commands, so derive
+    // the step inventory from live config only.
     let content = read_live_file(&ci_yml);
 
     // Extract the MSRV job block
@@ -22362,22 +22382,47 @@ fn test_msrv_job_uses_single_verification_step() {
         .collect::<Vec<&str>>()
         .join("\n");
 
-    // Should NOT have separate cargo check and cargo test steps
-    let has_cargo_check = msrv_block.contains("cargo check");
-    let has_cargo_test = msrv_block.contains("cargo test");
+    let check_step = msrv_block
+        .split("- name: Verify compilation at MSRV")
+        .nth(1)
+        .unwrap_or_else(|| {
+            panic!("MSRV job must define the per-event check step.\nFile: {ci_yml:?}")
+        })
+        .split("- name:")
+        .next()
+        .expect("check step delimited")
+        .to_string();
+    let suite_step = msrv_block
+        .split("- name: Verify build and tests with MSRV")
+        .nth(1)
+        .unwrap_or_else(|| panic!("MSRV job must define the full-suite step.\nFile: {ci_yml:?}"))
+        .split("- name:")
+        .next()
+        .expect("suite step delimited")
+        .to_string();
 
     assert!(
-        !has_cargo_check,
-        "MSRV job should not have a separate 'cargo check' step.\n\
-         'cargo test' implicitly compiles all targets, making 'cargo check' redundant.\n\
-         Combine into a single step to save ~2-3 minutes of redundant compilation.\n\
+        check_step.contains("cargo check --locked --all-targets --all-features"),
+        "the per-event MSRV step must verify compilation of all targets and features.\n\
          File: {}",
         ci_yml.display()
     );
-
     assert!(
-        has_cargo_test,
-        "MSRV job must run 'cargo test' to verify tests pass with MSRV.\n\
+        check_step.contains("if: github.event_name != 'schedule'"),
+        "the MSRV check step must be excluded from the schedule: the full-suite \
+         step subsumes the compilation, and running both would double the cron's \
+         MSRV compile.\nFile: {}",
+        ci_yml.display()
+    );
+    assert!(
+        suite_step.contains("cargo test --locked --all-features --no-fail-fast"),
+        "the MSRV full-suite step must run the complete test suite.\nFile: {}",
+        ci_yml.display()
+    );
+    assert!(
+        suite_step.contains("if: github.event_name == 'schedule'"),
+        "the MSRV full-suite step must run on the daily cron only (issue #512): \
+         the suite itself is already covered per-event by ubuntu nextest.\n\
          File: {}",
         ci_yml.display()
     );
@@ -26002,9 +26047,7 @@ const SCHEDULE_EXCLUSION_GUARD: &str = "github.event_name != 'schedule'";
 const SCHEDULE_EXCLUDED_CI_JOBS: &[&str] = &[
     "relay-allocations",
     "doc-consistency",
-    "msrv",
     "docker",
-    "coverage",
     "panic-policy",
     "sbom",
 ];
@@ -26012,16 +26055,23 @@ const SCHEDULE_EXCLUDED_CI_JOBS: &[&str] = &[
 #[test]
 fn test_ci_schedule_only_runs_security_jobs() {
     // Validates the daily scheduled trigger's cost cohort (issues #513 and
-    // #512): only the security audit jobs (`deny` and `audit`), the
-    // `quick-check` gate, and the macOS + Windows legs of `lint`/`nextest`
-    // run on schedule; every job in `SCHEDULE_EXCLUDED_CI_JOBS` is excluded
-    // from schedule runs entirely, and `doc-consistency` — a Linux-only
-    // lane — keeps its own exclusion guard in that list.
+    // #512): the security audit jobs (`deny` and `audit`), the
+    // `quick-check` gate, the macOS + Windows legs of `lint`/`nextest`, the
+    // instrumented `coverage` gate, and the MSRV full-suite run execute on
+    // schedule; every job in `SCHEDULE_EXCLUDED_CI_JOBS` is excluded from
+    // schedule runs entirely, and `doc-consistency` — a Linux-only lane —
+    // keeps its own exclusion guard in that list. `msrv` runs on every
+    // event (per-event MSRV compilation) and `coverage` runs on the cron
+    // only; both cohort placements are pinned by
+    // test_ci_msrv_and_coverage_suite_lanes_run_on_the_daily_cron.
     //
-    // The ci.yml workflow has a daily cron schedule for catching new CVEs and
-    // for the macOS + Windows lint/nextest cohort — macOS bills at 10x and
-    // Windows at 2x Linux per minute, so those lanes run daily against main
-    // instead of on every push/PR.
+    // The ci.yml workflow has a daily cron schedule for catching new CVEs
+    // and for the cohort lanes whose per-event cost outweighs their
+    // marginal signal — macOS bills at 10x and Windows at 2x Linux per
+    // minute, the instrumented coverage run duplicates the per-event
+    // nextest suite, and the MSRV full-suite run duplicates it on a second
+    // toolchain — so those lanes run daily against main instead of on every
+    // push/PR.
     //
     // This test ensures:
     //   1. Every job in `SCHEDULE_EXCLUDED_CI_JOBS` has a schedule-exclusion guard
@@ -26221,6 +26271,74 @@ fn test_ci_windows_and_macos_lanes_run_only_on_the_daily_cron() {
         "quick-check must NOT exclude schedule runs: the macOS + Windows \
          lint/nextest cron legs (issues #513 and #512) depend on its \
          fail-closed gate result"
+    );
+}
+
+#[test]
+fn test_ci_msrv_and_coverage_suite_lanes_run_on_the_daily_cron() {
+    // Issue #512 cohort, extending the #513 trade-off: each per-event full
+    // suite execution costs ~10-12 Linux minutes, and before this cohort the
+    // suite ran THREE times per push/PR (nextest, instrumented llvm-cov, and
+    // the MSRV full-suite run). The suite's pass/fail signal is already
+    // covered per-event by ubuntu nextest, so:
+    //   1. coverage (instrumented, 2-4x slower) is cron-only;
+    //   2. msrv verifies COMPILATION on every event (the actual MSRV-breakage
+    //      class) and runs its full test suite on the cron only.
+    // Pins the cohort placement so a refactor cannot silently re-triple the
+    // per-event suite executions or silently drop the nightly verification.
+    use saphyr::LoadableYamlNode;
+
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let documents = Yaml::load_from_str(&workflow).expect("ci.yml must parse");
+    let jobs = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .expect("ci.yml jobs");
+
+    // Coverage is cron-only.
+    let coverage = jobs
+        .as_mapping_get("coverage")
+        .unwrap_or_else(|| panic!("parsed ci.yml must define `coverage`"));
+    assert_eq!(
+        coverage.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("${{ !cancelled() && github.event_name == 'schedule' }}"),
+        "coverage must run on the daily cron only: its instrumented suite \
+         duplicates the per-event nextest run (issue #512)"
+    );
+
+    // MSRV runs on every event but runs its test suite on the cron only.
+    let msrv = jobs
+        .as_mapping_get("msrv")
+        .unwrap_or_else(|| panic!("parsed ci.yml must define `msrv`"));
+    assert_eq!(
+        msrv.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("${{ !cancelled() }}"),
+        "msrv must run on every event: per-event MSRV compilation is the \
+         actual MSRV-breakage guard"
+    );
+    let msrv_block = extract_workflow_job_block(&workflow, "msrv")
+        .unwrap_or_else(|| panic!("ci.yml must define the `msrv` job"));
+    assert!(
+        msrv_block.contains("Verify compilation at MSRV"),
+        "msrv must verify compilation on every event"
+    );
+    let suite_step = msrv_block
+        .split("- name: Verify build and tests with MSRV")
+        .nth(1)
+        .unwrap_or_else(|| panic!("msrv must define the full-suite step"));
+    let suite_step = suite_step
+        .split("- name:")
+        .next()
+        .expect("msrv suite step delimited");
+    assert!(
+        suite_step.contains("if: github.event_name == 'schedule'"),
+        "the MSRV full-suite step must be cron-only (issue #512): the suite \
+         itself is already covered per-event by ubuntu nextest"
+    );
+    assert!(
+        suite_step.contains("SIGNAL_FISH_TEST_TIMEOUT_MULTIPLIER: \"3\""),
+        "the MSRV full-suite step must keep the idle-timeout headroom multiplier"
     );
 }
 

@@ -390,6 +390,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a `ClientCertificateFingerprint` would bind identity (and any derived
   proofs) to a meaningless string. Embedders that terminate AWS-native mTLS
   must hash the decoded certificate themselves (issue #396).
+- **MSRV and coverage suite lanes moved to the daily cron, issue #512:**
+  each push or pull request previously executed the full test suite three
+  times on ubuntu — `nextest` (~10 min), the instrumented `llvm-cov`
+  coverage run (~12 min), and the MSRV full `cargo test` run (~12 min).
+  The suite's pass/fail signal is already covered per-event by ubuntu
+  `nextest`, so the instrumented coverage gate and the MSRV full-suite run
+  now join the noon UTC daily cohort against `main` (next-day signal,
+  matching the macOS/Windows lanes from issue #513). The MSRV job still
+  runs on every event: it verifies MSRV compilation of all targets and
+  features with `cargo check`, which is the actual MSRV-breakage class.
+  Measured from recent successful CI runs, per-event CI billing drops by
+  roughly 20 Linux minutes per CI-workflow event (about 13 events/day);
+  the daily cron gains two parallel ubuntu lanes, which one CI-triggering
+  event per day pays back.
 
 ### Fixed
 
@@ -444,6 +458,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recipients. TLS client-auth errors now spell the mode in configuration
   grammar (`optional`/`require`) via `Display` instead of Rust `Debug`
   casing.
+
+- `TransferAuthority` now sequences its `AuthorityChanged` announcement
+  through the room's event lane instead of delivering it after releasing the
+  room mutation gate (issue #396). A departure of the freshly granted
+  authority could previously commit and announce the cleared role between
+  the role write and the announcement; live members then kept a stale
+  authority view (`Some(departed)`) that no later event corrected, so their
+  moderation operations kept failing `NOT_ROOM_AUTHORITY` and nobody issued
+  the `AuthorityRequest` that would have repaired it. The announcement is
+  replay-recorded in the same sequenced position, and the former
+  authority's correlated result follows the announcement as before.
+- Authority kick and ban no longer evict a target from the wrong room
+  (issue #396). A storage-failed detach can leave a stale durable seat in
+  the authority's room after the target's connection has left; if the
+  target then joins another room before the detach-backlog repair runs, the
+  eviction classified the target as routed and removed its LIVE membership
+  in the other room — wrong `PlayerLeft`, wrong-room re-planning, and a
+  `4007 kicked` close — while the stale row survived. The eviction now
+  re-reads the target's route after the reconnection tombstone and removes
+  only stale residue: the target's live membership, reconnection
+  credential, farewell, and connection in its actual room are untouched.
+- The TLS serve stack now enables HTTP/2 RFC 8441 extended CONNECT to match
+  the plain stack (issue #396). Its ALPN configuration advertises `h2`, but
+  the h2 builder never enabled the CONNECT protocol, so a `wss://` client
+  negotiating HTTP/2 received a rejected WebSocket upgrade and had to fall
+  back to HTTP/1.1 while the plain path accepted the same upgrade.
 
 ## [0.8.0] - 2026-09-01
 

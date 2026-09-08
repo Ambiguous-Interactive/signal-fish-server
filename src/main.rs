@@ -467,7 +467,11 @@ async fn main() -> anyhow::Result<()> {
             .handle(tls_handle);
         // Arm the pre-upgrade header-read deadline on the TLS path too:
         // axum-server also leaves hyper's Timer unset, so its header-read
-        // timeout would otherwise stay inert (issue #518).
+        // timeout would otherwise stay inert (issue #518). The HTTP/2
+        // configuration mirrors the plain path (routes.rs): the TLS ALPN
+        // list advertises `h2`, so a `wss://` client negotiating HTTP/2
+        // needs RFC 8441 extended CONNECT to be enabled or its WebSocket
+        // upgrade is rejected even though ALPN selected `h2`.
         {
             use hyper_util::rt::TokioTimer;
             server
@@ -477,6 +481,7 @@ async fn main() -> anyhow::Result<()> {
                 .header_read_timeout(std::time::Duration::from_secs(
                     cfg.websocket.http_header_read_timeout_secs,
                 ));
+            server.http_builder().http2().enable_connect_protocol();
         }
         // Log "started" only after the bind and TLS setup have actually
         // succeeded: a log scraper reading the earlier placement would see a
@@ -909,6 +914,39 @@ mod cli_tests {
             None,
             "a 65535 main port has no sibling port: saturating derivation would collide \
              with the main listener, so it must be refused instead"
+        );
+    }
+}
+
+#[cfg(test)]
+mod serve_stack_parity_tests {
+    /// Both serve stacks must configure HTTP/2 RFC 8441 extended CONNECT:
+    /// the TLS ALPN list advertises `h2` (`security/tls.rs`), so a `wss://`
+    /// client negotiating HTTP/2 gets its WebSocket upgrade rejected unless
+    /// the TLS builder enables the CONNECT protocol — while the plain path
+    /// (`websocket/routes.rs`) already does. Source-pinned: the builders are
+    /// consumed inside the serve calls, and the behavior-level asymmetry only
+    /// reproduces with an h2-negotiating client plus TLS termination.
+    #[test]
+    fn both_serve_stacks_enable_http2_connect_protocol() {
+        let main_source = include_str!("main.rs");
+        let tls_block = main_source
+            .split("Arm the pre-upgrade header-read deadline on the TLS path too")
+            .nth(1)
+            .expect("the TLS serve configuration block must exist");
+        let tls_body = tls_block
+            .split("\n        }")
+            .next()
+            .expect("TLS serve block delimited");
+        assert!(
+            tls_body.contains(".http2().enable_connect_protocol()"),
+            "the TLS serve stack must enable RFC 8441 extended CONNECT to match its h2 ALPN advertisement"
+        );
+
+        let routes_source = include_str!("websocket/routes.rs");
+        assert!(
+            routes_source.contains(".http2().enable_connect_protocol()"),
+            "the plain serve stack must keep RFC 8441 extended CONNECT enabled"
         );
     }
 }

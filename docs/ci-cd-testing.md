@@ -280,7 +280,7 @@ Tests that validate CI runtime optimizations and flake prevention measures:
 | `test_nextest_config_exists_and_is_valid` | Validates `.config/nextest.toml` exists with required settings | Missing or incomplete nextest configuration |
 | `test_nextest_config_no_retries_by_default` | Ensures no blanket test retries (zero-flake policy) | Retries that mask real test failures |
 | `test_ci_safety_shared_nightly_cache_prefix` | Validates Miri and ASan share nightly cache | Redundant nightly compilation across safety jobs |
-| `test_msrv_job_uses_single_verification_step` | Ensures MSRV doesn't redundantly compile | Wasted CI minutes from separate check+test steps |
+| `test_msrv_job_verification_steps_are_cohort_disjoint` | Ensures MSRV check runs per event and its full suite runs on the daily cron only | Wasted CI minutes from duplicate suite executions |
 | `test_docker_health_check_uses_exponential_backoff` | Validates exponential backoff in Docker smoke test | Fixed-interval retries wasting time |
 | `test_release_sccache_failure_emits_warning` | Ensures sccache failures are visible | Silent build cache degradation |
 

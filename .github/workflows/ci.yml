@@ -6,8 +6,9 @@
 # Runs on:
 #   - Push to main branch
 #   - Pull requests to main
-#   - Daily schedule (the `deny` and `audit` security-audit jobs, plus the
-#     macOS and Windows lint/nextest lanes — issues #513 and #512)
+#   - Daily schedule (the `deny` and `audit` security-audit jobs, the
+#     macOS and Windows lint/nextest lanes, the instrumented coverage
+#     gate, and the MSRV full-suite test run — issues #513 and #512)
 #
 # Jobs:
 #   - lint: Cross-OS code formatting (rustfmt) and linting (clippy) matrix
@@ -19,7 +20,11 @@
 #   - deny: Security audits, license checks, and dependency validation
 #   - audit: RustSec and npm vulnerability scans
 #   - docker: Docker image build and smoke test with health check
-#   - coverage: Linux code coverage gate via cargo-llvm-cov
+#   - coverage: Linux code coverage gate via cargo-llvm-cov (daily schedule
+#     only — the instrumented suite duplicates the per-event nextest run)
+#   - msrv: MSRV verification (compilation per push/PR; the full test suite
+#     runs on the daily schedule — the suite itself is already covered
+#     per-event by ubuntu nextest)
 #   - panic-policy: Zero-panic production code enforcement
 #   - sbom: Software Bill of Materials generation (CycloneDX JSON)
 #
@@ -38,11 +43,14 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    # Daily security audit at noon UTC to catch new CVEs, plus the macOS and
-    # Windows lint/nextest lanes (issues #513 and #512): macOS bills at 10x
-    # and Windows at 2x Linux per minute, and the server is deployed on
-    # Linux, so cross-OS coverage runs daily against main instead of on every
-    # push/pull request.
+    # Daily security audit at noon UTC to catch new CVEs, plus the lanes
+    # whose per-event cost outweighs their marginal signal (issues #513 and
+    # #512): macOS bills at 10x and Windows at 2x Linux per minute, the
+    # instrumented coverage run duplicates the per-event nextest suite at
+    # 2-4x slower execution, and the MSRV full-suite run duplicates it on a
+    # second toolchain. The server is deployed on Linux with the pinned
+    # stable toolchain, so all of these run daily against main instead of on
+    # every push/pull request.
     - cron: "0 12 * * *"
 
 concurrency:
@@ -588,13 +596,20 @@ jobs:
   msrv:
     name: MSRV Verification
     needs: quick-check
-    if: ${{ !cancelled() && github.event_name != 'schedule' }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Verify Minimum Supported Rust Version (MSRV) compliance
     # This job catches future regressions when dependencies require newer Rust versions
     # MSRV is the single source of truth defined in Cargo.toml and must be consistent
     # across all configuration files (rust-toolchain.toml, clippy.toml, Dockerfile, etc.)
+    #
+    # Issue #512 cohort: every push/PR verifies MSRV COMPILATION of all
+    # targets and features — the actual MSRV-breakage class (a dependency or
+    # code change needing a newer rustc). The full MSRV TEST-SUITE run
+    # duplicates the per-event ubuntu nextest suite on a second toolchain,
+    # so it runs on the daily schedule only (next-day signal, same
+    # trade-off as the macOS/Windows lanes).
     steps:
       - name: Require fast-fail gate success
         env:
@@ -629,13 +644,24 @@ jobs:
           prefix-key: "msrv"
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
+      - name: Verify compilation at MSRV
+        # A no-codegen `check` across all targets and features: catches the
+        # MSRV-breakage class (newer-rustc-only syntax, or a dependency bump
+        # raising the effective MSRV) at a fraction of a full test run.
+        # Excluded from the schedule, where the full-suite step below
+        # subsumes the compilation — the cron compiles once, not twice.
+        if: github.event_name != 'schedule'
+        run: cargo check --locked --all-targets --all-features
+
       - name: Verify build and tests with MSRV
-        # Plain `cargo test` (NOT nextest) runs every test binary in parallel
-        # with no `process-spawning` isolation, so the multiprocess and
+        # Daily-schedule full suite (issue #512). Plain `cargo test` (NOT
+        # nextest) runs every test binary in parallel with no
+        # `process-spawning` isolation, so the multiprocess and
         # idle-timeout tests share CPU with ~40 other binaries. The timeout
         # multiplier gives the idle-timeout tests proportional headroom so a
         # starved task still resets the idle timer in time (see
         # idle_timeout_test_multiplier in tests/e2e_tests.rs).
+        if: github.event_name == 'schedule'
         env:
           SIGNAL_FISH_TEST_TIMEOUT_MULTIPLIER: "3"
         run: |
@@ -751,7 +777,13 @@ jobs:
   coverage:
     name: Coverage (llvm-cov)
     needs: quick-check
-    if: ${{ !cancelled() && github.event_name != 'schedule' }}
+    # Daily-schedule lane (issue #512): the instrumented run executes the
+    # same suite nextest already runs on every push/PR, at 2-4x slower
+    # execution (see the timeout multiplier below). Keeping it per-event
+    # tripled every full-suite execution for a threshold signal that
+    # tolerates next-day detection — the same trade-off the macOS/Windows
+    # lanes accepted (#513).
+    if: ${{ !cancelled() && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

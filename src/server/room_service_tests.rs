@@ -1185,6 +1185,11 @@ enum DrainTrigger {
     MissingTerminalTail,
     SpectatorRoutingLookupFailure,
     AuthorityBroadcastFailure,
+    // Marker only: the transfer-announcement pause arms through the
+    // `pause_next_transfer_announcement` latch below; the variant exists
+    // because `new()` requires a trigger and the sequencer's post-job hook
+    // cannot pause mid-broadcast.
+    PauseAuthorityTransferAnnouncement,
 }
 
 struct DrainTriggerCoordinator {
@@ -1201,6 +1206,9 @@ struct DrainTriggerCoordinator {
     pause_next_player_left_broadcast: AtomicBool,
     player_left_broadcast_started: Arc<Notify>,
     resume_player_left_broadcast: Arc<Notify>,
+    pause_next_transfer_announcement: AtomicBool,
+    transfer_announcement_started: Arc<Notify>,
+    resume_transfer_announcement: Arc<Notify>,
     clients: RwLock<HashMap<PlayerId, ClientDeliveryHandle>>,
     room_players: RwLock<HashMap<RoomId, HashSet<PlayerId>>>,
 }
@@ -1221,6 +1229,9 @@ impl DrainTriggerCoordinator {
             pause_next_player_left_broadcast: AtomicBool::new(false),
             player_left_broadcast_started: Arc::new(Notify::new()),
             resume_player_left_broadcast: Arc::new(Notify::new()),
+            pause_next_transfer_announcement: AtomicBool::new(false),
+            transfer_announcement_started: Arc::new(Notify::new()),
+            resume_transfer_announcement: Arc::new(Notify::new()),
             clients: RwLock::new(HashMap::new()),
             room_players: RwLock::new(HashMap::new()),
         }
@@ -1491,6 +1502,19 @@ impl MessageCoordinator for DrainTriggerCoordinator {
                 + 'a,
         >,
     ) -> anyhow::Result<bool> {
+        if matches!(
+            message.as_ref(),
+            ServerMessage::AuthorityChanged {
+                authority_player: Some(_),
+                ..
+            }
+        ) && self
+            .pause_next_transfer_announcement
+            .swap(false, Ordering::AcqRel)
+        {
+            self.transfer_announcement_started.notify_one();
+            self.resume_transfer_announcement.notified().await;
+        }
         before_send().await;
         self.broadcast_to_room(room_id, message).await?;
         Ok(true)
@@ -8355,4 +8379,146 @@ async fn creator_name_failure_keeps_published_snapshot_consistent_with_storage()
         .name
         .clone();
     assert_eq!(stored_after_rename, "Display-Name");
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transfer_authority_announcement_cannot_be_overtaken_by_a_departure() {
+    // The transfer's `AuthorityChanged` must be sequenced with the room's
+    // other lifecycle events. If the announcement is delivered outside the
+    // room mutation gate, a departure of the freshly granted authority can
+    // commit and announce the cleared role between the role write and the
+    // announcement, and the member below ends with `Some(successor)` as its
+    // final authority view while storage holds `None`. The pause orders the
+    // announcement strictly before an independently completed departure
+    // would deliver its own view; the sequenced implementation makes that
+    // departure wait behind the announcement instead.
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(
+        DrainTrigger::PauseAuthorityTransferAnnouncement,
+    ));
+    coordinator
+        .pause_next_transfer_announcement
+        .store(true, Ordering::Release);
+    let server = create_test_server_with_message_coordinator(
+        ServerConfig::default(),
+        Arc::clone(&coordinator) as Arc<dyn MessageCoordinator>,
+    )
+    .await;
+    coordinator.attach_server(&server);
+    let (authority, mut authority_rx) =
+        register_client(&server, "127.0.0.1:48060".parse().unwrap()).await;
+    let (successor, mut successor_rx) =
+        register_client(&server, "127.0.0.1:48061".parse().unwrap()).await;
+    let (member, mut member_rx) =
+        register_client(&server, "127.0.0.1:48062".parse().unwrap()).await;
+    for (player, receiver, name, code) in [
+        (&authority, &mut authority_rx, "host", "XRACE1"),
+        (&successor, &mut successor_rx, "heir", "XRACE1"),
+        (&member, &mut member_rx, "peer", "XRACE1"),
+    ] {
+        server
+            .handle_join_room(
+                player,
+                "transfer-race-game".to_string(),
+                Some(code.to_string()),
+                name.to_string(),
+                Some(4),
+                Some(true),
+                None,
+                None,
+            )
+            .await;
+        let joined = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("join finishes")
+            .expect("join responds");
+        assert!(
+            matches!(joined.as_ref(), ServerMessage::RoomJoined(_)),
+            "expected RoomJoined, got {joined:?}"
+        );
+    }
+
+    let transfer_server = Arc::clone(&server);
+    let transfer = tokio::spawn(async move {
+        transfer_server
+            .handle_transfer_authority_operation(
+                &authority,
+                crate::protocol::RoomOperationId::new_v4(),
+                successor,
+            )
+            .await;
+    });
+    timeout(
+        Duration::from_secs(1),
+        coordinator.transfer_announcement_started.notified(),
+    )
+    .await
+    .expect("the transfer announcement must commit and then pause");
+
+    // Race the new authority's departure against the paused announcement.
+    let teardown_server = Arc::clone(&server);
+    let mut teardown =
+        tokio::spawn(async move { teardown_server.unregister_client(&successor).await });
+    match timeout(Duration::from_secs(1), &mut teardown).await {
+        // Independent teardown: the announcement is not sequenced with the
+        // room's lifecycle, so the departure can fully complete (and
+        // announce the cleared role) while the stale grant is still paused.
+        Ok(_) => {
+            coordinator.resume_transfer_announcement.notify_one();
+        }
+        Err(_) => {
+            // Sequenced teardown: the departure waits behind the paused
+            // announcement job. Release it, then the departure completes.
+            coordinator.resume_transfer_announcement.notify_one();
+            timeout(Duration::from_secs(1), &mut teardown)
+                .await
+                .expect("departure completes after the announcement it follows")
+                .expect("departure task does not panic");
+        }
+    }
+    timeout(Duration::from_secs(1), transfer)
+        .await
+        .expect("transfer handler finishes")
+        .expect("transfer task does not panic");
+
+    // Durable truth: the successor departed, so the role is vacant.
+    let room = server
+        .database
+        .get_room("transfer-race-game", "XRACE1")
+        .await
+        .expect("room lookup succeeds")
+        .expect("room survives the transfer and departure");
+    assert_eq!(
+        room.authority_player, None,
+        "the departed authority's role must be vacant in storage"
+    );
+
+    // The member's final observed authority view must match storage: the
+    // cleared-role announcement is the last `AuthorityChanged` it receives.
+    let mut last_authority: Option<Option<PlayerId>> = None;
+    let mut saw_departure = false;
+    let mut authority_views = 0;
+    while authority_views < 2 || !saw_departure {
+        let message = timeout(Duration::from_secs(1), member_rx.recv())
+            .await
+            .expect("member frame arrives")
+            .expect("member channel stays open");
+        match message.as_ref() {
+            ServerMessage::PlayerLeft { player_id, .. } if *player_id == successor => {
+                saw_departure = true;
+            }
+            ServerMessage::AuthorityChanged {
+                authority_player, ..
+            } => {
+                authority_views += 1;
+                last_authority = Some(*authority_player);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        last_authority,
+        Some(None),
+        "the member's final authority view must match storage, not the stale grant"
+    );
 }
