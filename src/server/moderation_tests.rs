@@ -303,15 +303,22 @@ async fn kick_evicts_only_the_authoritys_room_not_a_rerouted_target() {
     // eviction send happens before the correlated result, so draining the
     // channel after the result observes the final state.
     let mut unexpected_farewell = None;
-    while let Ok(message) = target_rx.try_recv() {
-        if matches!(
-            message.as_ref(),
-            ServerMessage::Error {
-                error_code: Some(ErrorCode::Kicked),
-                ..
+    loop {
+        match target_rx.try_recv() {
+            Ok(message) => {
+                if matches!(
+                    message.as_ref(),
+                    ServerMessage::Error {
+                        error_code: Some(ErrorCode::Kicked),
+                        ..
+                    }
+                ) {
+                    unexpected_farewell = Some(message);
+                }
             }
-        ) {
-            unexpected_farewell = Some(message);
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                break;
+            }
         }
     }
     assert!(
