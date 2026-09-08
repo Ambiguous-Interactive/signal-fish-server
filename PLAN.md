@@ -77,7 +77,15 @@ correctness evidence appears.
   `app_auth_path` registry file). Session 216 killed the nightly
   mutation-testing miss on the finalized-join mixed-path observation guard
   and closed the #526 griefing-forensics item (per-player and per-room
-  rejection tallies with throttled info-level attribution). Remaining
+  rejection tallies with throttled info-level attribution). Session 221
+  closed two session-218/219 follow-on classes: the `TransferAuthority`
+  announcement now sequences through the room event lane (a departure of the
+  freshly granted authority could previously leave live members with a
+  stale authority view), and authority kick/ban removes only stale durable
+  residue — never the target's live membership in another room — with the
+  farewell, reconnection credential, and `4007` close gated on a fresh
+  post-tombstone route read; the TLS serve stack also gained RFC 8441
+  extended CONNECT to match its `h2` ALPN advertisement. Remaining
   frontier: continue seam sweeps; #539 tracks the coordinated-SDK path for
   the `connected_at` v3 trim (released SDKs 0.8.0–0.12.0 require the field);
   the parked-state (`senderState`) producers are same-thread program-ordered
@@ -112,7 +120,11 @@ correctness evidence appears.
 - #512 — session 220 moved the Windows lint/nextest lanes into the #513
   daily cron cohort (measured: the Windows pair averaged ~40 of ~92 billed
   minutes per CI run, 43%; the cron gains one Windows pair per day, paid
-  back by a single CI-triggering event). Remaining levers need owner input:
+  back by a single CI-triggering event). Session 221 removed the remaining
+  per-event full-suite duplication: the instrumented coverage gate and the
+  MSRV full-suite run joined the noon cron (~20 fewer ubuntu minutes per
+  CI-workflow event, ~13 events/day measured; MSRV compilation still
+  verifies per event). Remaining levers need owner input:
   self-hosted runner labels (owner comment excludes DAD-MACHINE and
   ELI-MACHINE) and the #379 path-awareness inventory.
 - #379 — make verification-nightly pull-request fan-out path-aware only after
