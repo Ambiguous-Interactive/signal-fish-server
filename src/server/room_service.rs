@@ -2348,6 +2348,56 @@ impl EnhancedGameServer {
                                 // before treating that error as unrelated
                                 // storage failure. Explicit requests retain the
                                 // adapter's original error semantics.
+                                //
+                                // A password-protected creation never adopts
+                                // (nor leaves behind) a committed-but-unsealed
+                                // row, for either admission intent: the write
+                                // may have committed through a non-atomic
+                                // adapter that then returned an error, and
+                                // handing out or keeping an unlocked room where
+                                // the creator asked for a protected one would
+                                // break the seal-from-birth contract
+                                // (issue #525).
+                                if sealed_creation {
+                                    if let Ok(Some(ambiguous_room)) =
+                                        self.database.get_room(game_name, room_code).await
+                                    {
+                                        if ambiguous_room.players.contains_key(player_id)
+                                            && ambiguous_room.password.is_none()
+                                        {
+                                            tracing::error!(
+                                                room_id = %ambiguous_room.id,
+                                                %room_code,
+                                                "Ambiguous commit produced an unsealed room for a password-protected creation; rolling it back instead of adopting it"
+                                            );
+                                            // Roll the orphaned row back like the
+                                            // drain branch: the join fails, so
+                                            // nothing legitimate is seated, and
+                                            // an unlocked room must not linger as
+                                            // the artifact of a refused
+                                            // "protected" creation.
+                                            match self
+                                                .database
+                                                .delete_room(&ambiguous_room.id)
+                                                .await
+                                            {
+                                                Ok(true) => {
+                                                    self.metrics.add_rooms_deleted(1);
+                                                }
+                                                Ok(false) => tracing::warn!(
+                                                    room_id = %ambiguous_room.id,
+                                                    "Unsealed ambiguous room vanished during rollback"
+                                                ),
+                                                Err(delete_error) => tracing::error!(
+                                                    room_id = %ambiguous_room.id,
+                                                    %delete_error,
+                                                    "Failed to roll back the unsealed ambiguous room"
+                                                ),
+                                            }
+                                            return Err(error.into());
+                                        }
+                                    }
+                                }
                                 if matches!(admission_intent, RoomAdmissionIntent::CreateOnly) {
                                     if let Ok(Some(room)) =
                                         self.database.get_room(game_name, room_code).await
@@ -2359,44 +2409,9 @@ impl EnhancedGameServer {
                                             // loss after acknowledgement). Adopt
                                             // that exact creator-owned result so
                                             // retrying cannot orphan a room or
-                                            // consume quota twice — but only if
-                                            // the adopted row carries the
-                                            // requested seal: an adapter that
-                                            // committed through the non-atomic
-                                            // fallback may have returned an
-                                            // error after creating an unlocked
-                                            // row, and adopting that would hand
-                                            // out a "protected" room without
-                                            // its password (issue #525).
-                                            if sealed_creation && room.password.is_none() {
-                                                tracing::error!(
-                                                    room_id = %room.id,
-                                                    %room_code,
-                                                    "Ambiguous commit produced an unsealed room for a password-protected creation; rolling it back instead of adopting it"
-                                                );
-                                                // Roll the orphaned row back like
-                                                // the drain branch: the join
-                                                // fails, so nothing legitimate
-                                                // is seated, and an unlocked
-                                                // room must not linger as the
-                                                // artifact of a refused
-                                                // "protected" creation.
-                                                match self.database.delete_room(&room.id).await {
-                                                    Ok(true) => {
-                                                        self.metrics.add_rooms_deleted(1);
-                                                    }
-                                                    Ok(false) => tracing::warn!(
-                                                        room_id = %room.id,
-                                                        "Unsealed ambiguous room vanished during rollback"
-                                                    ),
-                                                    Err(delete_error) => tracing::error!(
-                                                        room_id = %room.id,
-                                                        %delete_error,
-                                                        "Failed to roll back the unsealed ambiguous room"
-                                                    ),
-                                                }
-                                                return Err(error.into());
-                                            }
+                                            // consume quota twice. A sealless row
+                                            // under a sealed creation was already
+                                            // refused and rolled back above.
                                             room
                                         } else {
                                             return Err(JoinRoomError::RoomCodeCollision);

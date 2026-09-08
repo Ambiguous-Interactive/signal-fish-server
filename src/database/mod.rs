@@ -215,8 +215,9 @@ pub trait GameDatabase: Send + Sync {
     /// lock) can observe an unlocked row — so implementations that can create
     /// atomically SHOULD override and do so. If the fallback's seal write
     /// fails, the fresh room is deleted and the creation surfaces as
-    /// [`CreateRoomError::Storage`] rather than an unlocked `Ok` room; a
-    /// server joins nothing into a room whose creation reported an error.
+    /// [`CreateRoomError::Storage`] rather than an unlocked `Ok` room: on the
+    /// seal-failure path the server joins nothing into a room whose creation
+    /// reported an error.
     #[allow(clippy::too_many_arguments)]
     async fn create_room_classified(
         &self,
