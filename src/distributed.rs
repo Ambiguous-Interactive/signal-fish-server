@@ -267,7 +267,7 @@ const LEASE_RENEWAL_INTERVAL_FRACTION: u32 = 3;
 /// Both holders then passed the cap check, so the ceiling overshoots.
 ///
 /// The guard spawns one renewal task per held lock. The task extends the lease
-/// every [`LEASE_RENEWAL_INTERVAL_FRACTION`]-th of the TTL until the guard is
+/// every `LEASE_RENEWAL_INTERVAL_FRACTION`-th of the TTL until the guard is
 /// dropped. A lost lease (`extend` reports `Ok(false)`: expired and reclaimed,
 /// or re-keyed) is fail-visible — an error log plus a
 /// `signal_fish_distributed_lock_renewal_failures_total` increment — and ends
