@@ -250,6 +250,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Stray join passwords now fail closed, issue #546:** a `JoinRoom` or
+  `JoinAsSpectator` request that presents a password to an open (unsealed)
+  room is refused with `PASSWORD_REQUIRED` instead of being silently seated.
+  A password-carrying join states the intent to enter a sealed room; when the
+  code already exists as an open room, the room under that code was created
+  by someone else (the room-namespace squat), and seating the joiner would
+  place them — their identity, connection info, and signaling traffic — under
+  that room's authority. The refusal is indistinguishable from a sealed-room
+  mismatch, so the outcome leaks nothing about the room's policy. Password-less
+  joins to open rooms, creation-time sealing, and reconnection tokens are
+  unchanged. The whole join-password surface is unreleased (it shipped after
+  v0.8.0), so no released SDK observes a behavior change.
 - **Protocol v3 snapshot trim, issue #529:** room snapshots sent to
   protocol-v3 recipients no longer echo `PlayerInfo.connection_info`. The
   self-declared metadata (including credential-looking `relay.token` values

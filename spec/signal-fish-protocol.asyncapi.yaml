@@ -967,10 +967,13 @@ components:
               description: >-
                 Join password for password-protected rooms. Required when the
                 target room carries an authority-set password (else
-                PASSWORD_REQUIRED); ignored otherwise. When the join creates
-                the room, this password seals it from birth. A wrong and a
-                missing password are indistinguishable. Non-empty, at most 256
-                bytes. Never logged by the server.
+                PASSWORD_REQUIRED). A password presented to an open room is
+                also refused (issue #546): the join states the intent to enter
+                a sealed room, and the open room under that code was created
+                by someone else; the refusal is indistinguishable from a
+                mismatch. When the join creates the room, this password seals
+                it from birth. Non-empty, at most 256 bytes. Never logged by
+                the server.
       required: [type, data]
     LeaveRoom:
       type: object
@@ -1101,8 +1104,10 @@ components:
               description: >-
                 Join password for password-protected rooms. Required when the
                 room carries an authority-set password (else
-                PASSWORD_REQUIRED); ignored otherwise. Non-empty, at most 256
-                bytes. Never logged by the server.
+                PASSWORD_REQUIRED). A password presented to an open room is
+                also refused (issue #546); the refusal is indistinguishable
+                from a mismatch. Non-empty, at most 256 bytes. Never logged by
+                the server.
       required: [type, data]
     LeaveSpectator:
       type: object

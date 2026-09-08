@@ -460,7 +460,8 @@ impl SpectatorService {
         // checked against the fresh in-lane room state before capacity, so a
         // protected room leaks nothing — not even its fullness — to a request
         // that has not presented its credential. As on the seated-join path,
-        // a missing and a mismatched password share one outcome.
+        // a missing, mismatched, or stray (open-room) password share one
+        // non-enumerating outcome (issue #546).
         if !room.admits_join_password(password.as_deref()) {
             return Err(SpectatorError::new(
                 "Room requires the join password set by its authority",

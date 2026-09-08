@@ -113,9 +113,12 @@ pub enum ClientMessage {
         relay_transport: Option<RelayTransport>,
         /// Join password for password-protected rooms (issue #525).
         ///
-        /// Required when the target room carries an authority-set password;
-        /// ignored otherwise. When the join creates the room, this password
-        /// seals it from birth. Never logged by the server.
+        /// Required when the target room carries an authority-set password.
+        /// A password presented to an open room is refused (issue #546): the
+        /// join states the intent to enter a sealed room, and the room under
+        /// that code was created by someone else. When the join creates the
+        /// room, this password seals it from birth. Never logged by the
+        /// server.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         password: Option<String>,
     },
@@ -196,7 +199,8 @@ pub enum ClientMessage {
         room_code: String,
         spectator_name: String,
         /// Join password for password-protected rooms (issue #525). Required
-        /// when the room carries an authority-set password. Never logged.
+        /// when the room carries an authority-set password. A password
+        /// presented to an open room is refused (issue #546). Never logged.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         password: Option<String>,
     },
@@ -238,7 +242,8 @@ pub enum RoomOperationRequest {
         #[serde(default)]
         relay_transport: Option<RelayTransport>,
         /// Join password for password-protected rooms (issue #525). See
-        /// [`ClientMessage::JoinRoom`].
+        /// [`ClientMessage::JoinRoom`]: a password presented to an open room
+        /// is refused (issue #546).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         password: Option<String>,
     },
@@ -253,7 +258,8 @@ pub enum RoomOperationRequest {
         room_code: String,
         spectator_name: String,
         /// Join password for password-protected rooms (issue #525). See
-        /// [`ClientMessage::JoinAsSpectator`].
+        /// [`ClientMessage::JoinAsSpectator`]: a password presented to an
+        /// open room is refused (issue #546).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         password: Option<String>,
     },

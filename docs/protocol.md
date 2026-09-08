@@ -1582,10 +1582,10 @@ The moderation operations are authority-only (v3 only):
   code stops resolving to the room immediately, and a join that names it behaves like any unknown code
   (join-creates-room may open a fresh, unrelated room under it).
 - `SetRoomAccess` takes `password` (non-empty string, max 256 bytes, or `null`). A password seals the room: every
-  later seated or spectator join must present the same password or is refused with `PASSWORD_REQUIRED` (a missing
-  and a mismatched password are indistinguishable); `null` reopens the room. Current members and their
-  reconnection tokens are unaffected. The password is stored only as a salted hash and never logged or echoed. The
-  requester receives `RoomAccessUpdated { requires_password }`.
+  later seated or spectator join must present the same password or is refused with `PASSWORD_REQUIRED` (a missing,
+  a mismatched, and a stray password into an open room are indistinguishable); `null` reopens the room. Current
+  members and their reconnection tokens are unaffected. The password is stored only as a salted hash and never
+  logged or echoed. The requester receives `RoomAccessUpdated { requires_password }`.
 - `BanPlayer` names a seated `player_id` and evicts it exactly like `KickPlayer`, then records the id on the
   room's in-memory ban list: while the room lives, the banned id cannot rejoin it as a player or spectator
   (`BANNED`). The ban dies with the room. The requester receives `PlayerBanned`.
@@ -1598,7 +1598,9 @@ The moderation operations are authority-only (v3 only):
 
 Join-password fields also exist outside the capability envelope: `JoinRoom.password` and
 `JoinAsSpectator.password` are optional on both the legacy top-level commands and their correlated forms, so a
-pre-capability client can still present the password of a room an authority sealed.
+pre-capability client can still present the password of a room an authority sealed. A password presented to an
+open room is refused with `PASSWORD_REQUIRED` (issue #546): the join states the intent to enter a sealed room,
+and an open room under that code was created by someone else.
 
 Generate a UUID that is unique among live and recently completed operations on the current physical WebSocket.
 The `operation_id` text must use lowercase hyphenated canonical UUID form; any other encoding is rejected as a
