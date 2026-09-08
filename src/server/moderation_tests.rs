@@ -193,6 +193,135 @@ async fn authority_kick_removes_seat_closes_target_and_reports_to_authority() {
 
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
+async fn kick_evicts_only_the_authoritys_room_not_a_rerouted_target() {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (authority, mut authority_rx) =
+        register_client(&server, "127.0.0.1:48170".parse().unwrap()).await;
+    let (target, mut target_rx, target_close_listener) =
+        register_client_with_close_listener(&server, "127.0.0.1:48171".parse().unwrap()).await;
+
+    join_seated_player(&server, &authority, &mut authority_rx, "WRONG1", "host").await;
+    join_seated_player(&server, &target, &mut target_rx, "WRONG1", "guest").await;
+
+    let stale_room = server
+        .database
+        .get_room("moderation-game", "WRONG1")
+        .await
+        .expect("room lookup succeeds")
+        .expect("authority room exists");
+    let target_row = server
+        .database
+        .get_room_players(&stale_room.id)
+        .await
+        .expect("roster readable")
+        .into_iter()
+        .find(|player| player.id == target)
+        .expect("target seated in the authority room");
+
+    // Build the stale-residue state a storage-failed detach leaves behind:
+    // the target departs the authority's room (row removed, route gone), its
+    // connection then joins another room, and the authority's room row is
+    // re-planted before the detach backlog repair can run.
+    assert!(
+        server
+            .database
+            .remove_player_from_room(&stale_room.id, &target)
+            .await
+            .expect("durable removal succeeds")
+            .is_some(),
+        "test setup removes the target's seat"
+    );
+    let live_room = server
+        .database
+        .create_room(
+            "moderation-game".to_string(),
+            Some("WRONG2".to_string()),
+            4,
+            false,
+            target,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("target's live room creation succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&target, live_room.id)
+        .await;
+    server
+        .database
+        .add_player_to_room(&stale_room.id, target_row)
+        .await
+        .expect("stale row planted");
+
+    server
+        .handle_kick_player_operation(&authority, RoomOperationId::new_v4(), target)
+        .await;
+
+    // The authority's room loses its stale row...
+    let stale_room_after = server
+        .database
+        .get_room("moderation-game", "WRONG1")
+        .await
+        .expect("room lookup succeeds")
+        .expect("authority room survives the kick");
+    assert!(
+        !stale_room_after.players.contains_key(&target),
+        "the kick must remove the stale seat from the authority's room"
+    );
+    assert!(matches!(
+        room_access_result(&mut authority_rx).await,
+        RoomOperationResult::PlayerKicked { player_id } if player_id == target
+    ));
+
+    // ...and nothing else: the target's live membership, route, and
+    // connection in the other room are not the authority's to remove.
+    assert_eq!(
+        server.get_client_room(&target).await,
+        Some(live_room.id),
+        "the target's route in its live room must survive the kick"
+    );
+    let live_room_after = server
+        .database
+        .get_room("moderation-game", "WRONG2")
+        .await
+        .expect("room lookup succeeds")
+        .expect("live room survives the kick");
+    assert!(
+        live_room_after.players.contains_key(&target),
+        "the target's live seat in the other room must survive the kick"
+    );
+    assert_eq!(
+        target_close_listener.requested_reason(),
+        None,
+        "a kick of stale residue must not close the target's live connection"
+    );
+
+    // The farewell is part of the same contract: a target whose live
+    // membership is untouched receives no kicked `Error` frame. Every
+    // eviction send happens before the correlated result, so draining the
+    // channel after the result observes the final state.
+    let mut unexpected_farewell = None;
+    while let Ok(message) = target_rx.try_recv() {
+        if matches!(
+            message.as_ref(),
+            ServerMessage::Error {
+                error_code: Some(ErrorCode::Kicked),
+                ..
+            }
+        ) {
+            unexpected_farewell = Some(message);
+        }
+    }
+    assert!(
+        unexpected_farewell.is_none(),
+        "a kick of stale residue must not send the kicked farewell: got {unexpected_farewell:?}"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn kick_refusals_are_classified_per_failure() {
     let server = create_test_server_with(ServerConfig::default()).await;
     let (authority, mut authority_rx) =

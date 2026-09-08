@@ -43,8 +43,11 @@ impl EnhancedGameServer {
     /// seat receives exactly the same durable removal, reconnection-token
     /// discard, unrouted terminal watermark, and sequenced replay-recorded
     /// `PlayerLeft` broadcast as any other departure — a kicked seat is never
-    /// reconnectable. The target's connection closes with the dedicated
-    /// `4007 kicked` close code after a best-effort farewell `Error` frame.
+    /// reconnectable. A target still routed in this room closes with the
+    /// dedicated `4007 kicked` close code after a best-effort farewell
+    /// `Error` frame; a target whose live route is in another room (stale
+    /// durable residue here) loses only the residue, and its live connection
+    /// stays open.
     pub(super) async fn handle_kick_player_operation(
         self: &Arc<Self>,
         authority_id: &PlayerId,
@@ -499,12 +502,12 @@ impl EnhancedGameServer {
                 return;
             }
         };
-        drop(transfer_event_guard);
         if !granted {
             // Unreachable for an authority room (`supports_authority` holds
             // whenever `authority_player` is set); a source-compatible
             // storage adapter reporting otherwise is an infrastructure
             // fault, not a client refusal.
+            drop(transfer_event_guard);
             tracing::error!(
                 %authority_id,
                 %room_id,
@@ -520,41 +523,90 @@ impl EnhancedGameServer {
             return;
         }
 
-        tracing::info!(
-            authority = %authority_id,
-            player_id = %target_id,
-            room_id = %room_id,
-            "Authority transferred the authority role"
-        );
-
-        // Sequenced, replay-recorded broadcast (same shape as the
-        // reconnection restore's announcement): the per-recipient projection
-        // personalizes `you_are_authority`, so the new authority learns its
-        // role from this event and the former authority learns it lost.
+        // Sequenced, replay-recorded announcement (same shape as the claim
+        // and departure paths): the room mutation guard moves into the FIFO
+        // job, so the `AuthorityChanged` can never be overtaken by a
+        // membership change that commits after the role write. Delivering it
+        // outside this gate let a departure of the freshly granted authority
+        // announce the cleared role first, leaving live members with a stale
+        // authority view that no event would ever correct (issue #396).
         let notification = Arc::new(ServerMessage::AuthorityChanged {
             authority_player: Some(target_id),
             you_are_authority: false,
         });
         let replay_notification = Arc::clone(&notification);
         let reconnection_manager = self.reconnection_manager.clone();
-        if let Err(error) = self
-            .message_coordinator
-            .broadcast_to_room_with_hook(
-                &room_id,
-                notification,
-                Box::new(move || {
-                    Box::pin(async move {
-                        if let Some(reconnection_manager) = reconnection_manager {
-                            reconnection_manager
-                                .record_room_event(&room_id, replay_notification.as_ref())
-                                .await;
+        let job_coordinator = Arc::clone(&self.message_coordinator);
+        let job_room_id = room_id;
+        let job_authority_id = *authority_id;
+        let operation_result = Arc::new(ServerMessage::RoomOperationResult {
+            operation_id,
+            result: Box::new(RoomOperationResult::AuthorityTransferred {
+                player_id: target_id,
+            }),
+        });
+        let completion = self.message_coordinator.enqueue_room_event(
+            transfer_event_guard,
+            Box::new(move || {
+                Box::pin(async move {
+                    let announced = job_coordinator
+                        .broadcast_to_room_with_hook(
+                            &job_room_id,
+                            notification,
+                            Box::new(move || {
+                                Box::pin(async move {
+                                    if let Some(reconnection_manager) = reconnection_manager {
+                                        reconnection_manager
+                                            .record_room_event(
+                                                &job_room_id,
+                                                replay_notification.as_ref(),
+                                            )
+                                            .await;
+                                    }
+                                })
+                            }),
+                        )
+                        .await;
+                    match announced {
+                        Ok(true) => {
+                            tracing::info!(
+                                authority = %job_authority_id,
+                                player_id = %target_id,
+                                room_id = %job_room_id,
+                                "Authority transferred the authority role"
+                            );
                         }
-                    })
-                }),
-            )
-            .await
-        {
+                        Ok(false) => {
+                            tracing::info!(
+                                authority = %job_authority_id,
+                                player_id = %target_id,
+                                room_id = %job_room_id,
+                                "Authority transferred the authority role; no live recipient was available for the announcement"
+                            );
+                        }
+                        Err(_) => {
+                            tracing::info!(
+                                authority = %job_authority_id,
+                                player_id = %target_id,
+                                room_id = %job_room_id,
+                                "Authority transferred the authority role; the announcement failed and is reported by the completion"
+                            );
+                        }
+                    }
+                    // The per-recipient projection personalizes
+                    // `you_are_authority`, so the new authority learns its
+                    // role from this event and the former authority learns
+                    // it lost.
+                    let _ = job_coordinator
+                        .send_to_player(&job_authority_id, operation_result)
+                        .await;
+                    announced
+                })
+            }),
+        );
+        if let Err(error) = completion.await {
             tracing::error!(
+                authority = %authority_id,
                 %room_id,
                 %error,
                 "Failed to announce the transferred authority role"
@@ -562,18 +614,6 @@ impl EnhancedGameServer {
         }
 
         self.metrics.increment_authority_transfers();
-        let _ = self
-            .message_coordinator
-            .send_to_player(
-                authority_id,
-                Arc::new(ServerMessage::RoomOperationResult {
-                    operation_id,
-                    result: Box::new(RoomOperationResult::AuthorityTransferred {
-                        player_id: target_id,
-                    }),
-                }),
-            )
-            .await;
     }
 
     /// Handle an authority-initiated `RegenerateRoomCode` room operation
@@ -911,10 +951,14 @@ impl EnhancedGameServer {
     ///
     /// Callers have validated authority and target membership via
     /// [`Self::resolve_kick_style_target`] and still hold the returned
-    /// target lifecycle guard. The target receives a best-effort farewell,
-    /// every reconnection path is tombstoned before the durable removal, and
-    /// the seat is removed through the ordinary departure machinery. The
-    /// connection closes with the dedicated `4007 kicked` close code.
+    /// target lifecycle guard. Every reconnection path is tombstoned before
+    /// the durable removal. A target still routed in this room receives a
+    /// best-effort farewell and the `4007 kicked` close, and the seat is
+    /// removed through the ordinary departure machinery. A target whose live
+    /// route is in another room — this room's row is stale residue from a
+    /// storage-failed detach — loses only the residue row: its live
+    /// membership, the reconnection credential for its actual room, its
+    /// farewell, and its connection are untouched (issue #396).
     async fn evict_member_by_authority(
         self: &Arc<Self>,
         authority_id: &PlayerId,
@@ -925,43 +969,27 @@ impl EnhancedGameServer {
         _target_lifecycle_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
         _authority_lifecycle_guard: tokio::sync::OwnedMutexGuard<()>,
     ) {
-        // Best-effort farewell: the non-blocking send parks neither this
-        // handler (which holds both lifecycle gates) nor the target's writer,
-        // and a full queue must neither delay the removal nor reclassify the
-        // close. The close frame (`4007 kicked`) remains the attribution
-        // signal that always survives.
-        let _ = self
-            .message_coordinator
-            .try_send_to_player(
-                target_id,
-                Arc::new(ServerMessage::Error {
-                    message: "You were removed from the room by its authority player.".to_string(),
-                    error_code: Some(ErrorCode::Kicked),
-                }),
-            )
-            .await;
-
-        tracing::info!(
-            authority = %authority_id,
-            player_id = %target_id,
-            room_id = %room_id,
-            "Authority removed a player from the room"
-        );
+        // The target's live route decides what this eviction removes: a
+        // route in THIS room is the seat being evicted, while a route in any
+        // other room means this room's row is stale residue (a
+        // storage-failed detach that outlived its departure). Removing the
+        // residue must not disturb the target's live membership elsewhere —
+        // its farewell, credential, and close all belong to the room it is
+        // actually in (issue #396).
 
         // Tombstone every reconnection path for the seat BEFORE the durable
         // removal, so a kicked seat can never resurrect through a pending or
         // in-flight reconnection claim (issue #525).
-        self.discard_pre_issued_reconnection_token(target_id).await;
         if pending_record_room == Some(room_id) {
             // Serialize the tombstone with an in-flight claim's restore
             // transaction through the room mutation gate: the claim's
             // restore path re-checks the tombstone under this gate, so the
             // mark lands either before the claim's decision (claim refused)
-            // or after its completion (record consumed; the routing check
-            // below sees the restored seat and the routed branch removes
-            // it). Marking without this gate could lose the race against a
-            // claim that restores and completes between the mark and the
-            // routing check.
+            // or after its completion (record consumed; the fresh routing
+            // check below sees the restored seat and the routed branch
+            // removes it). Marking without this gate could lose the race
+            // against a claim that restores and completes between the mark
+            // and the routing check.
             let tombstone_event_guard = self
                 .message_coordinator
                 .lock_room_event_mutation(&room_id)
@@ -972,17 +1000,70 @@ impl EnhancedGameServer {
             drop(tombstone_event_guard);
         }
 
-        if self.get_client_room(target_id).await.is_some() {
+        // Fresh route read after the tombstone's gate section: a reconnection
+        // claim that completed against the tombstone re-keyed its live
+        // connection to the restored seat, and the branch below must observe
+        // that route rather than a pre-gate snapshot (issue #396). This
+        // stays correct only while the claim's restore AND its connection
+        // re-key happen inside one room-mutation-gate hold
+        // (`ReconnectionManager`'s restore transaction spans the gate
+        // acquire through the reassignment, `src/server/reconnection_service.rs`);
+        // moving the re-key outside that hold would let a kick lose to a
+        // mid-flight claim.
+        let routed_room = self.get_client_room(target_id).await;
+        let evicts_live_membership_elsewhere =
+            matches!(routed_room, Some(routed) if routed != room_id);
+
+        // The pre-issued token is keyed by player id alone and binds to the
+        // room the target currently occupies, so removing it here would
+        // destroy the credential of a live membership elsewhere. Only the
+        // eviction of a seat in THIS room discards it.
+        if !evicts_live_membership_elsewhere {
+            self.discard_pre_issued_reconnection_token(target_id).await;
+        }
+
+        // Best-effort farewell: the non-blocking send parks neither this
+        // handler (which holds both lifecycle gates) nor the target's writer,
+        // and a full queue must neither delay the removal nor reclassify the
+        // close. The close frame (`4007 kicked`) remains the attribution
+        // signal that always survives. A target whose live membership is in
+        // another room is not being removed from anything it can observe, so
+        // it receives neither the farewell nor the close.
+        if !evicts_live_membership_elsewhere {
+            let _ = self
+                .message_coordinator
+                .try_send_to_player(
+                    target_id,
+                    Arc::new(ServerMessage::Error {
+                        message: "You were removed from the room by its authority player."
+                            .to_string(),
+                        error_code: Some(ErrorCode::Kicked),
+                    }),
+                )
+                .await;
+        }
+
+        tracing::info!(
+            authority = %authority_id,
+            player_id = %target_id,
+            room_id = %room_id,
+            "Authority removed a player from the room"
+        );
+
+        if routed_room == Some(room_id) {
             // Routed seat: the ordinary departure machinery owns the durable
             // removal, terminal watermark, sequenced replay-recorded
             // `PlayerLeft` broadcast, and departure re-planning.
             self.leave_room_locked(target_id, false).await;
         } else if target_seated_in_row {
-            // Disconnected seat still present in durable state (e.g. a
-            // storage-failed detach): no live route and no terminal watermark
-            // exist, so the honest `PlayerLeft` is suppressed and peers
-            // reconcile the roster from their next baseline (the same
-            // degradation class as the leave path's no-watermark branch).
+            // Stale durable row: the seat is present in storage without a
+            // route in this room (a storage-failed detach, or the target
+            // already joined another room before the repair ran). Remove the
+            // residue without touching the target's live membership
+            // elsewhere: no live route and no terminal watermark exist here,
+            // so the honest `PlayerLeft` is suppressed and peers reconcile
+            // the roster from their next baseline (the same degradation
+            // class as the leave path's no-watermark branch).
             // The removal and the tombstone above are serialized against an
             // in-flight claim through the room mutation gate: a claim that
             // restores after this gate re-reads the room, finds no seat, and
@@ -1024,8 +1105,10 @@ impl EnhancedGameServer {
         drop(_target_lifecycle_guard);
         drop(_authority_lifecycle_guard);
 
-        self.connection_manager
-            .request_close_for(target_id, CloseReason::Kicked);
+        if !evicts_live_membership_elsewhere {
+            self.connection_manager
+                .request_close_for(target_id, CloseReason::Kicked);
+        }
     }
 
     /// Refuse unless the room's current authority is `authority_id`.
