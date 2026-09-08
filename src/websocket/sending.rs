@@ -713,7 +713,7 @@ pub(super) async fn send_single_message_ref(
                     || payload
                         .missed_events
                         .iter()
-                        .any(replayed_event_has_v2_only_snapshot_metadata)) =>
+                        .any(replayed_event_needs_v3_projection)) =>
         {
             let mut payload = payload.as_ref().clone();
             strip_roster_v2_only_snapshot_metadata(&mut payload.current_players);
@@ -721,7 +721,7 @@ pub(super) async fn send_single_message_ref(
             // live broadcast (where v2 recipients need the frozen shape), so
             // the same projection applies to the nested copies.
             for event in &mut payload.missed_events {
-                strip_replayed_event_v2_only_snapshot_metadata(event);
+                project_replayed_event_for_v3(event);
             }
             send_text_message(
                 sender,
@@ -787,6 +787,79 @@ pub(super) async fn send_single_message_ref(
             };
             send_text_message(sender, &stripped, player_id, max_outbound_message_size).await?;
         }
+        // Issue #525: on v3 connections the room-uniform spectator fan-outs
+        // are delta+count events — the roster clears (the field stays present
+        // because released SDK parsers require it) and `spectator_count`
+        // carries the post-change total. Every member already holds the
+        // authoritative roster from its join/reconnect snapshot and applies
+        // these deltas, so a full roster on every fan-out paid O(recipients ×
+        // spectators) bytes for state members can derive in O(1). Replays are
+        // recorded verbatim from the live broadcast, so the same slimming
+        // applies to the nested copies (see
+        // [`project_replayed_event_for_v3`]).
+        ServerMessage::NewSpectatorJoined {
+            spectator,
+            current_spectators,
+            spectator_count,
+            reason,
+        } if recipient_supports_v3
+            && !current_spectators.is_empty()
+            && spectator_count.is_some() =>
+        {
+            // Rebuild instead of clone-then-clear: the roster payload is the
+            // term this projection exists to drop, so cloning it per
+            // recipient would halve the win. A constructor that omitted the
+            // count fails open — the guard delivers the parseable full-roster
+            // shape instead of a countless slim one.
+            let slim = ServerMessage::NewSpectatorJoined {
+                spectator: spectator.clone(),
+                current_spectators: Vec::new(),
+                spectator_count: *spectator_count,
+                reason: reason.clone(),
+            };
+            send_text_message(sender, &slim, player_id, max_outbound_message_size).await?;
+        }
+        ServerMessage::SpectatorDisconnected {
+            spectator_id,
+            reason,
+            current_spectators,
+            spectator_count,
+        } if recipient_supports_v3
+            && !current_spectators.is_empty()
+            && spectator_count.is_some() =>
+        {
+            let slim = ServerMessage::SpectatorDisconnected {
+                spectator_id: *spectator_id,
+                reason: reason.clone(),
+                current_spectators: Vec::new(),
+                spectator_count: *spectator_count,
+            };
+            send_text_message(sender, &slim, player_id, max_outbound_message_size).await?;
+        }
+        // The frozen v2 bytes never carried `spectator_count`, so the count
+        // is stripped for pre-v3 recipients while they keep the full roster.
+        ServerMessage::NewSpectatorJoined {
+            spectator_count: Some(_),
+            ..
+        }
+        | ServerMessage::SpectatorDisconnected {
+            spectator_count: Some(_),
+            ..
+        } if !recipient_supports_v3 => {
+            let mut message = message.clone();
+            if let ServerMessage::NewSpectatorJoined {
+                spectator_count: count,
+                ..
+            }
+            | ServerMessage::SpectatorDisconnected {
+                spectator_count: count,
+                ..
+            } = &mut message
+            {
+                *count = None;
+            }
+            send_text_message(sender, &message, player_id, max_outbound_message_size).await?;
+        }
         // Issue #529: a correlated operation result (v3-only capability)
         // NESTS the same snapshot payloads (`RoomJoined`, `Reconnected`,
         // `SpectatorJoined`) that the arms above project at the top level,
@@ -796,11 +869,9 @@ pub(super) async fn send_single_message_ref(
         ServerMessage::RoomOperationResult {
             operation_id,
             result,
-        } if recipient_supports_v3
-            && room_operation_result_has_v2_only_snapshot_metadata(result) =>
-        {
+        } if recipient_supports_v3 && room_operation_result_needs_v3_projection(result) => {
             let mut result = result.as_ref().clone();
-            strip_room_operation_result_v2_only_snapshot_metadata(&mut result);
+            project_room_operation_result_for_v3(&mut result);
             send_text_message(
                 sender,
                 &ServerMessage::RoomOperationResult {
@@ -900,26 +971,63 @@ fn strip_roster_v2_only_snapshot_metadata(players: &mut [PlayerInfo]) {
     }
 }
 
-/// Strip v2-only snapshot metadata from a replayed room-uniform event nested
-/// in `Reconnected.missed_events` (issue #529). Only `PlayerJoined` carries
-/// member metadata among the replayable variants; every other variant passes
-/// through untouched.
-fn strip_replayed_event_v2_only_snapshot_metadata(event: &mut ServerMessage) {
-    if let ServerMessage::PlayerJoined { player } = event {
-        strip_player_v2_only_snapshot_metadata(player);
+/// Project one replayed room-uniform event for a v3 recipient (issues #529
+/// and #525): strip the v2-only member metadata from `PlayerJoined` and slim
+/// the spectator fan-outs to their delta+count shape. Replay rings store the
+/// verbatim live broadcast (where v2 recipients need the frozen shape), so
+/// the same per-cohort projection applies to the nested copies.
+fn project_replayed_event_for_v3(event: &mut ServerMessage) {
+    match event {
+        ServerMessage::PlayerJoined { player } => strip_player_v2_only_snapshot_metadata(player),
+        ServerMessage::NewSpectatorJoined { .. } | ServerMessage::SpectatorDisconnected { .. } => {
+            slim_spectator_fan_out_for_v3(event);
+        }
+        _ => {}
     }
 }
 
-/// Whether one nested replay event still carries v2-only metadata.
-fn replayed_event_has_v2_only_snapshot_metadata(event: &ServerMessage) -> bool {
-    matches!(event, ServerMessage::PlayerJoined { player }
-        if player_has_v2_only_snapshot_metadata(player))
+/// Whether one nested replay event still needs the v3 projection (the mirror
+/// of [`project_replayed_event_for_v3`]; keep the two exhaustive in lockstep).
+fn replayed_event_needs_v3_projection(event: &ServerMessage) -> bool {
+    match event {
+        ServerMessage::PlayerJoined { player } => player_has_v2_only_snapshot_metadata(player),
+        ServerMessage::NewSpectatorJoined {
+            current_spectators, ..
+        }
+        | ServerMessage::SpectatorDisconnected {
+            current_spectators, ..
+        } => !current_spectators.is_empty(),
+        _ => false,
+    }
+}
+
+/// Slim the room-uniform spectator fan-outs to their v3 delta+count shape
+/// (issue #525): the roster clears and `spectator_count` carries the
+/// post-change total. The roster field itself stays present — released SDK
+/// parsers require it — so the slim shape is wire-compatible by construction.
+/// An event without a count fails open: it is left untouched (the parseable
+/// full-roster shape) instead of slimmed to a countless delta.
+fn slim_spectator_fan_out_for_v3(message: &mut ServerMessage) {
+    match message {
+        ServerMessage::NewSpectatorJoined {
+            current_spectators,
+            spectator_count: Some(_),
+            ..
+        }
+        | ServerMessage::SpectatorDisconnected {
+            current_spectators,
+            spectator_count: Some(_),
+            ..
+        } => current_spectators.clear(),
+        _ => {}
+    }
 }
 
 /// Whether a correlated operation result nests snapshot payloads that still
-/// carry v2-only metadata (issue #529). Only the four success variants carry
-/// snapshot payloads; failure variants have nothing to project.
-fn room_operation_result_has_v2_only_snapshot_metadata(result: &RoomOperationResult) -> bool {
+/// need the v3 projection (issues #529 and #525). Only the four success
+/// variants carry snapshot payloads; failure variants have nothing to
+/// project.
+fn room_operation_result_needs_v3_projection(result: &RoomOperationResult) -> bool {
     match result {
         RoomOperationResult::RoomJoined(payload) => {
             roster_has_v2_only_snapshot_metadata(&payload.current_players)
@@ -929,7 +1037,7 @@ fn room_operation_result_has_v2_only_snapshot_metadata(result: &RoomOperationRes
                 || payload
                     .missed_events
                     .iter()
-                    .any(replayed_event_has_v2_only_snapshot_metadata)
+                    .any(replayed_event_needs_v3_projection)
         }
         RoomOperationResult::SpectatorJoined(payload) => {
             roster_has_v2_only_snapshot_metadata(&payload.current_players)
@@ -941,15 +1049,19 @@ fn room_operation_result_has_v2_only_snapshot_metadata(result: &RoomOperationRes
         | RoomOperationResult::SpectatorJoinFailed { .. }
         | RoomOperationResult::OperationFailed { .. }
         | RoomOperationResult::PlayerKicked { .. }
-        | RoomOperationResult::RoomCodeRegenerated { .. } => false,
+        | RoomOperationResult::RoomCodeRegenerated { .. }
+        | RoomOperationResult::RoomAccessUpdated { .. }
+        | RoomOperationResult::PlayerBanned { .. }
+        | RoomOperationResult::PlayerUnbanned { .. }
+        | RoomOperationResult::AuthorityTransferred { .. } => false,
     }
 }
 
 /// Apply the per-cohort projection to every snapshot payload nested in a
-/// correlated operation result (issue #529). The mirror of
-/// [`room_operation_result_has_v2_only_snapshot_metadata`]; keep the two
+/// correlated operation result (issues #529 and #525). The mirror of
+/// [`room_operation_result_needs_v3_projection`]; keep the two
 /// exhaustive in lockstep.
-fn strip_room_operation_result_v2_only_snapshot_metadata(result: &mut RoomOperationResult) {
+fn project_room_operation_result_for_v3(result: &mut RoomOperationResult) {
     match result {
         RoomOperationResult::RoomJoined(payload) => {
             strip_roster_v2_only_snapshot_metadata(&mut payload.current_players);
@@ -957,7 +1069,7 @@ fn strip_room_operation_result_v2_only_snapshot_metadata(result: &mut RoomOperat
         RoomOperationResult::Reconnected(payload) => {
             strip_roster_v2_only_snapshot_metadata(&mut payload.current_players);
             for event in &mut payload.missed_events {
-                strip_replayed_event_v2_only_snapshot_metadata(event);
+                project_replayed_event_for_v3(event);
             }
         }
         RoomOperationResult::SpectatorJoined(payload) => {
@@ -970,7 +1082,11 @@ fn strip_room_operation_result_v2_only_snapshot_metadata(result: &mut RoomOperat
         | RoomOperationResult::SpectatorJoinFailed { .. }
         | RoomOperationResult::OperationFailed { .. }
         | RoomOperationResult::PlayerKicked { .. }
-        | RoomOperationResult::RoomCodeRegenerated { .. } => {}
+        | RoomOperationResult::RoomCodeRegenerated { .. }
+        | RoomOperationResult::RoomAccessUpdated { .. }
+        | RoomOperationResult::PlayerBanned { .. }
+        | RoomOperationResult::PlayerUnbanned { .. }
+        | RoomOperationResult::AuthorityTransferred { .. } => {}
     }
 }
 
@@ -2145,6 +2261,50 @@ mod tests {
             serialize_json_text_limited(&message, size - 1, 0, "spectator"),
             Err(BoundedSerializationError::MessageTooLarge { size: attempted, max })
                 if attempted > max && max == size - 1
+        ));
+    }
+
+    /// Issue #525: a fan-out constructor that forgot `spectator_count`
+    /// fails open — the event keeps the parseable full-roster shape instead
+    /// of being slimmed to a countless delta.
+    #[test]
+    fn spectator_fan_out_without_a_count_fails_open_to_the_full_roster() {
+        let spectator = SpectatorInfo {
+            id: player_a(),
+            name: "Watcher".to_string(),
+            connected_at: Utc::now(),
+        };
+        let countless = ServerMessage::NewSpectatorJoined {
+            spectator: spectator.clone(),
+            current_spectators: vec![spectator.clone()],
+            spectator_count: None,
+            reason: None,
+        };
+        let mut event = countless;
+        slim_spectator_fan_out_for_v3(&mut event);
+        assert!(matches!(
+            &event,
+            ServerMessage::NewSpectatorJoined {
+                current_spectators,
+                spectator_count: None,
+                ..
+            } if current_spectators.len() == 1
+        ));
+
+        let mut counted = ServerMessage::SpectatorDisconnected {
+            spectator_id: spectator.id,
+            reason: None,
+            current_spectators: vec![spectator],
+            spectator_count: Some(1),
+        };
+        slim_spectator_fan_out_for_v3(&mut counted);
+        assert!(matches!(
+            &counted,
+            ServerMessage::SpectatorDisconnected {
+                current_spectators,
+                spectator_count: Some(1),
+                ..
+            } if current_spectators.is_empty()
         ));
     }
 

@@ -36,6 +36,7 @@ async fn test_multi_player_room_scenario() {
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
 
@@ -62,6 +63,7 @@ async fn test_multi_player_room_scenario() {
             "Player2".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -130,6 +132,7 @@ async fn test_game_data_exchange() {
             Some(2),
             Some(true),
             None,
+            None,
         )
         .await;
 
@@ -144,6 +147,7 @@ async fn test_game_data_exchange() {
             "DataPlayer2".to_string(),
             Some(2),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -238,6 +242,7 @@ async fn test_room_capacity() {
             Some(2),
             Some(true),
             None,
+            None,
         )
         .await;
     server
@@ -248,6 +253,7 @@ async fn test_room_capacity() {
             "Player2".to_string(),
             Some(2),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -261,6 +267,7 @@ async fn test_room_capacity() {
             "Player3".to_string(),
             Some(2),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -305,6 +312,7 @@ async fn test_authority_transfer() {
             Some(2),
             Some(true),
             None,
+            None,
         )
         .await;
 
@@ -319,6 +327,7 @@ async fn test_authority_transfer() {
             "AuthPlayer2".to_string(),
             Some(2),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -425,6 +434,7 @@ async fn authority_denials_report_their_documented_error_code() {
                 name.to_string(),
                 Some(2),
                 Some(supports_authority),
+                None,
                 None,
             )
             .await;
@@ -605,6 +615,7 @@ async fn test_player_disconnection() {
             Some(2),
             Some(true),
             None,
+            None,
         )
         .await;
     server
@@ -615,6 +626,7 @@ async fn test_player_disconnection() {
             "Player2".to_string(),
             Some(2),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -736,6 +748,7 @@ async fn test_validation_errors() {
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
 
@@ -824,6 +837,7 @@ async fn test_custom_protocol_config() {
             Some(2),
             Some(true),
             None,
+            None,
         )
         .await;
 
@@ -844,6 +858,7 @@ async fn test_custom_protocol_config() {
             "Player".to_string(),
             Some(2),
             Some(true),
+            None,
             None,
         )
         .await;
@@ -867,6 +882,7 @@ async fn test_custom_protocol_config() {
             Some(2),
             Some(true),
             None,
+            None,
         )
         .await;
 
@@ -888,6 +904,7 @@ async fn test_custom_protocol_config() {
             Some(8), // Exceeds our custom limit of 4
             Some(true),
             None,
+            None,
         )
         .await;
 
@@ -908,6 +925,7 @@ async fn test_custom_protocol_config() {
             "Bob".to_string(),        // Short player name
             Some(3),                  // Within limit
             Some(true),
+            None,
             None,
         )
         .await;
@@ -987,6 +1005,7 @@ async fn test_custom_rate_limiting() {
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
 
@@ -1036,6 +1055,7 @@ async fn test_custom_rate_limiting() {
             "Player".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
         )
         .await;

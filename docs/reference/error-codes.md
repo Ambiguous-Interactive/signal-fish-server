@@ -117,9 +117,12 @@ Errors related to room lifecycle, capacity, and membership.
 | `GAME_START_NOT_READY` | `StartGame` was sent before every current player was ready. |
 | `GAME_START_FORBIDDEN` | `StartGame` was sent by a player not permitted to start (the room has a designated authority and the sender is not it). |
 | `ROOM_SESSION_INCOMPATIBLE` | The room already finalized a peer-to-peer session whose sticky topology/transport pair this connection did not negotiate, so it cannot be joined mid-session (a seat-fill would silently split the room's data path). Reconnect advertising the session's capabilities or join another room; rooms that finalized to the relay floor remain open to everyone. |
-| `NOT_ROOM_AUTHORITY` | Only the room's authority player may perform this moderation operation (`KickPlayer` / `RegenerateRoomCode`). |
-| `KICK_TARGET_NOT_FOUND` | The player named by `KickPlayer` is not a seated member of this room. |
+| `NOT_ROOM_AUTHORITY` | Only the room's authority player may perform this moderation operation (`KickPlayer` / `RegenerateRoomCode` / `SetRoomAccess` / `BanPlayer` / `UnbanPlayer` / `TransferAuthority`). |
+| `KICK_TARGET_NOT_FOUND` | The player named by the moderation operation (`KickPlayer` / `BanPlayer`) is not a seated member of this room. |
 | `KICKED` | This connection was removed from its room by the room's authority player. The WebSocket closed with close code `4007` (`kicked`); reconnection is not offered. Join again with a valid room code. |
+| `PASSWORD_REQUIRED` | The room is password-protected and the request presented no password or the wrong one (the server does not distinguish the two). Send the join password chosen by its authority player (`JoinRoom.password` / `JoinAsSpectator.password`, or `SetRoomAccess` to change it). |
+| `BANNED` | This player id is banned from the room by its authority player (`BanPlayer`) and cannot join it, as a player or spectator, while the room lives. The ban is room-scoped and expires with the room; the authority can lift it with `UnbanPlayer`. |
+| `TRANSFER_TARGET_NOT_FOUND` | The player named by `TransferAuthority` is not a seated member of the room. |
 
 ### Authority Errors (4xxx)
 

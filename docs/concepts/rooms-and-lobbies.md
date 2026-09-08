@@ -148,6 +148,57 @@ dedicated `room_code_retry_operations`, `room_code_retry_successes`,
 selecting a longer prefix or shorter total length (`room_code_retry_success_rate`
 is `null` until at least one retry operation has been attempted).
 
+## Room Passwords and Bans
+
+Rooms are open by default: anyone with the code can join. For hosted or
+semi-public deployments the authority can add an access layer (all v3 only,
+via the `room_operation_ids` capability; see
+[Authority](authority.md#moderation-powers)):
+
+### Password protection
+
+`SetRoomAccess { password }` seals the room. From then on every seated or
+spectator join must present the same password:
+
+```json
+{
+  "type": "JoinRoom",
+  "data": {
+    "game_name": "my-game",
+    "room_code": "ABC123",
+    "player_name": "Player1",
+    "password": "open sesame"
+  }
+}
+```
+
+- A join with a missing **or wrong** password is refused with
+  `PASSWORD_REQUIRED`; the server never distinguishes the two, so a wrong
+  guess leaks nothing beyond the refusal itself.
+- The check runs before anything else about the room is evaluated (name
+  conflicts, capacity, session compatibility), so a sealed room reveals
+  nothing to a request without its credential.
+- When the **creating** join carries a password, the room is sealed from
+  birth -- there is no unlocked window between creation and `SetRoomAccess`.
+- `SetRoomAccess { password: null }` reopens the room. Current members and
+  their reconnection tokens are unaffected either way.
+- Passwords are capped at 256 bytes and stored only as salted hashes (a
+  single digest pass, no key-derivation work factor): the plaintext is
+  never logged, echoed, or persisted. Treat the password as a room-scoped
+  convenience secret guarding admission, not an account credential.
+
+### Bans
+
+`BanPlayer { player_id }` evicts a seated member exactly like a kick (close
+code `4007`, no reconnection) **and** records the id on the room's ban
+list. While the room lives, the banned id cannot rejoin as a player or a
+spectator (`BANNED`). `UnbanPlayer { player_id }` lifts a ban (idempotent).
+
+Bans are room-scoped and in-memory: they expire when the room dies and
+never extend across rooms or instances. They protect one room's community
+for one room's lifetime -- use app-level (tenant) controls for anything
+broader.
+
 ## Room Lifecycle
 
 Every room moves through a simple state machine. The following diagram

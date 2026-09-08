@@ -184,9 +184,9 @@ If the departed member reconnects while another player has since claimed the
 role, the successor keeps it: the returning member is restored as an ordinary,
 non-authority member.
 
-### Moderation Powers: Kick and Room-Code Rotation
+### Moderation Powers
 
-The authority holds two moderation operations (v3 only, via the
+The authority holds a set of moderation operations (v3 only, via the
 `room_operation_ids` capability; see [Protocol Reference](../protocol.md)):
 
 - **`KickPlayer`** removes a seated player from the room. The target's
@@ -194,13 +194,41 @@ The authority holds two moderation operations (v3 only, via the
   see the usual `PlayerLeft` roster delta, and the kicked seat is never
   reconnectable. Use it to evict a disruptive player instead of waiting for
   them to leave.
+- **`BanPlayer`** evicts exactly like `KickPlayer` **and** records the
+  player id on the room's ban list: while the room lives, the banned id
+  cannot rejoin it as a player or a spectator (`BANNED`). **`UnbanPlayer`**
+  lifts a ban (idempotent). Bans are room-scoped and in-memory: they expire
+  when the room dies, and no cross-room or cross-instance effect exists.
 - **`RegenerateRoomCode`** replaces the room code with a fresh one. Existing
   members stay connected; the old code stops resolving immediately. Use it
   when an invite code leaks: the room survives, and only holders of the new
   code can send new joiners.
+- **`SetRoomAccess`** seals the room behind a join password (or reopens it
+  with `null`). Sealed rooms refuse every join -- seated or spectator --
+  that does not present the password (`PASSWORD_REQUIRED`); a missing and a
+  mismatched password are indistinguishable. Current members and their
+  reconnection tokens are unaffected. The password is stored only as a
+  salted hash. See [Rooms and Lobbies](rooms-and-lobbies.md) for the
+  client-side flow.
+- **`TransferAuthority`** hands the authority role to a seated member of
+  your choice. Every member receives the usual `AuthorityChanged`
+  broadcast; the sender loses every authority capability (including
+  `StartGame` and the operations above) and the successor gains them.
 
-Both are authority-only: a member that is not the authority receives
-`NOT_ROOM_AUTHORITY`. The kicked player cannot be the authority itself.
+All of these are authority-only: a member that is not the authority receives
+`NOT_ROOM_AUTHORITY`. The kicked or banned player cannot be the authority
+itself.
+
+### Handing Over Authority Deliberately
+
+`TransferAuthority` is the planned successor path: before you leave -- or
+when the game should change hands -- name a seated member and the server
+moves the role atomically (validated under the room's mutation gate, so the
+successor cannot depart between validation and the grant). This is
+stronger than the drop-and-claim dance (release the role, everyone races to
+claim) and works even when no member was primed to claim: the departing
+authority picks any seated member, including one that never requested the
+role.
 
 ## Key Rules
 
@@ -212,8 +240,9 @@ Both are authority-only: a member that is not the authority receives
 - **Disconnection clears** authority with no auto-reassignment.
 - Authority status is included in the legacy `GameStarting` peer metadata
   so clients know who the authority is at game start.
-- **Moderation is authority-only**: `KickPlayer` and `RegenerateRoomCode`
-  are refused with `NOT_ROOM_AUTHORITY` for every other member, and rooms
+- **Moderation is authority-only**: `KickPlayer`, `RegenerateRoomCode`,
+  `SetRoomAccess`, `BanPlayer`, `UnbanPlayer`, and `TransferAuthority` are
+  refused with `NOT_ROOM_AUTHORITY` for every other member, and rooms
   created with `supports_authority: false` have no moderator at all.
 
 ## Use Cases

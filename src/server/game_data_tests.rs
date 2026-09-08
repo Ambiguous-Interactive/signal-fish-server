@@ -231,6 +231,7 @@ mod handler_honesty {
                 None,
                 None,
                 None,
+                None,
             )
             .await;
         let room_id = server
@@ -427,6 +428,7 @@ mod admission_and_budget {
                     None,
                     None,
                     None,
+                    None,
                 )
                 .await;
             if room_id.is_none() {
@@ -472,6 +474,7 @@ mod admission_and_budget {
                 "admission-budget".to_string(),
                 Some("OCI001".to_string()),
                 "player".to_string(),
+                None,
                 None,
                 None,
                 None,

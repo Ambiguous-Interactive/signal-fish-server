@@ -3628,6 +3628,8 @@ mod tests {
                 max_players: Some(4),
                 supports_authority: Some(true),
                 relay_transport: None,
+
+                password: None,
             };
 
             let json_message =

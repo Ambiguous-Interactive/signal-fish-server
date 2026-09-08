@@ -255,6 +255,8 @@ async fn join_room(
             max_players: Some(max_players),
             supports_authority: Some(false),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await;
@@ -618,6 +620,8 @@ async fn mixed_v2_v3_n3_relay_floor_is_explicit_only_for_v3() {
             max_players: Some(3),
             supports_authority: Some(false),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await;
@@ -1411,6 +1415,8 @@ async fn mixed_v2_v3_n3_transport_status_v2_member_hears_nothing() {
             max_players: Some(3),
             supports_authority: Some(false),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await;

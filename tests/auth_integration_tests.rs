@@ -506,6 +506,8 @@ async fn real_websocket_handshake_binds_room_and_spectator_policy_to_public_app_
             max_players: Some(4),
             supports_authority: Some(false),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await;
@@ -524,6 +526,8 @@ async fn real_websocket_handshake_binds_room_and_spectator_policy_to_public_app_
             max_players: Some(4),
             supports_authority: Some(false),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await;
@@ -542,6 +546,8 @@ async fn real_websocket_handshake_binds_room_and_spectator_policy_to_public_app_
             game_name: "trust-boundary".to_string(),
             room_code: "BOUND1".to_string(),
             spectator_name: "Observer".to_string(),
+
+            password: None,
         },
     )
     .await;
@@ -572,6 +578,8 @@ async fn real_websocket_handshake_binds_room_and_spectator_policy_to_public_app_
             max_players: Some(4),
             supports_authority: Some(false),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await;

@@ -200,6 +200,8 @@ async fn join_room(
             max_players: Some(4),
             supports_authority: Some(false),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await;
@@ -653,6 +655,8 @@ async fn truncated_replay_still_carries_full_room_snapshot() {
             game_name: "replay-game".to_string(),
             room_code: joined_a.room_code.clone(),
             spectator_name: "Spec".to_string(),
+
+            password: None,
         },
     )
     .await;
@@ -1173,6 +1177,8 @@ async fn v2_room_joined_has_no_reconnection_token_key() {
             max_players: Some(4),
             supports_authority: Some(false),
             relay_transport: None,
+
+            password: None,
         },
     )
     .await;

@@ -603,6 +603,9 @@ components:
         - NOT_ROOM_AUTHORITY
         - KICK_TARGET_NOT_FOUND
         - KICKED
+        - PASSWORD_REQUIRED
+        - BANNED
+        - TRANSFER_TARGET_NOT_FOUND
 
     ReliableDeliveryCounters:
       type: object
@@ -957,6 +960,17 @@ components:
               description: >-
                 Reserved compatibility hint; currently ignored. Omission and
                 all accepted values have identical server behavior.
+            password:
+              type: [string, 'null']
+              minLength: 1
+              maxLength: 256
+              description: >-
+                Join password for password-protected rooms. Required when the
+                target room carries an authority-set password (else
+                PASSWORD_REQUIRED); ignored otherwise. When the join creates
+                the room, this password seals it from birth. A wrong and a
+                missing password are indistinguishable. Non-empty, at most 256
+                bytes. Never logged by the server.
       required: [type, data]
     LeaveRoom:
       type: object
@@ -1080,6 +1094,15 @@ components:
             game_name: { type: string }
             room_code: { type: string }
             spectator_name: { type: string }
+            password:
+              type: [string, 'null']
+              minLength: 1
+              maxLength: 256
+              description: >-
+                Join password for password-protected rooms. Required when the
+                room carries an authority-set password (else
+                PASSWORD_REQUIRED); ignored otherwise. Non-empty, at most 256
+                bytes. Never logged by the server.
       required: [type, data]
     LeaveSpectator:
       type: object
@@ -1118,6 +1141,78 @@ components:
       properties:
         type: { const: RegenerateRoomCode }
       required: [type]
+    SetRoomAccess:
+      type: object
+      description: >-
+        Authority-only: set or clear the room's join password. A non-empty
+        password seals the room: every later seated or spectator join must
+        present the same password or is refused with PASSWORD_REQUIRED (a
+        missing and a mismatched password are indistinguishable). An explicit
+        null reopens the room. Current members and their reconnection tokens
+        are unaffected. The password is stored only as a salted hash and is
+        never logged or echoed. Success responses use the RoomAccessUpdated
+        result.
+      properties:
+        type: { const: SetRoomAccess }
+        data:
+          type: object
+          required: [password]
+          properties:
+            password:
+              type: [string, 'null']
+              minLength: 1
+              maxLength: 256
+              description: The new join password, or null to open the room.
+      required: [type, data]
+    BanPlayer:
+      type: object
+      description: >-
+        Authority-only: ban a seated player from the room. The target is
+        removed exactly as by KickPlayer (close code 4007 `kicked`, no
+        reconnection) and additionally recorded in the room's in-memory ban
+        list: while this room lives, the banned player id cannot rejoin it as
+        a player or spectator (BANNED). The ban is room-scoped and dies with
+        the room. Success responses use the PlayerBanned result.
+      properties:
+        type: { const: BanPlayer }
+        data:
+          type: object
+          required: [player_id]
+          properties:
+            player_id: { type: string, format: uuid }
+      required: [type, data]
+    UnbanPlayer:
+      type: object
+      description: >-
+        Authority-only: lift a room ban so the named player id may join the
+        room again. Idempotent: unbanning an id that is not banned succeeds.
+        Success responses use the PlayerUnbanned result.
+      properties:
+        type: { const: UnbanPlayer }
+        data:
+          type: object
+          required: [player_id]
+          properties:
+            player_id: { type: string, format: uuid }
+      required: [type, data]
+    TransferAuthority:
+      type: object
+      description: >-
+        Authority-only: hand the authority role to a seated member. Only the
+        room's designated authority may transfer, the target must be a seated
+        member other than the sender, and the room must be an authority room.
+        Every member receives the usual AuthorityChanged broadcast
+        (personalized you_are_authority per recipient); the sender receives
+        the AuthorityTransferred result and loses every authority capability
+        (StartGame, kick, ban, access, rotation, further transfers).
+      properties:
+        type: { const: TransferAuthority }
+        data:
+          type: object
+          required: [player_id]
+          properties:
+            player_id: { type: string, format: uuid }
+      required: [type, data]
     RoomOperation:
       type: object
       description: >-
@@ -1147,6 +1242,10 @@ components:
                 - { $ref: '#/components/schemas/LeaveSpectator' }
                 - { $ref: '#/components/schemas/KickPlayer' }
                 - { $ref: '#/components/schemas/RegenerateRoomCode' }
+                - { $ref: '#/components/schemas/SetRoomAccess' }
+                - { $ref: '#/components/schemas/BanPlayer' }
+                - { $ref: '#/components/schemas/UnbanPlayer' }
+                - { $ref: '#/components/schemas/TransferAuthority' }
       required: [type, data]
     TransportStatus:
       type: object
@@ -2185,6 +2284,67 @@ components:
           properties:
             room_code: { type: string }
       required: [type, data]
+    RoomAccessUpdated:
+      type: object
+      description: >-
+        The requested SetRoomAccess operation succeeded.
+      properties:
+        type: { const: RoomAccessUpdated }
+        data:
+          type: object
+          additionalProperties: false
+          required: [requires_password]
+          properties:
+            requires_password:
+              type: boolean
+              description: >-
+                Whether the room now requires a join password (true) or is
+                open (false).
+      required: [type, data]
+    PlayerBanned:
+      type: object
+      description: >-
+        The requested BanPlayer operation succeeded: the target seat was
+        removed (as by PlayerKicked) and the player id was recorded in the
+        room's ban list for the room's remaining lifetime.
+      properties:
+        type: { const: PlayerBanned }
+        data:
+          type: object
+          additionalProperties: false
+          required: [player_id]
+          properties:
+            player_id: { type: string, format: uuid }
+      required: [type, data]
+    PlayerUnbanned:
+      type: object
+      description: >-
+        The requested UnbanPlayer operation succeeded: the player may join
+        the room again. Idempotent.
+      properties:
+        type: { const: PlayerUnbanned }
+        data:
+          type: object
+          additionalProperties: false
+          required: [player_id]
+          properties:
+            player_id: { type: string, format: uuid }
+      required: [type, data]
+    AuthorityTransferred:
+      type: object
+      description: >-
+        The requested TransferAuthority operation succeeded: the named member
+        now holds the authority role. All members received the usual
+        AuthorityChanged broadcast.
+      properties:
+        type: { const: AuthorityTransferred }
+        data:
+          type: object
+          additionalProperties: false
+          required: [player_id]
+          properties:
+            player_id: { type: string, format: uuid }
+      required: [type, data]
     RoomOperationResult:
       type: object
       description: >-
@@ -2215,6 +2375,10 @@ components:
                 - { $ref: '#/components/schemas/OperationFailed' }
                 - { $ref: '#/components/schemas/PlayerKicked' }
                 - { $ref: '#/components/schemas/RoomCodeRegenerated' }
+                - { $ref: '#/components/schemas/RoomAccessUpdated' }
+                - { $ref: '#/components/schemas/PlayerBanned' }
+                - { $ref: '#/components/schemas/PlayerUnbanned' }
+                - { $ref: '#/components/schemas/AuthorityTransferred' }
       required: [type, data]
     NewSpectatorJoined:
       type: object
@@ -2230,6 +2394,17 @@ components:
             current_spectators:
               type: array
               items: { $ref: '#/components/schemas/SpectatorInfo' }
+              description: >-
+                Full roster after the join on protocol v2 connections. On v3
+                connections this is [] — the event is a join delta and
+                spectator_count carries the room total.
+            spectator_count:
+              type: integer
+              minimum: 0
+              description: >-
+                Total spectators in the room after this join. Present on v3
+                connections only; pre-v3 connections receive the full roster
+                instead.
             reason: { $ref: '#/components/schemas/SpectatorStateChangeReason' }
       required: [type, data]
     SpectatorDisconnected:
@@ -2247,6 +2422,17 @@ components:
             current_spectators:
               type: array
               items: { $ref: '#/components/schemas/SpectatorInfo' }
+              description: >-
+                Full roster after the departure on protocol v2 connections.
+                On v3 connections this is [] — the event is a departure delta
+                and spectator_count carries the room total.
+            spectator_count:
+              type: integer
+              minimum: 0
+              description: >-
+                Total spectators in the room after this departure. Present on
+                v3 connections only; pre-v3 connections receive the full
+                roster instead.
       required: [type, data]
     Error:
       type: object

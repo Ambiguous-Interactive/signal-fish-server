@@ -1,4 +1,6 @@
-use crate::protocol::{ConnectionInfo, PlayerId, PlayerInfo, Room, RoomId, SpectatorInfo};
+use crate::protocol::{
+    ConnectionInfo, PlayerId, PlayerInfo, Room, RoomId, RoomPasswordCredential, SpectatorInfo,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::any::Any;
@@ -203,6 +205,19 @@ pub trait GameDatabase: Send + Sync {
     /// Create a room while preserving collision identity for bounded generated
     /// code retries. Implementations should override this method when they can
     /// classify their storage backend's uniqueness violation.
+    ///
+    /// `join_password` (issue #525) seals the room from birth: the row must
+    /// become visible already carrying the credential, so no admission can
+    /// observe an unlocked room. The shipped in-memory implementation creates
+    /// and seals under one guard set. This fallback is NOT atomic — it seals
+    /// after `create_room` returned, leaving a window in which an admission
+    /// that resolves the code (a spectator join resolves without the room-code
+    /// lock) can observe an unlocked row — so implementations that can create
+    /// atomically SHOULD override and do so. If the fallback's seal write
+    /// fails, the fresh room is deleted and the creation surfaces as
+    /// [`CreateRoomError::Storage`] rather than an unlocked `Ok` room: on the
+    /// seal-failure path the server joins nothing into a room whose creation
+    /// reported an error.
     #[allow(clippy::too_many_arguments)]
     async fn create_room_classified(
         &self,
@@ -214,19 +229,39 @@ pub trait GameDatabase: Send + Sync {
         relay_type: String,
         region_id: String,
         application_id: Option<Uuid>,
+        join_password: Option<RoomPasswordCredential>,
     ) -> CreateRoomResult {
-        self.create_room(
-            game_name,
-            room_code,
-            max_players,
-            supports_authority,
-            creator_id,
-            relay_type,
-            region_id,
-            application_id,
-        )
-        .await
-        .map_err(CreateRoomError::Storage)
+        let room = self
+            .create_room(
+                game_name,
+                room_code,
+                max_players,
+                supports_authority,
+                creator_id,
+                relay_type,
+                region_id,
+                application_id,
+            )
+            .await
+            .map_err(CreateRoomError::Storage)?;
+        if let Some(credential) = join_password {
+            if let Err(error) = self.set_room_password(&room.id, Some(credential)).await {
+                // Never hand back a room the caller asked to protect: the
+                // failure must not surface as an unlocked `Ok` room. The
+                // caller aborts the join on this error, so the fresh row is
+                // deleted; if even the delete fails, the row leaks unlocked —
+                // log it loudly here, where the operator first learns of it.
+                if let Err(delete_error) = self.delete_room(&room.id).await {
+                    tracing::error!(
+                        room_id = %room.id,
+                        %delete_error,
+                        "Failed to roll back an unsealed room after a failed creation-time password write"
+                    );
+                }
+                return Err(CreateRoomError::Storage(error));
+            }
+        }
+        Ok(room)
     }
     async fn set_room_application_id(
         &self,
@@ -277,6 +312,36 @@ pub trait GameDatabase: Send + Sync {
         _max_spectators: Option<u8>,
     ) -> Result<()> {
         anyhow::bail!("spectator capacity persistence is not supported")
+    }
+
+    /// Store a room's hashed join password (authority-initiated access
+    /// control, issue #525).
+    ///
+    /// `None` opens the room. Callers pass the already-hashed credential —
+    /// the plaintext password never reaches storage. Callers hold the room
+    /// mutation gate across the write, so a missing room is an error but
+    /// cannot otherwise race admission.
+    async fn set_room_password(
+        &self,
+        _room_id: &RoomId,
+        _password: Option<RoomPasswordCredential>,
+    ) -> Result<()> {
+        anyhow::bail!("room password persistence is not supported")
+    }
+
+    /// Add or lift a room-scoped player ban (authority-initiated moderation,
+    /// issue #525).
+    ///
+    /// The ban lives on the room row, so it expires with the room. Callers
+    /// hold the room mutation gate across the write, so a missing room is an
+    /// error but cannot otherwise race admission.
+    async fn set_room_ban(
+        &self,
+        _room_id: &RoomId,
+        _player_id: &PlayerId,
+        _banned: bool,
+    ) -> Result<()> {
+        anyhow::bail!("room ban persistence is not supported")
     }
 
     /// Get room by game name and room code
@@ -1020,6 +1085,7 @@ impl GameDatabase for InMemoryDatabase {
             relay_type,
             region_id,
             application_id,
+            None,
         )
         .await
         .map_err(anyhow::Error::new)
@@ -1035,6 +1101,7 @@ impl GameDatabase for InMemoryDatabase {
         relay_type: String,
         region_id: String,
         application_id: Option<Uuid>,
+        join_password: Option<RoomPasswordCredential>,
     ) -> CreateRoomResult {
         let room_code =
             room_code.unwrap_or_else(crate::protocol::room_codes::generate_clean_room_code);
@@ -1127,11 +1194,15 @@ impl GameDatabase for InMemoryDatabase {
             last_activity: now,
             spectators: HashMap::new(),
             max_spectators: None,
+            password: join_password,
+            banned_players: HashSet::new(),
         };
 
         // Insert into all three maps under one set of guards, so a dropped
         // future can never commit the room without its monotonic GC stamp
         // (which would silently degrade the room to the wall-clock fallback).
+        // The join password rides the same insert: the room is born sealed,
+        // so no admission can observe an unlocked row (issue #525).
         rooms.insert(room_id, room.clone());
         room_codes.insert(game_room_key, room_id);
         liveness.insert(room_id, RoomLiveness::Live(tokio::time::Instant::now()));
@@ -1191,6 +1262,37 @@ impl GameDatabase for InMemoryDatabase {
             anyhow::anyhow!("Room {room_id} not found while setting spectator cap")
         })?;
         room.max_spectators = max_spectators;
+        Ok(())
+    }
+
+    async fn set_room_password(
+        &self,
+        room_id: &RoomId,
+        password: Option<RoomPasswordCredential>,
+    ) -> Result<()> {
+        let mut rooms = self.rooms.write().await;
+        let room = rooms.get_mut(room_id).ok_or_else(|| {
+            anyhow::anyhow!("Room {room_id} not found while setting room password")
+        })?;
+        room.password = password;
+        Ok(())
+    }
+
+    async fn set_room_ban(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+        banned: bool,
+    ) -> Result<()> {
+        let mut rooms = self.rooms.write().await;
+        let room = rooms
+            .get_mut(room_id)
+            .ok_or_else(|| anyhow::anyhow!("Room {room_id} not found while setting room ban"))?;
+        if banned {
+            room.banned_players.insert(*player_id);
+        } else {
+            room.banned_players.remove(player_id);
+        }
         Ok(())
     }
 
@@ -2390,6 +2492,7 @@ mod tests {
                 Uuid::new_v4(),
                 "relay".to_string(),
                 "us-east-1".to_string(),
+                None,
                 None,
             )
             .await

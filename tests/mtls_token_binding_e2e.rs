@@ -616,6 +616,8 @@ async fn required_mtls_without_token_binding_keeps_unsigned_json_and_binary_path
         max_players: Some(2),
         supports_authority: Some(true),
         relay_transport: None,
+
+        password: None,
     };
     socket
         .send(Message::Text(
@@ -713,6 +715,8 @@ async fn reconnect_token_is_bound_to_issuing_certificate_without_consuming_misma
             max_players: Some(2),
             supports_authority: Some(true),
             relay_transport: None,
+
+            password: None,
         },
         Some(&fingerprint_a),
     )
@@ -819,6 +823,8 @@ async fn reconnect_token_is_bound_to_issuing_certificate_without_consuming_misma
             max_players: None,
             supports_authority: Some(true),
             relay_transport: None,
+
+            password: None,
         },
         Some(&fingerprint_b),
     )

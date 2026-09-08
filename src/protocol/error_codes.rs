@@ -145,6 +145,20 @@ pub enum ErrorCode {
     /// player. The WebSocket closed with private close code `4007`
     /// (`kicked`); reconnection is not offered.
     Kicked,
+    // Moderation errors, access control (4xxx category). Appended at the END;
+    // see the signaling-errors note above. Raised by the authority-only
+    // `SetRoomAccess` / `BanPlayer` / `TransferAuthority` room operations
+    // (issue #525).
+    /// The room requires a join password and the request presented none or
+    /// the wrong one. The server does not distinguish the two cases.
+    PasswordRequired,
+    /// This player id is banned from the room by its authority player and
+    /// cannot join it (as a player or spectator) while the room lives. The
+    /// ban is room-scoped and expires with the room.
+    Banned,
+    /// The player named by `TransferAuthority` is not a seated member of the
+    /// room.
+    TransferTargetNotFound,
 }
 
 impl ErrorCode {
@@ -363,6 +377,15 @@ impl ErrorCode {
             Self::Kicked => {
                 "You were removed from the room by its authority player. Reconnection is not offered; join again with a valid room code."
             }
+            Self::PasswordRequired => {
+                "This room is password-protected. Send the join password chosen by its authority player."
+            }
+            Self::Banned => {
+                "This player id is banned from the room by its authority player and cannot join it while the room lives."
+            }
+            Self::TransferTargetNotFound => {
+                "The player to transfer authority to is not a current member of this room."
+            }
         }
     }
 }
@@ -438,6 +461,9 @@ mod tests {
             ErrorCode::NotRoomAuthority,
             ErrorCode::KickTargetNotFound,
             ErrorCode::Kicked,
+            ErrorCode::PasswordRequired,
+            ErrorCode::Banned,
+            ErrorCode::TransferTargetNotFound,
         ];
 
         for error_code in &error_codes {

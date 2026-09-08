@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Spectator fan-out slimming (issue #525, v3 only): the room-uniform
+  `NewSpectatorJoined` and `SpectatorDisconnected` broadcasts no longer carry
+  the full spectator roster to protocol-v3 connections. On v3 they are
+  delta+count events — `current_spectators` is `[]` (the field stays present
+  because released SDK parsers require it) and the new additive optional
+  `spectator_count` field carries the room's total after the change. Members
+  keep the roster current by applying these deltas to the roster from their
+  `RoomJoined`, `SpectatorJoined`, or `Reconnected` snapshot, so per-join
+  fan-out bytes drop from O(recipients × spectators) to O(recipients).
+  Replayed copies (`Reconnected.missed_events`) are projected to the same
+  v3 shape. Pre-v3 connections keep the exact frozen v2 bytes (full roster,
+  no count field).
+- Room access control and expanded moderation surface (issue #525, v3 only):
+  four new `room_operation_ids` operations alongside the existing kick and
+  rotation. `SetRoomAccess { password }` seals a room behind a join password
+  (salted-hash storage, never logged or echoed; `null` reopens it) — sealed
+  rooms refuse every seated or spectator join that does not present the
+  password with the new `PASSWORD_REQUIRED` code, a missing and a mismatched
+  password are indistinguishable, the check runs before any other room
+  information is evaluated, and a password on the **creating** `JoinRoom`
+  seals the room from birth: storage creates and seals the row under one
+  insert, and an ambiguous commit that produced an unlocked row is refused
+  rather than adopted.
+  **Breaking (Rust API):** `GameDatabase` implementors overriding
+  `create_room_classified` must accept the new trailing
+  `join_password: Option<RoomPasswordCredential>` parameter; the trait
+  contract is that the room becomes visible already sealed (the shipped
+  in-memory implementation creates and seals under one guard set, and the
+  trait default seals after creation, deleting the fresh room if the seal
+  write fails). `BanPlayer` evicts a seated member
+  exactly like a kick and additionally records the id on the room's
+  in-memory ban list: while the room lives, the banned id cannot rejoin as a
+  player or spectator (`BANNED`); `UnbanPlayer` lifts a ban idempotently.
+  `TransferAuthority` hands the authority role to a seated member atomically
+  (validated and granted under the room mutation gate, so the successor
+  cannot depart between check and grant): every member receives the usual
+  replay-recorded `AuthorityChanged` broadcast, and the sender loses every
+  authority capability. New append-only error codes `PASSWORD_REQUIRED`,
+  `BANNED`, and `TRANSFER_TARGET_NOT_FOUND`; optional additive
+  `password` fields on `JoinRoom` / `JoinAsSpectator` (legacy top-level and
+  correlated forms); success results `RoomAccessUpdated`, `PlayerBanned`,
+  `PlayerUnbanned`, `AuthorityTransferred`; new counters
+  `room_bans` / `room_unbans` and the now-live `authority_transfers` /
+  `authority_transfer_conflicts` (JSON snapshot fields, like the existing
+  moderation counters).
+- Loud reconnection-token credential documentation (issue #523): the
+  [Reconnection security notes](docs/concepts/reconnection.md) now state the
+  bearer-credential property up front — possession authorizes seat takeover
+  within the window — with operator guidance to shrink `reconnection_window`
+  and to require the mTLS fingerprint second factor
+  (`security.transport.token_binding.require_client_fingerprint`) in hosted
+  deployments, plus a "Reconnection token exposure bounded" section in the
+  pre-deployment checklist.
 - Authority moderation surface (issue #525, v3 only): two new
   `room_operation_ids` operations. `KickPlayer` lets the room's authority
   remove a seated player: the seat is removed with the ordinary departure

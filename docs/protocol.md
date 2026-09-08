@@ -1312,6 +1312,13 @@ Another spectator joined the room.
 
 Note: The `reason` field is optional.
 
+On protocol v3 connections this event carries the join delta plus a count
+instead of the full roster: `current_spectators` is `[]` and
+`spectator_count` holds the room's total after the join. Members keep their
+roster current by applying these deltas to the roster from their
+`RoomJoined`, `SpectatorJoined`, or `Reconnected` snapshot. Pre-v3
+connections keep the full roster and never receive `spectator_count`.
+
 ### SpectatorDisconnected
 
 Another spectator left the room.
@@ -1330,6 +1337,11 @@ Another spectator left the room.
 ```
 
 Note: The `reason` field is optional.
+
+On protocol v3 connections this event carries the departure delta plus a
+count instead of the full roster: `current_spectators` is `[]` and
+`spectator_count` holds the room's total after the departure. Pre-v3
+connections keep the full roster and never receive `spectator_count`.
 
 ## Session Flow
 
@@ -1553,12 +1565,12 @@ operation and echoes the same UUID:
 ```
 
 The nested request types are `JoinRoom`, `LeaveRoom`, `Reconnect`, `JoinAsSpectator`, `LeaveSpectator`,
-`KickPlayer`, and `RegenerateRoomCode`.
+`KickPlayer`, `RegenerateRoomCode`, `SetRoomAccess`, `BanPlayer`, `UnbanPlayer`, and `TransferAuthority`.
 Their success/failure result types retain the legacy payloads; `OperationFailed` covers a valid correlated command
 that cannot produce its operation-specific success result. A malformed top-level frame may still receive an
 uncorrelated top-level `Error`, because the server cannot safely trust an operation ID from undecodable input.
 
-The two moderation operations are authority-only (v3 only):
+The moderation operations are authority-only (v3 only):
 
 - `KickPlayer` names a seated `player_id`. The server removes the seat, broadcasts the usual `PlayerLeft` roster
   delta to the remaining members, closes the target's connection with close code `4007` (`kicked`), and never arms
@@ -1569,6 +1581,24 @@ The two moderation operations are authority-only (v3 only):
   reconnection tokens are unaffected. The requester receives `RoomCodeRegenerated` carrying the new code; the old
   code stops resolving to the room immediately, and a join that names it behaves like any unknown code
   (join-creates-room may open a fresh, unrelated room under it).
+- `SetRoomAccess` takes `password` (non-empty string, max 256 bytes, or `null`). A password seals the room: every
+  later seated or spectator join must present the same password or is refused with `PASSWORD_REQUIRED` (a missing
+  and a mismatched password are indistinguishable); `null` reopens the room. Current members and their
+  reconnection tokens are unaffected. The password is stored only as a salted hash and never logged or echoed. The
+  requester receives `RoomAccessUpdated { requires_password }`.
+- `BanPlayer` names a seated `player_id` and evicts it exactly like `KickPlayer`, then records the id on the
+  room's in-memory ban list: while the room lives, the banned id cannot rejoin it as a player or spectator
+  (`BANNED`). The ban dies with the room. The requester receives `PlayerBanned`.
+- `UnbanPlayer` lifts a room ban (idempotent). The requester receives `PlayerUnbanned`.
+- `TransferAuthority` names a seated `player_id` that becomes the room's authority. Every member receives the usual
+  `AuthorityChanged` broadcast (personalized `you_are_authority` per recipient); the sender receives
+  `AuthorityTransferred` and loses every authority capability (`StartGame`, kick, ban, access, rotation, further
+  transfers). Refusals use `NOT_ROOM_AUTHORITY`, `TRANSFER_TARGET_NOT_FOUND` (target is not a seated member), or
+  `INVALID_INPUT` (self-transfer).
+
+Join-password fields also exist outside the capability envelope: `JoinRoom.password` and
+`JoinAsSpectator.password` are optional on both the legacy top-level commands and their correlated forms, so a
+pre-capability client can still present the password of a room an authority sealed.
 
 Generate a UUID that is unique among live and recently completed operations on the current physical WebSocket.
 The `operation_id` text must use lowercase hyphenated canonical UUID form; any other encoding is rejected as a

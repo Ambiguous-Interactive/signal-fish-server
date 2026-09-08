@@ -992,6 +992,7 @@ async fn missing_join_publication_snapshot_preserves_open_then_terminal_order() 
             Some(2),
             Some(false),
             None,
+            None,
         )
         .await;
     let room_id = server
@@ -1020,6 +1021,7 @@ async fn missing_join_publication_snapshot_preserves_open_then_terminal_order() 
             "joiner".to_string(),
             Some(2),
             Some(false),
+            None,
             None,
         )
         .await;
@@ -2065,6 +2067,7 @@ async fn spectators_cannot_send_or_receive_webrtc_signals() {
             "webrtc-game".to_string(),
             room_code,
             "Observer".to_string(),
+            None,
         )
         .await;
     match recv(&mut spectator_rx).await.as_ref() {

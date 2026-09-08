@@ -303,6 +303,8 @@ impl Harness {
                             max_players: Some(2 + max_players % 3),
                             supports_authority: Some(client == 0),
                             relay_transport: None,
+
+                            password: None,
                         },
                     )
                     .await;

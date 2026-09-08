@@ -424,6 +424,10 @@ pub enum ServerMessage {
         spectator: SpectatorInfo,
         #[serde(default)]
         current_spectators: Vec<SpectatorInfo>,
+        /// v3 connections receive the fan-out as a delta: the roster is
+        /// empty and this count carries the room total.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spectator_count: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
@@ -434,6 +438,10 @@ pub enum ServerMessage {
         reason: Option<String>,
         #[serde(default)]
         current_spectators: Vec<SpectatorInfo>,
+        /// v3 connections receive the fan-out as a delta: the roster is
+        /// empty and this count carries the room total.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spectator_count: Option<u32>,
     },
     /// General error message.
     Error {
@@ -1546,6 +1554,8 @@ pub enum ServerMessage {
         spectator: SpectatorInfo,
         #[serde(default)]
         current_spectators: Vec<SpectatorInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spectator_count: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
@@ -1555,6 +1565,8 @@ pub enum ServerMessage {
         reason: Option<String>,
         #[serde(default)]
         current_spectators: Vec<SpectatorInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spectator_count: Option<u32>,
     },
     Error {
         message: String,

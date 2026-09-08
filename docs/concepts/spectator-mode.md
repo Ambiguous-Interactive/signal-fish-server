@@ -166,6 +166,13 @@ message is broadcast:
 }
 ```
 
+On protocol v3 connections both broadcasts are delta events:
+`current_spectators` is `[]` and `spectator_count` carries the room's total
+after the change. Members track the roster by applying these deltas to the
+roster from their `RoomJoined`, `SpectatorJoined`, or `Reconnected`
+snapshot. Pre-v3 connections receive the full roster and never receive
+`spectator_count`.
+
 ## Leaving Spectator Mode
 
 To leave, send a `LeaveSpectator` message:

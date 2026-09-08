@@ -79,6 +79,7 @@ async fn join_seated_player(
             Some(4),
             Some(true),
             None,
+            None,
         )
         .await;
     let joined = timeout(Duration::from_secs(1), receiver.recv())
@@ -432,6 +433,7 @@ async fn creation_applies_the_default_spectator_capacity() {
                 Some(case.max_players),
                 Some(false),
                 None,
+                None,
             )
             .await;
         let joined = timeout(Duration::from_secs(1), rx.recv())
@@ -534,4 +536,559 @@ async fn kicked_disconnected_seat_is_removed_and_never_reconnectable() {
         matches!(result.as_ref(), RoomOperationResult::PlayerKicked { player_id } if *player_id == target),
         "expected PlayerKicked for the vacated seat, got {result:?}"
     );
+}
+
+/// Drive a seated join that may carry a join password and assert the
+/// terminal `RoomJoinFailed` classification when the join is refused.
+async fn join_with_password(
+    server: &Arc<EnhancedGameServer>,
+    player_id: &PlayerId,
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+    room_code: &str,
+    name: &str,
+    password: Option<&str>,
+) -> Result<(), ErrorCode> {
+    server
+        .handle_join_room(
+            player_id,
+            "moderation-game".to_string(),
+            Some(room_code.to_string()),
+            name.to_string(),
+            Some(4),
+            Some(true),
+            None,
+            password.map(str::to_string),
+        )
+        .await;
+    let terminal = recv_until(receiver, |message| {
+        matches!(
+            message,
+            ServerMessage::RoomJoined(_) | ServerMessage::RoomJoinFailed { .. }
+        )
+    })
+    .await;
+    match terminal.as_ref() {
+        ServerMessage::RoomJoined(_) => Ok(()),
+        ServerMessage::RoomJoinFailed { error_code, .. } => {
+            Err(error_code.clone().expect("join refusals carry a code"))
+        }
+        other => panic!("expected a join terminal, got {other:?}"),
+    }
+}
+
+async fn room_access_result(
+    receiver: &mut mpsc::Receiver<Arc<ServerMessage>>,
+) -> RoomOperationResult {
+    let response = recv_until(receiver, |message| {
+        matches!(message, ServerMessage::RoomOperationResult { .. })
+    })
+    .await;
+    let ServerMessage::RoomOperationResult { result, .. } = response.as_ref() else {
+        panic!("expected correlated result, got {response:?}");
+    };
+    result.as_ref().clone()
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn set_room_access_seals_and_reopens_the_room() {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (authority, mut authority_rx) =
+        register_client(&server, "127.0.0.1:48140".parse().unwrap()).await;
+    let (latecomer, mut latecomer_rx) =
+        register_client(&server, "127.0.0.1:48141".parse().unwrap()).await;
+
+    join_seated_player(&server, &authority, &mut authority_rx, "SECRET", "host").await;
+
+    // Seal the room.
+    server
+        .handle_set_room_access_operation(
+            &authority,
+            RoomOperationId::new_v4(),
+            Some("open sesame".to_string()),
+        )
+        .await;
+    assert!(
+        matches!(
+            room_access_result(&mut authority_rx).await,
+            RoomOperationResult::RoomAccessUpdated {
+                requires_password: true
+            }
+        ),
+        "sealing must report requires_password=true"
+    );
+    let room = server
+        .database
+        .get_room("moderation-game", "SECRET")
+        .await
+        .expect("room lookup succeeds")
+        .expect("room exists");
+    assert!(room.password.is_some(), "storage must hold the credential");
+
+    // A join without the password is refused with the non-enumerating code;
+    // a wrong password is indistinguishable.
+    assert_eq!(
+        join_with_password(
+            &server,
+            &latecomer,
+            &mut latecomer_rx,
+            "SECRET",
+            "late",
+            None
+        )
+        .await
+        .expect_err("password-less join must be refused"),
+        ErrorCode::PasswordRequired
+    );
+    assert_eq!(
+        join_with_password(
+            &server,
+            &latecomer,
+            &mut latecomer_rx,
+            "SECRET",
+            "late",
+            Some("wrong")
+        )
+        .await
+        .expect_err("wrong-password join must be refused"),
+        ErrorCode::PasswordRequired
+    );
+    assert!(
+        !server
+            .database
+            .get_room_by_id(&room.id)
+            .await
+            .expect("ok")
+            .expect("room exists")
+            .players
+            .contains_key(&latecomer),
+        "a refused join must not seat the player"
+    );
+
+    // The correct password admits.
+    join_with_password(
+        &server,
+        &latecomer,
+        &mut latecomer_rx,
+        "SECRET",
+        "late",
+        Some("open sesame"),
+    )
+    .await
+    .expect("correct password must admit");
+
+    // Reopening restores open admission.
+    server
+        .handle_set_room_access_operation(&authority, RoomOperationId::new_v4(), None)
+        .await;
+    assert!(
+        matches!(
+            room_access_result(&mut authority_rx).await,
+            RoomOperationResult::RoomAccessUpdated {
+                requires_password: false
+            }
+        ),
+        "reopening must report requires_password=false"
+    );
+    let (another, mut another_rx) =
+        register_client(&server, "127.0.0.1:48142".parse().unwrap()).await;
+    join_with_password(&server, &another, &mut another_rx, "SECRET", "fresh", None)
+        .await
+        .expect("an open room must admit without a password");
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn creation_time_password_seals_the_room_from_birth() {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48143".parse().unwrap()).await;
+    let (latecomer, mut latecomer_rx) =
+        register_client(&server, "127.0.0.1:48144".parse().unwrap()).await;
+
+    // The creating join carries the password: there is no unlocked window.
+    join_with_password(
+        &server,
+        &creator,
+        &mut creator_rx,
+        "BIRTH1",
+        "host",
+        Some("secret"),
+    )
+    .await
+    .expect("creating join succeeds");
+    let room = server
+        .database
+        .get_room("moderation-game", "BIRTH1")
+        .await
+        .expect("room lookup succeeds")
+        .expect("room exists");
+    assert!(room.password.is_some(), "creation must seal the room");
+
+    assert_eq!(
+        join_with_password(
+            &server,
+            &latecomer,
+            &mut latecomer_rx,
+            "BIRTH1",
+            "late",
+            None
+        )
+        .await
+        .expect_err("uninvited join must be refused"),
+        ErrorCode::PasswordRequired
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn set_room_access_refusals_are_classified_per_failure() {
+    let cases: &[(&str, Option<&str>, ErrorCode)] = &[
+        ("empty password", Some(""), ErrorCode::InvalidInput),
+        (
+            "oversized password",
+            Some(&"x".repeat(crate::protocol::MAX_ROOM_PASSWORD_LENGTH + 1)),
+            ErrorCode::InvalidInput,
+        ),
+    ];
+    for (name, password, expected) in cases {
+        let server = create_test_server_with(ServerConfig::default()).await;
+        let (authority, mut authority_rx) =
+            register_client(&server, "127.0.0.1:48145".parse().unwrap()).await;
+        join_seated_player(&server, &authority, &mut authority_rx, "REFUS1", "host").await;
+
+        server
+            .handle_set_room_access_operation(
+                &authority,
+                RoomOperationId::new_v4(),
+                password.map(str::to_string),
+            )
+            .await;
+        let response = recv_until(&mut authority_rx, |message| {
+            matches!(message, ServerMessage::RoomOperationResult { .. })
+        })
+        .await;
+        assert_eq!(
+            operation_failed_code(&response),
+            *expected,
+            "{name}: got {response:?}"
+        );
+        let room = server
+            .database
+            .get_room("moderation-game", "REFUS1")
+            .await
+            .expect("room lookup succeeds")
+            .expect("room exists");
+        assert!(
+            room.password.is_none(),
+            "{name}: a refused access update must not change the policy"
+        );
+    }
+
+    // A non-authority member is refused regardless of the payload.
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (authority, mut authority_rx) =
+        register_client(&server, "127.0.0.1:48146".parse().unwrap()).await;
+    let (member, mut member_rx) =
+        register_client(&server, "127.0.0.1:48147".parse().unwrap()).await;
+    join_seated_player(&server, &authority, &mut authority_rx, "REFUS2", "host").await;
+    join_seated_player(&server, &member, &mut member_rx, "REFUS2", "guest").await;
+    server
+        .handle_set_room_access_operation(
+            &member,
+            RoomOperationId::new_v4(),
+            Some("sneaky".to_string()),
+        )
+        .await;
+    let response = recv_until(&mut member_rx, |message| {
+        matches!(message, ServerMessage::RoomOperationResult { .. })
+    })
+    .await;
+    assert_eq!(
+        operation_failed_code(&response),
+        ErrorCode::NotRoomAuthority,
+        "non-authority access update must be refused: got {response:?}"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn ban_evicts_blocks_rejoin_and_lifts_on_unban() {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (authority, mut authority_rx) =
+        register_client(&server, "127.0.0.1:48148".parse().unwrap()).await;
+    let (target, mut target_rx, target_close_listener) =
+        register_client_with_close_listener(&server, "127.0.0.1:48149".parse().unwrap()).await;
+
+    join_seated_player(&server, &authority, &mut authority_rx, "BAN001", "host").await;
+    join_seated_player(&server, &target, &mut target_rx, "BAN001", "guest").await;
+
+    server
+        .handle_ban_player_operation(&authority, RoomOperationId::new_v4(), target)
+        .await;
+
+    // The banned seat is evicted through the same machinery as a kick.
+    let _ = recv_until(&mut authority_rx, |message| {
+        matches!(message, ServerMessage::PlayerLeft { .. })
+    })
+    .await;
+    assert!(
+        matches!(
+            room_access_result(&mut authority_rx).await,
+            RoomOperationResult::PlayerBanned { player_id } if player_id == target
+        ),
+        "ban must report PlayerBanned"
+    );
+    assert_eq!(
+        target_close_listener.requested_reason(),
+        Some(CloseReason::Kicked),
+        "a banned seat must close with the dedicated 4007 reason"
+    );
+    let room = server
+        .database
+        .get_room("moderation-game", "BAN001")
+        .await
+        .expect("room lookup succeeds")
+        .expect("room exists");
+    assert!(room.is_banned(&target), "storage must record the ban");
+
+    // The banned id cannot rejoin as a player...
+    assert_eq!(
+        join_with_password(&server, &target, &mut target_rx, "BAN001", "guest", None)
+            .await
+            .expect_err("banned rejoin must be refused"),
+        ErrorCode::Banned
+    );
+    // ...nor as a spectator.
+    let spectator_err = server
+        .spectator_service
+        .join(
+            &target,
+            "moderation-game".to_string(),
+            "BAN001".to_string(),
+            "guest".to_string(),
+        )
+        .await
+        .expect_err("banned spectator join must be refused");
+    assert_eq!(
+        spectator_err.code,
+        Some(ErrorCode::Banned),
+        "banned spectator join must be refused: got {spectator_err:?}"
+    );
+
+    // Lifting the ban restores admission.
+    server
+        .handle_unban_player_operation(&authority, RoomOperationId::new_v4(), target)
+        .await;
+    assert!(
+        matches!(
+            room_access_result(&mut authority_rx).await,
+            RoomOperationResult::PlayerUnbanned { player_id } if player_id == target
+        ),
+        "unban must report PlayerUnbanned"
+    );
+    assert!(
+        !server
+            .database
+            .get_room("moderation-game", "BAN001")
+            .await
+            .expect("ok")
+            .expect("room exists")
+            .is_banned(&target),
+        "storage must clear the ban"
+    );
+    join_with_password(&server, &target, &mut target_rx, "BAN001", "guest", None)
+        .await
+        .expect("unbanned id must be able to rejoin");
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn ban_refusals_mirror_the_kick_classification() {
+    let cases: &[(&str, ErrorCode)] = &[
+        ("non-member target", ErrorCode::KickTargetNotFound),
+        ("self-target", ErrorCode::InvalidInput),
+    ];
+    for (name, expected) in cases {
+        let server = create_test_server_with(ServerConfig::default()).await;
+        let (authority, mut authority_rx) =
+            register_client(&server, "127.0.0.1:48150".parse().unwrap()).await;
+        join_seated_player(&server, &authority, &mut authority_rx, "BANR01", "host").await;
+
+        let target = match *name {
+            "self-target" => authority,
+            _ => PlayerId::new_v4(),
+        };
+        server
+            .handle_ban_player_operation(&authority, RoomOperationId::new_v4(), target)
+            .await;
+        let response = recv_until(&mut authority_rx, |message| {
+            matches!(message, ServerMessage::RoomOperationResult { .. })
+        })
+        .await;
+        assert_eq!(
+            operation_failed_code(&response),
+            *expected,
+            "{name}: got {response:?}"
+        );
+        let room = server
+            .database
+            .get_room("moderation-game", "BANR01")
+            .await
+            .expect("room lookup succeeds")
+            .expect("room exists");
+        assert!(
+            !room.is_banned(&target),
+            "{name}: a refused ban must not record the ban"
+        );
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transfer_authority_moves_the_role_and_notifies_members() {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (authority, mut authority_rx) =
+        register_client(&server, "127.0.0.1:48151".parse().unwrap()).await;
+    let (successor, mut successor_rx) =
+        register_client(&server, "127.0.0.1:48152".parse().unwrap()).await;
+
+    join_seated_player(&server, &authority, &mut authority_rx, "XFER01", "host").await;
+    join_seated_player(&server, &successor, &mut successor_rx, "XFER01", "guest").await;
+
+    server
+        .handle_transfer_authority_operation(&authority, RoomOperationId::new_v4(), successor)
+        .await;
+
+    // Both members observe the personalized AuthorityChanged announcement.
+    let authority_view = recv_until(&mut authority_rx, |message| {
+        matches!(message, ServerMessage::AuthorityChanged { .. })
+    })
+    .await;
+    let ServerMessage::AuthorityChanged {
+        authority_player,
+        you_are_authority,
+    } = authority_view.as_ref()
+    else {
+        panic!("expected AuthorityChanged, got {authority_view:?}");
+    };
+    assert_eq!(*authority_player, Some(successor));
+    assert!(
+        !you_are_authority,
+        "the former authority must learn it lost the role"
+    );
+
+    let successor_view = recv_until(&mut successor_rx, |message| {
+        matches!(message, ServerMessage::AuthorityChanged { .. })
+    })
+    .await;
+    let ServerMessage::AuthorityChanged {
+        you_are_authority, ..
+    } = successor_view.as_ref()
+    else {
+        panic!("expected AuthorityChanged, got {successor_view:?}");
+    };
+    assert!(
+        *you_are_authority,
+        "the new authority must learn it holds the role"
+    );
+
+    // Durable truth and the correlated terminal.
+    let room = server
+        .database
+        .get_room("moderation-game", "XFER01")
+        .await
+        .expect("room lookup succeeds")
+        .expect("room exists");
+    assert_eq!(
+        room.authority_player,
+        Some(successor),
+        "storage must hold the new authority"
+    );
+    assert!(matches!(
+        room.players.get(&authority),
+        Some(info) if !info.is_authority
+    ));
+    assert!(matches!(
+        room.players.get(&successor),
+        Some(info) if info.is_authority
+    ));
+
+    assert!(matches!(
+        room_access_result(&mut authority_rx).await,
+        RoomOperationResult::AuthorityTransferred { player_id } if player_id == successor
+    ));
+
+    // The transferred-away authority can no longer moderate.
+    server
+        .handle_set_room_access_operation(
+            &authority,
+            RoomOperationId::new_v4(),
+            Some("no longer mine".to_string()),
+        )
+        .await;
+    let response = recv_until(&mut authority_rx, |message| {
+        matches!(message, ServerMessage::RoomOperationResult { .. })
+    })
+    .await;
+    assert_eq!(
+        operation_failed_code(&response),
+        ErrorCode::NotRoomAuthority,
+        "the former authority must lose its moderation surface"
+    );
+
+    // The new authority can transfer the role back.
+    server
+        .handle_transfer_authority_operation(&successor, RoomOperationId::new_v4(), authority)
+        .await;
+    let room = server
+        .database
+        .get_room("moderation-game", "XFER01")
+        .await
+        .expect("ok")
+        .expect("room exists");
+    assert_eq!(room.authority_player, Some(authority));
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transfer_authority_refusals_are_classified_per_failure() {
+    let cases: &[(&str, ErrorCode)] = &[
+        ("non-member target", ErrorCode::TransferTargetNotFound),
+        ("self-transfer", ErrorCode::InvalidInput),
+    ];
+    for (name, expected) in cases {
+        let server = create_test_server_with(ServerConfig::default()).await;
+        let (authority, mut authority_rx) =
+            register_client(&server, "127.0.0.1:48153".parse().unwrap()).await;
+        join_seated_player(&server, &authority, &mut authority_rx, "XFER02", "host").await;
+
+        let target = match *name {
+            "self-transfer" => authority,
+            _ => PlayerId::new_v4(),
+        };
+        server
+            .handle_transfer_authority_operation(&authority, RoomOperationId::new_v4(), target)
+            .await;
+        let response = recv_until(&mut authority_rx, |message| {
+            matches!(message, ServerMessage::RoomOperationResult { .. })
+        })
+        .await;
+        assert_eq!(
+            operation_failed_code(&response),
+            *expected,
+            "{name}: got {response:?}"
+        );
+        let room = server
+            .database
+            .get_room("moderation-game", "XFER02")
+            .await
+            .expect("room lookup succeeds")
+            .expect("room exists");
+        assert_eq!(
+            room.authority_player,
+            Some(authority),
+            "{name}: a refused transfer must not disturb the role"
+        );
+    }
 }

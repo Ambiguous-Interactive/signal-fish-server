@@ -13,7 +13,7 @@ use crate::config::ProtocolConfig;
 use crate::coordination::{MessageCoordinator, RoomOperationCoordinatorTrait};
 use crate::database::GameDatabase;
 use crate::protocol::{
-    validation, ErrorCode, PlayerId, PlayerInfo, RoomId, ServerMessage, SpectatorInfo,
+    validation, ErrorCode, PlayerId, PlayerInfo, Room, RoomId, ServerMessage, SpectatorInfo,
     SpectatorJoinedPayload, SpectatorStateChangeReason,
 };
 use crate::rate_limit::RoomRateLimiter;
@@ -21,9 +21,6 @@ use crate::reconnection::ReconnectionManager;
 use tokio::sync::watch;
 
 use super::ConnectionManager;
-
-#[cfg(test)]
-use crate::protocol::Room;
 
 #[derive(Clone)]
 pub(crate) struct SpectatorService {
@@ -215,7 +212,7 @@ impl SpectatorService {
         room_code: String,
         spectator_name: String,
     ) -> Result<(), SpectatorError> {
-        self.join_operation(player_id, None, game_name, room_code, spectator_name)
+        self.join_operation(player_id, None, game_name, room_code, spectator_name, None)
             .await
     }
 
@@ -226,6 +223,7 @@ impl SpectatorService {
         game_name: String,
         room_code: String,
         spectator_name: String,
+        password: Option<String>,
     ) -> Result<(), SpectatorError> {
         let service = self.clone();
         let player_id = *player_id;
@@ -273,6 +271,7 @@ impl SpectatorService {
                 game_name,
                 room_code,
                 spectator_name,
+                password,
                 pending_rollback_in_task,
             ))
             .catch_unwind()
@@ -328,6 +327,7 @@ impl SpectatorService {
         game_name: String,
         room_code: String,
         spectator_name: String,
+        password: Option<String>,
         pending_rollback: Arc<std::sync::Mutex<Option<(RoomId, bool)>>>,
     ) -> Result<(), SpectatorError> {
         let player_id = &player_id;
@@ -376,6 +376,20 @@ impl SpectatorService {
             validation::validate_room_code_with_config(&room_code, &self.protocol_config)
         {
             return Err(SpectatorError::new(err, Some(ErrorCode::InvalidRoomCode)));
+        }
+        // Join-password shape check (issue #525), mirroring the seated-join
+        // path: an empty or oversized password is a malformed request,
+        // rejected before any room lookup.
+        if let Some(password) = password.as_deref() {
+            if !Room::is_valid_room_password(Some(password)) {
+                return Err(SpectatorError::new(
+                    format!(
+                        "Join password must be non-empty and at most {} bytes",
+                        crate::protocol::MAX_ROOM_PASSWORD_LENGTH
+                    ),
+                    Some(ErrorCode::InvalidInput),
+                ));
+            }
         }
         let room_code = room_code.to_ascii_uppercase();
 
@@ -440,6 +454,24 @@ impl SpectatorService {
                 ));
             }
             self.room_applications.insert(room.id, owner);
+        }
+
+        // Join-password perimeter and the authority ban list (issue #525):
+        // checked against the fresh in-lane room state before capacity, so a
+        // protected room leaks nothing — not even its fullness — to a request
+        // that has not presented its credential. As on the seated-join path,
+        // a missing and a mismatched password share one outcome.
+        if !room.admits_join_password(password.as_deref()) {
+            return Err(SpectatorError::new(
+                "Room requires the join password set by its authority",
+                Some(ErrorCode::PasswordRequired),
+            ));
+        }
+        if room.is_banned(player_id) {
+            return Err(SpectatorError::new(
+                "Player is banned from this room",
+                Some(ErrorCode::Banned),
+            ));
         }
 
         if !room.can_spectate() {
@@ -617,6 +649,12 @@ impl SpectatorService {
                 let notification = Arc::new(ServerMessage::NewSpectatorJoined {
                     spectator: spectator.clone(),
                     current_spectators: spectator_snapshot.clone(),
+                    // The roster is u8-capped (`max_spectators`), so the
+                    // saturating fallback is unreachable; it keeps the
+                    // explicit-narrowing lint honest without a panic path.
+                    spectator_count: Some(
+                        u32::try_from(spectator_snapshot.len()).unwrap_or(u32::MAX),
+                    ),
                     reason: Some(join_reason),
                 });
                 let replay_notification = Arc::clone(&notification);
@@ -1170,6 +1208,10 @@ impl SpectatorService {
         let notification = Arc::new(ServerMessage::SpectatorDisconnected {
             spectator_id: *player_id,
             reason: Some(reason.clone()),
+            // The roster is u8-capped (`max_spectators`), so the saturating
+            // fallback is unreachable; it keeps the explicit-narrowing lint
+            // honest without a panic path.
+            spectator_count: Some(u32::try_from(current_spectators.len()).unwrap_or(u32::MAX)),
             current_spectators,
         });
         let replay_notification = Arc::clone(&notification);
@@ -2305,6 +2347,7 @@ mod tests {
                     spectator_id: sid,
                     reason: Some(SpectatorStateChangeReason::VoluntaryLeave),
                     current_spectators,
+                    ..
                 } if sid == spectator_id
                     && current_spectators.iter().map(|spectator| spectator.id).eq([remaining_id])
             )),

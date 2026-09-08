@@ -209,6 +209,8 @@ fn golden_client_join_room() {
         max_players: Some(4),
         supports_authority: Some(true),
         relay_transport: Some(RelayTransport::Udp),
+
+        password: None,
     };
     assert_json(
         &msg,
@@ -240,6 +242,8 @@ fn golden_client_join_room_minimal() {
         max_players: None,
         supports_authority: None,
         relay_transport: None,
+
+        password: None,
     };
     assert_json(
         &msg,
@@ -384,6 +388,8 @@ fn golden_client_join_as_spectator() {
         game_name: "test_game".to_string(),
         room_code: "ABC123".to_string(),
         spectator_name: "Watcher".to_string(),
+
+        password: None,
     };
     assert_json(
         &msg,
@@ -1055,9 +1061,13 @@ fn golden_server_spectator_left() {
 
 #[test]
 fn golden_server_new_spectator_joined() {
+    // The frozen v2 bytes: full roster, no count. The v3 slim shape (empty
+    // roster + `spectator_count`) is locked by
+    // `golden_server_new_spectator_joined_v3_slim` below.
     let msg = ServerMessage::NewSpectatorJoined {
         spectator: spectator(),
         current_spectators: vec![spectator()],
+        spectator_count: None,
         reason: Some(SpectatorStateChangeReason::Joined),
     };
     assert_json(
@@ -1083,6 +1093,7 @@ fn golden_server_spectator_disconnected() {
         spectator_id: player_b(),
         reason: Some(SpectatorStateChangeReason::Disconnected),
         current_spectators: vec![],
+        spectator_count: None,
     };
     assert_json(
         &msg,
@@ -1099,6 +1110,59 @@ fn golden_server_spectator_disconnected() {
         ),
     );
     assert_msgpack(&msg, "82a474797065b5537065637461746f72446973636f6e6e6563746564a46461746183ac737065637461746f725f6964c4100000000000000000000000000000000ba6726561736f6eac646973636f6e6e6563746564b263757272656e745f737065637461746f727390");
+}
+
+// Issue #525: the v3 fan-out shape the per-recipient projection produces —
+// roster cleared (field present for parser compatibility), total carried by
+// `spectator_count`, optional fields absent when `None`.
+#[test]
+fn golden_server_new_spectator_joined_v3_slim() {
+    let msg = ServerMessage::NewSpectatorJoined {
+        spectator: spectator(),
+        current_spectators: vec![],
+        spectator_count: Some(1),
+        reason: None,
+    };
+    assert_json(
+        &msg,
+        json!({
+            "type": "NewSpectatorJoined",
+            "data": {
+                "spectator": { "id": PLAYER_B_STR, "name": "Watcher", "connected_at": TIME_STR },
+                "current_spectators": [],
+                "spectator_count": 1
+            }
+        }),
+        &format!(
+            r#"{{"type":"NewSpectatorJoined","data":{{"spectator":{{"id":"{PLAYER_B_STR}","name":"Watcher","connected_at":"{TIME_STR}"}},"current_spectators":[],"spectator_count":1}}}}"#
+        ),
+    );
+    assert_msgpack(&msg, "82a474797065b24e6577537065637461746f724a6f696e6564a46461746183a9737065637461746f7283a26964c4100000000000000000000000000000000ba46e616d65a757617463686572ac636f6e6e65637465645f6174b4323032342d30312d30325430333a30343a30355ab263757272656e745f737065637461746f727390af737065637461746f725f636f756e7401");
+}
+
+#[test]
+fn golden_server_spectator_disconnected_v3_slim() {
+    let msg = ServerMessage::SpectatorDisconnected {
+        spectator_id: player_b(),
+        reason: None,
+        current_spectators: vec![],
+        spectator_count: Some(2),
+    };
+    assert_json(
+        &msg,
+        json!({
+            "type": "SpectatorDisconnected",
+            "data": {
+                "spectator_id": PLAYER_B_STR,
+                "current_spectators": [],
+                "spectator_count": 2
+            }
+        }),
+        &format!(
+            r#"{{"type":"SpectatorDisconnected","data":{{"spectator_id":"{PLAYER_B_STR}","current_spectators":[],"spectator_count":2}}}}"#
+        ),
+    );
+    assert_msgpack(&msg, "82a474797065b5537065637461746f72446973636f6e6e6563746564a46461746183ac737065637461746f725f6964c4100000000000000000000000000000000bb263757272656e745f737065637461746f727390af737065637461746f725f636f756e7402");
 }
 
 #[test]
@@ -1285,6 +1349,12 @@ fn golden_enum_error_code_all_variants() {
         (ErrorCode::NotRoomAuthority, r#""NOT_ROOM_AUTHORITY""#),
         (ErrorCode::KickTargetNotFound, r#""KICK_TARGET_NOT_FOUND""#),
         (ErrorCode::Kicked, r#""KICKED""#),
+        (ErrorCode::PasswordRequired, r#""PASSWORD_REQUIRED""#),
+        (ErrorCode::Banned, r#""BANNED""#),
+        (
+            ErrorCode::TransferTargetNotFound,
+            r#""TRANSFER_TARGET_NOT_FOUND""#,
+        ),
     ];
     for (code, expected) in cases {
         assert_json_str(code, expected);
@@ -1350,12 +1420,15 @@ fn golden_enum_error_code_all_variants() {
         | ErrorCode::RoomSessionIncompatible
         | ErrorCode::NotRoomAuthority
         | ErrorCode::KickTargetNotFound
-        | ErrorCode::Kicked => (),
+        | ErrorCode::Kicked
+        | ErrorCode::PasswordRequired
+        | ErrorCode::Banned
+        | ErrorCode::TransferTargetNotFound => (),
     };
     covered(ErrorCode::Unauthorized);
     assert_eq!(
         cases.len(),
-        57,
+        60,
         "golden table entry count must track the ErrorCode variant count \
          (update alongside the exhaustive guard above)"
     );

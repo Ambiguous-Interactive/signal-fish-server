@@ -1473,6 +1473,9 @@ impl EnhancedGameServer {
                         // broadcast form, but `missed_events` is embedded in
                         // `Reconnected` and bypasses per-recipient top-level
                         // stripping. Strip those fields for pre-v3 reconnectors.
+                        // The v3-only `spectator_count` on the spectator
+                        // fan-outs is stripped the same way so the frozen v2
+                        // bytes stay count-free (issue #525).
                         if !recipient_is_v3 {
                             for event in &mut missed_events.events {
                                 match event {
@@ -1487,6 +1490,13 @@ impl EnhancedGameServer {
                                         *epoch = None;
                                         *final_seq = None;
                                     }
+                                    ServerMessage::NewSpectatorJoined {
+                                        spectator_count, ..
+                                    }
+                                    | ServerMessage::SpectatorDisconnected {
+                                        spectator_count,
+                                        ..
+                                    } => *spectator_count = None,
                                     _ => {}
                                 }
                             }

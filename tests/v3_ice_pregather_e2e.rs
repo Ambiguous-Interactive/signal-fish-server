@@ -320,6 +320,8 @@ fn join_message(game_name: &str, room_code: Option<String>, player_name: &str) -
         max_players: Some(2),
         supports_authority: Some(false),
         relay_transport: None,
+
+        password: None,
     }
 }
 

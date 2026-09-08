@@ -10,6 +10,7 @@ impl EnhancedGameServer {
         game_name: String,
         room_code: String,
         spectator_name: String,
+        password: Option<String>,
     ) {
         self.handle_join_as_spectator_operation(
             player_id,
@@ -17,6 +18,7 @@ impl EnhancedGameServer {
             game_name,
             room_code,
             spectator_name,
+            password,
         )
         .await;
     }
@@ -28,6 +30,7 @@ impl EnhancedGameServer {
         game_name: String,
         room_code: String,
         spectator_name: String,
+        password: Option<String>,
     ) {
         // Shutdown-drain parity with the join path: only a socket upgraded
         // before the drain flipped can still deliver `JoinAsSpectator` inside
@@ -58,6 +61,7 @@ impl EnhancedGameServer {
                 game_name,
                 room_code,
                 spectator_name,
+                password,
             )
             .await
         {
