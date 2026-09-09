@@ -496,6 +496,176 @@ async fn missed_events_strip_epoch_for_pre_v3_reconnector() {
     running_server.shutdown().await;
 }
 
+/// Issue #529 nested-replay leg: the replay ring stores the VERBATIM
+/// broadcast bytes, so a buffered `PlayerJoined` can carry the legacy
+/// self-declared `connection_info` echo (e.g. a relay entry with a
+/// credential-looking token). The v3 write-layer projection must trim it
+/// from the NESTED copy a v3 reconnector receives — surgically, keeping the
+/// v3 `epoch`/`seq` stamps and `connected_at` — while the ring copy stays
+/// verbatim for a v2 reconnecter (frozen v2 shape keeps `connection_info`).
+/// The seed enters through the manager's real buffering path; the reconnect
+/// handshake and the per-cohort write projection are the production paths
+/// under test.
+#[tokio::test]
+async fn replayed_player_joined_trims_connection_info_for_v3_and_keeps_it_verbatim_for_v2() {
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Cohort {
+        V2,
+        V3,
+    }
+    let cases = [
+        (Cohort::V2, "replay-trim-v2"),
+        (Cohort::V3, "replay-trim-v3"),
+    ];
+    for (cohort, game) in cases {
+        let (running_server, game_server) = start_server_default().await;
+        let addr = running_server.addr();
+
+        let mut anchor = connect(addr).await;
+        authenticate_v3(&mut anchor).await;
+        let joined_a = join_room(&mut anchor, game, None, "Anchor").await;
+
+        let mut dropper = connect(addr).await;
+        authenticate_v3(&mut dropper).await;
+        let joined_b = join_room(
+            &mut dropper,
+            game,
+            Some(joined_a.room_code.clone()),
+            "Dropper",
+        )
+        .await;
+
+        // The dropper leaves a pending record: the room's replay gate opens.
+        let token =
+            register_reconnect_token(&game_server, joined_b.player_id, joined_b.room_id).await;
+        let _ = dropper.close(None).await;
+
+        // Seed the ring verbatim: a PlayerJoined whose player carries the
+        // legacy connection_info echo plus v3 incarnation stamps. A fresh
+        // id keeps the seeded event outside the reconnector's own retained
+        // membership deltas.
+        let legacy_id = uuid::Uuid::new_v4();
+        game_server
+            .reconnection_manager()
+            .expect("reconnection enabled")
+            .buffer_event(
+                &joined_b.room_id,
+                ServerMessage::PlayerJoined {
+                    player: signal_fish_server::protocol::PlayerInfo {
+                        id: legacy_id,
+                        name: "Legacy".to_string(),
+                        is_authority: false,
+                        is_ready: false,
+                        connected_at: chrono::Utc::now(),
+                        connection_info: Some(
+                            signal_fish_server::protocol::ConnectionInfo::Relay {
+                                host: "relay.example.test".to_string(),
+                                port: 3478,
+                                transport: signal_fish_server::protocol::RelayTransport::Auto,
+                                allocation_id: "alloc-1".to_string(),
+                                token: "cred-looking-secret".to_string(),
+                                client_id: None,
+                            },
+                        ),
+                        epoch: Some(1),
+                        seq: Some(1),
+                        region_id: "test".to_string(),
+                    },
+                },
+            )
+            .await;
+
+        // Reconnect over the real WebSocket stack as the cohort under test.
+        let mut replacement = connect(addr).await;
+        match cohort {
+            Cohort::V2 => authenticate_v2(&mut replacement).await,
+            Cohort::V3 => authenticate_v3(&mut replacement).await,
+        }
+        send(
+            &mut replacement,
+            &ClientMessage::Reconnect {
+                player_id: joined_b.player_id,
+                room_id: joined_b.room_id,
+                auth_token: token,
+            },
+        )
+        .await;
+        let raw =
+            next_raw_server_message_of_type(&mut replacement, "Reconnected", "cohort reconnect")
+                .await;
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("Reconnected is JSON");
+        let replayed_player = value
+            .pointer("/data/missed_events")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|events| {
+                events
+                    .iter()
+                    .find(|event| {
+                        event.get("type").and_then(serde_json::Value::as_str)
+                            == Some("PlayerJoined")
+                            && event
+                                .pointer("/data/player/id")
+                                .and_then(serde_json::Value::as_str)
+                                == Some(legacy_id.to_string().as_str())
+                    })
+                    .and_then(|event| event.pointer("/data/player"))
+                    .and_then(serde_json::Value::as_object)
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "the seeded legacy PlayerJoined must be replayed to the {cohort:?} \
+                     reconnector: {raw}"
+                )
+            });
+
+        match cohort {
+            Cohort::V2 => {
+                assert_eq!(
+                    replayed_player
+                        .get("connection_info")
+                        .and_then(|info| info.get("type"))
+                        .and_then(serde_json::Value::as_str),
+                    Some("relay"),
+                    "a v2 reconnecter keeps the verbatim ring copy (frozen v2 shape): {raw}"
+                );
+                assert_eq!(
+                    replayed_player
+                        .get("connection_info")
+                        .and_then(|info| info.get("token"))
+                        .and_then(serde_json::Value::as_str),
+                    Some("cred-looking-secret"),
+                    "the verbatim ring copy keeps the relay token echo for v2: {raw}"
+                );
+            }
+            Cohort::V3 => {
+                assert!(
+                    !replayed_player.contains_key("connection_info"),
+                    "the v3 write-layer projection must trim connection_info from the \
+                     nested replay copy: {raw}"
+                );
+                assert!(
+                    !raw.contains("cred-looking-secret") && !raw.contains("relay.example.test"),
+                    "the nested copy must not leak the credential-looking relay entry: {raw}"
+                );
+                assert_eq!(
+                    replayed_player
+                        .get("epoch")
+                        .and_then(serde_json::Value::as_u64),
+                    Some(1),
+                    "the trim is surgical: the v3 incarnation epoch survives: {raw}"
+                );
+                assert!(
+                    replayed_player.contains_key("connected_at"),
+                    "connected_at stays on the v3 wire (released SDKs require it): {raw}"
+                );
+            }
+        }
+
+        assert_message_conservation(&game_server.metrics()).await;
+        running_server.shutdown().await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 2. Overflow: more control events than the ring holds => the replay is a
 //    suffix and is reported truncated; the eviction metric records the loss.

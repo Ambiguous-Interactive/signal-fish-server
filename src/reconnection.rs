@@ -2713,6 +2713,52 @@ mod tests {
         );
     }
 
+    /// Issue #525 sibling of the snapshot pin above: the authority-kick
+    /// tombstone is one of the preserved fields of a same-room
+    /// re-registration. A kick that landed on the pending record must keep
+    /// `kicked` across a duplicate teardown re-registration, or a later
+    /// reconnect claim would resurrect the removed seat from its membership
+    /// snapshot.
+    #[tokio::test]
+    async fn same_room_reregistration_preserves_the_kick_tombstone() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let player = Uuid::new_v4();
+        let room = Uuid::new_v4();
+
+        let token = manager
+            .register_disconnection(player, room, false, None, 0)
+            .await;
+        assert!(
+            manager.mark_reconnection_kicked(&player).await,
+            "the kick must tombstone the pending record"
+        );
+        assert!(
+            manager.is_reconnection_kicked(&player).await,
+            "the tombstone must be observable before the re-registration"
+        );
+
+        // A duplicate teardown for the same still-pending room (e.g. a
+        // racing second disconnect of the replaced socket) must not wipe
+        // the tombstone.
+        manager
+            .register_disconnection(player, room, false, None, 0)
+            .await;
+        assert!(
+            manager.is_reconnection_kicked(&player).await,
+            "the kick tombstone must survive a same-room re-registration"
+        );
+        assert!(
+            matches!(
+                manager
+                    .claim_reconnection(&Uuid::new_v4(), &player, &room, &token)
+                    .await,
+                Err(ReconnectionError::Kicked)
+            ),
+            "the preserved tombstone must refuse the later reconnect claim with Kicked"
+        );
+    }
+
     /// A pre-issued token bound to a DIFFERENT room is not reused (the player
     /// joined elsewhere without a clean leave): the disconnect mints fresh.
     #[tokio::test]
