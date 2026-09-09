@@ -90,7 +90,10 @@ jobs:
   tlc:
     name: TLA+ Model Check (TLC)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 20 minutes: the sum of the former standalone ceilings (10 TLC + 5 Z3)
+    # plus headroom, since the legs now run sequentially in one job and a
+    # timeout-minutes ceiling is free until a job actually hangs.
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1

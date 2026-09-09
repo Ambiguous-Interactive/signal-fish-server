@@ -24991,7 +24991,8 @@ fn test_check_no_panics_script_structure() {
 
     assert!(
         script_path.exists(),
-        "scripts/check-no-panics.sh must exist for panic-policy CI job"
+        "scripts/check-no-panics.sh must exist for the CI lint job's \
+         panic-policy check"
     );
 
     let content = read_file(&script_path);

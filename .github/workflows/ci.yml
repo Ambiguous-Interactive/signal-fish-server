@@ -4,24 +4,26 @@
 # This workflow ensures code quality, correctness, and security before merging.
 #
 # Runs on:
-#   - Push to main branch
-#   - Pull requests to main
-#   - Daily schedule (the `deny` and `audit` security-audit jobs, the
-#     macOS and Windows lint/nextest lanes, the instrumented coverage
-#     gate, and the MSRV full-suite test run — issues #513 and #512)
+#   - Pull requests to main (push-to-main validation moved to the daily
+#     cron in issue #557: squash content is identical to the PR run)
+#   - Daily schedule (the `deny` supply-chain job, the macOS and Windows
+#     lint/nextest lanes, the instrumented coverage gate, and the MSRV
+#     full-suite test run — issues #513 and #512)
 #
 # Jobs:
 #   - lint: Cross-OS code formatting (rustfmt) and linting (clippy) matrix
-#     (ubuntu per push/PR; macOS + Windows on the daily schedule only).
+#     (ubuntu per pull request; macOS + Windows on the daily schedule only).
 #     The ubuntu leg also runs the zero-panic production policy
 #     (scripts/check-no-panics.sh) — issue #558 moved the standalone
-#     panic-policy job here so the nested clippy graph shares this runner's
-#     toolchain, cache, and checkout
+#     panic-policy job here so one runner setup covers both: the nested
+#     scan reuses this runner's toolchain, registry cache, and checkout,
+#     while keeping its own scrubbed nested target dir
 #   - nextest: Cross-OS test execution via cargo-nextest (doc-tests in doc-validation.yml)
-#     (ubuntu per push/PR; macOS + Windows on the daily schedule only). The
-#     ubuntu leg also enforces the deterministic relay allocation ceilings —
-#     issue #558 moved the standalone relay-allocations job here so the bench
-#     compile graph shares this runner's toolchain, cache, and target dir
+#     (ubuntu per pull request; macOS + Windows on the daily schedule only).
+#     The ubuntu leg also enforces the deterministic relay allocation
+#     ceilings — issue #558 moved the standalone relay-allocations job here
+#     so one runner setup covers both, and the bench compile graph reuses
+#     this job's target dir and cache
 #   - doc-consistency: Version/changelog/doc drift checks (diff-aware changelog gate)
 #   - deny: Supply-chain job (issue #512): cargo-deny policy over every
 #     tracked Cargo graph, RustSec + npm vulnerability scans, and CycloneDX
@@ -237,13 +239,12 @@ jobs:
 
       # Zero-panic production policy (#558): the full panic-policy checker
       # (nested syn-backed scan + panic-lint clippy passes over the server and
-      # native-client production targets) runs inside this job so the nested
-      # clippy graph shares this runner's toolchain, cache, and checkout
-      # instead of paying a second full setup (the standalone panic-policy
-      # job was 2.8 billed minutes plus a runner startup per event). The
-      # script scrubs inherited instrumentation env and builds in its own
-      # nested target dir (see scripts/check-no-panics.sh). ubuntu-only: the
-      # policy is platform-independent and Linux is the deployment platform.
+      # native-client production targets) runs inside this job so one runner
+      # setup covers both (the standalone panic-policy job was 2.8 billed
+      # minutes plus a runner startup per event). The script scrubs inherited
+      # instrumentation env and builds in its own nested target dir
+      # (see scripts/check-no-panics.sh). ubuntu-only: the policy is
+      # platform-independent and Linux is the deployment platform.
       - name: Run panic-policy check
         if: matrix.os == 'ubuntu-latest'
         run: bash scripts/check-no-panics.sh
@@ -321,12 +322,12 @@ jobs:
           validate_config_rejects_tls_for_a_binary_without_tls_support -- --exact
 
       # Relay allocation ceilings (#558): the deterministic production-seam
-      # allocation budgets run inside this job so the bench compile graph
-      # shares this runner's toolchain, cache, and target dir instead of
-      # paying a second full setup (the standalone relay-allocations job was
-      # 2.2 billed minutes plus a runner startup per event). ubuntu-only, and
-      # implicitly cron-excluded: the schedule cohort is macOS/Windows only
-      # (see ci-matrix), matching the standalone job's schedule exclusion.
+      # allocation budgets run inside this job so one runner setup covers
+      # both (the standalone relay-allocations job was 2.2 billed minutes
+      # plus a runner startup per event), and the bench compile graph reuses
+      # this job's target dir and cache. ubuntu-only, and implicitly
+      # cron-excluded: the schedule cohort is macOS/Windows only (see
+      # ci-matrix), matching the standalone job's schedule exclusion.
       - name: Enforce deterministic relay allocation ceilings
         if: matrix.os == 'ubuntu-latest'
         run: |

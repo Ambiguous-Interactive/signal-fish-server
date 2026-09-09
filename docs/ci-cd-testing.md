@@ -506,9 +506,9 @@ code. Miri and sanitizer jobs provide complementary runtime coverage; the gate
 does not claim that dependencies or allocation failure can never panic.
 
 **CI integration:** The `lint` job's ubuntu leg in `ci.yml` runs this script
-on every push and pull request to `main`. Since the #558 job consolidation,
-the check is a step of that job (sharing its runner, toolchain, and cache)
-instead of a standalone `CI / Panic Policy` job.
+on every pull request to `main`. Since the #558 job consolidation, the check
+is a step of that job (sharing its runner, toolchain, and cache) instead of a
+standalone `CI / Panic Policy` job.
 
 **Tests that enforce this:** `test_ci_lint_job_runs_panic_policy_check` (pins
 the script invocation and its ubuntu-only guard inside the lint job) and
