@@ -114,9 +114,15 @@ correctness evidence appears.
   re-reads the ban under its gate hold and refuses `BANNED`, record intact
   for mid-window unban). Pins: password-perimeter-before-ban ordering on
   both admission paths, ban/password persistence across rotation and
-  transfer. Remaining frontier: the reconnection replay/ring-buffer
-  seams interacting with the moderation tombstone preserve/merge paths,
-  and the #550 distributed-lock lease-renewal paths.
+  transfer. The 2026-09-09 session-225 sweep closed the last named frontier:
+  the replay/ring-buffer × tombstone preserve/merge seams and the
+  #550 lease-renewal paths produced zero new defect classes (tombstone-vs-
+  restore ordering, kick-vs-re-key, ban-restore precedence, generation
+  isolation, nested replay projection verified safe; two unpinned invariants
+  gained pins), while two confirmed #550 lease defects were fixed red-first
+  (the app-cap enforcement read ran on an unprotected lease; the room-code
+  rotation hold had no renewal). Remaining frontier: continue seam sweeps
+  into whichever seams new features open.
 - #525 — session 217 landed the minimal viable moderation set: authority
   kick (close code `4007 kicked`, no reconnect), authority room-code
   regeneration, and a shipped default spectator cap
@@ -156,15 +162,20 @@ correctness evidence appears.
    minutes per eligible change, weekly cron → daily 02:00 UTC) and the
    webrtc-interop native-platforms matrix (~28 billed minutes per run, macOS
    10x + Windows 2x, new daily 05:00 UTC cron); both keep manual dispatch.
-   Remaining levers need owner input: self-hosted runner labels (owner
-   comment excludes DAD-MACHINE and ELI-MACHINE) and the #379
-   path-awareness inventory. Session 224 (#557) removed the post-merge
+   Session 224 (#557) removed the post-merge
    push-to-main wave from the 16 validation workflows (measured: five
    merge waves at ~40 wall minutes each, ~200 Linux-billed minutes/day,
    ~27% of Linux spend; squash content is identical to the PR run, and
    the noon cron re-proves main daily) and moved the relay-timing
    native-platforms legs (macOS 10x + Windows 2x) into the
    schedule/dispatch cohort; per-event validation coverage is unchanged.
+   Session 225 consolidated job granularity (measured pool ~115 Linux
+   billed minutes/day): verification-nightly's four short lanes share one
+   runner setup, the cargo-audit/npm/SBOM steps joined the `deny`
+   supply-chain job, and the doc-test lanes joined `Rustdoc Validation`.
+   Remaining levers are itemized on #558; the bigger items still need
+   owner input: self-hosted runner labels (owner comment excludes
+   DAD-MACHINE and ELI-MACHINE) and the #379 path-awareness inventory.
 - #379 — make verification-nightly pull-request fan-out path-aware only after
   an owner exports the required-check/ruleset inventory and a historical
   changed-file replay proves net allocation and runner-time savings. On the
