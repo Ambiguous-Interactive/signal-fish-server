@@ -214,7 +214,9 @@ The authority holds a set of moderation operations (v3 only, via the
 - **`TransferAuthority`** hands the authority role to a seated member of
   your choice. Every member receives the usual `AuthorityChanged`
   broadcast; the sender loses every authority capability (including
-  `StartGame` and the operations above) and the successor gains them.
+  `StartGame` and the operations above) and the successor gains them. If the
+  session is already running, the transfer moves the role but **not** the
+  session's transport host (see below).
 
 All of these are authority-only: a member that is not the authority receives
 `NOT_ROOM_AUTHORITY`. The kicked or banned player cannot be the authority
@@ -231,6 +233,28 @@ claim) and works even when no member was primed to claim: the departing
 authority picks any seated member, including one that never requested the
 role.
 
+### The Role and the Transport Host Are Not the Same Thing
+
+When a v3 room finalizes, the server elects a **transport host** for the
+running session: the peer every other member connects to for P2P traffic
+(for a host/star topology) or the member that anchors the session. This
+election is recorded at finalize time and does not follow the authority
+role afterwards.
+
+A mid-game `TransferAuthority` changes **who moderates** (kick, ban, room
+access, room-code rotation, further transfers) and who may re-start or
+manage the session -- it does **not** re-elect the transport host. After a
+mid-game transfer, clients receive `AuthorityChanged`, while the session
+plan keeps hosting on the finalize-time host. The host only moves when a
+host-failover event happens: the elected host departs (or can no longer
+run the session), and the server re-elects a host and re-emits fresh
+session plans.
+
+If your game wants the new authority to also become the transport host,
+the simplest supported path is: have the old host leave (or reconnect the
+session through a re-plan) after the transfer. Design your client to read
+the transport host from the `SessionPlan`, not from the authority role.
+
 ## Key Rules
 
 - Only **one player** can hold authority at a time per room.
@@ -245,6 +269,9 @@ role.
   `SetRoomAccess`, `BanPlayer`, `UnbanPlayer`, and `TransferAuthority` are
   refused with `NOT_ROOM_AUTHORITY` for every other member, and rooms
   created with `supports_authority: false` have no moderator at all.
+- A **mid-game authority transfer moves the role, not the session's
+  transport host**: the host was elected at finalize time and only changes
+  through host failover.
 
 ## Use Cases
 

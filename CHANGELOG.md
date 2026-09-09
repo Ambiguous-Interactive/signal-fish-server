@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Admission lock lease renewal (issue #550): the room-cap critical sections
+  (join lock and the per-app, per-game, and server-wide room-cap locks) now
+  renew their distributed-lock lease every third of its TTL while held, so a
+  slow or stalled storage call can no longer let the lease expire mid-hold
+  and void the room-cap guarantee. A lease that is lost anyway (expired and
+  taken over) is fail-visible: an error log plus the new
+  `signal_fish_distributed_lock_renewal_failures_total` counter (also a
+  `distributed_lock.renewal_failures` JSON snapshot field).
+- HTTP/2 keep-alive on both serve stacks (issue #553): the plain and TLS
+  paths arm a 20 s keep-alive PING interval with a 10 s acknowledgement
+  deadline. hyper applies no header-read deadline to HTTP/2, so a direct-TCP
+  client that completes the h2 preface and then parks is now closed instead
+  of holding an fd, a task, and buffers forever. A client that answers
+  PINGs still holds the connection; an h2-capable reverse proxy with its own
+  idle timeout remains the stronger mitigation (documented in the
+  deployment guide).
+- Whole-response `/metrics` byte budget (issue #551): the JSON response is
+  capped at 1 MiB. When the budget is exceeded, the oldest
+  `dashboardCache.history` samples are dropped first (the newest survive)
+  and the loss is marked with `dashboardCache.historyTruncated` and
+  `historySamplesDropped`; a response still oversized without history is
+  replaced by the same fail-visible truncation marker the metrics snapshot
+  uses.
+
 - Spectator fan-out slimming (issue #525, v3 only): the room-uniform
   `NewSpectatorJoined` and `SpectatorDisconnected` broadcasts no longer carry
   the full spectator roster to protocol-v3 connections. On v3 they are
@@ -250,6 +274,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Allowlist reloads prune the `app_relay_bytes` series of revoked app IDs
+  (issue #552): departed tenants no longer surface forever in the
+  `/metrics` JSON snapshot and `signal_fish_relay_app_bytes_total`. A still-
+  connected client whose app was revoked may re-create its series by
+  relaying; re-adding a revoked app ID starts from no series until new
+  traffic arrives.
+- Mid-game `TransferAuthority` semantics are now documented and pinned
+  (issue #554): the transfer moves the moderation and start-game role only.
+  The finalize-time transport host of a running session does not move;
+  departure-driven host failover remains the only re-plan path. See
+  "The Role and the Transport Host Are Not the Same Thing" in
+  [Authority System](docs/concepts/authority.md).
 - **Windows CI lanes moved to the daily cron, issue #512:** the `Lint` and
   `Nextest` windows legs no longer run on every push and pull request; they
   join the macOS legs in the noon UTC daily cohort against `main`. Windows

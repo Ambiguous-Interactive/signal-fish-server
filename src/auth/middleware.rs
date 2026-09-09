@@ -126,7 +126,7 @@ pub fn app_id_is_log_safe(app_id: &str) -> bool {
 /// Derive a deterministic UUID from a string key using SHA-256. The first 16
 /// bytes of the hash are used as the UUID value with the version nibble set
 /// to 4 (random) and the variant to RFC 4122.
-fn deterministic_uuid(key: &str) -> Uuid {
+pub(crate) fn deterministic_uuid(key: &str) -> Uuid {
     let hash = Sha256::digest(key.as_bytes());
     let mut bytes = [0u8; 16];
     let Some(prefix) = hash.get(..16) else {

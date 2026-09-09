@@ -6,7 +6,7 @@ use super::{
 };
 use crate::coordination::RoomEventMutationGuard;
 use crate::database::CreateRoomError;
-use crate::distributed::LockHandle;
+use crate::distributed::{LeaseRenewalGuard, LockHandle};
 use crate::protocol::validation;
 use crate::protocol::{
     ErrorCode, LobbyState, PlayerId, PlayerInfo, RelayTransport, Room, RoomId, RoomJoinedPayload,
@@ -2001,13 +2001,15 @@ impl EnhancedGameServer {
         // joins acquire the application-cap lock only when claiming a legacy
         // unowned room.
         let lock_key = format!("room_join:{game_name}:{room_code}");
-        let lock_handle = self
-            .distributed_lock
-            .acquire(&lock_key, ROOM_JOIN_LOCK_TTL)
-            .await?;
-        let mut application_cap_lock: Option<LockHandle> = None;
-        let mut game_cap_lock: Option<LockHandle> = None;
-        let mut server_cap_lock: Option<LockHandle> = None;
+        let mut lock_renewal = self.keep_lock_renewed(
+            self.distributed_lock
+                .acquire(&lock_key, ROOM_JOIN_LOCK_TTL)
+                .await?,
+            ROOM_JOIN_LOCK_TTL,
+        );
+        let mut application_cap_lock: Option<LeaseRenewalGuard> = None;
+        let mut game_cap_lock: Option<LeaseRenewalGuard> = None;
+        let mut server_cap_lock: Option<LeaseRenewalGuard> = None;
         let mut room_event_guard = None;
 
         // Try to join existing room or create new one
@@ -2032,11 +2034,11 @@ impl EnhancedGameServer {
                 let mut room = match self.database.get_room_by_id(&room_lane.id).await {
                     Ok(Some(room)) => room,
                     Ok(None) => {
-                        self.release_lock_accounted(&lock_handle).await;
+                        self.release_renewed_lock(&mut lock_renewal).await;
                         return Err(JoinRoomError::RoomNotFound);
                     }
                     Err(error) => {
-                        self.release_lock_accounted(&lock_handle).await;
+                        self.release_renewed_lock(&mut lock_renewal).await;
                         return Err(error.into());
                     }
                 };
@@ -2116,9 +2118,14 @@ impl EnhancedGameServer {
                                         .acquire_application_room_cap_lock(app_id, app_limit)
                                         .await
                                     {
-                                        Ok(lock) => application_cap_lock = Some(lock),
+                                        Ok(lock) => {
+                                            application_cap_lock = Some(self.keep_lock_renewed(
+                                                lock,
+                                                APPLICATION_ROOM_CAP_LOCK_TTL,
+                                            ));
+                                        }
                                         Err(error) => {
-                                            self.release_lock_accounted(&lock_handle).await;
+                                            self.release_renewed_lock(&mut lock_renewal).await;
                                             return Err(error);
                                         }
                                     }
@@ -2126,8 +2133,9 @@ impl EnhancedGameServer {
                                 if let Err(error) =
                                     self.record_room_application(&room.id, app_id).await
                                 {
-                                    self.release_cap_lock(&application_cap_lock).await;
-                                    self.release_lock_accounted(&lock_handle).await;
+                                    self.release_renewed_cap_lock(&mut application_cap_lock)
+                                        .await;
+                                    self.release_renewed_lock(&mut lock_renewal).await;
                                     return Err(error.into());
                                 }
                                 room.application_id = Some(app_id);
@@ -2236,7 +2244,7 @@ impl EnhancedGameServer {
                         .and_then(|app| app.max_players_per_room)
                         .filter(|limit| max_players > *limit)
                     {
-                        self.release_lock_accounted(&lock_handle).await;
+                        self.release_renewed_lock(&mut lock_renewal).await;
                         return Err(JoinRoomError::MaxPlayersPerApplicationExceeded(
                             MaxPlayersPerApplicationExceededError {
                                 requested: max_players,
@@ -2250,14 +2258,15 @@ impl EnhancedGameServer {
                             client_app_id,
                             client_app_context.as_ref().and_then(|app| app.max_rooms),
                         ) {
-                            application_cap_lock = Some(
+                            application_cap_lock = Some(self.keep_lock_renewed(
                                 self.acquire_application_room_cap_lock(app_id, app_limit)
                                     .await?,
-                            );
+                                APPLICATION_ROOM_CAP_LOCK_TTL,
+                            ));
                         }
 
                         let cap_lock_key = format!("game_room_cap:{game_name}");
-                        game_cap_lock = Some(
+                        game_cap_lock = Some(self.keep_lock_renewed(
                             self.distributed_lock
                                 .acquire(&cap_lock_key, GAME_ROOM_CAP_LOCK_TTL)
                                 .await
@@ -2266,7 +2275,8 @@ impl EnhancedGameServer {
                                     self.metrics.increment_room_cap_lock_failures();
                                     JoinRoomError::Internal(error)
                                 })?,
-                        );
+                            GAME_ROOM_CAP_LOCK_TTL,
+                        ));
                         self.metrics.increment_room_cap_lock_acquisitions();
 
                         if self.is_draining() {
@@ -2289,7 +2299,7 @@ impl EnhancedGameServer {
                         // faces no aggregate bound. Checked under a server-global
                         // lock so concurrent creations across games cannot
                         // overshoot, mirroring the per-game and per-app caps.
-                        server_cap_lock = Some(
+                        server_cap_lock = Some(self.keep_lock_renewed(
                             self.distributed_lock
                                 .acquire("server_room_cap", SERVER_ROOM_CAP_LOCK_TTL)
                                 .await
@@ -2298,7 +2308,8 @@ impl EnhancedGameServer {
                                     self.metrics.increment_room_cap_lock_failures();
                                     JoinRoomError::Internal(error)
                                 })?,
-                        );
+                            SERVER_ROOM_CAP_LOCK_TTL,
+                        ));
                         self.metrics.increment_room_cap_lock_acquisitions();
 
                         let total_room_count = self.database.get_total_room_count().await?;
@@ -2541,10 +2552,11 @@ impl EnhancedGameServer {
             Err(e) => Err(e.into()),
         };
 
-        self.release_cap_lock(&server_cap_lock).await;
-        self.release_cap_lock(&game_cap_lock).await;
-        self.release_cap_lock(&application_cap_lock).await;
-        self.release_lock_accounted(&lock_handle).await;
+        self.release_renewed_cap_lock(&mut server_cap_lock).await;
+        self.release_renewed_cap_lock(&mut game_cap_lock).await;
+        self.release_renewed_cap_lock(&mut application_cap_lock)
+            .await;
+        self.release_renewed_lock(&mut lock_renewal).await;
         let (room, admission_kind) = result?;
         let guard = room_event_guard.ok_or_else(|| {
             anyhow::anyhow!("successful room admission lost its room publication guard")
@@ -2575,10 +2587,31 @@ impl EnhancedGameServer {
         }
     }
 
-    async fn release_cap_lock(&self, cap_lock: &Option<LockHandle>) {
-        if let Some(lock) = cap_lock {
-            self.release_lock_accounted(lock).await;
+    /// Wrap a freshly acquired lock handle in a lease-renewal guard so the
+    /// lease cannot expire while its critical section stalls (issue #550).
+    fn keep_lock_renewed(&self, handle: LockHandle, ttl: std::time::Duration) -> LeaseRenewalGuard {
+        crate::distributed::keep_lease_renewed(
+            Arc::clone(&self.distributed_lock),
+            handle,
+            ttl,
+            Arc::clone(&self.metrics),
+        )
+    }
+
+    /// Stop the lease renewal, then release the lock with accounting.
+    ///
+    /// Stopping the renewal first prevents a final tick from extending — and
+    /// then reporting a phantom loss on — a lease this caller is surrendering.
+    async fn release_renewed_lock(&self, renewal: &mut LeaseRenewalGuard) {
+        renewal.stop_renewal();
+        self.release_lock_accounted(renewal.handle()).await;
+    }
+
+    async fn release_renewed_cap_lock(&self, cap_lock: &mut Option<LeaseRenewalGuard>) {
+        if let Some(renewal) = cap_lock.as_mut() {
+            self.release_renewed_lock(renewal).await;
         }
+        *cap_lock = None;
     }
 
     async fn acquire_application_room_cap_lock(

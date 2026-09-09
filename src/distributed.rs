@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
+use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
 /// Lock interface used for process-local room coordination.
@@ -248,6 +249,115 @@ impl DistributedLock for InMemoryDistributedLock {
     fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
         self
     }
+}
+
+/// Interval between lease renewals, as a fraction of the lease TTL.
+///
+/// A renewal every third of the TTL tolerates two consecutive missed or
+/// failing renewal attempts before the lease can expire, while keeping the
+/// renewal traffic at three extensions per TTL.
+const LEASE_RENEWAL_INTERVAL_FRACTION: u32 = 3;
+
+/// Keeps a held lock lease alive for the whole duration of a critical section.
+///
+/// Failure class (issue #550): the room-cap checks hold their coordination
+/// locks across storage calls. If one hold stalls longer than the lease TTL —
+/// slow or failing storage, a stalled task — the lease expires mid-hold and a
+/// second creation can acquire the same key, read the same count, and insert.
+/// Both holders then passed the cap check, so the ceiling overshoots.
+///
+/// The guard spawns one renewal task per held lock. The task extends the lease
+/// every `LEASE_RENEWAL_INTERVAL_FRACTION`-th of the TTL until the guard is
+/// dropped. A lost lease (`extend` reports `Ok(false)`: expired and reclaimed,
+/// or re-keyed) is fail-visible — an error log plus a
+/// `signal_fish_distributed_lock_renewal_failures_total` increment — and ends
+/// the renewal; holding the critical section itself is still safe, it only
+/// degrades that one cap check to best-effort, which is exactly the state the
+/// metrics now report instead of hiding.
+///
+/// Dropping the guard aborts the renewal task; the underlying release stays
+/// with the caller, which already accounts for stale and failed releases.
+pub struct LeaseRenewalGuard {
+    renewal: tokio::task::JoinHandle<()>,
+    /// Caller-owned copy; the task renews its own clone.
+    handle_ref: LockHandle,
+}
+
+impl LeaseRenewalGuard {
+    /// The still-owned lock handle, for the caller's accounted release.
+    pub fn handle(&self) -> &LockHandle {
+        // The renewal task only reads its own clone; no mutable access exists.
+        &self.handle_ref
+    }
+
+    /// Cancel the renewal task without consuming the guard.
+    ///
+    /// Call this before releasing the lock: a tick firing after the release
+    /// would extend an already-surrendered key or report a phantom loss.
+    pub fn stop_renewal(&mut self) {
+        self.renewal.abort();
+    }
+
+    fn spawn(
+        lock: Arc<dyn DistributedLock>,
+        handle: LockHandle,
+        ttl: Duration,
+        metrics: Arc<crate::metrics::ServerMetrics>,
+    ) -> Self {
+        // A third of the TTL keeps three extensions per lease; if the
+        // division cannot compute, renewing every whole TTL still bounds the
+        // exposure.
+        let interval = ttl
+            .checked_div(LEASE_RENEWAL_INTERVAL_FRACTION)
+            .unwrap_or(ttl);
+        let task_handle = handle.clone();
+        let renewal = tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(interval);
+            ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            ticks.tick().await; // `interval` fires its first tick immediately; skip it.
+            loop {
+                ticks.tick().await;
+                match lock.extend(&task_handle, ttl).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        metrics.increment_distributed_lock_renewal_failures();
+                        tracing::error!(
+                            key = %task_handle.key,
+                            "Distributed-lock lease expired or was stolen mid-hold; \
+                             the critical section continues without coordination"
+                        );
+                        break;
+                    }
+                    Err(error) => {
+                        // The lease may still be alive; keep retrying until a
+                        // successful extension or a reported loss.
+                        tracing::warn!(key = %task_handle.key, %error, "Failed to renew distributed-lock lease");
+                    }
+                }
+            }
+        });
+        Self {
+            renewal,
+            handle_ref: handle,
+        }
+    }
+}
+
+impl Drop for LeaseRenewalGuard {
+    fn drop(&mut self) {
+        self.renewal.abort();
+    }
+}
+
+/// Acquire-with-renewal shorthand: wraps a freshly acquired handle in a
+/// [`LeaseRenewalGuard`] so the lease cannot expire mid-hold (issue #550).
+pub fn keep_lease_renewed(
+    lock: Arc<dyn DistributedLock>,
+    handle: LockHandle,
+    ttl: Duration,
+    metrics: Arc<crate::metrics::ServerMetrics>,
+) -> LeaseRenewalGuard {
+    LeaseRenewalGuard::spawn(lock, handle, ttl, metrics)
 }
 
 /// Message with sequence number for deduplication
@@ -493,7 +603,274 @@ impl CircuitBreaker {
 #[cfg(test)]
 mod tests {
     use super::{DistributedLock, InMemoryDistributedLock};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
+
+    fn test_metrics() -> Arc<crate::metrics::ServerMetrics> {
+        Arc::new(crate::metrics::ServerMetrics::new())
+    }
+
+    /// Give freshly spawned tasks their polls before advancing the paused
+    /// clock, so the renewal interval registers its ticks at the intended
+    /// instants (a task spawned and immediately advanced would first be polled
+    /// *during* the advance, shifting every tick one boundary late).
+    async fn settle_tasks() {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Issue #550: while a critical section holds the guard, the renewal task
+    /// must keep extending the lease — the lease must still be held many times
+    /// the TTL later — and expiry must resume once renewal stops.
+    ///
+    /// Time advances one renewal interval per step with yields in between, so
+    /// every tick is processed deterministically regardless of how the runtime
+    /// interleaves the spawned task.
+    #[tokio::test(start_paused = true)]
+    async fn lease_renewal_keeps_the_lease_alive_across_the_original_ttl() {
+        let lock = Arc::new(InMemoryDistributedLock::new());
+        let metrics = test_metrics();
+        let key = "room_join:game:RENEW";
+        let ttl = Duration::from_secs(1);
+        let handle = lock
+            .try_acquire(key, ttl)
+            .await
+            .expect("acquisition should not fail")
+            .expect("free key should be acquired");
+        let mut guard = super::keep_lease_renewed(lock.clone(), handle, ttl, metrics.clone());
+        settle_tasks().await;
+
+        // Twelve intervals = four TTLs. Without renewal the lease would die
+        // after the first one.
+        for _ in 0..12 {
+            tokio::time::advance(ttl / 3).await;
+            settle_tasks().await;
+        }
+        assert!(
+            lock.is_locked(key)
+                .await
+                .expect("is_locked should not fail"),
+            "a renewed lease must stay held far beyond its original TTL"
+        );
+
+        guard.stop_renewal();
+        tokio::time::advance(ttl * 2).await;
+        settle_tasks().await;
+        assert!(
+            !lock
+                .is_locked(key)
+                .await
+                .expect("is_locked should not fail"),
+            "the lease must expire once renewal stops"
+        );
+        assert_eq!(
+            metrics.snapshot().await.distributed_lock.renewal_failures,
+            0,
+            "a healthy renewal must never report a lost lease"
+        );
+    }
+
+    /// A test double whose first `extend` succeeds and every later one reports
+    /// the lease as lost (`Ok(false)`), the way a stolen or expired lease looks.
+    struct LeasesStolenAfterFirstExtension {
+        inner: InMemoryDistributedLock,
+        extend_calls: AtomicUsize,
+    }
+
+    impl LeasesStolenAfterFirstExtension {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryDistributedLock::new(),
+                extend_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DistributedLock for LeasesStolenAfterFirstExtension {
+        async fn acquire(&self, key: &str, ttl: Duration) -> anyhow::Result<super::LockHandle> {
+            self.inner.acquire(key, ttl).await
+        }
+
+        async fn try_acquire(
+            &self,
+            key: &str,
+            ttl: Duration,
+        ) -> anyhow::Result<Option<super::LockHandle>> {
+            self.inner.try_acquire(key, ttl).await
+        }
+
+        async fn extend(
+            &self,
+            _handle: &super::LockHandle,
+            _ttl: Duration,
+        ) -> anyhow::Result<bool> {
+            let call = self.extend_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(call == 0)
+        }
+
+        async fn release(&self, handle: &super::LockHandle) -> anyhow::Result<bool> {
+            self.inner.release(handle).await
+        }
+
+        async fn is_locked(&self, key: &str) -> anyhow::Result<bool> {
+            self.inner.is_locked(key).await
+        }
+
+        async fn cleanup_expired_locks(&self) -> anyhow::Result<usize> {
+            self.inner.cleanup_expired_locks().await
+        }
+
+        #[cfg(test)]
+        fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+            self
+        }
+    }
+
+    /// Issue #550: a lost lease must be fail-visible (one counted renewal
+    /// failure) and the renewal task must stop instead of spinning forever.
+    #[tokio::test(start_paused = true)]
+    async fn lease_renewal_stops_and_counts_after_the_lease_is_lost() {
+        let lock = Arc::new(LeasesStolenAfterFirstExtension::new());
+        let metrics = test_metrics();
+        let ttl = Duration::from_millis(300);
+        let handle = lock
+            .try_acquire("server_room_cap", ttl)
+            .await
+            .expect("acquisition should not fail")
+            .expect("free key should be acquired");
+        let _guard = super::keep_lease_renewed(lock.clone(), handle, ttl, metrics.clone());
+        settle_tasks().await;
+
+        // Tick one: the first extension succeeds. Tick two: the lease is
+        // reported lost, which must count once and end the task. Advance one
+        // interval per step until both calls have happened.
+        for _ in 0..8 {
+            if lock.extend_calls.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::time::advance(ttl / 3).await;
+            settle_tasks().await;
+        }
+        assert_eq!(
+            lock.extend_calls.load(Ordering::SeqCst),
+            2,
+            "the first extension succeeds and the second reports the loss"
+        );
+        assert_eq!(
+            metrics.snapshot().await.distributed_lock.renewal_failures,
+            1,
+            "a lost lease must be fail-visible through the renewal-failure metric"
+        );
+
+        // The ended task must not keep extending.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        settle_tasks().await;
+        assert_eq!(
+            lock.extend_calls.load(Ordering::SeqCst),
+            2,
+            "renewal must stop after the lease is reported lost"
+        );
+    }
+
+    /// A failing (`Err`) renewal must not end the task: the lease may still be
+    /// alive, so the next tick retries and can extend again.
+    #[tokio::test(start_paused = true)]
+    async fn lease_renewal_retries_through_extension_errors() {
+        struct FailsOnceThenExtends {
+            inner: InMemoryDistributedLock,
+            extend_calls: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl DistributedLock for FailsOnceThenExtends {
+            async fn acquire(&self, key: &str, ttl: Duration) -> anyhow::Result<super::LockHandle> {
+                self.inner.acquire(key, ttl).await
+            }
+
+            async fn try_acquire(
+                &self,
+                key: &str,
+                ttl: Duration,
+            ) -> anyhow::Result<Option<super::LockHandle>> {
+                self.inner.try_acquire(key, ttl).await
+            }
+
+            async fn extend(
+                &self,
+                _handle: &super::LockHandle,
+                _ttl: Duration,
+            ) -> anyhow::Result<bool> {
+                let call = self.extend_calls.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    anyhow::bail!("injected extension failure");
+                }
+                Ok(true)
+            }
+
+            async fn release(&self, handle: &super::LockHandle) -> anyhow::Result<bool> {
+                self.inner.release(handle).await
+            }
+
+            async fn is_locked(&self, key: &str) -> anyhow::Result<bool> {
+                self.inner.is_locked(key).await
+            }
+
+            async fn cleanup_expired_locks(&self) -> anyhow::Result<usize> {
+                self.inner.cleanup_expired_locks().await
+            }
+
+            #[cfg(test)]
+            fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+                self
+            }
+        }
+
+        let lock = Arc::new(FailsOnceThenExtends {
+            inner: InMemoryDistributedLock::new(),
+            extend_calls: AtomicUsize::new(0),
+        });
+        let metrics = test_metrics();
+        let key = "game_room_cap:game";
+        let ttl = Duration::from_secs(1);
+        let handle = lock
+            .try_acquire(key, ttl)
+            .await
+            .expect("acquisition should not fail")
+            .expect("free key should be acquired");
+        let mut guard = super::keep_lease_renewed(lock.clone(), handle, ttl, metrics.clone());
+        settle_tasks().await;
+
+        // Tick one fails; the following ticks must still run and succeed.
+        for _ in 0..8 {
+            if lock.extend_calls.load(Ordering::SeqCst) >= 3 {
+                break;
+            }
+            tokio::time::advance(ttl / 3).await;
+            settle_tasks().await;
+        }
+        assert!(
+            lock.extend_calls.load(Ordering::SeqCst) >= 3,
+            "an Err extension must not end the renewal task"
+        );
+        assert_eq!(
+            metrics.snapshot().await.distributed_lock.renewal_failures,
+            0,
+            "an Err extension is not a lost lease and must not count as one"
+        );
+
+        guard.stop_renewal();
+        let calls_before = lock.extend_calls.load(Ordering::SeqCst);
+        tokio::time::advance(ttl * 2).await;
+        settle_tasks().await;
+        assert_eq!(
+            lock.extend_calls.load(Ordering::SeqCst),
+            calls_before,
+            "stopping the guard must end the renewal task"
+        );
+    }
 
     /// Issue #414: `acquire` retries while the key it wants is held, and its
     /// whole scheduled backoff must fit strictly inside the lease TTL itself

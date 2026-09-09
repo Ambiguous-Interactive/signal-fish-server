@@ -249,6 +249,21 @@ signal.yourgame.com {
 
 ```
 
+### Idle Connections and HTTP/2
+
+The server reaps parked pre-upgrade connections by itself:
+
+- HTTP/1.1: a header-read deadline (`websocket.http_header_read_timeout_secs`)
+  closes clients that open a request and never finish the headers.
+- HTTP/2: hyper applies no header deadline, so the server arms a keep-alive
+  PING cycle instead. A client that completes the h2 preface and then sends
+  nothing is closed when it misses the PING acknowledgement.
+
+A client that answers the PINGs but never sends a request still holds its
+connection. Put an h2-capable reverse proxy with its own idle timeout in front
+of the server for that case. The proxy then also absorbs slowloris-style
+connection exhaustion before it reaches the server.
+
 ## Cloud Providers
 
 ### AWS (ECS Fargate)

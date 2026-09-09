@@ -36,17 +36,19 @@ impl RunningTestServer {
         let addr = listener.local_addr().expect("read test listener address");
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let make_service = router.into_make_service_with_connect_info::<std::net::SocketAddr>();
-        let http_header_read_timeout = std::time::Duration::from_secs(
-            server
-                .config()
-                .websocket_config
-                .http_header_read_timeout_secs,
+        let timeouts = signal_fish_server::websocket::HttpServeTimeouts::production(
+            std::time::Duration::from_secs(
+                server
+                    .config()
+                    .websocket_config
+                    .http_header_read_timeout_secs,
+            ),
         );
         let serve_task = tokio::spawn(
             signal_fish_server::websocket::serve_with_http_header_deadline(
                 listener,
                 make_service,
-                http_header_read_timeout,
+                timeouts,
                 shutdown_rx,
             ),
         );
