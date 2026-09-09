@@ -18,16 +18,6 @@
 name: Spellcheck
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '**/*.md'
-      - '**/*.rs'
-      - '**/*.toml'
-      - '**/*.yml'
-      - '**/*.yaml'
-      - '.typos.toml'
-      - '.github/workflows/spellcheck.yml'
   pull_request:
     branches: [main]
     paths:

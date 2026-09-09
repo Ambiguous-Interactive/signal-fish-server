@@ -15,18 +15,6 @@
 name: Markdownlint
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "**.md"
-      - ".markdownlint.json"
-      - ".markdownlintignore"
-      - ".markdownlint-version"
-      - "package.json"
-      - "package-lock.json"
-      - "scripts/check-markdown.sh"
-      - "scripts/check-markdown-link-text.sh"
-      - ".github/workflows/markdownlint.yml"
   pull_request:
     branches: [main]
     paths:

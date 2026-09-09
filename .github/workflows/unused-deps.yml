@@ -58,19 +58,6 @@ name: Unused Dependencies
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'build.rs'
-      - 'rust-toolchain.toml'
-      - '.cargo/**'
-      - 'src/**'
-      - 'tests/**'
-      - 'benches/**'
-      - 'examples/**'
-      - '.github/workflows/unused-deps.yml'
   pull_request:
     branches: [main]
     paths:

@@ -9,18 +9,6 @@
 name: TURN-only WebRTC Interop
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "src/**"
-      - "build.rs"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "clients/native/**"
-      - "scripts/run-turn-interop.sh"
-      - "scripts/read-toml-string.sh"
-      - ".github/workflows/turn-interop.yml"
   pull_request:
     branches: [main]
     paths:

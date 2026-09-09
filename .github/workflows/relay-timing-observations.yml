@@ -8,7 +8,10 @@
 # Runs daily at 05:30 UTC, after the 03:00 delivery suite and 04:00 fuzz suite,
 # so independent hosted allocations accumulate without concentrating load.
 # Manual runs support deliberate experiments. Pull requests run this workflow
-# only when its measurement contract changes.
+# only when its measurement contract changes, and only the Linux leg: the
+# Windows and macOS legs bill at 2x/10x Linux per minute (issues #513 and
+# #512) and are measurement-cohort members (eligible = scheduled first
+# attempts), never per-event proof, so they run on the daily cron only.
 #
 # all-jobs-run-on-schedule
 
@@ -25,8 +28,11 @@ on:
       - ".github/workflows/relay-timing-observations.yml"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.run_id }}
+  # Superseded pull-request runs are pure duplicate allocations. Scheduled
+  # attempts fall back to the run-ID group, so an eligible first attempt is
+  # never cancelled by a manual or overlapping run.
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -37,14 +43,34 @@ env:
   SIGNAL_FISH_RELAY_WORKLOAD_VERSION: relay-clean-v1
 
 jobs:
+  os-cohort:
+    name: OS Cohort
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      os: ${{ steps.cohort.outputs.os }}
+    steps:
+      - id: cohort
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "schedule" ] || [ "$EVENT" = "workflow_dispatch" ]; then
+            echo 'os=["ubuntu-latest","windows-latest","macos-latest"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'os=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+          fi
+
   observations:
     name: Clean Relay Samples (${{ matrix.os }})
+    needs: os-cohort
+    if: ${{ !cancelled() && needs.os-cohort.result == 'success' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(needs.os-cohort.outputs.os) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
