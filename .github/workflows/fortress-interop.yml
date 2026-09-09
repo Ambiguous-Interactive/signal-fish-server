@@ -5,18 +5,6 @@
 name: Fortress Interop
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "src/**"
-      - "build.rs"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "clients/fortress/**"
-      - "scripts/run-fortress-interop.sh"
-      - "scripts/read-toml-string.sh"
-      - ".github/workflows/fortress-interop.yml"
   pull_request:
     branches: [main]
     paths:

@@ -51,8 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (salted-hash storage, never logged or echoed; `null` reopens it) — sealed
   rooms refuse every seated or spectator join that does not present the
   password with the new `PASSWORD_REQUIRED` code, a missing and a mismatched
-  password are indistinguishable, the check runs before any other room
-  information is evaluated, and a password on the **creating** `JoinRoom`
+  password are indistinguishable, the check runs ahead of every other
+  admission signal that could distinguish the room's state, and a password on
+  the **creating** `JoinRoom`
   seals the room from birth: storage creates and seals the row under one
   insert, and an ambiguous commit that produced an unlocked row is refused
   rather than adopted.
@@ -462,6 +463,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   event per day pays back.
 
 ### Fixed
+
+- A player banned while disconnected could restore their own seat through the
+  reconnection claim path (issue #525, found by the #396 cross-feature seam
+  sweep). The reconnect restore transaction re-checked only the authority-kick
+  tombstone, never the room ban list — and the tombstone cannot cover every
+  arrival order: `BanPlayer` commits the durable ban write and the record
+  tombstone in two separate room-mutation-gate holds, and a teardown re-arm
+  after a raced eviction carries a fresh record that no tombstone ever
+  touched. The restore now re-reads the ban under its room-mutation gate hold
+  and refuses with `BANNED`, so a recorded ban refuses every restore and the
+  only way back into the room is the fresh-join perimeter after an unban. The
+  record itself is left intact, so a mid-window unban can still honor the
+  credential. A red-first regression test pins the invariant.
 
 - The shipped Docker image no longer hard-disables the security gates via
   `ENV SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false` and

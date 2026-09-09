@@ -678,6 +678,168 @@ async fn kicked_disconnected_seat_is_removed_and_never_reconnectable() {
     );
 }
 
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn banned_players_pending_record_cannot_restore_the_seat() {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (authority, mut _authority_rx) =
+        register_client(&server, "127.0.0.1:48152".parse().unwrap()).await;
+    let (target, mut _target_rx) =
+        register_client(&server, "127.0.0.1:48153".parse().unwrap()).await;
+
+    join_seated_player(&server, &authority, &mut _authority_rx, "BANR10", "host").await;
+    join_seated_player(&server, &target, &mut _target_rx, "BANR10", "guest").await;
+    let room_id = server
+        .get_client_room(&target)
+        .await
+        .expect("target seated");
+
+    // The target's socket drops and its record is armed through the same
+    // teardown path a real disconnect uses.
+    let seat_info = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room lookup succeeds")
+        .expect("room remains present")
+        .players
+        .get(&target)
+        .cloned()
+        .expect("target holds a durable seat");
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection is enabled")
+        .register_disconnection(
+            target,
+            room_id,
+            false,
+            Some(seat_info),
+            server
+                .connection_manager
+                .game_data_epoch(&target)
+                .unwrap_or(0),
+        )
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &target)
+        .await
+        .expect("disconnect removes the durable seat");
+    server.connection_manager.remove_client(&target);
+    server
+        .message_coordinator
+        .unregister_local_client(&target)
+        .await
+        .expect("disconnect removes the coordinator route");
+
+    // The authority bans the vacated seat through the same durable write
+    // the `BanPlayer` operation performs, in the state a claim that won the
+    // room-mutation gate leaves behind: the ban is committed, but the
+    // record is not tombstoned (the tombstone mark lands in a later gate
+    // hold, and a teardown re-arm after a raced eviction carries a fresh
+    // record that no tombstone can cover).
+    server
+        .database
+        .set_room_ban(&room_id, &target, true)
+        .await
+        .expect("ban write succeeds");
+
+    // The banned player's fresh socket must not restore the seat through
+    // its pending record: the ban's only path back into the room is a
+    // future fresh join after an unban. The fresh socket registers with the
+    // connection manager and the coordinator the same way a real
+    // reconnecting handshake does before its claim.
+    use crate::coordination::ClientDeliveryHandle;
+
+    let (sender, mut socket_rx) = mpsc::channel(8);
+    let socket = server
+        .connection_manager
+        .register_client(
+            sender.clone(),
+            ConnectionCloseSignal::detached(),
+            "127.0.0.1:48154".parse().unwrap(),
+            server.instance_id,
+        )
+        .await
+        .expect("socket registration succeeds");
+    server
+        .message_coordinator
+        .register_local_client(
+            socket,
+            None,
+            ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+        )
+        .await
+        .expect("socket coordinator route registers");
+    let effective_player_id = Arc::new(tokio::sync::RwLock::new(socket));
+    let operation_id = RoomOperationId::new_v4();
+    let restored = server
+        .handle_reconnect_with_identity_operation(
+            &socket,
+            &target,
+            &room_id,
+            &token,
+            Arc::clone(&effective_player_id),
+            Some(operation_id),
+        )
+        .await;
+    let seat_restored = restored;
+    assert!(
+        !seat_restored,
+        "a banned player's reconnection claim must not restore the seat"
+    );
+    let failure = recv_until(&mut socket_rx, |message| {
+        matches!(
+            message,
+            ServerMessage::ReconnectionFailed { .. } | ServerMessage::RoomOperationResult { .. }
+        )
+    })
+    .await;
+    let refused_code = match failure.as_ref() {
+        ServerMessage::ReconnectionFailed { error_code, .. } => Some(error_code.clone()),
+        ServerMessage::RoomOperationResult { result, .. } => match result.as_ref() {
+            RoomOperationResult::ReconnectionFailed { error_code, .. } => Some(error_code.clone()),
+            other => panic!("expected a reconnect refusal result, got {other:?}"),
+        },
+        other => panic!("expected a reconnect refusal, got {other:?}"),
+    };
+    assert!(
+        matches!(refused_code.as_ref(), Some(ErrorCode::Banned)),
+        "the ban refusal must surface the BANNED classification, got {refused_code:?}"
+    );
+    assert_eq!(
+        *effective_player_id.read().await,
+        socket,
+        "a refused claim must leave the websocket's transient identity alone"
+    );
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room lookup succeeds")
+        .expect("room remains present");
+    assert!(
+        !room.players.contains_key(&target),
+        "a banned player must stay unseated after the refused claim"
+    );
+
+    // The un-tombstoned record stays claimable, so a later unban during
+    // the reconnect window can still honor the credential; until then the
+    // ban must refuse every claim, not just the first.
+    if let Some(manager) = &server.reconnection_manager {
+        let outcome = manager
+            .claim_reconnection(&socket, &target, &room_id, &token)
+            .await;
+        assert!(
+            outcome.is_ok(),
+            "a ban refusal must leave the record claimable, not consume it with \
+             a kick tombstone or delete it: {outcome:?}"
+        );
+    } else {
+        panic!("reconnection manager must be active for this test");
+    }
+}
+
 /// Drive a seated join that may carry a join password and assert the
 /// terminal `RoomJoinFailed` classification when the join is refused.
 async fn join_with_password(
@@ -1111,6 +1273,189 @@ async fn ban_evicts_blocks_rejoin_and_lifts_on_unban() {
     join_with_password(&server, &target, &mut target_rx, "BAN001", "guest", None)
         .await
         .expect("unbanned id must be able to rejoin");
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn sealed_room_password_check_precedes_the_ban_refusal() {
+    // Non-enumeration (issue #525): the join password is the outermost
+    // admission perimeter on both paths. A banned caller that has not
+    // presented the room credential learns only PASSWORD_REQUIRED; with the
+    // credential, the refusal names the ban.
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (authority, mut authority_rx) =
+        register_client(&server, "127.0.0.1:48155".parse().unwrap()).await;
+    let (target, mut target_rx) =
+        register_client(&server, "127.0.0.1:48156".parse().unwrap()).await;
+
+    join_seated_player(&server, &authority, &mut authority_rx, "SEALB1", "host").await;
+    join_seated_player(&server, &target, &mut target_rx, "SEALB1", "guest").await;
+
+    server
+        .handle_ban_player_operation(&authority, RoomOperationId::new_v4(), target)
+        .await;
+    let _ = recv_until(&mut authority_rx, |message| {
+        matches!(message, ServerMessage::PlayerLeft { .. })
+    })
+    .await;
+    let _ = room_access_result(&mut authority_rx).await;
+
+    server
+        .handle_set_room_access_operation(
+            &authority,
+            RoomOperationId::new_v4(),
+            Some("secret".to_string()),
+        )
+        .await;
+    let _ = room_access_result(&mut authority_rx).await;
+
+    // Seated path: without the credential the sealed perimeter answers
+    // first; with it, the refusal names the ban.
+    assert_eq!(
+        join_with_password(&server, &target, &mut target_rx, "SEALB1", "guest", None)
+            .await
+            .expect_err("banned join without the credential must be refused"),
+        ErrorCode::PasswordRequired,
+        "the sealed perimeter must answer before the ban does"
+    );
+    assert_eq!(
+        join_with_password(
+            &server,
+            &target,
+            &mut target_rx,
+            "SEALB1",
+            "guest",
+            Some("secret")
+        )
+        .await
+        .expect_err("banned join with the credential must be refused"),
+        ErrorCode::Banned
+    );
+
+    // The spectator path shares the ordering.
+    let spectator_error = server
+        .spectator_service
+        .join_operation(
+            &target,
+            None,
+            "moderation-game".to_string(),
+            "SEALB1".to_string(),
+            "guest".to_string(),
+            None,
+        )
+        .await
+        .expect_err("banned spectator join without the credential must be refused");
+    assert_eq!(
+        spectator_error.code,
+        Some(ErrorCode::PasswordRequired),
+        "the sealed perimeter must answer before the ban does: {spectator_error:?}"
+    );
+    let spectator_error = server
+        .spectator_service
+        .join_operation(
+            &target,
+            None,
+            "moderation-game".to_string(),
+            "SEALB1".to_string(),
+            "guest".to_string(),
+            Some("secret".to_string()),
+        )
+        .await
+        .expect_err("banned spectator join with the credential must be refused");
+    assert_eq!(spectator_error.code, Some(ErrorCode::Banned));
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn rotation_and_transfer_preserve_the_ban_list_and_the_join_password() {
+    // Pins the in-place room-write design (issue #525 sweep): rotating the
+    // room code and moving the authority role must never rewrite the room
+    // in a way that drops the ban list or the join password.
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (authority, mut authority_rx) =
+        register_client(&server, "127.0.0.1:48157".parse().unwrap()).await;
+    let (successor, mut successor_rx) =
+        register_client(&server, "127.0.0.1:48158".parse().unwrap()).await;
+    let (target, mut target_rx) =
+        register_client(&server, "127.0.0.1:48159".parse().unwrap()).await;
+
+    join_seated_player(&server, &authority, &mut authority_rx, "KEEPB1", "host").await;
+    join_seated_player(&server, &successor, &mut successor_rx, "KEEPB1", "second").await;
+    join_seated_player(&server, &target, &mut target_rx, "KEEPB1", "guest").await;
+    let room_id = server
+        .get_client_room(&authority)
+        .await
+        .expect("authority seated");
+
+    server
+        .handle_ban_player_operation(&authority, RoomOperationId::new_v4(), target)
+        .await;
+    let _ = recv_until(&mut authority_rx, |message| {
+        matches!(message, ServerMessage::PlayerLeft { .. })
+    })
+    .await;
+    let _ = room_access_result(&mut authority_rx).await;
+    server
+        .handle_set_room_access_operation(
+            &authority,
+            RoomOperationId::new_v4(),
+            Some("secret".to_string()),
+        )
+        .await;
+    let _ = room_access_result(&mut authority_rx).await;
+
+    server
+        .handle_regenerate_room_code_operation(&authority, RoomOperationId::new_v4())
+        .await;
+    let new_code = match room_access_result(&mut authority_rx).await {
+        RoomOperationResult::RoomCodeRegenerated { room_code } => room_code,
+        other => panic!("expected RoomCodeRegenerated, got {other:?}"),
+    };
+    assert_ne!(new_code, "KEEPB1", "rotation must mint a fresh code");
+
+    server
+        .handle_transfer_authority_operation(&authority, RoomOperationId::new_v4(), successor)
+        .await;
+    let _ = room_access_result(&mut authority_rx).await;
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room lookup succeeds")
+        .expect("room remains present");
+    assert_eq!(
+        room.authority_player,
+        Some(successor),
+        "the transfer must have moved the authority role"
+    );
+    assert!(
+        room.is_banned(&target),
+        "the ban list must survive rotation and transfer"
+    );
+
+    // The preserved policy is live, not just stored: the fresh code refuses
+    // a passwordless join with the sealed perimeter, and the banned id with
+    // the correct credential is told BANNED under the new authority.
+    let (fresh, mut fresh_rx) = register_client(&server, "127.0.0.1:48160".parse().unwrap()).await;
+    assert_eq!(
+        join_with_password(&server, &fresh, &mut fresh_rx, &new_code, "late", None)
+            .await
+            .expect_err("passwordless join into the rotated sealed room must be refused"),
+        ErrorCode::PasswordRequired
+    );
+    assert_eq!(
+        join_with_password(
+            &server,
+            &target,
+            &mut target_rx,
+            &new_code,
+            "guest",
+            Some("secret")
+        )
+        .await
+        .expect_err("banned join must stay refused after rotation and transfer"),
+        ErrorCode::Banned
+    );
 }
 
 #[tokio::test]

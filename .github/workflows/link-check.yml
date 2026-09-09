@@ -23,20 +23,6 @@
 name: Link Check
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '**/*.md'
-      - '**/*.rs'
-      - '**/*.toml'
-      - '.lychee.toml'
-      - 'scripts/install-lychee.sh'
-      - 'scripts/download-verified.sh'
-      - 'scripts/run-lychee.sh'
-      - 'scripts/check-internal-links.sh'
-      - 'docs/**'
-      - '.github/test-fixtures/**'
-      - '.github/workflows/link-check.yml'
   pull_request:
     branches: [main]
     paths:

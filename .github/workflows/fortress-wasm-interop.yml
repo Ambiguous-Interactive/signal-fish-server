@@ -5,21 +5,6 @@
 name: Fortress WASM Interop
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "src/**"
-      - "build.rs"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "clients/fortress/src/relay.rs"
-      - "clients/fortress/src/workload.rs"
-      - "clients/fortress-wasm/**"
-      - "clients/browser/package.json"
-      - "clients/browser/package-lock.json"
-      - "scripts/run-fortress-wasm-interop.sh"
-      - ".github/workflows/fortress-wasm-interop.yml"
   pull_request:
     branches: [main]
     paths:

@@ -1587,8 +1587,9 @@ The moderation operations are authority-only (v3 only):
   members and their reconnection tokens are unaffected. The password is stored only as a salted hash and never
   logged or echoed. The requester receives `RoomAccessUpdated { requires_password }`.
 - `BanPlayer` names a seated `player_id` and evicts it exactly like `KickPlayer`, then records the id on the
-  room's in-memory ban list: while the room lives, the banned id cannot rejoin it as a player or spectator
-  (`BANNED`). The ban dies with the room. The requester receives `PlayerBanned`.
+  room's in-memory ban list: while the room lives, the banned id cannot rejoin it as a player or spectator, and a
+  reconnection attempt refuses with `BANNED` (the pending record is kept, so a mid-window unban lets the token work
+  again). The ban dies with the room. The requester receives `PlayerBanned`.
 - `UnbanPlayer` lifts a room ban (idempotent). The requester receives `PlayerUnbanned`.
 - `TransferAuthority` names a seated `player_id` that becomes the room's authority. Every member receives the usual
   `AuthorityChanged` broadcast (personalized `you_are_authority` per recipient); the sender receives

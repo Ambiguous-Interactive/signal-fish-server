@@ -24,18 +24,6 @@
 name: Browser Interop
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "src/**"
-      - "build.rs"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "clients/**"
-      - "scripts/run-browser-interop.sh"
-      - "scripts/read-toml-string.sh"
-      - ".github/workflows/browser-interop.yml"
   pull_request:
     branches: [main]
     paths:

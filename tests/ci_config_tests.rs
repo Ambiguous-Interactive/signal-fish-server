@@ -2057,7 +2057,7 @@ fn test_actionlint_runs_on_relevant_changes_without_a_static_weekly_rerun() {
          request. Remove the `schedule` trigger from actionlint.yml."
     );
 
-    for event in ["push", "pull_request"] {
+    for event in ["pull_request"] {
         let paths = triggers
             .as_mapping_get(event)
             .and_then(|trigger| trigger.as_mapping_get("paths"))
@@ -2389,8 +2389,10 @@ fn test_relay_timing_observations_workflow_is_bounded_complete_and_retainable() 
         concurrency
             .as_mapping_get("cancel-in-progress")
             .and_then(Yaml::as_bool),
-        Some(false),
-        "manual or overlapping runs must not cancel an eligible scheduled attempt"
+        Some(true),
+        "superseded pull-request runs are pure duplicate allocations; scheduled \
+         attempts stay safe because the concurrency group includes the event name, \
+         so a manual or pull-request run can never cancel an eligible scheduled attempt"
     );
     assert_eq!(
         document
@@ -2407,17 +2409,67 @@ fn test_relay_timing_observations_workflow_is_bounded_complete_and_retainable() 
         Some("relay-clean-v1")
     );
 
-    let job = document
-        .as_mapping_get("jobs")
-        .and_then(|jobs| jobs.as_mapping_get("observations"))
-        .expect("workflow must define the observations job");
-    assert!(
-        job.as_mapping_get("if").is_none(),
-        "job must be unconditional"
+    // The OS cohort is event-dependent (issues #513 and #512): macOS bills at
+    // 10x and Windows at 2x Linux per minute, so the expensive legs run on the
+    // daily cron (and dispatch) only; a pull request validating the workflow's
+    // measurement contract runs the Linux leg alone. The eligible evidence
+    // cohort (scheduled first attempts) still covers all three platforms.
+    let jobs = document.as_mapping_get("jobs").expect("workflow jobs");
+    let cohort_job = jobs.as_mapping_get("os-cohort").expect("os-cohort job");
+    assert_eq!(
+        cohort_job.as_mapping_get("runs-on").and_then(Yaml::as_str),
+        Some("ubuntu-latest")
     );
+    let cohort_steps = cohort_job
+        .as_mapping_get("steps")
+        .and_then(Yaml::as_sequence)
+        .expect("os-cohort steps");
+    let cohort_step = cohort_steps.first().expect("os-cohort has one step");
+    assert_eq!(
+        cohort_step.as_mapping_get("id").and_then(Yaml::as_str),
+        Some("cohort")
+    );
+    let cohort_step_source = cohort_step
+        .as_mapping_get("run")
+        .and_then(Yaml::as_str)
+        .expect("cohort step script");
+    for event in ["schedule", "workflow_dispatch"] {
+        assert!(
+            cohort_step_source.contains(&format!("\"{event}\"")),
+            "the cohort must branch on {event}"
+        );
+    }
     assert!(
-        job.as_mapping_get("needs").is_none(),
-        "a skipped dependency must not erase a timing attempt"
+        cohort_step_source.contains("windows-latest")
+            && cohort_step_source.contains("macos-latest"),
+        "the scheduled cohort must keep the Windows and macOS timing legs"
+    );
+    // Ordering, not just presence: the Linux-only fallback must be the
+    // `else` branch, not a dead string beside an unconditional 3-OS emit.
+    let expensive_branch = cohort_step_source
+        .find("\"schedule\"")
+        .expect("cohort branches on schedule");
+    let fallback = cohort_step_source
+        .find("os=[\"ubuntu-latest\"]")
+        .expect("cohort keeps the Linux-only fallback");
+    assert!(
+        fallback > expensive_branch,
+        "the Linux-only cohort must be the fallback branch, not a dead string"
+    );
+
+    let job = jobs
+        .as_mapping_get("observations")
+        .expect("workflow must define the observations job");
+    assert_eq!(
+        job.as_mapping_get("needs").and_then(Yaml::as_str),
+        Some("os-cohort"),
+        "the observations matrix comes from the event-dependent cohort"
+    );
+    assert_eq!(
+        job.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("${{ !cancelled() && needs.os-cohort.result == 'success' }}"),
+        "the observations job must run whenever the cohort resolved, and report \
+         failure honestly when it did not"
     );
     assert_failure_is_not_swallowed(job, "the observations job");
     assert_eq!(
@@ -2446,12 +2498,9 @@ fn test_relay_timing_observations_workflow_is_bounded_complete_and_retainable() 
     assert_eq!(
         matrix
             .as_mapping_get("os")
-            .and_then(Yaml::as_sequence)
-            .expect("matrix.os")
-            .iter()
-            .map(|value| value.as_str().expect("OS string"))
-            .collect::<Vec<_>>(),
-        vec!["ubuntu-latest", "windows-latest", "macos-latest"]
+            .and_then(Yaml::as_str)
+            .expect("matrix.os comes from the event-dependent cohort"),
+        "${{ fromJSON(needs.os-cohort.outputs.os) }}"
     );
 
     let steps = job
@@ -8924,20 +8973,26 @@ fn test_required_check_names_match_workflow_definitions() {
 #[test]
 fn test_required_workflow_triggers() {
     // This test validates that required workflows have the correct triggers
-    // (push to main, pull_request to main). Without these triggers, the
-    // workflows would not run on the repository's primary integration events.
+    // for the repository's cost policy (issues #513 and #512): validation
+    // content is proven pre-merge by the pull_request run, and the post-merge
+    // push-to-main wave would re-run the identical squash content, so it is
+    // reserved for workflows with a deployment side effect (docker-publish,
+    // docs-deploy) or a release-preflight contract (doc-validation).
     //
-    // Both ci.yml and doc-validation.yml must trigger on:
+    // ci.yml must trigger on:
     //   - pull_request with branches: [main]
-    //   - push with branches: [main]
+    // and must NOT trigger on push to main (the daily noon cron re-proves
+    // main's health, including the macOS/Windows cohort lanes).
     //
-    // Note: doc-validation.yml also has path filters, which are acceptable
-    // as long as the branch triggers are present.
+    // doc-validation.yml keeps both branch triggers: its push trigger is the
+    // release-preflight contract pinning version-introduction commits.
 
     let root = repo_root();
     let mut errors = Vec::new();
 
-    for (workflow_file, _workflow_name) in REQUIRED_WORKFLOW_NAMES {
+    let expectations: &[(&str, bool)] = &[("ci.yml", false), ("doc-validation.yml", true)];
+
+    for (workflow_file, requires_push) in expectations {
         let workflow_path = root.join(".github/workflows").join(workflow_file);
         let content = read_live_file(&workflow_path);
 
@@ -8956,18 +9011,27 @@ fn test_required_workflow_triggers() {
             ));
         }
 
-        if !has_push {
+        if *requires_push && !has_push {
             errors.push(format!(
                 "{workflow_file}: Missing 'push:' trigger.\n\
-                 Required workflows must trigger on push to main.\n\
+                 This workflow's push trigger is a repository contract.\n\
                  To fix: Add push trigger:\n\
                    on:\n\
                      push:\n\
                        branches: [main]"
             ));
         }
+        if !*requires_push && has_push {
+            errors.push(format!(
+                "{workflow_file}: Forbidden 'push:' trigger.\n\
+                 Validation workflows must not re-run the post-merge push wave:\n\
+                 the pull_request run proves the identical squash content pre-merge,\n\
+                 and the daily cron re-proves main (issues #513 and #512).\n\
+                 To fix: Remove the push trigger block from {workflow_file}."
+            ));
+        }
 
-        // Validate that both push and pull_request sections have `branches: [main]`.
+        // Validate that each present trigger section carries `branches: [main]`.
         // We extract the text between each trigger keyword and the next top-level key
         // to scope the check, avoiding false positives from `branches: [main]` appearing
         // in unrelated parts of the file (e.g., comments or step names).
@@ -9019,9 +9083,10 @@ fn test_required_workflow_triggers() {
     if !errors.is_empty() {
         panic!(
             "Required workflow trigger validation failed:\n\n{}\n\n\
-             Required workflows must trigger on both push and pull_request events\n\
-             targeting the main branch. Without these triggers, repository validation\n\
-             will not run for the changes it is intended to cover.",
+             Validation workflows must trigger on pull_request events targeting the\n\
+             main branch and must not re-run the post-merge push wave; only workflows\n\
+             with a deployment side effect or a release-preflight contract keep a\n\
+             push trigger.",
             errors.join("\n\n")
         );
     }
@@ -11205,9 +11270,9 @@ fn test_link_check_workflow_exists_and_is_configured() {
     ] {
         let occurrences = content.matches(required_trigger).count();
         assert!(
-            occurrences >= 2,
-            "link-check.yml path triggers must include {required_trigger} for BOTH push \
-             and pull_request (found {occurrences} occurrence(s)); a missing trigger \
+            occurrences >= 1,
+            "link-check.yml path triggers must include {required_trigger} under \
+             pull_request (found {occurrences} occurrence(s)); a missing trigger \
              silently bypasses the canonical link gate"
         );
     }
@@ -19729,7 +19794,7 @@ fn test_workflow_consumed_configuration_paths_trigger_validation() {
 
     for (workflow_path, required_paths) in cases {
         let workflow = read_file(&root.join(workflow_path));
-        for event in ["push", "pull_request"] {
+        for event in ["pull_request"] {
             let paths = extract_workflow_event_paths(&workflow, event)
                 .into_iter()
                 .collect::<BTreeSet<_>>();
@@ -19747,11 +19812,11 @@ fn test_workflow_consumed_configuration_paths_trigger_validation() {
 fn test_root_build_script_triggers_specialized_root_compile_workflows() {
     let root = repo_root();
     let cases: [(&str, &[&str]); 6] = [
-        ("browser-interop.yml", &["push", "pull_request"]),
-        ("fortress-interop.yml", &["push", "pull_request"]),
-        ("fortress-wasm-interop.yml", &["push", "pull_request"]),
-        ("turn-interop.yml", &["push", "pull_request"]),
-        ("webrtc-interop.yml", &["push", "pull_request"]),
+        ("browser-interop.yml", &["pull_request"]),
+        ("fortress-interop.yml", &["pull_request"]),
+        ("fortress-wasm-interop.yml", &["pull_request"]),
+        ("turn-interop.yml", &["pull_request"]),
+        ("webrtc-interop.yml", &["pull_request"]),
         ("h14-pr.yml", &["pull_request"]),
     ];
 
@@ -21672,6 +21737,7 @@ fn test_unused_deps_workflow_only_allocates_for_root_rust_graph_changes() {
     assert_workflow_triggers_on_paths(
         &workflow,
         "unused-deps.yml",
+        &["pull_request"],
         &[
             "Cargo.toml",
             "Cargo.lock",
@@ -28306,6 +28372,7 @@ fn test_fortress_interop_gate_is_pinned_and_runs_current_server() {
     assert_workflow_triggers_on_paths(
         &workflow,
         "fortress-interop.yml",
+        &["pull_request"],
         &[
             "src/**",
             "build.rs",
@@ -28342,6 +28409,7 @@ fn test_turn_interop_gate_is_local_pinned_and_fail_closed() {
     assert_workflow_triggers_on_paths(
         &workflow,
         "turn-interop.yml",
+        &["pull_request"],
         &[
             "src/**",
             "build.rs",
@@ -28457,6 +28525,7 @@ fn test_formal_verification_triggers_cover_modeled_sources() {
     assert_workflow_triggers_on_paths(
         &workflow,
         "formal-verification.yml",
+        &["pull_request"],
         &[
             "formal/**",
             "scripts/run-tla-model-check.sh",
@@ -28585,14 +28654,18 @@ fn test_sequenced_relay_trace_refinement_has_gating_and_production_replays() {
     }
 }
 
-/// Assert both the `push` and `pull_request` events trigger on exactly
-/// `required_paths`.
+/// Assert each listed event triggers on exactly `required_paths`.
 ///
 /// Parsed, not counted: a substring count of `- "<path>"` cannot tell which key
 /// the list sits under, so renaming `paths:` to `paths-ignore:` — which INVERTS
 /// the filter and stops the workflow running on precisely the changes it exists
 /// to cover — passes a counting check untouched.
-fn assert_workflow_triggers_on_paths(workflow: &str, name: &str, required_paths: &[&str]) {
+fn assert_workflow_triggers_on_paths(
+    workflow: &str,
+    name: &str,
+    events: &[&str],
+    required_paths: &[&str],
+) {
     let documents = Yaml::load_from_str(workflow)
         .unwrap_or_else(|error| panic!("{name} must parse as YAML: {error}"));
     let document = documents.first().expect("a workflow has one document");
@@ -28603,7 +28676,7 @@ fn assert_workflow_triggers_on_paths(workflow: &str, name: &str, required_paths:
         .or_else(|| document.as_mapping_get("true"))
         .unwrap_or_else(|| panic!("{name} must define workflow triggers"));
     let expected: BTreeSet<&str> = required_paths.iter().copied().collect();
-    for event in ["push", "pull_request"] {
+    for &event in events {
         let block = triggers
             .as_mapping_get(event)
             .unwrap_or_else(|| panic!("{name} must define an `{event}` trigger"));
@@ -28870,6 +28943,7 @@ fn test_native_client_platform_matrix_live_smoke_and_ipv6_proof_are_pinned() {
     assert_workflow_triggers_on_paths(
         &workflow,
         "webrtc-interop.yml",
+        &["pull_request"],
         &[
             "src/**",
             "build.rs",
@@ -29754,6 +29828,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     assert_workflow_triggers_on_paths(
         &workflow,
         "fortress-wasm-interop.yml",
+        &["pull_request"],
         &[
             "src/**",
             "build.rs",

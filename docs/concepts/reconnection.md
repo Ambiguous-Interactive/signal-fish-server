@@ -303,6 +303,13 @@ The server responds with a `ReconnectionFailed` message if:
 - **Room closed** -- The room was cleaned up while the player was away.
 - **Already connected** -- The player is already connected from another
   session.
+- **Kicked** -- The room's authority removed the seat while the player was
+  away. The pending record is refused; join again with a valid room code.
+- **Banned** -- The room's authority banned the player id while the player
+  was away. Every reconnection attempt is refused while the ban lives. The
+  pending record is kept, so if the authority lifts the ban during the
+  reconnection window, the token works again; otherwise join again after
+  the unban.
 
 ```json
 {

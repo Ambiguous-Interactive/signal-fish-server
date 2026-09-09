@@ -11,13 +11,6 @@
 name: LLM File Size Check
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - ".llm/**"
-      - "scripts/check-llm-file-sizes.sh"
-      - "scripts/check-llm-example-files.sh"
-      - ".github/workflows/llm-file-sizes.yml"
   pull_request:
     branches: [main]
     paths:

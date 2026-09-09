@@ -27,11 +27,6 @@
 name: Dev Container Build
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '.devcontainer/**'
-      - '.github/workflows/devcontainer-build.yml'
   pull_request:
     branches: [main]
     paths:
