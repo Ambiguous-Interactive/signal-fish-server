@@ -650,20 +650,49 @@ async fn stalled_app_cap_count_read_keeps_its_lease_against_a_late_claimer() {
     // walks straight through the cap check.
     tokio::time::sleep(Duration::from_millis(10_400)).await;
 
+    // The late claimer CREATES a room in the same application. The one-shot
+    // server-total-count park (armed here) sits after its enforcement read
+    // but before its creation commit, so once its read completes the late
+    // claimer holds pre-commit. Both reads then complete before either
+    // claim commits — exactly the world where a dead lease overshoots.
+    database.pause_next_get_application_room_count_for_test();
+    database.pause_next_get_total_room_count_for_test();
     let second_server = Arc::clone(&server);
     let second_task = tokio::spawn(async move {
         join_room(
             &second_server,
             &second,
             "lease-cap-b",
-            Some("LCAPE2"),
+            Some("LNEW99"),
             "Second",
-            8,
+            4,
         )
         .await;
     });
+    // Confirmed before any release fires: pre-fix the late claimer parks at
+    // its (re-armed) enforcement read while the first claim is still stalled.
+    // Post-fix the late claimer never reaches its read — it blocks on the
+    // renewed lease — so this wait alone may time out and the run continues.
+    let _late_claimer_reached_its_read = timeout(
+        Duration::from_secs(2),
+        database.wait_for_paused_get_application_room_count_for_test(),
+    )
+    .await
+    .is_ok();
 
+    // Wake the late claimer's read FIRST: it must return 0 (no claim has
+    // committed yet), pass, and park at the armed server-total-count hold
+    // before it can create.
     database.release_paused_get_application_room_count_for_test();
+
+    // Only then wake the stalled first read: it must also return 0 — the
+    // late claimer sits parked pre-create — and commit its claim.
+    database.release_paused_get_application_room_count_for_test();
+
+    // Let the late claimer create last: both claimers passed the cap in a
+    // pre-commit world, so the ceiling holds only if the lease never died.
+    database.release_paused_get_total_room_count_for_test();
+
     first_task.await.expect("first claim task completes");
     second_task.await.expect("second claim task completes");
     let first_result = receive(&mut first_rx).await;
