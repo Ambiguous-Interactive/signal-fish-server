@@ -892,7 +892,10 @@ impl EnhancedGameServer {
 
     /// The server's own distributed-lock instance, for tests that must probe
     /// the live lease state of a hold (issue #550 lease-renewal coverage).
+    /// Used only by repository-only test modules, so it is gated out of
+    /// packaged builds together with them.
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) fn distributed_lock_for_test(&self) -> Arc<dyn DistributedLock> {
         Arc::clone(&self.distributed_lock)
     }

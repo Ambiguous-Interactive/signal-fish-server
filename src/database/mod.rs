@@ -864,18 +864,21 @@ impl InMemoryDatabase {
         self.release_get_total_room_count.notify_one();
     }
 
-    #[cfg(test)]
+    /// Rotation-stall determinism gate: used only by repository-only test
+    /// modules (`moderation_tests`), so it is gated out of packaged builds
+    /// together with them.
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) fn pause_next_update_room_code_for_test(&self) {
         self.pause_update_room_code
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) async fn wait_for_paused_update_room_code_for_test(&self) {
         self.update_room_code_reached.notified().await;
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) fn release_paused_update_room_code_for_test(&self) {
         self.release_update_room_code.notify_one();
     }
