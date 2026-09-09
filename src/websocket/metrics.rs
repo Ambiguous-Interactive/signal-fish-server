@@ -171,11 +171,6 @@ const METRICS_SNAPSHOT_MAX_BYTES: usize = 128 * 1024;
 /// the same fail-visible truncation marker the snapshot uses.
 const METRICS_RESPONSE_MAX_BYTES: usize = 1024 * 1024;
 
-/// Slack reserved for the truncation markers themselves when computing how
-/// much history fits in [`METRICS_RESPONSE_MAX_BYTES`]. The markers carry a
-/// boolean and a count, far below this bound.
-const HISTORY_TRUNCATION_MARKER_SLACK_BYTES: usize = 128;
-
 /// Enforce the whole-response byte budget (see [`METRICS_RESPONSE_MAX_BYTES`]).
 ///
 /// Truncation is deterministic and fail-visible: the newest history samples
@@ -201,8 +196,9 @@ fn bounded_metrics_response(
         .map(std::mem::take);
     if let Some(serde_json::Value::Array(samples)) = history_taken {
         let sample_sizes: Vec<usize> = samples.iter().map(&measured).collect();
-        // The fixed size is measured with an empty history plus the markers,
-        // so the kept suffix always lands strictly inside the budget.
+        // The envelope is measured with an empty history and BOTH markers in
+        // place (placeholder dropped count), so the kept suffix accounts for
+        // everything around it.
         if let Some(cache) = response
             .get_mut("dashboardCache")
             .and_then(|cache| cache.as_object_mut())
@@ -212,21 +208,31 @@ fn bounded_metrics_response(
                 "historyTruncated".to_string(),
                 serde_json::Value::Bool(true),
             );
+            cache.insert("historySamplesDropped".to_string(), serde_json::json!(0));
         }
-        let fixed_size = measured(&response).saturating_add(HISTORY_TRUNCATION_MARKER_SLACK_BYTES);
-        let budget_for_history = METRICS_RESPONSE_MAX_BYTES.saturating_sub(fixed_size);
+        // History depth is capped at 720, so the real dropped count is at
+        // most three digits: four bytes cover the growth over the placeholder.
+        let envelope_size = measured(&response).saturating_add(4);
+        let budget_for_history = METRICS_RESPONSE_MAX_BYTES.saturating_sub(envelope_size);
         // Walk from the newest sample backwards; keep the longest suffix that
-        // fits the budget.
+        // fits the budget. JSON separators are part of the cost: every sample
+        // after the first adds one comma, and the brackets themselves match
+        // the empty array already in the envelope.
         let mut suffix_bytes = 0usize;
+        let mut any_kept = false;
         let kept_count: usize = sample_sizes
             .iter()
             .rev()
             .take_while(|size| {
-                let next = suffix_bytes.saturating_add(**size);
+                let separator = usize::from(any_kept);
+                let next = suffix_bytes
+                    .saturating_add(**size)
+                    .saturating_add(separator);
                 if next > budget_for_history {
                     false
                 } else {
                     suffix_bytes = next;
+                    any_kept = true;
                     true
                 }
             })
@@ -650,6 +656,79 @@ mod tests {
             ))),
             "the newest sample must be the last survivor"
         );
+    }
+
+    /// Issue #551, boundary regression (review feedback): the budget math
+    /// must account for array separators and the dropped-count marker, so a
+    /// response only slightly over budget is fixed by trimming history — it
+    /// must NOT collapse to the whole-response stub. `padding=1407` is the
+    /// exact byte boundary where separator-blind arithmetic keeps every
+    /// sample and then still lands over budget; the others straddle it.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn bounded_metrics_response_trims_history_instead_of_collapsing_near_the_boundary() {
+        let server = build_metrics_test_server(ServerConfig::default()).await;
+        for padding in [1405usize, 1407, 1455, 1500] {
+            let samples: Vec<serde_json::Value> = (0..720)
+                .map(|index| {
+                    serde_json::json!({
+                        "fetchedAt": format!("2026-09-08T00:00:{index:02}Z"),
+                        "padding": "x".repeat(padding),
+                    })
+                })
+                .collect();
+            let response = serde_json::json!({
+                "activeRooms": 1,
+                "dashboardCache": { "history": samples },
+            });
+            let original_size = serde_json::to_vec(&response)
+                .expect("a constructed value always serializes")
+                .len();
+            let bounded = bounded_metrics_response(&server, response);
+            let bounded_size = serde_json::to_vec(&bounded)
+                .expect("a constructed value always serializes")
+                .len();
+            assert!(
+                bounded_size <= METRICS_RESPONSE_MAX_BYTES,
+                "padding={padding}: bounded response must respect the budget"
+            );
+            if original_size <= METRICS_RESPONSE_MAX_BYTES {
+                assert_eq!(
+                    bounded_size, original_size,
+                    "padding={padding}: an under-budget response must pass through"
+                );
+                continue;
+            }
+            assert_eq!(
+                bounded["truncated"],
+                serde_json::Value::Null,
+                "padding={padding}: a trimmable response must not collapse to the stub"
+            );
+            assert_eq!(
+                bounded["activeRooms"],
+                serde_json::json!(1),
+                "padding={padding}: the current view must survive history trimming"
+            );
+            assert_eq!(
+                bounded["dashboardCache"]["historyTruncated"],
+                serde_json::Value::Bool(true),
+                "padding={padding}: the trim must be marked"
+            );
+            let dropped = bounded["dashboardCache"]["historySamplesDropped"]
+                .as_u64()
+                .and_then(|dropped| usize::try_from(dropped).ok())
+                .expect("dropped count must be a number");
+            let kept = bounded["dashboardCache"]["history"]
+                .as_array()
+                .expect("history stays an array")
+                .len();
+            assert_eq!(
+                dropped + kept,
+                720,
+                "padding={padding}: kept + dropped must account for every sample"
+            );
+            assert!(kept > 0, "padding={padding}: newest samples must survive");
+        }
     }
 
     /// Issue #551: a response that stays oversized even without history (a
