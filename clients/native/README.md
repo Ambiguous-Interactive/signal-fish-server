@@ -248,8 +248,9 @@ Scenario 6 is the smallest complete live WebRTC cell: two real clients negotiate
 exchange exact messages on both SCTP channel labels. With no STUN or TURN configured, rtc may learn the
 remote host socket from an inbound connectivity check before its signaled candidate is registered, so that
 side is honestly reported as `prflx` with no address. The family-agnostic baseline accepts that shape only
-when both clients advertised non-empty host-only UDP candidate sets. CI runs the selector on Linux, Windows,
-and macOS.
+when both clients advertised non-empty host-only UDP candidate sets. CI runs the selector on Linux on every
+push and pull request, and on Windows and macOS on the daily cron cohort (see [Platform
+coverage](#platform-coverage)).
 
 Scenario 8 is the IPv6 cell: both clients run with `--ip-family ipv6`, so only IPv6 host candidates can be
 advertised, and the assertions require a host/host pair of concrete dialable IPv6 addresses plus the exact
@@ -314,6 +315,10 @@ path plus an exact exchange on both data channels. Linux is absent from the matr
 runs the full eight-scenario suite,
 including the same two-peer cell. Windows and macOS now carry a live transport proof, while the larger topology,
 fault-injection, TURN, browser, and IPv6 matrices remain Linux-specific evidence.
+
+Cadence (issue #512, the #513 cohort pattern): Linux runs on every push and pull request. The Windows and
+macOS matrix runs on the daily cron against main — plus manual dispatch — because macOS bills at 10x and
+Windows at 2x Linux per minute and the server deploys on Linux. Cross-platform regressions surface next-day.
 
 ## Troubleshooting
 

@@ -20925,56 +20925,76 @@ fn test_ci_safety_workflow_uses_pinned_nightly() {
 }
 
 #[test]
-fn test_ci_safety_workflow_has_required_triggers() {
-    // Validates that ci-safety.yml has all required triggers:
-    // push to main, pull_request to main, schedule, and workflow_dispatch.
+fn test_ci_safety_workflow_is_periodic_not_per_event() {
+    // Validates that ci-safety.yml is a periodic/manual health check, exactly
+    // like full mutation testing (`test_mutation_workflow_is_periodic_not_per_pr`).
+    // Issue #512 (the #513 cohort pattern) moved Miri and ASan off per-event
+    // triggers: both analyzers re-run the library suite the per-event nextest
+    // lane already covers, measured at roughly 38 Linux runner-minutes per
+    // eligible change. Restoring a per-event trigger must be a deliberate,
+    // test-updated decision, not config drift.
 
     let root = repo_root();
     let workflow_path = root.join(".github/workflows/ci-safety.yml");
-    let content = read_live_file(&workflow_path);
+    let workflow = read_live_file(&workflow_path);
+    let documents = Yaml::load_from_str(&workflow).expect("ci-safety.yml must parse as YAML");
+    let document = documents.first().expect("workflow YAML document");
+    let triggers = document
+        .as_mapping_get("on")
+        .or_else(|| document.as_mapping_get("true"))
+        .expect("ci-safety.yml must define triggers");
 
-    let required_triggers = [
-        ("push:", "push to main"),
-        ("pull_request:", "pull requests to main"),
-        ("schedule:", "weekly scheduled runs"),
-        ("workflow_dispatch:", "manual trigger for diagnostics"),
-    ];
-
-    let mut missing = Vec::new();
-    for (trigger, description) in &required_triggers {
-        if !content.contains(trigger) {
-            missing.push(format!("  - {trigger} ({description})"));
-        }
-    }
-
-    if !missing.is_empty() {
-        panic!(
-            "ci-safety.yml is missing required triggers:\n\n{}\n\n\
-             Advanced safety workflows need all four triggers:\n\
-             - push/pull_request: run on code changes\n\
-             - schedule: weekly heavy analysis\n\
-             - workflow_dispatch: manual diagnostics",
-            missing.join("\n")
+    let schedule = triggers
+        .as_mapping_get("schedule")
+        .and_then(Yaml::as_sequence)
+        .expect("heavy Miri/ASan analysis must retain its scheduled evidence lane");
+    assert_eq!(
+        schedule.len(),
+        1,
+        "safety analysis must have one canonical daily cadence"
+    );
+    assert_eq!(
+        schedule[0].as_mapping_get("cron").and_then(Yaml::as_str),
+        Some("0 2 * * *"),
+        "Miri/ASan must remain scheduled daily at 02:00 UTC: next-day detection \
+         is the accepted trade-off for a lane measured at ~38 runner-minutes \
+         per eligible change (issue #512)"
+    );
+    assert!(
+        triggers.as_mapping_get("workflow_dispatch").is_some(),
+        "manual diagnostics must remain able to run Miri/ASan on demand"
+    );
+    for forbidden in ["push", "pull_request", "pull_request_target", "merge_group"] {
+        assert!(
+            triggers.as_mapping_get(forbidden).is_none(),
+            "Miri/ASan are periodic/manual health checks, not a {forbidden} gate; \
+             restoring this trigger re-spends roughly 38 Linux runner-minutes on \
+             every eligible change (issue #512 cohort decision).\n\
+             Fix: keep ci-safety.yml on the schedule + workflow_dispatch triggers, \
+             or update this test in the same change that deliberately re-baselines \
+             the cohort decision.\n\
+             Verify: cargo test --locked --test ci_config_tests \
+             test_ci_safety_workflow_is_periodic_not_per_event -- --exact"
         );
     }
-}
 
-#[test]
-fn test_ci_safety_pr_triggers_are_code_scoped() {
-    let root = repo_root();
-    let workflow_path = root.join(".github/workflows/ci-safety.yml");
-    // Live view: the header comment references Cargo.toml/paths in prose, so
-    // assert the path filters are real config, not commented examples.
-    let content = read_live_file(&workflow_path);
-
-    for required_path in ["src/**", "tests/**", "build.rs", "Cargo.toml", "Cargo.lock"] {
+    // The jobs themselves must stay unconditional: with per-event triggers
+    // gone, the scheduled events are the ONLY automated evidence lane, so a
+    // job-level `if:` (for example `github.event_name == 'workflow_dispatch'`)
+    // would silently kill the scheduled Miri/ASan runs while every other pin
+    // in this file still passes.
+    let jobs = document
+        .as_mapping_get("jobs")
+        .expect("ci-safety.yml must define a jobs mapping");
+    for job_key in ["miri", "asan"] {
+        let job = jobs
+            .as_mapping_get(job_key)
+            .unwrap_or_else(|| panic!("ci-safety.yml must define the {job_key} job"));
         assert!(
-            content.contains(required_path),
-            "ci-safety.yml push/pull_request path filters must include `{required_path}`.\n\
-             Heavy Miri/ASan analysis should run for code and dependency changes, \
-             but not for docs-only changes where failures would be misclassified and slow.\n\
-             File: {}",
-            workflow_path.display()
+            job.as_mapping_get("if").is_none(),
+            "the ci-safety {job_key} job must not be conditional: the daily \
+             schedule is the only automated lane left (issue #512), and a job \
+             guard can silently retire its evidence"
         );
     }
 }
@@ -28953,10 +28973,17 @@ fn test_native_client_platform_matrix_live_smoke_and_ipv6_proof_are_pinned() {
         .and_then(|document| document.as_mapping_get("jobs"))
         .and_then(|jobs| jobs.as_mapping_get("native-platforms"))
         .expect("webrtc-interop.yml must define the native-platforms job (issue #271)");
-    assert!(
-        job.as_mapping_get("if").is_none(),
-        "the native platform matrix must not be conditional; an `if:` can disable \
-         every non-Linux proof without touching a single command"
+    // Issue #512 (the #513 cohort pattern): the macOS (10x) and Windows (2x)
+    // legs moved to the daily cron + manual dispatch. The `if:` must be the
+    // exact event-cohort expression — anything weaker (any truthy condition)
+    // could silently widen it back to per-event billing, and anything absent
+    // restores the old cohort outright.
+    assert_eq!(
+        job.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}"),
+        "the native platform matrix must run on the daily cron + dispatch cohort \
+         only (issues #513 and #512): macOS bills at 10x and Windows at 2x Linux \
+         per minute, and the full Linux suite above already covers every event"
     );
     assert!(
         job.as_mapping_get("needs").is_none(),
@@ -28964,6 +28991,42 @@ fn test_native_client_platform_matrix_live_smoke_and_ipv6_proof_are_pinned() {
          skips this matrix whenever that job fails, which is the same outcome \
          `fail-fast: false` exists to prevent"
     );
+    {
+        // The cohort only exists if the workflow retains its daily schedule:
+        // removing the trigger would silently retire the Windows/macOS proof.
+        let triggers = documents
+            .first()
+            .and_then(|document| document.as_mapping_get("on"))
+            .or_else(|| {
+                documents
+                    .first()
+                    .and_then(|document| document.as_mapping_get("true"))
+            })
+            .expect("webrtc-interop.yml must define triggers");
+        let schedule = triggers
+            .as_mapping_get("schedule")
+            .and_then(Yaml::as_sequence)
+            .expect("webrtc-interop.yml must define the daily cross-platform cohort");
+        assert_eq!(
+            schedule.len(),
+            1,
+            "the cross-platform cohort must have exactly one cron entry"
+        );
+        assert_eq!(
+            schedule[0].as_mapping_get("cron").and_then(Yaml::as_str),
+            Some("0 5 * * *"),
+            "the cross-platform native-client cohort must stay daily at 05:00 UTC \
+             (issues #513 and #512)"
+        );
+        // The pinned job-level `if:` admits dispatch; deleting the trigger
+        // would strand manual cross-platform diagnostics behind a condition
+        // that can never be true.
+        assert!(
+            triggers.as_mapping_get("workflow_dispatch").is_some(),
+            "webrtc-interop.yml must keep workflow_dispatch: manual cross-platform \
+             diagnostics are part of the native-platforms cohort contract"
+        );
+    }
     // `runs-on` is the whole point: pointing it at ubuntu-latest keeps every
     // command and both matrix legs while deleting the non-Linux proof entirely.
     assert_eq!(

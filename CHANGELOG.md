@@ -299,6 +299,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the issue #513 macOS trade. The `CI / Lint (windows-latest)` and
   `CI / Nextest (windows-latest)` check names are unchanged and keep being
   produced by the cron.
+- **Miri and AddressSanitizer moved to the daily cron, issue #512:** the two
+  Miri lanes and the ASan lane no longer run on every push and pull request;
+  `Advanced Safety` now runs on a daily 02:00 UTC schedule against `main`
+  (plus manual dispatch). Both analyzers re-execute the library suite the
+  per-event nextest lane already runs, at 10–50x interpreter/instrumentation
+  cost: measured hosted, the Miri pair plus ASan average ~38 Linux-billed
+  minutes per eligible change. The cron runs the identical commands, so a
+  memory-safety regression surfaces next-day — the same accepted trade as the
+  macOS/Windows lint/nextest cohort (issue #513) and the instrumented
+  coverage gate. Neither lane is a branch-protection required check, so no
+  per-PR check waits on these names.
+- **Native-client Windows/macOS interop moved to the daily cron, issue #512:**
+  the `Native Client Build + Live WebRTC (windows-latest)` and `(macos-latest)`
+  lanes no longer run on every push and pull request; they run on a daily
+  05:00 UTC cohort against `main` (plus manual dispatch). macOS bills at 10x
+  and Windows at 2x Linux per minute: measured hosted, the pair costs ~28
+  billed minutes per triggering run. The Linux `Native Client Interop` lane
+  keeps running the full eight-scenario suite on every event, including the
+  exact two-peer live cell the moved lanes run. The check names are unchanged
+  and keep being produced by the cron.
 - **Stray join passwords now fail closed, issue #546:** a `JoinRoom` or
   `JoinAsSpectator` request that presents a password to an open (unsealed)
   room is refused with `PASSWORD_REQUIRED` instead of being silently seated.

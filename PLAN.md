@@ -95,11 +95,17 @@ correctness evidence appears.
   budget with oldest-first history truncation, allowlist reloads prune the
   relay-byte series of revoked app IDs, and the mid-game
   `TransferAuthority` semantics are decided and pinned (role moves, the
-  finalize-time transport host does not). Remaining
+  finalize-time transport host does not).   Remaining
   frontier: continue seam sweeps; #539 tracks the coordinated-SDK path for
   the `connected_at` v3 trim (released SDKs 0.8.0–0.12.0 require the field);
   the parked-state (`senderState`) producers are same-thread program-ordered
-  behind their `SendFull` record (verified, no race window).
+  behind their `SendFull` record (verified, no race window). The 2026-09-09
+  session-223 sweep found no demonstrable in-file defect across the stalest
+  seams (authority, messaging, relay_policy, maintenance, shutdown,
+  token_binding, outbound_queue, batching, deadline); residual risk
+  concentrates in cross-feature interaction seams between the recently
+  landed room-access, spectator fan-out, and authority-moderation features —
+  sweep there next.
 - #525 — session 217 landed the minimal viable moderation set: authority
   kick (close code `4007 kicked`, no reconnect), authority room-code
   regeneration, and a shipped default spectator cap
@@ -128,15 +134,20 @@ correctness evidence appears.
   the `Markdown Code Validation` job, and branch protection (no required
   checks, per #513) needed no settings migration.
 - #512 — session 220 moved the Windows lint/nextest lanes into the #513
-  daily cron cohort (measured: the Windows pair averaged ~40 of ~92 billed
-  minutes per CI run, 43%; the cron gains one Windows pair per day, paid
-  back by a single CI-triggering event). Session 221 removed the remaining
-  per-event full-suite duplication: the instrumented coverage gate and the
-  MSRV full-suite run joined the noon cron (~20 fewer ubuntu minutes per
-  CI-workflow event, ~13 events/day measured; MSRV compilation still
-  verifies per event). Remaining levers need owner input:
-  self-hosted runner labels (owner comment excludes DAD-MACHINE and
-  ELI-MACHINE) and the #379 path-awareness inventory.
+   daily cron cohort (measured: the Windows pair averaged ~40 of ~92 billed
+   minutes per CI run, 43%; the cron gains one Windows pair per day, paid
+   back by a single CI-triggering event). Session 221 removed the remaining
+   per-event full-suite duplication: the instrumented coverage gate and the
+   MSRV full-suite run joined the noon cron (~20 fewer ubuntu minutes per
+   CI-workflow event, ~13 events/day measured; MSRV compilation still
+   verifies per event). Session 223 moved the last two heavy duplicative
+   cohorts off per-event triggers: the ci-safety Miri/ASan lanes (~38 Linux
+   minutes per eligible change, weekly cron → daily 02:00 UTC) and the
+   webrtc-interop native-platforms matrix (~28 billed minutes per run, macOS
+   10x + Windows 2x, new daily 05:00 UTC cron); both keep manual dispatch.
+   Remaining levers need owner input: self-hosted runner labels (owner
+   comment excludes DAD-MACHINE and ELI-MACHINE) and the #379
+   path-awareness inventory.
 - #379 — make verification-nightly pull-request fan-out path-aware only after
   an owner exports the required-check/ruleset inventory and a historical
   changed-file replay proves net allocation and runner-time savings. On the
