@@ -133,7 +133,7 @@ correctness evidence appears.
   `Documentation Link Check` job is retired, the strict MkDocs build moved to
   the `Markdown Code Validation` job, and branch protection (no required
   checks, per #513) needed no settings migration.
- - #512 — session 220 moved the Windows lint/nextest lanes into the #513
+- #512 — session 220 moved the Windows lint/nextest lanes into the #513
    daily cron cohort (measured: the Windows pair averaged ~40 of ~92 billed
    minutes per CI run, 43%; the cron gains one Windows pair per day, paid
    back by a single CI-triggering event). Session 221 removed the remaining
