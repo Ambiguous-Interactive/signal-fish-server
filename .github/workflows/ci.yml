@@ -4,18 +4,26 @@
 # This workflow ensures code quality, correctness, and security before merging.
 #
 # Runs on:
-#   - Push to main branch
-#   - Pull requests to main
-#   - Daily schedule (the `deny` and `audit` security-audit jobs, the
-#     macOS and Windows lint/nextest lanes, the instrumented coverage
-#     gate, and the MSRV full-suite test run — issues #513 and #512)
+#   - Pull requests to main (push-to-main validation moved to the daily
+#     cron in issue #557: squash content is identical to the PR run)
+#   - Daily schedule (the `deny` supply-chain job, the macOS and Windows
+#     lint/nextest lanes, the instrumented coverage gate, and the MSRV
+#     full-suite test run — issues #513 and #512)
 #
 # Jobs:
 #   - lint: Cross-OS code formatting (rustfmt) and linting (clippy) matrix
-#     (ubuntu per push/PR; macOS + Windows on the daily schedule only)
+#     (ubuntu per pull request; macOS + Windows on the daily schedule only).
+#     The ubuntu leg also runs the zero-panic production policy
+#     (scripts/check-no-panics.sh) — issue #558 moved the standalone
+#     panic-policy job here so one runner setup covers both: the nested
+#     scan reuses this runner's toolchain, registry cache, and checkout,
+#     while keeping its own scrubbed nested target dir
 #   - nextest: Cross-OS test execution via cargo-nextest (doc-tests in doc-validation.yml)
-#     (ubuntu per push/PR; macOS + Windows on the daily schedule only)
-#   - relay-allocations: Deterministic production-seam allocation ceilings
+#     (ubuntu per pull request; macOS + Windows on the daily schedule only).
+#     The ubuntu leg also enforces the deterministic relay allocation
+#     ceilings — issue #558 moved the standalone relay-allocations job here
+#     so one runner setup covers both, and the bench compile graph reuses
+#     this job's target dir and cache
 #   - doc-consistency: Version/changelog/doc drift checks (diff-aware changelog gate)
 #   - deny: Supply-chain job (issue #512): cargo-deny policy over every
 #     tracked Cargo graph, RustSec + npm vulnerability scans, and CycloneDX
@@ -26,7 +34,6 @@
 #   - msrv: MSRV verification (compilation per push/PR; the full test suite
 #     runs on the daily schedule — the suite itself is already covered
 #     per-event by ubuntu nextest)
-#   - panic-policy: Zero-panic production code enforcement
 #
 # Features:
 #   - Rust toolchain caching for faster builds
@@ -148,42 +155,6 @@ jobs:
             echo 'os=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
           fi
 
-  relay-allocations:
-    name: Relay Allocation Ceilings
-    needs: quick-check
-    if: ${{ !cancelled() && github.event_name != 'schedule' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Require fast-fail gate success
-        env:
-          QUICK_CHECK_RESULT: ${{ needs.quick-check.result }}
-        run: test "$QUICK_CHECK_RESULT" = success
-      - name: Checkout repository
-        uses: actions/checkout@v7.0.1
-      - name: Read Rust toolchain
-        id: toolchain
-        shell: bash
-        run: |
-          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
-          if [ -z "$CHANNEL" ]; then
-            echo "ERROR: Could not extract channel from rust-toolchain.toml"
-            exit 1
-          fi
-          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - name: Enforce deterministic relay allocation ceilings
-        run: |
-          cargo bench --locked --bench relay_allocations --features allocation-tracking
-          cargo bench --locked --bench relay_serialization_allocations --features allocation-tracking
-
   lint:
     name: Lint (${{ matrix.os }})
     needs: [quick-check, ci-matrix]
@@ -266,6 +237,18 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: bash scripts/check-feature-matrix.sh
 
+      # Zero-panic production policy (#558): the full panic-policy checker
+      # (nested syn-backed scan + panic-lint clippy passes over the server and
+      # native-client production targets) runs inside this job so one runner
+      # setup covers both (the standalone panic-policy job was 2.8 billed
+      # minutes plus a runner startup per event). The script scrubs inherited
+      # instrumentation env and builds in its own nested target dir
+      # (see scripts/check-no-panics.sh). ubuntu-only: the policy is
+      # platform-independent and Linux is the deployment platform.
+      - name: Run panic-policy check
+        if: matrix.os == 'ubuntu-latest'
+        run: bash scripts/check-no-panics.sh
+
   nextest:
     name: Nextest (${{ matrix.os }})
     needs: [quick-check, ci-matrix]
@@ -337,6 +320,19 @@ jobs:
           cargo test --locked --no-default-features
           --test config_and_endpoints_tests
           validate_config_rejects_tls_for_a_binary_without_tls_support -- --exact
+
+      # Relay allocation ceilings (#558): the deterministic production-seam
+      # allocation budgets run inside this job so one runner setup covers
+      # both (the standalone relay-allocations job was 2.2 billed minutes
+      # plus a runner startup per event), and the bench compile graph reuses
+      # this job's target dir and cache. ubuntu-only, and implicitly
+      # cron-excluded: the schedule cohort is macOS/Windows only (see
+      # ci-matrix), matching the standalone job's schedule exclusion.
+      - name: Enforce deterministic relay allocation ceilings
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo bench --locked --bench relay_allocations --features allocation-tracking
+          cargo bench --locked --bench relay_serialization_allocations --features allocation-tracking
 
       - name: Drop trybuild artifacts before cache save
         # trybuild builds nested cargo projects under `<target>/tests`. Swatinem/rust-cache's
@@ -415,7 +411,7 @@ jobs:
                 clients/fortress-wasm/Cargo.toml|clients/fortress-wasm/Cargo.lock) HAS_DEPENDENCY_CHANGE="true" ;;
                 package.json|package-lock.json|clients/browser/package.json|clients/browser/package-lock.json) HAS_DEPENDENCY_CHANGE="true" ;;
                 .github/*|.githooks/*|.devcontainer/*|.config/*|.vscode/*|.claude/*) ;;
-                scripts/*|tests/*|test-fixtures/*|.llm/*|target/*|progress/*) ;;
+                scripts/*|tests/*|test-fixtures/*|formal/*|.llm/*|target/*|progress/*) ;;
                 src/*_tests.rs|src/*_test.rs|src/*/tests.rs) ;;
                 docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md|docs/quickstart.md) ;;
                 .markdownlint*|.lychee.toml|.lycheecache|.typos.toml|.yamllint.yml) ;;
@@ -868,40 +864,3 @@ jobs:
         if: always()
         shell: bash
         run: rm -rf "${CARGO_TARGET_DIR:-target}/tests"
-
-  panic-policy:
-    name: Panic Policy
-    needs: quick-check
-    if: ${{ !cancelled() && github.event_name != 'schedule' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Require fast-fail gate success
-        env:
-          QUICK_CHECK_RESULT: ${{ needs.quick-check.result }}
-        run: test "$QUICK_CHECK_RESULT" = success
-      - name: Checkout repository
-        uses: actions/checkout@v7.0.1
-      - name: Read Rust toolchain
-        id: toolchain
-        shell: bash
-        run: |
-          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
-          if [ -z "$CHANNEL" ]; then
-            echo "ERROR: Could not extract channel from rust-toolchain.toml"
-            exit 1
-          fi
-          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
-      - name: Install Rust toolchain
-        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.91.0)
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-          components: clippy
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - name: Run panic-policy check
-        run: bash scripts/check-no-panics.sh

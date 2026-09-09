@@ -1159,12 +1159,10 @@ fn validate_workflow_has_required_jobs(
 //   - CI / Nextest (ubuntu-latest)
 //   - CI / Nextest (windows-latest)  — daily cron cohort only (issues #513, #512)
 //   - CI / Nextest (macos-latest)    — daily cron cohort only (issues #513, #512)
-//   - CI / Relay Allocation Ceilings
 //   - CI / Dependency Audit
 //   - CI / MSRV Verification
 //   - CI / Docker Build
 //   - CI / Coverage (llvm-cov)
-//   - CI / Panic Policy
 //   - Documentation Validation / Rustdoc Validation
 //   - Documentation Validation / Markdown Code Validation
 //
@@ -1174,6 +1172,12 @@ fn validate_workflow_has_required_jobs(
 // The cargo-audit and SBOM lanes joined the Dependency Audit job for the same
 // reason (#512): the "CI / Audit (cargo-audit)" and "CI / SBOM (CycloneDX)"
 // check names were consolidated into "CI / Dependency Audit".
+// The panic-policy check and the relay-allocation ceilings joined the lint and
+// nextest jobs, respectively (#558), for the same one-runner-setup reason:
+// the "CI / Panic Policy" and "CI / Relay Allocation Ceilings" check names
+// were retired; the checks themselves are pinned by
+// test_ci_lint_job_runs_panic_policy_check and
+// test_ci_enforces_relay_allocation_ceilings.
 //
 // Offline link validation is the canonical `Link Check / Check Links` check
 // (issue #378); the duplicate Documentation Link Check job was retired.
@@ -1191,21 +1195,22 @@ const REQUIRED_WORKFLOW_NAMES: &[(&str, &str)] = &[
 ];
 
 /// Required CI workflow jobs: (job_key, display_name, description)
+///
+/// The panic-policy and relay-allocation checks are deliberately absent
+/// (issue #558): they are steps inside the `lint` and `nextest` jobs rather
+/// than standalone jobs, so they produce no check names of their own. The
+/// checks themselves are pinned by `test_ci_lint_job_runs_panic_policy_check`
+/// and `test_ci_enforces_relay_allocation_ceilings`.
 const REQUIRED_CI_JOBS: &[(&str, &str, &str)] = &[
     (
         "lint",
         "Lint (${{ matrix.os }})",
-        "Cross-OS code formatting and linting",
+        "Cross-OS code formatting and linting; ubuntu leg adds the panic-policy check (#558)",
     ),
     (
         "nextest",
         "Nextest (${{ matrix.os }})",
-        "Cross-OS test execution via cargo-nextest",
-    ),
-    (
-        "relay-allocations",
-        "Relay Allocation Ceilings",
-        "Deterministic production-seam allocation ceilings",
+        "Cross-OS test execution via cargo-nextest; ubuntu leg adds the relay-allocation ceilings (#558)",
     ),
     (
         "deny",
@@ -1226,11 +1231,6 @@ const REQUIRED_CI_JOBS: &[(&str, &str, &str)] = &[
         "coverage",
         "Coverage (llvm-cov)",
         "Linux code coverage gate",
-    ),
-    (
-        "panic-policy",
-        "Panic Policy",
-        "Zero-panic production code enforcement",
     ),
 ];
 
@@ -1333,12 +1333,10 @@ const REQUIRED_CHECK_NAMES: &[&str] = &[
     "CI / Nextest (ubuntu-latest)",
     "CI / Nextest (windows-latest)",
     "CI / Nextest (macos-latest)",
-    "CI / Relay Allocation Ceilings",
     "CI / Dependency Audit",
     "CI / MSRV Verification",
     "CI / Docker Build",
     "CI / Coverage (llvm-cov)",
-    "CI / Panic Policy",
     "Documentation Validation / Rustdoc Validation",
     "Documentation Validation / Markdown Code Validation",
 ];
@@ -1358,7 +1356,7 @@ const REQUIRED_CHECK_NAMES: &[&str] = &[
 const REQUIRED_WORKFLOW_FILES: &[(&str, &str)] = &[
     (
         "ci.yml",
-        "Main CI pipeline (lint, nextest, deny, audit, MSRV, Docker, coverage, panic-policy, SBOM)",
+        "Main CI pipeline (lint+panic-policy, nextest+relay-allocations, deny/audit/SBOM, MSRV, Docker, coverage)",
     ),
     (
         "doc-validation.yml",
@@ -1924,15 +1922,12 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
     // Event cohorts (issues #513/#512): the macOS/Windows legs are cron-only via
     // the `ci-matrix` cohort job; coverage is cron-only (the instrumented run
     // duplicates the per-event nextest suite); msrv verifies compilation on
-    // every event and runs its full test suite on the cron only; the rest run
-    // on push/PR and are excluded from the schedule.
+    // every event and runs its full test suite on the cron only. The
+    // panic-policy and relay-allocation checks are steps of the lint and
+    // nextest jobs (#558), so the jobs pinned here cover them transitively.
     for (job, cohort_guard) in [
         ("lint", CI_MATRIX_GUARD),
         ("nextest", CI_MATRIX_GUARD),
-        (
-            "relay-allocations",
-            "${{ !cancelled() && github.event_name != 'schedule' }}",
-        ),
         ("msrv", "${{ !cancelled() }}"),
         (
             "docker",
@@ -1941,10 +1936,6 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
         (
             "coverage",
             "${{ !cancelled() && github.event_name == 'schedule' }}",
-        ),
-        (
-            "panic-policy",
-            "${{ !cancelled() && github.event_name != 'schedule' }}",
         ),
     ] {
         let header = format!("\n  {job}:");
@@ -2098,11 +2089,37 @@ fn test_doc_validation_uses_prebuilt_taplo() {
 
 #[test]
 fn test_ci_enforces_relay_allocation_ceilings() {
+    // Issue #558: the deterministic production-seam allocation ceilings are
+    // steps of the `nextest` job (ubuntu leg) rather than a standalone
+    // `relay-allocations` job, so the bench compile graph shares the nextest
+    // runner's toolchain, cache, and target dir. Pin the commands, their
+    // ubuntu-only guard, and their placement after the suite inside the job.
     let root = repo_root();
     let workflow = read_live_file(&root.join(".github/workflows/ci.yml"));
-    let job = extract_workflow_job_block(&workflow, "relay-allocations")
-        .expect("ci.yml must define the relay-allocations job");
-    let normalized_job = job.split_whitespace().collect::<Vec<_>>().join(" ");
+    let job = extract_workflow_job_block(&workflow, "nextest")
+        .expect("ci.yml must define the nextest job");
+
+    assert!(
+        extract_workflow_job_block(&workflow, "relay-allocations").is_none(),
+        "the standalone `relay-allocations` job was consolidated into `nextest` \
+         (issue #558); do not reintroduce it as a separate runner setup"
+    );
+
+    let step_start = job
+        .find("- name: Enforce deterministic relay allocation ceilings")
+        .expect("ci.yml `nextest` must enforce the relay allocation ceilings on its ubuntu leg");
+    let step_end = step_start
+        + job[step_start..]
+            .find("\n      - name:")
+            .unwrap_or(job.len() - step_start);
+    let step = &job[step_start..step_end];
+
+    assert!(
+        step.contains("if: matrix.os == 'ubuntu-latest'"),
+        "ci.yml `nextest` relay-allocation steps must stay ubuntu-only: the \
+         cron cohort is macOS/Windows only, which is what keeps the ceilings \
+         off the daily schedule"
+    );
 
     for (benchmark, purpose) in [
         ("relay_allocations", "production relay path"),
@@ -2114,11 +2131,60 @@ fn test_ci_enforces_relay_allocation_ceilings() {
         let command =
             format!("cargo bench --locked --bench {benchmark} --features allocation-tracking");
         assert!(
-            normalized_job.contains(&command),
-            "ci.yml `relay-allocations` must enforce the {purpose} ceiling. \
-             Fix: add `{command}` to that job."
+            step.contains(&command),
+            "ci.yml `nextest` must enforce the {purpose} ceiling. \
+             Fix: add `{command}` as an ubuntu-gated step of that job."
         );
     }
+}
+
+#[test]
+fn test_ci_lint_job_runs_panic_policy_check() {
+    // Issue #558: the zero-panic production policy (scripts/check-no-panics.sh:
+    // the nested syn-backed scan plus panic-lint clippy passes over the server
+    // and native-client production targets) is a step of the `lint` job's
+    // ubuntu leg rather than a standalone `panic-policy` job, so the nested
+    // clippy graph shares the lint runner's toolchain, cache, and checkout.
+    // Pin the script invocation, its ubuntu-only guard, and its placement
+    // after clippy inside the job.
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let job =
+        extract_workflow_job_block(&workflow, "lint").expect("ci.yml must define the lint job");
+
+    assert!(
+        extract_workflow_job_block(&workflow, "panic-policy").is_none(),
+        "the standalone `panic-policy` job was consolidated into `lint` \
+         (issue #558); do not reintroduce it as a separate runner setup"
+    );
+
+    let step_start = job
+        .find("- name: Run panic-policy check")
+        .expect("ci.yml `lint` must run the panic-policy check on its ubuntu leg");
+    let step_end = step_start
+        + job[step_start..]
+            .find("\n      - name:")
+            .unwrap_or(job.len() - step_start);
+    let step = &job[step_start..step_end];
+
+    assert!(
+        step.contains("if: matrix.os == 'ubuntu-latest'"),
+        "ci.yml `lint` panic-policy step must stay ubuntu-only: the policy is \
+         platform-independent and Linux is the deployment platform, while the \
+         macOS/Windows cron legs keep their setup-free fast path"
+    );
+    assert!(
+        step.contains("bash scripts/check-no-panics.sh"),
+        "ci.yml `lint` panic-policy step must delegate to \
+         scripts/check-no-panics.sh (clippy panic lints + syn-backed scan)"
+    );
+    assert!(
+        job.find("- name: Run clippy")
+            .expect("lint must run clippy")
+            < step_start,
+        "ci.yml `lint` must surface plain clippy failures before the slower \
+         nested panic-policy scan"
+    );
 }
 
 #[test]
@@ -24711,7 +24777,7 @@ const LOCAL_CI_FAST_SKIPPED_CHECKS: &[(&str, &str, &str)] = &[
     (
         "no-panic nested scan",
         "run_check_quiet \"no-panics\"",
-        "the panic-policy job runs the nested syn-backed scan once",
+        "the CI lint job runs the nested syn-backed scan once",
     ),
     (
         "documentation policy tests",
@@ -24925,7 +24991,8 @@ fn test_check_no_panics_script_structure() {
 
     assert!(
         script_path.exists(),
-        "scripts/check-no-panics.sh must exist for panic-policy CI job"
+        "scripts/check-no-panics.sh must exist for the CI lint job's \
+         panic-policy check"
     );
 
     let content = read_file(&script_path);
@@ -26126,24 +26193,20 @@ fn test_audit_job_configuration() {
 }
 
 /// The schedule guard condition that non-audit CI jobs must use.
-/// This ensures only the `deny` and `audit` (security audit) jobs plus the
-/// macOS lint/nextest legs (issue #513) run on the daily schedule trigger,
-/// preventing unnecessary CI resource consumption for scheduled runs.
+/// This ensures only the `deny` (consolidated supply-chain) job plus the
+/// macOS lint/nextest legs (issues #513 and #512) run on the daily schedule
+/// trigger, preventing unnecessary CI resource consumption for scheduled runs.
 const SCHEDULE_EXCLUSION_GUARD: &str = "github.event_name != 'schedule'";
 
 /// CI jobs that must be excluded from scheduled runs via an `if:` guard.
-/// The `deny` and `audit` jobs are intentionally absent — they run on the
-/// daily schedule trigger (for CVE detection). The `lint` and `nextest` jobs
-/// are also absent: their per-leg guards (`CI_MATRIX_GUARD`, issues #513 and
-/// #512) admit only their macOS + Windows legs on the schedule and are
-/// pinned separately. `quick-check` is absent by design: it gates the cron
-/// legs.
-const SCHEDULE_EXCLUDED_CI_JOBS: &[&str] = &[
-    "relay-allocations",
-    "doc-consistency",
-    "docker",
-    "panic-policy",
-];
+/// The `deny` job is intentionally absent — it runs on the daily schedule
+/// trigger (for CVE detection). The `lint` and `nextest` jobs are also
+/// absent: their per-leg guards (`CI_MATRIX_GUARD`, issues #513 and #512)
+/// admit only their macOS + Windows legs on the schedule and are pinned
+/// separately, and their ubuntu legs (with the #558 panic-policy and
+/// relay-allocation steps) never materialize on the cron cohort.
+/// `quick-check` is absent by design: it gates the cron legs.
+const SCHEDULE_EXCLUDED_CI_JOBS: &[&str] = &["doc-consistency", "docker"];
 
 #[test]
 fn test_ci_schedule_only_runs_security_jobs() {
@@ -30159,6 +30222,11 @@ const INTERNAL_PATH_CLASSIFICATION_CASES: &[(&str, bool, &str)] = &[
         "scripts are internal tooling",
     ),
     ("tests/ci_config_tests.rs", true, "test files are internal"),
+    (
+        "formal/README.md",
+        true,
+        "formal-verification assets mirror source behavior but have no shipped-runtime impact",
+    ),
     (
         "src/server/message_router_tests.rs",
         true,

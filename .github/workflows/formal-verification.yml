@@ -82,10 +82,18 @@ permissions:
   contents: read
 
 jobs:
+  # Both the TLC model check and the Z3 SMT proofs run in this one job
+  # (issue #558): the Z3 leg only needs a Python interpreter and a pip wheel,
+  # so a second runner setup duplicated the checkout purely to run a script
+  # that installs its own dependency if missing. Sequential steps keep both
+  # formal lanes' failures separately named.
   tlc:
     name: TLA+ Model Check (TLC)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 20 minutes: the sum of the former standalone ceilings (10 TLC + 5 Z3)
+    # plus headroom, since the legs now run sequentially in one job and a
+    # timeout-minutes ceiling is free until a job actually hangs.
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
@@ -112,14 +120,6 @@ jobs:
         run: >-
           bash scripts/run-sequenced-relay-trace-validation.sh
           formal/traces/sequenced-relay-replay.jsonl
-
-  z3:
-    name: Z3 SMT Proofs
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7.0.1
 
       - name: Set up Python
         uses: actions/setup-python@v7.0.0

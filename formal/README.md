@@ -97,7 +97,8 @@ Requirements (TLA+): a Java runtime (11+). The script downloads `tla2tools.jar` 
 version **and** SHA256 into `${XDG_CACHE_HOME:-~/.cache}/signal-fish/tla` (override with
 `SIGNAL_FISH_TLA_CACHE_DIR`) and re-verifies the checksum on every run, so a corrupted or
 tampered jar never executes. CI runs both scripts via
-`.github/workflows/formal-verification.yml` (a `tlc` job and a `z3` job).
+`.github/workflows/formal-verification.yml` (sequential steps of the single
+`tlc` job — issue #558 merged the former standalone `z3` job into it).
 
 ## Delivery trace validation
 
