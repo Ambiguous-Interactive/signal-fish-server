@@ -644,7 +644,7 @@ is_internal_path() {
         .github/*|.githooks/*|.devcontainer/*|.config/*|.vscode/*|.claude/*)
             return 0
             ;;
-        scripts/*|tests/*|test-fixtures/*|.llm/*|target/*|progress/*)
+        scripts/*|tests/*|test-fixtures/*|formal/*|.llm/*|target/*|progress/*)
             return 0
             ;;
         src/*_tests.rs|src/*_test.rs|src/*/tests.rs)

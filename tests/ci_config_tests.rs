@@ -30223,6 +30223,11 @@ const INTERNAL_PATH_CLASSIFICATION_CASES: &[(&str, bool, &str)] = &[
     ),
     ("tests/ci_config_tests.rs", true, "test files are internal"),
     (
+        "formal/README.md",
+        true,
+        "formal-verification assets mirror source behavior but have no shipped-runtime impact",
+    ),
+    (
         "src/server/message_router_tests.rs",
         true,
         "Rust test modules under src are internal",
