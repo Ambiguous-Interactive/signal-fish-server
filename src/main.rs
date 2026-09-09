@@ -483,10 +483,13 @@ async fn main() -> anyhow::Result<()> {
                 ));
             // Keep-alive mirrors the plain path (routes.rs): h2 has no header
             // deadline, so parked pre-upgrade h2 connections are reaped by the
-            // PING cycle instead (issue #553).
+            // PING cycle instead (issue #553). The h2 builder needs its OWN
+            // timer (the http1 timer is not shared); keep-alive pings panic
+            // without one (hyper "You must supply a timer").
             server
                 .http_builder()
                 .http2()
+                .timer(TokioTimer::new())
                 .enable_connect_protocol()
                 .keep_alive_interval(Some(websocket::H2_KEEP_ALIVE_INTERVAL))
                 .keep_alive_timeout(websocket::H2_KEEP_ALIVE_TIMEOUT);
@@ -961,10 +964,13 @@ mod serve_stack_parity_tests {
 
     /// Issue #553: both serve stacks must arm the HTTP/2 keep-alive cycle —
     /// the only reaper for parked pre-upgrade h2 connections, since hyper's
-    /// `header_read_timeout` never applies to h2. Source-pinned: the reaping
-    /// behavior on the plain path is covered by a live-socket test
-    /// (`parked_h2_connection_is_reaped_by_the_keep_alive_cycle` in
-    /// `websocket/routes.rs`), but the TLS builder inside `axum_server` is
+    /// `header_read_timeout` never applies to h2. Both stacks must also arm
+    /// the h2 builder's own timer: the http1 timer is not shared, and the
+    /// keep-alive ping sleep panics without it (observed as the Docker TLS
+    /// smoke failing its health check on the first 20 s ping tick).
+    /// Source-pinned: the reaping behavior on the plain path is covered by a
+    /// live-socket test (`parked_h2_connection_is_reaped_by_the_keep_alive_cycle`
+    /// in `websocket/routes.rs`), but the TLS builder inside `axum_server` is
     /// only observable at this level.
     #[test]
     fn both_serve_stacks_arm_http2_keep_alive() {
@@ -985,6 +991,12 @@ mod serve_stack_parity_tests {
             tls_body.contains(".keep_alive_timeout(websocket::H2_KEEP_ALIVE_TIMEOUT)"),
             "the TLS serve stack must arm the h2 keep-alive PING deadline"
         );
+        assert_eq!(
+            tls_body.matches(".timer(TokioTimer::new())").count(),
+            2,
+            "the TLS serve stack must arm a timer for http1 (header deadline) \
+             AND for http2 (keep-alive pings)"
+        );
 
         let routes_source = include_str!("websocket/routes.rs");
         let serve_fn = routes_source
@@ -1002,6 +1014,12 @@ mod serve_stack_parity_tests {
         assert!(
             serve_body.contains(".keep_alive_timeout(timeouts.h2_keep_alive_timeout)"),
             "the plain serve stack must arm the h2 keep-alive PING deadline"
+        );
+        assert_eq!(
+            serve_body.matches(".timer(TokioTimer::new())").count(),
+            2,
+            "the plain serve stack must arm a timer for http1 (header deadline) \
+             AND for http2 (keep-alive pings)"
         );
     }
 }

@@ -242,9 +242,12 @@ pub async fn serve_with_http_header_deadline(
                     // 8441), matching axum::serve's http2 configuration. The
                     // keep-alive cycle reaps h2 connections parked after the
                     // preface (issue #553), which hyper's h2 path otherwise
-                    // holds forever.
+                    // holds forever. The h2 builder needs its OWN timer: the
+                    // http1 timer is not shared, and keep-alive pings panic
+                    // without one (hyper "You must supply a timer").
                     builder
                         .http2()
+                        .timer(TokioTimer::new())
                         .enable_connect_protocol()
                         .keep_alive_interval(Some(timeouts.h2_keep_alive_interval))
                         .keep_alive_timeout(timeouts.h2_keep_alive_timeout);
@@ -954,9 +957,17 @@ mod tests {
             reaped.is_ok(),
             "the parked h2 connection must be reaped by the keep-alive cycle"
         );
+        // A keep-alive PING (type 0x6, 8-byte payload) must precede the close:
+        // a connection task killed by a missing h2 timer would close after the
+        // SETTINGS alone, with no PING on the wire (hyper panics when the ping
+        // sleep is scheduled).
         assert!(
-            !drained.is_empty(),
-            "the server must have spoken h2 first (SETTINGS/PING frames) before closing"
+            drained
+                .windows(4)
+                .any(|window| window == [0x00, 0x00, 0x08, 0x06]),
+            "the server must send a keep-alive PING before closing; no PING in \
+             {} bytes means the connection died without keep-alive",
+            drained.len()
         );
 
         shutdown_tx
