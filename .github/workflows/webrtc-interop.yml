@@ -16,6 +16,12 @@
 # Windows and macOS, so every supported desktop platform executes real ICE,
 # DTLS, SCTP, process, and socket behavior rather than stopping at linkage.
 #
+# The Windows and macOS legs bill at 2x and 10x Linux per minute (issue #512)
+# and the server deploys on Linux, so they follow the #513 cohort pattern from
+# ci.yml: the daily cron proves them against main (next-day signal), while
+# every push and pull request keeps the full Linux suite, which already
+# includes the exact two-peer live cell and the whole scenario matrix.
+#
 # The reference client is a standalone crate outside the root package. The
 # central CI dependency-audit job covers its Cargo.lock and deny.toml alongside
 # every other tracked Cargo graph on push, pull request, and schedule. A local
@@ -25,7 +31,7 @@
 # depends on: all server sources (the harness spawns the binary built from the
 # whole src/ tree, including root-level modules like src/server.rs), the root
 # manifest/lockfile, the pinned toolchain, the runner script, and this
-# workflow.
+# workflow. The scheduled cohort runs the full workflow against main.
 
 name: WebRTC Interop
 
@@ -55,6 +61,11 @@ on:
       - "scripts/read-toml-string.sh"
       - ".github/workflows/webrtc-interop.yml"
   workflow_dispatch:
+  schedule:
+    # Daily cross-platform cohort (issues #513 and #512): Windows (2x) and
+    # macOS (10x) build + live-mesh proof against main. Placed after the
+    # 03:00 verification-nightly and 04:00 fuzz crons to stagger runner load.
+    - cron: "0 5 * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.run_id }}
@@ -124,7 +135,15 @@ jobs:
     # corroborated direct host/host-or-prflx path, then exchange on both SCTP
     # data channels. Linux is
     # deliberately absent because its full suite includes this exact selector.
+    #
+    # Event cohort (issues #513 and #512): macOS bills at 10x and Windows at 2x
+    # Linux per minute and the server deploys on Linux, so this matrix runs on
+    # the daily cron (and manual dispatch for diagnostics) against main —
+    # next-day cross-platform signal, exactly like the macOS/Windows
+    # lint/nextest cohort in ci.yml. Every push and pull request keeps the full
+    # Linux suite above, which includes this exact two-peer live selector.
     name: Native Client Build + Live WebRTC (${{ matrix.os }})
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:

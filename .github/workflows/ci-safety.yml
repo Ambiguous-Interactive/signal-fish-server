@@ -5,10 +5,18 @@
 # lints cannot catch.
 #
 # Runs on:
-#   - Push to main branch
-#   - Pull requests to main
-#   - Weekly schedule (Sunday at 02:00 UTC) for heavy analysis jobs
+#   - Daily schedule (02:00 UTC) for heavy analysis jobs
 #   - Manual workflow_dispatch for diagnostics and debugging
+#
+# Per-event triggers were removed by issue #512 (the #513 cohort pattern):
+# Miri and ASan re-execute the same library suite the per-event nextest lane
+# already runs, at 10-50x interpreter / instrumentation cost — measured at
+# roughly 38 Linux runner-minutes per eligible change (two Miri lanes plus
+# ASan). Detection of a memory-safety regression moves from pre-merge to
+# next-day, the same trade-off the macOS/Windows lint/nextest lanes, the
+# instrumented coverage gate, and the MSRV full suite already accepted.
+# Neither job is a branch-protection required check, so nothing per-PR waits
+# on these names.
 #
 # all-jobs-run-on-schedule
 #
@@ -68,37 +76,12 @@
 name: Advanced Safety
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'tests/**'
-      - 'benches/**'
-      - 'build.rs'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'clients/native/src/**'
-      - 'clients/native/Cargo.toml'
-      - 'clients/native/Cargo.lock'
-      - 'rust-toolchain.toml'
-      - '.github/workflows/ci-safety.yml'
-  pull_request:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'tests/**'
-      - 'benches/**'
-      - 'build.rs'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'clients/native/src/**'
-      - 'clients/native/Cargo.toml'
-      - 'clients/native/Cargo.lock'
-      - 'rust-toolchain.toml'
-      - '.github/workflows/ci-safety.yml'
   schedule:
-    # Weekly on Sunday at 02:00 UTC — heavy analysis jobs
-    - cron: "0 2 * * 0"
+    # Daily at 02:00 UTC — heavy analysis jobs against main (issue #512).
+    # Ahead of the 03:00 verification-nightly and 04:00 fuzz crons to stagger
+    # runner load. Pinned nightly analyzers surface next-day, matching the
+    # cron cohort of the other duplicated heavy lanes (#513, #512).
+    - cron: "0 2 * * *"
   workflow_dispatch:
     # Manual trigger for diagnostics and debugging
 

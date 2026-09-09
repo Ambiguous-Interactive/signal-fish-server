@@ -769,9 +769,15 @@ Advanced Safety workflow red. Both upload actionable diagnostic artifacts.
 
 ### Triggers
 
-- **Push to main** and **pull requests to main**: run on code changes
-- **Weekly schedule** (Sunday 02:00 UTC): heavy analysis on the latest main
+- **Daily schedule** (02:00 UTC): heavy analysis against main (issue #512 —
+  the #513 cohort pattern; next-day signal)
 - **Manual dispatch**: on-demand diagnostics and debugging
+
+Per-event push/pull-request triggers were removed: both analyzers re-run the
+library suite the per-event nextest lane already covers, measured at roughly
+38 Linux runner-minutes per eligible change (two Miri lanes plus ASan). The
+same trade-off applies to the macOS/Windows lint/nextest lanes, the
+instrumented coverage gate, and the MSRV full suite.
 
 ### Nightly Toolchain
 
@@ -806,16 +812,11 @@ Download these from the workflow run's Artifacts section in GitHub Actions.
 
 ### Promotion to Required Branch Protection
 
-These checks will be promoted to required branch-protection checks when:
-
-- Failure rate < 2% over a 2–4 week observation window
-- No nightly toolchain incidents during that window
-- Median runtime stays within the timeout budget
-
-Until repository settings promote these names to required checks, the workflow
-still propagates both analyzers' failures and reports red.
-AddressSanitizer failures already make the workflow fail even though the check
-is not yet required by branch protection.
+These checks are not promoted to required branch-protection checks, and the
+earlier promotion plan is retired by the #512 cohort decision: a check that
+only runs on the daily cron cannot gate per-PR merges. The workflow still
+propagates both analyzers' failures and reports red, so a finding on main is
+always visible.
 
 ### Tests That Enforce This
 
@@ -824,7 +825,7 @@ is not yet required by branch protection.
 | `test_ci_safety_workflow_has_required_jobs` | Both `miri` and `asan` jobs exist |
 | `test_ci_safety_workflow_failure_policy_is_explicit` | Miri and AddressSanitizer are gating |
 | `test_ci_safety_workflow_uses_pinned_nightly` | Pinned nightly toolchain is used |
-| `test_ci_safety_workflow_has_required_triggers` | All four trigger types are present |
+| `test_ci_safety_workflow_is_periodic_not_per_event` | Schedule + dispatch only; per-event triggers stay removed |
 | `test_ci_safety_workflow_uploads_artifacts` | Output artifacts are uploaded |
 | `test_ci_safety_jobs_not_in_required_check_names` | Jobs are NOT in required check names |
 | `test_ci_safety_workflow_artifact_uploads_always_run` | Upload steps use `if: always()` |
