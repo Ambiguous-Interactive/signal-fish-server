@@ -17,8 +17,9 @@
 #     (ubuntu per push/PR; macOS + Windows on the daily schedule only)
 #   - relay-allocations: Deterministic production-seam allocation ceilings
 #   - doc-consistency: Version/changelog/doc drift checks (diff-aware changelog gate)
-#   - deny: Security audits, license checks, and dependency validation
-#   - audit: RustSec and npm vulnerability scans
+#   - deny: Supply-chain job (issue #512): cargo-deny policy over every
+#     tracked Cargo graph, RustSec + npm vulnerability scans, and CycloneDX
+#     SBOM generation — one runner setup instead of three jobs
 #   - docker: Docker image build and smoke test with health check
 #   - coverage: Linux code coverage gate via cargo-llvm-cov (daily schedule
 #     only — the instrumented suite duplicates the per-event nextest run)
@@ -26,7 +27,6 @@
 #     runs on the daily schedule — the suite itself is already covered
 #     per-event by ubuntu nextest)
 #   - panic-policy: Zero-panic production code enforcement
-#   - sbom: Software Bill of Materials generation (CycloneDX JSON)
 #
 # Features:
 #   - Rust toolchain caching for faster builds
@@ -455,10 +455,17 @@ jobs:
   deny:
     name: Dependency Audit
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    # This job handles Rust licenses, banned dependencies, source verification,
-    # and the cargo-deny advisory pass.
-    # Runs on push/PR and daily via schedule (see workflow triggers).
+    # Supply-chain consolidation (issue #512): cargo-deny policy, the
+    # cargo-audit second opinion, and the CycloneDX SBOM share one runner
+    # setup instead of three jobs. The SBOM stays a per-event artifact (it is
+    # skipped on the daily schedule, exactly like the standalone sbom job it
+    # absorbed).
+    timeout-minutes: 40
+    # cargo-deny handles Rust licenses, banned dependencies, source
+    # verification, and the advisory pass. cargo-audit scans Rust lockfiles
+    # directly against RustSec and both locked JavaScript graphs against the
+    # npm advisory service. Steps run in sequence; a failure in one
+    # supply-chain layer still names its step.
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
@@ -504,23 +511,8 @@ jobs:
           manifest-path: clients/fortress-wasm/Cargo.toml
           arguments: --all-features
           rust-version: 1.94.0
-
-  audit:
-    name: Audit (cargo-audit)
-    runs-on: ubuntu-latest
-    # 15 min: five cargo-audit lockfile scans plus two npm audits whose
-    # transient-5xx retry (up to 3 attempts + backoff each) legitimately
-    # spends the slack when the npm registry is degraded — the 10-minute
-    # budget cancelled the lane mid-retry on PR #533 (2026-09-04).
-    timeout-minutes: 15
-    # Scan Rust lockfiles directly against RustSec and both locked JavaScript
-    # graphs against the npm advisory service. This complements cargo-deny's
-    # broader Rust policy checks (licenses, bans, and sources).
-    # Runs on push/PR and daily via schedule (see workflow triggers).
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7.0.1
       - name: Install Node.js for npm audits
+        if: ${{ !cancelled() }}
         uses: actions/setup-node@v7.0.0
         with:
           node-version: "22"
@@ -531,6 +523,7 @@ jobs:
       # successful response because `npm audit` exits non-zero on
       # vulnerabilities.
       - name: Run npm audit (repository tooling)
+        if: ${{ !cancelled() }}
         run: |
           for attempt in 1 2 3; do
             if npm audit; then
@@ -543,6 +536,7 @@ jobs:
           echo "npm audit failed after 3 attempts" >&2
           exit "$status"
       - name: Run npm audit (browser reference client)
+        if: ${{ !cancelled() }}
         working-directory: clients/browser
         run: |
           for attempt in 1 2 3; do
@@ -556,6 +550,7 @@ jobs:
           echo "npm audit failed after 3 attempts" >&2
           exit "$status"
       - name: Read Rust toolchain
+        if: ${{ !cancelled() }}
         id: toolchain
         shell: bash
         run: |
@@ -566,30 +561,59 @@ jobs:
           fi
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
+        if: ${{ !cancelled() }}
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
+        if: ${{ !cancelled() }}
         uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-audit
+        if: ${{ !cancelled() }}
         uses: taiki-e/install-action@v2.87.5
         with:
           tool: cargo-audit@0.22.2
           fallback: none
       - name: Verify cargo-audit version
+        if: ${{ !cancelled() }}
         run: cargo-audit --version | grep -Fxq 'cargo-audit 0.22.2'
       - name: Run cargo-audit
+        if: ${{ !cancelled() }}
         run: cargo audit
       - name: Run cargo-audit (native reference client)
+        if: ${{ !cancelled() }}
         run: cargo audit --file clients/native/Cargo.lock
       - name: Run cargo-audit (fuzz package)
+        if: ${{ !cancelled() }}
         run: cargo audit --file fuzz/Cargo.lock
       - name: Run cargo-audit (Fortress fixture)
+        if: ${{ !cancelled() }}
         run: cargo audit --file clients/fortress/Cargo.lock
       - name: Run cargo-audit (Fortress WASM fixture)
+        if: ${{ !cancelled() }}
         run: cargo audit --file clients/fortress-wasm/Cargo.lock
+      - name: Install cargo-sbom
+        if: ${{ !cancelled() && github.event_name != 'schedule' }}
+        uses: taiki-e/install-action@v2.87.5
+        with:
+          tool: cargo-sbom
+
+      - name: Generate SBOM (CycloneDX)
+        if: ${{ !cancelled() && github.event_name != 'schedule' }}
+        run: cargo sbom --output-format cyclone_dx_json_1_5 > sbom.cdx.json
+
+      - name: Upload SBOM artifact
+        # `success()` keeps a failed generation from uploading an empty or
+        # invalid artifact; the schedule guard preserves the standalone sbom
+        # job's cron exclusion.
+        if: success() && github.event_name != 'schedule'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: sbom-cyclonedx-${{ github.sha }}
+          path: sbom.cdx.json
+          retention-days: 90
 
   msrv:
     name: MSRV Verification
@@ -881,45 +905,3 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Run panic-policy check
         run: bash scripts/check-no-panics.sh
-
-  sbom:
-    name: SBOM (CycloneDX)
-    if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7.0.1
-      - name: Read Rust toolchain
-        id: toolchain
-        shell: bash
-        run: |
-          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
-          if [ -z "$CHANNEL" ]; then
-            echo "ERROR: Could not extract channel from rust-toolchain.toml"
-            exit 1
-          fi
-          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - name: Install cargo-sbom
-        uses: taiki-e/install-action@v2.87.5
-        with:
-          tool: cargo-sbom
-
-      - name: Generate SBOM (CycloneDX)
-        run: cargo sbom --output-format cyclone_dx_json_1_5 > sbom.cdx.json
-
-      - name: Upload SBOM artifact
-        if: success()
-        uses: actions/upload-artifact@v7.0.1
-        with:
-          name: sbom-cyclonedx-${{ github.sha }}
-          path: sbom.cdx.json
-          retention-days: 90

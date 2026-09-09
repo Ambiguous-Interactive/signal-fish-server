@@ -150,10 +150,13 @@ Key design decisions:
 
 #### SBOM (Software Bill of Materials)
 
-The CI workflow (`ci.yml`) includes an `sbom` job that generates a
-CycloneDX v1.5 JSON Software Bill of Materials on every push and pull
-request. The SBOM captures dependency metadata (components, licenses,
-versions) in a machine-readable format for supply-chain auditing.
+The CI workflow (`ci.yml`) generates a CycloneDX v1.5 JSON Software Bill of
+Materials on every push and pull request. Since the #512 supply-chain
+consolidation, the SBOM steps live inside the `Dependency Audit` job (they
+share one runner setup with cargo-deny and cargo-audit) and stay skipped on
+the daily schedule, exactly like the standalone job they absorbed. The SBOM
+captures dependency metadata (components, licenses, versions) in a
+machine-readable format for supply-chain auditing.
 
 Key design decisions:
 
@@ -165,8 +168,8 @@ Key design decisions:
   uploaded when generation succeeds, avoiding empty or invalid artifacts.
   Unlike coverage (which uses `if: always()` because partial reports are
   still useful for debugging), an SBOM from a failed generation has no value.
-- **Non-blocking**: The SBOM job runs independently and does not gate
-  other jobs. It generates useful metadata without slowing the pipeline.
+- **Non-blocking**: The SBOM steps do not gate other jobs. They generate
+  useful metadata without slowing the pipeline.
 - **Release attachment**: The release workflow (`release.yml`) also
   generates an SBOM and attaches it to the GitHub release as a
   downloadable asset (`sbom.cdx.json`).
@@ -177,18 +180,20 @@ Key design decisions:
 | `test_sbom_job_uploads_artifact` | Artifact upload with 90-day retention |
 | `test_sbom_job_upload_runs_on_success` | Upload step uses `if: success()` |
 | `test_sbom_job_installs_cargo_sbom` | cargo-sbom installed via taiki-e/install-action |
-| `test_sbom_job_has_reasonable_timeout` | 10-minute timeout budget |
+| `test_sbom_job_has_reasonable_timeout` | Consolidated supply-chain ceiling stays generous |
 | `test_release_workflow_generates_sbom` | Release workflow generates SBOM |
 | `test_release_workflow_attaches_sbom_to_release` | SBOM attached to GitHub release |
 | `test_release_sbom_has_continue_on_error` | Release SBOM step uses `continue-on-error: true` (regression guard) |
 
 #### Audit (cargo-audit)
 
-The CI workflow (`ci.yml`) includes an `audit` job that runs `cargo audit`
-as a second-opinion vulnerability scanner alongside `cargo-deny`. While
-cargo-deny provides broader policy checks (licenses, banned crates,
-source verification), cargo-audit queries the RustSec advisory database
-directly and may catch advisories at different cadences.
+The CI workflow (`ci.yml`) runs `cargo audit` as a second-opinion
+vulnerability scanner alongside `cargo-deny`. Since the #512 supply-chain
+consolidation, the audit steps live inside the `Dependency Audit` job, which
+keeps the stable `CI / Dependency Audit` check name. While cargo-deny
+provides broader policy checks (licenses, banned crates, source
+verification), cargo-audit queries the RustSec advisory database directly
+and may catch advisories at different cadences.
 
 Key design decisions:
 
@@ -197,15 +202,15 @@ Key design decisions:
   database but different detection logic and update schedules.
 - **Gating workflow job**: Unlike the staged safety jobs, cargo-audit is stable
   and reliable enough to fail its CI workflow via `continue-on-error: false`.
-  Its check name is part of the repository-owned stable naming contract;
-  external branch policy is configured separately.
-- **Runs on schedule**: Like cargo-deny, the audit job runs on the daily
+  Its steps are part of the repository-owned stable naming contract through
+  the `Dependency Audit` job; external branch policy is configured separately.
+- **Runs on schedule**: Like cargo-deny, the audit steps run on the daily
   cron schedule to catch newly published advisories.
-- **Simple and focused**: The job runs only `cargo audit` with no extra flags,
-  keeping the failure mode easy to diagnose.
+- **Simple and focused**: The audit steps run only `cargo audit` with no
+  extra flags, keeping the failure mode easy to diagnose.
 
 **Test that enforces this:** `test_ci_workflow_has_required_jobs`
-(validates the audit job exists in ci.yml)
+(validates the Dependency Audit job exists in ci.yml)
 
 #### Relay Allocation Ceilings
 

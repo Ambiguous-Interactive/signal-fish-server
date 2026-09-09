@@ -9,8 +9,8 @@
 #   - Pull requests to main (only for relevant file changes)
 #
 # Jobs:
-#   - rustdoc: Build and validate Rust API documentation
-#   - doc-tests: Run tests embedded in documentation comments
+#   - rustdoc: Build and validate Rust API documentation, then run the tests
+#     embedded in documentation comments (one runner setup for both, #512)
 #   - markdown-code-samples: Extract and validate code blocks from Markdown,
 #     and build the rendered MkDocs site in strict mode
 #
@@ -79,7 +79,9 @@ jobs:
   rustdoc:
     name: Rustdoc Validation
     runs-on: ubuntu-latest
-    timeout-minutes: 15 # Generous timeout for building documentation with all features
+    # Both cargo doc passes and both doc-test passes share one runner setup
+    # (issue #512): the doc-test compile graph reuses the rustdoc one.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Read Rust toolchain
@@ -106,34 +108,14 @@ jobs:
       - name: Build rustdoc (no features)
         run: cargo doc --locked --no-deps --no-default-features
 
-  doc-tests:
-    name: Documentation Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 15 # Generous timeout for running all doc tests with features
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - name: Read Rust toolchain
-        id: toolchain
-        shell: bash
-        run: |
-          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
-          if [ -z "$CHANNEL" ]; then
-            echo "ERROR: Could not extract channel from rust-toolchain.toml"
-            exit 1
-          fi
-          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       # Run all doc tests (tests embedded in /// comments)
       - name: Run doc tests
+        if: ${{ !cancelled() }}
         run: cargo test --locked --doc
 
       # Run doc tests with all features enabled
       - name: Run doc tests (all features)
+        if: ${{ !cancelled() }}
         run: cargo test --locked --doc --all-features
 
   markdown-code-samples:
