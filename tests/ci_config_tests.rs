@@ -26017,7 +26017,7 @@ fn test_audit_job_covers_every_dependabot_managed_npm_graph() {
     });
     assert!(
         setup_node,
-        "ci.yml jobs.audit must install Node 22 before scanning npm lockfiles.\n\
+        "ci.yml jobs.deny must install Node 22 before scanning npm lockfiles.\n\
          Fix: add a pinned actions/setup-node step with node-version: \"22\"."
     );
 

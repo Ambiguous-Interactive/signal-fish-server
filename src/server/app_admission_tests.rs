@@ -596,38 +596,41 @@ async fn legacy_room_claims_share_the_atomic_application_room_cap() {
 
 /// Issue #550 class, app-cap leg: the application-room-cap hold spans the
 /// enforcement count read. When that read stalls past the lease TTL, the
-/// lease must stay alive (renewed), so a late claimer still waits and the
-/// ceiling holds. The renewal guard must therefore wrap the hold BEFORE the
+/// lease must still be held — renewed — so the cap check stays mutually
+/// exclusive. The renewal guard must therefore wrap the hold BEFORE the
 /// count read, not after the helper returns.
+///
+/// The pinned observable is the lease state itself (same shape as the
+/// moderation rotation pin): a direct `try_acquire` probe after the raw TTL
+/// has elapsed is wake-order-independent, so the test cannot pass on the
+/// pre-fix code by scheduling luck.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg_attr(miri, ignore)]
-async fn stalled_app_cap_count_read_keeps_its_lease_against_a_late_claimer() {
+async fn stalled_app_cap_count_read_keeps_its_lease_alive() {
     let server = create_server(true, vec![app_entry(APP_A, Some(1), Some(8))]).await;
     let database = server
         .database
         .as_any()
         .downcast_ref::<InMemoryDatabase>()
         .expect("in-memory test database");
-    for (game, code) in [("lease-cap-a", "LCAPE1"), ("lease-cap-b", "LCAPE2")] {
-        server
-            .database
-            .create_room(
-                game.to_string(),
-                Some(code.to_string()),
-                8,
-                true,
-                PlayerId::new_v4(),
-                "udp".to_string(),
-                "test".to_string(),
-                None,
-            )
-            .await
-            .expect("create legacy room");
-    }
+    server
+        .database
+        .create_room(
+            "lease-cap-a".to_string(),
+            Some("LCAPE1".to_string()),
+            8,
+            true,
+            PlayerId::new_v4(),
+            "udp".to_string(),
+            "test".to_string(),
+            None,
+        )
+        .await
+        .expect("create legacy room");
     let (first, mut first_rx) = connect_as(&server, APP_A, 42301).await;
-    let (second, mut second_rx) = connect_as(&server, APP_A, 42302).await;
     let app_id = server.client_app_id(&first).expect("app context attached");
 
+    // The claim stalls mid enforcement read, holding the cap lock.
     database.pause_next_get_application_room_count_for_test();
     let first_server = Arc::clone(&server);
     let first_task = tokio::spawn(async move {
@@ -646,67 +649,32 @@ async fn stalled_app_cap_count_read_keeps_its_lease_against_a_late_claimer() {
         .await;
 
     // Outlast the application room-cap lease TTL with zero storage progress.
-    // Without a live renewal the lease dies here and the late claimer below
-    // walks straight through the cap check.
+    // An unrenewed lease died at acquire+TTL, well before this probe; a
+    // renewed lease must still report the key busy.
     tokio::time::sleep(Duration::from_millis(10_400)).await;
-
-    // The late claimer CREATES a room in the same application. The one-shot
-    // server-total-count park (armed here) sits after its enforcement read
-    // but before its creation commit, so once its read completes the late
-    // claimer holds pre-commit. Both reads then complete before either
-    // claim commits — exactly the world where a dead lease overshoots.
-    database.pause_next_get_application_room_count_for_test();
-    database.pause_next_get_total_room_count_for_test();
-    let second_server = Arc::clone(&server);
-    let second_task = tokio::spawn(async move {
-        join_room(
-            &second_server,
-            &second,
-            "lease-cap-b",
-            Some("LNEW99"),
-            "Second",
-            4,
+    let stolen = server
+        .distributed_lock_for_test()
+        .try_acquire(
+            &format!("application_room_cap:{app_id}"),
+            Duration::from_secs(1),
         )
-        .await;
-    });
-    // Confirmed before any release fires: pre-fix the late claimer parks at
-    // its (re-armed) enforcement read while the first claim is still stalled.
-    // Post-fix the late claimer never reaches its read — it blocks on the
-    // renewed lease — so this wait alone may time out and the run continues.
-    let _late_claimer_reached_its_read = timeout(
-        Duration::from_secs(2),
-        database.wait_for_paused_get_application_room_count_for_test(),
-    )
-    .await
-    .is_ok();
+        .await
+        .expect("lock probe succeeds")
+        .is_some();
+    assert!(
+        !stolen,
+        "the app-cap lease must outlive its stalled enforcement read"
+    );
 
-    // Wake the late claimer's read FIRST: it must return 0 (no claim has
-    // committed yet), pass, and park at the armed server-total-count hold
-    // before it can create.
+    // Let the claim finish: the read returns 0 (nothing committed), the
+    // ceiling admits it, and the seat is granted.
     database.release_paused_get_application_room_count_for_test();
-
-    // Only then wake the stalled first read: it must also return 0 — the
-    // late claimer sits parked pre-create — and commit its claim.
-    database.release_paused_get_application_room_count_for_test();
-
-    // Let the late claimer create last: both claimers passed the cap in a
-    // pre-commit world, so the ceiling holds only if the lease never died.
-    database.release_paused_get_total_room_count_for_test();
-
-    first_task.await.expect("first claim task completes");
-    second_task.await.expect("second claim task completes");
+    first_task.await.expect("claim task completes");
     let first_result = receive(&mut first_rx).await;
-    let second_result = receive(&mut second_rx).await;
-    match (first_result.as_ref(), second_result.as_ref()) {
-        (ServerMessage::RoomJoined(_), ServerMessage::RoomJoinFailed { error_code, .. })
-        | (ServerMessage::RoomJoinFailed { error_code, .. }, ServerMessage::RoomJoined(_)) => {
-            assert_eq!(*error_code, Some(ErrorCode::MaxRoomsPerGameExceeded));
-        }
-        outcomes => panic!(
-            "the app cap must hold across a stalled enforcement read (one \
-             claim plus one denial), got {outcomes:?}"
-        ),
-    }
+    assert!(
+        matches!(first_result.as_ref(), ServerMessage::RoomJoined(_)),
+        "the stalled claim must complete normally, got {first_result:?}"
+    );
     assert_eq!(
         server
             .database

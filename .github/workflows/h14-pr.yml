@@ -1,5 +1,5 @@
 # Exact pull-request gate for the H14 equal-fault relay contract. The complete
-# verification-nightly workflow has eight jobs and remains narrowly triggered;
+# verification-nightly workflow has five jobs and remains narrowly triggered;
 # broad production inputs route only this selector here.
 
 name: H14 Relay Integrity
