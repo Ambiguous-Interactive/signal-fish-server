@@ -6,20 +6,27 @@
 # or loud disconnect") that is deliberately kept out of every PR build.
 #
 # Jobs:
-#   - soak: tests/relay_delivery_soak.rs — paced senders vs. oscillating /
-#     stalled receivers over real sockets; terminal delivery-ledger and
-#     conservation assertions.
-#   - concurrency-stress: tests/delivery_concurrency_stress.rs — the
-#     loom-substitute lane racing deliver_or_disconnect against receiver
-#     drops and explicit closes across thousands of scheduler samples.
-#   - load-smoke: the in-process latency-distribution, room-creation-throughput,
-#     and sustained-connections smoke tests from tests/load_tests.rs. The latter
-#     two were previously excluded as known-broken; issue #207 traced that to
-#     invalid room-code lengths across the whole suite — see the load-smoke job
-#     comment. NOTE these are throughput/latency smoke checks
-#     only — their clients are mpsc channels that cannot observe delivery
-#     (see the module docs in tests/load_tests.rs); the delivery contract is
-#     verified by the soak/backpressure suites above.
+#   - lightweight-cohorts: four short nextest cohorts that share one runner
+#     setup (checkout + toolchain + cache + nextest), each in its own step so
+#     the failing lane stays visible:
+#     * soak: tests/relay_delivery_soak.rs — paced senders vs. oscillating /
+#       stalled receivers over real sockets; terminal delivery-ledger and
+#       conservation assertions.
+#     * concurrency-stress: tests/delivery_concurrency_stress.rs — the
+#       loom-substitute lane racing deliver_or_disconnect against receiver
+#       drops and explicit closes across thousands of scheduler samples.
+#     * load-smoke: the in-process latency-distribution,
+#       room-creation-throughput, and sustained-connections smoke tests from
+#       tests/load_tests.rs. The latter two were previously excluded as
+#       known-broken; issue #207 traced that to invalid room-code lengths
+#       across the whole suite — see the run-step comment. NOTE these are
+#       throughput/latency smoke checks only — their clients are mpsc
+#       channels that cannot observe delivery (see the module docs in
+#       tests/load_tests.rs); the delivery contract is verified by the
+#       soak/backpressure suites above.
+#     * split-brain-catalog: tests/split_brain_two_instances_e2e.rs — two real
+#       server processes pin the unsupported multi-instance failure catalog
+#       used by the deployment doctrine.
 #   - multiprocess-delivery: tests/multiprocess_delivery_e2e.rs — REAL server
 #     + REAL client processes with OS faults (SIGSTOP/SIGKILL); the three
 #     ignored child-process tests need the pre-built native reference client
@@ -40,9 +47,6 @@
 #     H10 classifies a 256-kbps recipient under ~90-KiB/s reliable and volatile
 #     demand, including loud reconnect flaps and the volatile
 #     stable-versus-fail-loud classification.
-#   - split-brain-catalog: tests/split_brain_two_instances_e2e.rs — two real
-#     server processes pin the unsupported multi-instance failure catalog used
-#     by the deployment doctrine.
 #   - trace-validation: the reliable-delivery trace contract captures
 #     deterministic paused-clock producer traces plus a real-socket
 #     writer/finalizer trace. The classified-omission and reconnect-lifecycle
@@ -99,10 +103,15 @@ env:
   SIGNAL_FISH_H14_CONTRACT_VERSION: h14-capacity-v1
 
 jobs:
-  soak:
-    name: Relay Delivery Soak
+  lightweight-cohorts:
+    name: Lightweight Cohorts (soak, stress, load, split-brain)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Four short cohorts share one runner setup (issue #512): measured walls
+    # are soak ~1.7m, stress ~1.4m, load ~1.6m, split-brain ~1.5m plus one
+    # shared build. The ceiling keeps the zero-flakiness headroom for all
+    # four plus cold compilation; each lane stays its own step so a failure
+    # names its cohort.
+    timeout-minutes: 45
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
@@ -146,37 +155,8 @@ jobs:
             tail -n 60 soak-output.txt 2>/dev/null || echo "no soak output captured"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-  concurrency-stress:
-    name: Delivery Concurrency Stress
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7.0.1
-      - name: Read Rust toolchain
-        id: toolchain
-        shell: bash
-        run: |
-          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
-          if [ -z "$CHANNEL" ]; then
-            echo "ERROR: Could not extract channel from rust-toolchain.toml"
-            exit 1
-          fi
-          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.87.5
-        with:
-          tool: cargo-nextest
       - name: Run delivery concurrency stress
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -o pipefail
@@ -194,36 +174,6 @@ jobs:
             tail -n 40 stress-output.txt 2>/dev/null || echo "no stress output captured"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-  load-smoke:
-    name: Load Smoke (in-process throughput)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7.0.1
-      - name: Read Rust toolchain
-        id: toolchain
-        shell: bash
-        run: |
-          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
-          if [ -z "$CHANNEL" ]; then
-            echo "ERROR: Could not extract channel from rust-toolchain.toml"
-            exit 1
-          fi
-          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.87.5
-        with:
-          tool: cargo-nextest
       # All three room-based smoke cells are activated by name. The two
       # throughput cells were previously excluded as "known-broken": every cell
       # in load_tests.rs built a room code of the wrong length (the server
@@ -234,9 +184,10 @@ jobs:
       # that players actually joined, so all three now measure real work. The
       # remaining #[ignore]d load tests (stress to failure, memory projection,
       # connection-rate) are exploratory and stay manual. These tests cannot
-      # observe delivery — see the load_tests.rs module docs — so this job
+      # observe delivery — see the load_tests.rs module docs — so this step
       # reports numbers and fails only on genuine test failure.
       - name: Run load smoke tests
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -o pipefail
@@ -257,6 +208,12 @@ jobs:
             tail -n 120 load-output.txt 2>/dev/null || echo "no load output captured"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Run split-brain failure catalog
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          cargo nextest run --profile ci --locked --all-features \
+            --test split_brain_two_instances_e2e --run-ignored all
 
   multiprocess-delivery:
     name: Multi-Process Delivery Faults
@@ -636,41 +593,6 @@ jobs:
             tail -n 60 asymmetric-bandwidth-output.txt 2>/dev/null || echo "no asymmetric-bandwidth output captured"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-  split-brain-catalog:
-    name: Single-Instance Doctrine Catalog
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7.0.1
-      - name: Read Rust toolchain
-        id: toolchain
-        shell: bash
-        run: |
-          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
-          if [ -z "$CHANNEL" ]; then
-            echo "ERROR: Could not extract channel from rust-toolchain.toml"
-            exit 1
-          fi
-          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.87.5
-        with:
-          tool: cargo-nextest
-      - name: Run split-brain failure catalog
-        shell: bash
-        run: |
-          cargo nextest run --profile ci --locked --all-features \
-            --test split_brain_two_instances_e2e --run-ignored all
 
   trace-validation:
     name: Delivery Trace Replays (informational)

@@ -1617,7 +1617,10 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
         let joined = join_room(&mut observer, game, None, "Observer", 5).await;
         let room_code = joined.room_code;
 
-        // 2. A member stores credential-looking legacy metadata.
+        // 2. A member stores credential-looking legacy metadata. The Ping
+        // barrier guarantees the server processed the ProvideConnectionInfo
+        // before the late joiner's snapshot (same-connection messages are
+        // processed in order), so the stored-metadata leg is deterministic.
         let (mut provider, _) = connect_and_authenticate("provider").await;
         join_room(&mut provider, game, Some(room_code.clone()), "Provider", 4).await;
         send(
@@ -1632,6 +1635,14 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
                     client_id: None,
                 },
             },
+        )
+        .await;
+        send(&mut provider, &ClientMessage::Ping).await;
+        next_matching_server_message_within(
+            &mut provider,
+            SERVER_MESSAGE_TIMEOUT,
+            "ProvideConnectionInfo processing barrier",
+            |message| matches!(message, ServerMessage::Pong).then_some(()),
         )
         .await;
 

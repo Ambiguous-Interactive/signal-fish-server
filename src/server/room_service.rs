@@ -2118,11 +2118,8 @@ impl EnhancedGameServer {
                                         .acquire_application_room_cap_lock(app_id, app_limit)
                                         .await
                                     {
-                                        Ok(lock) => {
-                                            application_cap_lock = Some(self.keep_lock_renewed(
-                                                lock,
-                                                APPLICATION_ROOM_CAP_LOCK_TTL,
-                                            ));
+                                        Ok(guard) => {
+                                            application_cap_lock = Some(guard);
                                         }
                                         Err(error) => {
                                             self.release_renewed_lock(&mut lock_renewal).await;
@@ -2258,11 +2255,10 @@ impl EnhancedGameServer {
                             client_app_id,
                             client_app_context.as_ref().and_then(|app| app.max_rooms),
                         ) {
-                            application_cap_lock = Some(self.keep_lock_renewed(
+                            application_cap_lock = Some(
                                 self.acquire_application_room_cap_lock(app_id, app_limit)
                                     .await?,
-                                APPLICATION_ROOM_CAP_LOCK_TTL,
-                            ));
+                            );
                         }
 
                         let cap_lock_key = format!("game_room_cap:{game_name}");
@@ -2595,7 +2591,11 @@ impl EnhancedGameServer {
 
     /// Wrap a freshly acquired lock handle in a lease-renewal guard so the
     /// lease cannot expire while its critical section stalls (issue #550).
-    fn keep_lock_renewed(&self, handle: LockHandle, ttl: std::time::Duration) -> LeaseRenewalGuard {
+    pub(super) fn keep_lock_renewed(
+        &self,
+        handle: LockHandle,
+        ttl: std::time::Duration,
+    ) -> LeaseRenewalGuard {
         crate::distributed::keep_lease_renewed(
             Arc::clone(&self.distributed_lock),
             handle,
@@ -2608,7 +2608,7 @@ impl EnhancedGameServer {
     ///
     /// Stopping the renewal first prevents a final tick from extending — and
     /// then reporting a phantom loss on — a lease this caller is surrendering.
-    async fn release_renewed_lock(&self, renewal: &mut LeaseRenewalGuard) {
+    pub(super) async fn release_renewed_lock(&self, renewal: &mut LeaseRenewalGuard) {
         renewal.stop_renewal();
         self.release_lock_accounted(renewal.handle()).await;
     }
@@ -2624,32 +2624,38 @@ impl EnhancedGameServer {
         &self,
         app_id: uuid::Uuid,
         app_limit: u32,
-    ) -> Result<LockHandle, JoinRoomError> {
+    ) -> Result<LeaseRenewalGuard, JoinRoomError> {
         let cap_lock_key = format!("application_room_cap:{app_id}");
-        let lock = self
-            .distributed_lock
-            .acquire(&cap_lock_key, APPLICATION_ROOM_CAP_LOCK_TTL)
-            .await
-            .map_err(|error| {
-                tracing::error!(%app_id, %error, "Failed to acquire application room-cap lock");
-                JoinRoomError::Internal(error)
-            })?;
+        // The renewal guard must be alive before the enforcement read below:
+        // the whole point of this lock (issue #550) is that the cap count is
+        // decided under a live lease, so a stalled storage read cannot let a
+        // second claimer acquire the expired key and pass the same check.
+        let mut cap_lock = self.keep_lock_renewed(
+            self.distributed_lock
+                .acquire(&cap_lock_key, APPLICATION_ROOM_CAP_LOCK_TTL)
+                .await
+                .map_err(|error| {
+                    tracing::error!(%app_id, %error, "Failed to acquire application room-cap lock");
+                    JoinRoomError::Internal(error)
+                })?,
+            APPLICATION_ROOM_CAP_LOCK_TTL,
+        );
         let current = match self.database.get_application_room_count(&app_id).await {
             Ok(current) => current,
             Err(error) => {
                 tracing::error!(%app_id, %error, "Failed to count application rooms");
-                self.release_lock_accounted(&lock).await;
+                self.release_renewed_lock(&mut cap_lock).await;
                 return Err(JoinRoomError::Internal(error));
             }
         };
         let limit = usize::try_from(app_limit).unwrap_or(usize::MAX);
         if current >= limit {
-            self.release_lock_accounted(&lock).await;
+            self.release_renewed_lock(&mut cap_lock).await;
             return Err(JoinRoomError::MaxRoomsPerApplicationExceeded(
                 MaxRoomsPerApplicationExceededError { current, limit },
             ));
         }
-        Ok(lock)
+        Ok(cap_lock)
     }
 
     pub(super) async fn rollback_room_application_claim_if_unchanged(

@@ -464,6 +464,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The application room-cap lock now keeps its lease renewed across the
+  enforcement count read (issue #550 follow-up). The read previously ran
+  before the renewal guard existed, so a stalled storage call could let the
+  lease expire and a second claimer pass the same cap check, overshooting
+  the application room ceiling.
+- The authority `RegenerateRoomCode` operation now keeps its
+  `room_join:{game}:{candidate}` lease renewed across the storage swap
+  (issue #550 follow-up). The hold previously had no renewal, so an expired
+  lease silently voided the mutual exclusion against a joiner racing the
+  same candidate code.
 - A player banned while disconnected could restore their own seat through the
   reconnection claim path (issue #525, found by the #396 cross-feature seam
   sweep). The reconnect restore transaction re-checked only the authority-kick

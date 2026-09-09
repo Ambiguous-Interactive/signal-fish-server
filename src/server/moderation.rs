@@ -713,9 +713,12 @@ impl EnhancedGameServer {
                     return;
                 }
             };
+            // The hold spans the storage swap; keep the lease renewed so the
+            // mutual exclusion cannot silently expire mid-hold (issue #550).
+            let mut lock_renewal = self.keep_lock_renewed(lock_handle, ROOM_JOIN_LOCK_TTL);
             match self.database.update_room_code(&room_id, candidate).await {
                 Ok(room) => {
-                    self.release_lock_accounted(&lock_handle).await;
+                    self.release_renewed_lock(&mut lock_renewal).await;
                     self.metrics.increment_room_code_regenerations();
                     tracing::info!(
                         authority = %authority_id,
@@ -738,12 +741,12 @@ impl EnhancedGameServer {
                     return;
                 }
                 Err(UpdateRoomCodeError::RoomCodeCollision { .. }) => {
-                    self.release_lock_accounted(&lock_handle).await;
+                    self.release_renewed_lock(&mut lock_renewal).await;
                     self.metrics.increment_room_code_collisions();
                     continue;
                 }
                 Err(UpdateRoomCodeError::Storage(error)) => {
-                    self.release_lock_accounted(&lock_handle).await;
+                    self.release_renewed_lock(&mut lock_renewal).await;
                     tracing::error!(%authority_id, %room_id, %error, "Room-code rotation failed in storage");
                     self.fail_operation(
                         authority_id,

@@ -1034,28 +1034,32 @@ fn extract_job_display_name(content: &str, job_key: &str) -> Option<String> {
 ///
 /// Finds the `  audit:` job header and collects all lines belonging to that job
 /// block (4+-space-indented lines and blank lines) into a single string.
+/// Extract the cargo-audit steps from the CI workflow YAML content.
+///
+/// Since #512 the audit steps live inside the `deny:` supply-chain job. Finds
+/// the "Install cargo-audit" step and collects the remaining lines belonging
+/// to that job block (4+-space-indented lines and blank lines) into a single
+/// string, so the audit-step assertions keep working against the merged job.
 fn extract_audit_section(ci_content: &str) -> String {
     ci_content
         .lines()
-        .skip_while(|line| !line.starts_with("  audit:"))
-        .take_while(|line| {
-            line.starts_with("  audit:") || line.starts_with("    ") || line.trim().is_empty()
-        })
+        .skip_while(|line| !line.contains("- name: Install cargo-audit"))
+        .take_while(|line| line.starts_with("    ") || line.trim().is_empty())
         .collect::<Vec<&str>>()
         .join("\n")
 }
 
-/// Extract the `sbom:` job section from CI workflow YAML content.
+/// Extract the SBOM steps from the CI workflow YAML content.
 ///
-/// Finds the `  sbom:` job header and collects all lines belonging to that job
-/// block (4+-space-indented lines and blank lines) into a single string.
+/// Since #512 the SBOM steps live inside the `deny:` supply-chain job. Finds
+/// the "Install cargo-sbom" step and collects the remaining lines belonging
+/// to that job block (4+-space-indented lines and blank lines) into a single
+/// string, so the SBOM step assertions keep working against the merged job.
 fn extract_sbom_section(ci_content: &str) -> String {
     ci_content
         .lines()
-        .skip_while(|line| !line.starts_with("  sbom:"))
-        .take_while(|line| {
-            line.starts_with("  sbom:") || line.starts_with("    ") || line.trim().is_empty()
-        })
+        .skip_while(|line| !line.contains("- name: Install cargo-sbom"))
+        .take_while(|line| line.starts_with("    ") || line.trim().is_empty())
         .collect::<Vec<&str>>()
         .join("\n")
 }
@@ -1161,10 +1165,15 @@ fn validate_workflow_has_required_jobs(
 //   - CI / Docker Build
 //   - CI / Coverage (llvm-cov)
 //   - CI / Panic Policy
-//   - CI / SBOM (CycloneDX)
 //   - Documentation Validation / Rustdoc Validation
-//   - Documentation Validation / Documentation Tests
 //   - Documentation Validation / Markdown Code Validation
+//
+// The doc-test lanes joined the Rustdoc Validation job (#512): one runner
+// setup covers both compile graphs. The display name "Rustdoc Validation" is
+// unchanged, so the stable check name survives the consolidation.
+// The cargo-audit and SBOM lanes joined the Dependency Audit job for the same
+// reason (#512): the "CI / Audit (cargo-audit)" and "CI / SBOM (CycloneDX)"
+// check names were consolidated into "CI / Dependency Audit".
 //
 // Offline link validation is the canonical `Link Check / Check Links` check
 // (issue #378); the duplicate Documentation Link Check job was retired.
@@ -1201,12 +1210,7 @@ const REQUIRED_CI_JOBS: &[(&str, &str, &str)] = &[
     (
         "deny",
         "Dependency Audit",
-        "Security audits and license checks",
-    ),
-    (
-        "audit",
-        "Audit (cargo-audit)",
-        "Second-opinion vulnerability scan via cargo-audit",
+        "Supply-chain job: cargo-deny policy, cargo-audit + npm scans, SBOM (#512)",
     ),
     (
         "msrv",
@@ -1228,25 +1232,21 @@ const REQUIRED_CI_JOBS: &[(&str, &str, &str)] = &[
         "Panic Policy",
         "Zero-panic production code enforcement",
     ),
-    (
-        "sbom",
-        "SBOM (CycloneDX)",
-        "Software Bill of Materials generation",
-    ),
 ];
 
 /// Required doc-validation workflow jobs: (job_key, display_name, description)
 ///
 /// Workflow-script shellcheck coverage runs inside `markdown-code-samples` so
 /// it reuses the checkout and shellcheck installation without allocating a
-/// fifth runner or introducing another status name.
+/// fifth runner or introducing another status name. The doc-test lanes run
+/// inside `rustdoc` (#512) for the same reason: one runner setup covers the
+/// rustdoc and doc-test compile graphs without a third status name.
 const REQUIRED_DOC_VALIDATION_JOBS: &[(&str, &str, &str)] = &[
     (
         "rustdoc",
         "Rustdoc Validation",
-        "Rustdoc build with strict warnings",
+        "Rustdoc build with strict warnings, then cargo doc-tests",
     ),
-    ("doc-tests", "Documentation Tests", "Cargo doc-tests"),
     (
         "markdown-code-samples",
         "Markdown Code Validation",
@@ -1335,14 +1335,11 @@ const REQUIRED_CHECK_NAMES: &[&str] = &[
     "CI / Nextest (macos-latest)",
     "CI / Relay Allocation Ceilings",
     "CI / Dependency Audit",
-    "CI / Audit (cargo-audit)",
     "CI / MSRV Verification",
     "CI / Docker Build",
     "CI / Coverage (llvm-cov)",
     "CI / Panic Policy",
-    "CI / SBOM (CycloneDX)",
     "Documentation Validation / Rustdoc Validation",
-    "Documentation Validation / Documentation Tests",
     "Documentation Validation / Markdown Code Validation",
 ];
 
@@ -1365,7 +1362,7 @@ const REQUIRED_WORKFLOW_FILES: &[(&str, &str)] = &[
     ),
     (
         "doc-validation.yml",
-        "Documentation validation (rustdoc, doc-tests, markdown, links)",
+        "Documentation validation (rustdoc + doc-tests, markdown, links)",
     ),
     ("yaml-lint.yml", "YAML syntax validation"),
     ("actionlint.yml", "GitHub Actions syntax validation"),
@@ -8520,8 +8517,8 @@ fn test_doc_validation_workflow_has_required_jobs() {
     assert_eq!(
         jobs.len(),
         REQUIRED_DOC_VALIDATION_JOBS.len(),
-        "doc-validation.yml must use exactly the four stable documentation jobs; auxiliary \
-         validation belongs in an existing job instead of consuming another runner"
+        "doc-validation.yml must use exactly the two stable documentation jobs; the doc-test \
+         lanes belong inside Rustdoc Validation (#512) instead of consuming another runner"
     );
     assert!(
         !jobs.contains_key(&Yaml::value_from_str("inline-code-references")),
@@ -21961,7 +21958,9 @@ fn test_sbom_job_installs_cargo_sbom() {
 #[test]
 fn test_sbom_job_has_reasonable_timeout() {
     // SBOM generation only reads Cargo.lock/Cargo.toml metadata and should
-    // complete quickly. A 10-minute timeout is generous but prevents hangs.
+    // complete quickly. Since #512 the SBOM steps share the Dependency Audit
+    // job, whose 40-minute ceiling covers the nominal 10+15+10 budgets of the
+    // three supply-chain layers it consolidated.
 
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
@@ -21969,10 +21968,15 @@ fn test_sbom_job_has_reasonable_timeout() {
     let sbom_section = extract_sbom_section(&strip_comment_lines(&ci_content));
 
     assert!(
-        sbom_section.contains("timeout-minutes: 10"),
-        "SBOM job should have a 10-minute timeout.\n\
-         SBOM generation is metadata-only and should complete in under a minute.\n\
-         A 10-minute budget provides margin without wasting CI resources on hangs."
+        ci_content.contains("timeout-minutes: 40"),
+        "the consolidated supply-chain job should keep a 40-minute timeout.\n\
+         cargo-deny + cargo-audit + SBOM spent three runner setups before; \
+         their merged ceiling must still leave zero-flakiness headroom."
+    );
+    assert!(
+        sbom_section.contains("Install cargo-sbom"),
+        "the SBOM steps must stay part of the Dependency Audit job after the \
+         #512 consolidation"
     );
 }
 
@@ -25996,10 +26000,10 @@ fn test_audit_job_covers_every_dependabot_managed_npm_graph() {
     let steps = documents
         .first()
         .and_then(|document| document.as_mapping_get("jobs"))
-        .and_then(|jobs| jobs.as_mapping_get("audit"))
+        .and_then(|jobs| jobs.as_mapping_get("deny"))
         .and_then(|job| job.as_mapping_get("steps"))
         .and_then(Yaml::as_sequence)
-        .unwrap_or_else(|| panic!("ci.yml must define jobs.audit.steps"));
+        .unwrap_or_else(|| panic!("ci.yml must define jobs.deny.steps"));
 
     let setup_node = steps.iter().any(|step| {
         step.as_mapping_get("uses")
@@ -26013,7 +26017,7 @@ fn test_audit_job_covers_every_dependabot_managed_npm_graph() {
     });
     assert!(
         setup_node,
-        "ci.yml jobs.audit must install Node 22 before scanning npm lockfiles.\n\
+        "ci.yml jobs.deny must install Node 22 before scanning npm lockfiles.\n\
          Fix: add a pinned actions/setup-node step with node-version: \"22\"."
     );
 
@@ -26092,28 +26096,32 @@ fn test_markdownlint_workflow_uses_supported_node_runtime() {
 
 #[test]
 fn test_audit_job_configuration() {
-    // Validates that the audit job has appropriate timeout and runs on ubuntu-latest,
-    // matching the project's convention for security-related CI jobs.
+    // Validates that the audit steps run on ubuntu-latest inside the
+    // consolidated supply-chain job (#512), whose 40-minute ceiling covers
+    // the nominal 10+15+10 budgets of the three layers it merged.
 
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
 
-    let audit_section = extract_audit_section(&strip_comment_lines(&ci_content));
-
-    assert!(
-        audit_section.contains("timeout-minutes: 15"),
-        "Audit job should have a 15-minute timeout.\n\
-         cargo-audit is a lightweight advisory database check, but the lane runs \
-         five lockfile scans plus two npm audits whose transient-registry retry \
-         legitimately spends slack when the npm registry is degraded.\n\
-         A 15-minute budget absorbs the retry path without wasting CI resources \
-         on hangs."
+    let documents = Yaml::load_from_str(&ci_content).expect("ci.yml must parse as YAML");
+    let deny_job = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .and_then(|jobs| jobs.as_mapping_get("deny"))
+        .expect("ci.yml must define jobs.deny");
+    assert_eq!(
+        deny_job
+            .as_mapping_get("timeout-minutes")
+            .and_then(Yaml::as_integer),
+        Some(40),
+        "the consolidated supply-chain job keeps a 40-minute ceiling: five \
+         lockfile cargo-audit scans plus two npm audits whose transient-registry \
+         retry legitimately spends slack when the npm registry is degraded."
     );
-
-    assert!(
-        audit_section.contains("runs-on: ubuntu-latest"),
-        "Audit job should run on ubuntu-latest.\n\
-         Security advisory scanning is platform-independent and only needs a single runner."
+    assert_eq!(
+        deny_job.as_mapping_get("runs-on").and_then(Yaml::as_str),
+        Some("ubuntu-latest"),
+        "Security advisory scanning is platform-independent and only needs a single runner."
     );
 }
 
@@ -26135,20 +26143,20 @@ const SCHEDULE_EXCLUDED_CI_JOBS: &[&str] = &[
     "doc-consistency",
     "docker",
     "panic-policy",
-    "sbom",
 ];
 
 #[test]
 fn test_ci_schedule_only_runs_security_jobs() {
     // Validates the daily scheduled trigger's cost cohort (issues #513 and
-    // #512): the security audit jobs (`deny` and `audit`), the
-    // `quick-check` gate, the macOS + Windows legs of `lint`/`nextest`, the
-    // instrumented `coverage` gate, and the MSRV full-suite run execute on
-    // schedule; every job in `SCHEDULE_EXCLUDED_CI_JOBS` is excluded from
-    // schedule runs entirely, and `doc-consistency` — a Linux-only lane —
-    // keeps its own exclusion guard in that list. `msrv` runs on every
-    // event (per-event MSRV compilation) and `coverage` runs on the cron
-    // only; both cohort placements are pinned by
+    // #512): the consolidated supply-chain job (`deny`, which absorbed the
+    // audit and per-event SBOM steps), the `quick-check` gate, the macOS +
+    // Windows legs of `lint`/`nextest`, the instrumented `coverage` gate, and
+    // the MSRV full-suite run execute on schedule; every job in
+    // `SCHEDULE_EXCLUDED_CI_JOBS` is excluded from schedule runs entirely,
+    // and `doc-consistency` — a Linux-only lane — keeps its own exclusion
+    // guard in that list. `msrv` runs on every event (per-event MSRV
+    // compilation) and `coverage` runs on the cron only; both cohort
+    // placements are pinned by
     // test_ci_msrv_and_coverage_suite_lanes_run_on_the_daily_cron.
     //
     // The ci.yml workflow has a daily cron schedule for catching new CVEs
@@ -26161,25 +26169,26 @@ fn test_ci_schedule_only_runs_security_jobs() {
     //
     // This test ensures:
     //   1. Every job in `SCHEDULE_EXCLUDED_CI_JOBS` has a schedule-exclusion guard
-    //   2. The `deny` and `audit` jobs do NOT have a schedule exclusion guard
+    //   2. The `deny` job does NOT have a schedule exclusion guard
     //   3. The macOS + Windows lint/nextest per-leg cohort guard is pinned
     //      separately (test_ci_windows_and_macos_lanes_run_only_on_the_daily_cron)
 
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
 
-    // Verify the deny and audit jobs do NOT have a schedule exclusion guard
-    for security_job in &["deny", "audit"] {
-        let condition = extract_job_if_condition(&ci_content, security_job);
+    // Verify the consolidated supply-chain job does NOT have a schedule
+    // exclusion guard
+    {
+        let condition = extract_job_if_condition(&ci_content, "deny");
         if let Some(ref cond) = condition {
             assert!(
                 !cond.contains("schedule"),
-                "The `{security_job}` job must NOT exclude schedule runs.\n\
-                 Found `if: {cond}` on the {security_job} job, which would prevent the \
+                "The `deny` job must NOT exclude schedule runs.\n\
+                 Found `if: {cond}` on the deny job, which would prevent the \
                  daily security audit from running.\n\n\
-                 The deny and audit jobs should run on the daily schedule \
+                 The deny job should run on the daily schedule \
                  trigger to catch new CVEs.\n\n\
-                 To fix: Remove the `if:` guard from the {security_job} job in ci.yml."
+                 To fix: Remove the `if:` guard from the deny job in ci.yml."
             );
         }
         // condition being None is fine — no `if:` means it runs on all triggers

@@ -473,6 +473,73 @@ async fn regenerate_room_code_rotates_registry_and_drops_the_old_code() {
     );
 }
 
+/// Issue #550 class, room-code rotation leg: the rotation holds
+/// `room_join:{game}:{candidate}` across the storage swap, so the lease must
+/// stay renewed while the swap stalls — the candidate-code mutex must still
+/// exclude a racing joiner after the raw TTL has elapsed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg_attr(miri, ignore)]
+async fn stalled_room_code_rotation_keeps_its_mutex_lease_alive() {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .expect("in-memory test database");
+    let (authority, mut authority_rx) =
+        register_client(&server, "127.0.0.1:48137".parse().unwrap()).await;
+    join_seated_player(&server, &authority, &mut authority_rx, "OLDCOD", "host").await;
+    server.script_room_codes_for_test(["NEWCOD"]);
+
+    database.pause_next_update_room_code_for_test();
+    let rotation_server = Arc::clone(&server);
+    let rotation_task = tokio::spawn(async move {
+        rotation_server
+            .handle_regenerate_room_code_operation(&authority, RoomOperationId::new_v4())
+            .await;
+    });
+    database.wait_for_paused_update_room_code_for_test().await;
+
+    // Outlast the room-join lease TTL with the swap stalled. An expired lease
+    // would leave the candidate-code mutex free to take; a renewed lease must
+    // still report it busy.
+    tokio::time::sleep(Duration::from_millis(10_400)).await;
+    let stolen = server
+        .distributed_lock_for_test()
+        .try_acquire("room_join:moderation-game:NEWCOD", Duration::from_secs(1))
+        .await
+        .expect("lock probe succeeds")
+        .is_some();
+    assert!(
+        !stolen,
+        "the rotation's mutex lease must outlive its stalled storage hold"
+    );
+
+    database.release_paused_update_room_code_for_test();
+    rotation_task.await.expect("rotation task completes");
+    let response = recv_until(&mut authority_rx, |message| {
+        matches!(message, ServerMessage::RoomOperationResult { .. })
+    })
+    .await;
+    let ServerMessage::RoomOperationResult { result, .. } = response.as_ref() else {
+        panic!("expected correlated result, got {response:?}");
+    };
+    let RoomOperationResult::RoomCodeRegenerated { room_code } = result.as_ref() else {
+        panic!("expected RoomCodeRegenerated, got {result:?}");
+    };
+    assert_eq!(room_code, "NEWCOD");
+    assert_eq!(
+        server
+            .metrics
+            .snapshot()
+            .await
+            .distributed_lock
+            .renewal_failures,
+        0,
+        "a lease that stayed renewed must never report a loss"
+    );
+}
+
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn regenerate_retries_colliding_candidates_within_the_budget() {

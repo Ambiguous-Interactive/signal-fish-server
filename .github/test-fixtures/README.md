@@ -260,8 +260,7 @@ These test fixtures are part of the comprehensive documentation validation strat
 
 ```text
 Documentation Validation Workflow
-├── rustdoc: Build and validate Rust API docs
-├── doc-tests: Run tests in documentation comments
+├── rustdoc: Build and validate Rust API docs, run doc tests
 ├── markdown-code-samples: ← These fixtures test this job
 │   ├── Rust code blocks
 │   ├── JSON validation
