@@ -672,6 +672,12 @@ pub struct InMemoryDatabase {
     #[cfg(test)]
     release_get_total_room_count: tokio::sync::Notify,
     #[cfg(test)]
+    pause_update_room_code: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    update_room_code_reached: tokio::sync::Notify,
+    #[cfg(test)]
+    release_update_room_code: tokio::sync::Notify,
+    #[cfg(test)]
     get_room_by_id_calls: std::sync::atomic::AtomicU32,
     #[cfg(test)]
     pause_get_room_by_id: std::sync::atomic::AtomicBool,
@@ -741,6 +747,12 @@ impl InMemoryDatabase {
             get_total_room_count_reached: tokio::sync::Notify::new(),
             #[cfg(test)]
             release_get_total_room_count: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            pause_update_room_code: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            update_room_code_reached: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            release_update_room_code: tokio::sync::Notify::new(),
             #[cfg(test)]
             get_room_by_id_calls: std::sync::atomic::AtomicU32::new(0),
             #[cfg(test)]
@@ -850,6 +862,22 @@ impl InMemoryDatabase {
     #[cfg(test)]
     pub(crate) fn release_paused_get_total_room_count_for_test(&self) {
         self.release_get_total_room_count.notify_one();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_next_update_room_code_for_test(&self) {
+        self.pause_update_room_code
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_paused_update_room_code_for_test(&self) {
+        self.update_room_code_reached.notified().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_paused_update_room_code_for_test(&self) {
+        self.release_update_room_code.notify_one();
     }
 
     #[cfg(test)]
@@ -1211,6 +1239,14 @@ impl GameDatabase for InMemoryDatabase {
     }
 
     async fn update_room_code(&self, room_id: &RoomId, new_code: String) -> UpdateRoomCodeResult {
+        #[cfg(test)]
+        if self
+            .pause_update_room_code
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            self.update_room_code_reached.notify_one();
+            self.release_update_room_code.notified().await;
+        }
         // Lock order matches `create_room`: rooms first, then room_codes,
         // then liveness. All writes commit under one set of guards so the
         // code registry can never disagree with the stored room about which

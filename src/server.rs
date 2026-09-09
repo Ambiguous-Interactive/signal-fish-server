@@ -890,6 +890,13 @@ impl EnhancedGameServer {
             .extend(codes.into_iter().map(str::to_string));
     }
 
+    /// The server's own distributed-lock instance, for tests that must probe
+    /// the live lease state of a hold (issue #550 lease-renewal coverage).
+    #[cfg(test)]
+    pub(crate) fn distributed_lock_for_test(&self) -> Arc<dyn DistributedLock> {
+        Arc::clone(&self.distributed_lock)
+    }
+
     /// Register a new client connection.
     ///
     /// The connection is registered with a detached close signal: delivery

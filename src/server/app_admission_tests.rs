@@ -594,6 +594,110 @@ async fn legacy_room_claims_share_the_atomic_application_room_cap() {
     );
 }
 
+/// Issue #550 class, app-cap leg: the application-room-cap hold spans the
+/// enforcement count read. When that read stalls past the lease TTL, the
+/// lease must stay alive (renewed), so a late claimer still waits and the
+/// ceiling holds. The renewal guard must therefore wrap the hold BEFORE the
+/// count read, not after the helper returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg_attr(miri, ignore)]
+async fn stalled_app_cap_count_read_keeps_its_lease_against_a_late_claimer() {
+    let server = create_server(true, vec![app_entry(APP_A, Some(1), Some(8))]).await;
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<InMemoryDatabase>()
+        .expect("in-memory test database");
+    for (game, code) in [("lease-cap-a", "LCAPE1"), ("lease-cap-b", "LCAPE2")] {
+        server
+            .database
+            .create_room(
+                game.to_string(),
+                Some(code.to_string()),
+                8,
+                true,
+                PlayerId::new_v4(),
+                "udp".to_string(),
+                "test".to_string(),
+                None,
+            )
+            .await
+            .expect("create legacy room");
+    }
+    let (first, mut first_rx) = connect_as(&server, APP_A, 42301).await;
+    let (second, mut second_rx) = connect_as(&server, APP_A, 42302).await;
+    let app_id = server.client_app_id(&first).expect("app context attached");
+
+    database.pause_next_get_application_room_count_for_test();
+    let first_server = Arc::clone(&server);
+    let first_task = tokio::spawn(async move {
+        join_room(
+            &first_server,
+            &first,
+            "lease-cap-a",
+            Some("LCAPE1"),
+            "First",
+            8,
+        )
+        .await;
+    });
+    database
+        .wait_for_paused_get_application_room_count_for_test()
+        .await;
+
+    // Outlast the application room-cap lease TTL with zero storage progress.
+    // Without a live renewal the lease dies here and the late claimer below
+    // walks straight through the cap check.
+    tokio::time::sleep(Duration::from_millis(10_400)).await;
+
+    let second_server = Arc::clone(&server);
+    let second_task = tokio::spawn(async move {
+        join_room(
+            &second_server,
+            &second,
+            "lease-cap-b",
+            Some("LCAPE2"),
+            "Second",
+            8,
+        )
+        .await;
+    });
+
+    database.release_paused_get_application_room_count_for_test();
+    first_task.await.expect("first claim task completes");
+    second_task.await.expect("second claim task completes");
+    let first_result = receive(&mut first_rx).await;
+    let second_result = receive(&mut second_rx).await;
+    match (first_result.as_ref(), second_result.as_ref()) {
+        (ServerMessage::RoomJoined(_), ServerMessage::RoomJoinFailed { error_code, .. })
+        | (ServerMessage::RoomJoinFailed { error_code, .. }, ServerMessage::RoomJoined(_)) => {
+            assert_eq!(*error_code, Some(ErrorCode::MaxRoomsPerGameExceeded));
+        }
+        outcomes => panic!(
+            "the app cap must hold across a stalled enforcement read (one \
+             claim plus one denial), got {outcomes:?}"
+        ),
+    }
+    assert_eq!(
+        server
+            .database
+            .get_application_room_count(&app_id)
+            .await
+            .expect("count claimed legacy rooms"),
+        1
+    );
+    assert_eq!(
+        server
+            .metrics
+            .snapshot()
+            .await
+            .distributed_lock
+            .renewal_failures,
+        0,
+        "a lease that stayed renewed must never report a loss"
+    );
+}
+
 #[tokio::test]
 async fn unpublished_legacy_admission_rolls_back_ownership_claim() {
     let server = create_server(true, vec![app_entry(APP_A, Some(10), Some(8))]).await;
