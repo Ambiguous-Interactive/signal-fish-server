@@ -213,19 +213,25 @@ fn bounded_metrics_response(
                 serde_json::Value::Bool(true),
             );
         }
-        let fixed_size = measured(&response) + HISTORY_TRUNCATION_MARKER_SLACK_BYTES;
+        let fixed_size = measured(&response).saturating_add(HISTORY_TRUNCATION_MARKER_SLACK_BYTES);
         let budget_for_history = METRICS_RESPONSE_MAX_BYTES.saturating_sub(fixed_size);
-        let mut kept_from = samples.len();
+        // Walk from the newest sample backwards; keep the longest suffix that
+        // fits the budget.
         let mut suffix_bytes = 0usize;
-        while kept_from > 0 {
-            let size = sample_sizes[kept_from - 1];
-            if suffix_bytes + size > budget_for_history {
-                break;
-            }
-            suffix_bytes += size;
-            kept_from -= 1;
-        }
-        let dropped = kept_from;
+        let kept_count: usize = sample_sizes
+            .iter()
+            .rev()
+            .take_while(|size| {
+                let next = suffix_bytes.saturating_add(**size);
+                if next > budget_for_history {
+                    false
+                } else {
+                    suffix_bytes = next;
+                    true
+                }
+            })
+            .count();
+        let dropped = sample_sizes.len().saturating_sub(kept_count);
         let kept: Vec<serde_json::Value> = samples.into_iter().skip(dropped).collect();
         if let Some(cache) = response
             .get_mut("dashboardCache")

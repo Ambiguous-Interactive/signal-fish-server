@@ -304,7 +304,12 @@ impl LeaseRenewalGuard {
         ttl: Duration,
         metrics: Arc<crate::metrics::ServerMetrics>,
     ) -> Self {
-        let interval = ttl / LEASE_RENEWAL_INTERVAL_FRACTION;
+        // A third of the TTL keeps three extensions per lease; if the
+        // division cannot compute, renewing every whole TTL still bounds the
+        // exposure.
+        let interval = ttl
+            .checked_div(LEASE_RENEWAL_INTERVAL_FRACTION)
+            .unwrap_or(ttl);
         let task_handle = handle.clone();
         let renewal = tokio::spawn(async move {
             let mut ticks = tokio::time::interval(interval);
