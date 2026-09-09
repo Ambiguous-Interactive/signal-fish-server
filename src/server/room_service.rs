@@ -2463,14 +2463,20 @@ impl EnhancedGameServer {
                         // Creation-time spectator capacity (issue #525):
                         // apply the deployment default while the room is
                         // still inside its join critical section. The room
-                        // mutation gate is taken first so a spectator
-                        // admission that already resolved the code
-                        // serializes behind the cap instead of observing the
-                        // unlimited default. A storage backend that cannot
-                        // persist the cap logs loudly and keeps the room
-                        // unlimited (the local row stays consistent with
-                        // storage) rather than failing an already-committed
-                        // admission.
+                        // mutation gate serializes this write with any
+                        // spectator admission resolved onto the same lane,
+                        // but it does not order the two against each other:
+                        // the fresh room row is visible in storage before
+                        // this section, so a spectator that resolves the
+                        // unannounced code in that microsecond window can
+                        // acquire the gate first and be admitted against
+                        // the unlimited default (bounded by the room's
+                        // eventual cap churn, and refused outright for a
+                        // sealed creation by the password perimeter). A
+                        // storage backend that cannot persist the cap logs
+                        // loudly and keeps the room unlimited (the local
+                        // row stays consistent with storage) rather than
+                        // failing an already-committed admission.
                         let spectator_cap = self.default_max_spectators(max_players);
                         let cap_event_guard = self
                             .message_coordinator

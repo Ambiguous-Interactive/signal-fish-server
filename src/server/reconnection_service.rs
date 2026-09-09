@@ -983,6 +983,28 @@ impl EnhancedGameServer {
                 .await;
         }
 
+        // A ban that raced this claim serialized its durable write on the
+        // same room mutation gate, but the record's tombstone cannot cover
+        // every arrival order: the mark lands in a later gate hold than the
+        // ban write, and a teardown re-arm after a raced eviction carries a
+        // fresh record no tombstone ever touched. Re-check the ban list
+        // against this gate-fresh room read so a recorded ban refuses every
+        // restore, and the only path back into the room is the fresh-join
+        // perimeter after an unban (issue #525). The record itself is left
+        // intact so a mid-window unban can still honor the credential.
+        if room.is_banned(reconnect_player_id) {
+            return self
+                .reject_claimed_reconnect(
+                    current_player_id,
+                    claim_guard,
+                    &restore,
+                    "Player is banned from this room",
+                    ErrorCode::Banned,
+                    operation_id,
+                )
+                .await;
+        }
+
         // Reconnection tokens prove the prior player identity, not the
         // application principal on this new socket. Re-authorize against the
         // persisted room owner before restoring membership (the owner gate
