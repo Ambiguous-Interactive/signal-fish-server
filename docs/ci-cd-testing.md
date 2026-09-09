@@ -97,7 +97,7 @@ Tests that validate CI workflow configuration:
 | `test_markdownlint_workflow_exists_and_is_configured` | Validates markdownlint workflow setup | Missing or misconfigured markdown linting |
 | `test_doc_validation_workflow_has_shellcheck` | Ensures doc-validation validates its own scripts | AWK/bash syntax errors in workflows |
 | `test_workflow_hygiene_requirements` | Data-driven validation of concurrency, timeouts, and permissions | Wasted CI resources, hanging jobs, overly permissive workflows |
-| `test_ci_workflow_has_required_jobs` | Validates all required CI jobs exist (including panic-policy, SBOM, audit) | Accidental removal of safety-critical CI checks |
+| `test_ci_workflow_has_required_jobs` | Validates all required CI jobs exist (including the consolidated supply-chain job) | Accidental removal of safety-critical CI checks |
 
 **Example:** Preventing AWK syntax errors
 
@@ -215,18 +215,20 @@ Key design decisions:
 #### Relay Allocation Ceilings
 
 The CI workflow runs the production-seam relay allocation harness on Linux for
-every push and pull request. The job checks allocation operations,
+every push and pull request. The harness checks allocation operations,
 reallocations, and allocated bytes for JSON, direct MessagePack, and mixed
-relay projections at room sizes 2, 8, and 16. The gating job has the stable
-repository-owned name `CI / Relay Allocation Ceilings`; serializer, allocator
-accounting, or ceiling changes therefore make the CI workflow fail when the
-deterministic gate fails. External branch policy is configured separately. The
-daily security schedule excludes this job because it does not inspect newly
-published advisories.
+relay projections at room sizes 2, 8, and 16. Since the #558 job
+consolidation, the ceiling commands run as ubuntu-gated steps of the `Nextest
+(ubuntu-latest)` job: the bench compile graph shares the nextest runner's
+toolchain, cache, and target dir instead of paying a second full runner setup.
+Serializer, allocator accounting, or ceiling changes therefore make the CI
+workflow fail when the deterministic gate fails. External branch policy is
+configured separately. The daily security schedule does not run the ceilings
+because it does not inspect newly published advisories: the cron cohort is
+macOS/Windows only, so the ubuntu-gated steps never materialize there.
 
 **Tests that enforce this:** `test_ci_enforces_relay_allocation_ceilings`,
-`test_ci_workflow_has_required_jobs`, `test_required_check_names_are_consistent`,
-and `test_ci_schedule_only_runs_security_jobs`.
+`test_ci_workflow_has_required_jobs`, and `test_ci_schedule_only_runs_security_jobs`.
 
 #### Platform Cohorts (Lint / Nextest)
 
@@ -503,11 +505,14 @@ The scanner is a fail-closed syntactic baseline for first-party production
 code. Miri and sanitizer jobs provide complementary runtime coverage; the gate
 does not claim that dependencies or allocation failure can never panic.
 
-**CI integration:** The `panic-policy` job in `ci.yml` runs this script
-on every push and pull request to `main`. The job uses `ubuntu-latest`
-with clippy and has a 15-minute timeout.
+**CI integration:** The `lint` job's ubuntu leg in `ci.yml` runs this script
+on every push and pull request to `main`. Since the #558 job consolidation,
+the check is a step of that job (sharing its runner, toolchain, and cache)
+instead of a standalone `CI / Panic Policy` job.
 
-**Test that enforces this:** `test_ci_workflow_has_required_jobs` (validates the panic-policy job exists in ci.yml)
+**Tests that enforce this:** `test_ci_lint_job_runs_panic_policy_check` (pins
+the script invocation and its ubuntu-only guard inside the lint job) and
+`test_ci_workflow_has_required_jobs` (validates the lint job exists in ci.yml)
 
 ### 5. Outdated Dependency Checking: `scripts/check-outdated.sh`
 
@@ -747,8 +752,8 @@ let item = vec.get(index).ok_or(MyError::IndexOutOfBounds)?;
 - `.unwrap()` and `.expect()` calls
 - Unchecked array/slice indexing (`vec[i]`)
 
-**Test that enforces this:** `test_ci_workflow_has_required_jobs`
-(validates panic-policy job exists)
+**Test that enforces this:** `test_ci_lint_job_runs_panic_policy_check`
+(validates the lint job runs the check)
 
 **Local check:** `./scripts/check-no-panics.sh`
 

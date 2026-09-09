@@ -170,12 +170,19 @@ correctness evidence appears.
    native-platforms legs (macOS 10x + Windows 2x) into the
    schedule/dispatch cohort; per-event validation coverage is unchanged.
    Session 225 consolidated job granularity (measured pool ~115 Linux
-   billed minutes/day): verification-nightly's four short lanes share one
-   runner setup, the cargo-audit/npm/SBOM steps joined the `deny`
-   supply-chain job, and the doc-test lanes joined `Rustdoc Validation`.
-   Remaining levers are itemized on #558; the bigger items still need
-   owner input: self-hosted runner labels (owner comment excludes
-   DAD-MACHINE and ELI-MACHINE) and the #379 path-awareness inventory.
+    billed minutes/day): verification-nightly's four short lanes share one
+    runner setup, the cargo-audit/npm/SBOM steps joined the `deny`
+    supply-chain job, and the doc-test lanes joined `Rustdoc Validation`.
+    Session 226 closed the #558 owner-input-free levers: the
+    `panic-policy` job is now an ubuntu-gated step of `lint`, the
+    `relay-allocations` job is now an ubuntu-gated step of `nextest`, and
+    the `z3` job is now a step of the formal-verification `tlc` job
+    (measured before: 2.8 + 2.2 billed minutes per CI event plus two
+    runner setups; guard constants/tests migrated atomically, retired
+    check names documented in the naming-contract header).
+    Remaining levers still need owner input: self-hosted runner labels
+    (owner comment excludes DAD-MACHINE and ELI-MACHINE) and the #379
+    path-awareness inventory.
 - #379 — make verification-nightly pull-request fan-out path-aware only after
   an owner exports the required-check/ruleset inventory and a historical
   changed-file replay proves net allocation and runner-time savings. On the
