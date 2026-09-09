@@ -99,7 +99,7 @@ correctness evidence appears.
   frontier: continue seam sweeps; #539 tracks the coordinated-SDK path for
   the `connected_at` v3 trim (released SDKs 0.8.0–0.12.0 require the field);
   the parked-state (`senderState`) producers are same-thread program-ordered
-  behind their `SendFull` record (  verified, no race window). The 2026-09-09
+  behind their `SendFull` record (verified, no race window). The 2026-09-09
   session-223 sweep found no demonstrable in-file defect across the stalest
   seams (authority, messaging, relay_policy, maintenance, shutdown,
   token_binding, outbound_queue, batching, deadline); residual risk
@@ -114,7 +114,7 @@ correctness evidence appears.
   re-reads the ban under its gate hold and refuses `BANNED`, record intact
   for mid-window unban). Pins: password-perimeter-before-ban ordering on
   both admission paths, ban/password persistence across rotation and
-  transfer.   Remaining frontier: the reconnection replay/ring-buffer
+  transfer. Remaining frontier: the reconnection replay/ring-buffer
   seams interacting with the moderation tombstone preserve/merge paths,
   and the #550 distributed-lock lease-renewal paths.
 - #525 — session 217 landed the minimal viable moderation set: authority

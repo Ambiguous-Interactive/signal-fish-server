@@ -2444,10 +2444,17 @@ fn test_relay_timing_observations_workflow_is_bounded_complete_and_retainable() 
             && cohort_step_source.contains("macos-latest"),
         "the scheduled cohort must keep the Windows and macOS timing legs"
     );
+    // Ordering, not just presence: the Linux-only fallback must be the
+    // `else` branch, not a dead string beside an unconditional 3-OS emit.
+    let expensive_branch = cohort_step_source
+        .find("\"schedule\"")
+        .expect("cohort branches on schedule");
+    let fallback = cohort_step_source
+        .find("os=[\"ubuntu-latest\"]")
+        .expect("cohort keeps the Linux-only fallback");
     assert!(
-        cohort_step_source.contains("os=[\"ubuntu-latest\"]"),
-        "any other event (a pull_request validating the contract) must fall back \
-         to the fail-closed Linux-only cohort"
+        fallback > expensive_branch,
+        "the Linux-only cohort must be the fallback branch, not a dead string"
     );
 
     let job = jobs

@@ -681,8 +681,6 @@ async fn kicked_disconnected_seat_is_removed_and_never_reconnectable() {
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn banned_players_pending_record_cannot_restore_the_seat() {
-    use crate::reconnection::ReconnectionError;
-
     let server = create_test_server_with(ServerConfig::default()).await;
     let (authority, mut _authority_rx) =
         register_client(&server, "127.0.0.1:48152".parse().unwrap()).await;
@@ -833,8 +831,9 @@ async fn banned_players_pending_record_cannot_restore_the_seat() {
             .claim_reconnection(&socket, &target, &room_id, &token)
             .await;
         assert!(
-            !matches!(outcome, Err(ReconnectionError::Kicked)),
-            "a ban refusal must not consume the record with a kick tombstone: {outcome:?}"
+            outcome.is_ok(),
+            "a ban refusal must leave the record claimable, not consume it with \
+             a kick tombstone or delete it: {outcome:?}"
         );
     } else {
         panic!("reconnection manager must be active for this test");
