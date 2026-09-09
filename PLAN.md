@@ -99,13 +99,24 @@ correctness evidence appears.
   frontier: continue seam sweeps; #539 tracks the coordinated-SDK path for
   the `connected_at` v3 trim (released SDKs 0.8.0–0.12.0 require the field);
   the parked-state (`senderState`) producers are same-thread program-ordered
-  behind their `SendFull` record (verified, no race window). The 2026-09-09
+  behind their `SendFull` record (  verified, no race window). The 2026-09-09
   session-223 sweep found no demonstrable in-file defect across the stalest
   seams (authority, messaging, relay_policy, maintenance, shutdown,
   token_binding, outbound_queue, batching, deadline); residual risk
   concentrates in cross-feature interaction seams between the recently
   landed room-access, spectator fan-out, and authority-moderation features —
-  sweep there next.
+  sweep there next. The 2026-09-09 session-224 sweep covered exactly those
+  seams (three parallel audits + adversarial verification) and closed the
+  ban × reconnect-restore divergence class: the restore transaction
+  re-checked only the kick tombstone, never the room ban list, and the
+  two-hold `BanPlayer` gate sequence plus teardown re-arms left arrival
+  orders where a banned player re-seated permanently (#557; restore now
+  re-reads the ban under its gate hold and refuses `BANNED`, record intact
+  for mid-window unban). Pins: password-perimeter-before-ban ordering on
+  both admission paths, ban/password persistence across rotation and
+  transfer.   Remaining frontier: the reconnection replay/ring-buffer
+  seams interacting with the moderation tombstone preserve/merge paths,
+  and the #550 distributed-lock lease-renewal paths.
 - #525 — session 217 landed the minimal viable moderation set: authority
   kick (close code `4007 kicked`, no reconnect), authority room-code
   regeneration, and a shipped default spectator cap
@@ -147,7 +158,13 @@ correctness evidence appears.
    10x + Windows 2x, new daily 05:00 UTC cron); both keep manual dispatch.
    Remaining levers need owner input: self-hosted runner labels (owner
    comment excludes DAD-MACHINE and ELI-MACHINE) and the #379
-   path-awareness inventory.
+   path-awareness inventory. Session 224 (#557) removed the post-merge
+   push-to-main wave from the 16 validation workflows (measured: five
+   merge waves at ~40 wall minutes each, ~200 Linux-billed minutes/day,
+   ~27% of Linux spend; squash content is identical to the PR run, and
+   the noon cron re-proves main daily) and moved the relay-timing
+   native-platforms legs (macOS 10x + Windows 2x) into the
+   schedule/dispatch cohort; per-event validation coverage is unchanged.
 - #379 — make verification-nightly pull-request fan-out path-aware only after
   an owner exports the required-check/ruleset inventory and a historical
   changed-file replay proves net allocation and runner-time savings. On the
