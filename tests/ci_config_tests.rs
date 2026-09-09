@@ -26169,7 +26169,7 @@ fn test_ci_schedule_only_runs_security_jobs() {
     //
     // This test ensures:
     //   1. Every job in `SCHEDULE_EXCLUDED_CI_JOBS` has a schedule-exclusion guard
-    //   2. The `deny` and `audit` jobs do NOT have a schedule exclusion guard
+    //   2. The `deny` job does NOT have a schedule exclusion guard
     //   3. The macOS + Windows lint/nextest per-leg cohort guard is pinned
     //      separately (test_ci_windows_and_macos_lanes_run_only_on_the_daily_cron)
 
@@ -26178,17 +26178,17 @@ fn test_ci_schedule_only_runs_security_jobs() {
 
     // Verify the consolidated supply-chain job does NOT have a schedule
     // exclusion guard
-    for security_job in &["deny"] {
-        let condition = extract_job_if_condition(&ci_content, security_job);
+    {
+        let condition = extract_job_if_condition(&ci_content, "deny");
         if let Some(ref cond) = condition {
             assert!(
                 !cond.contains("schedule"),
-                "The `{security_job}` job must NOT exclude schedule runs.\n\
-                 Found `if: {cond}` on the {security_job} job, which would prevent the \
+                "The `deny` job must NOT exclude schedule runs.\n\
+                 Found `if: {cond}` on the deny job, which would prevent the \
                  daily security audit from running.\n\n\
-                 The deny and audit jobs should run on the daily schedule \
+                 The deny job should run on the daily schedule \
                  trigger to catch new CVEs.\n\n\
-                 To fix: Remove the `if:` guard from the {security_job} job in ci.yml."
+                 To fix: Remove the `if:` guard from the deny job in ci.yml."
             );
         }
         // condition being None is fine — no `if:` means it runs on all triggers
