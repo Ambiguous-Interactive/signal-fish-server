@@ -1,5 +1,18 @@
 #!/usr/bin/env bash
 # Fail closed unless required CI passed on the exact default-branch release commit.
+#
+# Each required workflow must pass one of two acceptance legs:
+#   1. Push leg: a completed successful `push` run on the default branch at
+#      the exact release commit.
+#   2. Release pull-request leg: the merged pull request whose squash merge
+#      commit is the release commit, proven by a completed successful
+#      `pull_request` run at that pull request's head SHA. A squash merge
+#      keeps the pull-request run's content identical to the release
+#      commit's tree, so this leg carries the same evidence as the removed
+#      post-merge push wave (issue #557) for workflows that no longer
+#      trigger on push. The leg refuses a multi-parent commit: a merge
+#      commit's tree can carry manual conflict resolutions that no
+#      pull-request run ever validated.
 set -euo pipefail
 
 require_value() {
@@ -11,6 +24,102 @@ require_value() {
     fi
 }
 
+# Map the release commit to the merged pull request that produced it.
+# Caches the result; a failed resolution stays failed for the whole run.
+RELEASE_PR_NUMBER=""
+RELEASE_PR_HEAD_SHA=""
+RELEASE_PR_RESOLUTION=""
+
+resolve_release_pr() {
+    if [ -n "$RELEASE_PR_NUMBER" ]; then
+        return 0
+    fi
+    if [ -n "$RELEASE_PR_RESOLUTION" ]; then
+        echo "ERROR: ${RELEASE_PR_RESOLUTION}" >&2
+        return 1
+    fi
+
+    # The pull-request leg's evidence is content identity: only a squash
+    # merge (single parent) guarantees the pull-request run's tree equals
+    # the release commit's tree. A merge commit can carry manual conflict
+    # resolutions no pull-request run ever validated, so refuse it here
+    # instead of accepting a weaker proof.
+    local parents
+    if ! parents=$(gh api \
+        --method GET \
+        "repos/${REPO}/commits/${COMMIT_SHA}" \
+        --jq '.parents | length'); then
+        RELEASE_PR_RESOLUTION="Could not retrieve commit ${COMMIT_SHA} from GitHub."
+        echo "ERROR: ${RELEASE_PR_RESOLUTION}" >&2
+        return 1
+    fi
+    if [ "$parents" -ne 1 ]; then
+        RELEASE_PR_RESOLUTION="Commit ${COMMIT_SHA} has ${parents} parents; a release commit must be a single-parent squash merge."
+        echo "ERROR: ${RELEASE_PR_RESOLUTION}" >&2
+        return 1
+    fi
+
+    local matches
+    if ! matches=$(gh api \
+        --method GET \
+        --paginate \
+        "repos/${REPO}/pulls?state=closed&base=${DEFAULT_BRANCH}&per_page=100" \
+        --jq "[.[] | select(.merged_at != null and .merge_commit_sha == \"${COMMIT_SHA}\")][0:2] | .[] | [.number, .head.sha] | @tsv"); then
+        RELEASE_PR_RESOLUTION="Could not query merged pull requests from GitHub."
+        echo "ERROR: ${RELEASE_PR_RESOLUTION}" >&2
+        return 1
+    fi
+
+    local count
+    count=$(printf '%s' "$matches" | grep -c . || true)
+    if [ "$count" -eq 0 ]; then
+        RELEASE_PR_RESOLUTION="No merged pull request found for commit ${COMMIT_SHA}."
+        echo "ERROR: ${RELEASE_PR_RESOLUTION}" >&2
+        echo "  The release commit must be the squash merge of its release pull request." >&2
+        return 1
+    fi
+    if [ "$count" -gt 1 ]; then
+        RELEASE_PR_RESOLUTION="Multiple merged pull requests found for commit ${COMMIT_SHA}."
+        echo "ERROR: ${RELEASE_PR_RESOLUTION}" >&2
+        return 1
+    fi
+
+    local number head_sha
+    IFS=$'\t' read -r number head_sha <<< "$matches"
+    if [ -z "$number" ] || [ -z "$head_sha" ]; then
+        RELEASE_PR_RESOLUTION="Malformed pull-request metadata for commit ${COMMIT_SHA}."
+        echo "ERROR: ${RELEASE_PR_RESOLUTION}" >&2
+        return 1
+    fi
+    RELEASE_PR_NUMBER=$number
+    RELEASE_PR_HEAD_SHA=$head_sha
+}
+
+# Validate one completed run against the leg's expected identity.
+# Arguments: workflow name, expected event, expected head SHA, expected
+# branch (empty = any non-empty branch), run metadata.
+check_run_metadata() {
+    local workflow=$1 expected_event=$2 expected_sha=$3 expected_branch=$4 metadata=$5
+    local run_event run_branch run_sha run_status conclusion
+    IFS=$'\t' read -r run_event run_branch run_sha run_status conclusion <<< "$metadata"
+    if [[ "$metadata" == *$'\n'* ]] || \
+        [ "$run_event" != "$expected_event" ] || \
+        [ "$run_sha" != "$expected_sha" ] || \
+        { [ -n "$expected_branch" ] && [ "$run_branch" != "$expected_branch" ]; } || \
+        [ -z "$run_branch" ] || \
+        [ "$run_status" != "completed" ] || \
+        [ -z "$conclusion" ]; then
+        echo "ERROR: GitHub returned unrelated or malformed run metadata for '${workflow}'." >&2
+        echo "  event=${run_event} branch=${run_branch} sha=${run_sha} status=${run_status}" >&2
+        return 1
+    fi
+    if [ "$conclusion" != "success" ]; then
+        echo "ERROR: '${workflow}' conclusion is '${conclusion}' (expected 'success')" >&2
+        echo "  Fix the failing checks before releasing." >&2
+        return 1
+    fi
+}
+
 require_value RELEASE_REPOSITORY "${RELEASE_REPOSITORY:-}"
 require_value RELEASE_COMMIT_SHA "${RELEASE_COMMIT_SHA:-}"
 require_value RELEASE_DEFAULT_BRANCH "${RELEASE_DEFAULT_BRANCH:-}"
@@ -18,6 +127,11 @@ require_value RELEASE_DEFAULT_BRANCH "${RELEASE_DEFAULT_BRANCH:-}"
 REPO=$RELEASE_REPOSITORY
 COMMIT_SHA=$RELEASE_COMMIT_SHA
 DEFAULT_BRANCH=$RELEASE_DEFAULT_BRANCH
+
+if [[ ! "$COMMIT_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    echo "ERROR: RELEASE_COMMIT_SHA must be a full 40-character commit SHA, got '${COMMIT_SHA}'." >&2
+    exit 1
+fi
 
 echo "Verifying CI status for commit: $COMMIT_SHA"
 
@@ -67,6 +181,7 @@ for WORKFLOW_NAME in "${REQUIRED_WORKFLOWS[@]}"; do
     fi
     WORKFLOW_ID=${WORKFLOW_IDS[0]}
 
+    # Leg 1: an exact push run on the default branch at the release commit.
     if ! RUN_METADATA=$(gh api \
         --method GET \
         "repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs" \
@@ -82,37 +197,47 @@ for WORKFLOW_NAME in "${REQUIRED_WORKFLOWS[@]}"; do
     fi
 
     if [ -n "$RUN_METADATA" ]; then
-        RUN_EVENT=""
-        RUN_BRANCH=""
-        RUN_SHA=""
-        RUN_STATUS=""
-        CONCLUSION=""
-        IFS=$'\t' read -r RUN_EVENT RUN_BRANCH RUN_SHA RUN_STATUS CONCLUSION <<< "$RUN_METADATA"
-        if [[ "$RUN_METADATA" == *$'\n'* ]] || \
-            [ "$RUN_EVENT" != "push" ] || \
-            [ "$RUN_BRANCH" != "$DEFAULT_BRANCH" ] || \
-            [ "$RUN_SHA" != "$COMMIT_SHA" ] || \
-            [ "$RUN_STATUS" != "completed" ] || \
-            [ -z "$CONCLUSION" ]; then
-            echo "ERROR: GitHub returned unrelated or malformed run metadata for '${WORKFLOW_NAME}'." >&2
-            echo "  event=${RUN_EVENT} branch=${RUN_BRANCH} sha=${RUN_SHA} status=${RUN_STATUS}" >&2
-            FAILED=1
-            continue
-        fi
-
-        if [ "$CONCLUSION" != "success" ]; then
-            echo "ERROR: '${WORKFLOW_NAME}' conclusion is '${CONCLUSION}' (expected 'success')" >&2
-            echo "  Fix the failing checks before releasing." >&2
-            FAILED=1
-        else
+        if check_run_metadata "$WORKFLOW_NAME" "push" "$COMMIT_SHA" "$DEFAULT_BRANCH" "$RUN_METADATA"; then
             echo "OK: '${WORKFLOW_NAME}' passed on commit ${COMMIT_SHA}"
+        else
+            FAILED=1
         fi
         continue
     fi
 
-    echo "ERROR: No completed default-branch push run found for '${WORKFLOW_NAME}' on commit ${COMMIT_SHA}" >&2
-    echo "  Ensure CI has run and completed on this commit before releasing." >&2
-    FAILED=1
+    # Leg 2: no push run exists (issue #557 removed the push triggers), so
+    # prove this workflow through the merged release pull request.
+    if ! resolve_release_pr; then
+        FAILED=1
+        continue
+    fi
+    echo "  No push run found; checking release pull request #${RELEASE_PR_NUMBER} (head ${RELEASE_PR_HEAD_SHA})."
+
+    if ! RUN_METADATA=$(gh api \
+        --method GET \
+        "repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs" \
+        -f event=pull_request \
+        -f head_sha="$RELEASE_PR_HEAD_SHA" \
+        -f status=completed \
+        -f per_page=1 \
+        --jq '.workflow_runs[0] // empty | [.event, .head_branch, .head_sha, .status, .conclusion] | @tsv'); then
+        echo "ERROR: Could not retrieve '${WORKFLOW_NAME}' pull-request runs from GitHub." >&2
+        FAILED=1
+        continue
+    fi
+
+    if [ -z "$RUN_METADATA" ]; then
+        echo "ERROR: No completed pull-request run found for '${WORKFLOW_NAME}' on release pull request #${RELEASE_PR_NUMBER} (head ${RELEASE_PR_HEAD_SHA})." >&2
+        echo "  Re-run this workflow on the pull request head commit, or merge a successor pull request for the release." >&2
+        FAILED=1
+        continue
+    fi
+
+    if check_run_metadata "$WORKFLOW_NAME" "pull_request" "$RELEASE_PR_HEAD_SHA" "" "$RUN_METADATA"; then
+        echo "OK: '${WORKFLOW_NAME}' passed on release pull request #${RELEASE_PR_NUMBER} (head ${RELEASE_PR_HEAD_SHA})"
+    else
+        FAILED=1
+    fi
 done
 
 echo ""

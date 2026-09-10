@@ -80,16 +80,19 @@ on:
       - "tests/multiprocess_delivery_e2e.rs"
       - "tests/webrtc_mesh_budget_e2e.rs"
       - "tests/scenario_realworld_e2e.rs"
-      - "tests/v3_game_data_sequencing_e2e.rs"
       - "tests/sixteen_player_matrix_e2e.rs"
       - "tests/asymmetric_bandwidth_flap_e2e.rs"
       - "tests/split_brain_two_instances_e2e.rs"
       - "tests/websocket_test_helpers/**"
-      - "formal/tla/SequencedRelayTrace.tla"
-      - "scripts/generate-sequenced-relay-trace.py"
-      - "scripts/run-sequenced-relay-trace-validation.sh"
       - "clients/native/**"
       - ".github/workflows/verification-nightly.yml"
+      # Note: the sequenced-relay trace inputs (tests/
+      # v3_game_data_sequencing_e2e.rs, formal/tla/SequencedRelayTrace.tla,
+      # scripts/generate-sequenced-relay-trace.py,
+      # scripts/run-sequenced-relay-trace-validation.sh) are deliberately NOT
+      # pull-request triggers here. Their only consumer, trace-validation,
+      # is schedule-only; formal-verification.yml owns the per-PR gating for
+      # those inputs (issue #512).
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.run_id }}

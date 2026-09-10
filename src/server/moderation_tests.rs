@@ -989,6 +989,148 @@ async fn banned_players_pending_record_cannot_restore_the_seat() {
     }
 }
 
+/// A room seal gates fresh admissions only: a pending reconnection record
+/// armed before the seal still restores its holder into the sealed room,
+/// with no password and no fresh-join perimeter. This is the pinned contract
+/// (issue #396 cross-feature seam sweep): the seal's password perimeter is an
+/// admission check, and `Reconnect` carries no password field. Resuming a
+/// prior membership through a live bearer seat credential is not a fresh
+/// admission — the same distinction that makes bans the tool that refuses
+/// restores while seals do not. "Current members and their reconnection
+/// tokens are unaffected" in the `SetRoomAccess` contract covers the
+/// disconnected member holding a live record.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn sealed_room_restore_honors_a_pre_seal_record() {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (authority, mut _authority_rx) =
+        register_client(&server, "127.0.0.1:48155".parse().unwrap()).await;
+    let (target, mut _target_rx) =
+        register_client(&server, "127.0.0.1:48156".parse().unwrap()).await;
+
+    join_seated_player(&server, &authority, &mut _authority_rx, "SEAL10", "host").await;
+    join_seated_player(&server, &target, &mut _target_rx, "SEAL10", "guest").await;
+    let room_id = server
+        .get_client_room(&target)
+        .await
+        .expect("target seated");
+
+    // The guest's socket drops and its record is armed through the same
+    // teardown path a real disconnect uses.
+    let seat_info = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room lookup succeeds")
+        .expect("room remains present")
+        .players
+        .get(&target)
+        .cloned()
+        .expect("target holds a durable seat");
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection is enabled")
+        .register_disconnection(
+            target,
+            room_id,
+            false,
+            Some(seat_info),
+            server
+                .connection_manager
+                .game_data_epoch(&target)
+                .unwrap_or(0),
+        )
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &target)
+        .await
+        .expect("disconnect removes the durable seat");
+    server.connection_manager.remove_client(&target);
+    server
+        .message_coordinator
+        .unregister_local_client(&target)
+        .await
+        .expect("disconnect removes the coordinator route");
+
+    // The authority seals the vacated room while the record is live: the
+    // same hashed-credential write the `SetRoomAccess` operation performs.
+    server
+        .database
+        .set_room_password(
+            &room_id,
+            Some(crate::protocol::RoomPasswordCredential::new("seal-secret")),
+        )
+        .await
+        .expect("seal write succeeds");
+
+    // The pre-seal record restores its holder without any password: the
+    // `Reconnect` message carries no password field, and the restore path is
+    // not a fresh admission.
+    use crate::coordination::ClientDeliveryHandle;
+
+    let (sender, mut socket_rx) = mpsc::channel(8);
+    let socket = server
+        .connection_manager
+        .register_client(
+            sender.clone(),
+            ConnectionCloseSignal::detached(),
+            "127.0.0.1:48157".parse().unwrap(),
+            server.instance_id,
+        )
+        .await
+        .expect("socket registration succeeds");
+    server
+        .message_coordinator
+        .register_local_client(
+            socket,
+            None,
+            ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+        )
+        .await
+        .expect("socket coordinator route registers");
+    let effective_player_id = Arc::new(tokio::sync::RwLock::new(socket));
+    let operation_id = RoomOperationId::new_v4();
+    let restored = server
+        .handle_reconnect_with_identity_operation(
+            &socket,
+            &target,
+            &room_id,
+            &token,
+            Arc::clone(&effective_player_id),
+            Some(operation_id),
+        )
+        .await;
+    assert!(
+        restored,
+        "a pre-seal record must restore into the now-sealed room"
+    );
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room lookup succeeds")
+        .expect("room remains present");
+    assert!(
+        room.players.contains_key(&target),
+        "the restored holder is seated again"
+    );
+    let baseline = socket_rx.try_recv().expect("restore responds");
+    let restored_payload = match baseline.as_ref() {
+        ServerMessage::Reconnected(payload) => Some(payload),
+        ServerMessage::RoomOperationResult { result, .. } => match result.as_ref() {
+            RoomOperationResult::Reconnected(payload) => Some(payload),
+            other => panic!("expected a reconnect result, got {other:?}"),
+        },
+        other => panic!("expected a reconnect response, got {other:?}"),
+    };
+    assert_eq!(
+        restored_payload.expect("reconnected payload").player_id,
+        target,
+        "the restore delivers the Reconnected baseline for the recorded player"
+    );
+}
+
 /// Drive a seated join that may carry a join password and assert the
 /// terminal `RoomJoinFailed` classification when the join is refused.
 async fn join_with_password(

@@ -684,6 +684,20 @@ impl SpectatorService {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 
+                // The spectator admission is a new role choice in this room:
+                // it supersedes any unclaimed pending reconnection record the
+                // player left here, exactly as a seated join does. A surviving
+                // record would let the pre-spectator token re-seat the player
+                // after the spectator session ends — a superseded membership
+                // resurrected through a stale credential. Claimed records (an
+                // in-flight token restore) and records for other rooms are
+                // untouched.
+                if let Some(reconnection_manager) = self.reconnection_manager.as_ref() {
+                    reconnection_manager
+                        .discard_pending_reconnection_in_room(player_id, &room.id)
+                        .await;
+                }
+
                 let notification = Arc::new(ServerMessage::NewSpectatorJoined {
                     spectator: spectator.clone(),
                     current_spectators: spectator_snapshot.clone(),

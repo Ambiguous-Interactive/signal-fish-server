@@ -214,6 +214,11 @@ spectator join must present the same password:
   birth -- there is no unlocked window between creation and `SetRoomAccess`.
 - `SetRoomAccess { password: null }` reopens the room. Current members and
   their reconnection tokens are unaffected either way.
+- The seal gates fresh joins only. A pending reconnection record armed
+  before the seal still restores its holder into the sealed room with no
+  password: `Reconnect` carries no password field, and resuming a prior
+  membership through a live seat credential is not a fresh admission. A
+  ban is the tool that refuses restores.
 - Passwords are capped at 256 bytes and stored only as salted hashes (a
   single digest pass, no key-derivation work factor): the plaintext is
   never logged, echoed, or persisted. Treat the password as a room-scoped

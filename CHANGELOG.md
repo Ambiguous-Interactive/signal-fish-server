@@ -275,6 +275,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Documentation Validation no longer triggers on push to main (issue #512):
+  the post-merge push wave is reserved for deployment side effects, per the
+  issue #557 doctrine. Pull-request coverage is unchanged. The release
+  preflight proves the workflow on a release commit through the merged
+  release pull request's own `pull_request` run (identical squash content)
+  instead of an exact push run.
+- Two pull-request path filters no longer allocate workflows whose suites
+  do not consume the change (issue #512): Verification Nightly no longer
+  fires on the sequenced-relay trace inputs (its only consumer of them is
+  the schedule-only trace-validation job; Formal Verification owns the
+  per-PR gating), and Browser Interop now triggers on `clients/browser/**`
+  and `clients/native/**` instead of all of `clients/**` (the fortress
+  fixture packages are not suite inputs).
 - Allowlist reloads prune the `app_relay_bytes` series of revoked app IDs
   (issue #552): departed tenants no longer surface forever in the
   `/metrics` JSON snapshot and `signal_fish_relay_app_bytes_total`. A still-
@@ -464,6 +477,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The release preflight no longer blocks every release (issue #512 follow-up
+  to the issue #557 CI consolidation). `scripts/check-release-preflight.sh`
+  required a completed successful `push` run of the workflow named "CI" at
+  the exact release commit, but issue #557 removed the push triggers from
+  every validation workflow, so the requirement became unsatisfiable and the
+  next release would have failed closed. The preflight now also accepts the
+  merged release pull request's own completed successful `pull_request` run
+  at the head that squash-produced the release commit: identical content,
+  proven per event. The exact push run remains accepted first; resolution of
+  the release commit to its pull request is strict and fails closed on a
+  missing, ambiguous, malformed, or failed mapping. A behavior-matrix test
+  pins both legs and every failure mode.
 - A fresh join into the same room no longer leaves the dropped membership's
   pending reconnection record behind (issue #396 cross-feature seam sweep).
   The record previously survived the seat commit, so the next disconnect
@@ -475,6 +500,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   membership" rule the readiness state already followed). Claimed records
   (an in-flight token restore) and records for other rooms are untouched. A
   red-first regression test pins the invariant.
+- A same-room spectator join now also discards the player's unclaimed
+  pending reconnection record (issue #396, same seam class). The record
+  previously survived the spectator admission, so after the spectator
+  session ended a `Reconnect` with the pre-spectator token re-seated the
+  player — a superseded membership resurrected through a stale credential,
+  and a violation of the "rotates on every join" contract, which spectator
+  joins now explicitly document. A red-first regression test pins the
+  invariant.
+- The seal-restore admission contract is now pinned (issue #396 seam
+  adjudication): `SetRoomAccess` seals fresh admissions only. A pending
+  reconnection record armed before the seal still restores its holder into
+  the sealed room with no password — `Reconnect` carries no password field,
+  and resuming a prior membership through a live bearer seat credential is
+  not a fresh admission; a ban is the tool that refuses restores. A pin
+  test and the `SetRoomAccess` documentation (authority, rooms-and-lobbies,
+  reconnection concepts) state the contract.
 - `TransferAuthority` no longer grants the role onto a stale residue row
   (issue #396, same class as the kick path's rerouted-target handling). A
   storage-failed detach can leave a durable row behind while the player is

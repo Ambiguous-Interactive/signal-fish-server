@@ -1947,6 +1947,101 @@ async fn same_room_rejoin_supersedes_the_pending_reconnection_record() {
         .expect("the re-issued token claims after the next disconnect");
 }
 
+/// A same-room spectator join supersedes the dropped membership's pending
+/// reconnection record, exactly as a seated same-room join does. The record
+/// must not survive the spectator admission: the player's latest role choice
+/// in the room is spectator, so letting the pre-spectator token stay claimable
+/// would re-seat the player after the spectator session ends — a superseded
+/// membership resurrected through a stale credential.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn spectator_join_supersedes_the_pending_reconnection_record() {
+    let server = create_test_server_with_config(ServerConfig {
+        enable_reconnection: true,
+        ..ServerConfig::default()
+    })
+    .await;
+    let (player, mut player_rx) =
+        register_client(&server, "127.0.0.1:48131".parse().unwrap()).await;
+    server.set_client_protocol(
+        &player,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![crate::protocol::Transport::Relay],
+            topologies: vec![crate::protocol::Topology::Relay],
+        },
+    );
+    server
+        .handle_join_room(
+            &player,
+            "spectator-supersede".to_string(),
+            Some("SJS001".to_string()),
+            "spectator-superseder".to_string(),
+            Some(4),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+    assert!(
+        drain_queued_messages(&mut player_rx)
+            .iter()
+            .any(|message| matches!(message.as_ref(), ServerMessage::RoomJoined(_))),
+        "the seated join seats the player"
+    );
+    let room_id = server
+        .get_client_room(&player)
+        .await
+        .expect("the seated join seats the player");
+    let reconnection_manager = server
+        .reconnection_manager()
+        .expect("reconnection is enabled");
+
+    // The residue this seam targets: a record armed for the player's
+    // membership in the teardown window before routing and the durable seat
+    // go away — the state an eviction teardown racing a role change produces.
+    let player_info = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room lookup succeeds")
+        .expect("room exists")
+        .players
+        .get(&player)
+        .cloned()
+        .expect("seated player info");
+    reconnection_manager
+        .register_disconnection(player, room_id, false, Some(player_info), 0)
+        .await;
+    assert!(reconnection_manager.has_pending_reconnection(&player).await);
+    server.leave_room_locked(&player, false).await;
+
+    // The superseding role choice: the same player rejoins the same room as
+    // a spectator from the still-registered connection.
+    server
+        .spectator_service
+        .join(
+            &player,
+            "spectator-supersede".to_string(),
+            "SJS001".to_string(),
+            "ReturnedWatcher".to_string(),
+        )
+        .await
+        .expect("the spectator join is admitted");
+
+    assert!(
+        !reconnection_manager.has_pending_reconnection(&player).await,
+        "the pre-spectator record must not survive the spectator admission"
+    );
+    let claim = reconnection_manager
+        .claim_reconnection(&uuid::Uuid::new_v4(), &player, &room_id, "any-token")
+        .await;
+    assert!(
+        matches!(claim, Err(crate::reconnection::ReconnectionError::NoRecord)),
+        "the discarded record must not be claimable, got {claim:?}"
+    );
+}
+
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn seated_room_join_rejects_an_existing_spectator_role() {

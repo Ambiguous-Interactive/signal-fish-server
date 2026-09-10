@@ -115,8 +115,11 @@ assert!(
 The release workflow (`release.yml`) includes a `preflight` job that runs
 before `publish`. The preflight job uses the GitHub API (via the `gh` CLI) to
 verify that the required CI workflows ("CI" and "Documentation Validation")
-have completed successfully on the commit being released. If any required
-workflow has not passed, the release is blocked with actionable error messages.
+passed on the commit being released. Each required workflow passes one of two
+legs: an exact successful default-branch `push` run at that commit, or the
+merged release pull request's own `pull_request` run at the head that
+squash-produced the commit (identical content). If neither leg passes, the
+release is blocked with actionable error messages.
 
 Key design decisions:
 
