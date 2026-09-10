@@ -914,10 +914,17 @@ impl SpectatorService {
             }
             Err(error) => {
                 // The ghost row is already deleted and the repair key
-                // cleared; only the correcting broadcast is owed. Say so —
-                // silence here would resurrect the exact stale-count state
-                // this repair exists to close.
-                warn!(%room_id, ghost_id = %ghost_id, error = %error, "Failed to read room for ghost-repair notification");
+                // cleared; only the correcting broadcast is owed. Re-queue
+                // the repair key so the next sweep retries the notification
+                // instead of dropping it (the sweep's delete-then-repair
+                // ordering leaves no other path back to this state), and say
+                // so — silence here would resurrect the exact stale-count
+                // state this repair exists to close. A durable identity
+                // republished before the retry is voided by the sweep's
+                // republished-identity check, exactly like a failed delete.
+                self.pending_unpublished_detaches
+                    .insert((*room_id, *ghost_id), ());
+                warn!(%room_id, ghost_id = %ghost_id, error = %error, "Failed to read room for ghost-repair notification; queued a retry");
                 return;
             }
         };
@@ -2936,6 +2943,80 @@ mod tests {
         assert!(
             current_spectators.iter().all(|info| info.id != ghost_id),
             "the corrected roster must not name the ghost"
+        );
+    }
+
+    /// The sweep deletes the ghost row before the repair notification reads
+    /// the room, so a transient storage fault in that read would otherwise
+    /// lose the correction forever — no row and no repair key left to retry.
+    /// The read failure must re-queue the repair key, and the next sweep must
+    /// converge the notification.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn ghost_repair_notification_is_retried_after_a_storage_fault() {
+        let (service, room, creator_id, coordinator, database) = setup_service().await;
+        let ghost_id = PlayerId::new_v4();
+        database
+            .add_spectator_to_room(
+                &room.id,
+                SpectatorInfo {
+                    id: ghost_id,
+                    name: "Ghost Watcher".to_string(),
+                    connected_at: chrono::Utc::now(),
+                },
+            )
+            .await
+            .expect("ghost row insert succeeds");
+        service
+            .pending_unpublished_detaches
+            .insert((room.id, ghost_id), ());
+
+        database.fail_get_room_by_id_for_test(true);
+        assert_eq!(
+            service.retry_disconnected_detaches().await,
+            1,
+            "the first sweep still deletes the ghost row"
+        );
+        assert!(
+            service
+                .pending_unpublished_detaches
+                .contains_key(&(room.id, ghost_id)),
+            "a failed notification read must re-queue the repair for the next sweep"
+        );
+        assert!(
+            coordinator.messages_for(&creator_id).await.is_empty(),
+            "no correcting event can be built without the room row"
+        );
+
+        database.fail_get_room_by_id_for_test(false);
+        assert_eq!(
+            service.retry_disconnected_detaches().await,
+            1,
+            "the retry sweep converges the notification"
+        );
+        let corrections = coordinator
+            .messages_for(&creator_id)
+            .await
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::SpectatorDisconnected {
+                    spectator_id,
+                    spectator_count,
+                    ..
+                } if spectator_id == ghost_id => Some(spectator_count),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            corrections,
+            vec![Some(0)],
+            "exactly one absolute correction, built after the delete"
+        );
+        assert!(
+            !service
+                .pending_unpublished_detaches
+                .contains_key(&(room.id, ghost_id)),
+            "the converged repair leaves no retry key behind"
         );
     }
 }

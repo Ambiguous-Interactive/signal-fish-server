@@ -492,8 +492,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   admission announces it through its baseline or delta; the sweep previously
   deleted the row silently, so live members kept the ghost in their count
   until the room's next spectator event — indefinitely for a quiet room.
-  Members that never saw the ghost apply the identical absolute shape as a
-  no-op. A red-first regression test pins the event.
+  A storage fault while reading the room for the correction re-queues the
+  repair for the next sweep instead of dropping the notification. Members
+  that never saw the ghost apply the identical absolute shape as a no-op.
+  Red-first regression tests pin the event and the retry.
 - `RegenerateRoomCode` now takes the old code's `room_join` lock before the
   candidate loop (issue #396). A joiner holding the old code's admission
   lock could previously be descheduled across the swap, observe the dropped
