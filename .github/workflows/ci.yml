@@ -11,8 +11,9 @@
 #     full-suite test run — issues #513 and #512)
 #
 # Jobs:
-#   - lint: Cross-OS code formatting (rustfmt) and linting (clippy) matrix
-#     (ubuntu per pull request; macOS + Windows on the daily schedule only).
+#   - lint: Cross-OS linting (clippy) matrix (ubuntu per pull request;
+#     macOS + Windows on the daily schedule only). Formatting is gated once
+#     by quick-check — rustfmt output is platform-independent (#512).
 #     The ubuntu leg also runs the zero-panic production policy
 #     (scripts/check-no-panics.sh) — issue #558 moved the standalone
 #     panic-policy job here so one runner setup covers both: the nested
@@ -201,8 +202,8 @@ jobs:
           cargo -V
           cargo clippy -V
           cargo fmt --version
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      # Formatting is gated once by the quick-check job (issue #512): rustfmt
+      # output is platform-independent, so per-OS re-checks add no signal.
 
       - name: Run clippy
         shell: bash
@@ -557,15 +558,16 @@ jobs:
           fi
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
+        # cargo-sbom shells out to `cargo metadata`, so this job needs a cargo
+        # even though nothing here compiles the workspace.
         if: ${{ !cancelled() }}
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
-      - name: Cache Rust dependencies
-        if: ${{ !cancelled() }}
-        uses: Swatinem/rust-cache@v2.9.2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      # No dependency cache on purpose (issue #512): every analyzer in this job
+      # is a prebuilt binary and `cargo metadata` touches only the sparse
+      # registry index, so a per-job rust-cache would be written and read by
+      # nothing.
       - name: Install cargo-audit
         if: ${{ !cancelled() }}
         uses: taiki-e/install-action@v2.87.5

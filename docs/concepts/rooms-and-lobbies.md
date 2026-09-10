@@ -163,6 +163,10 @@ unknown code: join-creates-room opens a fresh, unrelated room under it, and
 the joiner becomes that room's authority. Clients must therefore treat any
 `RoomJoined` for a code the user did not just create as a new room, never as
 a return to the previous one. After a rotation, share only the new code.
+The current code reaches a member only at join time, in `Reconnected`, or
+out of band from the authority. A member who receives the authority role
+after a rotation never learns the new code in-protocol (issue #566); share
+it with them before the transfer.
 
 The per-game (`max_rooms_per_game`) and server-wide (`max_rooms`) room caps
 bound the cost of namespace enumeration in open mode.

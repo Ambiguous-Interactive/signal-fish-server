@@ -7,13 +7,17 @@
 #   - cargo-udeps: Detects unused dependencies and features (requires nightly)
 #
 # Runs on:
-#   - Pushes and pull requests that change the root Rust package or this workflow
-#   - Manual dispatch for on-demand diagnostics
+#   - Pull requests that change the root Rust package or this workflow
+#     (cargo-machete only: seconds-cheap, gating)
+#   - Daily schedule and manual dispatch for on-demand diagnostics
+#     (both analyzers, including the nightly cargo-udeps compile)
 #
-# There is intentionally no schedule: unused-dependency results are a pure
-# function of the pinned source graph, nightly toolchain, and analyzer versions,
-# all of which are covered by the path triggers below. Workflow Hygiene owns the
-# weekly staleness check for the shared pinned nightly.
+# Issue #512: cargo-udeps is informational (continue-on-error) and its result
+# is a pure function of the pinned source graph, nightly toolchain, and
+# analyzer versions, so its multi-minute nightly compile joined the daily
+# cohort instead of rerunning per pull request. cargo-machete stays on every
+# pull request as the fast gating signal. Workflow Hygiene owns the weekly
+# staleness check for the shared pinned nightly.
 #
 # Features:
 #   - Shared checkout, nightly toolchain, and Rust dependency cache
@@ -58,6 +62,9 @@ name: Unused Dependencies
 
 on:
   workflow_dispatch:
+  schedule:
+    # Daily cohort for the heavy non-gating udeps compile (issue #512).
+    - cron: '0 7 * * *'
   pull_request:
     branches: [main]
     paths:
@@ -69,7 +76,6 @@ on:
       - 'src/**'
       - 'tests/**'
       - 'benches/**'
-      - 'examples/**'
       - '.github/workflows/unused-deps.yml'
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.run_id }}
@@ -117,7 +123,10 @@ jobs:
         run: cargo machete
 
       - name: Check for unused dependencies (udeps)
-        if: ${{ !cancelled() }}
+        # The nightly compile is the job's heavy leg and the result is
+        # informational (see the continue-on-error note below), so it runs on
+        # the daily cohort and manual dispatch only (issue #512).
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
         # Note: continue-on-error is enabled because cargo-udeps may report
         # false positives for:
         #   - Proc-macro dependencies (used at compile-time)

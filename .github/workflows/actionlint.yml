@@ -3,7 +3,6 @@
 # catch issues before they cause CI/CD failures.
 #
 # Runs on:
-# - Push to main branch (when workflow files change)
 # - Pull requests to main (when workflow files change)
 #
 # Features:

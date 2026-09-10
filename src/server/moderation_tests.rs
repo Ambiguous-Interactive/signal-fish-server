@@ -2055,6 +2055,83 @@ async fn rotation_and_transfer_preserve_the_ban_list_and_the_join_password() {
     );
 }
 
+/// Issue #566 documented-contract pin: `RoomCodeRegenerated` is delivered
+/// only to the acting authority and the transfer announcements
+/// (`AuthorityChanged` for the room, `AuthorityTransferred` to the sender)
+/// carry no room code, so a successor who inherits the role after a rotation
+/// holds only their join-time code. The documented operator contract is to
+/// share the new code out of band before or with the transfer. If a future
+/// wire change adds a code query or a code field, this pin must be a
+/// conscious edit. (The rotation's absence from the reconnection replay ring
+/// is enforced by construction — the rotation path calls no
+/// `record_room_event` — and is not pinned here.)
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn rotation_then_transfer_delivers_no_room_code_to_the_successor() {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (authority, mut authority_rx) =
+        register_client(&server, "127.0.0.1:48173".parse().unwrap()).await;
+    let (successor, mut successor_rx) =
+        register_client(&server, "127.0.0.1:48174".parse().unwrap()).await;
+
+    join_seated_player(&server, &authority, &mut authority_rx, "ROTTR1", "host").await;
+    join_seated_player(&server, &successor, &mut successor_rx, "ROTTR1", "heir").await;
+
+    server
+        .handle_regenerate_room_code_operation(&authority, RoomOperationId::new_v4())
+        .await;
+    let new_code = match room_access_result(&mut authority_rx).await {
+        RoomOperationResult::RoomCodeRegenerated { room_code } => room_code,
+        other => panic!("expected RoomCodeRegenerated, got {other:?}"),
+    };
+    assert_ne!(new_code, "ROTTR1", "rotation must mint a fresh code");
+    // Every frame the successor holds after the rotation; the handlers
+    // enqueue before returning, so a try_recv drain cannot miss delivery.
+    let after_rotation = drain_receiver(&mut successor_rx);
+
+    server
+        .handle_transfer_authority_operation(&authority, RoomOperationId::new_v4(), successor)
+        .await;
+    let _ = room_access_result(&mut authority_rx).await;
+    let mut delivered = drain_receiver(&mut successor_rx);
+    // The role grant itself proves the successor's channel was live: a
+    // code-bearing announcement would have arrived on it too, and the
+    // non-vacuity guard below keeps this pin from passing on a dead channel.
+    assert!(
+        delivered
+            .iter()
+            .any(|message| matches!(message.as_ref(), ServerMessage::AuthorityChanged { .. })),
+        "the successor must receive the AuthorityChanged role grant, got {delivered:?}"
+    );
+    delivered.extend(after_rotation);
+
+    for message in &delivered {
+        let frame = serde_json::to_string(message.as_ref()).expect("server messages serialize");
+        assert!(
+            !frame.contains(&new_code),
+            "the successor must never receive the current code, got {frame}"
+        );
+        assert!(
+            !matches!(
+                message.as_ref(),
+                ServerMessage::RoomOperationResult { result, .. }
+                    if matches!(result.as_ref(), RoomOperationResult::RoomCodeRegenerated { .. })
+            ),
+            "the rotation result must never reach a non-acting member, got {message:?}"
+        );
+    }
+
+    // The divergence is real and bounded: storage holds the fresh code while
+    // the successor's only in-protocol view is their join-time code.
+    let room = server
+        .database
+        .get_room("moderation-game", &new_code)
+        .await
+        .expect("new-code lookup succeeds")
+        .expect("the room resolves under the new code");
+    assert_eq!(room.authority_player, Some(successor));
+}
+
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn ban_refusals_mirror_the_kick_classification() {

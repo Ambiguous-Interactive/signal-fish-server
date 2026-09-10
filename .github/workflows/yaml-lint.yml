@@ -12,7 +12,6 @@
 #   - .yamllint.yml: YAML linting rules and exclusions
 #
 # Runs on:
-#   - Push to main branch (only for YAML file changes)
 #   - Pull requests to main (only for YAML file changes)
 #
 # Features:

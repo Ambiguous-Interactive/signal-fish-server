@@ -5,7 +5,6 @@
 # degrades agent performance and increases token costs.
 #
 # Runs on:
-#   - Push to main branch (only for .llm/** or script changes)
 #   - Pull requests to main (only for .llm/** or script changes)
 
 name: LLM File Size Check

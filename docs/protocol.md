@@ -1583,7 +1583,9 @@ The moderation operations are authority-only (v3 only):
 - `RegenerateRoomCode` replaces the room code with a freshly generated one. Existing members stay connected and
   reconnection tokens are unaffected. The requester receives `RoomCodeRegenerated` carrying the new code; the old
   code stops resolving to the room immediately, and a join that names it behaves like any unknown code
-  (join-creates-room may open a fresh, unrelated room under it).
+  (join-creates-room may open a fresh, unrelated room under it). The result goes only to the acting authority, and
+  no message queries the current code. If the authority role moves after a rotation, share the new code with the
+  successor out of band before the transfer (issue #566).
 - `SetRoomAccess` takes `password` (non-empty string, max 256 bytes, or `null`). A password seals the room: every
   later seated or spectator join must present the same password or is refused with `PASSWORD_REQUIRED` (a missing,
   a mismatched, and a stray password into an open room are indistinguishable); `null` reopens the room. Current
@@ -1599,7 +1601,8 @@ The moderation operations are authority-only (v3 only):
 - `TransferAuthority` names a seated `player_id` that becomes the room's authority. Every member receives the usual
   `AuthorityChanged` broadcast (personalized `you_are_authority` per recipient); the sender receives
   `AuthorityTransferred` and loses every authority capability (`StartGame`, kick, ban, access, rotation, further
-  transfers). Refusals use `NOT_ROOM_AUTHORITY`, `TRANSFER_TARGET_NOT_FOUND` (target is not a seated member), or
+  transfers). The transfer carries no room code: after a rotation, the successor knows only their join-time code
+  (issue #566). Refusals use `NOT_ROOM_AUTHORITY`, `TRANSFER_TARGET_NOT_FOUND` (target is not a seated member), or
   `INVALID_INPUT` (self-transfer).
 
 Join-password fields also exist outside the capability envelope: `JoinRoom.password` and

@@ -1144,7 +1144,11 @@ components:
         unrelated room under it). Existing members stay connected and
         reconnection tokens are unaffected. Success responses use the
         RoomCodeRegenerated result, which carries the new code for the
-        authority to distribute to future invitees.
+        authority to distribute to future invitees. The result goes only to
+        the acting authority, and no message queries the current code. A
+        planned authority transfer after a rotation needs the new code shared
+        with the successor out of band first, because TransferAuthority
+        carries no room code.
       properties:
         type: { const: RegenerateRoomCode }
       required: [type]
@@ -1213,7 +1217,10 @@ components:
         Every member receives the usual AuthorityChanged broadcast
         (personalized you_are_authority per recipient); the sender receives
         the AuthorityTransferred result and loses every authority capability
-        (StartGame, kick, ban, access, rotation, further transfers).
+        (StartGame, kick, ban, access, rotation, further transfers). The
+        transfer carries no room code: after a rotation, the successor knows
+        only their join-time code, so share the current code out of band
+        before or with the transfer.
       properties:
         type: { const: TransferAuthority }
         data:

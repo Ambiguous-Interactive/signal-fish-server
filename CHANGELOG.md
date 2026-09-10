@@ -275,6 +275,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The nightly `cargo-udeps` compile moved to a daily 07:00 UTC cohort
+  (issue #512). Its result is informational (`continue-on-error`), so it no
+  longer reruns on every covered pull request. `cargo-machete` stays on
+  every pull request as the fast gating signal. This reverses the
+  workflow's earlier no-schedule stance; the guard tests pin the new
+  contract. The dead `examples/**` path filter is gone; no such directory
+  exists.
+- The `deny` supply-chain job no longer saves or restores a Rust dependency
+  cache (issue #512). Every analyzer there is a prebuilt binary, and
+  `cargo sbom` shells out to `cargo metadata` only. Nothing consumed the
+  cache.
+- The `lint` job no longer re-runs `cargo fmt --all -- --check`
+  (issue #512). The `quick-check` gate owns formatting on every event, and
+  rustfmt output is platform-independent, so the macOS and Windows cron
+  legs gained nothing from the re-check.
+- Seven workflows carry corrected "Runs on" headers after the issue #557
+  push-wave removal. Their triggers are unchanged.
+- Post-rotation authority transfer code visibility is now stated as the
+  documented contract (issue #566): `RoomCodeRegenerated` goes only to the
+  acting authority, `AuthorityChanged` carries no room code, and no message
+  queries the current code. A member who receives the authority role after
+  a rotation therefore knows only their join-time code. Share the new code
+  with the successor out of band before or with the transfer. The authority
+  and rooms-and-lobbies concept guides, the protocol reference, and the
+  AsyncAPI descriptions state the contract; a unit test pins it.
 - Stale-code join-or-create semantics are now stated as the consumer
   contract (issue #561): a code rotated away by `RegenerateRoomCode` is an
   unknown code, and a join that names it afterwards opens a fresh,

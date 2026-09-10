@@ -9,7 +9,6 @@
 #   - .markdownlint-version: pinned markdownlint-cli2 version
 #
 # Runs on:
-#   - Push to main branch (only for changed Markdown files)
 #   - Pull requests to main (only for changed Markdown files)
 
 name: Markdownlint
