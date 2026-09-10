@@ -1120,11 +1120,13 @@ components:
       description: >-
         Authority-only: remove a seated player from the room. Only the room's
         designated authority is accepted; the target must be a current seated
-        member and cannot be the sender. The server removes the seat,
-        broadcasts the usual PlayerLeft roster delta to the remaining members,
-        closes the target's connection with private close code 4007
-        (`kicked`), and never arms reconnection for a kicked seat. Success
-        responses use the PlayerKicked result.
+        member — or hold this room's pending reconnection record — and cannot
+        be the sender. The server removes the seat (a pending record is
+        tombstoned instead), broadcasts the usual PlayerLeft roster delta to
+        the remaining members when a seat was removed, closes the target's
+        connection with private close code 4007 (`kicked`) unless the target
+        is live in another room, and never arms reconnection for a kicked
+        seat. Success responses use the PlayerKicked result.
       properties:
         type: { const: KickPlayer }
         data:
@@ -1172,8 +1174,10 @@ components:
     BanPlayer:
       type: object
       description: >-
-        Authority-only: ban a seated player from the room. The target is
-        removed exactly as by KickPlayer (close code 4007 `kicked`, no
+        Authority-only: ban a seated member — or this room's pending-record
+        holder — from the room. The target is
+        removed exactly as by KickPlayer (close code 4007 `kicked` unless the
+        target is live in another room, no
         reconnection) and additionally recorded in the room's in-memory ban
         list: while this room lives, the banned player id cannot rejoin it as
         a player or spectator (BANNED). The ban is room-scoped and dies with
@@ -2264,9 +2268,10 @@ components:
       type: object
       description: >-
         The requested KickPlayer operation succeeded: the target seat was
-        removed and its connection is being closed with close code 4007
-        (`kicked`). The remaining members receive the usual PlayerLeft roster
-        delta.
+        removed (or its pending reconnection record tombstoned) and, unless
+        the target is live in another room, its connection is being closed
+        with close code 4007 (`kicked`). The remaining members receive the
+        usual PlayerLeft roster delta when a seat was removed.
       properties:
         type: { const: PlayerKicked }
         data:

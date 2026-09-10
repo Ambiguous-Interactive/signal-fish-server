@@ -267,15 +267,18 @@ pub enum RoomOperationRequest {
     /// Authority-only: remove a seated player from the room (v3 only).
     ///
     /// Only the room's designated authority may kick. The target must be a
-    /// current seated member and cannot be the sender. The server removes the
-    /// seat, broadcasts the usual `PlayerLeft` roster delta to the remaining
-    /// members, closes the target's connection with private close code
-    /// `4007` (`kicked`), and never arms reconnection for a kicked seat.
+    /// current seated member — or hold this room's pending reconnection
+    /// record — and cannot be the sender. The server removes the seat (a
+    /// pending record is tombstoned instead), broadcasts the usual
+    /// `PlayerLeft` roster delta to the remaining members when a seat was
+    /// removed, closes the target's connection with private close code
+    /// `4007` (`kicked`) unless the target is live in another room, and
+    /// never arms reconnection for a kicked seat.
     /// The requester receives [`RoomOperationResult::PlayerKicked`] on
     /// success.
     KickPlayer {
-        /// Seated player to remove. Must be a current room member other than
-        /// the sender.
+        /// Seated player to remove — or the holder of this room's pending
+        /// reconnection record. Must not be the sender.
         player_id: PlayerId,
     },
     /// Authority-only: replace the room code with a freshly generated one
@@ -302,16 +305,18 @@ pub enum RoomOperationRequest {
         /// join password.
         password: Option<String>,
     },
-    /// Authority-only: ban a seated player from the room (v3 only).
+    /// Authority-only: ban a seated member — or this room's pending-record
+    /// holder — from the room (v3 only).
     ///
     /// The target is removed exactly as by [`RoomOperationRequest::KickPlayer`]
-    /// (close code `4007`, no reconnection) and additionally recorded in the
+    /// (close code `4007` unless the target is live in another room, no
+    /// reconnection) and additionally recorded in the
     /// room's in-memory ban list: while this room lives, the banned player id
     /// cannot rejoin it as a player or spectator (`BANNED`). The ban is
     /// room-scoped and dies with the room.
     BanPlayer {
-        /// Seated player to ban. Must be a current room member other than
-        /// the sender.
+        /// Seated player to ban — or the holder of this room's pending
+        /// reconnection record. Must not be the sender.
         player_id: PlayerId,
     },
     /// Authority-only: lift a room ban (v3 only). The named player may join

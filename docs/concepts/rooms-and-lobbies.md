@@ -157,6 +157,13 @@ Operators should therefore:
   trusted operator backend) as a hosted-tier feature; it is not part of the
   current protocol surface.
 
+Rotation does not reserve the old code. `RegenerateRoomCode` makes the old
+code stop resolving, and a join that names it afterwards behaves like any
+unknown code: join-creates-room opens a fresh, unrelated room under it, and
+the joiner becomes that room's authority. Clients must therefore treat any
+`RoomJoined` for a code the user did not just create as a new room, never as
+a return to the previous one. After a rotation, share only the new code.
+
 The per-game (`max_rooms_per_game`) and server-wide (`max_rooms`) room caps
 bound the cost of namespace enumeration in open mode.
 
