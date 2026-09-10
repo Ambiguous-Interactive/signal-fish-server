@@ -625,6 +625,53 @@ impl ReconnectionManager {
         removed.is_some()
     }
 
+    /// Discard the pending reconnection record for `player_id` only when it
+    /// would restore into `room_id` (and is unclaimed).
+    ///
+    /// A fresh seat commit for the same player and room (a join, not a token
+    /// claim) supersedes the dropped prior membership. The stale record must
+    /// not survive it: the next disconnect would merge the old record —
+    /// keeping its token, deadline, and epoch/sequence view — and destroy the
+    /// token the join just issued, dead-ending the client's credential with a
+    /// misleading `TokenMismatch`. Cross-room records keep the replacement
+    /// semantics of [`Self::register_disconnection`]; claimed records stay
+    /// owned by their in-flight restore (same invariant as
+    /// [`Self::discard_pending_reconnection`]). Returns whether a record was
+    /// discarded.
+    pub async fn discard_pending_reconnection_in_room(
+        &self,
+        player_id: &PlayerId,
+        room_id: &RoomId,
+    ) -> bool {
+        let mut state = self.replay_state.write().await;
+        let same_room_unclaimed = state
+            .disconnected_players
+            .get(player_id)
+            .is_some_and(|record| {
+                record.disconnected.room_id == *room_id && record.claim.is_none()
+            });
+        if !same_room_unclaimed {
+            return false;
+        }
+        let removed = state.disconnected_players.remove(player_id);
+        if let Some(record) = &removed {
+            let room_id = record.disconnected.room_id;
+            let others_waiting = state
+                .disconnected_players
+                .values()
+                .any(|pending| pending.disconnected.room_id == room_id);
+            if !others_waiting {
+                state.event_buffers.remove(&room_id);
+            }
+        }
+        if removed.is_some() {
+            self.metrics.decrement_reconnection_sessions_active();
+        }
+        drop(state);
+
+        removed.is_some()
+    }
+
     /// Tombstone a pending reconnection record as authority-kicked
     /// (issue #525).
     ///
@@ -1849,6 +1896,68 @@ mod tests {
             !manager.has_pending_reconnection(&player_id).await,
             "completion removes the record the discard could not"
         );
+    }
+
+    /// A fresh same-room seat supersedes the pending record of the dropped
+    /// prior membership, other-room records keep their replacement semantics,
+    /// and a claimed record stays owned by its in-flight restore.
+    #[tokio::test]
+    async fn discard_pending_reconnection_in_room_is_same_room_and_unclaimed_only() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let manager = ReconnectionManager::new(300, 100, metrics);
+        let player_id = Uuid::new_v4();
+        let room_id = Uuid::new_v4();
+        let other_room_id = Uuid::new_v4();
+
+        // Other-room record: untouched by a same-room discard.
+        manager
+            .register_disconnection(player_id, other_room_id, false, None, 0)
+            .await;
+        assert!(
+            !manager
+                .discard_pending_reconnection_in_room(&player_id, &room_id)
+                .await,
+            "a record for another room must not be discarded"
+        );
+        assert!(manager.has_pending_reconnection(&player_id).await);
+        assert!(
+            manager
+                .discard_pending_reconnection_in_room(&player_id, &other_room_id)
+                .await,
+            "the room-scoped discard removes its own room's record"
+        );
+        assert!(!manager.has_pending_reconnection(&player_id).await);
+
+        // Same-room unclaimed record: discarded.
+        manager
+            .register_disconnection(player_id, room_id, false, None, 0)
+            .await;
+        assert!(
+            manager
+                .discard_pending_reconnection_in_room(&player_id, &room_id)
+                .await
+        );
+        assert!(!manager.has_pending_reconnection(&player_id).await);
+
+        // Same-room claimed record: owned by its in-flight restore.
+        let token = manager
+            .register_disconnection(player_id, room_id, false, None, 0)
+            .await;
+        let claim = manager
+            .claim_reconnection(&Uuid::new_v4(), &player_id, &room_id, &token)
+            .await
+            .expect("claim succeeds");
+        assert!(
+            !manager
+                .discard_pending_reconnection_in_room(&player_id, &room_id)
+                .await,
+            "a claimed record must not be discarded"
+        );
+        assert!(
+            manager.has_pending_reconnection(&player_id).await,
+            "the claimed record survives the discard attempt"
+        );
+        assert!(manager.complete_claimed_reconnection(&claim).await);
     }
 
     #[tokio::test]

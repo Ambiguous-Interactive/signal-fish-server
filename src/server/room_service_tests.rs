@@ -1833,6 +1833,120 @@ fn assert_no_queued_message(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>, c
     }
 }
 
+/// A fresh same-room join supersedes the dropped prior membership: the
+/// pending reconnection record left behind by that membership must not
+/// survive the seat commit. If it does, the next disconnect merges the stale
+/// record — keeping its token, deadline, and epoch/sequence view — and
+/// destroys the token the join just issued, so the client's only live
+/// credential dead-ends with a misleading `TokenMismatch`.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn same_room_rejoin_supersedes_the_pending_reconnection_record() {
+    let server = create_test_server_with_config(ServerConfig {
+        enable_reconnection: true,
+        ..ServerConfig::default()
+    })
+    .await;
+    let (player, mut player_rx) =
+        register_client(&server, "127.0.0.1:48130".parse().unwrap()).await;
+    server.set_client_protocol(
+        &player,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![crate::protocol::Transport::Relay],
+            topologies: vec![crate::protocol::Topology::Relay],
+        },
+    );
+    server
+        .handle_join_room(
+            &player,
+            "rejoin-supersede".to_string(),
+            Some("RSJ001".to_string()),
+            "rejoiner".to_string(),
+            Some(4),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+    let first_token = drain_queued_messages(&mut player_rx)
+        .iter()
+        .find_map(|message| match message.as_ref() {
+            ServerMessage::RoomJoined(payload) => payload.reconnection_token.clone(),
+            _ => None,
+        })
+        .expect("v3 join baseline carries a pre-issued reconnect token");
+    let room_id = server
+        .get_client_room(&player)
+        .await
+        .expect("first join seated the player");
+    let reconnection_manager = server
+        .reconnection_manager()
+        .expect("reconnection is enabled");
+
+    // The residue this seam targets: a disconnection record armed for the
+    // player's membership while the player's connection is still registered —
+    // the state an eviction teardown racing an in-flight rejoin produces.
+    let player_info = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room lookup succeeds")
+        .expect("room exists")
+        .players
+        .get(&player)
+        .cloned()
+        .expect("seated player info");
+    let stale_token = reconnection_manager
+        .register_disconnection(player, room_id, false, Some(player_info), 0)
+        .await;
+    assert_eq!(
+        stale_token, first_token,
+        "the armed record preserves the token the client already holds"
+    );
+    assert!(reconnection_manager.has_pending_reconnection(&player).await);
+    // The teardown window continues: routing and the durable seat are removed
+    // while the client stays registered — the window an in-flight rejoin
+    // slips through.
+    server.leave_room_locked(&player, false).await;
+
+    // The superseding membership: the same player joins the same room again
+    // from the still-registered connection.
+    server
+        .handle_join_room(
+            &player,
+            "rejoin-supersede".to_string(),
+            Some("RSJ001".to_string()),
+            "rejoiner".to_string(),
+            Some(4),
+            Some(true),
+            None,
+            None,
+        )
+        .await;
+    let second_token = drain_queued_messages(&mut player_rx)
+        .iter()
+        .find_map(|message| match message.as_ref() {
+            ServerMessage::RoomJoined(payload) => payload.reconnection_token.clone(),
+            _ => None,
+        })
+        .expect("rejoin baseline carries a freshly issued reconnect token");
+    assert_ne!(second_token, first_token, "every join rotates the token");
+    assert!(
+        !reconnection_manager.has_pending_reconnection(&player).await,
+        "the superseded record must not survive the seat commit"
+    );
+
+    // The credential contract, end to end: the next real disconnection arms
+    // the record from THIS membership, and its token claims.
+    server.unregister_client(&player).await;
+    assert!(reconnection_manager.has_pending_reconnection(&player).await);
+    reconnection_manager
+        .claim_reconnection(&uuid::Uuid::new_v4(), &player, &room_id, &second_token)
+        .await
+        .expect("the re-issued token claims after the next disconnect");
+}
+
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn seated_room_join_rejects_an_existing_spectator_role() {

@@ -464,6 +464,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A fresh join into the same room no longer leaves the dropped membership's
+  pending reconnection record behind (issue #396 cross-feature seam sweep).
+  The record previously survived the seat commit, so the next disconnect
+  merged the stale record — keeping its token, deadline, and epoch/sequence
+  view — and destroyed the token the join had just issued: the client's only
+  live credential then failed with a misleading `TokenMismatch`, and a
+  holder of the older token could restore a superseded membership. A join
+  now discards the unclaimed same-room record (the same "a join is a new
+  membership" rule the readiness state already followed). Claimed records
+  (an in-flight token restore) and records for other rooms are untouched. A
+  red-first regression test pins the invariant.
+- `TransferAuthority` no longer grants the role onto a stale residue row
+  (issue #396, same class as the kick path's rerouted-target handling). A
+  storage-failed detach can leave a durable row behind while the player is
+  routed — or seated — in another room. The grant previously validated only
+  the durable row, announced `AuthorityChanged` for a target that could
+  never act for the room, wedged every authority operation behind
+  `NotRoomAuthority`, and later cleared the role silently when the residue
+  was repaired — a stale view no event would ever correct. The transfer now
+  requires the target's live route to be this room and otherwise refuses
+  with the same `TransferTargetNotFound` classification as a non-member. A
+  red-first regression test pins the invariant.
+- Deleting a ghost spectator row during the maintenance sweep now publishes
+  the absolute correcting `SpectatorDisconnected` event (issue #396). A
+  failed compensating rollback keeps the row visible, and a racing
+  admission announces it through its baseline or delta; the sweep previously
+  deleted the row silently, so live members kept the ghost in their count
+  until the room's next spectator event — indefinitely for a quiet room.
+  A storage fault while reading the room for the correction re-queues the
+  repair for the next sweep instead of dropping the notification; the
+  re-queued notification marker is distinct from the rollback marker, so a
+  later successful rollback for the same identity cannot suppress it.
+  Members that never saw the ghost apply the identical absolute shape as a
+  no-op. Red-first regression tests pin the event, the retry, and the
+  marker distinction.
+- `RegenerateRoomCode` now takes the old code's `room_join` lock before the
+  candidate loop (issue #396). A joiner holding the old code's admission
+  lock could previously be descheduled across the swap, observe the dropped
+  code as free, and resurrect it as a duplicate room seated as creator.
+  Rotation now holds old-code → candidate-code in a deadlock-free order, so
+  an in-flight old-code admission resolves the room pre-swap. A red-first
+  regression test pins the serialization.
+- Application room-cap lock acquisitions and failures now increment the
+  shared `signal_fish_room_cap_lock_acquisitions_total` and
+  `_failures_total` counters (issue #396). The game- and server-cap locks
+  were counted; app-cap activity was invisible, so a storage stall on the
+  app-cap lock could not alarm.
+
 - The application room-cap lock now keeps its lease renewed across the
   enforcement count read (issue #550 follow-up). The read previously ran
   before the renewal guard existed, so a stalled storage call could let the

@@ -2174,6 +2174,16 @@ impl EnhancedGameServer {
                                 self.room_coordinator
                                     .forget_player_ready(&room.id, player_id)
                                     .await;
+                                // Same rule for the reconnection record of the
+                                // dropped prior membership: a pending same-room
+                                // record surviving this seat commit would merge
+                                // its stale token/deadline/epoch into the next
+                                // disconnect and destroy the token this join
+                                // just issued. Claimed records (an in-flight
+                                // token restore) and other-room records are
+                                // left alone.
+                                self.discard_pending_reconnection_in_room(player_id, &room.id)
+                                    .await;
                                 room.players.insert(*player_id, player_info);
                                 Ok((
                                     room,
@@ -2636,10 +2646,12 @@ impl EnhancedGameServer {
                 .await
                 .map_err(|error| {
                     tracing::error!(%app_id, %error, "Failed to acquire application room-cap lock");
+                    self.metrics.increment_room_cap_lock_failures();
                     JoinRoomError::Internal(error)
                 })?,
             APPLICATION_ROOM_CAP_LOCK_TTL,
         );
+        self.metrics.increment_room_cap_lock_acquisitions();
         let current = match self.database.get_application_room_count(&app_id).await {
             Ok(current) => current,
             Err(error) => {

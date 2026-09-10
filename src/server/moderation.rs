@@ -483,6 +483,26 @@ impl EnhancedGameServer {
             .await;
             return;
         }
+        // Fresh route read (issue #396 sweep, same class as the kick path's
+        // target resolution): a durable row can outlive its membership as
+        // residue from a storage-failed detach while the player is routed —
+        // or seated — elsewhere. Granting the role onto such a row would
+        // announce an authority that can never act for this room, wedge every
+        // authority operation behind `NotRoomAuthority`, and later clear the
+        // role silently when the residue is repaired — a stale view no event
+        // would ever correct.
+        if self.get_client_room(&target_id).await != Some(room_id) {
+            drop(transfer_event_guard);
+            self.metrics.increment_authority_transfer_conflicts();
+            self.fail_operation(
+                authority_id,
+                operation_id,
+                "Transfer target is not a member of this room",
+                ErrorCode::TransferTargetNotFound,
+            )
+            .await;
+            return;
+        }
         let granted = match self
             .database
             .update_room_authority(&room_id, Some(target_id))
@@ -626,7 +646,9 @@ impl EnhancedGameServer {
     /// serializes against same-code joiners through the shared
     /// `room_join:{game}:{code}` distributed lock, so a joiner that resolved
     /// the candidate before the swap joins this room instead of opening a
-    /// duplicate.
+    /// duplicate. The old code's lock is held across the loop for the same
+    /// reason on the outgoing side: a joiner already admitted on the old code
+    /// resolves this room, and only post-swap joiners observe the drop.
     pub(super) async fn handle_regenerate_room_code_operation(
         self: &Arc<Self>,
         authority_id: &PlayerId,
@@ -689,6 +711,34 @@ impl EnhancedGameServer {
             return;
         }
 
+        // Serialize against old-code joiners too (issue #396 sweep): a joiner
+        // holding `room_join:{game}:{old}` is mid-admission and must resolve
+        // this room before the swap, never observe the dropped code as free
+        // and resurrect it as a duplicate. The hold spans the candidate loop;
+        // the candidate acquisition below nests under it (lock order
+        // old → candidate), and a join takes exactly one code lock plus the
+        // cap locks — which rotation never touches — so the order cannot
+        // cycle. Released on every exit from the loop.
+        let old_lock_key = format!("room_join:{}:{}", room.game_name, room.code);
+        let mut old_lock_renewal = match self
+            .distributed_lock
+            .acquire(&old_lock_key, ROOM_JOIN_LOCK_TTL)
+            .await
+        {
+            Ok(handle) => self.keep_lock_renewed(handle, ROOM_JOIN_LOCK_TTL),
+            Err(error) => {
+                tracing::error!(%authority_id, %room_id, %error, "Failed to acquire old room-code lock");
+                self.fail_operation(
+                    authority_id,
+                    operation_id,
+                    "Failed to regenerate the room code",
+                    ErrorCode::StorageError,
+                )
+                .await;
+                return;
+            }
+        };
+
         for _ in 0..REGENERATED_ROOM_CODE_MAX_ATTEMPTS {
             let candidate = self.generate_region_room_code();
             // Serialize against same-code joiners exactly like room creation:
@@ -703,6 +753,7 @@ impl EnhancedGameServer {
                 Ok(handle) => handle,
                 Err(error) => {
                     tracing::error!(%authority_id, %room_id, %error, "Failed to acquire candidate room-code lock");
+                    self.release_renewed_lock(&mut old_lock_renewal).await;
                     self.fail_operation(
                         authority_id,
                         operation_id,
@@ -719,6 +770,7 @@ impl EnhancedGameServer {
             match self.database.update_room_code(&room_id, candidate).await {
                 Ok(room) => {
                     self.release_renewed_lock(&mut lock_renewal).await;
+                    self.release_renewed_lock(&mut old_lock_renewal).await;
                     self.metrics.increment_room_code_regenerations();
                     tracing::info!(
                         authority = %authority_id,
@@ -747,6 +799,7 @@ impl EnhancedGameServer {
                 }
                 Err(UpdateRoomCodeError::Storage(error)) => {
                     self.release_renewed_lock(&mut lock_renewal).await;
+                    self.release_renewed_lock(&mut old_lock_renewal).await;
                     tracing::error!(%authority_id, %room_id, %error, "Room-code rotation failed in storage");
                     self.fail_operation(
                         authority_id,
@@ -766,6 +819,7 @@ impl EnhancedGameServer {
             attempts = REGENERATED_ROOM_CODE_MAX_ATTEMPTS,
             "Regenerated room-code retry budget exhausted"
         );
+        self.release_renewed_lock(&mut old_lock_renewal).await;
         self.fail_operation(
             authority_id,
             operation_id,

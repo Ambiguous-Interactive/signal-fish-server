@@ -10,7 +10,9 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::config::ProtocolConfig;
-use crate::coordination::{MessageCoordinator, RoomOperationCoordinatorTrait};
+use crate::coordination::{
+    MessageCoordinator, RoomEventMutationGuard, RoomOperationCoordinatorTrait,
+};
 use crate::database::GameDatabase;
 use crate::protocol::{
     validation, ErrorCode, PlayerId, PlayerInfo, Room, RoomId, ServerMessage, SpectatorInfo,
@@ -22,6 +24,21 @@ use tokio::sync::watch;
 
 use super::ConnectionManager;
 
+/// The owed repair behind a [`SpectatorService::pending_unpublished_detaches`]
+/// entry. The two markers are owned by different writers and must not clear
+/// each other: a compensating rollback clears only its own `RowDelete`, and
+/// the maintenance sweep converts a deleted ghost row's `NotifyRetry` into a
+/// published correction (re-queueing `NotifyRetry` if publication could not
+/// read the room).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PendingSpectatorDetachRepair {
+    /// The durable row still exists and its compensating delete is owed.
+    RowDelete,
+    /// The row is deleted; the absolute correcting
+    /// `SpectatorDisconnected` event is still owed to live members.
+    NotifyRetry,
+}
+
 #[derive(Clone)]
 pub(crate) struct SpectatorService {
     spectator_rooms: Arc<DashMap<PlayerId, RoomId>>,
@@ -29,7 +46,14 @@ pub(crate) struct SpectatorService {
     /// externally visible, but whose compensating delete failed. These are
     /// deliberately separate from `spectator_rooms`: the client must not look
     /// joined while maintenance retains enough identity to repair storage.
-    pending_unpublished_detaches: Arc<DashMap<(RoomId, PlayerId), ()>>,
+    /// The value names the owed repair: `RowDelete` belongs to a failed
+    /// compensating rollback (the row still exists), while `NotifyRetry`
+    /// belongs to the maintenance sweep after it deleted a ghost row but
+    /// could not publish the correcting event. The distinction keeps a
+    /// later successful rollback from clearing a notification it does not
+    /// own (a rollback that deleted its own row must still let the ghost
+    /// correction converge).
+    pending_unpublished_detaches: Arc<DashMap<(RoomId, PlayerId), PendingSpectatorDetachRepair>>,
     database: Arc<dyn GameDatabase>,
     /// Readiness is coordinator state, not room-record state, until finalize
     /// writes it through. The spectator snapshot reads it from here so it
@@ -193,12 +217,25 @@ impl SpectatorService {
             .await
         {
             Ok(_) => {
-                self.pending_unpublished_detaches
-                    .remove(&(*room_id, *player_id));
+                // Clear only a repair this rollback owns. A `NotifyRetry`
+                // marker means maintenance deleted an earlier ghost row and
+                // still owes members the correcting event; this rollback
+                // deleted its own (later) row and must leave that retry
+                // standing.
+                if self
+                    .pending_unpublished_detaches
+                    .get(&(*room_id, *player_id))
+                    .is_some_and(|entry| *entry.value() == PendingSpectatorDetachRepair::RowDelete)
+                {
+                    self.pending_unpublished_detaches
+                        .remove(&(*room_id, *player_id));
+                }
             }
             Err(err) => {
-                self.pending_unpublished_detaches
-                    .insert((*room_id, *player_id), ());
+                self.pending_unpublished_detaches.insert(
+                    (*room_id, *player_id),
+                    PendingSpectatorDetachRepair::RowDelete,
+                );
                 warn!(%player_id, %room_id, error = %err, "Failed to roll back unpublished spectator join; queued durable repair");
             }
         }
@@ -835,7 +872,7 @@ impl SpectatorService {
             .collect();
         let mut detached = 0_usize;
         for (room_id, player_id) in pending_unpublished {
-            let _guard = self
+            let room_event_guard = self
                 .message_coordinator
                 .lock_room_event_mutation(&room_id)
                 .await;
@@ -858,12 +895,20 @@ impl SpectatorService {
                         .is_some()
                     {
                         detached = detached.saturating_add(1);
+                        self.publish_ghost_repair_notification(
+                            &room_id,
+                            &player_id,
+                            room_event_guard,
+                        )
+                        .await;
+                        continue;
                     }
                 }
                 Err(err) => {
                     warn!(%player_id, %room_id, error = %err, "Failed to retry unpublished spectator rollback");
                 }
             }
+            drop(room_event_guard);
         }
 
         let candidates: Vec<PlayerId> = self
@@ -881,6 +926,94 @@ impl SpectatorService {
             }
         }
         detached
+    }
+
+    /// Publish the terminal roster after the sweep deletes a ghost row that a
+    /// failed compensating rollback kept visible (issue #396 sweep): a racing
+    /// admission may already have announced the ghost through an absolute
+    /// baseline or delta, so live members need the absolute correcting event.
+    /// Members that never saw the ghost apply the identical absolute shape as
+    /// a no-op. Runs under the room's event-lane guard; the notification and
+    /// its replay record move into one FIFO lane job.
+    async fn publish_ghost_repair_notification(
+        &self,
+        room_id: &RoomId,
+        ghost_id: &PlayerId,
+        room_event_guard: RoomEventMutationGuard,
+    ) {
+        let room = match self.database.get_room_by_id(room_id).await {
+            Ok(Some(room)) => room,
+            Ok(None) => {
+                // The room row is gone; nobody remains to correct.
+                return;
+            }
+            Err(error) => {
+                // The ghost row is already deleted and the repair key
+                // cleared; only the correcting broadcast is owed. Re-queue
+                // the repair key so the next sweep retries the notification
+                // instead of dropping it (the sweep's delete-then-repair
+                // ordering leaves no other path back to this state), and say
+                // so — silence here would resurrect the exact stale-count
+                // state this repair exists to close. A durable identity
+                // republished before the retry is voided by the sweep's
+                // republished-identity check, exactly like a failed delete.
+                self.pending_unpublished_detaches.insert(
+                    (*room_id, *ghost_id),
+                    PendingSpectatorDetachRepair::NotifyRetry,
+                );
+                warn!(%room_id, ghost_id = %ghost_id, error = %error, "Failed to read room for ghost-repair notification; queued a retry");
+                return;
+            }
+        };
+        let current_spectators = room.get_spectators();
+        let notification = Arc::new(ServerMessage::SpectatorDisconnected {
+            spectator_id: *ghost_id,
+            reason: Some(SpectatorStateChangeReason::Disconnected),
+            // Same saturating fallback discipline as the detach path: the
+            // roster is u8-capped (`max_spectators`), so it is unreachable.
+            spectator_count: Some(u32::try_from(current_spectators.len()).unwrap_or(u32::MAX)),
+            current_spectators,
+        });
+        let replay_notification = Arc::clone(&notification);
+        let room_id_for_replay = *room_id;
+        let ghost_id_for_send = *ghost_id;
+        let coordinator = Arc::clone(&self.message_coordinator);
+        let reconnection_manager = self.reconnection_manager.clone();
+        // Maintenance is not drain-aware: a fresh never-drained channel keeps
+        // the broadcast predicates unconditionally true for the job's life.
+        let (drain_tx, drain_rx) = watch::channel(false);
+        let completion = self.message_coordinator.enqueue_room_event(
+            room_event_guard,
+            Box::new(move || {
+                Box::pin(async move {
+                    // Keep the sender alive for as long as the receivers.
+                    let _keep_drain_sender = drain_tx;
+                    let should_broadcast = || !*drain_rx.borrow();
+                    coordinator
+                        .broadcast_to_room_except_if_with_hook(
+                            &room_id_for_replay,
+                            &ghost_id_for_send,
+                            notification,
+                            &should_broadcast,
+                            drain_rx.clone(),
+                            Box::new(move || {
+                                Box::pin(async move {
+                                    if let Some(reconnection_manager) = reconnection_manager {
+                                        reconnection_manager
+                                            .record_room_event(
+                                                &room_id_for_replay,
+                                                replay_notification.as_ref(),
+                                            )
+                                            .await;
+                                    }
+                                })
+                            }),
+                        )
+                        .await
+                })
+            }),
+        );
+        let _ = completion.await;
     }
 
     pub(crate) async fn detach(
@@ -2752,9 +2885,10 @@ mod tests {
         // Simulate the stale rollback state: a disconnect-time storage failure
         // left an unpublished detach row behind, then the same durable
         // identity was re-admitted to the same room before maintenance ran.
-        service
-            .pending_unpublished_detaches
-            .insert((room.id, spectator_id), ());
+        service.pending_unpublished_detaches.insert(
+            (room.id, spectator_id),
+            PendingSpectatorDetachRepair::RowDelete,
+        );
 
         assert_eq!(
             service.retry_disconnected_detaches().await,
@@ -2775,6 +2909,236 @@ mod tests {
                 .pending_unpublished_detaches
                 .contains_key(&(room.id, spectator_id)),
             "the voided rollback record is cleared"
+        );
+    }
+
+    /// A ghost row kept by a failed compensating rollback is durable state a
+    /// racing admission can announce (its absolute baseline or delta includes
+    /// the ghost). When the sweep deletes the ghost, live members need the
+    /// absolute correcting event — otherwise the ghost stays in their count
+    /// until the room's next spectator event, indefinitely for a quiet room.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn retry_disconnected_detaches_publishes_a_correcting_event_for_a_deleted_ghost() {
+        let (service, room, creator_id, coordinator, database) = setup_service().await;
+        let ghost_id = PlayerId::new_v4();
+        // The failed-rollback residue: a durable roster row plus the pending
+        // repair key, with no local role and no live connection to notify.
+        database
+            .add_spectator_to_room(
+                &room.id,
+                SpectatorInfo {
+                    id: ghost_id,
+                    name: "Ghost Watcher".to_string(),
+                    connected_at: chrono::Utc::now(),
+                },
+            )
+            .await
+            .expect("ghost row insert succeeds");
+        service
+            .pending_unpublished_detaches
+            .insert((room.id, ghost_id), PendingSpectatorDetachRepair::RowDelete);
+
+        assert_eq!(
+            service.retry_disconnected_detaches().await,
+            1,
+            "the ghost row is deleted as a detach"
+        );
+        let stored = database
+            .get_room_spectators(&room.id)
+            .await
+            .expect("fetch spectators after ghost repair");
+        assert!(
+            !stored.iter().any(|info| info.id == ghost_id),
+            "the ghost row must not survive the sweep"
+        );
+
+        let corrections = coordinator
+            .messages_for(&creator_id)
+            .await
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::SpectatorDisconnected {
+                    spectator_id,
+                    spectator_count,
+                    current_spectators,
+                    ..
+                } if spectator_id == ghost_id => Some((spectator_count, current_spectators)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            corrections.len(),
+            1,
+            "the ghost repair must publish exactly one correcting SpectatorDisconnected"
+        );
+        let (spectator_count, current_spectators) = &corrections[0];
+        assert_eq!(
+            spectator_count,
+            &Some(0),
+            "the roster is absolute and post-delete: the ghost is gone"
+        );
+        assert!(
+            current_spectators.iter().all(|info| info.id != ghost_id),
+            "the corrected roster must not name the ghost"
+        );
+    }
+
+    /// The sweep deletes the ghost row before the repair notification reads
+    /// the room, so a transient storage fault in that read would otherwise
+    /// lose the correction forever — no row and no repair key left to retry.
+    /// The read failure must re-queue the repair key, and the next sweep must
+    /// converge the notification. Repository-gated: the fault-injection hook
+    /// it drives is `signal_fish_repository_tests`-only, like its siblings.
+    #[tokio::test]
+    #[cfg(all(test, signal_fish_repository_tests))]
+    #[cfg_attr(miri, ignore)]
+    async fn ghost_repair_notification_is_retried_after_a_storage_fault() {
+        let (service, room, creator_id, coordinator, database) = setup_service().await;
+        let ghost_id = PlayerId::new_v4();
+        database
+            .add_spectator_to_room(
+                &room.id,
+                SpectatorInfo {
+                    id: ghost_id,
+                    name: "Ghost Watcher".to_string(),
+                    connected_at: chrono::Utc::now(),
+                },
+            )
+            .await
+            .expect("ghost row insert succeeds");
+        service
+            .pending_unpublished_detaches
+            .insert((room.id, ghost_id), PendingSpectatorDetachRepair::RowDelete);
+
+        database.fail_get_room_by_id_for_test(true);
+        assert_eq!(
+            service.retry_disconnected_detaches().await,
+            1,
+            "the first sweep still deletes the ghost row"
+        );
+        assert!(
+            service
+                .pending_unpublished_detaches
+                .contains_key(&(room.id, ghost_id)),
+            "a failed notification read must re-queue the repair for the next sweep"
+        );
+        assert!(
+            coordinator.messages_for(&creator_id).await.is_empty(),
+            "no correcting event can be built without the room row"
+        );
+
+        database.fail_get_room_by_id_for_test(false);
+        assert_eq!(
+            service.retry_disconnected_detaches().await,
+            1,
+            "the retry sweep converges the notification"
+        );
+        let corrections = coordinator
+            .messages_for(&creator_id)
+            .await
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::SpectatorDisconnected {
+                    spectator_id,
+                    spectator_count,
+                    ..
+                } if spectator_id == ghost_id => Some(spectator_count),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            corrections,
+            vec![Some(0)],
+            "exactly one absolute correction, built after the delete"
+        );
+        assert!(
+            !service
+                .pending_unpublished_detaches
+                .contains_key(&(room.id, ghost_id)),
+            "the converged repair leaves no retry key behind"
+        );
+    }
+
+    /// A re-queued notification marker must survive a later successful
+    /// rollback for the same identity: the rollback clears only its own
+    /// `RowDelete` repair, so the ghost correction still converges on the
+    /// next sweep instead of being suppressed by an unrelated rollback.
+    #[tokio::test]
+    #[cfg(all(test, signal_fish_repository_tests))]
+    #[cfg_attr(miri, ignore)]
+    async fn ghost_notify_retry_survives_a_later_rollback_for_the_same_identity() {
+        let (service, room, creator_id, coordinator, database) = setup_service().await;
+        let ghost_id = PlayerId::new_v4();
+
+        // Phase 1: the sweep deletes the ghost row but cannot read the room
+        // for the correction; the repair re-queues as a notification retry.
+        database
+            .add_spectator_to_room(
+                &room.id,
+                SpectatorInfo {
+                    id: ghost_id,
+                    name: "Ghost Watcher".to_string(),
+                    connected_at: chrono::Utc::now(),
+                },
+            )
+            .await
+            .expect("ghost row insert succeeds");
+        service
+            .pending_unpublished_detaches
+            .insert((room.id, ghost_id), PendingSpectatorDetachRepair::RowDelete);
+        database.fail_get_room_by_id_for_test(true);
+        assert_eq!(service.retry_disconnected_detaches().await, 1);
+        database.fail_get_room_by_id_for_test(false);
+
+        // Phase 2: the same identity re-spectates and the join fails after
+        // the durable admission; the compensation deletes its own row
+        // successfully — and must not clear the notification it does not own.
+        connect_spectator(&service, ghost_id, 35_021).await;
+        service.panic_spectator_join_for_test(SpectatorJoinPanicPoint::JoinAfterDurableAdmission);
+        let outcome = service
+            .join(
+                &ghost_id,
+                room.game_name.clone(),
+                room.code.clone(),
+                "Rejoining Watcher".to_string(),
+            )
+            .await;
+        assert!(outcome.is_err(), "the injected panic fails the re-join");
+        assert_eq!(
+            service
+                .pending_unpublished_detaches
+                .get(&(room.id, ghost_id))
+                .map(|entry| *entry.value()),
+            Some(PendingSpectatorDetachRepair::NotifyRetry),
+            "the successful rollback must not clear the notification retry"
+        );
+
+        // Phase 3: the next sweep converges the correction exactly once.
+        assert_eq!(service.retry_disconnected_detaches().await, 1);
+        let corrections = coordinator
+            .messages_for(&creator_id)
+            .await
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::SpectatorDisconnected {
+                    spectator_id,
+                    spectator_count,
+                    ..
+                } if spectator_id == ghost_id => Some(spectator_count),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            corrections,
+            vec![Some(0)],
+            "the surviving retry publishes exactly one absolute correction"
+        );
+        assert!(
+            !service
+                .pending_unpublished_detaches
+                .contains_key(&(room.id, ghost_id)),
+            "the converged repair leaves no retry key behind"
         );
     }
 }

@@ -121,8 +121,27 @@ correctness evidence appears.
   isolation, nested replay projection verified safe; two unpinned invariants
   gained pins), while two confirmed #550 lease defects were fixed red-first
   (the app-cap enforcement read ran on an unprotected lease; the room-code
-  rotation hold had no renewal). Remaining frontier: continue seam sweeps
-  into whichever seams new features open.
+  rotation hold had no renewal). The 2026-09-10 session-227 sweep ran three
+  parallel audits over the access-control × reconnection/restore ×
+  moderation, spectator-fan-out × authority/replay, and
+  admission/lease × reload × metrics-bounds seams with adversarial
+  verification, and closed four confirmed classes red-first: a fresh
+  same-room rejoin no longer leaves the superseded pending record alive
+  (the next disconnect merged it and destroyed the just-issued token);
+  `TransferAuthority` now requires the target's live route to be this room
+  (a storage-failed residue row could take the role and wedge the authority
+  surface — same class as the session-221 kick hardening); the ghost-row
+  sweep publishes the absolute correcting `SpectatorDisconnected`; and
+  rotation holds the old code's `room_join` lock across the candidate loop
+  (a mid-flight old-code joiner could resurrect the dropped code as a
+  duplicate room). App-cap lock acquisitions/failures joined the shared
+  cap-lock counters. Residual stale-code join-or-create semantics tracked
+  by #561; the blocking `fail_operation` refusals under the room gate
+  (bounded by `slow_consumer_timeout`, consistent with the leave-path
+  pattern) recorded as accepted; a pending player record surviving a
+  spectator join into the same room (restore has no current-spectator
+  check) noted as a bounded pre-existing seam. Remaining frontier: continue
+  seam sweeps into whichever seams new features open.
 - #525 — session 217 landed the minimal viable moderation set: authority
   kick (close code `4007 kicked`, no reconnect), authority room-code
   regeneration, and a shipped default spectator cap

@@ -540,6 +540,88 @@ async fn stalled_room_code_rotation_keeps_its_mutex_lease_alive() {
     );
 }
 
+/// Issue #396 sweep, rotation × old-code admission seam: a joiner holding
+/// `room_join:{game}:{old}` is mid-admission. Rotation must take the old
+/// code's lock before the swap so the joiner resolves the room pre-swap;
+/// otherwise it observes the dropped code as free and resurrects it as a
+/// duplicate room, seated as creator. The held lock hard-blocks the fixed
+/// rotation, so "the swap did not run while the lock was held" cannot pass
+/// by timing — an unfixed rotation reaches the swap within microseconds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg_attr(miri, ignore)]
+async fn rotation_waits_for_an_in_flight_old_code_admission_lock() {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .expect("in-memory test database");
+    let (authority, mut authority_rx) =
+        register_client(&server, "127.0.0.1:48138".parse().unwrap()).await;
+    join_seated_player(&server, &authority, &mut authority_rx, "OLDCOD", "host").await;
+    server.script_room_codes_for_test(["NEWCOD"]);
+
+    // The simulated mid-flight old-code joiner: its admission holds the old
+    // code's lock with the join path's TTL, exactly like the admission
+    // critical section (a short probe TTL would expire under rotation's
+    // bounded retry and void the serialization this test pins).
+    let joiner_lock = server
+        .distributed_lock_for_test()
+        .try_acquire("room_join:moderation-game:OLDCOD", Duration::from_secs(10))
+        .await
+        .expect("lock probe succeeds")
+        .expect("the old-code lock is free before the simulated joiner");
+
+    database.pause_next_update_room_code_for_test();
+    let rotation_server = Arc::clone(&server);
+    let rotation_task = tokio::spawn(async move {
+        rotation_server
+            .handle_regenerate_room_code_operation(&authority, RoomOperationId::new_v4())
+            .await;
+    });
+
+    let reached_swap = timeout(
+        Duration::from_secs(2),
+        database.wait_for_paused_update_room_code_for_test(),
+    )
+    .await
+    .is_ok();
+    assert!(
+        !reached_swap,
+        "rotation must not swap the code while an old-code admission holds its lock"
+    );
+
+    // The mid-flight admission completes against the pre-swap registry; only
+    // then does rotation acquire the freed lock and swap.
+    server
+        .distributed_lock_for_test()
+        .release(&joiner_lock)
+        .await
+        .expect("simulated joiner releases its admission lock");
+    database.release_paused_update_room_code_for_test();
+    rotation_task.await.expect("rotation task completes");
+    let response = recv_until(&mut authority_rx, |message| {
+        matches!(message, ServerMessage::RoomOperationResult { .. })
+    })
+    .await;
+    let ServerMessage::RoomOperationResult { result, .. } = response.as_ref() else {
+        panic!("expected correlated result, got {response:?}");
+    };
+    let RoomOperationResult::RoomCodeRegenerated { room_code } = result.as_ref() else {
+        panic!("expected RoomCodeRegenerated, got {result:?}");
+    };
+    assert_eq!(room_code, "NEWCOD");
+    let old_lookup = server
+        .database
+        .get_room("moderation-game", "OLDCOD")
+        .await
+        .expect("old-code lookup succeeds");
+    assert!(
+        old_lookup.is_none(),
+        "the old code must stop resolving after the swap"
+    );
+}
+
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn regenerate_retries_colliding_candidates_within_the_budget() {
@@ -1671,6 +1753,118 @@ async fn transfer_authority_moves_the_role_and_notifies_members() {
         .expect("ok")
         .expect("room exists");
     assert_eq!(room.authority_player, Some(authority));
+}
+
+/// Issue #396 sweep, same class as the kick path's rerouted-target handling:
+/// a durable row can outlive its membership as residue from a storage-failed
+/// detach while the player is routed elsewhere. Granting the role onto such a
+/// row would announce an authority that can never act for this room and
+/// later lose the role silently when the residue is repaired — a stale view
+/// no event would ever correct. The transfer must refuse it.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn transfer_authority_refuses_a_stale_residue_row() {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (authority, mut authority_rx) =
+        register_client(&server, "127.0.0.1:48153".parse().unwrap()).await;
+    let (target, mut target_rx) =
+        register_client(&server, "127.0.0.1:48154".parse().unwrap()).await;
+
+    join_seated_player(&server, &authority, &mut authority_rx, "XFER02", "host").await;
+    join_seated_player(&server, &target, &mut target_rx, "XFER02", "guest").await;
+
+    let stale_room = server
+        .database
+        .get_room("moderation-game", "XFER02")
+        .await
+        .expect("room lookup succeeds")
+        .expect("authority room exists");
+    let target_row = server
+        .database
+        .get_room_players(&stale_room.id)
+        .await
+        .expect("roster readable")
+        .into_iter()
+        .find(|player| player.id == target)
+        .expect("target seated in the authority room");
+
+    // Build the stale-residue state a storage-failed detach leaves behind:
+    // the target's live connection is routed in another room while its row
+    // in the authority's room is still present.
+    assert!(
+        server
+            .database
+            .remove_player_from_room(&stale_room.id, &target)
+            .await
+            .expect("durable removal succeeds")
+            .is_some(),
+        "test setup removes the target's seat"
+    );
+    let live_room = server
+        .database
+        .create_room(
+            "moderation-game".to_string(),
+            Some("XFER99".to_string()),
+            4,
+            false,
+            target,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("target's live room creation succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&target, live_room.id)
+        .await;
+    server
+        .database
+        .add_player_to_room(&stale_room.id, target_row)
+        .await
+        .expect("stale row planted");
+
+    server
+        .handle_transfer_authority_operation(&authority, RoomOperationId::new_v4(), target)
+        .await;
+
+    // The refusal is the same non-member classification the routed check
+    // already produces, and the role never moves.
+    let response = recv_until(&mut authority_rx, |message| {
+        matches!(message, ServerMessage::RoomOperationResult { .. })
+    })
+    .await;
+    assert_eq!(
+        operation_failed_code(&response),
+        ErrorCode::TransferTargetNotFound,
+        "a residue row is not a transferable member"
+    );
+    let room_after = server
+        .database
+        .get_room("moderation-game", "XFER02")
+        .await
+        .expect("room lookup succeeds")
+        .expect("room survives the refused transfer");
+    assert_eq!(
+        room_after.authority_player,
+        Some(authority),
+        "the role must stay with the authority"
+    );
+    let stray_announcements = drain_receiver(&mut authority_rx)
+        .into_iter()
+        .filter(|message| matches!(message.as_ref(), ServerMessage::AuthorityChanged { .. }))
+        .count();
+    assert_eq!(
+        stray_announcements, 0,
+        "a refused transfer must not announce any AuthorityChanged"
+    );
+
+    // The target's live membership elsewhere is untouched.
+    assert_eq!(
+        server.get_client_room(&target).await,
+        Some(live_room.id),
+        "the refused transfer must not disturb the target's live route"
+    );
 }
 
 #[tokio::test]
