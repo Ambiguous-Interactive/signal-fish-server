@@ -249,8 +249,9 @@ correctness evidence appears.
     wave moved the last owner-input-free per-PR compile leg onto the cron
     cohort (the non-gating nightly `cargo-udeps` analysis now runs daily at
     07:00 UTC with `cargo-machete` staying per-PR), dropped the never-read
-    per-job rust-cache from the `deny` supply-chain job, and de-duplicated
-    the lint job's cross-OS `cargo fmt` re-check behind the quick-check gate.
+    per-job dependency cache from the `deny` supply-chain job, and
+    de-duplicated the lint job's cross-OS `cargo fmt` re-check behind the
+    quick-check gate.
     Remaining levers still
     need owner input: self-hosted runner labels (owner comment excludes
     DAD-MACHINE and ELI-MACHINE) and the #379 path-awareness inventory;
