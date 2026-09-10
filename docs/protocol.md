@@ -939,7 +939,7 @@ assignments that are never renumbered:
 | `4004` | `idle_timeout` | No inbound frame was observed strictly before the `websocket.idle_timeout_secs` deadline |
 | `4005` | `room_inactive` | The assigned room exceeded `server.inactive_room_timeout` and was deleted; the client must join or create a new room |
 | `4006` | `inbound_rate_limited` | The connection exhausted its per-window inbound application-message budget (`rate_limit.max_inbound_messages`); reconnect and stay within the budget |
-| `4007` | `kicked` | The room's authority removed this seated member via the `KickPlayer` room operation; the seat is gone and reconnection is not offered. Join again with a valid room code |
+| `4007` | `kicked` | The room's authority removed this member via the `KickPlayer` room operation; the seat is removed or the pending reconnection record tombstoned, and reconnection is not offered. Join again with a valid room code |
 | `1000` | `unregistered` | Normal closure (leave, replaced connection, ordinary teardown) |
 | `1009` | `outbound_message_too_large` | A complete encoded server application message exceeded the advertised outbound payload limit; no prefix of that message was written |
 
@@ -1572,10 +1572,13 @@ uncorrelated top-level `Error`, because the server cannot safely trust an operat
 
 The moderation operations are authority-only (v3 only):
 
-- `KickPlayer` names a seated `player_id`. The server removes the seat, broadcasts the usual `PlayerLeft` roster
-  delta to the remaining members, closes the target's connection with close code `4007` (`kicked`), and never arms
-  reconnection for a kicked seat. The requester receives `PlayerKicked` on success; refusals use
-  `NOT_ROOM_AUTHORITY` (sender is not the authority), `KICK_TARGET_NOT_FOUND` (target is not a seated member), or
+- `KickPlayer` names a seated `player_id` or the holder of this room's pending reconnection record. The server removes
+  the seat (a pending record is tombstoned instead), broadcasts the usual `PlayerLeft` roster delta to the remaining
+  members when a seat was removed, closes the target's connection with close code `4007` (`kicked`) unless the target
+  is live in another room, and never arms reconnection for a kicked seat. The requester receives `PlayerKicked` on
+  success; refusals use
+  `NOT_ROOM_AUTHORITY` (sender is not the authority), `KICK_TARGET_NOT_FOUND` (target is not a seated member or a
+  holder of this room's pending reconnection record), or
   `INVALID_INPUT` (the authority cannot kick itself).
 - `RegenerateRoomCode` replaces the room code with a freshly generated one. Existing members stay connected and
   reconnection tokens are unaffected. The requester receives `RoomCodeRegenerated` carrying the new code; the old
@@ -1586,10 +1589,12 @@ The moderation operations are authority-only (v3 only):
   a mismatched, and a stray password into an open room are indistinguishable); `null` reopens the room. Current
   members and their reconnection tokens are unaffected. The password is stored only as a salted hash and never
   logged or echoed. The requester receives `RoomAccessUpdated { requires_password }`.
-- `BanPlayer` names a seated `player_id` and evicts it exactly like `KickPlayer`, then records the id on the
-  room's in-memory ban list: while the room lives, the banned id cannot rejoin it as a player or spectator, and a
-  reconnection attempt refuses with `BANNED` (the pending record is kept, so a mid-window unban lets the token work
-  again). The ban dies with the room. The requester receives `PlayerBanned`.
+- `BanPlayer` names a seated `player_id` or the holder of this room's pending reconnection record and evicts it
+  exactly like `KickPlayer`, then records the id on the
+  room's in-memory ban list: while the room lives, the banned id cannot rejoin it as a player or spectator. The
+  settled operation tombstones the pending record, so a reconnection attempt refuses with `KICKED`; a record that
+  survived a raced eviction refuses with `BANNED` (the record stays claimable, so a mid-window unban lets the token
+  work again). The ban dies with the room. The requester receives `PlayerBanned`.
 - `UnbanPlayer` lifts a room ban (idempotent). The requester receives `PlayerUnbanned`.
 - `TransferAuthority` names a seated `player_id` that becomes the room's authority. Every member receives the usual
   `AuthorityChanged` broadcast (personalized `you_are_authority` per recipient); the sender receives

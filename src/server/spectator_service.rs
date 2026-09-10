@@ -1936,6 +1936,73 @@ mod tests {
         assert_eq!(stored[0].id, spectator_id);
     }
 
+    /// Service-level pin of the `TOO_MANY_SPECTATORS` admission refusal
+    /// (issue #396): a room at its configured spectator cap refuses the next
+    /// admission without publishing a role or mutating the roster, and the
+    /// freed seat becomes admittable again.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn spectator_join_refuses_when_the_room_is_at_capacity() {
+        let (service, room, _creator_id, _coordinator, database) = setup_service().await;
+        database
+            .set_room_max_spectators(&room.id, Some(1))
+            .await
+            .expect("capacity update succeeds");
+
+        let first = PlayerId::new_v4();
+        connect_spectator(&service, first, 35_014).await;
+        service
+            .join(
+                &first,
+                room.game_name.clone(),
+                room.code.clone(),
+                "First Watcher".to_string(),
+            )
+            .await
+            .expect("the first spectator is admitted");
+
+        let second = PlayerId::new_v4();
+        connect_spectator(&service, second, 35_015).await;
+        let error = service
+            .join(
+                &second,
+                room.game_name.clone(),
+                room.code.clone(),
+                "Second Watcher".to_string(),
+            )
+            .await
+            .expect_err("a room at its spectator cap must refuse the next admission");
+        assert_eq!(
+            error.code,
+            Some(ErrorCode::TooManySpectators),
+            "the refusal must name the cap: {error:?}"
+        );
+        assert!(
+            !service.is_spectating(&second),
+            "the refusal must not publish a spectator role"
+        );
+        assert_eq!(
+            database
+                .get_room_spectators(&room.id)
+                .await
+                .expect("fetch spectators after the refusal")
+                .len(),
+            1,
+            "the refusal must not mutate the roster"
+        );
+
+        service.leave(&first).await.expect("spectator leaves");
+        service
+            .join(
+                &second,
+                room.game_name.clone(),
+                room.code.clone(),
+                "Second Watcher".to_string(),
+            )
+            .await
+            .expect("the freed seat is admittable again");
+    }
+
     /// A panic between the durable spectator admission and the local role
     /// publication must be compensated. Uncompensated, the ghost row consumes
     /// spectator capacity and is invisible to both maintenance sweeps: no

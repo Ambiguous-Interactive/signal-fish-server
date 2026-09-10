@@ -275,6 +275,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Stale-code join-or-create semantics are now stated as the consumer
+  contract (issue #561): a code rotated away by `RegenerateRoomCode` is an
+  unknown code, and a join that names it afterwards opens a fresh,
+  unrelated room under it. Clients must treat any `RoomJoined` for a code
+  the user did not just create as a new room, never as a return to the
+  previous one; after a rotation, share only the new code. The
+  rooms-and-lobbies and authority concept guides state the contract.
 - Documentation Validation no longer triggers on push to main (issue #512):
   the post-merge push wave is reserved for deployment side effects, per the
   issue #557 doctrine. Pull-request coverage is unchanged. The release
@@ -516,6 +523,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not a fresh admission; a ban is the tool that refuses restores. A pin
   test and the `SetRoomAccess` documentation (authority, rooms-and-lobbies,
   reconnection concepts) state the contract.
+- The moderation target surface is now pinned (issue #396 seam sweep):
+  `KickPlayer` and `BanPlayer` evict a seated member or a pending-record
+  holder only. A live spectator of the same room is neither, so both
+  operations refuse with `KICK_TARGET_NOT_FOUND` and leave the spectator
+  session, the roster, and the ban list untouched. A data-driven pin test
+  states the contract for both operations.
+- The `TOO_MANY_SPECTATORS` admission refusal is now pinned at the service
+  level (issue #396): a room at its configured spectator cap refuses the
+  next admission without publishing a role or mutating the roster, and a
+  departure frees exactly one admittable seat.
+- The stale-code rotation contract from the preceding Changed entry is now
+  pinned end-to-end (issue #561 resolution): a spectator join with a
+  rotated-away code is refused `ROOM_NOT_FOUND`, and a seated join opens a
+  fresh, unrelated room under it with first-claim authority while the
+  rotated room stays intact under its new code.
+- A moderation eviction of a pending-record holder no longer closes the
+  holder's live spectator session in another room (issue #396, same class
+  as the residue-only eviction rule). The route read that gates the
+  farewell and the `4007 kicked` close saw only seated routes, so a record
+  holder spectating a different room lost that unrelated session to an
+  authority it never joined. The spectator role is now checked alongside
+  the seated route: the holder keeps the session, the record is still
+  tombstoned, and a ban still records the ban bit. A red-first regression
+  test pins the invariant for kick and ban.
 - `TransferAuthority` no longer grants the role onto a stale residue row
   (issue #396, same class as the kick path's rerouted-target handling). A
   storage-failed detach can leave a durable row behind while the player is

@@ -135,12 +135,19 @@ correctness evidence appears.
   rotation holds the old code's `room_join` lock across the candidate loop
   (a mid-flight old-code joiner could resurrect the dropped code as a
    duplicate room). App-cap lock acquisitions/failures joined the shared
-   cap-lock counters. Residual stale-code join-or-create semantics tracked
-   by #561; the blocking `fail_operation` refusals under the room gate
-   (bounded by `slow_consumer_timeout`, consistent with the leave-path
-   pattern) recorded as accepted; a pending player record surviving a
-   spectator join into the same room (restore has no current-spectator
-   check) noted as a bounded pre-existing seam. Remaining frontier: continue
+   cap-lock counters. The 2026-09-10 session-229 sweep covered the
+   remaining spectator × moderation seams (ban/kick target classification,
+   spectator cap, transfer × spectator, kick/ban with spectators present,
+   rotation × live spectators, unban × spectator) and closed one confirmed
+   class red-first: a moderation eviction of a pending-record holder no
+   longer closes the holder's live spectator session in another room (the
+   route read that gates the farewell and the `4007` close saw only seated
+   routes). Three documented contracts gained pins (spectator-target
+   kick/ban refusal, service-level `TOO_MANY_SPECTATORS` refusal,
+   stale-rotated-code join-or-create semantics), and #561 was resolved as
+   documented semantics (a stale code is an unknown code; the tombstone
+   registry was rejected as a namespace-wide design change needing owner
+   input). Remaining frontier: continue
    seam sweeps into whichever seams new features open. The 2026-09-10
    session-228 sweep closed the spectator-join seam red-first (a same-room
    spectator join now discards the unclaimed pending record — the

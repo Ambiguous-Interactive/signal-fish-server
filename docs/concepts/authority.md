@@ -189,9 +189,11 @@ non-authority member.
 The authority holds a set of moderation operations (v3 only, via the
 `room_operation_ids` capability; see [Protocol Reference](../protocol.md)):
 
-- **`KickPlayer`** removes a seated player from the room. The target's
-  connection closes with close code `4007` (`kicked`), the remaining members
-  see the usual `PlayerLeft` roster delta, and the kicked seat is never
+- **`KickPlayer`** removes a seated player from the room — or tombstones
+  this room's pending reconnection record. The target's connection closes
+  with close code `4007` (`kicked`) unless the target is live in another
+  room, the remaining members see the usual `PlayerLeft` roster delta, and
+  the kicked seat is never
   reconnectable. Use it to evict a disruptive player instead of waiting for
   them to leave.
 - **`BanPlayer`** evicts exactly like `KickPlayer` **and** records the
@@ -202,7 +204,12 @@ The authority holds a set of moderation operations (v3 only, via the
 - **`RegenerateRoomCode`** replaces the room code with a fresh one. Existing
   members stay connected; the old code stops resolving immediately. Use it
   when an invite code leaks: the room survives, and only holders of the new
-  code can send new joiners.
+  code can send new joiners. The rotation result (`RoomCodeRegenerated`) is
+  delivered only to the authority, who shares the new code with future
+  invitees out of band. The rotation is never broadcast: a member who stays
+  connected keeps the stale code until the next snapshot, and a
+  reconnecting member receives the current code in `Reconnected`. A stale
+  code is an unknown code: a join that names it opens a different room.
 - **`SetRoomAccess`** seals the room behind a join password (or reopens it
   with `null`). Sealed rooms refuse every join -- seated or spectator --
   that does not present the password (`PASSWORD_REQUIRED`); a missing, a

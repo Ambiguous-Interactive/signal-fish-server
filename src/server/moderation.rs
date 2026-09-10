@@ -38,16 +38,17 @@ impl EnhancedGameServer {
     /// issue #525).
     ///
     /// Only the room's designated authority may kick, the target must be a
-    /// seated member other than the sender. The removal itself reuses the
+    /// seated member — or this room's pending-record holder — other than
+    /// the sender. The removal itself reuses the
     /// ordinary departure machinery (`leave_room_locked`), so the target's
     /// seat receives exactly the same durable removal, reconnection-token
     /// discard, unrouted terminal watermark, and sequenced replay-recorded
     /// `PlayerLeft` broadcast as any other departure — a kicked seat is never
     /// reconnectable. A target still routed in this room closes with the
     /// dedicated `4007 kicked` close code after a best-effort farewell
-    /// `Error` frame; a target whose live route is in another room (stale
-    /// durable residue here) loses only the residue, and its live connection
-    /// stays open.
+    /// `Error` frame; a target whose live route is in another room — a
+    /// seated route or a spectator session — loses only the residue row or
+    /// the tombstoned record, and its live connection stays open.
     pub(super) async fn handle_kick_player_operation(
         self: &Arc<Self>,
         authority_id: &PlayerId,
@@ -1015,9 +1016,9 @@ impl EnhancedGameServer {
     /// the durable removal. A target still routed in this room receives a
     /// best-effort farewell and the `4007 kicked` close, and the seat is
     /// removed through the ordinary departure machinery. A target whose live
-    /// route is in another room — this room's row is stale residue from a
-    /// storage-failed detach — loses only the residue row: its live
-    /// membership, the reconnection credential for its actual room, its
+    /// route is in another room — a seated route or a spectator session —
+    /// means this room's row is stale residue or a tombstoned record: its
+    /// live membership, the reconnection credential for its actual room, its
     /// farewell, and its connection are untouched (issue #396).
     async fn evict_member_by_authority(
         self: &Arc<Self>,
@@ -1070,9 +1071,13 @@ impl EnhancedGameServer {
         // acquire through the reassignment, `src/server/reconnection_service.rs`);
         // moving the re-key outside that hold would let a kick lose to a
         // mid-flight claim.
+        // A live spectator session in another room is a live membership
+        // elsewhere too (issue #396): the seated-route read cannot see it,
+        // so it is queried separately.
         let routed_room = self.get_client_room(target_id).await;
-        let evicts_live_membership_elsewhere =
-            matches!(routed_room, Some(routed) if routed != room_id);
+        let spectator_room = self.spectator_service.spectator_room(target_id);
+        let evicts_live_membership_elsewhere = matches!(routed_room, Some(routed) if routed != room_id)
+            || matches!(spectator_room, Some(live) if live != room_id);
 
         // The pre-issued token is keyed by player id alone and binds to the
         // room the target currently occupies, so removing it here would
@@ -1087,8 +1092,9 @@ impl EnhancedGameServer {
         // and a full queue must neither delay the removal nor reclassify the
         // close. The close frame (`4007 kicked`) remains the attribution
         // signal that always survives. A target whose live membership is in
-        // another room is not being removed from anything it can observe, so
-        // it receives neither the farewell nor the close.
+        // another room — a seated route or a spectator session — is not
+        // being removed from anything it can observe, so it receives neither
+        // the farewell nor the close (issue #396).
         if !evicts_live_membership_elsewhere {
             let _ = self
                 .message_coordinator

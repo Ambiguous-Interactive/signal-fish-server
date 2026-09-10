@@ -540,6 +540,312 @@ async fn stalled_room_code_rotation_keeps_its_mutex_lease_alive() {
     );
 }
 
+/// Issue #396 spectator-target pin: kick and ban evict a *seated* member (or
+/// a pending-record holder). A live spectator of the same room is neither,
+/// so both operations refuse with `KICK_TARGET_NOT_FOUND` and leave the
+/// spectator session, the roster, and the ban list untouched.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn kick_and_ban_refuse_a_spectator_target() {
+    for operation in ["kick", "ban"] {
+        let server = create_test_server_with(ServerConfig::default()).await;
+        let (authority, mut authority_rx) =
+            register_client(&server, "127.0.0.1:48163".parse().unwrap()).await;
+        let (watcher, _watcher_rx) =
+            register_client(&server, "127.0.0.1:48164".parse().unwrap()).await;
+
+        join_seated_player(&server, &authority, &mut authority_rx, "SPTGT1", "host").await;
+        server
+            .spectator_service
+            .join(
+                &watcher,
+                "moderation-game".to_string(),
+                "SPTGT1".to_string(),
+                "watcher".to_string(),
+            )
+            .await
+            .expect("spectator join succeeds");
+        assert!(server.spectator_service.is_spectating(&watcher));
+
+        if operation == "kick" {
+            server
+                .handle_kick_player_operation(&authority, RoomOperationId::new_v4(), watcher)
+                .await;
+        } else {
+            server
+                .handle_ban_player_operation(&authority, RoomOperationId::new_v4(), watcher)
+                .await;
+        }
+        let response = recv_until(&mut authority_rx, |message| {
+            matches!(message, ServerMessage::RoomOperationResult { .. })
+        })
+        .await;
+        assert_eq!(
+            operation_failed_code(&response),
+            ErrorCode::KickTargetNotFound,
+            "{operation}: a spectator is not a moderation target: got {response:?}"
+        );
+        assert!(
+            server.spectator_service.is_spectating(&watcher),
+            "{operation}: the refused moderation must not disturb the spectator session"
+        );
+        let room = server
+            .database
+            .get_room("moderation-game", "SPTGT1")
+            .await
+            .expect("room lookup succeeds")
+            .expect("room exists");
+        assert!(!room.is_banned(&watcher), "{operation}: no ban is recorded");
+        assert_eq!(room.spectators.len(), 1, "{operation}: roster unchanged");
+    }
+}
+
+/// Issue #396 cross-room protection, pending-record class: a moderation
+/// eviction of a pending-record holder must not reach into another room.
+/// The holder's live spectator session in a different room is a live
+/// membership elsewhere — it receives neither the farewell nor the `4007`
+/// close; only the record (tombstoned) and, for a ban, the room A ban bit
+/// are removed. Red-first: `get_client_room` saw only seated routes, so the
+/// close fired on the unrelated spectator socket.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn evicting_a_record_holder_leaves_their_other_room_spectator_session_alive() {
+    for operation in ["kick", "ban"] {
+        let server = create_test_server_with(ServerConfig {
+            enable_reconnection: true,
+            ..ServerConfig::default()
+        })
+        .await;
+        let (authority, mut authority_rx) =
+            register_client(&server, "127.0.0.1:48168".parse().unwrap()).await;
+        let (target, mut _target_rx, target_close_listener) =
+            register_client_with_close_listener(&server, "127.0.0.1:48169".parse().unwrap()).await;
+
+        join_seated_player(&server, &authority, &mut authority_rx, "EVICT1", "host").await;
+        join_seated_player(&server, &target, &mut _target_rx, "EVICT1", "guest").await;
+        let room_a_id = server
+            .get_client_room(&target)
+            .await
+            .expect("target seated");
+        let reconnection_manager = server
+            .reconnection_manager()
+            .expect("reconnection is enabled");
+
+        // The disconnect arms the record through the teardown-window path,
+        // keeping the connection registered for the spectator re-admission.
+        let seat_info = server
+            .database
+            .get_room_by_id(&room_a_id)
+            .await
+            .expect("room lookup succeeds")
+            .expect("room remains present")
+            .players
+            .get(&target)
+            .cloned()
+            .expect("target holds a durable seat");
+        reconnection_manager
+            .register_disconnection(
+                target,
+                room_a_id,
+                false,
+                Some(seat_info),
+                server
+                    .connection_manager
+                    .game_data_epoch(&target)
+                    .unwrap_or(0),
+            )
+            .await;
+        server.leave_room_locked(&target, false).await;
+        assert!(reconnection_manager.has_pending_reconnection(&target).await);
+
+        // The holder's live role elsewhere: a spectator session in room B.
+        server
+            .database
+            .create_room(
+                "moderation-game".to_string(),
+                Some("OTHER9".to_string()),
+                4,
+                false,
+                uuid::Uuid::new_v4(),
+                "udp".to_string(),
+                "region-a".to_string(),
+                None,
+            )
+            .await
+            .expect("other-room creation succeeds");
+        server
+            .spectator_service
+            .join(
+                &target,
+                "moderation-game".to_string(),
+                "OTHER9".to_string(),
+                "WatcherElsewhere".to_string(),
+            )
+            .await
+            .expect("the holder spectates the other room");
+        assert!(server.spectator_service.is_spectating(&target));
+
+        if operation == "kick" {
+            server
+                .handle_kick_player_operation(&authority, RoomOperationId::new_v4(), target)
+                .await;
+        } else {
+            server
+                .handle_ban_player_operation(&authority, RoomOperationId::new_v4(), target)
+                .await;
+        }
+        let result = room_access_result(&mut authority_rx).await;
+        match (operation, &result) {
+            ("kick", RoomOperationResult::PlayerKicked { player_id }) => {
+                assert_eq!(*player_id, target)
+            }
+            ("ban", RoomOperationResult::PlayerBanned { player_id }) => {
+                assert_eq!(*player_id, target)
+            }
+            other => panic!("expected the {operation} to succeed, got {other:?}"),
+        }
+
+        // The unrelated spectator session keeps its socket: no farewell, no
+        // `4007` close, no detach.
+        assert_eq!(
+            target_close_listener.requested_reason(),
+            None,
+            "{operation}: a record holder spectating another room must keep its session"
+        );
+        assert!(
+            server.spectator_service.is_spectating(&target),
+            "{operation}: the spectator role must survive the eviction"
+        );
+
+        // The room A credential is still terminated: the record is
+        // tombstoned, and a ban additionally records the ban bit.
+        let claim = reconnection_manager
+            .claim_reconnection(&uuid::Uuid::new_v4(), &target, &room_a_id, "any-token")
+            .await;
+        assert!(
+            matches!(claim, Err(crate::reconnection::ReconnectionError::Kicked)),
+            "{operation}: the record must be tombstoned, got {claim:?}"
+        );
+        let room_a = server
+            .database
+            .get_room_by_id(&room_a_id)
+            .await
+            .expect("room lookup succeeds")
+            .expect("room remains present");
+        assert_eq!(
+            room_a.is_banned(&target),
+            operation == "ban",
+            "{operation}: the ban bit must match the operation"
+        );
+        let room_b_spectators = server
+            .database
+            .get_room_spectators(
+                &server
+                    .database
+                    .get_room("moderation-game", "OTHER9")
+                    .await
+                    .expect("room lookup succeeds")
+                    .expect("other room remains present")
+                    .id,
+            )
+            .await
+            .expect("fetch spectators");
+        assert!(
+            room_b_spectators.iter().any(|info| info.id == target),
+            "{operation}: the other room's roster must keep the spectator"
+        );
+    }
+}
+
+/// Issue #561 resolution pin: a rotated-away code is an unknown code. The
+/// spectator path resolves nothing and refuses `ROOM_NOT_FOUND`; the seated
+/// path has no tombstone either, so join-creates-room opens a fresh,
+/// unrelated room under the stale code and first-claim authority seats the
+/// joiner. Pinned end-to-end so the documented contract cannot change
+/// silently (a future tombstone registry would be a deliberate wire-visible
+/// design change).
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn a_stale_rotated_code_behaves_like_an_unknown_code() {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (authority, mut authority_rx) =
+        register_client(&server, "127.0.0.1:48165".parse().unwrap()).await;
+    let (watcher, _watcher_rx) = register_client(&server, "127.0.0.1:48166".parse().unwrap()).await;
+    let (newcomer, mut newcomer_rx) =
+        register_client(&server, "127.0.0.1:48167".parse().unwrap()).await;
+
+    join_seated_player(&server, &authority, &mut authority_rx, "STALE1", "host").await;
+    let rotated_room_id = server
+        .get_client_room(&authority)
+        .await
+        .expect("authority seated");
+    server.script_room_codes_for_test(["FRESH1"]);
+    server
+        .handle_regenerate_room_code_operation(&authority, RoomOperationId::new_v4())
+        .await;
+    let response = recv_until(&mut authority_rx, |message| {
+        matches!(message, ServerMessage::RoomOperationResult { .. })
+    })
+    .await;
+    let ServerMessage::RoomOperationResult { result, .. } = response.as_ref() else {
+        panic!("expected correlated result, got {response:?}");
+    };
+    let RoomOperationResult::RoomCodeRegenerated { room_code } = result.as_ref() else {
+        panic!("expected RoomCodeRegenerated, got {result:?}");
+    };
+    assert_eq!(room_code, "FRESH1");
+
+    // Spectator path: the stale code resolves to nothing (no creation
+    // branch), so the admission is refused.
+    let spectator_error = server
+        .spectator_service
+        .join(
+            &watcher,
+            "moderation-game".to_string(),
+            "STALE1".to_string(),
+            "watcher".to_string(),
+        )
+        .await
+        .expect_err("a stale code must not seat a spectator");
+    assert_eq!(
+        spectator_error.code,
+        Some(ErrorCode::RoomNotFound),
+        "the stale code must not resolve: {spectator_error:?}"
+    );
+
+    // Seated path: the stale code is an unknown code, so join-creates-room
+    // opens a fresh room and first-claim authority seats the joiner.
+    join_seated_player(&server, &newcomer, &mut newcomer_rx, "STALE1", "newcomer").await;
+    let fresh_room_id = server
+        .get_client_room(&newcomer)
+        .await
+        .expect("the stale-code join seats its own room");
+    assert_ne!(
+        fresh_room_id, rotated_room_id,
+        "the stale code must not lead back into the rotated room"
+    );
+    let fresh_room = server
+        .database
+        .get_room_by_id(&fresh_room_id)
+        .await
+        .expect("room lookup succeeds")
+        .expect("fresh room exists");
+    assert_eq!(fresh_room.code, "STALE1");
+    assert_eq!(
+        fresh_room.authority_player,
+        Some(newcomer),
+        "first-claim authority seats the stale-code joiner"
+    );
+    let rotated_room = server
+        .database
+        .get_room_by_id(&rotated_room_id)
+        .await
+        .expect("room lookup succeeds")
+        .expect("rotated room exists");
+    assert_eq!(rotated_room.code, "FRESH1");
+    assert_eq!(rotated_room.authority_player, Some(authority));
+}
+
 /// Issue #396 sweep, rotation × old-code admission seam: a joiner holding
 /// `room_join:{game}:{old}` is mid-admission. Rotation must take the old
 /// code's lock before the swap so the joiner resolves the room pre-swap;
