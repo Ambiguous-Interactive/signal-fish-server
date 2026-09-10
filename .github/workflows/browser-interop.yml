@@ -17,9 +17,11 @@
 # no external network access (the Chromium download at install time is the
 # one network fetch, cached across runs).
 #
-# Triggers on changes to either client package and every input the suite
-# actually depends on: all server sources, the root manifest/lockfile, the
-# pinned toolchain, the runner script, and this workflow.
+# Triggers on changes to either interop client package and every input the
+# suite actually depends on: all server sources, the root manifest/lockfile,
+# the pinned toolchain, the runner script, and this workflow. The fortress
+# and fortress-wasm fixture packages are not suite inputs; their own interop
+# workflows own them (issue #512).
 
 name: Browser Interop
 
@@ -32,7 +34,8 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
-      - "clients/**"
+      - "clients/browser/**"
+      - "clients/native/**"
       - "scripts/run-browser-interop.sh"
       - "scripts/read-toml-string.sh"
       - ".github/workflows/browser-interop.yml"
