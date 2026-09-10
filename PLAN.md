@@ -147,7 +147,14 @@ correctness evidence appears.
    stale-rotated-code join-or-create semantics), and #561 was resolved as
    documented semantics (a stale code is an unknown code; the tombstone
    registry was rejected as a namespace-wide design change needing owner
-   input). Remaining frontier: continue
+   input). The 2026-09-10 session-230 sweep closed the #566
+   rotation × transfer gap as documented semantics pending the same
+   coordinated-SDK owner decision as #539: the docs (authority,
+   rooms-and-lobbies, protocol reference, AsyncAPI descriptions) now state
+   that after a rotation the role hand-over needs the new code shared out of
+   band first, and a red-verified delivery pin
+   (`rotation_then_transfer_delivers_no_room_code_to_the_successor`) freezes
+   the wire contract. Remaining frontier: continue
    seam sweeps into whichever seams new features open. The 2026-09-10
    session-228 sweep closed the spectator-join seam red-first (a same-room
    spectator join now discards the unclaimed pending record — the
@@ -238,7 +245,14 @@ correctness evidence appears.
     the change: verification-nightly no longer fires on the four
     sequenced-relay trace inputs (formal-verification owns their per-PR
     gating) and browser-interop narrows `clients/**` to
-    `clients/browser/**` + `clients/native/**`. Remaining levers still
+    `clients/browser/**` + `clients/native/**`. The 2026-09-10 session-230
+    wave moved the last owner-input-free per-PR compile leg onto the cron
+    cohort (the non-gating nightly `cargo-udeps` analysis now runs daily at
+    07:00 UTC with `cargo-machete` staying per-PR), dropped the never-read
+    per-job dependency cache from the `deny` supply-chain job, and
+    de-duplicated the lint job's cross-OS `cargo fmt` re-check behind the
+    quick-check gate.
+    Remaining levers still
     need owner input: self-hosted runner labels (owner comment excludes
     DAD-MACHINE and ELI-MACHINE) and the #379 path-awareness inventory;
     a cargo-deny single-container consolidation is blocked by the pinned

@@ -10,7 +10,6 @@
 #   - .lychee.toml: Link checker configuration and exclusions
 #
 # Runs on:
-#   - Push to main branch (only for relevant file changes)
 #   - Pull requests to main (only for relevant file changes)
 #   - Weekly schedule (Monday at 00:00 UTC) for proactive link rot detection
 #

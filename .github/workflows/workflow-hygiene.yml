@@ -7,7 +7,6 @@
 #   3. Dependencies not actually used in code
 #
 # Runs on:
-#   - Push to main branch (only for workflow file changes)
 #   - Pull requests to main (only for workflow file changes)
 #   - Weekly schedule (Monday at 06:00 UTC) for proactive staleness detection
 #

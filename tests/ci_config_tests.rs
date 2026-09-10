@@ -1209,7 +1209,7 @@ const REQUIRED_CI_JOBS: &[(&str, &str, &str)] = &[
     (
         "lint",
         "Lint (${{ matrix.os }})",
-        "Cross-OS code formatting and linting; ubuntu leg adds the panic-policy check (#558)",
+        "Cross-OS linting; ubuntu leg adds the panic-policy check (#558)",
     ),
     (
         "nextest",
@@ -22088,8 +22088,10 @@ fn test_unused_deps_workflow_uses_one_shared_analyzer_job() {
     );
     assert_eq!(
         udeps.as_mapping_get("if").and_then(Yaml::as_str),
-        Some("${{ !cancelled() }}"),
-        "cargo-udeps must still run after a cargo-machete failure while respecting cancellation"
+        Some("${{ !cancelled() && github.event_name != 'pull_request' }}"),
+        "cargo-udeps must still run after a cargo-machete failure while respecting \
+         cancellation, but only on the schedule/dispatch cohort (issue #512: the nightly \
+         compile is informational and moved off the per-PR lane)"
     );
     assert_eq!(
         step_named("Check for unused dependencies (udeps)")
@@ -22117,7 +22119,6 @@ fn test_unused_deps_workflow_only_allocates_for_root_rust_graph_changes() {
             "src/**",
             "tests/**",
             "benches/**",
-            "examples/**",
             ".github/workflows/unused-deps.yml",
         ],
     );
@@ -22132,10 +22133,21 @@ fn test_unused_deps_workflow_only_allocates_for_root_rust_graph_changes() {
         triggers.as_mapping_get("workflow_dispatch").is_some(),
         "unused-deps.yml must retain a manual full-analysis trigger"
     );
+    // Issue #512 reversed the earlier no-schedule stance: the nightly udeps
+    // compile is the job's heavy leg and its result is informational
+    // (continue-on-error), so it now runs on the daily cohort instead of on
+    // every covered pull request. cargo-machete stays per-PR as the fast
+    // gating signal, so the per-event allocation still tracks root-graph
+    // changes; the schedule exists so the informational signal never dies.
+    let schedule = triggers
+        .as_mapping_get("schedule")
+        .and_then(Yaml::as_sequence)
+        .expect("unused-deps.yml must keep a daily cohort for the udeps compile");
     assert!(
-        triggers.as_mapping_get("schedule").is_none(),
-        "unused-deps.yml must not allocate a deterministic weekly rerun: its source graph, \
-         toolchain, and analyzer versions only change through already-covered repository paths"
+        schedule
+            .iter()
+            .any(|entry| entry.as_mapping_get("cron").and_then(Yaml::as_str) == Some("0 7 * * *")),
+        "the udeps cohort must stay daily at 07:00 UTC (clear of the other scheduled legs)"
     );
 }
 

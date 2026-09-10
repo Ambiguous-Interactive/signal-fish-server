@@ -7,7 +7,6 @@
 #   - .typos.toml: Spell check configuration and custom dictionary
 #
 # Runs on:
-#   - Push to main branch (only for relevant file changes)
 #   - Pull requests to main (only for relevant file changes)
 #
 # Features:

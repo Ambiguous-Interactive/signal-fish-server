@@ -209,7 +209,11 @@ The authority holds a set of moderation operations (v3 only, via the
   invitees out of band. The rotation is never broadcast: a member who stays
   connected keeps the stale code until the next snapshot, and a
   reconnecting member receives the current code in `Reconnected`. A stale
-  code is an unknown code: a join that names it opens a different room.
+  code is an unknown code: a join that names it opens a different room. No
+  message queries the current code, and the transfer announcements carry no
+  code. A role hand-over after a rotation needs the new code shared with the
+  successor out of band first; otherwise the new authority holds only their
+  join-time code and cannot invite (issue #566).
 - **`SetRoomAccess`** seals the room behind a join password (or reopens it
   with `null`). Sealed rooms refuse every join -- seated or spectator --
   that does not present the password (`PASSWORD_REQUIRED`); a missing, a
@@ -225,7 +229,10 @@ The authority holds a set of moderation operations (v3 only, via the
 - **`TransferAuthority`** hands the authority role to a seated member of
   your choice. Every member receives the usual `AuthorityChanged`
   broadcast; the sender loses every authority capability (including
-  `StartGame` and the operations above) and the successor gains them. If the
+  `StartGame` and the operations above) and the successor gains them. The
+  transfer carries no room code: a successor who joined before a rotation
+  still knows only their join-time code. Share the current code out of
+  band before or with the transfer (issue #566). If the
   session is already running, the transfer moves the role but **not** the
   session's transport host (see below).
 
