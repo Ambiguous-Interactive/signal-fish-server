@@ -493,9 +493,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deleted the row silently, so live members kept the ghost in their count
   until the room's next spectator event — indefinitely for a quiet room.
   A storage fault while reading the room for the correction re-queues the
-  repair for the next sweep instead of dropping the notification. Members
-  that never saw the ghost apply the identical absolute shape as a no-op.
-  Red-first regression tests pin the event and the retry.
+  repair for the next sweep instead of dropping the notification; the
+  re-queued notification marker is distinct from the rollback marker, so a
+  later successful rollback for the same identity cannot suppress it.
+  Members that never saw the ghost apply the identical absolute shape as a
+  no-op. Red-first regression tests pin the event, the retry, and the
+  marker distinction.
 - `RegenerateRoomCode` now takes the old code's `room_join` lock before the
   candidate loop (issue #396). A joiner holding the old code's admission
   lock could previously be descheduled across the swap, observe the dropped
