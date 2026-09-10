@@ -1573,6 +1573,11 @@ async fn application_room_lock_failure_denies_creation_without_side_effects() {
     );
     distributed_lock.fail_acquire_for_test(None).await;
     assert_eq!(
+        server.metrics.snapshot().await.rooms.room_cap_lock_failures,
+        1,
+        "an app-cap lock acquisition failure must reach the shared cap-lock failure counter"
+    );
+    assert_eq!(
         server
             .database
             .get_application_room_count(&app_id)
@@ -1586,4 +1591,14 @@ async fn application_room_lock_failure_denies_creation_without_side_effects() {
         receive(&mut creator_rx).await.as_ref(),
         ServerMessage::RoomJoined(_)
     ));
+    assert_eq!(
+        server
+            .metrics
+            .snapshot()
+            .await
+            .rooms
+            .room_cap_lock_acquisitions,
+        3,
+        "the shared counter must now include the app-cap acquisition alongside the game- and server-cap ones"
+    );
 }

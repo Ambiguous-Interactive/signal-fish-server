@@ -304,6 +304,31 @@ impl EnhancedGameServer {
         }
     }
 
+    /// A fresh same-room seat supersedes the dropped prior membership: the
+    /// pending record from that membership must not survive the seat commit,
+    /// or the next disconnect would merge it — keeping its token, deadline,
+    /// and epoch/sequence view — and dead-end the token this join issued.
+    /// Claimed records (an in-flight token restore) are left alone, and
+    /// records for other rooms keep their replacement semantics.
+    pub(crate) async fn discard_pending_reconnection_in_room(
+        &self,
+        player_id: &PlayerId,
+        room_id: &RoomId,
+    ) {
+        if let Some(reconnection_manager) = &self.reconnection_manager {
+            if reconnection_manager
+                .discard_pending_reconnection_in_room(player_id, room_id)
+                .await
+            {
+                tracing::debug!(
+                    %player_id,
+                    %room_id,
+                    "Discarded pending reconnection record superseded by a fresh same-room join"
+                );
+            }
+        }
+    }
+
     pub(crate) async fn register_disconnection_for_reconnect(
         &self,
         player_id: &PlayerId,
