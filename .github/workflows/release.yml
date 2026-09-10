@@ -8,8 +8,11 @@
 #
 # Release gating:
 #   A `preflight` job verifies that required CI workflows ("CI" and
-#   "Documentation Validation") have passed on the commit being released
-#   before the `publish` job runs. This prevents publishing a broken crate.
+#   "Documentation Validation") passed on the commit being released before
+#   the `publish` job runs: either an exact default-branch push run at that
+#   commit, or the merged release pull request's own pull_request run at
+#   the head that squash-produced it (see scripts/check-release-preflight.sh).
+#   This prevents publishing a broken crate.
 #
 # Concurrency:
 #   cancel-in-progress is set to false because aborting a half-finished

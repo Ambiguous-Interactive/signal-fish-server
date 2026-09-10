@@ -10,7 +10,9 @@
 #      keeps the pull-request run's content identical to the release
 #      commit's tree, so this leg carries the same evidence as the removed
 #      post-merge push wave (issue #557) for workflows that no longer
-#      trigger on push.
+#      trigger on push. The leg refuses a multi-parent commit: a merge
+#      commit's tree can carry manual conflict resolutions that no
+#      pull-request run ever validated.
 set -euo pipefail
 
 require_value() {
@@ -33,6 +35,26 @@ resolve_release_pr() {
         return 0
     fi
     if [ -n "$RELEASE_PR_RESOLUTION" ]; then
+        echo "ERROR: ${RELEASE_PR_RESOLUTION}" >&2
+        return 1
+    fi
+
+    # The pull-request leg's evidence is content identity: only a squash
+    # merge (single parent) guarantees the pull-request run's tree equals
+    # the release commit's tree. A merge commit can carry manual conflict
+    # resolutions no pull-request run ever validated, so refuse it here
+    # instead of accepting a weaker proof.
+    local parents
+    if ! parents=$(gh api \
+        --method GET \
+        "repos/${REPO}/commits/${COMMIT_SHA}" \
+        --jq '.parents | length'); then
+        RELEASE_PR_RESOLUTION="Could not retrieve commit ${COMMIT_SHA} from GitHub."
+        echo "ERROR: ${RELEASE_PR_RESOLUTION}" >&2
+        return 1
+    fi
+    if [ "$parents" -ne 1 ]; then
+        RELEASE_PR_RESOLUTION="Commit ${COMMIT_SHA} has ${parents} parents; a release commit must be a single-parent squash merge."
         echo "ERROR: ${RELEASE_PR_RESOLUTION}" >&2
         return 1
     fi
@@ -105,6 +127,11 @@ require_value RELEASE_DEFAULT_BRANCH "${RELEASE_DEFAULT_BRANCH:-}"
 REPO=$RELEASE_REPOSITORY
 COMMIT_SHA=$RELEASE_COMMIT_SHA
 DEFAULT_BRANCH=$RELEASE_DEFAULT_BRANCH
+
+if [[ ! "$COMMIT_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    echo "ERROR: RELEASE_COMMIT_SHA must be a full 40-character commit SHA, got '${COMMIT_SHA}'." >&2
+    exit 1
+fi
 
 echo "Verifying CI status for commit: $COMMIT_SHA"
 
@@ -201,7 +228,7 @@ for WORKFLOW_NAME in "${REQUIRED_WORKFLOWS[@]}"; do
 
     if [ -z "$RUN_METADATA" ]; then
         echo "ERROR: No completed pull-request run found for '${WORKFLOW_NAME}' on release pull request #${RELEASE_PR_NUMBER} (head ${RELEASE_PR_HEAD_SHA})." >&2
-        echo "  Merge the release pull request and let its required runs complete before releasing." >&2
+        echo "  Re-run this workflow on the pull request head commit, or merge a successor pull request for the release." >&2
         FAILED=1
         continue
     fi

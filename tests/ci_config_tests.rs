@@ -18793,6 +18793,7 @@ fn test_release_preflight_behavior_matrix() {
             "unused",
             "unused",
             "unused",
+            "single_parent",
             true,
             "All required CI checks passed",
         ),
@@ -18807,8 +18808,33 @@ fn test_release_preflight_behavior_matrix() {
             "release_pr",
             "success",
             "success",
+            "single_parent",
             true,
             "All required CI checks passed",
+        ),
+        (
+            "two_parent_release",
+            "normal",
+            "none",
+            "none",
+            "unused",
+            "unused",
+            "unused",
+            "two_parents",
+            false,
+            "must be a single-parent squash merge",
+        ),
+        (
+            "commit_api_failure",
+            "normal",
+            "none",
+            "none",
+            "unused",
+            "unused",
+            "unused",
+            "api_failure",
+            false,
+            "Could not retrieve commit",
         ),
         (
             "mixed_legs",
@@ -18818,6 +18844,7 @@ fn test_release_preflight_behavior_matrix() {
             "release_pr",
             "unused",
             "success",
+            "single_parent",
             true,
             "All required CI checks passed",
         ),
@@ -18829,6 +18856,7 @@ fn test_release_preflight_behavior_matrix() {
             "empty",
             "unused",
             "unused",
+            "single_parent",
             false,
             "No merged pull request found for commit",
         ),
@@ -18840,6 +18868,7 @@ fn test_release_preflight_behavior_matrix() {
             "ambiguous",
             "unused",
             "unused",
+            "single_parent",
             false,
             "Multiple merged pull requests found for commit",
         ),
@@ -18851,6 +18880,7 @@ fn test_release_preflight_behavior_matrix() {
             "api_failure",
             "unused",
             "unused",
+            "single_parent",
             false,
             "Could not query merged pull requests from GitHub",
         ),
@@ -18862,6 +18892,7 @@ fn test_release_preflight_behavior_matrix() {
             "release_pr",
             "none",
             "success",
+            "single_parent",
             false,
             "No completed pull-request run found for 'CI'",
         ),
@@ -18873,6 +18904,7 @@ fn test_release_preflight_behavior_matrix() {
             "release_pr",
             "failure",
             "success",
+            "single_parent",
             false,
             "conclusion is 'failure'",
         ),
@@ -18884,6 +18916,7 @@ fn test_release_preflight_behavior_matrix() {
             "release_pr",
             "api_failure",
             "success",
+            "single_parent",
             false,
             "Could not retrieve 'CI' pull-request runs",
         ),
@@ -18895,6 +18928,7 @@ fn test_release_preflight_behavior_matrix() {
             "release_pr",
             "wrong_sha",
             "success",
+            "single_parent",
             false,
             "unrelated or malformed run metadata",
         ),
@@ -18906,19 +18940,9 @@ fn test_release_preflight_behavior_matrix() {
             "release_pr",
             "success",
             "none",
+            "single_parent",
             false,
             "No completed pull-request run found for 'Documentation Validation'",
-        ),
-        (
-            "no_run",
-            "normal",
-            "none",
-            "none",
-            "empty",
-            "unused",
-            "unused",
-            false,
-            "No merged pull request found for commit",
         ),
         (
             "pull_request_run",
@@ -18928,6 +18952,7 @@ fn test_release_preflight_behavior_matrix() {
             "unused",
             "unused",
             "unused",
+            "single_parent",
             false,
             "unrelated or malformed run metadata",
         ),
@@ -18939,6 +18964,7 @@ fn test_release_preflight_behavior_matrix() {
             "unused",
             "unused",
             "unused",
+            "single_parent",
             false,
             "unrelated or malformed run metadata",
         ),
@@ -18950,6 +18976,7 @@ fn test_release_preflight_behavior_matrix() {
             "unused",
             "unused",
             "unused",
+            "single_parent",
             false,
             "unrelated or malformed run metadata",
         ),
@@ -18961,6 +18988,7 @@ fn test_release_preflight_behavior_matrix() {
             "unused",
             "unused",
             "unused",
+            "single_parent",
             false,
             "unrelated or malformed run metadata",
         ),
@@ -18972,6 +19000,7 @@ fn test_release_preflight_behavior_matrix() {
             "unused",
             "unused",
             "unused",
+            "single_parent",
             false,
             "unrelated or malformed run metadata",
         ),
@@ -18983,6 +19012,7 @@ fn test_release_preflight_behavior_matrix() {
             "unused",
             "unused",
             "unused",
+            "single_parent",
             false,
             "unrelated or malformed run metadata",
         ),
@@ -18994,6 +19024,7 @@ fn test_release_preflight_behavior_matrix() {
             "unused",
             "unused",
             "unused",
+            "single_parent",
             false,
             "conclusion is 'failure'",
         ),
@@ -19005,6 +19036,7 @@ fn test_release_preflight_behavior_matrix() {
             "unused",
             "unused",
             "unused",
+            "single_parent",
             false,
             "Could not retrieve repository workflows",
         ),
@@ -19016,6 +19048,7 @@ fn test_release_preflight_behavior_matrix() {
             "unused",
             "unused",
             "unused",
+            "single_parent",
             false,
             "Could not retrieve 'CI' runs",
         ),
@@ -19027,6 +19060,7 @@ fn test_release_preflight_behavior_matrix() {
             "unused",
             "unused",
             "unused",
+            "single_parent",
             true,
             "All required CI checks passed",
         ),
@@ -19038,6 +19072,7 @@ fn test_release_preflight_behavior_matrix() {
             "unused",
             "unused",
             "unused",
+            "single_parent",
             false,
             "not found in repository",
         ),
@@ -19049,6 +19084,7 @@ fn test_release_preflight_behavior_matrix() {
             "unused",
             "unused",
             "unused",
+            "single_parent",
             false,
             "Multiple workflows found",
         ),
@@ -19064,6 +19100,7 @@ fn test_release_preflight_behavior_matrix() {
         pr_map_mode,
         ci_pr_mode,
         doc_pr_mode,
+        commit_mode,
         expected_success,
         expected,
     ) in cases
@@ -19165,6 +19202,15 @@ case "$endpoint" in
       esac
     fi
     ;;
+  */commits/*)
+    require_arg --jq "$@"
+    case "$MOCK_COMMIT_MODE" in
+      single_parent) printf '1\n' ;;
+      two_parents) printf '2\n' ;;
+      api_failure) echo "simulated commit API failure" >&2; exit 71 ;;
+      *) echo "fake gh: unexpected commit mode $MOCK_COMMIT_MODE" >&2; exit 90 ;;
+    esac
+    ;;
   *"/pulls?"*)
     require_arg --paginate "$@"
     case "$endpoint" in
@@ -19224,6 +19270,7 @@ esac
             .env("MOCK_PR_MAP_MODE", pr_map_mode)
             .env("MOCK_CI_PR_RUN_MODE", ci_pr_mode)
             .env("MOCK_DOC_PR_RUN_MODE", doc_pr_mode)
+            .env("MOCK_COMMIT_MODE", commit_mode)
             .env("MOCK_PR_HEAD_SHA", PR_HEAD_SHA)
             .env("MOCK_DEFAULT_BRANCH", "main")
             .env("MOCK_SHA", SHA)
@@ -19246,10 +19293,16 @@ esac
             "{name}: expected diagnostic `{expected}`\n{combined}\nCalls:\n{}",
             read_file(&calls)
         );
-        assert!(
-            !read_file(&calls).contains("/commits/"),
-            "{name}: release preflight must not infer path-filter skips from a single commit"
-        );
+        for call in read_file(&calls).lines() {
+            if call.contains("/commits/") {
+                assert!(
+                    call.contains(".parents | length"),
+                    "{name}: release preflight must use a commits lookup only for the \
+                     single-parent squash check, never to infer path-filter skips from the \
+                     commit's parent diff.\nCall: {call}"
+                );
+            }
+        }
     }
 }
 
@@ -20938,8 +20991,7 @@ fn test_documentation_validation_runs_for_every_release_introduction() {
     let helper_path = root.join("scripts/check-release-preflight.sh");
     let helper = read_live_file(&helper_path);
     assert!(
-        !helper.contains("/commits/${COMMIT_SHA}")
-            && !helper.contains("commit did not touch relevant paths"),
+        !helper.contains("commit did not touch relevant paths") && !helper.contains(".paths"),
         "release preflight must require exact successful runs, not infer a path-filter skip from \
          the release commit's parent diff.\nFile: {}",
         helper_path.display()
@@ -20948,6 +21000,10 @@ fn test_documentation_validation_runs_for_every_release_introduction() {
         "repos/${REPO}/pulls?state=closed&base=${DEFAULT_BRANCH}",
         "--paginate",
         "merge_commit_sha",
+        // Content identity only holds for a squash merge: the pull-request
+        // leg must refuse a multi-parent commit whose tree can carry manual
+        // conflict resolutions no pull_request run ever validated.
+        "'.parents | length'",
     ] {
         assert!(
             helper.contains(required),

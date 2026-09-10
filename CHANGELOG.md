@@ -500,6 +500,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   membership" rule the readiness state already followed). Claimed records
   (an in-flight token restore) and records for other rooms are untouched. A
   red-first regression test pins the invariant.
+- A same-room spectator join now also discards the player's unclaimed
+  pending reconnection record (issue #396, same seam class). The record
+  previously survived the spectator admission, so after the spectator
+  session ended a `Reconnect` with the pre-spectator token re-seated the
+  player — a superseded membership resurrected through a stale credential,
+  and a violation of the "rotates on every join" contract, which spectator
+  joins now explicitly document. A red-first regression test pins the
+  invariant.
+- The seal-restore admission contract is now pinned (issue #396 seam
+  adjudication): `SetRoomAccess` seals fresh admissions only. A pending
+  reconnection record armed before the seal still restores its holder into
+  the sealed room with no password — `Reconnect` carries no password field,
+  and resuming a prior membership through a live bearer seat credential is
+  not a fresh admission; a ban is the tool that refuses restores. A pin
+  test and the `SetRoomAccess` documentation (authority, rooms-and-lobbies,
+  reconnection concepts) state the contract.
 - `TransferAuthority` no longer grants the role onto a stale residue row
   (issue #396, same class as the kick path's rerouted-target handling). A
   storage-failed detach can leave a durable row behind while the player is
