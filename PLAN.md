@@ -134,14 +134,33 @@ correctness evidence appears.
   sweep publishes the absolute correcting `SpectatorDisconnected`; and
   rotation holds the old code's `room_join` lock across the candidate loop
   (a mid-flight old-code joiner could resurrect the dropped code as a
-  duplicate room). App-cap lock acquisitions/failures joined the shared
-  cap-lock counters. Residual stale-code join-or-create semantics tracked
-  by #561; the blocking `fail_operation` refusals under the room gate
-  (bounded by `slow_consumer_timeout`, consistent with the leave-path
-  pattern) recorded as accepted; a pending player record surviving a
-  spectator join into the same room (restore has no current-spectator
-  check) noted as a bounded pre-existing seam. Remaining frontier: continue
-  seam sweeps into whichever seams new features open.
+   duplicate room). App-cap lock acquisitions/failures joined the shared
+   cap-lock counters. Residual stale-code join-or-create semantics tracked
+   by #561; the blocking `fail_operation` refusals under the room gate
+   (bounded by `slow_consumer_timeout`, consistent with the leave-path
+   pattern) recorded as accepted; a pending player record surviving a
+   spectator join into the same room (restore has no current-spectator
+   check) noted as a bounded pre-existing seam. Remaining frontier: continue
+   seam sweeps into whichever seams new features open. The 2026-09-10
+   session-228 sweep closed the spectator-join seam red-first (a same-room
+   spectator join now discards the unclaimed pending record — the
+   pre-spectator token could previously re-seat the player after the
+   spectator session ended) and adjudicated the seal-restore seam (pinned:
+   `SetRoomAccess` gates fresh admissions only; a pre-seal record restores
+   without a password — resumption, not admission; bans refuse restores).
+   Also verified safe: rotation × spectator code resolution (spectator
+   joins have no creation branch, so the #561 resurrection class does not
+   apply to them; mid-swap misdirection re-reads by room id and cannot
+   strand), TURN/relay issuance × rotation/reload/restore (pure, fail-closed
+   mint; restore folds fresh plan/ICE repair; TURN config is not
+   SIGHUP-reloadable), metrics bounds × spectator counters (none exist).
+   Recorded as accepted: zero-member record-protected rooms count toward
+   `server.max_rooms` for the reconnect window (intentional protection ×
+   ceiling; availability-only, bounded by window × code space); the room
+   event lane stalls behind one slow recipient up to `slow_consumer_timeout`
+   per send with an unbounded job queue behind it (per-client rate budgets
+   bound admission); a tightened per-app `max_relay_bytes` override reaches
+   live connections only on reconnect (same revocation-is-restart contract).
 - #525 — session 217 landed the minimal viable moderation set: authority
   kick (close code `4007 kicked`, no reconnect), authority room-code
   regeneration, and a shipped default spectator cap
@@ -199,9 +218,25 @@ correctness evidence appears.
     (measured before: 2.8 + 2.2 billed minutes per CI event plus two
     runner setups; guard constants/tests migrated atomically, retired
     check names documented in the naming-contract header).
-    Remaining levers still need owner input: self-hosted runner labels
-    (owner comment excludes DAD-MACHINE and ELI-MACHINE) and the #379
-    path-awareness inventory.
+    Session 228 closed the release-preflight deadlock and the last
+    validation push wave: the issue-#557 push-trigger removal had left
+    `check-release-preflight.sh` requiring an `event=push` run of "CI" at
+    the release commit — unsatisfiable, so every future release would have
+    failed closed; the preflight now also accepts the merged release pull
+    request's own `pull_request` run at the squash head (single-parent
+    check enforced; strict commit→PR mapping), and doc-validation dropped
+    its push trigger entirely (~50–90 Linux-billed minutes/day at the
+    session-224 merge rate; docs-deploy still strict-builds main docs).
+    Two dead PR path filters stopped allocating suites that never consumed
+    the change: verification-nightly no longer fires on the four
+    sequenced-relay trace inputs (formal-verification owns their per-PR
+    gating) and browser-interop narrows `clients/**` to
+    `clients/browser/**` + `clients/native/**`. Remaining levers still
+    need owner input: self-hosted runner labels (owner comment excludes
+    DAD-MACHINE and ELI-MACHINE) and the #379 path-awareness inventory;
+    a cargo-deny single-container consolidation is blocked by the pinned
+    action's one-manifest-per-boot input and the fortress-wasm 1.94
+    toolchain pin.
 - #379 — make verification-nightly pull-request fan-out path-aware only after
   an owner exports the required-check/ruleset inventory and a historical
   changed-file replay proves net allocation and runner-time savings. On the
