@@ -943,8 +943,12 @@ fn extract_workflow_event_paths(workflow_content: &str, event: &str) -> Vec<Stri
         .unwrap_or_else(|| panic!("workflow must define top-level on block"));
     let on_child_indent = yaml_first_child_indent(&on_block)
         .unwrap_or_else(|| panic!("workflow on block must define events"));
-    let event_block = extract_yaml_mapping_block(&on_block, event, on_child_indent)
-        .unwrap_or_else(|| panic!("workflow must define {event} event block"));
+    // An absent event block means the workflow does not trigger on that
+    // event, so it has no paths there.
+    let event_block = match extract_yaml_mapping_block(&on_block, event, on_child_indent) {
+        Some(block) => block,
+        None => return Vec::new(),
+    };
 
     extract_yaml_field_values(&event_block, "paths")
 }
@@ -8645,7 +8649,19 @@ fn test_doc_validation_path_filters_cover_critical_paths() {
 
     let mut missing_paths = Vec::new();
 
-    for event in ["push", "pull_request"] {
+    // The push trigger is gone: validation workflows prove content on pull
+    // requests only, and the release preflight accepts the merged release
+    // pull request's runs (issue #557). The release-introduction inputs
+    // (Cargo.toml, markdown) must therefore stay in the pull_request paths
+    // so the release pull request itself fires the exact run the preflight
+    // accepts.
+    let push_paths = extract_workflow_event_paths(&content, "push");
+    assert!(
+        push_paths.is_empty(),
+        "doc-validation.yml must not trigger on push anymore; found {push_paths:?}"
+    );
+
+    for event in ["pull_request"] {
         let paths = extract_workflow_event_paths(&content, event)
             .into_iter()
             .collect::<BTreeSet<_>>();
@@ -9047,13 +9063,17 @@ fn test_required_workflow_triggers() {
     // and must NOT trigger on push to main (the daily noon cron re-proves
     // main's health, including the macOS/Windows cohort lanes).
     //
-    // doc-validation.yml keeps both branch triggers: its push trigger is the
-    // release-preflight contract pinning version-introduction commits.
+    // doc-validation.yml kept its push trigger only as the release-preflight
+    // contract pinning version-introduction commits. The preflight now proves
+    // the release commit through the merged release pull request's own
+    // pull_request runs (identical squash content, issue #557), so no
+    // validation workflow triggers on push to main anymore; push triggers are
+    // reserved for deployment side effects (docker-publish, docs-deploy).
 
     let root = repo_root();
     let mut errors = Vec::new();
 
-    let expectations: &[(&str, bool)] = &[("ci.yml", false), ("doc-validation.yml", true)];
+    let expectations: &[(&str, bool)] = &[("ci.yml", false), ("doc-validation.yml", false)];
 
     for (workflow_file, requires_push) in expectations {
         let workflow_path = root.join(".github/workflows").join(workflow_file);
@@ -18759,28 +18779,155 @@ fn test_release_preflight_behavior_matrix() {
     use std::os::unix::fs::PermissionsExt;
 
     const SHA: &str = "1111111111111111111111111111111111111111";
+    const PR_HEAD_SHA: &str = "2222222222222222222222222222222222222222";
+    // Case fields:
+    // (name, workflow-discovery mode, CI push-run mode, docs push-run mode,
+    //  release-PR mapping mode, CI PR-run mode, docs PR-run mode,
+    //  expected success, expected diagnostic)
     let cases = [
         (
             "exact_default_branch_push",
             "normal",
             "success",
             "success",
+            "unused",
+            "unused",
+            "unused",
             true,
             "All required CI checks passed",
+        ),
+        (
+            // The post-#557 reality: neither required workflow triggers on
+            // push anymore, so both must be proven through the merged
+            // release pull request.
+            "release_pr_runs",
+            "normal",
+            "none",
+            "none",
+            "release_pr",
+            "success",
+            "success",
+            true,
+            "All required CI checks passed",
+        ),
+        (
+            "mixed_legs",
+            "normal",
+            "success",
+            "none",
+            "release_pr",
+            "unused",
+            "success",
+            true,
+            "All required CI checks passed",
+        ),
+        (
+            "no_merged_pr",
+            "normal",
+            "none",
+            "none",
+            "empty",
+            "unused",
+            "unused",
+            false,
+            "No merged pull request found for commit",
+        ),
+        (
+            "ambiguous_merged_prs",
+            "normal",
+            "none",
+            "none",
+            "ambiguous",
+            "unused",
+            "unused",
+            false,
+            "Multiple merged pull requests found for commit",
+        ),
+        (
+            "pr_mapping_api_failure",
+            "normal",
+            "none",
+            "none",
+            "api_failure",
+            "unused",
+            "unused",
+            false,
+            "Could not query merged pull requests from GitHub",
+        ),
+        (
+            "release_pr_run_missing",
+            "normal",
+            "none",
+            "none",
+            "release_pr",
+            "none",
+            "success",
+            false,
+            "No completed pull-request run found for 'CI'",
+        ),
+        (
+            "release_pr_run_failed",
+            "normal",
+            "none",
+            "none",
+            "release_pr",
+            "failure",
+            "success",
+            false,
+            "conclusion is 'failure'",
+        ),
+        (
+            "release_pr_run_api_failure",
+            "normal",
+            "none",
+            "none",
+            "release_pr",
+            "api_failure",
+            "success",
+            false,
+            "Could not retrieve 'CI' pull-request runs",
+        ),
+        (
+            "release_pr_run_malformed",
+            "normal",
+            "none",
+            "none",
+            "release_pr",
+            "wrong_sha",
+            "success",
+            false,
+            "unrelated or malformed run metadata",
+        ),
+        (
+            "missing_documentation_run",
+            "normal",
+            "none",
+            "none",
+            "release_pr",
+            "success",
+            "none",
+            false,
+            "No completed pull-request run found for 'Documentation Validation'",
         ),
         (
             "no_run",
             "normal",
             "none",
-            "success",
+            "none",
+            "empty",
+            "unused",
+            "unused",
             false,
-            "No completed default-branch push run",
+            "No merged pull request found for commit",
         ),
         (
             "pull_request_run",
             "normal",
             "pull_request",
             "success",
+            "unused",
+            "unused",
+            "unused",
             false,
             "unrelated or malformed run metadata",
         ),
@@ -18789,6 +18936,9 @@ fn test_release_preflight_behavior_matrix() {
             "normal",
             "schedule",
             "success",
+            "unused",
+            "unused",
+            "unused",
             false,
             "unrelated or malformed run metadata",
         ),
@@ -18797,6 +18947,9 @@ fn test_release_preflight_behavior_matrix() {
             "normal",
             "tag",
             "success",
+            "unused",
+            "unused",
+            "unused",
             false,
             "unrelated or malformed run metadata",
         ),
@@ -18805,6 +18958,9 @@ fn test_release_preflight_behavior_matrix() {
             "normal",
             "wrong_branch",
             "success",
+            "unused",
+            "unused",
+            "unused",
             false,
             "unrelated or malformed run metadata",
         ),
@@ -18813,6 +18969,9 @@ fn test_release_preflight_behavior_matrix() {
             "normal",
             "wrong_sha",
             "success",
+            "unused",
+            "unused",
+            "unused",
             false,
             "unrelated or malformed run metadata",
         ),
@@ -18821,6 +18980,9 @@ fn test_release_preflight_behavior_matrix() {
             "normal",
             "incomplete",
             "success",
+            "unused",
+            "unused",
+            "unused",
             false,
             "unrelated or malformed run metadata",
         ),
@@ -18829,6 +18991,9 @@ fn test_release_preflight_behavior_matrix() {
             "normal",
             "failure",
             "success",
+            "unused",
+            "unused",
+            "unused",
             false,
             "conclusion is 'failure'",
         ),
@@ -18837,6 +19002,9 @@ fn test_release_preflight_behavior_matrix() {
             "api_failure",
             "success",
             "success",
+            "unused",
+            "unused",
+            "unused",
             false,
             "Could not retrieve repository workflows",
         ),
@@ -18845,22 +19013,20 @@ fn test_release_preflight_behavior_matrix() {
             "normal",
             "api_failure",
             "success",
+            "unused",
+            "unused",
+            "unused",
             false,
             "Could not retrieve 'CI' runs",
-        ),
-        (
-            "missing_documentation_run",
-            "normal",
-            "success",
-            "none",
-            false,
-            "No completed default-branch push run found for 'Documentation Validation'",
         ),
         (
             "paginated_workflow_discovery",
             "paginated",
             "success",
             "success",
+            "unused",
+            "unused",
+            "unused",
             true,
             "All required CI checks passed",
         ),
@@ -18869,6 +19035,9 @@ fn test_release_preflight_behavior_matrix() {
             "missing_ci",
             "success",
             "success",
+            "unused",
+            "unused",
+            "unused",
             false,
             "not found in repository",
         ),
@@ -18877,6 +19046,9 @@ fn test_release_preflight_behavior_matrix() {
             "duplicate_ci",
             "success",
             "success",
+            "unused",
+            "unused",
+            "unused",
             false,
             "Multiple workflows found",
         ),
@@ -18884,7 +19056,18 @@ fn test_release_preflight_behavior_matrix() {
 
     let root = repo_root();
     let helper = root.join("scripts/check-release-preflight.sh");
-    for (name, workflow_mode, ci_mode, doc_mode, expected_success, expected) in cases {
+    for (
+        name,
+        workflow_mode,
+        ci_mode,
+        doc_mode,
+        pr_map_mode,
+        ci_pr_mode,
+        doc_pr_mode,
+        expected_success,
+        expected,
+    ) in cases
+    {
         let fixture = unique_temp_dir(&format!("release-preflight-{name}"));
         let fake_bin = fixture.path().join("bin");
         let fake_gh = fake_bin.join("gh");
@@ -18945,25 +19128,75 @@ case "$endpoint" in
       *) echo "fake gh: unexpected workflow mode $MOCK_WORKFLOW_MODE" >&2; exit 90 ;;
     esac
     ;;
-  */actions/workflows/101/runs|*/actions/workflows/202/runs)
-    require_arg "branch=$MOCK_DEFAULT_BRANCH" "$@"
-    require_arg event=push "$@"
-    require_arg "head_sha=$MOCK_SHA" "$@"
-    require_arg status=completed "$@"
-    require_arg per_page=1 "$@"
-    if [[ "$endpoint" == */101/runs ]]; then mode=$MOCK_CI_RUN_MODE; else mode=$MOCK_DOC_RUN_MODE; fi
-    case "$mode" in
-      success) printf 'push\t%s\t%s\tcompleted\tsuccess\n' "$MOCK_DEFAULT_BRANCH" "$MOCK_SHA" ;;
-      none) ;;
-      pull_request) printf 'pull_request\t%s\t%s\tcompleted\tsuccess\n' "$MOCK_DEFAULT_BRANCH" "$MOCK_SHA" ;;
-      schedule) printf 'schedule\t%s\t%s\tcompleted\tsuccess\n' "$MOCK_DEFAULT_BRANCH" "$MOCK_SHA" ;;
-      tag) printf 'push\tv0.6.0\t%s\tcompleted\tsuccess\n' "$MOCK_SHA" ;;
-      wrong_branch) printf 'push\tfeature\t%s\tcompleted\tsuccess\n' "$MOCK_SHA" ;;
-      wrong_sha) printf 'push\t%s\t0000000000000000000000000000000000000000\tcompleted\tsuccess\n' "$MOCK_DEFAULT_BRANCH" ;;
-      incomplete) printf 'push\t%s\t%s\tin_progress\t\n' "$MOCK_DEFAULT_BRANCH" "$MOCK_SHA" ;;
-      failure) printf 'push\t%s\t%s\tcompleted\tfailure\n' "$MOCK_DEFAULT_BRANCH" "$MOCK_SHA" ;;
-      api_failure) echo "simulated run API failure" >&2; exit 71 ;;
-      *) echo "fake gh: unexpected run mode $mode" >&2; exit 90 ;;
+      */actions/workflows/101/runs|*/actions/workflows/202/runs)
+    if has_arg event=pull_request "$@"; then
+      require_arg "head_sha=$MOCK_PR_HEAD_SHA" "$@"
+      require_arg status=completed "$@"
+      require_arg per_page=1 "$@"
+      if [[ "$endpoint" == */101/runs ]]; then mode=$MOCK_CI_PR_RUN_MODE; else mode=$MOCK_DOC_PR_RUN_MODE; fi
+      case "$mode" in
+        success) printf 'pull_request\trelease/v0.7.0\t%s\tcompleted\tsuccess\n' "$MOCK_PR_HEAD_SHA" ;;
+        none) ;;
+        failure) printf 'pull_request\trelease/v0.7.0\t%s\tcompleted\tfailure\n' "$MOCK_PR_HEAD_SHA" ;;
+        wrong_sha) printf 'pull_request\trelease/v0.7.0\t0000000000000000000000000000000000000000\tcompleted\tsuccess\n' ;;
+        api_failure) echo "simulated pull-request run API failure" >&2; exit 71 ;;
+        unused) echo "fake gh: pull-request run leg reached in a push-leg scenario" >&2; exit 90 ;;
+        *) echo "fake gh: unexpected pull-request run mode $mode" >&2; exit 90 ;;
+      esac
+    else
+      require_arg "branch=$MOCK_DEFAULT_BRANCH" "$@"
+      require_arg event=push "$@"
+      require_arg "head_sha=$MOCK_SHA" "$@"
+      require_arg status=completed "$@"
+      require_arg per_page=1 "$@"
+      if [[ "$endpoint" == */101/runs ]]; then mode=$MOCK_CI_RUN_MODE; else mode=$MOCK_DOC_RUN_MODE; fi
+      case "$mode" in
+        success) printf 'push\t%s\t%s\tcompleted\tsuccess\n' "$MOCK_DEFAULT_BRANCH" "$MOCK_SHA" ;;
+        none) ;;
+        pull_request) printf 'pull_request\t%s\t%s\tcompleted\tsuccess\n' "$MOCK_DEFAULT_BRANCH" "$MOCK_SHA" ;;
+        schedule) printf 'schedule\t%s\t%s\tcompleted\tsuccess\n' "$MOCK_DEFAULT_BRANCH" "$MOCK_SHA" ;;
+        tag) printf 'push\tv0.6.0\t%s\tcompleted\tsuccess\n' "$MOCK_SHA" ;;
+        wrong_branch) printf 'push\tfeature\t%s\tcompleted\tsuccess\n' "$MOCK_SHA" ;;
+        wrong_sha) printf 'push\t%s\t0000000000000000000000000000000000000000\tcompleted\tsuccess\n' "$MOCK_DEFAULT_BRANCH" ;;
+        incomplete) printf 'push\t%s\t%s\tin_progress\t\n' "$MOCK_DEFAULT_BRANCH" "$MOCK_SHA" ;;
+        failure) printf 'push\t%s\t%s\tcompleted\tfailure\n' "$MOCK_DEFAULT_BRANCH" "$MOCK_SHA" ;;
+        api_failure) echo "simulated run API failure" >&2; exit 71 ;;
+        *) echo "fake gh: unexpected run mode $mode" >&2; exit 90 ;;
+      esac
+    fi
+    ;;
+  *"/pulls?"*)
+    require_arg --paginate "$@"
+    case "$endpoint" in
+      *"state=closed"*) : ;;
+      *) echo "fake gh: pulls lookup must filter state=closed" >&2; exit 90 ;;
+    esac
+    case "$endpoint" in
+      *"base=$MOCK_DEFAULT_BRANCH"*) : ;;
+      *) echo "fake gh: pulls lookup must filter base=$MOCK_DEFAULT_BRANCH" >&2; exit 90 ;;
+    esac
+    if ! has_arg "--jq" "$@"; then
+      echo "fake gh: pulls lookup must filter with --jq" >&2
+      exit 90
+    fi
+    jq_program="${@: -1}"
+    case "$jq_program" in
+      *merge_commit_sha*) : ;;
+      *) echo "fake gh: pulls --jq must select on merge_commit_sha" >&2; exit 90 ;;
+    esac
+    case "$jq_program" in
+      *"$MOCK_SHA"*) : ;;
+      *) echo "fake gh: pulls --jq must select the release commit" >&2; exit 90 ;;
+    esac
+    case "$MOCK_PR_MAP_MODE" in
+      release_pr) printf '4042\t%s\n' "$MOCK_PR_HEAD_SHA" ;;
+      empty) ;;
+      ambiguous)
+        printf '4042\t%s\n' "$MOCK_PR_HEAD_SHA"
+        printf '4043\t%s\n' "$MOCK_PR_HEAD_SHA"
+        ;;
+      api_failure) echo "simulated pulls API failure" >&2; exit 71 ;;
+      *) echo "fake gh: unexpected PR map mode $MOCK_PR_MAP_MODE" >&2; exit 90 ;;
     esac
     ;;
   *) echo "fake gh: unexpected endpoint '$endpoint'" >&2; exit 90 ;;
@@ -18988,6 +19221,10 @@ esac
             .env("MOCK_WORKFLOW_MODE", workflow_mode)
             .env("MOCK_CI_RUN_MODE", ci_mode)
             .env("MOCK_DOC_RUN_MODE", doc_mode)
+            .env("MOCK_PR_MAP_MODE", pr_map_mode)
+            .env("MOCK_CI_PR_RUN_MODE", ci_pr_mode)
+            .env("MOCK_DOC_PR_RUN_MODE", doc_pr_mode)
+            .env("MOCK_PR_HEAD_SHA", PR_HEAD_SHA)
             .env("MOCK_DEFAULT_BRANCH", "main")
             .env("MOCK_SHA", SHA)
             .env("RELEASE_REPOSITORY", "example/signal-fish-server")
@@ -20707,19 +20944,33 @@ fn test_documentation_validation_runs_for_every_release_introduction() {
          the release commit's parent diff.\nFile: {}",
         helper_path.display()
     );
+    for required in [
+        "repos/${REPO}/pulls?state=closed&base=${DEFAULT_BRANCH}",
+        "--paginate",
+        "merge_commit_sha",
+    ] {
+        assert!(
+            helper.contains(required),
+            "release preflight must map the release commit to its merged release pull request \
+             (`{required}`) and prove the required workflows through that pull request's own \
+             pull_request runs; push-only proofs are unsatisfiable since issue #557 removed the \
+             push triggers.\nFile: {}",
+            helper_path.display()
+        );
+    }
 
     let doc_validation_yml = root.join(".github/workflows/doc-validation.yml");
     let doc_validation_content = read_file(&doc_validation_yml);
-    let push_paths: BTreeSet<String> =
-        extract_workflow_event_paths(&doc_validation_content, "push")
+    let pr_paths: BTreeSet<String> =
+        extract_workflow_event_paths(&doc_validation_content, "pull_request")
             .into_iter()
             .collect();
     for release_file_pattern in ["Cargo.toml", "**/*.md"] {
         assert!(
-            push_paths.contains(release_file_pattern),
-            "Documentation Validation push.paths must include `{release_file_pattern}` so every \
-             version-introduction commit triggers the exact run required by release preflight.\n\
-             File: {}",
+            pr_paths.contains(release_file_pattern),
+            "Documentation Validation pull_request.paths must include `{release_file_pattern}` so \
+             the release pull request (which bumps Cargo.toml and rewrites CHANGELOG.md) fires \
+             the exact run the release preflight accepts.\nFile: {}",
             doc_validation_yml.display()
         );
     }

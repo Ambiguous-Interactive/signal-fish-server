@@ -5,8 +5,12 @@
 # compilable, and up-to-date with the codebase.
 #
 # Runs on:
-#   - Push to main branch (only for relevant file changes)
 #   - Pull requests to main (only for relevant file changes)
+#
+# No push trigger: the post-merge push wave is reserved for deployment side
+# effects (issue #557), and the release preflight proves this workflow on a
+# release commit through the merged release pull request's own pull_request
+# run (identical squash content). See scripts/check-release-preflight.sh.
 #
 # Jobs:
 #   - rustdoc: Build and validate Rust API documentation, then run the tests
@@ -27,21 +31,6 @@
 name: Documentation Validation
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "docs/**"
-      - "**/*.md"
-      - "**/*.rs"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "mkdocs.yml"
-      - "requirements-docs.txt"
-      - "rust-toolchain.toml"
-      - "scripts/read-toml-string.sh"
-      - ".github/workflows/doc-validation.yml"
-      - ".github/scripts/**"
-      - ".github/test-fixtures/**"
   pull_request:
     branches: [main]
     paths:

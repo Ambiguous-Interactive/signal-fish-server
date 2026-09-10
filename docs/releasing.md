@@ -96,15 +96,19 @@ A human-pushed annotated `vX.Y.Z` tag remains supported. Its target must be the
 unique commit on the default branch's first-parent history that introduced
 `X.Y.Z` in `Cargo.toml`; a later same-version commit is not a release source. It
 does not have to remain the current default-branch tip, so a queued run remains
-valid if the branch advances. Because that introduction commit necessarily
-touches `Cargo.toml`, both required CI workflows must have an exact successful
-default-branch push run for it that is still retained by GitHub Actions. A
-second-parent pull-request head, a later same-version commit, or a commit whose
-CI run records have expired cannot be published through this path. Human tag
-pushes enter only through the release workflow, which invokes Docker
-publication after CI preflight; Docker Publish does not have a second, ungated
-tag-push trigger. Release publication fails closed for a lightweight, moved,
-mismatched, or unproven tag.
+valid if the branch advances. For that introduction commit, each required CI
+workflow must pass one of two preflight legs: an exact successful
+default-branch push run that is still retained by GitHub Actions, or the
+merged release pull request's own `pull_request` run at the pull request head
+that squash-produced the commit (identical content, issue #557). No validation
+workflow triggers on push anymore, so the pull-request leg is the operative
+proof; a commit that is not a merged pull request, a second-parent
+pull-request head, a later same-version commit, or a commit whose run records
+have expired cannot be published through this path. Human tag pushes enter
+only through the release workflow, which invokes Docker publication after CI
+preflight; Docker Publish does not have a second, ungated tag-push trigger.
+Release publication fails closed for a lightweight, moved, mismatched, or
+unproven tag.
 
 To backfill GHCR tags for a historical release, dispatch **Docker Publish** from
 the default branch with `release_tag=vX.Y.Z`. The workflow checks out that tag,
