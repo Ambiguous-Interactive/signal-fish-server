@@ -2950,8 +2950,10 @@ mod tests {
     /// the room, so a transient storage fault in that read would otherwise
     /// lose the correction forever — no row and no repair key left to retry.
     /// The read failure must re-queue the repair key, and the next sweep must
-    /// converge the notification.
+    /// converge the notification. Repository-gated: the fault-injection hook
+    /// it drives is `signal_fish_repository_tests`-only, like its siblings.
     #[tokio::test]
+    #[cfg(all(test, signal_fish_repository_tests))]
     #[cfg_attr(miri, ignore)]
     async fn ghost_repair_notification_is_retried_after_a_storage_fault() {
         let (service, room, creator_id, coordinator, database) = setup_service().await;
