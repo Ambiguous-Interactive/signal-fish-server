@@ -279,8 +279,11 @@ impl EnhancedGameServer {
     ///
     /// `Some(password)` seals the room behind a hashed join password; `None`
     /// reopens it. Current members and their reconnection tokens are
-    /// unaffected. The plaintext password is hashed once here and never
-    /// logged, echoed, or persisted.
+    /// unaffected; so is a pending reconnection record armed before the
+    /// seal — restore is a resumption of a prior membership, not a fresh
+    /// admission, so the password perimeter does not apply to it (a ban is
+    /// the tool that refuses restores). The plaintext password is hashed
+    /// once here and never logged, echoed, or persisted.
     pub(super) async fn handle_set_room_access_operation(
         self: &Arc<Self>,
         authority_id: &PlayerId,

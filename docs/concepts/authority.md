@@ -208,7 +208,11 @@ The authority holds a set of moderation operations (v3 only, via the
   that does not present the password (`PASSWORD_REQUIRED`); a missing, a
   mismatched, and a stray password into an open room are indistinguishable.
   Current members and their
-  reconnection tokens are unaffected. The password is stored only as a
+  reconnection tokens are unaffected. A pending reconnection record armed
+  before the seal also restores its holder with no password: `Reconnect`
+  carries no password field, and resuming a prior membership through a live
+  seat credential is not a fresh admission. (A ban is the tool that refuses
+  restores.) The password is stored only as a
   salted hash. See [Rooms and Lobbies](rooms-and-lobbies.md) for the
   client-side flow.
 - **`TransferAuthority`** hands the authority role to a seated member of

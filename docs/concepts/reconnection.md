@@ -71,7 +71,10 @@ stable from join through a later disconnect, but it only becomes
 claimable for `server.reconnection_window` seconds counted from the
 disconnect (holding it early does not widen the window), and it rotates
 on every join and every successful reconnect
-(`Reconnected.reconnection_token` carries the replacement). It is discarded on
+(`Reconnected.reconnection_token` carries the replacement). Every join
+includes a same-room spectator join: a newer role choice supersedes the
+older credential, so spectating the same room discards the pending player
+record. It is discarded on
 a voluntary `LeaveRoom` — leaving cleanly is not a disconnect. It is also not
 armed for a server shutdown drain (`GoingAway` / close code `4000
 server_shutdown`); the instance is going away, so clients should join or create a
