@@ -33,7 +33,7 @@
 //! The server is stateless and does no single-use tracking. A token is valid
 //! until `exp`, so a leaked token replays until expiry — accepted over TLS.
 //! The server additionally refuses tokens whose remaining validity exceeds
-//! [`CONNECT_TOKEN_MAX_TTL_SECS`] (plus a fixed clock-skew allowance), which
+//! `CONNECT_TOKEN_MAX_TTL_SECS` (plus a fixed clock-skew allowance), which
 //! caps the replay window at mint time even for a misbehaving minter. The
 //! signed `nonce` gives the control plane an anchor for optional single-use
 //! enforcement at its edge.
@@ -64,6 +64,12 @@ pub const CONNECT_TOKEN_MAX_TTL_SECS: i64 = 300;
 /// seconds of server/minter clock divergence, while an absurd validity
 /// window still fails.
 pub const CONNECT_TOKEN_CLOCK_SKEW_SECS: i64 = 60;
+
+/// Compile-time acceptance ceiling: max TTL plus skew (300 + 60 = 360).
+/// Written as a literal so the addition is compile-time checkable and the
+/// runtime check needs no arithmetic; the pairing is pinned by
+/// `ttl_ceiling_constant_tracks_the_two_policy_constants`.
+const CONNECT_TOKEN_MAX_REMAINING_SECS: i128 = 360;
 
 /// Largest accepted encoded token. The payload is bounded by its field caps
 /// (app id <= [`crate::auth::middleware::MAX_APP_ID_LENGTH`] bytes, nonce
@@ -161,7 +167,9 @@ impl ConnectTokenVerifier {
         if decoded.len() != 32 {
             return Err(ConnectTokenKeyError::InvalidLength(decoded.len()));
         }
-        let bytes: [u8; 32] = decoded.try_into().expect("length checked above");
+        let key_len = decoded.len();
+        let bytes: [u8; 32] = <[u8; 32]>::try_from(decoded)
+            .map_err(|_| ConnectTokenKeyError::InvalidLength(key_len))?;
         let key = VerifyingKey::from_bytes(&bytes)
             .map_err(|error| ConnectTokenKeyError::InvalidEncoding(error.to_string()))?;
         Ok(Self { key })
@@ -199,12 +207,15 @@ impl ConnectTokenVerifier {
         }
 
         // exp > now is the validity condition; the subtraction is total in
-        // i128 so an extreme minted `exp` cannot wrap into a pass.
-        let remaining = i128::from(payload.exp) - i128::from(now_unix_secs);
+        // i128 and checked anyway, so an extreme minted `exp` cannot wrap
+        // into a pass.
+        let remaining = i128::from(payload.exp)
+            .checked_sub(i128::from(now_unix_secs))
+            .ok_or(ConnectTokenError::Expired)?;
         if remaining <= 0 {
             return Err(ConnectTokenError::Expired);
         }
-        if remaining > i128::from(CONNECT_TOKEN_MAX_TTL_SECS + CONNECT_TOKEN_CLOCK_SKEW_SECS) {
+        if remaining > CONNECT_TOKEN_MAX_REMAINING_SECS {
             return Err(ConnectTokenError::TtlTooLong);
         }
 
@@ -242,12 +253,11 @@ fn split_token(token: &str) -> Result<(Vec<u8>, &[u8], Vec<u8>), ConnectTokenErr
         .map_err(|_| ConnectTokenError::Malformed)?;
     // The signature covers the encoded payload segment exactly as presented:
     // "sfct_v1." ++ payload_b64, which is the token head through the second
-    // dot. Recomputing the head from the validated parts keeps the signed
-    // view and the parsed view byte-identical.
-    let signed_bytes_len = CONNECT_TOKEN_PREFIX.len() + 1 + payload_b64.len();
-    let signed_bytes = token
-        .as_bytes()
-        .get(..signed_bytes_len)
+    // dot. The split above validated exactly three parts, so the last dot is
+    // the payload/signature boundary and everything before it is the signed
+    // head.
+    let head_end = token.rfind('.').ok_or(ConnectTokenError::Malformed)?;
+    let signed_bytes = token.as_bytes().get(..head_end)
         .ok_or(ConnectTokenError::Malformed)?;
     let signature_bytes = BASE64_URL_SAFE_NO_PAD
         .decode(signature_b64)
@@ -378,6 +388,15 @@ mod tests {
         assert_eq!(claims.app_id, "mb_app_one");
         assert_eq!(claims.exp, 1_700_000_300);
         assert_eq!(claims.nonce, "n-1");
+    }
+
+    #[test]
+    fn ttl_ceiling_constant_tracks_the_two_policy_constants() {
+        assert_eq!(
+            CONNECT_TOKEN_MAX_REMAINING_SECS,
+            i128::from(CONNECT_TOKEN_MAX_TTL_SECS) + i128::from(CONNECT_TOKEN_CLOCK_SKEW_SECS),
+            "the acceptance ceiling must stay max TTL plus the skew allowance"
+        );
     }
 
     #[test]
