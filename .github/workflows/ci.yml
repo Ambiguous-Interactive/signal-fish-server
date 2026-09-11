@@ -24,7 +24,10 @@
 #     The ubuntu leg also enforces the deterministic relay allocation
 #     ceilings — issue #558 moved the standalone relay-allocations job here
 #     so one runner setup covers both, and the bench compile graph reuses
-#     this job's target dir and cache
+#     this job's target dir and cache — and runs the H14 equal-fault
+#     amplification experiment — issue #512 retired the standalone h14-pr.yml
+#     workflow, whose runner duplicated this job's checkout, toolchain, and
+#     test-graph build for one already-compiled test
 #   - doc-consistency: Version/changelog/doc drift checks (diff-aware changelog gate)
 #   - deny: Supply-chain job (issue #512): cargo-deny policy over every
 #     tracked Cargo graph, RustSec + npm vulnerability scans, and CycloneDX
@@ -334,6 +337,39 @@ jobs:
         run: |
           cargo bench --locked --bench relay_allocations --features allocation-tracking
           cargo bench --locked --bench relay_serialization_allocations --features allocation-tracking
+
+      # H14 equal-fault relay accountability (#512): the nightly-only
+      # throttled amplification experiment runs inside this job so a
+      # production change keeps its pre-merge signal without the retired
+      # h14-pr.yml workflow duplicating this runner's checkout, toolchain
+      # install, and test-graph build. ubuntu-only and implicit cron-excluded
+      # (the schedule cohort is macOS/Windows), mirroring the relay-allocation
+      # benches above; the test binary is already part of this job's compiled
+      # suite graph, so the marginal per-event cost is the experiment itself.
+      # Full H14 attempt evidence artifacts stay on the daily
+      # scenario-profiles cron leg (verification-nightly.yml).
+      - name: Run mixed-encoding amplification experiment
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo nextest run --profile ci --locked --all-features \
+            --test mixed_encoding_relay_e2e --run-ignored ignored-only \
+            -E 'test(=unsupported_message_pack_fallback_does_not_flap_weaker_recipient)' \
+            --no-tests fail \
+            --success-output final 2>&1 | tee mixed-encoding-output.txt
+
+      - name: Report H14 result
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
+        shell: bash
+        run: |
+          {
+            echo "### H14 equal-fault relay accountability"
+            echo
+            echo '```text'
+            tail -n 80 mixed-encoding-output.txt 2>/dev/null || echo "no H14 output captured"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Drop trybuild artifacts before cache save
         # trybuild builds nested cargo projects under `<target>/tests`. Swatinem/rust-cache's

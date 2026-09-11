@@ -1181,7 +1181,10 @@ fn validate_workflow_has_required_jobs(
 // the "CI / Panic Policy" and "CI / Relay Allocation Ceilings" check names
 // were retired; the checks themselves are pinned by
 // test_ci_lint_job_runs_panic_policy_check and
-// test_ci_enforces_relay_allocation_ceilings.
+// test_ci_enforces_relay_allocation_ceilings. The H14 amplification selector
+// joined the nextest job the same way (#512), retiring the "H14 Relay
+// Integrity" check name and the standalone h14-pr.yml workflow; the selector
+// is pinned by test_h14_selector_runs_in_ci_nextest_and_the_standalone_gate_stays_retired.
 //
 // Offline link validation is the canonical `Link Check / Check Links` check
 // (issue #378); the duplicate Documentation Link Check job was retired.
@@ -1360,7 +1363,7 @@ const REQUIRED_CHECK_NAMES: &[&str] = &[
 const REQUIRED_WORKFLOW_FILES: &[(&str, &str)] = &[
     (
         "ci.yml",
-        "Main CI pipeline (lint+panic-policy, nextest+relay-allocations, deny/audit/SBOM, MSRV, Docker, coverage)",
+        "Main CI pipeline (lint+panic-policy, nextest+relay-allocations+H14, deny/audit/SBOM, MSRV, Docker, coverage)",
     ),
     (
         "doc-validation.yml",
@@ -1378,10 +1381,6 @@ const REQUIRED_WORKFLOW_FILES: &[(&str, &str)] = &[
     (
         "link-check.yml",
         "Canonical offline link gate: lychee + internal link checker, plus the scheduled external audit",
-    ),
-    (
-        "h14-pr.yml",
-        "Focused pull-request gate for equal-fault relay accountability",
     ),
     (
         "release.yml",
@@ -3147,49 +3146,79 @@ fn test_verification_nightly_retains_multiprocess_pause_resume_evidence() {
 }
 
 #[test]
-fn test_h14_pr_gate_is_isolated_and_covers_its_complete_input_surface() {
+fn test_h14_selector_runs_in_ci_nextest_and_the_standalone_gate_stays_retired() {
     let root = repo_root();
-    let workflow_path = root.join(".github/workflows/h14-pr.yml");
-    let workflow = read_live_file(&workflow_path);
-    let documents = Yaml::load_from_str(&workflow).expect("H14 PR workflow must parse");
-    let document = documents.first().expect("workflow YAML document");
-    let triggers = document
-        .as_mapping_get("on")
-        .or_else(|| document.as_mapping_get("true"))
-        .expect("H14 PR workflow triggers");
-    assert_eq!(
-        triggers.as_mapping().map(saphyr::Mapping::len),
-        Some(1),
-        "the isolated H14 gate must allocate only for pull requests"
-    );
-    let pull_request = triggers
-        .as_mapping_get("pull_request")
-        .expect("H14 gate must run for pull requests");
-    let configured = pull_request
-        .as_mapping_get("paths")
-        .and_then(Yaml::as_sequence)
-        .expect("H14 pull-request paths")
-        .iter()
-        .map(|value| value.as_str().expect("each trigger path is a string"))
-        .collect::<BTreeSet<_>>();
-    let expected = [
-        "src/**",
-        "build.rs",
-        "tests/mixed_encoding_relay_e2e.rs",
-        "tests/test_helpers.rs",
-        "tests/websocket_test_helpers/**",
-        "Cargo.toml",
-        "Cargo.lock",
-        "rust-toolchain.toml",
-        ".config/nextest.toml",
-        "scripts/read-toml-string.sh",
-        ".github/workflows/h14-pr.yml",
-        ".github/workflows/verification-nightly.yml",
-    ]
-    .into_iter()
-    .collect::<BTreeSet<_>>();
-    assert_eq!(configured, expected, "H14 trigger inputs drifted");
 
+    // The standalone gate stayed retired (issue #512): re-adding it would
+    // re-allocate a runner that duplicates the nextest job's checkout,
+    // toolchain install, and test-graph build for one already-compiled test.
+    assert!(
+        !root.join(".github/workflows/h14-pr.yml").exists(),
+        "h14-pr.yml was retired into CI / Nextest; do not reintroduce the \
+         duplicate runner allocation"
+    );
+
+    let workflow = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let documents = Yaml::load_from_str(&workflow).expect("CI workflow must parse");
+    let document = documents.first().expect("workflow YAML document");
+    let nextest = document
+        .as_mapping_get("jobs")
+        .and_then(|jobs| jobs.as_mapping_get("nextest"))
+        .expect("CI nextest job");
+    let steps = nextest
+        .as_mapping_get("steps")
+        .and_then(Yaml::as_sequence)
+        .expect("nextest steps");
+
+    let h14 = steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str)
+                == Some("Run mixed-encoding amplification experiment")
+        })
+        .expect("H14 selector step inside the nextest job");
+    assert_eq!(
+        h14.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("matrix.os == 'ubuntu-latest'"),
+        "H14 is a deterministic Linux experiment; it must not bill the \
+         macOS/Windows cron legs"
+    );
+    let h14_run = h14
+        .as_mapping_get("run")
+        .and_then(Yaml::as_str)
+        .expect("H14 command");
+    let cargo_commands = shell_logical_lines(h14_run)
+        .into_iter()
+        .filter(|line| line.contains("cargo nextest"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        cargo_commands,
+        vec![
+            "cargo nextest run --profile ci --locked --all-features --test \
+             mixed_encoding_relay_e2e --run-ignored ignored-only -E \
+             'test(=unsupported_message_pack_fallback_does_not_flap_weaker_recipient)' \
+             --no-tests fail --success-output final 2>&1 | tee mixed-encoding-output.txt"
+        ],
+        "the consolidated H14 leg must keep the exact hosted selector and context"
+    );
+
+    let report = steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str) == Some("Report H14 result")
+        })
+        .expect("H14 result summary step");
+    assert_eq!(
+        report.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("${{ !cancelled() && matrix.os == 'ubuntu-latest' }}"),
+        "the summary must survive an H14 RED and stay off the macOS/Windows cron legs"
+    );
+
+    // Allocation hygiene carried over from the retired gate: a
+    // mixed-encoding test edit must not allocate the complete nightly
+    // workflow; the nightly keeps its own H14 attempt inside
+    // scenario-profiles (pinned by
+    // test_verification_nightly_retains_h14_hosted_attempt_evidence).
     let nightly_workflow = read_live_file(&root.join(".github/workflows/verification-nightly.yml"));
     let nightly_documents =
         Yaml::load_from_str(&nightly_workflow).expect("verification nightly must parse");
@@ -3206,69 +3235,7 @@ fn test_h14_pr_gate_is_isolated_and_covers_its_complete_input_surface() {
         !broad_pr_paths
             .iter()
             .any(|path| { path.as_str() == Some("tests/mixed_encoding_relay_e2e.rs") }),
-        "the isolated H14 test must not allocate the complete nightly workflow"
-    );
-
-    let job = document
-        .as_mapping_get("jobs")
-        .and_then(|jobs| jobs.as_mapping_get("h14"))
-        .expect("isolated H14 job");
-    assert_eq!(
-        job.as_mapping_get("timeout-minutes")
-            .and_then(Yaml::as_integer),
-        Some(20)
-    );
-    let steps = job
-        .as_mapping_get("steps")
-        .and_then(Yaml::as_sequence)
-        .expect("H14 PR steps");
-    let h14_run = steps
-        .iter()
-        .find(|step| {
-            step.as_mapping_get("name").and_then(Yaml::as_str)
-                == Some("Run mixed-encoding amplification experiment")
-        })
-        .and_then(|step| step.as_mapping_get("run"))
-        .and_then(Yaml::as_str)
-        .expect("H14 PR command");
-    let cargo_commands = shell_logical_lines(h14_run)
-        .into_iter()
-        .filter(|line| line.contains("cargo nextest"))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        cargo_commands,
-        vec![
-            "cargo nextest run --profile ci --locked --all-features --test \
-             mixed_encoding_relay_e2e --run-ignored ignored-only -E \
-             'test(=unsupported_message_pack_fallback_does_not_flap_weaker_recipient)' \
-             --no-tests fail --success-output final 2>&1 | tee mixed-encoding-output.txt"
-        ],
-        "the isolated PR gate must retain the exact hosted H14 selector and context"
-    );
-    let upload = steps
-        .iter()
-        .find(|step| {
-            step.as_mapping_get("name").and_then(Yaml::as_str) == Some("Upload H14 diagnostics")
-        })
-        .expect("H14 PR diagnostic upload");
-    assert_eq!(
-        upload.as_mapping_get("if").and_then(Yaml::as_str),
-        Some("always()")
-    );
-    assert_eq!(
-        upload.as_mapping_get("uses").and_then(Yaml::as_str),
-        Some("actions/upload-artifact@v7.0.1")
-    );
-    let upload_with = upload.as_mapping_get("with").expect("upload settings");
-    assert_eq!(
-        upload_with.as_mapping_get("path").and_then(Yaml::as_str),
-        Some("mixed-encoding-output.txt")
-    );
-    assert_eq!(
-        upload_with
-            .as_mapping_get("if-no-files-found")
-            .and_then(Yaml::as_str),
-        Some("error")
+        "the mixed-encoding experiment must not allocate the complete nightly workflow"
     );
 }
 
@@ -20164,13 +20131,12 @@ fn test_workflow_consumed_configuration_paths_trigger_validation() {
 #[test]
 fn test_root_build_script_triggers_specialized_root_compile_workflows() {
     let root = repo_root();
-    let cases: [(&str, &[&str]); 6] = [
+    let cases: [(&str, &[&str]); 5] = [
         ("browser-interop.yml", &["pull_request"]),
         ("fortress-interop.yml", &["pull_request"]),
         ("fortress-wasm-interop.yml", &["pull_request"]),
         ("turn-interop.yml", &["pull_request"]),
         ("webrtc-interop.yml", &["pull_request"]),
-        ("h14-pr.yml", &["pull_request"]),
     ];
 
     for (workflow_name, events) in cases {
