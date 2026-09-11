@@ -1135,9 +1135,17 @@ impl EnhancedGameServer {
         Ok(security.connect_token.is_some())
     }
 
+    /// Whether a connect-token verification key is currently installed
+    /// (issue #517). Introspection for operators and tests; the connection
+    /// path refuses presented tokens when this is `false`.
+    #[must_use]
+    pub fn connect_token_verification_enabled(&self) -> bool {
+        self.connect_token_keys.current().is_some()
+    }
+
     /// Verify one presented tenant `connect_token` against the configured
     /// key at the current Unix time (issue #517).
-    pub(crate) fn verify_connect_token(
+    pub fn verify_connect_token(
         &self,
         presented_app_id: &str,
         token: &str,

@@ -107,7 +107,8 @@ pub enum ConnectTokenError {
     Expired,
     #[error(
         "connect token rejected: validity window exceeds the server maximum of \
-         {CONNECT_TOKEN_MAX_TTL_SECS} seconds"
+         {CONNECT_TOKEN_MAX_TTL_SECS} seconds plus a {CONNECT_TOKEN_CLOCK_SKEW_SECS} second \
+         clock-skew allowance"
     )]
     TtlTooLong,
     #[error("connect token rejected: token was minted for a different app id")]

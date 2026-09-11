@@ -1311,4 +1311,28 @@ mod tests {
             "error must name the empty path: {error}"
         );
     }
+    /// The documented `SIGNAL_FISH__SECURITY__CONNECT_TOKEN` env override
+    /// (issue #517) must produce a validating block through the same generic
+    /// env machinery as every other knob, end to end through
+    /// `finalize_config`.
+    #[test]
+    fn connect_token_env_override_produces_a_validating_block() {
+        let key = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+        let mut merged =
+            serde_json::to_value(Config::default()).expect("default config serializes");
+        apply_env_overrides_from_iter(
+            &mut merged,
+            [(
+                "SIGNAL_FISH__SECURITY__CONNECT_TOKEN",
+                format!(r#"{{"public_key":"{key}"}}"#),
+            )],
+        );
+        let cfg = finalize_config(merged).expect("env override finalizes");
+        let connect_token = cfg
+            .security
+            .connect_token
+            .expect("env override creates the block");
+        assert_eq!(connect_token.public_key, key);
+        assert_eq!(connect_token.public_key_path, None);
+    }
 }
