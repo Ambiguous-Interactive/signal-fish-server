@@ -1981,7 +1981,7 @@ mod tests {
             (2, tokio::time::Duration::from_secs(60)),
         );
         let addr: SocketAddr = "127.0.0.1:5044".parse().unwrap();
-        let (tx, mut rx) = channel();
+        let (tx, _rx) = channel();
         let (close_signal, close_listener) = ConnectionCloseSignal::channel();
         let transient_id = manager
             .register_client(tx, close_signal, addr, Uuid::new_v4())
@@ -2014,7 +2014,6 @@ mod tests {
             Some(crate::coordination::CloseReason::InboundRateLimited),
             "the exhaustion close must be pinned through the swap"
         );
-        let _ = rx.try_recv();
     }
 
     /// A stale terminal unroute for a room the player no longer (or never did)
