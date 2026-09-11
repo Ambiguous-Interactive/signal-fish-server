@@ -2,7 +2,6 @@ use crate::protocol::{
     DeliveryClass, ErrorCode, GameDataEncoding, PlayerId, RoomId, ServerMessage,
 };
 use bytes::Bytes;
-use std::sync::Arc;
 
 use super::signaling::canonical_json_len;
 use super::EnhancedGameServer;
@@ -39,13 +38,10 @@ impl EnhancedGameServer {
 
         let Some(room_id) = self.get_client_room(player_id).await else {
             let _ = self
-                .message_coordinator
-                .send_to_player(
+                .send_error_to_player(
                     player_id,
-                    Arc::new(ServerMessage::Error {
-                        message: "Not in a room".to_string(),
-                        error_code: Some(ErrorCode::NotInRoom),
-                    }),
+                    "Not in a room".to_string(),
+                    Some(ErrorCode::NotInRoom),
                 )
                 .await;
             return;

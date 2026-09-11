@@ -18,9 +18,20 @@ impl EnhancedGameServer {
     /// replies `Pong`. The throttled `last_seen` + room-activity refresh is done
     /// once per inbound message by the router (`handle_client_message` →
     /// `maybe_update_last_seen`), so `Ping` needs no separate refresh here.
+    ///
+    /// The `Pong` reply charges the per-connection error-reply budget
+    /// (issue #518): a Ping flood is the same one-write-one-reply
+    /// amplification channel as malformed-frame refusals. An exhausted budget
+    /// closes the connection with `4006 inbound_rate_limited` instead of
+    /// answering again; liveness is still recorded for the frame that trips
+    /// it, and the close itself follows.
     pub async fn handle_ping(&self, player_id: &PlayerId) {
         // Always record the ping in memory for disconnect detection
         self.connection_manager.record_ping(player_id);
+
+        if !self.connection_manager.charge_error_reply(player_id).await {
+            return;
+        }
 
         let _ = self
             .message_coordinator

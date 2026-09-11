@@ -109,6 +109,10 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
         Arc::clone(&metrics),
         Arc::clone(&message_coordinator),
         config.websocket_config.delivery_stats_interval_secs > 0,
+        (
+            config.rate_limit_config.max_inbound_error_replies,
+            config.rate_limit_config.time_window,
+        ),
     ));
     let reconnection_manager = if config.enable_reconnection {
         Some(Arc::new(crate::reconnection::ReconnectionManager::new(

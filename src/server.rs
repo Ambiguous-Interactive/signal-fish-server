@@ -330,6 +330,9 @@ mod admin;
 #[cfg(signal_fish_repository_tests)]
 mod app_admission_tests;
 mod authority;
+#[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
+mod authority_tests;
 mod connection_manager;
 mod dashboard_cache;
 mod game_data;
@@ -727,6 +730,10 @@ impl EnhancedGameServer {
             // emission is enabled, keeping the delivery hot path at a single
             // cheap registry miss otherwise.
             config.websocket_config.delivery_stats_interval_secs > 0,
+            (
+                config.rate_limit_config.max_inbound_error_replies,
+                config.rate_limit_config.time_window,
+            ),
         ));
 
         // Initialize reconnection manager if enabled (in-memory only). Built
@@ -1455,15 +1462,15 @@ impl EnhancedGameServer {
         let Some(operation_id) = operation_id else {
             return false;
         };
+        // Charged like every polite per-frame reply (issue #518): a stream of
+        // internally-failed operations is the same one-write-one-reply
+        // amplification channel as refused-operation spam.
         match self
-            .message_coordinator
-            .send_to_player(
+            .send_room_operation_failure_to_player(
                 &player_id,
-                Arc::new(ServerMessage::room_operation_failed(
-                    operation_id,
-                    reason,
-                    Some(ErrorCode::InternalError),
-                )),
+                operation_id,
+                reason,
+                Some(ErrorCode::InternalError),
             )
             .await
         {

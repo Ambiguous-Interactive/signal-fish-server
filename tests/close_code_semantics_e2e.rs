@@ -18,7 +18,7 @@
 //! - `4005 room_inactive` — the assigned room was deleted after exceeding
 //!   `server.inactive_room_timeout`.
 //! - `4006 inbound_rate_limited` — the connection exhausted its per-window
-//!   inbound application-message budget (`rate_limit.max_inbound_messages`).
+//!   inbound error-reply budget (`rate_limit.max_inbound_error_replies`).
 //! - `1009 outbound_message_too_large` — a complete encoded server message
 //!   exceeded the deployment's advertised aggregate outbound payload limit.
 //!
@@ -478,6 +478,286 @@ async fn inbound_frames_under_the_budget_leave_the_connection_open() {
     assert!(
         saw_pong,
         "a connection within its inbound budget must stay open and answer Pings"
+    );
+    running_server.shutdown().await;
+}
+
+/// Application-level `Ping` frames each buy a `Pong` reply. A Ping flood is
+/// the same one-write-one-reply amplification channel the 4006 gate exists to
+/// bound, so the replies must charge the same per-connection budget and the
+/// exhausting frame must close with `4006 inbound_rate_limited` (issue #396).
+#[tokio::test]
+async fn application_ping_flood_exhausting_the_reply_budget_closes_with_4006() {
+    let mut config = base_config();
+    config.rate_limit_config.max_inbound_error_replies = 3;
+    let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
+
+    let mut ws = connect(addr).await;
+    authenticate(&mut ws).await;
+
+    let ping = Message::Text(
+        serde_json::to_string(&ClientMessage::Ping)
+            .expect("serialize Ping")
+            .into(),
+    );
+    for _ in 0..4 {
+        ws.send(ping.clone()).await.expect("send application Ping");
+    }
+
+    // Exactly the three budgeted Pongs may be produced; the fourth Ping's
+    // reply is withheld and the connection closes instead.
+    let deadline = tokio::time::Instant::now() + CLOSE_DEADLINE;
+    let mut pongs = 0;
+    let (code, reason) = loop {
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or_else(|| panic!("timed out waiting for the 4006 close"));
+        match tokio::time::timeout(remaining, ws.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                if matches!(
+                    serde_json::from_str::<ServerMessage>(&text),
+                    Ok(ServerMessage::Pong)
+                ) {
+                    pongs += 1;
+                }
+            }
+            Ok(Some(Ok(Message::Close(Some(frame))))) => {
+                break (u16::from(frame.code), frame.reason.to_string());
+            }
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(error))) => panic!("transport error during Ping flood: {error}"),
+            Ok(None) => panic!("stream ended with no close frame during Ping flood"),
+            Err(_elapsed) => panic!("timed out waiting for the 4006 close"),
+        }
+    };
+    assert_eq!(
+        pongs, 3,
+        "only the budgeted Pong replies may be produced before the close"
+    );
+    assert_eq!(
+        code, 4006,
+        "Ping-flood reply exhaustion must close with 4006 ({reason})"
+    );
+    assert_eq!(reason, "inbound_rate_limited");
+    running_server.shutdown().await;
+}
+
+/// Roomless `Signal` frames are refused with a polite `NotInRoom` reply each.
+/// The refusal replies must charge the 4006 budget, or a single open-mode
+/// connection can buy unbounded amplified replies at line rate forever
+/// (issue #396).
+#[tokio::test]
+async fn roomless_signal_flood_exhausting_the_reply_budget_closes_with_4006() {
+    let mut config = base_config();
+    config.rate_limit_config.max_inbound_error_replies = 3;
+    let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
+
+    let mut ws = connect(addr).await;
+    authenticate(&mut ws).await;
+
+    let signal = Message::Text(
+        serde_json::to_string(&ClientMessage::Signal {
+            to: uuid::Uuid::new_v4(),
+            generation: uuid::Uuid::new_v4(),
+            signal: serde_json::Value::Null,
+        })
+        .expect("serialize Signal")
+        .into(),
+    );
+    for _ in 0..4 {
+        ws.send(signal.clone()).await.expect("send roomless Signal");
+    }
+
+    let (code, reason) = read_close_frame(&mut ws, "roomless Signal flood").await;
+    assert_eq!(
+        code, 4006,
+        "roomless Signal refusal exhaustion must close with 4006 ({reason})"
+    );
+    assert_eq!(reason, "inbound_rate_limited");
+    running_server.shutdown().await;
+}
+
+/// Oversized binary relay payloads on a binary-negotiated connection buy a
+/// polite `MessageTooLarge` reply each — the exact asymmetric twin of the
+/// (already charged) oversized-text path. The refusal replies must charge the
+/// 4006 budget (issue #396).
+#[tokio::test]
+async fn oversized_binary_flood_exhausting_the_reply_budget_closes_with_4006() {
+    let mut config = base_config();
+    config.rate_limit_config.max_inbound_error_replies = 3;
+    // The inbound cap must admit the Authenticate frame itself (~114 bytes)
+    // while staying under the 2x transport cap for the oversized payloads.
+    // The signal/connection-info caps must follow `max_message_size` down so
+    // the construction-time security validation stays satisfied; the
+    // game-data oversize check itself reads `max_message_size` only.
+    config.max_message_size = 256;
+    config.max_signal_bytes = 256;
+    config.max_connection_info_bytes = 256;
+    let mut protocol = ProtocolConfig::default();
+    protocol.sdk_compatibility.enforce = false;
+    let server = create_test_server_with_config(config, protocol).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
+
+    let mut ws = connect(addr).await;
+    // Negotiate the binary relay lane so the oversized payloads reach the
+    // game-data handler instead of the (already charged) binary-on-JSON
+    // refusal in the receive loop.
+    let auth = ClientMessage::Authenticate {
+        app_id: "close-code-test".to_string(),
+        sdk_version: None,
+        platform: None,
+        game_data_format: Some(signal_fish_server::protocol::GameDataEncoding::MessagePack),
+        protocol_version: Some(3),
+        supported_transports: None,
+        supported_topologies: None,
+        requested_capabilities: None,
+    };
+    ws.send(Message::Text(
+        serde_json::to_string(&auth)
+            .expect("serialize Authenticate")
+            .into(),
+    ))
+    .await
+    .expect("send Authenticate");
+
+    let oversized = Message::Binary(vec![0u8; 300].into());
+    for _ in 0..4 {
+        ws.send(oversized.clone())
+            .await
+            .expect("send oversized binary frame");
+    }
+
+    let (code, reason) = read_close_frame(&mut ws, "oversized binary flood").await;
+    assert_eq!(
+        code, 4006,
+        "oversized binary refusal exhaustion must close with 4006 ({reason})"
+    );
+    assert_eq!(reason, "inbound_rate_limited");
+    running_server.shutdown().await;
+}
+
+/// A retryable handshake refusal is a polite per-frame reply: an enforced
+/// SDK-compatibility failure answers every retried `Authenticate` with an
+/// `AuthenticationError`. The refusal loop must charge the 4006 budget — the
+/// exhausting refusal is withheld and the connection closes with
+/// `4006 inbound_rate_limited` (issue #396).
+#[tokio::test]
+async fn sdk_refusal_loop_exhausting_the_reply_budget_closes_with_4006() {
+    let mut config = base_config();
+    config.rate_limit_config.max_inbound_error_replies = 3;
+    let mut protocol = ProtocolConfig::default();
+    protocol.sdk_compatibility.enforce = true;
+    let server = create_test_server_with_config(config, protocol).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
+
+    let mut ws = connect(addr).await;
+
+    // platform "unity" with an SDK below the enforced minimum (1.10.0)
+    // fails the compatibility check on every attempt and stays retryable.
+    let auth = ClientMessage::Authenticate {
+        app_id: "close-code-test".to_string(),
+        sdk_version: Some("0.0.1".to_string()),
+        platform: Some("unity".to_string()),
+        game_data_format: None,
+        protocol_version: None,
+        supported_transports: None,
+        supported_topologies: None,
+        requested_capabilities: None,
+    };
+    let auth_frame = Message::Text(
+        serde_json::to_string(&auth)
+            .expect("serialize Authenticate")
+            .into(),
+    );
+    for _ in 0..4 {
+        ws.send(auth_frame.clone())
+            .await
+            .expect("send refusing Authenticate");
+    }
+
+    let (code, reason) = read_close_frame(&mut ws, "SDK refusal loop").await;
+    assert_eq!(
+        code, 4006,
+        "SDK-refusal exhaustion must close with 4006 ({reason})"
+    );
+    assert_eq!(reason, "inbound_rate_limited");
+    running_server.shutdown().await;
+}
+
+/// Admitted relay traffic never charges the 4006 gate: the data planes carry
+/// their own byte/signal budgets, so an honest high-throughput connection
+/// stays open regardless of how small the reply budget is (issue #518).
+#[tokio::test]
+async fn relay_traffic_never_charges_the_error_reply_budget() {
+    let mut config = base_config();
+    config.rate_limit_config.max_inbound_error_replies = 3;
+    let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
+
+    let mut sender = connect(addr).await;
+    let mut receiver = connect(addr).await;
+    authenticate(&mut sender).await;
+    authenticate(&mut receiver).await;
+    join(&mut sender, "RelaySender").await;
+    join(&mut receiver, "RelayReceiver").await;
+
+    // Ten times the reply budget of admitted relay frames: not one of them
+    // buys a reply to the sender, so none may charge the gate.
+    let relay = ClientMessage::GameData {
+        class: None,
+        key: None,
+        data: serde_json::json!({ "tick": 1 }),
+    };
+    let json = serde_json::to_string(&relay).expect("serialize GameData");
+    for _ in 0..10 {
+        sender
+            .send(Message::Text(json.clone().into()))
+            .await
+            .expect("send relay frame");
+    }
+
+    // The connection is still alive and answers a Ping: the relay flood left
+    // the reply budget untouched.
+    let probe = Message::Text(
+        serde_json::to_string(&ClientMessage::Ping)
+            .expect("serialize Ping")
+            .into(),
+    );
+    sender.send(probe).await.expect("send liveness Ping");
+    let pong_deadline = tokio::time::Instant::now() + CLOSE_DEADLINE;
+    let mut saw_pong = false;
+    while tokio::time::Instant::now() < pong_deadline {
+        match tokio::time::timeout(
+            pong_deadline.saturating_duration_since(tokio::time::Instant::now()),
+            sender.next(),
+        )
+        .await
+        {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                if matches!(
+                    serde_json::from_str::<ServerMessage>(&text),
+                    Ok(ServerMessage::Pong)
+                ) {
+                    saw_pong = true;
+                    break;
+                }
+            }
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(error))) => panic!("transport error after relay flood: {error}"),
+            Ok(None) => panic!("relay flood must not close the connection"),
+            Err(_elapsed) => break,
+        }
+    }
+    assert!(
+        saw_pong,
+        "an honest relay connection must never touch the reply budget"
     );
     running_server.shutdown().await;
 }

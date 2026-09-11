@@ -258,16 +258,12 @@ impl EnhancedGameServer {
                             "Reconnect operation reached the message router; reconnection is dispatched only by the connection task"
                         );
                         let _ = self
-                            .message_coordinator
-                            .send_to_player(
+                            .send_room_operation_failure_to_player(
                                 player_id,
-                                Arc::new(ServerMessage::room_operation_failed(
-                                    operation_id,
-                                    "Reconnection is dispatched by the connection that owns \
-                                     the reconnection identity"
-                                        .to_string(),
-                                    Some(crate::protocol::ErrorCode::ReconnectionFailed),
-                                )),
+                                operation_id,
+                                "Reconnection is dispatched by the connection that owns \
+                                 the reconnection identity",
+                                Some(crate::protocol::ErrorCode::ReconnectionFailed),
                             )
                             .await;
                     }

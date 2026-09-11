@@ -1154,6 +1154,7 @@ async fn terminal_unroute_captures_every_stamp_allocated_before_player_left() {
         metrics,
         coordinator.clone(),
         false,
+        (u32::MAX, Duration::from_secs(60)),
     ));
     let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0013);
     let sender_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0014);

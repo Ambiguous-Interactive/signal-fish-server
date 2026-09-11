@@ -19,10 +19,13 @@ use uuid::Uuid;
 
 use crate::auth::AppContext;
 use crate::coordination::{
-    ClientDeliveryHandle, ConnectionCloseSignal, DeliverySender, MessageCoordinator,
+    ClientDeliveryHandle, CloseReason, ConnectionCloseSignal, DeliverySender, MessageCoordinator,
 };
-use crate::metrics::ServerMetrics;
-use crate::protocol::{GameDataEncoding, PlayerId, RoomId, ServerMessage, Topology, Transport};
+use crate::metrics::{RateLimitRejection, ServerMetrics};
+use crate::protocol::{
+    ErrorCode, GameDataEncoding, PlayerId, RoomId, ServerMessage, Topology, Transport,
+};
+use crate::rate_limit::ErrorReplyGate;
 
 use super::RegisterClientError;
 
@@ -49,7 +52,7 @@ impl Default for NegotiatedProtocol {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct ClientConnection {
     pub room_id: Option<RoomId>,
     /// Serializes room-role and connection-lifecycle transitions for this
@@ -133,6 +136,13 @@ pub(crate) struct ClientConnection {
     /// Paired with `game_data_seq` (which restarts at 1 per epoch) it makes a
     /// `seq` restart self-describing.
     pub game_data_epoch: u32,
+    /// Per-connection inbound error-reply budget (issue #518): every polite
+    /// per-frame reply this connection buys — a refusal or failure envelope
+    /// of any kind, or the `Pong` keepalive answer — charges it. An exhausted
+    /// budget closes the connection with `4006 inbound_rate_limited` instead
+    /// of replying again (see [`ConnectionManager::charge_error_reply`]).
+    /// The gate follows the physical socket across a reconnect identity swap.
+    pub error_reply_gate: std::sync::Mutex<ErrorReplyGate>,
 }
 
 /// Per-physical-connection lifecycle identity and serialization gate.
@@ -288,6 +298,9 @@ pub(crate) struct ConnectionManager {
     /// Mirrors `websocket.delivery_stats_interval_secs > 0` so a disabled
     /// deployment keeps the per-delivery bookkeeping at a single map miss.
     track_delivery_stats: bool,
+    /// Per-connection inbound error-reply budget the registration arms every
+    /// gate with: `(max_inbound_error_replies, time_window)`.
+    error_reply_budget: (u32, tokio::time::Duration),
 }
 
 impl ConnectionManager {
@@ -325,6 +338,7 @@ impl ConnectionManager {
         metrics: Arc<ServerMetrics>,
         message_coordinator: Arc<dyn MessageCoordinator>,
         track_delivery_stats: bool,
+        error_reply_budget: (u32, tokio::time::Duration),
     ) -> Self {
         Self {
             clients: DashMap::new(),
@@ -335,6 +349,7 @@ impl ConnectionManager {
             live_connections: AtomicUsize::new(0),
             max_connections_per_ip,
             track_delivery_stats,
+            error_reply_budget,
         }
     }
 
@@ -414,6 +429,7 @@ impl ConnectionManager {
             prior_membership_generation: None,
             game_data_seq: 0,
             game_data_epoch: 0,
+            error_reply_gate: std::sync::Mutex::new(self.new_error_reply_gate()),
         };
 
         self.clients.insert(player_id, connection);
@@ -478,6 +494,7 @@ impl ConnectionManager {
             prior_membership_generation: None,
             game_data_seq: 0,
             game_data_epoch: 0,
+            error_reply_gate: std::sync::Mutex::new(self.new_error_reply_gate()),
         };
 
         self.increment_ip_slot_unbounded(client_addr.ip());
@@ -1058,6 +1075,10 @@ impl ConnectionManager {
             // transient socket itself never joined a room (epoch 0); the
             // reconnect path always dominates it.
             game_data_epoch,
+            // The budget belongs to the physical socket, which survives the
+            // identity swap: carried charged state keeps per-connection
+            // accounting exact.
+            error_reply_gate: old_connection.error_reply_gate,
         };
 
         // IP slot is already reserved from the old entry -- no need to
@@ -1114,6 +1135,7 @@ impl ConnectionManager {
             prior_membership_generation: None,
             game_data_seq: 0,
             game_data_epoch: 0,
+            error_reply_gate: reassigned_connection.error_reply_gate,
         };
 
         self.clients.insert(*current_player_id, restored_client);
@@ -1125,6 +1147,64 @@ impl ConnectionManager {
         self.metrics
             .rekey_slow_consumer_eviction_attributions(reconnect_player_id, *current_player_id);
         Some(delivery)
+    }
+
+    /// Arm a fresh per-connection error-reply gate from the configured budget.
+    fn new_error_reply_gate(&self) -> ErrorReplyGate {
+        let (limit, window) = self.error_reply_budget;
+        ErrorReplyGate::new(limit, window)
+    }
+
+    /// Charge one polite per-frame reply — a refusal or failure envelope of
+    /// any kind, or the `Pong` keepalive answer — against `player_id`'s
+    /// fixed-window budget
+    /// (issue #518). Returns `false` when the window is exhausted: the caller
+    /// must NOT send the reply. The exhaustion side effects fire here, once
+    /// per exhaustion event — the rejection metric, the best-effort advisory
+    /// farewell, and the semantic `4006 inbound_rate_limited` close request,
+    /// in that order — while the close lands.
+    ///
+    /// An unknown player id is admitted (`true`): there is no budget to
+    /// charge, and the caller's send fails downstream anyway.
+    pub async fn charge_error_reply(&self, player_id: &PlayerId) -> bool {
+        let (allowed, first_exhaustion) = {
+            let Some(entry) = self.clients.get_mut(player_id) else {
+                return true;
+            };
+            let mut gate = entry
+                .error_reply_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let allowed = gate.charge(Instant::now());
+            (allowed, !allowed && gate.report_exhaustion())
+        };
+        if allowed {
+            return true;
+        }
+        if !first_exhaustion {
+            return false;
+        }
+        warn!(
+            %player_id,
+            "Inbound error-reply rate limit exceeded, closing connection"
+        );
+        self.metrics
+            .record_rate_limit_rejection(RateLimitRejection::InboundErrorReply);
+        // The budget-exhaustion farewell rides the reliable delivery path and
+        // never waits for capacity; the semantic close reason is pinned after
+        // it so the close frame remains the authoritative attribution signal.
+        let _ = self
+            .message_coordinator
+            .try_send_to_player(
+                player_id,
+                Arc::new(ServerMessage::Error {
+                    message: "Inbound error-reply rate limit exceeded".to_string(),
+                    error_code: Some(ErrorCode::RateLimitExceeded),
+                }),
+            )
+            .await;
+        self.request_close_for(player_id, CloseReason::InboundRateLimited);
+        false
     }
 
     /// Request a close for `player_id`'s connection with an explicit reason,
@@ -1561,6 +1641,7 @@ mod tests {
             metrics,
             coordinator,
             false,
+            (u32::MAX, tokio::time::Duration::from_secs(60)),
         )
     }
 
@@ -1884,6 +1965,58 @@ mod tests {
         );
     }
 
+    /// The error-reply budget belongs to the physical socket (issue #518), so
+    /// a reconnect identity swap must carry its charged state instead of
+    /// re-arming a fresh budget that a same-socket refuser could multiply.
+    #[tokio::test]
+    async fn reassign_connection_carries_the_charged_error_reply_gate() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let coordinator: Arc<dyn MessageCoordinator> = Arc::new(TestCoordinator::default());
+        let manager = ConnectionManager::new(
+            usize::MAX,
+            4,
+            metrics,
+            coordinator,
+            false,
+            (2, tokio::time::Duration::from_secs(60)),
+        );
+        let addr: SocketAddr = "127.0.0.1:5044".parse().unwrap();
+        let (tx, mut rx) = channel();
+        let (close_signal, close_listener) = ConnectionCloseSignal::channel();
+        let transient_id = manager
+            .register_client(tx, close_signal, addr, Uuid::new_v4())
+            .await
+            .expect("registration succeeds");
+
+        // Spend one slot on the transient identity (an exhausted budget would
+        // pin a transient close and the swap would rightly refuse).
+        assert!(manager.charge_error_reply(&transient_id).await);
+
+        let restored_id = PlayerId::new_v4();
+        let room_id = RoomId::new_v4();
+        assert!(matches!(
+            manager.reassign_connection(&transient_id, &restored_id, room_id, 1),
+            ReassignmentOutcome::Reassigned(_)
+        ));
+
+        // The charged state followed the socket: only one further reply fits,
+        // and the next one exhausts. A re-armed fresh gate would pass both.
+        assert!(
+            manager.charge_error_reply(&restored_id).await,
+            "the restored identity resumes the carried budget"
+        );
+        assert!(
+            !manager.charge_error_reply(&restored_id).await,
+            "the identity swap must not re-arm the exhausted budget"
+        );
+        assert_eq!(
+            close_listener.requested_reason(),
+            Some(crate::coordination::CloseReason::InboundRateLimited),
+            "the exhaustion close must be pinned through the swap"
+        );
+        let _ = rx.try_recv();
+    }
+
     /// A stale terminal unroute for a room the player no longer (or never did)
     /// belongs to must be refused untouched — publishing the current
     /// assignment's live stamp as a foreign room's terminal watermark would
@@ -2043,6 +2176,7 @@ mod tests {
             metrics.clone(),
             coordinator.clone() as Arc<dyn MessageCoordinator>,
             false,
+            (u32::MAX, tokio::time::Duration::from_secs(60)),
         );
 
         let (tx, _rx) = channel();

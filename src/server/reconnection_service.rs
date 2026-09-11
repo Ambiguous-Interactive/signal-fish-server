@@ -434,16 +434,11 @@ impl EnhancedGameServer {
             .await;
 
         let _ = self
-            .message_coordinator
-            .send_to_player(
+            .send_reconnection_failure_to_player(
                 current_player_id,
-                Arc::new(
-                    (ServerMessage::ReconnectionFailed {
-                        reason: reason.to_string(),
-                        error_code,
-                    })
-                    .correlate_room_operation(operation_id),
-                ),
+                reason.to_string(),
+                error_code,
+                operation_id,
             )
             .await;
         false
@@ -799,16 +794,11 @@ impl EnhancedGameServer {
         // effect, so the token stays spendable on a healthy instance.
         if self.is_draining() {
             let _ = self
-                .message_coordinator
-                .send_to_player(
+                .send_reconnection_failure_to_player(
                     current_player_id,
-                    Arc::new(
-                        (ServerMessage::ReconnectionFailed {
-                            reason: "Server is draining for shutdown".to_string(),
-                            error_code: ErrorCode::ServerDraining,
-                        })
-                        .correlate_room_operation(operation_id),
-                    ),
+                    "Server is draining for shutdown".to_string(),
+                    ErrorCode::ServerDraining,
+                    operation_id,
                 )
                 .await;
             return false;
@@ -817,16 +807,11 @@ impl EnhancedGameServer {
         let Some(reconnection_manager) = &self.reconnection_manager else {
             tracing::warn!("Reconnection attempt but reconnection is disabled");
             let _ = self
-                .message_coordinator
-                .send_to_player(
+                .send_reconnection_failure_to_player(
                     current_player_id,
-                    Arc::new(
-                        (ServerMessage::ReconnectionFailed {
-                            reason: "Reconnection is not enabled".to_string(),
-                            error_code: ErrorCode::ReconnectionFailed,
-                        })
-                        .correlate_room_operation(operation_id),
-                    ),
+                    "Reconnection is not enabled".to_string(),
+                    ErrorCode::ReconnectionFailed,
+                    operation_id,
                 )
                 .await;
             return false;
@@ -835,16 +820,11 @@ impl EnhancedGameServer {
         // Check if player is already connected
         if self.connection_manager.has_client(reconnect_player_id) {
             let _ = self
-                .message_coordinator
-                .send_to_player(
+                .send_reconnection_failure_to_player(
                     current_player_id,
-                    Arc::new(
-                        (ServerMessage::ReconnectionFailed {
-                            reason: "Player is already connected".to_string(),
-                            error_code: ErrorCode::PlayerAlreadyConnected,
-                        })
-                        .correlate_room_operation(operation_id),
-                    ),
+                    "Player is already connected".to_string(),
+                    ErrorCode::PlayerAlreadyConnected,
+                    operation_id,
                 )
                 .await;
             return false;
@@ -854,17 +834,11 @@ impl EnhancedGameServer {
             || self.spectator_service.is_spectating(current_player_id)
         {
             let _ = self
-                .message_coordinator
-                .send_to_player(
+                .send_reconnection_failure_to_player(
                     current_player_id,
-                    Arc::new(
-                        (ServerMessage::ReconnectionFailed {
-                            reason: "Reconnect must be attempted from a fresh connection"
-                                .to_string(),
-                            error_code: ErrorCode::ReconnectionFailed,
-                        })
-                        .correlate_room_operation(operation_id),
-                    ),
+                    "Reconnect must be attempted from a fresh connection".to_string(),
+                    ErrorCode::ReconnectionFailed,
+                    operation_id,
                 )
                 .await;
             return false;
@@ -899,13 +873,11 @@ impl EnhancedGameServer {
                     "Reconnection validation failed: {reason}"
                 );
                 let _ = self
-                    .message_coordinator
-                    .send_to_player(
+                    .send_reconnection_failure_to_player(
                         current_player_id,
-                        Arc::new(
-                            (ServerMessage::ReconnectionFailed { reason, error_code })
-                                .correlate_room_operation(operation_id),
-                        ),
+                        reason,
+                        error_code,
+                        operation_id,
                     )
                     .await;
                 return false;

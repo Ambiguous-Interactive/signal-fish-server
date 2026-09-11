@@ -165,11 +165,23 @@ On each `SIGHUP` the server:
 Failure behavior:
 
 - A configuration that fails to load or fails security validation keeps the
-  running allowlist. The error is logged. To force fail-closed admission,
+  running allowlist. The error is logged. Validation covers the whole config
+  document, so an unrelated invalid edit (a removed TLS cert file, for
+  example) also blocks the allowlist update. To force fail-closed admission,
   restart the process instead.
 - Removing an application stops NEW handshakes for that label immediately.
   Connections that already resolved it keep their context; revoking a live
-  connection stays a restart or tenant-level action.
+  connection stays a restart or tenant-level action. The kept context includes
+  the admission powers the context carries: a pre-reload socket can still join
+  rooms and create new rooms under the revoked application's identity until it
+  disconnects. New handshakes — including any reconnect from a fresh socket —
+  fail with the unknown-app-ID refusal.
+- A reload that TIGHTENS a per-app cap (`max_rooms`, `max_players_per_room`)
+  reaches fresh handshakes immediately. Live sockets keep their resolved
+  context until they re-handshake (reconnect from a new socket), so the
+  stricter limit can coexist with rooms created by pre-reload sockets until
+  those sockets recycle. The room-count check itself is always live; only the
+  limit value is snapshotted.
 - A reload can introduce rate limits for the first time; new budgets apply
   to new handshakes at once.
 - In open mode (`enforce_app_id_allowlist: false`) the reload is a logged

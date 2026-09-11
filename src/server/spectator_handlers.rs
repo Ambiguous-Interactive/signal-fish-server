@@ -1,6 +1,5 @@
 use super::EnhancedGameServer;
-use crate::protocol::{PlayerId, ServerMessage};
-use std::sync::Arc;
+use crate::protocol::PlayerId;
 
 impl EnhancedGameServer {
     /// Handle joining a room as spectator, surfacing validation errors back to the client.
@@ -39,16 +38,11 @@ impl EnhancedGameServer {
         // deadline anyway — refuse before any admission side effect.
         if self.is_draining() {
             let _ = self
-                .message_coordinator
-                .send_to_player(
+                .send_spectator_join_failure_to_player(
                     player_id,
-                    Arc::new(
-                        (ServerMessage::SpectatorJoinFailed {
-                            reason: "Server is draining for shutdown".to_string(),
-                            error_code: Some(crate::protocol::ErrorCode::ServerDraining),
-                        })
-                        .correlate_room_operation(operation_id),
-                    ),
+                    "Server is draining for shutdown".to_string(),
+                    Some(crate::protocol::ErrorCode::ServerDraining),
+                    operation_id,
                 )
                 .await;
             return;
@@ -72,16 +66,11 @@ impl EnhancedGameServer {
             // instead. The reason and code are the same values the generic
             // `Error` frame carried.
             let _ = self
-                .message_coordinator
-                .send_to_player(
+                .send_spectator_join_failure_to_player(
                     player_id,
-                    Arc::new(
-                        (ServerMessage::SpectatorJoinFailed {
-                            reason: err.message,
-                            error_code: err.code,
-                        })
-                        .correlate_room_operation(operation_id),
-                    ),
+                    err.message,
+                    err.code,
+                    operation_id,
                 )
                 .await;
         }
@@ -110,14 +99,11 @@ impl EnhancedGameServer {
             Err(err) => match operation_id {
                 Some(operation_id) => {
                     let _ = self
-                        .message_coordinator
-                        .send_to_player(
+                        .send_room_operation_failure_to_player(
                             player_id,
-                            Arc::new(ServerMessage::room_operation_failed(
-                                operation_id,
-                                err.message,
-                                err.code,
-                            )),
+                            operation_id,
+                            err.message,
+                            err.code,
                         )
                         .await;
                 }

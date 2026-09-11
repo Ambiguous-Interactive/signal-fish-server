@@ -1785,6 +1785,7 @@ mod tests {
             Arc::new(crate::metrics::ServerMetrics::new()),
             coordinator.clone(),
             false,
+            (u32::MAX, tokio::time::Duration::from_secs(60)),
         ));
         let room_coordinator: Arc<dyn RoomOperationCoordinatorTrait> =
             Arc::new(crate::coordination::InMemoryRoomOperationCoordinator::new(
