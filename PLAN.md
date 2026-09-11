@@ -252,12 +252,24 @@ correctness evidence appears.
     per-job dependency cache from the `deny` supply-chain job, and
     de-duplicated the lint job's cross-OS `cargo fmt` re-check behind the
     quick-check gate.
+    The 2026-09-11 session-231 wave retired the standalone
+    `h14-pr.yml` gate: the nightly-only H14 amplification selector now runs
+    as an ubuntu-only step of the per-PR `nextest` job (exact #558
+    one-runner-setup pattern; the selector's test binary was already part of
+    that job's compiled suite graph, so the saved runner allocation
+    duplicated only setup and build). Measured: h14-pr averaged 1.1–2.2
+    ubuntu-billed minutes per `src/**` pull request (~24 billed minutes over
+    the 2026-09-08..10 window) and the step adds the ~12 s experiment
+    itself. Hosted H14 attempt-evidence artifacts stay on the daily
+    scenario-profiles cron leg.
     Remaining levers still
     need owner input: self-hosted runner labels (owner comment excludes
-    DAD-MACHINE and ELI-MACHINE) and the #379 path-awareness inventory;
-    a cargo-deny single-container consolidation is blocked by the pinned
-    action's one-manifest-per-boot input and the fortress-wasm 1.94
-    toolchain pin.
+    DAD-MACHINE and ELI-MACHINE), the #379 path-awareness inventory, and the
+    per-PR interop-quartet cohort question (#568: browser/fortress/
+    fortress-wasm/turn measured at ~180 Linux-billed minutes over
+    2026-09-08..10); a cargo-deny single-container consolidation is blocked
+    by the pinned action's one-manifest-per-boot input and the fortress-wasm
+    1.94 toolchain pin.
 - #379 — make verification-nightly pull-request fan-out path-aware only after
   an owner exports the required-check/ruleset inventory and a historical
   changed-file replay proves net allocation and runner-time savings. On the
