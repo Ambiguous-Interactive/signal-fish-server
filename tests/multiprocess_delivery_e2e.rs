@@ -246,6 +246,7 @@ async fn authenticate_raw_v3(sink: &mut WsSink, receiver: &mut WsReceiver) {
         sink,
         &ClientMessage::Authenticate {
             app_id: "reference-native-app".to_string(),
+            connect_token: None,
             sdk_version: None,
             platform: Some("multiprocess-resume-test".to_string()),
             game_data_format: None,

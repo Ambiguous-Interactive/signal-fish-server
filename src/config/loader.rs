@@ -104,6 +104,7 @@ pub fn load() -> anyhow::Result<Config> {
 fn finalize_config(merged: Value) -> anyhow::Result<Config> {
     let mut config = deserialize_merged_config(merged)?;
     apply_app_auth_file(&mut config)?;
+    apply_connect_token_key_file(&mut config)?;
 
     // Security validation for sensitive fields — intentional warn-only behavior;
     // main.rs calls validate_config_security() again and propagates errors properly.
@@ -152,6 +153,50 @@ fn apply_app_auth_file(config: &mut Config) -> anyhow::Result<()> {
         anyhow::anyhow!("Invalid app registry file {}: {error}", path.display())
     })?;
     config.security.allowed_apps.append(&mut entries);
+    Ok(())
+}
+
+/// Fold the configured connect-token key file into
+/// `security.connect_token.public_key` (issue #517).
+///
+/// The file is a deployment convenience (a read-only-mounted secret-style
+/// key file); its trimmed contents replace an empty inline `public_key`.
+/// Admission is fail-closed like `app_auth_path`: a configured path that is
+/// missing or unreadable is a load error, never a silently keyless server.
+/// Configuring both an inline key and a path is rejected — dead
+/// configuration would let the two disagree about which key verifies.
+fn apply_connect_token_key_file(config: &mut Config) -> anyhow::Result<()> {
+    let Some(connect_token) = config.security.connect_token.as_mut() else {
+        return Ok(());
+    };
+    let raw_path = connect_token
+        .public_key_path
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("");
+    if raw_path.is_empty() {
+        if connect_token.public_key_path.is_some() {
+            anyhow::bail!(
+                "security.connect_token.public_key_path is configured but empty: set a file \
+                 path or remove the knob"
+            );
+        }
+        return Ok(());
+    }
+    if !connect_token.public_key.trim().is_empty() {
+        anyhow::bail!(
+            "security.connect_token configures both public_key and public_key_path: keep \
+             exactly one source so the verification key cannot be ambiguous"
+        );
+    }
+    let contents = fs::read_to_string(raw_path).map_err(|error| {
+        anyhow::anyhow!(
+            "Failed to read connect-token key file {raw_path}: {error}. \
+             security.connect_token.public_key_path is fail-closed: a missing or unreadable \
+             key file is a startup error, not an unverified server"
+        )
+    })?;
+    connect_token.public_key = contents.trim().to_string();
     Ok(())
 }
 
@@ -1184,6 +1229,86 @@ mod tests {
                 DashboardHistoryField::ActiveRooms,
                 DashboardHistoryField::RoomsCreated
             ]
+        );
+    }
+    /// Write one connect-token key file with the given contents.
+    fn write_key_file(contents: &str) -> tempfile::TempDir {
+        let dir = tempfile::Builder::new()
+            .prefix("sf-connect-token-test")
+            .tempdir()
+            .expect("temporary key directory is created");
+        std::fs::write(dir.path().join("connect-token-key.b64"), contents)
+            .expect("key file is written");
+        dir
+    }
+
+    fn key_file_path_json(dir: &tempfile::TempDir) -> String {
+        dir.path()
+            .join("connect-token-key.b64")
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    /// The key file folds into the inline `public_key` at load time (issue
+    /// #517), so runtime code reads one value and SIGHUP re-reads the file
+    /// through the same path. Trimming must tolerate a trailing newline from
+    /// a provisioner echo.
+    #[test]
+    fn connect_token_key_file_folds_into_public_key() {
+        let key = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+        let dir = write_key_file(&format!("{key}\n"));
+        let config = finalize_with_security_doc(&format!(
+            r#"{{"security":{{"connect_token":{{"public_key_path":"{}"}}}}}}"#,
+            key_file_path_json(&dir)
+        ))
+        .expect("key file materializes");
+        let connect_token = config
+            .security
+            .connect_token
+            .expect("connect_token block survives");
+        assert_eq!(connect_token.public_key, key);
+    }
+
+    /// Configuring both sources is a load error: dead configuration would
+    /// let the inline key and the file disagree about which key verifies.
+    #[test]
+    fn connect_token_rejects_inline_key_beside_path() {
+        let dir = write_key_file("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=");
+        let error = finalize_with_security_doc(&format!(
+            r#"{{"security":{{"connect_token":{{"public_key":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=","public_key_path":"{}"}}}}}}"#,
+            key_file_path_json(&dir)
+        ))
+        .expect_err("both sources must be rejected");
+        assert!(
+            error.to_string().contains("exactly one source"),
+            "error must name the ambiguity: {error}"
+        );
+    }
+
+    /// A configured key file that is missing is a fail-closed load error
+    /// naming the path — never a silently keyless server.
+    #[test]
+    fn connect_token_missing_key_file_is_a_load_error() {
+        let error = finalize_with_security_doc(
+            r#"{"security":{"connect_token":{"public_key_path":"/nonexistent/sf-key.b64"}}}"#,
+        )
+        .expect_err("a missing key file must fail load");
+        assert!(
+            error.to_string().contains("connect-token key file"),
+            "error must name the seam: {error}"
+        );
+    }
+
+    /// An empty `public_key_path` string is dead configuration and fails
+    /// loudly, mirroring the `app_auth_path` contract.
+    #[test]
+    fn connect_token_empty_path_string_is_rejected() {
+        let error =
+            finalize_with_security_doc(r#"{"security":{"connect_token":{"public_key_path":""}}}"#)
+                .expect_err("an empty path cannot name a key file");
+        assert!(
+            error.to_string().contains("configured but empty"),
+            "error must name the empty path: {error}"
         );
     }
 }

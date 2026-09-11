@@ -2099,6 +2099,7 @@ pub(super) async fn handle_socket(
                     match client_message {
                         ClientMessage::Authenticate {
                             app_id,
+                            connect_token,
                             sdk_version,
                             platform,
                             game_data_format,
@@ -2154,6 +2155,50 @@ pub(super) async fn handle_socket(
                                 .await
                             {
                                 Ok(info) => {
+                                    // Optional tenant credential (issue
+                                    // #517): verified after the allowlist
+                                    // resolves the app and before any
+                                    // capability negotiation. The refusal
+                                    // is retryable, so it charges the
+                                    // per-connection error-reply budget
+                                    // (issue #518) exactly like the SDK
+                                    // refusal below, and mutates no
+                                    // admission state (`app_handshake_complete`
+                                    // is only committed on full success).
+                                    if let Some(token) = connect_token.as_deref() {
+                                        if let Err(error) =
+                                            server_clone.verify_connect_token(&app_id, token)
+                                        {
+                                            let error_message = error.to_string();
+                                            tracing::warn!(
+                                                %active_player_id,
+                                                app_id = %app_id,
+                                                error = %error_message,
+                                                "Connect token rejected"
+                                            );
+                                            if !server_clone
+                                                .charge_error_reply(&active_player_id)
+                                                .await
+                                            {
+                                                break;
+                                            }
+                                            let _ = enqueue_connection_message(
+                                                &tx_clone,
+                                                &close_signal,
+                                                &server_clone,
+                                                slow_consumer_timeout,
+                                                &active_player_id,
+                                                ServerMessage::AuthenticationError {
+                                                    error: error_message,
+                                                    error_code: ErrorCode::ConnectTokenInvalid,
+                                                },
+                                                "connect token error",
+                                            )
+                                            .await;
+                                            continue;
+                                        }
+                                    }
+
                                     let compatibility = match server_clone
                                         .protocol_config()
                                         .sdk_compatibility

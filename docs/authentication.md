@@ -36,17 +36,19 @@ The two policy modes are:
 - `true`: allowlist mode. The first client message must be `Authenticate`, and
   its public `app_id` must appear in `allowed_apps`.
 
-There is no optional or required client-credential mode. Credential
-provisioning, rotation, expiry, and replay protection therefore do not apply to
-the app-ID handshake. Use a separate trusted identity service if hostile-client
-tenant isolation is required.
+By default the app-ID handshake stays credential-free: `app_id` is a public
+label. Deployments that need protocol-level tenant authentication can enable
+the optional `connect_token` mode — see
+[Optional tenant connect tokens](#optional-tenant-connect-tokens) below.
 
 ## Frozen wire names
 
 Protocol v2 is frozen and protocol v3 is additive, so the existing wire names
 remain `Authenticate`, `Authenticated`, and `AuthenticationError`. In this
 server they mean “submit an app label,” “label accepted and protocol negotiated,”
-and “handshake rejected”; they do not prove the caller's identity.
+and “handshake rejected”; the label itself never proves the caller's identity.
+When the optional `connect_token` mode is enabled, the signed token — not the
+label — is the credential.
 
 ```javascript
 const ws = new WebSocket('wss://signal.example/v2/ws');
@@ -110,8 +112,8 @@ room admits only same-application seats, spectators, and reconnects. That
 boundary remains a soft one — an attacker who knows (or guesses) a victim's
 public app label can present it and pass the gate — so it must not be
 treated as a tenancy guarantee. Deployment-grade isolation requires
-allowlist enforcement, where the label is verified against configured
-entries, or the credential story tracked in issue #517.
+allowlist enforcement plus the optional `connect_token` mode, where a
+control-plane-signed credential is verified before admission.
 
 ## Per-app settings
 
@@ -187,8 +189,9 @@ Failure behavior:
 - In open mode (`enforce_app_id_allowlist: false`) the reload is a logged
   no-op: there is no configured set to swap.
 
-Only `security.allowed_apps` is applied live. Port, TLS, limits, and every
-other configuration field still require a restart; the reload log says so.
+Only `security.allowed_apps` and the `security.connect_token` verification key
+are applied live. Port, TLS, limits, and every other configuration field still
+require a restart; the reload log says so.
 
 ## External app-registry file (`security.app_auth_path`)
 
@@ -224,7 +227,10 @@ form one registry. Semantics:
 - **Strict keys.** Unknown keys — at the top level, or inside any entry — are
   rejected, so a typo'd cap fails loudly instead of silently widening.
   `app_secret` is rejected outright: the registry is a public-label list and
-  must never carry credential material (there is no client-credential mode).
+  must never carry credential material. (The optional `connect_token`
+  verification key is server-side *public* configuration, not a client
+  credential, and it lives under `security.connect_token`, never in the
+  registry.)
 - **No duplicates.** `app_id` collisions between the two lists (or within one
   list) are startup validation errors naming the duplicate entry
   (`allowed_apps[N].app_id`).
@@ -245,6 +251,90 @@ fail-closed rule applies: a missing or unreadable registry refuses to boot.
 At reload time the running allowlist is kept and the error is logged, so a
 transiently missing mount cannot silently change admission; restart to force
 the fail-closed refusal.
+
+## Optional tenant connect tokens
+
+The `connect_token` mode adds protocol-level tenant authentication (issue
+#517). The operator's control plane signs tokens with an Ed25519 private key;
+the server verifies them against the matching **public** key. The private key
+never reaches this process, and verification is stateless: no callouts, no
+store.
+
+### Configure
+
+```json
+{
+  "security": {
+    "connect_token": {
+      "public_key": "<base64 of the 32-byte Ed25519 public key>"
+    }
+  }
+}
+```
+
+- Set exactly one of `public_key` (inline base64) or `public_key_path`
+  (a file whose trimmed contents are the same base64 key; the loader folds
+  the file into `public_key`). Configuring both is a startup error.
+- The key is public material. The path option exists for mount and rotation
+  convenience, not secrecy.
+- A key that does not parse (not base64, not 32 bytes, not a valid curve
+  point) is a startup error.
+- The key reloads on `SIGHUP` with the allowlist. A reload with a corrupt
+  key keeps the running key; removing the block removes verification, and
+  presented tokens are then refused.
+
+### Wire contract
+
+A client that holds a credential adds one optional field to `Authenticate`:
+
+```json
+{
+  "type": "Authenticate",
+  "data": {
+    "app_id": "my-game",
+    "connect_token": "sfct_v1.C..."
+  }
+}
+```
+
+Token format (minted by the control plane):
+
+```text
+token   = "sfct_v1" "." payload_b64 "." signature_b64
+payload = UTF-8 JSON {"app_id": string, "exp": unix-seconds, "nonce": string}
+```
+
+Both base64 encodings are URL-safe without padding. The 64-byte Ed25519
+signature covers the exact ASCII bytes of `"sfct_v1." ++ payload_b64` — the
+encoded form is signed, so there is no JSON canonicalization anywhere.
+
+The server verifies, in order: encoding, signature, expiry, validity window,
+then that the payload's `app_id` equals the presented `app_id`. Every failure
+reports the same error code, `CONNECT_TOKEN_INVALID`; the `error` text carries
+the reason, and the token is never logged or echoed.
+
+### Semantics and limits
+
+- **Absent field.** No token: the handshake behaves exactly as before, in
+  every mode. Released SDKs and self-hosted deployments are unaffected.
+- **Presented without a configured key.** Refused with
+  `CONNECT_TOKEN_INVALID` (fail closed). A client that expects credentials to
+  matter must not be silently downgraded to public-label semantics.
+- **Token lifetime.** The server accepts a token only while `exp` is in the
+  future and its remaining validity is at most 300 seconds plus a fixed
+  60-second clock-skew allowance. A minter that sets a longer window fails;
+  the replay window stays bounded by policy, not minter discipline.
+- **Replay is accepted within the window.** The server is stateless and does
+  no single-use tracking. Send tokens only over TLS. A leaked token replays
+  until expiry — this is the ratified trade-off. Use the signed `nonce` at
+  the control plane or edge if single-use enforcement is needed.
+- **Retryable refusal.** A rejected token keeps the connection open, so the
+  client can fetch a fresh token and re-send `Authenticate` on the same
+  socket. The refusal charges the per-connection error-reply budget, like
+  every polite per-frame reply (close code `4006` bounds the total).
+- **Redaction.** The server never logs the token and never echoes it — not in
+  `Authenticated`, `ProtocolInfo`, room snapshots, or reconnect payloads.
+  Client SDKs must apply the same rule to their own logs.
 
 ## Legacy configuration
 

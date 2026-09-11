@@ -97,6 +97,7 @@ fn base_config() -> ServerConfig {
 async fn authenticate(ws: &mut WsStream) {
     let auth = ClientMessage::Authenticate {
         app_id: "close-code-test".to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: None,
         game_data_format: None,
@@ -114,6 +115,7 @@ async fn authenticate(ws: &mut WsStream) {
 async fn authenticate_v3(ws: &mut WsStream) {
     let auth = ClientMessage::Authenticate {
         app_id: "close-code-test".to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: None,
         game_data_format: None,
@@ -609,6 +611,7 @@ async fn oversized_binary_flood_exhausting_the_reply_budget_closes_with_4006() {
     // refusal in the receive loop.
     let auth = ClientMessage::Authenticate {
         app_id: "close-code-test".to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: None,
         game_data_format: Some(signal_fish_server::protocol::GameDataEncoding::MessagePack),
@@ -662,6 +665,7 @@ async fn sdk_refusal_loop_exhausting_the_reply_budget_closes_with_4006() {
     // fails the compatibility check on every attempt and stays retryable.
     let auth = ClientMessage::Authenticate {
         app_id: "close-code-test".to_string(),
+        connect_token: None,
         sdk_version: Some("0.0.1".to_string()),
         platform: Some("unity".to_string()),
         game_data_format: None,
@@ -1006,6 +1010,7 @@ async fn authority_kick_closes_target_with_4007() {
             .expect("connect failed");
         let auth = ClientMessage::Authenticate {
             app_id: "close-code-test".to_string(),
+            connect_token: None,
             sdk_version: None,
             platform: None,
             game_data_format: None,

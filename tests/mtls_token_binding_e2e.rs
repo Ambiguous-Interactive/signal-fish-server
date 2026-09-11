@@ -407,6 +407,7 @@ async fn authenticate(
 ) -> Value {
     let message = ClientMessage::Authenticate {
         app_id: "mtls_e2e".to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: None,
         game_data_format: None,
@@ -583,6 +584,7 @@ async fn required_mtls_without_token_binding_keeps_unsigned_json_and_binary_path
 
     let authentication = ClientMessage::Authenticate {
         app_id: "mtls_without_binding".to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: None,
         game_data_format: Some(GameDataEncoding::MessagePack),
@@ -986,6 +988,7 @@ async fn fingerprint_bound_authentication_advertises_signed_messagepack() {
         .expect("fingerprint-bound WebSocket upgrade");
     let message = ClientMessage::Authenticate {
         app_id: "mtls_e2e".to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: None,
         game_data_format: Some(GameDataEncoding::MessagePack),

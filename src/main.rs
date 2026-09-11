@@ -267,6 +267,14 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
+    // Install the optional tenant connect-token verification key (issue
+    // #517). Configuration validation already parsed the key, so this only
+    // fails on a race with a config rewrite; a failed startup install is
+    // fatal (fail closed) rather than a keyless server.
+    if game_server.install_connect_token_key(&cfg.security)? {
+        tracing::info!("Connect-token verification enabled (security.connect_token)");
+    }
+
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Start cleanup task
@@ -278,11 +286,13 @@ async fn main() -> anyhow::Result<()> {
             .await;
     });
 
-    // SIGHUP reloads the application allowlist from the same configuration
-    // sources as startup (issue #522). Only `security.allowed_apps` is
-    // applied live; every other field still requires a restart, and the
-    // reload log says so. A reload that fails to load or fails security
-    // validation keeps the running allowlist and logs the error.
+    // SIGHUP reloads the application allowlist — and the tenant
+    // connect-token verification key (issue #517) — from the same
+    // configuration sources as startup (issue #522). Only those two security
+    // surfaces are applied live; every other field still requires a restart,
+    // and the reload log says so. A reload that fails to load or fails
+    // security validation keeps the running allowlist and key, and logs the
+    // error.
     #[cfg(unix)]
     {
         let reload_server = game_server.clone();
@@ -667,6 +677,29 @@ async fn reload_allowed_apps_from_config(
             return;
         }
     };
+
+    // The connect-token verification key reloads with the allowlist (issue
+    // #517): the config went through the same load + validation gate, and a
+    // failure keeps the running key. Removal (block deleted) is applied
+    // verbatim — presented tokens are then refused fail-closed.
+    match server.install_connect_token_key(&cfg.security) {
+        Ok(true) => {
+            tracing::info!("SIGHUP reload: connect-token verification enabled");
+        }
+        Ok(false) => {
+            tracing::info!(
+                "SIGHUP reload: connect-token verification disabled (no key configured); \
+                 presented tokens are refused"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "SIGHUP reload: connect-token key was rejected; keeping the running key"
+            );
+        }
+    }
+
     if outcome.applied {
         // The applied+diff log lives in `reload_allowed_apps`. One case needs
         // an extra word: the NEW configuration turned enforcement off, but

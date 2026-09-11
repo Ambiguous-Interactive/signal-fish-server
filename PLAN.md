@@ -295,13 +295,28 @@ correctness evidence appears.
     itself. Hosted H14 attempt-evidence artifacts stay on the daily
     scenario-profiles cron leg.
     Remaining levers still
-    need owner input: self-hosted runner labels (owner comment excludes
-    DAD-MACHINE and ELI-MACHINE), the #379 path-awareness inventory, and the
-    per-PR interop-quartet cohort question (#568: browser/fortress/
-    fortress-wasm/turn measured at ~180 Linux-billed minutes over
-    2026-09-08..10); a cargo-deny single-container consolidation is blocked
+    need owner input: self-hosted runner labels and the #379 path-awareness
+    inventory (the per-PR interop-quartet cohort question was decided
+    2026-09-11: status quo — all four interop lanes stay per-PR, #568);
+    a cargo-deny single-container consolidation is blocked
     by the pinned action's one-manifest-per-boot input and the fortress-wasm
     1.94 toolchain pin.
+- #517 — the credential story is ratified (owner decisions 2026-09-11:
+  no shared secret, 5-minute TTL, self-hosting must keep public-`app_id`
+  mode, `connect_token` field name) and this repo's half is implemented:
+  `Authenticate` carries an optional `connect_token`
+  (`sfct_v1.<b64url(payload)>.<b64url(sig)>`, Ed25519), verified after the
+  allowlist resolves in the order encoding → signature → expiry →
+  300 s + 60 s skew TTL ceiling → app-id binding, all failures reported as
+  `CONNECT_TOKEN_INVALID` on a retryable, budget-charged refusal. Key config
+  is `security.connect_token.public_key`/`public_key_path` (public material,
+  file folded at load, fail-closed), SIGHUP-reloadable alongside the
+  allowlist. Absent field is byte-identical to today; presented token
+  without a configured key is refused fail closed. Cloud-side edge
+  enforcement (option 1) and token minting are the control plane's work.
+  Follow-on frontier for future seam sweeps: connect-token × reconnect
+  identity swap, token mode × open-mode endpoints, and SDK mint/attach
+  halves (tracked in the SDK repos).
 - #379 — make verification-nightly pull-request fan-out path-aware only after
   an owner exports the required-check/ruleset inventory and a historical
   changed-file replay proves net allocation and runner-time savings. On the

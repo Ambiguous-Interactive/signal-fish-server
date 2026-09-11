@@ -160,6 +160,15 @@ pub enum ErrorCode {
     /// The player named by `TransferAuthority` is not a seated member of the
     /// room.
     TransferTargetNotFound,
+
+    // Authentication errors (1xxx category). Appended at the END; see the
+    // signaling-errors note above. Raised by optional tenant `connect_token`
+    // verification (issue #517); only when the client presents the field.
+    /// The optional `connect_token` presented in `Authenticate` failed
+    /// verification (encoding, signature, expiry, validity window, or app-id
+    /// binding). The reason is in the `error` text; the token itself is never
+    /// quoted.
+    ConnectTokenInvalid,
 }
 
 impl ErrorCode {
@@ -387,6 +396,9 @@ impl ErrorCode {
             Self::TransferTargetNotFound => {
                 "The player to transfer authority to is not a current member of this room."
             }
+            Self::ConnectTokenInvalid => {
+                "The optional connect token was rejected (malformed, wrong signature, expired, or minted for a different app id). Obtain a fresh token from your game's backend."
+            }
         }
     }
 }
@@ -465,6 +477,7 @@ mod tests {
             ErrorCode::PasswordRequired,
             ErrorCode::Banned,
             ErrorCode::TransferTargetNotFound,
+            ErrorCode::ConnectTokenInvalid,
         ];
 
         for error_code in &error_codes {

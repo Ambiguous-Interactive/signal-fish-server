@@ -4,11 +4,18 @@
 /// - TLS/mTLS support (gated behind `tls` feature)
 /// - Envelope encryption (AES-GCM)
 /// - Token binding and channel security
+/// - Optional tenant `connect_token` verification (issue #517)
+pub mod connect_token;
 pub mod crypto;
 pub mod origin;
 pub mod tls;
 pub mod token_binding; // Always include tls module (ClientCertificateFingerprint is always needed)
 pub mod turn_credentials;
+
+pub use connect_token::{
+    ConnectTokenClaims, ConnectTokenError, ConnectTokenKeyError, ConnectTokenKeyState,
+    ConnectTokenVerifier,
+};
 
 pub use crypto::EnvelopeEncryptor;
 pub use origin::{OriginPolicy, OriginPolicyError};

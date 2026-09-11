@@ -93,6 +93,7 @@ async fn authenticate_with_version(
         ws,
         &ClientMessage::Authenticate {
             app_id: "v3-seq-test".to_string(),
+            connect_token: None,
             sdk_version: None,
             platform: None,
             game_data_format: None,

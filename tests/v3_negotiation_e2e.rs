@@ -153,6 +153,7 @@ async fn v3_client_negotiates_v3_and_protocol_info_reports_it() {
 
     let auth = ClientMessage::Authenticate {
         app_id: APP_ID.to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: None,
         game_data_format: None,
@@ -293,6 +294,7 @@ async fn open_policy_binary_rejection_starts_endpoint_default_advisories() {
 fn version_only_auth(protocol_version: Option<u16>) -> ClientMessage {
     ClientMessage::Authenticate {
         app_id: APP_ID.to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: None,
         game_data_format: None,
@@ -498,6 +500,7 @@ async fn v2_client_omitting_fields_is_recorded_as_v2() {
 
     let auth = ClientMessage::Authenticate {
         app_id: APP_ID.to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: None,
         game_data_format: None,
@@ -536,6 +539,7 @@ async fn v3_ws_alias_defaults_to_v3_when_client_omits_version() {
 
     let auth = ClientMessage::Authenticate {
         app_id: APP_ID.to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: None,
         game_data_format: None,
@@ -572,6 +576,7 @@ async fn v3_ws_alias_respects_explicit_client_version_over_path_default() {
 
     let auth = ClientMessage::Authenticate {
         app_id: APP_ID.to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: None,
         game_data_format: None,
@@ -604,6 +609,7 @@ async fn v2_ws_alias_defaults_to_v2_when_client_omits_version() {
 
     let auth = ClientMessage::Authenticate {
         app_id: APP_ID.to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: None,
         game_data_format: None,
@@ -631,6 +637,7 @@ async fn allowlist_disabled_v3_ws_authenticate_still_negotiates_v3_webrtc() {
 
     let auth = ClientMessage::Authenticate {
         app_id: APP_ID.to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: None,
         game_data_format: None,
@@ -672,6 +679,7 @@ async fn open_policy_v3_ws_respects_explicit_v2_without_version_fields() {
 
     let auth = ClientMessage::Authenticate {
         app_id: APP_ID.to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: None,
         game_data_format: None,

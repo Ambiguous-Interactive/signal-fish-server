@@ -160,6 +160,16 @@ hmac = "0.13.0"
 hkdf = "0.13.0"
 getrandom = "0.4"
 subtle = "2.6"
+# Ed25519 signatures for the optional tenant `connect_token` (issue #517).
+# The control plane holds the private key; this server only verifies and
+# never signs (no production path constructs a `SigningKey`).
+ed25519-dalek = { version = "2.2", default-features = false, features = [
+    "fast",
+    "std",
+] }
+# Trait-only surface (`Verifier`/`Signer`) ed25519-dalek's verify/sign methods
+# resolve through; the import keeps the method calls explicit.
+signature = "2"
 
 # Data structures
 hdrhistogram = "7.5"

@@ -152,6 +152,7 @@ fn assert_msgpack<T: Serialize>(value: &T, expected_hex: &str) {
 fn golden_client_authenticate() {
     let msg = ClientMessage::Authenticate {
         app_id: "mb_app_test".to_string(),
+        connect_token: None,
         sdk_version: Some("1.2.3".to_string()),
         platform: Some("godot".to_string()),
         game_data_format: Some(GameDataEncoding::MessagePack),
@@ -181,6 +182,7 @@ fn golden_client_authenticate_minimal() {
     // All optional fields absent — pure v2 minimal shape.
     let msg = ClientMessage::Authenticate {
         app_id: "mb_app_test".to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: None,
         game_data_format: None,
@@ -1355,6 +1357,7 @@ fn golden_enum_error_code_all_variants() {
             ErrorCode::TransferTargetNotFound,
             r#""TRANSFER_TARGET_NOT_FOUND""#,
         ),
+        (ErrorCode::ConnectTokenInvalid, r#""CONNECT_TOKEN_INVALID""#),
     ];
     for (code, expected) in cases {
         assert_json_str(code, expected);
@@ -1423,12 +1426,13 @@ fn golden_enum_error_code_all_variants() {
         | ErrorCode::Kicked
         | ErrorCode::PasswordRequired
         | ErrorCode::Banned
-        | ErrorCode::TransferTargetNotFound => (),
+        | ErrorCode::TransferTargetNotFound
+        | ErrorCode::ConnectTokenInvalid => (),
     };
     covered(ErrorCode::Unauthorized);
     assert_eq!(
         cases.len(),
-        60,
+        61,
         "golden table entry count must track the ErrorCode variant count \
          (update alongside the exhaustive guard above)"
     );

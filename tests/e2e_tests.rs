@@ -216,6 +216,7 @@ async fn authenticate_for_message_pack(
 ) {
     let auth = ClientMessage::Authenticate {
         app_id: "binary-e2e-app".to_string(),
+        connect_token: None,
         sdk_version: Some("1.0.0".to_string()),
         platform: Some("test".to_string()),
         game_data_format: Some(GameDataEncoding::MessagePack),
@@ -255,6 +256,7 @@ async fn test_rkyv_game_data_format_request_falls_back_to_json_and_is_not_advert
 
     let auth = ClientMessage::Authenticate {
         app_id: "rkyv-negotiation-app".to_string(),
+        connect_token: None,
         sdk_version: Some("1.0.0".to_string()),
         platform: Some("test".to_string()),
         game_data_format: Some(GameDataEncoding::Rkyv),

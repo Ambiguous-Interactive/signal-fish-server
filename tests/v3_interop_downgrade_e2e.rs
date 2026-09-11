@@ -182,6 +182,7 @@ async fn authenticate(
         ws,
         &ClientMessage::Authenticate {
             app_id: APP_ID.to_string(),
+            connect_token: None,
             sdk_version: None,
             platform: None,
             game_data_format: None,
@@ -1999,6 +2000,7 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
                 &mut correlated,
                 &ClientMessage::Authenticate {
                     app_id: APP_ID.to_string(),
+                    connect_token: None,
                     sdk_version: None,
                     platform: None,
                     game_data_format: None,

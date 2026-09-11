@@ -59,8 +59,8 @@ pub use protocol::{
 pub use relay::RelayTypeConfig;
 
 pub use security::{
-    AppRegistrationEntry, ClientAuthMode, SecurityConfig, TlsServerConfig, TokenBindingConfig,
-    TransportSecurityConfig,
+    AppRegistrationEntry, ClientAuthMode, ConnectTokenConfig, SecurityConfig, TlsServerConfig,
+    TokenBindingConfig, TransportSecurityConfig,
 };
 
 pub use server::{RateLimitConfig, ServerConfig};

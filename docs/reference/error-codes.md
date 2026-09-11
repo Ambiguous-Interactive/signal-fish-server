@@ -85,6 +85,7 @@ names do not imply client credentials.
 | `SDK_VERSION_UNSUPPORTED` | The SDK version is no longer supported. Upgrade to the latest version. |
 | `UNSUPPORTED_GAME_DATA_FORMAT` | A payload could not be represented in the recipient's negotiated format. For v3, an exact `DeliveryReport` gap with reason `unsupported_format` covers the omission and is written before this supplemental error; consecutive omissions from one sender coalesce into one range, so the report count does not scale with the relayed message count. This supplemental error is best effort, and a failed error write disconnects without exposing a successor. |
 | `UNSUPPORTED_PROTOCOL_VERSION` | The client's highest supported protocol version is below the deployment minimum, or a pre-v3 connection sent a frame class that requires a newer protocol surface (such as the v3 `RoomOperation` envelope). Upgrade the client or use a compatible deployment; the server will not silently raise the client's declared maximum. |
+| `CONNECT_TOKEN_INVALID` | The optional `connect_token` in `Authenticate` failed verification: malformed encoding, wrong signature, expired, a validity window past the server maximum, or the token was minted for a different app id. The `error` text names the reason. The refusal is retryable with a fresh token on the same connection. See [Application identification](../authentication.md#optional-tenant-connect-tokens). |
 
 ### Validation Errors (2xxx)
 

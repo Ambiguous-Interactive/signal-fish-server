@@ -807,6 +807,16 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         }
     }
 
+    // Optional tenant connect-token verification (issue #517): when the
+    // block is present, the verification key must parse now so a bad key is
+    // a startup (or SIGHUP-reload) error, never a silently keyless server.
+    if let Some(connect_token) = &config.security.connect_token {
+        use crate::security::connect_token::ConnectTokenVerifier;
+        ConnectTokenVerifier::from_encoded_key(&connect_token.public_key).map_err(|error| {
+            anyhow::anyhow!("security.connect_token validation failed: {error}")
+        })?;
+    }
+
     // The same constructor-owned projection is checked by
     // `EnhancedGameServer::new`; production additionally rejects zero operation
     // budgets, which remain a deliberate direct-library testing policy.
@@ -2296,5 +2306,45 @@ mod tests {
             .map(|error| error.to_string())
             .unwrap_or_default();
         assert!(error.contains("server.event_buffer_size must not exceed"));
+    }
+    /// The optional tenant connect-token block (issue #517) must carry a
+    /// parseable verification key: a present-but-garbage key is a startup
+    /// error, never a silently keyless server.
+    #[test]
+    fn connect_token_requires_a_parseable_verification_key() {
+        use base64::Engine as _;
+        // A genuinely-curve-valid key through the dependency itself so the
+        // positive case cannot rot against `VerifyingKey` strictness.
+        use ed25519_dalek::SigningKey;
+        let signing = SigningKey::from_bytes(&[7_u8; 32]);
+        let valid = base64::engine::general_purpose::STANDARD.encode(signing.verifying_key());
+
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.security.connect_token = Some(crate::config::ConnectTokenConfig {
+            public_key: valid,
+            public_key_path: None,
+        });
+        assert!(
+            validate_config_security(&config).is_ok(),
+            "a valid key validates"
+        );
+
+        for bad in [
+            String::new(),
+            base64::engine::general_purpose::STANDARD.encode([9_u8; 31]),
+            "not-a-key".to_string(),
+        ] {
+            config.security.connect_token = Some(crate::config::ConnectTokenConfig {
+                public_key: bad.clone(),
+                public_key_path: None,
+            });
+            let error = validate_config_security(&config)
+                .expect_err("a non-parseable key must fail validation");
+            assert!(
+                error.to_string().contains("security.connect_token"),
+                "error must name the config seam: {error}"
+            );
+        }
     }
 }
