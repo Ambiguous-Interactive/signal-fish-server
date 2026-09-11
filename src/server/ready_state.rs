@@ -1,6 +1,5 @@
 use crate::coordination::{PlayerReadyError, RoomOperationCoordinatorTrait, StartGameOutcome};
-use crate::protocol::{ErrorCode, LobbyState, PlayerId, Room, ServerMessage};
-use std::sync::Arc;
+use crate::protocol::{ErrorCode, LobbyState, PlayerId, Room};
 
 use super::EnhancedGameServer;
 
@@ -44,13 +43,10 @@ impl EnhancedGameServer {
 
         let Some(room_id) = self.get_client_room(player_id).await else {
             let _ = self
-                .message_coordinator
-                .send_to_player(
+                .send_error_to_player(
                     player_id,
-                    Arc::new(ServerMessage::Error {
-                        message: "Not in a room".to_string(),
-                        error_code: Some(ErrorCode::NotInRoom),
-                    }),
+                    "Not in a room".to_string(),
+                    Some(ErrorCode::NotInRoom),
                 )
                 .await;
             return;
@@ -82,14 +78,7 @@ impl EnhancedGameServer {
                 "Player ready toggle rejected: {error}"
             );
             let _ = self
-                .message_coordinator
-                .send_to_player(
-                    player_id,
-                    Arc::new(ServerMessage::Error {
-                        message,
-                        error_code: Some(error_code),
-                    }),
-                )
+                .send_error_to_player(player_id, message, Some(error_code))
                 .await;
         }
     }
@@ -117,13 +106,10 @@ impl EnhancedGameServer {
 
         let Some(room_id) = self.get_client_room(player_id).await else {
             let _ = self
-                .message_coordinator
-                .send_to_player(
+                .send_error_to_player(
                     player_id,
-                    Arc::new(ServerMessage::Error {
-                        message: "Not in a room".to_string(),
-                        error_code: Some(ErrorCode::NotInRoom),
-                    }),
+                    "Not in a room".to_string(),
+                    Some(ErrorCode::NotInRoom),
                 )
                 .await;
             return;
@@ -154,14 +140,7 @@ impl EnhancedGameServer {
                     StartGameOutcome::Started(_) => return,
                 };
                 let _ = self
-                    .message_coordinator
-                    .send_to_player(
-                        player_id,
-                        Arc::new(ServerMessage::Error {
-                            message,
-                            error_code: Some(error_code),
-                        }),
-                    )
+                    .send_error_to_player(player_id, message, Some(error_code))
                     .await;
             }
             Err(e) => {
@@ -175,13 +154,10 @@ impl EnhancedGameServer {
                 // actually reach it (#396 session-193 sweep).
                 tracing::debug!("Player {:?} attempted to start the game: {}", player_id, e);
                 let _ = self
-                    .message_coordinator
-                    .send_to_player(
+                    .send_error_to_player(
                         player_id,
-                        Arc::new(ServerMessage::Error {
-                            message: "Failed to start the game".to_string(),
-                            error_code: Some(ErrorCode::InternalError),
-                        }),
+                        "Failed to start the game".to_string(),
+                        Some(ErrorCode::InternalError),
                     )
                     .await;
             }

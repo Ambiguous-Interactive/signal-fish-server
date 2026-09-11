@@ -1602,3 +1602,94 @@ async fn application_room_lock_failure_denies_creation_without_side_effects() {
         "the shared counter must now include the app-cap acquisition alongside the game- and server-cap ones"
     );
 }
+
+/// The reload seam, driven through the real handshake-resolution and reload
+/// calls (issue #396): removing an app ID stops new handshakes immediately,
+/// while a pre-reload socket keeps its resolved context — including the power
+/// to create NEW rooms under the revoked application's identity until it
+/// disconnects. A tightened per-app room cap binds fresh handshakes at once,
+/// while pre-reload sockets keep creating under their snapshot until they
+/// re-handshake. This pins the documented "revocation is a restart or
+/// tenant-level action" contract (docs/authentication.md).
+#[tokio::test]
+async fn allowlist_reload_keeps_the_live_context_but_binds_fresh_handshakes() {
+    let server = create_server(
+        true,
+        vec![
+            app_entry(APP_A, Some(2), None),
+            app_entry(APP_B, None, None),
+        ],
+    )
+    .await;
+    let revoked_id = crate::auth::middleware::deterministic_uuid(APP_A);
+
+    // A live socket resolves its context through the handshake seam.
+    let (live, mut live_rx) = connect_as(&server, APP_A, 49300).await;
+
+    // Reload without APP_A and with APP_B tightened to zero live headroom.
+    server
+        .reload_allowed_apps(vec![app_entry(APP_B, Some(1), None)])
+        .expect("reload applies");
+
+    // Fresh handshakes fail closed for the revoked label...
+    let fresh_resolution = server
+        .app_id_allowlist
+        .resolve_app_id(APP_A, std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        .await;
+    assert!(
+        fresh_resolution.is_err(),
+        "a revoked app id must refuse fresh handshakes"
+    );
+
+    // ...while the live socket's context survives the revocation.
+    let live_context = server
+        .client_app_context(&live)
+        .expect("live socket keeps its resolved context");
+    assert_eq!(live_context.id, revoked_id);
+
+    // The kept context still carries admission powers: the pre-reload socket
+    // can mint a NEW room under the revoked application's identity.
+    join_room(&server, &live, "reload-seam", None, "LiveSocket", 8).await;
+    let joined = receive(&mut live_rx).await;
+    let (room_id, _code, _password) = joined_room(joined.as_ref());
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room lookup")
+        .expect("created room exists");
+    assert_eq!(
+        room.application_id,
+        Some(revoked_id),
+        "the new room must carry the revoked application's identity"
+    );
+
+    // A fresh (post-reload) socket of a SURVIVING label sees the tightened
+    // cap immediately: the label's first room is admitted, and a second
+    // socket's creation is refused once the live count reaches the new cap.
+    let (fresh, mut fresh_rx) = connect_as(&server, APP_B, 49301).await;
+    join_room(&server, &fresh, "reload-seam", None, "FreshSocket", 8).await;
+    assert!(matches!(
+        receive(&mut fresh_rx).await.as_ref(),
+        ServerMessage::RoomJoined(_)
+    ));
+    let (fresh2, mut fresh2_rx) = connect_as(&server, APP_B, 49302).await;
+    join_room(&server, &fresh2, "reload-seam-2", None, "FreshSocket2", 8).await;
+    // Skip interleaved lobby broadcasts; the refused create answers with the
+    // correlated failure.
+    let refused = loop {
+        let message = receive(&mut fresh2_rx).await;
+        if !matches!(message.as_ref(), ServerMessage::LobbyStateChanged { .. }) {
+            break message;
+        }
+    };
+    let ServerMessage::RoomJoinFailed { error_code, .. } = refused.as_ref() else {
+        panic!("expected RoomJoinFailed, got {refused:?}");
+    };
+    let error_code = error_code
+        .clone()
+        .expect("app-cap refusal carries a wire code");
+    // App-cap denials reuse the MAX_ROOMS_PER_GAME_EXCEEDED wire code
+    // (the server-wide ceiling shares it; see room_service mapping).
+    assert_eq!(error_code, ErrorCode::MaxRoomsPerGameExceeded);
+}

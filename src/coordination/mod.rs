@@ -349,10 +349,14 @@ pub enum CloseReason {
     /// deleted by maintenance. This is terminal: the deleted room cannot be
     /// resumed through a stale local assignment or reconnection token.
     RoomInactive,
-    /// The connection exhausted its per-window inbound application-message
-    /// budget (`rate_limit.max_inbound_messages`, issue #518). Counting every
-    /// frame before parsing keeps malformed-frame error replies (and per-frame
-    /// CPU) bounded for one connection.
+    /// The connection exhausted its per-window inbound error-reply budget
+    /// (`rate_limit.max_inbound_error_replies`, issue #518). Every polite
+    /// per-frame reply — an `Error`, `RoomJoinFailed`, `SpectatorJoinFailed`,
+    /// or `ReconnectionFailed` refusal, a room-operation or moderation
+    /// failure envelope, or the `Pong` answering an application `Ping` —
+    /// charges the budget, so one-write-per-reply amplification stays
+    /// bounded; admitted and answered traffic carries its own budgets and
+    /// never touches this gate.
     InboundRateLimited,
     /// A fully encoded server message exceeded the configured outbound
     /// aggregate payload limit. No prefix of that application message was

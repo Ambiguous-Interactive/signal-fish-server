@@ -2588,3 +2588,63 @@ async fn mid_game_transfer_moves_the_role_but_not_the_session_host() {
         );
     }
 }
+
+/// Refused-operation spam is the same one-write-one-reply amplification
+/// channel as malformed-frame refusals, so the correlated failure envelopes
+/// charge the per-connection error-reply budget (issue #518). An exhausted
+/// budget withholds the next envelope and closes the connection with the
+/// semantic `4006 inbound_rate_limited` reason instead.
+#[tokio::test]
+async fn moderation_refusal_envelopes_exhaust_the_error_reply_budget() {
+    let mut config = ServerConfig::default();
+    config.rate_limit_config.max_inbound_error_replies = 2;
+    let server = create_test_server_with(config).await;
+    let (player, mut receiver, close_listener) =
+        register_client_with_close_listener(&server, "127.0.0.1:48260".parse().unwrap()).await;
+
+    // A roomless sender refuses every SetRoomAccess with a correlated
+    // failure envelope: the budgeted replies.
+    for _ in 0..2 {
+        server
+            .handle_set_room_access_operation(&player, RoomOperationId::new_v4(), None)
+            .await;
+        let envelope = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("refusal envelope should arrive in time")
+            .expect("channel stays open");
+        assert!(
+            matches!(
+                envelope.as_ref(),
+                ServerMessage::RoomOperationResult {
+                    result,
+                    ..
+                } if matches!(result.as_ref(), RoomOperationResult::OperationFailed { .. })
+            ),
+            "the budgeted refusal must still produce its envelope, got {envelope:?}"
+        );
+    }
+
+    // The budget-exhausting refusal produces no envelope; the farewell rides
+    // instead and the semantic close reason is pinned.
+    server
+        .handle_set_room_access_operation(&player, RoomOperationId::new_v4(), None)
+        .await;
+    let drained = drain_receiver(&mut receiver);
+    assert!(
+        !drained
+            .iter()
+            .any(|message| matches!(message.as_ref(), ServerMessage::RoomOperationResult { .. })),
+        "an exhausted budget must withhold the refusal envelope, got {drained:?}"
+    );
+    assert!(
+        drained
+            .iter()
+            .any(|message| matches!(message.as_ref(), ServerMessage::Error { .. })),
+        "the budget-exhaustion farewell must be sent"
+    );
+    assert_eq!(
+        close_listener.requested_reason(),
+        Some(CloseReason::InboundRateLimited),
+        "the exhausted budget must close with the 4006 reason"
+    );
+}

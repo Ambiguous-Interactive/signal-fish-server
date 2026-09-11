@@ -175,6 +175,16 @@ correctness evidence appears.
    per send with an unbounded job queue behind it (per-client rate budgets
    bound admission); a tightened per-app `max_relay_bytes` override reaches
    live connections only on reconnect (same revocation-is-restart contract).
+   The 2026-09-11 session-232/233 sweep closed the error-reply amplification
+   class: every polite per-frame reply (error refusals incl. retryable
+   handshake refusals and the unsupported-format warning, join/spectator/
+   reconnection refusals, authority denials and internal-error replies,
+   room-operation and moderation failure envelopes, the application-Ping
+   `Pong`) now charges the per-connection `max_inbound_error_replies`
+   budget; exhaustion fires metric + farewell + `4006` exactly once and the
+   gate follows the physical socket across reconnect identity swaps. The
+   room event lane stall remains recorded-as-accepted above (per-client
+   admission budgets bound it).
 - #525 — session 217 landed the minimal viable moderation set: authority
   kick (close code `4007 kicked`, no reconnect), authority room-code
   regeneration, and a shipped default spectator cap

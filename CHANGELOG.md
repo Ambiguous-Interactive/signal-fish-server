@@ -275,6 +275,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The inbound error-reply budget now charges every polite per-frame reply
+  (issue #518). Before, only inbound messages counted, so a client could
+  flood requests and receive unlimited free replies. The charged replies are:
+  `Error` refusals (including retryable `AuthenticationError` handshake
+  refusals and the unsupported-`game_data_format` warning), `RoomJoinFailed`,
+  `SpectatorJoinFailed`, and `ReconnectionFailed` refusals,
+  `AuthorityResponse` denials and internal-error replies, room-operation and
+  moderation failure envelopes, and the `Pong` answering an application
+  `Ping`. Relay traffic, broadcasts, and unsolicited server events never
+  charge. When the per-window budget (`rate_limit.max_inbound_error_replies`,
+  default 3000) is spent, the server sends a farewell, closes with
+  `4006 inbound_rate_limited`, and counts one rejection. The budget follows
+  the physical socket across a reconnect identity swap.
+
 - The nightly `cargo-udeps` compile moved to a daily 07:00 UTC cohort
   (issue #512). Its result is informational (`continue-on-error`), so it no
   longer reruns on every covered pull request. `cargo-machete` stays on

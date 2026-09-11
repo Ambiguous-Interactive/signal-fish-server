@@ -1226,6 +1226,12 @@ impl EnhancedGameServer {
     }
 
     /// Send the correlated terminal failure for a moderation operation.
+    ///
+    /// The failure envelope charges the sender's per-connection error-reply
+    /// budget (issue #518): refused-operation spam is the same
+    /// one-write-one-reply amplification channel as malformed-frame
+    /// refusals. An exhausted budget withholds the envelope and closes the
+    /// connection with `4006 inbound_rate_limited` instead.
     async fn fail_operation(
         &self,
         player_id: &PlayerId,
@@ -1233,6 +1239,9 @@ impl EnhancedGameServer {
         reason: impl Into<String>,
         error_code: ErrorCode,
     ) {
+        if !self.connection_manager.charge_error_reply(player_id).await {
+            return;
+        }
         let _ = self
             .message_coordinator
             .send_to_player(

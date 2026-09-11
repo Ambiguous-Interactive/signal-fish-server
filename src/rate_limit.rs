@@ -32,8 +32,10 @@ pub struct RateLimitConfig {
     /// Maximum number of WebRTC signaling messages per fixed time window
     pub max_signals: u32,
     /// Per-connection inbound error-reply budget per fixed time window
-    /// (issue #518). Counts every inbound frame the receive loop answers
-    /// with a polite `Error` reply (malformed, oversized, wrong-state), so
+    /// (issue #518). Counts every polite per-frame reply the connection buys
+    /// — an `Error`, `RoomJoinFailed`, `SpectatorJoinFailed`, or
+    /// `ReconnectionFailed` refusal, a room-operation or moderation failure
+    /// envelope, or the `Pong` answering an application `Ping` — so
     /// one-write-per-reply amplification stays bounded without constraining
     /// admitted high-throughput traffic (which carries its own per-kind
     /// budgets). `0` is a valid explicit total-rejection policy for direct
@@ -884,22 +886,26 @@ pub struct PlayerRateStats {
 
 /// Per-connection inbound error-reply budget (issue #518).
 ///
-/// One fixed-window gate per WebSocket connection, charged for every inbound
-/// frame the receive loop answers with a polite `Error` reply (malformed
-/// JSON, oversized text, wrong-state refusals, ...). Those 1:1 replies are
-/// the amplification channel: a frame that costs the attacker one write must
-/// not be able to buy unlimited server work and one reply each. Every
-/// *admitted* message kind already carries its own budget (signals, joins,
-/// room creations, relay bytes), so honest high-throughput clients never
-/// touch this gate. An exhausted budget closes the connection with
-/// `4006 inbound_rate_limited` instead of replying again. The gate lives on
-/// the receive task, so it needs no synchronization.
+/// One fixed-window gate per WebSocket connection, charged for every polite
+/// per-frame reply the connection buys — an `Error`, `RoomJoinFailed`,
+/// `SpectatorJoinFailed`, or `ReconnectionFailed` refusal, a room-operation
+/// or moderation failure envelope, or the `Pong` answering an application
+/// `Ping`. Those 1:1 replies are the
+/// amplification channel: a frame that costs the attacker one write must not
+/// be able to buy unlimited server work and one reply each. Every *admitted*
+/// message kind already carries its own budget (signals, joins, room
+/// creations, relay bytes), so honest high-throughput clients never touch
+/// this gate. An exhausted budget closes the connection with
+/// `4006 inbound_rate_limited` instead of replying again. The gate follows
+/// the physical connection across a reconnect identity swap, so a same-socket
+/// refuser cannot multiply it.
 #[derive(Debug)]
 pub struct ErrorReplyGate {
     limit: u32,
     window: Duration,
     window_start: Instant,
     charged: u32,
+    exhaustion_reported: bool,
 }
 
 impl ErrorReplyGate {
@@ -909,6 +915,7 @@ impl ErrorReplyGate {
             window,
             window_start: Instant::now(),
             charged: 0,
+            exhaustion_reported: false,
         }
     }
 
@@ -921,6 +928,7 @@ impl ErrorReplyGate {
         if now.duration_since(self.window_start) >= self.window {
             self.window_start = now;
             self.charged = 0;
+            self.exhaustion_reported = false;
         }
         if self.charged >= self.limit {
             return false;
@@ -929,6 +937,18 @@ impl ErrorReplyGate {
         // saturation is unreachable; it exists to keep the panic-free
         // arithmetic policy (clippy::arithmetic_side_effects) satisfied.
         self.charged = self.charged.saturating_add(1);
+        true
+    }
+
+    /// One-shot exhaustion reporting: returns `true` only for the first
+    /// exhaustion observation since the last window reset, so the rejection
+    /// metric and farewell fire once per exhaustion event, not once per
+    /// withheld reply while the close is landing.
+    pub fn report_exhaustion(&mut self) -> bool {
+        if self.exhaustion_reported {
+            return false;
+        }
+        self.exhaustion_reported = true;
         true
     }
 }
@@ -1781,6 +1801,32 @@ mod tests {
         );
         assert!(gate.charge(later));
         assert!(!gate.charge(later));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn error_reply_gate_reports_exhaustion_once_per_window() {
+        let mut gate = ErrorReplyGate::new(1, Duration::from_secs(60));
+        let start = tokio::time::Instant::now();
+
+        assert!(gate.charge(start));
+        assert!(!gate.charge(start));
+        assert!(
+            gate.report_exhaustion(),
+            "the first exhausted observation reports"
+        );
+        assert!(
+            !gate.report_exhaustion(),
+            "later withheld replies in the same window must not re-report"
+        );
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+        let later = tokio::time::Instant::now();
+        assert!(gate.charge(later));
+        assert!(!gate.charge(later));
+        assert!(
+            gate.report_exhaustion(),
+            "a new exhaustion event after the window roll must report again"
+        );
     }
 
     /// Forensics tallies (issue #526) count every rejection per budget kind

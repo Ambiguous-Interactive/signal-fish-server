@@ -22,6 +22,12 @@ impl EnhancedGameServer {
 
         let Some(room_id) = self.get_client_room(player_id).await else {
             tracing::warn!(%player_id, "Player not in room for authority request");
+            // The refusal is a polite per-frame reply: it charges the
+            // per-connection error-reply budget (issue #518), so a
+            // roomless RequestAuthority flood cannot buy unbounded denials.
+            if !self.connection_manager.charge_error_reply(player_id).await {
+                return;
+            }
             if let Err(e) = self
                 .message_coordinator
                 .send_to_player(
@@ -58,10 +64,24 @@ impl EnhancedGameServer {
                     denial = ?outcome.denial(),
                     "Authority request processed"
                 );
+                // A denial is a 1:1 refusal reply to an unbudgeted request
+                // kind, so it charges the per-connection error-reply budget
+                // (issue #518). The coordinator's FIFO job may already have
+                // enqueued this one response; the charge still pins the
+                // semantic `4006` close at the first exhausted observation,
+                // and the pinned close stops later frames from producing
+                // further denials.
+                if outcome.denial().is_some() {
+                    self.connection_manager.charge_error_reply(player_id).await;
+                }
             }
             Err(e) => {
                 tracing::error!("Authority request failed: {}", e);
 
+                // Charged like the direct refusal above (issue #518).
+                if !self.connection_manager.charge_error_reply(player_id).await {
+                    return;
+                }
                 if let Err(e) = self
                     .message_coordinator
                     .send_to_player(
