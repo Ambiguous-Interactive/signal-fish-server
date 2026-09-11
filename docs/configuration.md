@@ -297,9 +297,10 @@ and the authenticated WebSocket relay floor remains available independently.
 - `max_signal_errors` - Detailed rejected-signal errors per player per window before generic rate-limit errors
 - `max_inbound_error_replies` - Per-connection inbound error-reply budget per time window:
   how many polite per-frame replies the server produces for one connection — an `Error`,
-  `RoomJoinFailed`, `SpectatorJoinFailed`, or `ReconnectionFailed` refusal, a room-operation
-  or moderation failure envelope, or the `Pong` answering an application `Ping` — before
-  closing the connection with `4006 inbound_rate_limited`. This includes failure replies to
+  `RoomJoinFailed`, `SpectatorJoinFailed`, or `ReconnectionFailed` refusal, an
+  `AuthenticationError` handshake refusal, an `AuthorityResponse` denial or internal-error
+  reply, a room-operation or moderation failure envelope, or the `Pong` answering an
+  application `Ping` — before closing the connection with `4006 inbound_rate_limited`. This includes failure replies to
   admitted frames (a storage error, for example). Admitted and answered traffic carries its
   own per-kind budgets, so only amplified rejections hit this gate (must be > 0)
 - `time_window` - Rate limit window in seconds

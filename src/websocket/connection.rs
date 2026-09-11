@@ -2280,22 +2280,34 @@ pub(super) async fn handle_socket(
                                                 supported_formats = %supported_list.join(", "),
                                                 "Client requested unsupported game_data_format"
                                             );
-                                            // Send error message to client about capability mismatch
-                                            let _ = enqueue_connection_message(
-                                                &tx_clone,
-                                                &close_signal,
-                                                &server_clone,
-                                                slow_consumer_timeout,
-                                                &active_player_id,
-                                                ServerMessage::Error {
-                                                    message: error_message,
-                                                    error_code: Some(
-                                                        ErrorCode::UnsupportedGameDataFormat,
-                                                    ),
-                                                },
-                                                "game data format error",
-                                            )
-                                            .await;
+                                            // The capability-mismatch warning is
+                                            // a polite per-frame reply: it
+                                            // charges the error-reply budget
+                                            // (issue #518) like every other
+                                            // refusal, for contract uniformity.
+                                            // Authentication runs at most once
+                                            // per socket, so this arm fires at
+                                            // most once.
+                                            if server_clone
+                                                .charge_error_reply(&active_player_id)
+                                                .await
+                                            {
+                                                let _ = enqueue_connection_message(
+                                                    &tx_clone,
+                                                    &close_signal,
+                                                    &server_clone,
+                                                    slow_consumer_timeout,
+                                                    &active_player_id,
+                                                    ServerMessage::Error {
+                                                        message: error_message,
+                                                        error_code: Some(
+                                                            ErrorCode::UnsupportedGameDataFormat,
+                                                        ),
+                                                    },
+                                                    "game data format error",
+                                                )
+                                                .await;
+                                            }
                                             GameDataEncoding::Json
                                         }
                                         None => GameDataEncoding::Json,

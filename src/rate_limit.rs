@@ -1803,6 +1803,32 @@ mod tests {
         assert!(!gate.charge(later));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn error_reply_gate_reports_exhaustion_once_per_window() {
+        let mut gate = ErrorReplyGate::new(1, Duration::from_secs(60));
+        let start = tokio::time::Instant::now();
+
+        assert!(gate.charge(start));
+        assert!(!gate.charge(start));
+        assert!(
+            gate.report_exhaustion(),
+            "the first exhausted observation reports"
+        );
+        assert!(
+            !gate.report_exhaustion(),
+            "later withheld replies in the same window must not re-report"
+        );
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+        let later = tokio::time::Instant::now();
+        assert!(gate.charge(later));
+        assert!(!gate.charge(later));
+        assert!(
+            gate.report_exhaustion(),
+            "a new exhaustion event after the window roll must report again"
+        );
+    }
+
     /// Forensics tallies (issue #526) count every rejection per budget kind
     /// in the player's window, survive repeats, and are consumed — with the
     /// window-summary log decision — by the first enforcement call after the
