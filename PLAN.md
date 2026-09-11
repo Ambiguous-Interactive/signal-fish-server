@@ -158,7 +158,7 @@ correctness evidence appears.
    the wire contract.    Remaining frontier: continue
    seam sweeps into whichever seams new features open. #539 is unblocked
    and staged (2026-09-11 owner decision): the client half is
-   signal-fish-client-rust#257 (`serde(default)` tolerant parse, public
+   `signal-fish-client-rust#257` (`serde(default)` tolerant parse, public
    type unchanged); after its release, bump `clients/fortress` (=0.8.0)
    and `clients/fortress-wasm` (=0.9.0), then re-land the v3
    `connected_at` trim (the #538 first-cut design). The 2026-09-10
