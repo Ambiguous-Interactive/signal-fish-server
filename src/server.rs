@@ -1150,9 +1150,8 @@ impl EnhancedGameServer {
         presented_app_id: &str,
         token: &str,
     ) -> Result<(), crate::security::connect_token::ConnectTokenError> {
-        let Some(verifier) = self.connect_token_keys.current() else {
-            return Err(crate::security::connect_token::ConnectTokenError::NoKeyConfigured);
-        };
+        // Thin clock wrapper (injectable-time convention): all logic lives
+        // in `verify_connect_token_at`.
         let now_unix_secs = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         {
             Ok(elapsed) => i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX),
@@ -1165,6 +1164,19 @@ impl EnhancedGameServer {
                 );
                 return Err(crate::security::connect_token::ConnectTokenError::Expired);
             }
+        };
+        self.verify_connect_token_at(presented_app_id, token, now_unix_secs)
+    }
+
+    /// [`Self::verify_connect_token`] with the Unix time injected.
+    pub fn verify_connect_token_at(
+        &self,
+        presented_app_id: &str,
+        token: &str,
+        now_unix_secs: i64,
+    ) -> Result<(), crate::security::connect_token::ConnectTokenError> {
+        let Some(verifier) = self.connect_token_keys.current() else {
+            return Err(crate::security::connect_token::ConnectTokenError::NoKeyConfigured);
         };
         verifier
             .verify(token, presented_app_id, now_unix_secs)

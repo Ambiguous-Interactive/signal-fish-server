@@ -116,6 +116,16 @@ fn std_time_allowlist() -> BTreeMap<&'static str, Exemption> {
                 test_module_only: true,
             },
         ),
+        (
+            "src/server.rs",
+            Exemption {
+                reason: "test-only unix_now() helper in connect_token_tests mints tokens \
+                         against the real wall clock; production verification reads the \
+                         clock only in the thin verify_connect_token wrapper over the \
+                         verify_connect_token_at injection seam",
+                test_module_only: true,
+            },
+        ),
     ])
 }
 
