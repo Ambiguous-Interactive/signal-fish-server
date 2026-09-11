@@ -257,7 +257,9 @@ fn split_token(token: &str) -> Result<(Vec<u8>, &[u8], Vec<u8>), ConnectTokenErr
     // the payload/signature boundary and everything before it is the signed
     // head.
     let head_end = token.rfind('.').ok_or(ConnectTokenError::Malformed)?;
-    let signed_bytes = token.as_bytes().get(..head_end)
+    let signed_bytes = token
+        .as_bytes()
+        .get(..head_end)
         .ok_or(ConnectTokenError::Malformed)?;
     let signature_bytes = BASE64_URL_SAFE_NO_PAD
         .decode(signature_b64)
