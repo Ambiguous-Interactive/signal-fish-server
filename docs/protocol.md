@@ -926,7 +926,11 @@ socket-progress deadline rather than inheriting unresolved reliable queue age.
 Farewell `Error` frames are best-effort: on the congested socket a
 slow-consumer eviction escapes, they frequently cannot be delivered at all.
 The WebSocket close frame's code travels in the closing handshake itself, so
-it is the one attribution signal a client can always read. The server uses
+it is the one attribution signal a client can always read. When two close
+conditions race, the first condition pinned wins the code (only `4000
+server_shutdown` supersedes an earlier reason). A `4006` budget exhaustion
+that races a `4007` kick, for example, still spends the budget and counts
+its rejection, but the close frame keeps `4007`. The server uses
 the standard RFC 6455 `1000` and `1009` codes plus stable private-range
 assignments that are never renumbered:
 
@@ -938,7 +942,7 @@ assignments that are never renumbered:
 | `4003` | `activity_timeout` | An idle server WebSocket Ping write timed out, the matching Pong missed its deadline while no inbound or outbound application progress superseded the probe, or the `server.ping_timeout` activity reaper evicted the connection. A Ping queued after outbound progress inherits the earlier capacity-wait/maximum-sojourn delivery budget and closes `4002` if that write stalls |
 | `4004` | `idle_timeout` | No inbound frame was observed strictly before the `websocket.idle_timeout_secs` deadline |
 | `4005` | `room_inactive` | The assigned room exceeded `server.inactive_room_timeout` and was deleted; the client must join or create a new room |
-| `4006` | `inbound_rate_limited` | The connection exhausted its per-window inbound error-reply budget (`rate_limit.max_inbound_error_replies`). Every polite per-frame reply charges the budget: an `Error`, `RoomJoinFailed`, `SpectatorJoinFailed`, or `ReconnectionFailed` refusal, an `AuthenticationError` handshake refusal, an `AuthorityResponse` denial or internal-error reply, a room-operation or moderation failure envelope, or the `Pong` answering an application `Ping`. This includes failure replies to admitted frames (a storage error, for example). Admitted and answered traffic carries its own per-kind budgets and never counts. Reconnect and stay within the budget |
+| `4006` | `inbound_rate_limited` | The connection exhausted its per-window inbound error-reply budget (`rate_limit.max_inbound_error_replies`). Every polite per-frame reply charges the budget: an `Error`, `RoomJoinFailed`, `SpectatorJoinFailed`, or `ReconnectionFailed` refusal, an `AuthenticationError` handshake refusal, an `AuthorityResponse` denial or internal-error reply, a room-operation or moderation failure envelope, or the `Pong` answering an application `Ping`. This includes failure replies to admitted frames (a storage error, for example). Admitted and answered traffic carries its own per-kind budgets and never counts, and neither does the recipient-side undeliverable-format advisory (coalesced to at most one notice per sending player per second). Reconnect and stay within the budget |
 | `4007` | `kicked` | The room's authority removed this member via the `KickPlayer` room operation; the seat is removed or the pending reconnection record tombstoned, and reconnection is not offered. Join again with a valid room code |
 | `1000` | `unregistered` | Normal closure (leave, replaced connection, ordinary teardown) |
 | `1009` | `outbound_message_too_large` | A complete encoded server application message exceeded the advertised outbound payload limit; no prefix of that message was written |

@@ -96,8 +96,8 @@ correctness evidence appears.
   relay-byte series of revoked app IDs, and the mid-game
   `TransferAuthority` semantics are decided and pinned (role moves, the
   finalize-time transport host does not).   Remaining
-  frontier: continue seam sweeps; #539 tracks the coordinated-SDK path for
-  the `connected_at` v3 trim (released SDKs 0.8.0–0.12.0 require the field);
+   frontier: continue seam sweeps; #539's staged path is tracked in the
+   frontier note below (owner-unblocked 2026-09-11, SDK half in review);
   the parked-state (`senderState`) producers are same-thread program-ordered
   behind their `SendFull` record (verified, no race window). The 2026-09-09
   session-223 sweep found no demonstrable in-file defect across the stalest
@@ -148,14 +148,20 @@ correctness evidence appears.
    documented semantics (a stale code is an unknown code; the tombstone
    registry was rejected as a namespace-wide design change needing owner
    input). The 2026-09-10 session-230 sweep closed the #566
-   rotation × transfer gap as documented semantics pending the same
-   coordinated-SDK owner decision as #539: the docs (authority,
+   rotation × transfer gap as documented semantics; the coordinated-SDK
+   decision it shared with #539 was made 2026-09-11 (see the #539 staging
+   note below): the docs (authority,
    rooms-and-lobbies, protocol reference, AsyncAPI descriptions) now state
    that after a rotation the role hand-over needs the new code shared out of
    band first, and a red-verified delivery pin
    (`rotation_then_transfer_delivers_no_room_code_to_the_successor`) freezes
-   the wire contract. Remaining frontier: continue
-   seam sweeps into whichever seams new features open. The 2026-09-10
+   the wire contract.    Remaining frontier: continue
+   seam sweeps into whichever seams new features open. #539 is unblocked
+   and staged (2026-09-11 owner decision): the client half is
+   `signal-fish-client-rust#257` (`serde(default)` tolerant parse, public
+   type unchanged); after its release, bump `clients/fortress` (=0.8.0)
+   and `clients/fortress-wasm` (=0.9.0), then re-land the v3
+   `connected_at` trim (the #538 first-cut design). The 2026-09-10
    session-228 sweep closed the spectator-join seam red-first (a same-room
    spectator join now discards the unclaimed pending record — the
    pre-spectator token could previously re-seat the player after the
@@ -184,7 +190,23 @@ correctness evidence appears.
    budget; exhaustion fires metric + farewell + `4006` exactly once and the
    gate follows the physical socket across reconnect identity swaps. The
    room event lane stall remains recorded-as-accepted above (per-client
-   admission budgets bound it).
+   admission budgets bound it). The 2026-09-11 session-234 sweep ran three
+   parallel audits over the error-reply budget's new cross-feature seams
+   (budget × admission/entry, budget × moderation/authority/spectator,
+   budget × reconnect/restore/replay/slow-lane) with adversarial
+   verification and closed with zero new defect classes: every reply path
+   charges before sending (or documents the one-reply grace), exhaustion
+   side effects fire exactly once (one-shot decided inside the charge
+   critical section; close pins are first-reason-wins), no charged-withhold
+   leaves admission state mutated (rollback precedes every post-mutation
+   charged refusal), the 4006 close lands through a stalled lane (watch
+   signal + 1 s bounded finalize), and the reconnect swap/rollback both
+   carry the charged gate. Two unpinned invariants gained pins
+   (rollback-arm gate carry; 4007-kick × 4006-exhaustion first-pin
+   arbitration in both orders, one-shot + metric asserted), and the
+   first-pinned-reason-wins close-code attribution contract plus the
+   never-charged recipient-side format advisory are now documented
+   (protocol.md close codes, `CloseReason::InboundRateLimited`, CHANGELOG).
 - #525 — session 217 landed the minimal viable moderation set: authority
   kick (close code `4007 kicked`, no reconnect), authority room-code
   regeneration, and a shipped default spectator cap

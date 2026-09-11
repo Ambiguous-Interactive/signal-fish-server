@@ -356,7 +356,11 @@ pub enum CloseReason {
     /// failure envelope, or the `Pong` answering an application `Ping` —
     /// charges the budget, so one-write-per-reply amplification stays
     /// bounded; admitted and answered traffic carries its own budgets and
-    /// never touches this gate.
+    /// never touches this gate. Close-code attribution stays best-effort
+    /// when close reasons race: the first pinned reason wins (`Shutdown`
+    /// aside), so a slow-consumer or authority-kick close pinned first still
+    /// owns the frame, while the exhaustion side effects — rejection metric,
+    /// farewell, spent window — apply regardless.
     InboundRateLimited,
     /// A fully encoded server message exceeded the configured outbound
     /// aggregate payload limit. No prefix of that application message was

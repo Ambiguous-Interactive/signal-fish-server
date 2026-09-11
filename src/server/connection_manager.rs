@@ -2016,6 +2016,140 @@ mod tests {
         );
     }
 
+    /// Mirror of the swap-carry pin for the rollback arm: undoing a reconnect
+    /// identity swap must hand the charged gate back to the transient
+    /// identity instead of dropping or re-arming it, so the WebSocket task
+    /// that keeps using `current_player_id` still answers for the socket's
+    /// spent budget.
+    #[tokio::test]
+    async fn restore_reassigned_connection_carries_the_charged_error_reply_gate_back() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let coordinator: Arc<dyn MessageCoordinator> = Arc::new(TestCoordinator::default());
+        let manager = ConnectionManager::new(
+            usize::MAX,
+            4,
+            metrics.clone(),
+            coordinator,
+            false,
+            (2, tokio::time::Duration::from_secs(60)),
+        );
+        let addr: SocketAddr = "127.0.0.1:5045".parse().unwrap();
+        let (tx, _rx) = channel();
+        let (close_signal, close_listener) = ConnectionCloseSignal::channel();
+        let transient_id = manager
+            .register_client(tx, close_signal, addr, Uuid::new_v4())
+            .await
+            .expect("registration succeeds");
+
+        // Spend one slot on the transient identity.
+        assert!(manager.charge_error_reply(&transient_id).await);
+
+        let restored_id = PlayerId::new_v4();
+        let room_id = RoomId::new_v4();
+        assert!(matches!(
+            manager.reassign_connection(&transient_id, &restored_id, room_id, 1),
+            ReassignmentOutcome::Reassigned(_)
+        ));
+        assert!(
+            manager
+                .restore_reassigned_connection(&transient_id, &restored_id)
+                .is_some(),
+            "the rollback arm restores the transient identity"
+        );
+
+        // The charged state followed the socket back: one reply still fits,
+        // and the next one exhausts. A dropped or re-armed gate passes both.
+        assert!(
+            manager.charge_error_reply(&transient_id).await,
+            "the transient identity resumes the carried budget"
+        );
+        assert!(
+            !manager.charge_error_reply(&transient_id).await,
+            "the rollback must not re-arm the exhausted budget"
+        );
+        assert_eq!(
+            close_listener.requested_reason(),
+            Some(crate::coordination::CloseReason::InboundRateLimited),
+            "the exhaustion close must be pinned through the rollback"
+        );
+        assert_eq!(
+            metrics
+                .rate_limit_inbound_error_reply_rejections
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the exhaustion metric fires exactly once"
+        );
+    }
+
+    /// Close-code attribution under a budget exhaustion that races a
+    /// competing close: the first pinned reason owns the close frame
+    /// (`Shutdown` aside), while the exhaustion side effects — rejection
+    /// metric, farewell, close request — fire exactly once regardless of
+    /// which order the two conditions land in. A kicked player and a flooder
+    /// share the same socket, so both orders are real interleavings.
+    #[tokio::test]
+    async fn error_reply_exhaustion_arbitrates_with_a_pinned_close_first_reason_wins() {
+        for (exhaust_first, expected) in [
+            (true, crate::coordination::CloseReason::InboundRateLimited),
+            (false, crate::coordination::CloseReason::Kicked),
+        ] {
+            let metrics = Arc::new(ServerMetrics::new());
+            let coordinator: Arc<dyn MessageCoordinator> = Arc::new(TestCoordinator::default());
+            let manager = ConnectionManager::new(
+                usize::MAX,
+                4,
+                metrics.clone(),
+                coordinator,
+                false,
+                (1, tokio::time::Duration::from_secs(60)),
+            );
+            let addr: SocketAddr = "127.0.0.1:5046".parse().unwrap();
+            let (tx, _rx) = channel();
+            let (close_signal, close_listener) = ConnectionCloseSignal::channel();
+            let player_id = manager
+                .register_client(tx, close_signal.clone(), addr, Uuid::new_v4())
+                .await
+                .expect("registration succeeds");
+
+            if exhaust_first {
+                // The budget spends first: the close request inside
+                // `charge_error_reply` pins 4006, and the competing kick
+                // cannot overwrite it (its request reports not-set).
+                assert!(manager.charge_error_reply(&player_id).await);
+                assert!(!manager.charge_error_reply(&player_id).await);
+                assert!(!close_signal.request_close(crate::coordination::CloseReason::Kicked));
+            } else {
+                // The kick pins 4007 first: the exhaustion that follows still
+                // fires its metric + farewell + close request, but the close
+                // frame keeps the kick's reason.
+                assert!(close_signal.request_close(crate::coordination::CloseReason::Kicked));
+                assert!(manager.charge_error_reply(&player_id).await);
+                assert!(!manager.charge_error_reply(&player_id).await);
+            }
+
+            assert_eq!(
+                close_listener.requested_reason(),
+                Some(expected),
+                "the first pinned close reason must win the frame"
+            );
+            // One-shot: further charges in the same spent window must not
+            // re-fire the metric or flip the pinned reason.
+            assert!(!manager.charge_error_reply(&player_id).await);
+            assert_eq!(
+                close_listener.requested_reason(),
+                Some(expected),
+                "repeat exhaustions must not overwrite the pinned close"
+            );
+            assert_eq!(
+                metrics
+                    .rate_limit_inbound_error_reply_rejections
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                1,
+                "the exhaustion metric fires exactly once per window in both orders"
+            );
+        }
+    }
+
     /// A stale terminal unroute for a room the player no longer (or never did)
     /// belongs to must be refused untouched — publishing the current
     /// assignment's live stamp as a foreign room's terminal watermark would
