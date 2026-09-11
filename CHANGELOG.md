@@ -275,6 +275,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Close-code attribution under racing close conditions is now documented and
+  pinned: the first condition pinned wins the close code (only `4000
+  server_shutdown` supersedes an earlier reason). A `4006` error-reply
+  budget exhaustion that races a `4007` kick, for example, still spends the
+  budget and counts its rejection, but the close frame keeps `4007`. The
+  recipient-side undeliverable-format advisory is also spelled out as never
+  charged against the `4006` budget (issue #396).
+
 - The inbound error-reply budget now charges every polite per-frame reply
   (issue #518). Before, only inbound messages counted, so a client could
   flood requests and receive unlimited free replies. The charged replies are:
