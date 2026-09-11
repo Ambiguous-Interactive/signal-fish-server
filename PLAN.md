@@ -265,9 +265,9 @@ correctness evidence appears.
     Remaining levers still
     need owner input: self-hosted runner labels (owner comment excludes
     DAD-MACHINE and ELI-MACHINE), the #379 path-awareness inventory, and the
-    per-PR interop-quartet cohort question (browser/fortress/fortress-wasm/
-    turn measured at ~180 Linux-billed minutes over 2026-09-08..10; see the
-    tracking issue); a cargo-deny single-container consolidation is blocked
+    per-PR interop-quartet cohort question (#568: browser/fortress/
+    fortress-wasm/turn measured at ~180 Linux-billed minutes over
+    2026-09-08..10); a cargo-deny single-container consolidation is blocked
     by the pinned action's one-manifest-per-boot input and the fortress-wasm
     1.94 toolchain pin.
 - #379 — make verification-nightly pull-request fan-out path-aware only after
