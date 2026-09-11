@@ -61,10 +61,10 @@ trust boundary.
 
 ## Tenant connect tokens (`connect_token`)
 
-Add protocol-level tenant authentication on top of the allowlist (issue
-#517). Your control plane signs short-lived tokens with an Ed25519 private
-key; the server verifies them with the matching public key. The private key
-never reaches the server.
+Add protocol-level tenant authentication on top of the allowlist
+(issue #517). Your control plane signs short-lived tokens with an Ed25519
+private key; the server verifies them with the matching public key. The
+private key never reaches the server.
 
 ```json
 {

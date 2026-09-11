@@ -92,8 +92,8 @@ allowlist-enforced and open deployments. A connection that never completed the
 optional `Authenticate` handshake (open deployments only) creates and joins
 unowned rooms but cannot enter an owned one. Open-policy application identity
 is a client-chosen label, not a credential; deployment-grade tenancy requires
-allowlist enforcement plus the optional `connect_token` credential (issue
-#517).
+allowlist enforcement plus the optional `connect_token` credential
+(issue #517).
 
 ```json
 
@@ -1089,7 +1089,8 @@ Common error codes:
 - `RATE_LIMIT_EXCEEDED` - Too many requests
 - `MISSING_APP_ID` - Required app-ID handshake was not completed
 - `INVALID_APP_ID` - Invalid app ID
-- `CONNECT_TOKEN_INVALID` - The optional `connect_token` failed verification (malformed, wrong signature, expired, or minted for a different app id)
+- `CONNECT_TOKEN_INVALID` - The optional `connect_token` failed verification (malformed, wrong signature, expired, or
+  minted for a different app id)
 - `INVALID_DELIVERY_CLASS` - Well-typed but illegal v3 class/key pairing
 - `INVALID_INPUT` - Malformed message or delivery metadata
 

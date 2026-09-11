@@ -228,7 +228,7 @@ form one registry. Semantics:
   rejected, so a typo'd cap fails loudly instead of silently widening.
   `app_secret` is rejected outright: the registry is a public-label list and
   must never carry credential material. (The optional `connect_token`
-  verification key is server-side *public* configuration, not a client
+  verification key is server-side public configuration, not a client
   credential, and it lives under `security.connect_token`, never in the
   registry.)
 - **No duplicates.** `app_id` collisions between the two lists (or within one
@@ -254,11 +254,11 @@ the fail-closed refusal.
 
 ## Optional tenant connect tokens
 
-The `connect_token` mode adds protocol-level tenant authentication (issue
-#517). The operator's control plane signs tokens with an Ed25519 private key;
-the server verifies them against the matching **public** key. The private key
-never reaches this process, and verification is stateless: no callouts, no
-store.
+The `connect_token` mode adds protocol-level tenant authentication
+(issue #517). The operator's control plane signs tokens with an Ed25519
+private key; the server verifies them against the matching public key. The
+private key never reaches this process, and verification is stateless: no
+callouts, no store.
 
 ### Configure
 
