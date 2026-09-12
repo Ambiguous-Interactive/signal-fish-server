@@ -77,6 +77,17 @@ Session notes under `progress/` are local planning artifacts. Keep them
 gitignored and never force-add or commit them; durable decisions belong in the
 relevant source, test, documentation, issue, or pull request.
 
+### Session Time-Box (Required)
+
+- Time-box each working session to roughly **one hour** of active work
+  (earlier sessions ran much longer and churned context).
+- Scope each session to exactly one green PR; carry the remainder forward in
+  `PLAN.md` instead of expanding the session.
+- Budget roughly: 10 min state assessment, 25-35 min implementation with
+  red-green checks, 10 min planning-doc updates, 10 min delivery (commit,
+  push, PR). If the assessment shows the candidate work cannot land green in
+  that budget, pick smaller work.
+
 ```bash
 # Rust changes (ALWAYS run in order)
 cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-features

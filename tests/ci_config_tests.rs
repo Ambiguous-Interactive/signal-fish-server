@@ -3146,6 +3146,111 @@ fn test_verification_nightly_retains_multiprocess_pause_resume_evidence() {
 }
 
 #[test]
+fn test_starved_runtime_matrix_shares_the_multiprocess_runner_setup() {
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/verification-nightly.yml"));
+    let documents = Yaml::load_from_str(&workflow).expect("verification nightly must parse");
+    let jobs = documents[0]
+        .as_mapping_get("jobs")
+        .expect("verification nightly jobs");
+
+    // The standalone starved-runtime job was retired into multiprocess-delivery
+    // (issue #512): both suites need the server workspace plus clients/native
+    // build graphs, so a second job re-paid one checkout, toolchain install,
+    // cache restore, and compile for every schedule and pull-request event.
+    assert!(
+        jobs.as_mapping_get("starved-runtime").is_none(),
+        "verification-nightly must not reintroduce the standalone starved-runtime \
+         job; its lanes share the multiprocess-delivery runner setup"
+    );
+
+    let job = jobs
+        .as_mapping_get("multiprocess-delivery")
+        .expect("verification nightly must retain multiprocess-delivery");
+    let timeout = job
+        .as_mapping_get("timeout-minutes")
+        .and_then(Yaml::as_integer)
+        .expect("multiprocess-delivery timeout-minutes");
+    assert!(
+        timeout >= 150,
+        "the merged job keeps the generous multiprocess floor plus the \
+         starved-runtime matrix headroom (zero-flakiness policy); got {timeout}"
+    );
+
+    let steps = job
+        .as_mapping_get("steps")
+        .and_then(Yaml::as_sequence)
+        .expect("multiprocess-delivery steps");
+    let named_index = |name: &str| {
+        steps
+            .iter()
+            .position(|step| step.as_mapping_get("name").and_then(Yaml::as_str) == Some(name))
+            .unwrap_or_else(|| panic!("missing `{name}` step"))
+    };
+    let netem_cleanup = named_index("Remove WebRTC network fault state");
+    let server_build = named_index("Build the server binary");
+    let starved_run = named_index("Run the starved-runtime matrix");
+    assert!(
+        netem_cleanup < server_build && server_build < starved_run,
+        "the starved-runtime lanes must run after the WebRTC fault matrix lane"
+    );
+    for step_index in [server_build, starved_run] {
+        let step = &steps[step_index];
+        assert_eq!(
+            step.as_mapping_get("if").and_then(Yaml::as_str),
+            Some("${{ !cancelled() }}"),
+            "a multiprocess failure must not skip the starved-runtime lane ({} step)",
+            step.as_mapping_get("name")
+                .and_then(Yaml::as_str)
+                .unwrap_or_default()
+        );
+    }
+    assert_eq!(
+        steps[server_build]
+            .as_mapping_get("run")
+            .and_then(Yaml::as_str)
+            .expect("server binary build command")
+            .trim(),
+        "cargo build --locked --bin signal-fish-server"
+    );
+    let run = &steps[starved_run];
+    assert_eq!(
+        run.as_mapping_get("env")
+            .and_then(|env| env.as_mapping_get("SIGNAL_FISH_SERVER_BIN"))
+            .and_then(Yaml::as_str),
+        Some("${{ github.workspace }}/target/debug/signal-fish-server")
+    );
+    let starved_command = run
+        .as_mapping_get("run")
+        .and_then(Yaml::as_str)
+        .expect("starved-runtime matrix command");
+    for required in [
+        "starved_runtime_e2e",
+        "--ignored",
+        "--test-threads=1",
+        "--manifest-path clients/native/Cargo.toml",
+    ] {
+        assert!(
+            starved_command.contains(required),
+            "starved-runtime matrix command lost `{required}`"
+        );
+    }
+    let summary = steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str)
+                == Some("Report multi-process results to job summary")
+        })
+        .and_then(|step| step.as_mapping_get("run"))
+        .and_then(Yaml::as_str)
+        .expect("multi-process job summary step");
+    assert!(
+        summary.contains("### Starved-runtime conformance matrix"),
+        "the consolidated job summary must keep reporting the starved-runtime lane"
+    );
+}
+
+#[test]
 fn test_h14_selector_runs_in_ci_nextest_and_the_standalone_gate_stays_retired() {
     let root = repo_root();
 

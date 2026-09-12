@@ -32,10 +32,14 @@
 #     ignored child-process tests need the pre-built native reference client
 #     (SIGNAL_FISH_CLIENT_BIN), which is why they are nightly-only.
 #     The same job runs the clean WebRTC {mesh,host} x {2,8,16} matrix, the H8
-#     16-client crippled-ICE fallback proof, and the N=3 pairwise ICE partition.
-#   - starved-runtime: clients/native/tests/starved_runtime_e2e.rs — the
-#     --runtime current / --tick-stall-ms conformance matrix pinning the
-#     documented "continuously drive your runtime" requirement.
+#     16-client crippled-ICE fallback proof, the N=3 pairwise ICE partition,
+#     and the starved-runtime conformance matrix
+#     (clients/native/tests/starved_runtime_e2e.rs — the --runtime current /
+#     --tick-stall-ms cells pinning the documented "continuously drive your
+#     runtime" requirement). Both lanes need the same two-workspace build
+#     graph (the server workspace plus clients/native), so they share one
+#     runner setup instead of paying a second full checkout, toolchain,
+#     cache restore, and compile (issue #512).
 #   - scenario-profiles: tests/scenario_realworld_e2e.rs with
 #     --run-ignored all — the PR-lane traffic profiles plus the nightly-only
 #     backgrounded-tab profile (multi-second absorbed pauses + eviction).
@@ -219,15 +223,18 @@ jobs:
             --test split_brain_two_instances_e2e --run-ignored all
 
   multiprocess-delivery:
-    name: Multi-Process Delivery Faults
+    name: Multi-Process Delivery Faults and Starved-Runtime Matrix
     runs-on: ubuntu-latest
     # Generous floor: after the native reference client build, twelve WebRTC
     # cells run serially in the process-spawning group (eight clean/H8/
     # deterministic-partition plus four privileged 1%-loss cells). Each has a 600s
-    # nextest ceiling above its 540s child watchdog, so the job ceiling keeps
-    # principled headroom for all cells plus the delivery-fault suite and cold
-    # compilation (zero-flakiness policy).
-    timeout-minutes: 150
+    # nextest ceiling above its 540s child watchdog, so the ceiling keeps
+    # principled headroom for all cells plus the delivery-fault suite, the
+    # starved-runtime conformance matrix, and cold compilation (zero-flakiness
+    # policy). The starved-runtime lanes share this runner because both suites
+    # need the server workspace plus clients/native build graphs (issue #512);
+    # each lane stays its own step so a failure names its suite.
+    timeout-minutes: 210
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
@@ -333,6 +340,24 @@ jobs:
             tc qdisc show dev lo
             exit 1
           fi
+      - name: Build the server binary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          cargo build --locked --bin signal-fish-server
+      # --ignored activates the nightly-only matrix cells; --test-threads=1
+      # keeps the flood-heavy cells from CPU-starving each other (they also
+      # carry #[serial_test::serial] as an in-binary guard).
+      - name: Run the starved-runtime matrix
+        if: ${{ !cancelled() }}
+        env:
+          SIGNAL_FISH_SERVER_BIN: ${{ github.workspace }}/target/debug/signal-fish-server
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --manifest-path clients/native/Cargo.toml \
+            --test starved_runtime_e2e -- --ignored --test-threads=1 \
+            2>&1 | tee starved-runtime-output.txt
       - name: Report multi-process results to job summary
         if: always()
         shell: bash
@@ -349,59 +374,7 @@ jobs:
             echo '```text'
             tail -n 260 webrtc-matrix-output.txt 2>/dev/null || echo "no WebRTC matrix output captured"
             echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  starved-runtime:
-    name: Starved-Runtime Conformance Matrix
-    runs-on: ubuntu-latest
-    # Generous floor: builds the server binary plus the client crate's full
-    # webrtc dependency graph before the matrix runs.
-    timeout-minutes: 60
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7.0.1
-      - name: Read Rust toolchain
-        id: toolchain
-        shell: bash
-        run: |
-          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
-          if [ -z "$CHANNEL" ]; then
-            echo "ERROR: Could not extract channel from rust-toolchain.toml"
-            exit 1
-          fi
-          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-          workspaces: |
-            .
-            clients/native
-      - name: Build the server binary
-        shell: bash
-        run: |
-          cargo build --locked --bin signal-fish-server
-      # --ignored activates the nightly-only matrix cells; --test-threads=1
-      # keeps the flood-heavy cells from CPU-starving each other (they also
-      # carry #[serial_test::serial] as an in-binary guard).
-      - name: Run the starved-runtime matrix
-        shell: bash
-        env:
-          SIGNAL_FISH_SERVER_BIN: ${{ github.workspace }}/target/debug/signal-fish-server
-        run: |
-          set -o pipefail
-          cargo test --locked --manifest-path clients/native/Cargo.toml \
-            --test starved_runtime_e2e -- --ignored --test-threads=1 \
-            2>&1 | tee starved-runtime-output.txt
-      - name: Report starved-runtime results to job summary
-        if: always()
-        shell: bash
-        run: |
-          {
+            echo
             echo "### Starved-runtime conformance matrix"
             echo
             echo '```text'

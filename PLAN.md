@@ -17,6 +17,8 @@ to risk.
 ## Execution rules
 
 - Keep one session's work in one pull request; do not stack pull requests.
+- Time-box each session to roughly one hour of active work (see GOAL.md).
+  Scope the session to one green PR; carry the remainder forward here.
 - Start production fixes with a deterministic failing test and sweep adjacent
   paths for the same failure class.
 - Run the mandatory local Rust sequence and repository gauntlet before
@@ -58,196 +60,21 @@ outside this plan's architecture scope.
 These items remain live but are not active phases. Re-rank them whenever new
 correctness evidence appears.
 
-- #396 — standing correctness/perf sweep. Session 208 closed the
-  admission-vs-consumption divergence class (padded metrics auth token, padded
-  TLS paths, dead `client_ca_cert_path`, unbounded relay labels — #509);
-  session 213 closed the open-mode DoS surface class from #518: a server-wide
-  room ceiling (`server.max_rooms` under a server-global cap lock), a
-  pre-parse per-connection inbound-message budget closing with new close code
-  `4006 inbound_rate_limited`, and an explicitly armed pre-upgrade HTTP
-  header-read deadline on both serve paths (hyper's 30 s default was inert
-  without a Timer). Session 214 closed the last two #518 items: open-mode
-  app UUIDs are now namespaced (no verbatim client-chosen identity) and the
-  `/metrics` response is bounded (snapshot byte cap, game-name map entry caps
-  incl. history samples). Session 215 closed the #529 credential-echo class
-  (v3 snapshots no longer rebroadcast `connection_info` — `relay.token` and
-  arbitrary `Custom` JSON — including nested replay events and correlated
-  result envelopes) and the #522 restart-to-change-allowlist constraint
-  (atomic SIGHUP reload of `security.allowed_apps`, incl. the
-  `app_auth_path` registry file). Session 216 killed the nightly
-  mutation-testing miss on the finalized-join mixed-path observation guard
-  and closed the #526 griefing-forensics item (per-player and per-room
-  rejection tallies with throttled info-level attribution). Session 221
-  closed two session-218/219 follow-on classes: the `TransferAuthority`
-  announcement now sequences through the room event lane (a departure of the
-  freshly granted authority could previously leave live members with a
-  stale authority view), and authority kick/ban removes only stale durable
-  residue — never the target's live membership in another room — with the
-  farewell, reconnection credential, and `4007` close gated on a fresh
-  post-tombstone route read; the TLS serve stack also gained RFC 8441
-  extended CONNECT to match its `h2` ALPN advertisement. Session 222 closed
-  the session-221 follow-up wave (#550–#554): admission locks renew their
-  leases mid-hold (`LeaseRenewalGuard`, so a stalled storage can no longer
-  void the cap guarantee; lost leases are fail-visible via
-  `signal_fish_distributed_lock_renewal_failures_total`), both serve stacks
-  arm an HTTP/2 keep-alive cycle that reaps parked h2 connections (hyper has
-  no h2 header deadline), the whole `/metrics` response carries a 1 MiB byte
-  budget with oldest-first history truncation, allowlist reloads prune the
-  relay-byte series of revoked app IDs, and the mid-game
-  `TransferAuthority` semantics are decided and pinned (role moves, the
-  finalize-time transport host does not).   Remaining
-   frontier: continue seam sweeps; #539's staged path is tracked in the
-   frontier note below (owner-unblocked 2026-09-11, SDK half in review);
-  the parked-state (`senderState`) producers are same-thread program-ordered
-  behind their `SendFull` record (verified, no race window). The 2026-09-09
-  session-223 sweep found no demonstrable in-file defect across the stalest
-  seams (authority, messaging, relay_policy, maintenance, shutdown,
-  token_binding, outbound_queue, batching, deadline); residual risk
-  concentrates in cross-feature interaction seams between the recently
-  landed room-access, spectator fan-out, and authority-moderation features —
-  sweep there next. The 2026-09-09 session-224 sweep covered exactly those
-  seams (three parallel audits + adversarial verification) and closed the
-  ban × reconnect-restore divergence class: the restore transaction
-  re-checked only the kick tombstone, never the room ban list, and the
-  two-hold `BanPlayer` gate sequence plus teardown re-arms left arrival
-  orders where a banned player re-seated permanently (#557; restore now
-  re-reads the ban under its gate hold and refuses `BANNED`, record intact
-  for mid-window unban). Pins: password-perimeter-before-ban ordering on
-  both admission paths, ban/password persistence across rotation and
-  transfer. The 2026-09-09 session-225 sweep closed the last named frontier:
-  the replay/ring-buffer × tombstone preserve/merge seams and the
-  #550 lease-renewal paths produced zero new defect classes (tombstone-vs-
-  restore ordering, kick-vs-re-key, ban-restore precedence, generation
-  isolation, nested replay projection verified safe; two unpinned invariants
-  gained pins), while two confirmed #550 lease defects were fixed red-first
-  (the app-cap enforcement read ran on an unprotected lease; the room-code
-  rotation hold had no renewal). The 2026-09-10 session-227 sweep ran three
-  parallel audits over the access-control × reconnection/restore ×
-  moderation, spectator-fan-out × authority/replay, and
-  admission/lease × reload × metrics-bounds seams with adversarial
-  verification, and closed four confirmed classes red-first: a fresh
-  same-room rejoin no longer leaves the superseded pending record alive
-  (the next disconnect merged it and destroyed the just-issued token);
-  `TransferAuthority` now requires the target's live route to be this room
-  (a storage-failed residue row could take the role and wedge the authority
-  surface — same class as the session-221 kick hardening); the ghost-row
-  sweep publishes the absolute correcting `SpectatorDisconnected`; and
-  rotation holds the old code's `room_join` lock across the candidate loop
-  (a mid-flight old-code joiner could resurrect the dropped code as a
-   duplicate room). App-cap lock acquisitions/failures joined the shared
-   cap-lock counters. The 2026-09-10 session-229 sweep covered the
-   remaining spectator × moderation seams (ban/kick target classification,
-   spectator cap, transfer × spectator, kick/ban with spectators present,
-   rotation × live spectators, unban × spectator) and closed one confirmed
-   class red-first: a moderation eviction of a pending-record holder no
-   longer closes the holder's live spectator session in another room (the
-   route read that gates the farewell and the `4007` close saw only seated
-   routes). Three documented contracts gained pins (spectator-target
-   kick/ban refusal, service-level `TOO_MANY_SPECTATORS` refusal,
-   stale-rotated-code join-or-create semantics), and #561 was resolved as
-   documented semantics (a stale code is an unknown code; the tombstone
-   registry was rejected as a namespace-wide design change needing owner
-   input). The 2026-09-10 session-230 sweep closed the #566
-   rotation × transfer gap as documented semantics; the coordinated-SDK
-   decision it shared with #539 was made 2026-09-11 (see the #539 staging
-   note below): the docs (authority,
-   rooms-and-lobbies, protocol reference, AsyncAPI descriptions) now state
-   that after a rotation the role hand-over needs the new code shared out of
-   band first, and a red-verified delivery pin
-   (`rotation_then_transfer_delivers_no_room_code_to_the_successor`) freezes
-   the wire contract.    Remaining frontier: continue
-   seam sweeps into whichever seams new features open. #539 is unblocked
-   and staged (2026-09-11 owner decision): the client half is
-   `signal-fish-client-rust#257` (`serde(default)` tolerant parse, public
-   type unchanged) — merged 2026-09-11, still awaiting the human-run
-   crates-io release (crates.io latest remains 0.12.0 as of 2026-09-12);
-   after its release, bump the `clients/fortress` and
-   `clients/fortress-wasm` pins, then re-land the v3 `connected_at` trim
-   (the #538 first-cut design). The 2026-09-10
-   session-228 sweep closed the spectator-join seam red-first (a same-room
-   spectator join now discards the unclaimed pending record — the
-   pre-spectator token could previously re-seat the player after the
-   spectator session ended) and adjudicated the seal-restore seam (pinned:
-   `SetRoomAccess` gates fresh admissions only; a pre-seal record restores
-   without a password — resumption, not admission; bans refuse restores).
-   Also verified safe: rotation × spectator code resolution (spectator
-   joins have no creation branch, so the #561 resurrection class does not
-   apply to them; mid-swap misdirection re-reads by room id and cannot
-   strand), TURN/relay issuance × rotation/reload/restore (pure, fail-closed
-   mint; restore folds fresh plan/ICE repair; TURN config is not
-   SIGHUP-reloadable), metrics bounds × spectator counters (none exist).
-   Recorded as accepted: zero-member record-protected rooms count toward
-   `server.max_rooms` for the reconnect window (intentional protection ×
-   ceiling; availability-only, bounded by window × code space); the room
-   event lane stalls behind one slow recipient up to `slow_consumer_timeout`
-   per send with an unbounded job queue behind it (per-client rate budgets
-   bound admission); a tightened per-app `max_relay_bytes` override reaches
-   live connections only on reconnect (same revocation-is-restart contract).
-   The 2026-09-11 session-232/233 sweep closed the error-reply amplification
-   class: every polite per-frame reply (error refusals incl. retryable
-   handshake refusals and the unsupported-format warning, join/spectator/
-   reconnection refusals, authority denials and internal-error replies,
-   room-operation and moderation failure envelopes, the application-Ping
-   `Pong`) now charges the per-connection `max_inbound_error_replies`
-   budget; exhaustion fires metric + farewell + `4006` exactly once and the
-   gate follows the physical socket across reconnect identity swaps. The
-   room event lane stall remains recorded-as-accepted above (per-client
-   admission budgets bound it). The 2026-09-11 session-234 sweep ran three
-   parallel audits over the error-reply budget's new cross-feature seams
-   (budget × admission/entry, budget × moderation/authority/spectator,
-   budget × reconnect/restore/replay/slow-lane) with adversarial
-   verification and closed with zero new defect classes: every reply path
-   charges before sending (or documents the one-reply grace), exhaustion
-   side effects fire exactly once (one-shot decided inside the charge
-   critical section; close pins are first-reason-wins), no charged-withhold
-   leaves admission state mutated (rollback precedes every post-mutation
-   charged refusal), the 4006 close lands through a stalled lane (watch
-   signal + 1 s bounded finalize), and the reconnect swap/rollback both
-   carry the charged gate. Two unpinned invariants gained pins
-   (rollback-arm gate carry; 4007-kick × 4006-exhaustion first-pin
-    arbitration in both orders, one-shot + metric asserted), and the
-    first-pinned-reason-wins close-code attribution contract plus the
-    never-charged recipient-side format advisory are now documented
-    (protocol.md close codes, `CloseReason::InboundRateLimited`, CHANGELOG).
-    The 2026-09-12 session-237 sweep ran three parallel audits over the
-    #575/#576 connect-token enforcement seams (handshake state machine,
-    config/reload, crypto/wire) with adversarial verification and closed one
-    confirmed class red-first: two pre-#574 open-mode predicates (the
-    below-floor negotiation refusal and the pre-upgrade endpoint floor
-    check) closed enforced-open sockets whose endpoint default never
-    governed — both now key on the actual handshake state, so
-    handshake-pending sockets retry like allowlist mode while legacy open
-    refuse-and-close stays pinned. Per-app enforcement posture joined the
-    startup/SIGHUP logs (gated on allowlist enforcement); token boundary
-    pins (nonce, exp, signature length, size cap) and doc-accuracy fixes
-    landed.
-- #525 — session 217 landed the minimal viable moderation set: authority
-  kick (close code `4007 kicked`, no reconnect), authority room-code
-  regeneration, and a shipped default spectator cap
-  (`server.default_max_spectators`, auto `2× max_players`). Session 218
-  completed the access-control tier: `SetRoomAccess` (salted-hash room
-  password, checked ahead of every other admission signal, sealable at
-  creation), `BanPlayer`/`UnbanPlayer` (room-scoped in-memory ban list,
-  TTL = room TTL), and `TransferAuthority` (atomic authority hand-off
-  under the room mutation gate, sequenced replay-recorded
-  `AuthorityChanged`). Session 219 completed the spectator fan-out
-  slimming: v3 connections receive `NewSpectatorJoined` /
-  `SpectatorDisconnected` as delta+count events (roster cleared,
-  additive `spectator_count`), replayed copies project to the same shape,
-  and the frozen v2 bytes are untouched (PR #545).
-  Session 220 closed the last thread (#546): the room-namespace
-  authority-squat design is resolved — codes are capability-ish and
-  first-claim authority is documented v2 behavior, so the shipped defense is
-  auto-generated codes plus seal-at-creation, now fail-closed: a
-  password-carrying join into an open room is refused with the same
-  non-enumerating `PASSWORD_REQUIRED` outcome instead of being seated under
-  the squatter's authority; hosted reservation tokens remain tracked by
-  #517.
-- #378 — CLOSED by the session-217 canonical-gate migration: `Link Check`
-  owns offline lychee + internal-link validation, the duplicate
-  `Documentation Link Check` job is retired, the strict MkDocs build moved to
-  the `Markdown Code Validation` job, and branch protection (no required
-  checks, per #513) needed no settings migration.
+- #396 — CLOSED 2026-09-12 (standing correctness/perf sweep, closed with the
+  session-237 enforcement-seam sweep). The sweep practice continues
+  opportunistically wherever new features open seams; per-session closure
+  evidence lives in the closed issue, session notes, and merged PRs.
+- #539 — still blocked on the human-run crates.io release of
+  `signal-fish-client` (latest remains 0.12.0 as of 2026-09-12; the tolerant
+  client half is merged in `signal-fish-client-rust#257`, awaiting release).
+  After release: bump the `clients/fortress` and `clients/fortress-wasm`
+  pins, prove the Fortress interop run, then re-land the v3 `connected_at`
+  trim (the #538 first-cut design) with the AsyncAPI `V3PlayerInfo`/
+  spectator schema split in the same change.
+- #525 — CLOSED (minimal moderation set, access-control tier, and spectator
+  fan-out slimming landed across sessions 217-220; the #546 squat design
+  resolved in session 220). Follow-on credential work is tracked under #517.
+- #378 — CLOSED (canonical Link Check gate, session 217).
 - #512 — session 220 moved the Windows lint/nextest lanes into the #513
    daily cron cohort (measured: the Windows pair averaged ~40 of ~92 billed
    minutes per CI run, 43%; the cron gains one Windows pair per day, paid
@@ -307,7 +134,12 @@ correctness evidence appears.
     ubuntu-billed minutes per `src/**` pull request (~24 billed minutes over
     the 2026-09-08..10 window) and the step adds the ~12 s experiment
     itself. Hosted H14 attempt-evidence artifacts stay on the daily
-    scenario-profiles cron leg.
+    scenario-profiles cron leg. Session 238 merged verification-nightly's
+    standalone `starved-runtime` job into `multiprocess-delivery` (both
+    suites build the same server workspace plus `clients/native` graphs, so
+    the second job re-paid one runner setup and a duplicate two-workspace
+    compile on every schedule and pull-request event; each lane keeps its
+    own step and the consolidated job summary keeps per-suite sections).
     Remaining levers still
     need owner input: self-hosted runner labels and the #379 path-awareness
     inventory (the per-PR interop-quartet cohort question was decided
