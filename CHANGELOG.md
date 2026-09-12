@@ -316,6 +316,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Relay egress delivery semantics are now pinned by tests (issue #396): on a
+  protocol-v3 connection a queued control message precedes a staged data
+  batch, and teardown abandonment accounting covers both the socket batcher
+  and the queue per delivery class. No behavior change; the pins fail if a
+  refactor flattens the writer's control bypass or drops the batcher from
+  the abandonment ledger.
+
 - Close-code attribution under racing close conditions is now documented and
   pinned: the first condition pinned wins the close code (only `4000
   server_shutdown` supersedes an earlier reason). A `4006` error-reply
