@@ -60,6 +60,11 @@ outside this plan's architecture scope.
 These items remain live but are not active phases. Re-rank them whenever new
 correctness evidence appears.
 
+- #581 — latent only: `handle_bus_message` ignores
+  `SequencedMessage::excluded_players`; untriggerable until a real
+  cross-instance bus is designed (multi-node fan-out stays outside
+  architecture scope). Honor or strip the field, with a conformance pin,
+  when that design lands.
 - #396 — CLOSED 2026-09-12 (standing correctness/perf sweep, closed with the
   session-237 enforcement-seam sweep). The sweep practice continues
   opportunistically wherever new features open seams; per-session closure
