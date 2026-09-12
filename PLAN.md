@@ -320,11 +320,14 @@ correctness evidence appears.
   `require_connect_token` override, missing-token refusals report the
   distinct `CONNECT_TOKEN_REQUIRED` (retryable, budget-charged, 4006 on
   exhaustion), posture reloads with the key, and a required entry with no
-  key is dead config rejected at startup/SIGHUP. Cloud-side edge
+  key is dead config rejected at startup/SIGHUP. Enforcement in open mode
+  also closes the legacy skip-`Authenticate` path (pre-auth frames refused
+  `MISSING_APP_ID`, silence hits `4001 auth_timeout`). Cloud-side edge
   enforcement (option 1) and token minting are the control plane's work.
-  Remaining seam-sweep frontier: connect-token enforcement × reconnect
-  identity swap replay, and SDK mint/attach halves (tracked in the SDK
-  repos).
+  Verified safe (session-236 sweep): enforcement × reconnect identity swap
+  (handshake guards block re-entry), enforcement × allowlist reload races
+  (fail-closed in both swap orders). Remaining frontier: SDK mint/attach
+  halves (tracked in the SDK repos).
 - #379 — make verification-nightly pull-request fan-out path-aware only after
   an owner exports the required-check/ruleset inventory and a historical
   changed-file replay proves net allocation and runner-time savings. On the
