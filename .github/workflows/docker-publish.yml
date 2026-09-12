@@ -23,6 +23,15 @@
 # runs were such no-op rebuilds (~7 billed minutes each plus a multi-arch
 # runner setup). workflow_call (release.yml) and workflow_dispatch paths are
 # unaffected and always publish.
+#
+# Alias consequence: the mutable-alias step only moves :latest when the
+# publication source is the current main head, so a no-op merge landing
+# during a build leaves :latest pinned at the last byte-relevant commit.
+# Its bytes are identical to that head's would-be image (that is the
+# filter's guarantee, enforced by
+# test_docker_publish_push_paths_cover_image_inputs), so pulls are never
+# stale in content — only the OCI revision label can lag main until the
+# next image-relevant merge.
 
 name: Docker Publish
 
