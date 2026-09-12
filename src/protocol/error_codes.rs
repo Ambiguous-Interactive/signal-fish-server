@@ -490,6 +490,7 @@ mod tests {
             ErrorCode::Banned,
             ErrorCode::TransferTargetNotFound,
             ErrorCode::ConnectTokenInvalid,
+            ErrorCode::ConnectTokenRequired,
         ];
 
         for error_code in &error_codes {

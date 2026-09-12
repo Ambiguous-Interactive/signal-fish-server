@@ -205,10 +205,22 @@ correctness evidence appears.
    signal + 1 s bounded finalize), and the reconnect swap/rollback both
    carry the charged gate. Two unpinned invariants gained pins
    (rollback-arm gate carry; 4007-kick × 4006-exhaustion first-pin
-   arbitration in both orders, one-shot + metric asserted), and the
-   first-pinned-reason-wins close-code attribution contract plus the
-   never-charged recipient-side format advisory are now documented
-   (protocol.md close codes, `CloseReason::InboundRateLimited`, CHANGELOG).
+    arbitration in both orders, one-shot + metric asserted), and the
+    first-pinned-reason-wins close-code attribution contract plus the
+    never-charged recipient-side format advisory are now documented
+    (protocol.md close codes, `CloseReason::InboundRateLimited`, CHANGELOG).
+    The 2026-09-12 session-237 sweep ran three parallel audits over the
+    #575/#576 connect-token enforcement seams (handshake state machine,
+    config/reload, crypto/wire) with adversarial verification and closed one
+    confirmed class red-first: two pre-#574 open-mode predicates (the
+    below-floor negotiation refusal and the pre-upgrade endpoint floor
+    check) closed enforced-open sockets whose endpoint default never
+    governed — both now key on the actual handshake state, so
+    handshake-pending sockets retry like allowlist mode while legacy open
+    refuse-and-close stays pinned. Per-app enforcement posture joined the
+    startup/SIGHUP logs (gated on allowlist enforcement); token boundary
+    pins (nonce, exp, signature length, size cap) and doc-accuracy fixes
+    landed.
 - #525 — session 217 landed the minimal viable moderation set: authority
   kick (close code `4007 kicked`, no reconnect), authority room-code
   regeneration, and a shipped default spectator cap

@@ -192,6 +192,8 @@ async fn main() -> anyhow::Result<()> {
         app_id_allowlist_enforced = cfg.security.enforce_app_id_allowlist,
         allowed_apps = cfg.security.allowed_apps.len(),
         metrics_auth_required = cfg.security.require_metrics_auth,
+        connect_token_required = cfg.security.connect_token_required(),
+        connect_token_apps_required = cfg.security.any_app_requires_connect_token(),
         "Effective security mode"
     );
     for warning in config::security_posture_warnings(&cfg) {
@@ -277,6 +279,11 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!(
                 "Connect-token verification enabled and required (security.connect_token); \
                  token-less handshakes are refused with CONNECT_TOKEN_REQUIRED"
+            );
+        } else if cfg.security.any_app_requires_connect_token() {
+            tracing::info!(
+                "Connect-token verification enabled (security.connect_token); per-app \
+                 require_connect_token registrations enforce the credential per tenant"
             );
         } else {
             tracing::info!("Connect-token verification enabled (security.connect_token)");
@@ -697,6 +704,11 @@ async fn reload_allowed_apps_from_config(
                 tracing::info!(
                     "SIGHUP reload: connect-token verification enabled and required; \
                      token-less handshakes are refused with CONNECT_TOKEN_REQUIRED"
+                );
+            } else if cfg.security.any_app_requires_connect_token() {
+                tracing::info!(
+                    "SIGHUP reload: connect-token verification enabled; per-app \
+                     require_connect_token registrations enforce the credential per tenant"
                 );
             } else {
                 tracing::info!("SIGHUP reload: connect-token verification enabled");
@@ -1458,7 +1470,8 @@ mod connect_token_reload_tests {
             .verify_connect_token("app", &mint(&second, "app", 60))
             .expect("the reloaded key verifies fresh tokens");
 
-        // SIGHUP with a corrupt key: the reload fails closed onto the
+        // SIGHUP with a corrupt key: the config validation gate rejects the
+        // key before install, so the reload fails closed onto the
         // running key.
         let corrupt = SecurityConfig {
             connect_token: Some(ConnectTokenConfig {
