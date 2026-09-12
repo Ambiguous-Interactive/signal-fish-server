@@ -420,8 +420,8 @@ The `relay-clean-v1` cohort decides issue #274's lane placement:
   inside the 125 ms candidacy bar.
 - **No new dedicated isolated PR timing job is added for any platform**: no
   platform needs more gating than it already has, correctness oracles run
-  everywhere, and per-PR allocation budget is governed by issue #379's
-  evidence rules.
+  everywhere, and issue #379's path-aware per-PR fan-out proposal was
+  replayed against merge history and closed as not planned (2026-09-12).
 
 Issue #274's comment history retains the full per-allocation audit
 (manifests, toolchain/workload pins, and the per-OS distributions, including
