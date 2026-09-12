@@ -95,8 +95,8 @@ send them only over TLS. See
 [Application identification](authentication.md#optional-tenant-connect-tokens)
 for the full wire contract.
 
-To also refuse token-less handshakes (server-side tenant isolation, issue
-#574), add `"required": true` to the same block:
+To also refuse token-less handshakes (server-side tenant isolation,
+issue #574), add `"required": true` to the same block:
 
 ```bash
 export SIGNAL_FISH__SECURITY__CONNECT_TOKEN='{"public_key":"<base64 32-byte Ed25519 public key>","required":true}'

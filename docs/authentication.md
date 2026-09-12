@@ -285,7 +285,7 @@ callouts, no store.
 
 ### Require tokens (issue #574)
 
-Verification alone rejects *bad* tokens. To also reject *missing* ones, arm
+Verification alone rejects _bad_ tokens. To also reject _missing_ ones, arm
 the global default:
 
 ```json
