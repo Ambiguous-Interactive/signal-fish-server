@@ -159,9 +159,11 @@ correctness evidence appears.
    seam sweeps into whichever seams new features open. #539 is unblocked
    and staged (2026-09-11 owner decision): the client half is
    `signal-fish-client-rust#257` (`serde(default)` tolerant parse, public
-   type unchanged); after its release, bump `clients/fortress` (=0.8.0)
-   and `clients/fortress-wasm` (=0.9.0), then re-land the v3
-   `connected_at` trim (the #538 first-cut design). The 2026-09-10
+   type unchanged) — merged 2026-09-11, still awaiting the human-run
+   crates-io release (crates.io latest remains 0.12.0 as of 2026-09-12);
+   after its release, bump the `clients/fortress` and
+   `clients/fortress-wasm` pins, then re-land the v3 `connected_at` trim
+   (the #538 first-cut design). The 2026-09-10
    session-228 sweep closed the spectator-join seam red-first (a same-room
    spectator join now discards the unclaimed pending record — the
    pre-spectator token could previously re-seat the player after the
@@ -312,10 +314,19 @@ correctness evidence appears.
   is `security.connect_token.public_key`/`public_key_path` (public material,
   file folded at load, fail-closed), SIGHUP-reloadable alongside the
   allowlist. Absent field is byte-identical to today; presented token
-  without a configured key is refused fail closed. Cloud-side edge
+  without a configured key is refused fail closed. Session 236 implemented
+  the #574 enforcement knob (owner sign-off 2026-09-12): layered
+  `security.connect_token.required` global default + per-app
+  `require_connect_token` override, missing-token refusals report the
+  distinct `CONNECT_TOKEN_REQUIRED` (retryable, budget-charged, 4006 on
+  exhaustion), posture reloads with the key, and a required entry with no
+  key is dead config rejected at startup/SIGHUP. Enforcement in open mode
+  also closes the legacy skip-`Authenticate` path (pre-auth frames refused
+  `MISSING_APP_ID`, silence hits `4001 auth_timeout`). Cloud-side edge
   enforcement (option 1) and token minting are the control plane's work.
-  Follow-on frontier for future seam sweeps: connect-token × reconnect
-  identity swap, token mode × open-mode endpoints, and SDK mint/attach
+  Verified safe (session-236 sweep): enforcement × reconnect identity swap
+  (handshake guards block re-entry), enforcement × allowlist reload races
+  (fail-closed in both swap orders). Remaining frontier: SDK mint/attach
   halves (tracked in the SDK repos).
 - #379 — make verification-nightly pull-request fan-out path-aware only after
   an owner exports the required-check/ruleset inventory and a historical

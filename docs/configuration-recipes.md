@@ -95,6 +95,22 @@ send them only over TLS. See
 [Application identification](authentication.md#optional-tenant-connect-tokens)
 for the full wire contract.
 
+To also refuse token-less handshakes (server-side tenant isolation,
+issue #574), add `"required": true` to the same block:
+
+```bash
+export SIGNAL_FISH__SECURITY__CONNECT_TOKEN='{"public_key":"<base64 32-byte Ed25519 public key>","required":true}'
+```
+
+A token-less `Authenticate` then fails with `CONNECT_TOKEN_REQUIRED`.
+Released SDKs that never send the field stop authenticating, so roll the
+flag out per tenant with the `require_connect_token` flag on an
+`allowed_apps` entry (`true` enforces one app, `false` exempts one app from
+the global default). A required entry with no configured key is a startup
+error. In open-policy mode the global knob also closes the legacy
+skip-`Authenticate` path: clients that never send `Authenticate` are closed
+with `4001 auth_timeout`.
+
 ## TURN/STUN
 
 Self-hosted TURN: the server mints short-lived coturn REST credentials from a

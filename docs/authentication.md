@@ -283,6 +283,48 @@ callouts, no store.
   key keeps the running key; removing the block removes verification, and
   presented tokens are then refused.
 
+### Require tokens (issue #574)
+
+Verification alone rejects _bad_ tokens. To also reject _missing_ ones, arm
+the global default:
+
+```json
+{
+  "security": {
+    "connect_token": {
+      "public_key": "<base64 of the 32-byte Ed25519 public key>",
+      "required": true
+    }
+  }
+}
+```
+
+- With `required: true`, an `Authenticate` without a `connect_token` is
+  refused with `CONNECT_TOKEN_REQUIRED` instead of falling back to
+  public-`app_id` semantics. Applications whose released SDKs never send
+  the field stop authenticating — roll the flag out per tenant first if you
+  host several.
+- The per-tenant rollout uses the allowlist entry:
+  `require_connect_token` on an `allowed_apps` entry overrides the global
+  default for that one application (`true` enforces a single app under a
+  lax deployment, `false` exempts one app from an enforcing deployment).
+  Registry changes reload on `SIGHUP` with the allowlist.
+- Open-policy mode (`enforce_app_id_allowlist: false`) has no registry, so
+  only the global default reaches it. Enforcement there also closes the
+  legacy skip-`Authenticate` path: an application frame sent before
+  `Authenticate` is refused with `MISSING_APP_ID`, and a socket that never
+  authenticates is closed with `4001 auth_timeout` — released clients that
+  skip the handshake stop working.
+- A `require_connect_token: true` entry with no verification key configured
+  is a startup error (and a rejected SIGHUP reload): enforcement would
+  refuse every handshake for that app with no remedy.
+- The posture reloads on `SIGHUP` together with the key. Removing the key
+  block disarms enforcement; a reload that would strip the key while an
+  entry still requires tokens is rejected wholesale, and the running
+  deployment keeps both.
+- The refusal is retryable and budget-charged like every handshake refusal:
+  the connection stays open, and the client can fetch a token and retry.
+
 ### Wire contract
 
 A client that holds a credential adds one optional field to `Authenticate`:
@@ -315,8 +357,10 @@ the reason, and the token is never logged or echoed.
 
 ### Semantics and limits
 
-- **Absent field.** No token: the handshake behaves exactly as before, in
-  every mode. Released SDKs and self-hosted deployments are unaffected.
+- **Absent field.** No token: the handshake behaves exactly as before,
+  unless the deployment enforces the credential (see
+  [Require tokens](#require-tokens-issue-574)). An enforcing deployment
+  refuses the token-less handshake with `CONNECT_TOKEN_REQUIRED`.
 - **Presented without a configured key.** Refused with
   `CONNECT_TOKEN_INVALID` (fail closed). A client that expects credentials to
   matter must not be silently downgraded to public-label semantics.

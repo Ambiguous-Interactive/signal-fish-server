@@ -817,6 +817,25 @@ pub fn validate_config_security(config: &Config) -> anyhow::Result<()> {
         })?;
     }
 
+    // Per-app tenant-credential enforcement (issue #574): an entry that
+    // requires tokens with no verification key configured is dead config —
+    // enforcement would refuse every handshake for that app with no remedy.
+    // The global `required` flag lives inside the connect_token block, so it
+    // cannot exist without a key; the key parse above already rejects it.
+    if config.security.connect_token.is_none()
+        && config
+            .security
+            .allowed_apps
+            .iter()
+            .any(|app| app.require_connect_token == Some(true))
+    {
+        anyhow::bail!(
+            "security.allowed_apps contains an entry with require_connect_token=true, but no \
+             verification key is configured: add security.connect_token.public_key (or \
+             public_key_path) so the requirement can ever be satisfied"
+        );
+    }
+
     // The same constructor-owned projection is checked by
     // `EnhancedGameServer::new`; production additionally rejects zero operation
     // budgets, which remain a deliberate direct-library testing policy.
@@ -1610,6 +1629,7 @@ mod tests {
             max_players_per_room: None,
             rate_limit_per_minute: None,
             max_relay_bytes: Some(0),
+            require_connect_token: None,
         }];
 
         let err = validate_config_security(&config)
@@ -1636,6 +1656,7 @@ mod tests {
                 max_players_per_room: None,
                 rate_limit_per_minute: None,
                 max_relay_bytes: None,
+                require_connect_token: None,
             };
             mutate(&mut app);
 
@@ -1649,6 +1670,7 @@ mod tests {
                     max_players_per_room: None,
                     rate_limit_per_minute: None,
                     max_relay_bytes: None,
+                    require_connect_token: None,
                 },
                 app,
             ];
@@ -1672,6 +1694,7 @@ mod tests {
             max_players_per_room: Some(2),
             rate_limit_per_minute: Some(3),
             max_relay_bytes: None,
+            require_connect_token: None,
         };
         let mut conflicting = entry.clone();
         conflicting.app_name = "Conflicting".to_string();
@@ -1711,6 +1734,7 @@ mod tests {
                 max_players_per_room: None,
                 rate_limit_per_minute: None,
                 max_relay_bytes: None,
+                require_connect_token: None,
             }];
             let mut unsafe_app = AppRegistrationEntry {
                 app_id: "probe".to_string(),
@@ -1719,6 +1743,7 @@ mod tests {
                 max_players_per_room: None,
                 rate_limit_per_minute: None,
                 max_relay_bytes: None,
+                require_connect_token: None,
             };
             mutate(&mut unsafe_app);
             config.security.allowed_apps.push(unsafe_app);
@@ -1876,6 +1901,7 @@ mod tests {
                 max_players_per_room: None,
                 rate_limit_per_minute: None,
                 max_relay_bytes: None,
+                require_connect_token: None,
             };
             mutate(&mut app);
             app
@@ -2324,6 +2350,7 @@ mod tests {
         config.security.connect_token = Some(crate::config::ConnectTokenConfig {
             public_key: valid,
             public_key_path: None,
+            required: false,
         });
         assert!(
             validate_config_security(&config).is_ok(),
@@ -2338,6 +2365,7 @@ mod tests {
             config.security.connect_token = Some(crate::config::ConnectTokenConfig {
                 public_key: bad.clone(),
                 public_key_path: None,
+                required: false,
             });
             let error = validate_config_security(&config)
                 .expect_err("a non-parseable key must fail validation");
@@ -2346,5 +2374,60 @@ mod tests {
                 "error must name the config seam: {error}"
             );
         }
+    }
+
+    /// Per-app tenant-credential enforcement (issue #574) with no
+    /// verification key configured is dead config: every handshake for the
+    /// flagged app would be refused with no remedy. The SIGHUP reload runs
+    /// this same gate, so a reload that would strip the key while an entry
+    /// still requires tokens is rejected wholesale and the running
+    /// deployment keeps both its key and its registry.
+    #[test]
+    fn require_connect_token_entry_without_a_key_is_dead_config() {
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.security.allowed_apps = vec![crate::config::AppRegistrationEntry {
+            app_id: "gated".to_string(),
+            app_name: "Gated".to_string(),
+            max_rooms: None,
+            max_players_per_room: None,
+            rate_limit_per_minute: None,
+            max_relay_bytes: None,
+            require_connect_token: Some(true),
+        }];
+
+        let error = validate_config_security(&config)
+            .expect_err("a required entry with no key must fail validation");
+        assert!(
+            error.to_string().contains("require_connect_token"),
+            "error must name the per-app flag: {error}"
+        );
+
+        // The same registry validates once a parseable key exists...
+        use base64::Engine as _;
+        use ed25519_dalek::SigningKey;
+        let signing = SigningKey::from_bytes(&[11_u8; 32]);
+        config.security.connect_token = Some(crate::config::ConnectTokenConfig {
+            public_key: base64::engine::general_purpose::STANDARD.encode(signing.verifying_key()),
+            public_key_path: None,
+            required: false,
+        });
+        assert!(
+            validate_config_security(&config).is_ok(),
+            "a configured key satisfies the per-app requirement"
+        );
+
+        // ...and per-app entries that do not enforce need no key at all.
+        config.security.connect_token = None;
+        config.security.allowed_apps[0].require_connect_token = Some(false);
+        assert!(
+            validate_config_security(&config).is_ok(),
+            "an opt-out entry is valid without a key"
+        );
+        config.security.allowed_apps[0].require_connect_token = None;
+        assert!(
+            validate_config_security(&config).is_ok(),
+            "an inheriting entry is valid without a key"
+        );
     }
 }

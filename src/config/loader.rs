@@ -591,6 +591,57 @@ mod tests {
         assert_eq!(config.security.allowed_apps[1].max_rooms, Some(5));
     }
 
+    /// A registry-file entry that requires tenant tokens is dead config
+    /// when no verification key is configured (issue #574): the fold runs
+    /// before security validation, so the per-app gate sees and rejects
+    /// file-owned entries exactly like inline `allowed_apps` ones. The
+    /// loader itself is warn-only; startup (and the SIGHUP gate) propagates
+    /// the error.
+    #[test]
+    fn registry_require_connect_token_entry_without_a_key_is_dead_config() {
+        let dir = write_registry_file(
+            r#"{"apps":[{"app_id":"gated","app_name":"Gated","require_connect_token":true}]}"#,
+        );
+        let mut config = finalize_with_security_doc(&format!(
+            r#"{{"security":{{"app_auth_path":"{}"}}}}"#,
+            registry_path_json(&dir)
+        ))
+        .expect("the loader folds the registry (validation is warn-only there)");
+        // The default-on metrics auth (no token) would bail before the
+        // per-app gate; this scenario is about the connect-token flag.
+        config.security.require_metrics_auth = false;
+
+        let error = validate_config_security(&config)
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(
+            error.contains("require_connect_token"),
+            "startup validation must name the per-app flag: {error}"
+        );
+
+        // The same registry validates once the main config carries a key.
+        use base64::Engine as _;
+        use ed25519_dalek::SigningKey;
+        let signing = SigningKey::from_bytes(&[23_u8; 32]);
+        let key = base64::engine::general_purpose::STANDARD.encode(signing.verifying_key());
+        let mut config = finalize_with_security_doc(&format!(
+            r#"{{"security":{{"app_auth_path":"{}","connect_token":{{"public_key":"{key}"}}}}}}"#,
+            registry_path_json(&dir)
+        ))
+        .expect("a configured key satisfies the registry requirement");
+        config.security.require_metrics_auth = false;
+        assert!(
+            validate_config_security(&config).is_ok(),
+            "the folded entry passes validation once a key exists"
+        );
+        assert_eq!(
+            config.security.allowed_apps[0].require_connect_token,
+            Some(true),
+            "the folded entry keeps its enforcement flag"
+        );
+    }
+
     /// The shape the control plane writes for a freshly-provisioned host —
     /// `{"apps": []}` — is valid and loads no entries.
     #[test]
