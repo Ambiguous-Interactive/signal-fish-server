@@ -139,6 +139,9 @@ a blocker when the Git remote accepts pushes and the connected VS Code GitHub
 extension / GitHub app can perform the operation. Use an authenticated `gh` only
 when the extension/app cannot perform a required operation.
 
+Write commit messages and PR text in Simplified Technical English, extremely
+short (see `.llm/context.md`, "Writing Style for User-Facing Text").
+
 Suggested commit message format:
 
 ```text

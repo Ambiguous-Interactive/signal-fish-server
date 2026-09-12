@@ -212,14 +212,14 @@ Validate locally with:
 ## Writing Style: Simplified Technical English (STE)
 
 Write all user-facing text in Simplified Technical English: short, simple,
-direct. The canonical scope list (which texts this covers) lives in
-`.llm/context.md` under "Writing Style for User-Facing Text".
+direct, and extremely brief. The canonical scope list (which texts this
+covers) lives in `.llm/context.md` under "Writing Style for User-Facing Text".
 
-- Short sentences. One idea per sentence.
-- Active voice. Name the actor ("The server closes the connection").
-- Common words. No idioms, jokes, or marketing language.
-- Say exactly what happened and what to do next.
-- Lists for steps. Paragraphs of 3-4 sentences at most.
+- Extremely short. A few sentences is the maximum. No fluff, no verbosity.
+- Answer "how": what changed and what to do next. For PR descriptions, also
+  answer "why" and "what", in a few sentences.
+- Short sentences. One idea per sentence. Active voice. Common words.
+- Lists for steps. No idioms, jokes, or marketing language.
 
 Simple text is faster to read and harder to misread, for non-native readers
 and for operators under pressure.
@@ -267,5 +267,5 @@ After every feature/bugfix:
 - [ ] If enforcing a minimum badge count, run strict mode (`./scripts/check-readme-badges.sh --require-at-least-one README.md`)
 - [ ] All code blocks have language identifiers
 - [ ] Technical terms added to `.typos.toml` if needed
-- [ ] All text uses Simplified Technical English: short, simple, direct
+- [ ] All text uses Simplified Technical English: extremely short, simple, direct
 - [ ] All text uses American English spellings (not British)

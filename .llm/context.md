@@ -131,18 +131,22 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
 ### Writing Style for User-Facing Text (Required)
 
 Write every user-facing text in Simplified Technical English (STE): short,
-simple, direct. This applies to PR titles and descriptions, issue text and
-comments, commit messages, code review comments, documentation, CHANGELOG
-entries, and operator-facing log messages.
+simple, direct, and extremely brief. This applies to PR titles and
+descriptions, issue text and comments, commit messages, code review comments,
+documentation, CHANGELOG entries, and operator-facing log messages.
 
+- Keep it extremely short. A few sentences is the maximum, not the target.
+  No fluff, no verbosity, no filler.
+- Answer "how": what changed and what to do next. Plain steps.
+- For PR descriptions, also answer "why" and "what": the reason and the
+  visible effect. A few sentences each, at most.
 - Write short sentences. One idea per sentence.
 - Use active voice. Name the actor ("The server closes the connection").
 - Use common words. No idioms, jokes, marketing language, or hype.
-- Say exactly what happened and what to do next.
-- Use lists for steps. Keep paragraphs to 3-4 sentences.
 
 The audience includes non-native English readers, operators under pressure,
-and automated tools. Simple text is faster to read and harder to misread.
+and automated tools. Short, simple text is faster to read and harder to
+misread.
 
 ### Hook Reliability Rules (Required)
 
