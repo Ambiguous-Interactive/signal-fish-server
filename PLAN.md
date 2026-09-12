@@ -153,8 +153,8 @@ correctness evidence appears.
     on), so the #379 owner-inventory prerequisite is exported and
     path-filter changes cannot strand a required check.
     Remaining levers still
-    need owner input: self-hosted runner labels and the #379 path-awareness
-    inventory (the per-PR interop-quartet cohort question was decided
+    need owner input: self-hosted runner labels (the per-PR interop-quartet
+    cohort question was decided
     2026-09-11: status quo — all four interop lanes stay per-PR, #568);
     a cargo-deny single-container consolidation is blocked
     by the pinned action's one-manifest-per-boot input and the fortress-wasm
@@ -184,14 +184,6 @@ correctness evidence appears.
   (handshake guards block re-entry), enforcement × allowlist reload races
   (fail-closed in both swap orders). Remaining frontier: SDK mint/attach
   halves (tracked in the SDK repos).
-- #379 — make verification-nightly pull-request fan-out path-aware only after
-  an owner exports the required-check/ruleset inventory and a historical
-  changed-file replay proves net allocation and runner-time savings. On the
-  2026-08-15 replay, classification reduced retained-trigger workers from 469
-  to 454, but 67 classifier jobs raised total allocations to 521; broadening
-  fail-closed triggers raised them to 569. Do not add per-lane status runners;
-  prefer a required classifier with server-side job skips and retain hosted
-  before/after evidence.
 - #207 — pursue the next optimization only from current allocation and latency
   profiles, with exact wire and delivery semantics held constant. The
   2026-09-01 profile found the fan-out core at its floor (0–1 allocation ops
