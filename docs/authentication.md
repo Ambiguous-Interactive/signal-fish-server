@@ -310,7 +310,11 @@ the global default:
   lax deployment, `false` exempts one app from an enforcing deployment).
   Registry changes reload on `SIGHUP` with the allowlist.
 - Open-policy mode (`enforce_app_id_allowlist: false`) has no registry, so
-  only the global default reaches it.
+  only the global default reaches it. Enforcement there also closes the
+  legacy skip-`Authenticate` path: an application frame sent before
+  `Authenticate` is refused with `MISSING_APP_ID`, and a socket that never
+  authenticates is closed with `4001 auth_timeout` — released clients that
+  skip the handshake stop working.
 - A `require_connect_token: true` entry with no verification key configured
   is a startup error (and a rejected SIGHUP reload): enforcement would
   refuse every handshake for that app with no remedy.

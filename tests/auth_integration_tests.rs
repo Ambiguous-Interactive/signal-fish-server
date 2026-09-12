@@ -1127,3 +1127,34 @@ async fn global_required_posture_reaches_open_mode() {
 
     running.shutdown().await;
 }
+
+/// With the enforcement posture armed, open-policy mode no longer admits
+/// legacy skip-`Authenticate` clients through the endpoint default: the
+/// handshake starts incomplete, so an application frame sent without a
+/// token-bearing `Authenticate` is refused with `MISSING_APP_ID` and the
+/// socket closes (issue #574).
+#[tokio::test]
+async fn open_mode_enforcement_closes_the_skip_authenticate_bypass() {
+    let signing = connect_token_support::signing_key(b"e2e-control-plane");
+    let security = signal_fish_server::config::SecurityConfig {
+        connect_token: Some(signal_fish_server::config::ConnectTokenConfig {
+            public_key: connect_token_support::encoded_public_key(&signing),
+            public_key_path: None,
+            required: true,
+        }),
+        ..signal_fish_server::config::SecurityConfig::default()
+    };
+    let running = spawn_connect_token_server(Vec::new(), Some(security), false).await;
+
+    let mut ws = connect_socket(running.addr()).await;
+    send_client_message(&mut ws, &ClientMessage::Ping).await;
+    match next_server_message_within(&mut ws, SOCKET_DEADLINE, "pre-auth refusal").await {
+        ServerMessage::Error {
+            error_code: Some(ErrorCode::MissingAppId),
+            ..
+        } => {}
+        other => panic!("expected MISSING_APP_ID refusal, got {other:?}"),
+    }
+
+    running.shutdown().await;
+}

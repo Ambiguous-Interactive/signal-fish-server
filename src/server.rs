@@ -1144,13 +1144,16 @@ impl EnhancedGameServer {
             }
             None => None,
         };
-        let required = security
-            .connect_token
-            .as_ref()
-            .is_some_and(|connect_token| connect_token.required);
-        self.connect_token_keys.replace(verifier);
+        // Store the posture BEFORE the key: arming then publishes
+        // required-with-old-key (a token-less handshake is refused — the
+        // fail-closed direction) for the sub-instant until the key lands;
+        // disarming publishes no-key-with-required (both refusal classes
+        // stay fail-closed) until the posture drops. The reverse order
+        // would open a required-but-unenforced window on arming.
+        let required = security.connect_token_required();
         self.connect_token_required
             .store(required, std::sync::atomic::Ordering::Release);
+        self.connect_token_keys.replace(verifier);
         Ok(security.connect_token.is_some())
     }
 

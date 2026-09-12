@@ -273,12 +273,7 @@ async fn main() -> anyhow::Result<()> {
     // fails on a race with a config rewrite; a failed startup install is
     // fatal (fail closed) rather than a keyless server.
     if game_server.install_connect_token_key(&cfg.security)? {
-        if cfg
-            .security
-            .connect_token
-            .as_ref()
-            .is_some_and(|connect_token| connect_token.required)
-        {
+        if cfg.security.connect_token_required() {
             tracing::info!(
                 "Connect-token verification enabled and required (security.connect_token); \
                  token-less handshakes are refused with CONNECT_TOKEN_REQUIRED"
@@ -698,12 +693,7 @@ async fn reload_allowed_apps_from_config(
     // enforcement posture (issue #574) reloads with the key.
     match server.install_connect_token_key(&cfg.security) {
         Ok(true) => {
-            if cfg
-                .security
-                .connect_token
-                .as_ref()
-                .is_some_and(|connect_token| connect_token.required)
-            {
+            if cfg.security.connect_token_required() {
                 tracing::info!(
                     "SIGHUP reload: connect-token verification enabled and required; \
                      token-less handshakes are refused with CONNECT_TOKEN_REQUIRED"
@@ -1495,5 +1485,36 @@ mod connect_token_reload_tests {
             server.verify_connect_token("app", &mint(&second, "app", 60)),
             Err(signal_fish_server::security::connect_token::ConnectTokenError::NoKeyConfigured)
         ));
+    }
+
+    /// The enforcement posture (issue #574) reloads with the key on the
+    /// SIGHUP path: arming and disarming flow through the full
+    /// reload-allowed-apps pipeline, and a corrupt-key reload keeps the
+    /// running posture.
+    #[tokio::test]
+    async fn sighup_reload_swaps_the_enforcement_posture_with_the_key() {
+        let server = test_server().await;
+        let signing = SigningKey::from_bytes(&seed(b"posture-reload"));
+        assert!(!server.connect_token_required());
+
+        // Arm through a full SIGHUP reload.
+        let mut required = security_with(&signing);
+        required.connect_token.as_mut().expect("key set").required = true;
+        reload_allowed_apps_from_config(&server, loaded_config(required)).await;
+        assert!(server.connect_token_required());
+
+        // A corrupt-key reload keeps the armed posture.
+        let mut corrupt = security_with(&signing);
+        corrupt.connect_token.as_mut().expect("key set").public_key = "not-a-key".to_string();
+        corrupt.connect_token.as_mut().expect("key set").required = true;
+        reload_allowed_apps_from_config(&server, loaded_config(corrupt)).await;
+        assert!(
+            server.connect_token_required(),
+            "a corrupt reload must keep the running posture"
+        );
+
+        // Disarm through a reload with the flag off (key still configured).
+        reload_allowed_apps_from_config(&server, loaded_config(security_with(&signing))).await;
+        assert!(!server.connect_token_required());
     }
 }

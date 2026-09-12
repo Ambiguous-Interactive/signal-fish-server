@@ -107,7 +107,9 @@ Released SDKs that never send the field stop authenticating, so roll the
 flag out per tenant with the `require_connect_token` flag on an
 `allowed_apps` entry (`true` enforces one app, `false` exempts one app from
 the global default). A required entry with no configured key is a startup
-error.
+error. In open-policy mode the global knob also closes the legacy
+skip-`Authenticate` path: clients that never send `Authenticate` are closed
+with `4001 auth_timeout`.
 
 ## TURN/STUN
 

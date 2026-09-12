@@ -1371,8 +1371,15 @@ pub(super) async fn handle_socket(
         return;
     }
 
-    // Track the frozen wire handshake state; open policy starts complete.
-    let mut app_handshake_complete = !server.config().app_id_allowlist_enabled;
+    // Track the frozen wire handshake state; open policy starts complete —
+    // unless tenant-credential enforcement is armed (issue #574): an
+    // enforcing deployment must not admit legacy skip-`Authenticate`
+    // clients through the endpoint default, so the socket stays incomplete
+    // until a token-bearing `Authenticate` lands (pre-auth application
+    // frames are refused with `MISSING_APP_ID`, and silence hits the
+    // `4001 auth_timeout` deadline).
+    let mut app_handshake_complete =
+        !server.config().app_id_allowlist_enabled && !server.connect_token_required();
     let mut authenticate_processed = false;
     let mut received_application_message = false;
     // Capability publication can precede the two handshake responses in the
@@ -1381,8 +1388,9 @@ pub(super) async fn handle_socket(
     // before ProtocolInfo establishes the negotiated mode.
     let protocol_handshake_complete = Arc::new(AtomicBool::new(false));
 
-    // With an open app-ID policy, legacy clients may skip Authenticate entirely. In
-    // that mode the endpoint default still applies, so `/v3/ws` starts as v3
+    // With an open app-ID policy, legacy clients may skip Authenticate entirely
+    // (when tenant-credential enforcement is NOT armed — see above). In that
+    // mode the endpoint default still applies, so `/v3/ws` starts as v3
     // relay-only while `/v2/ws` remains pure v2. A later first Authenticate can
     // still refine transports/topologies.
     if app_handshake_complete {
@@ -2221,10 +2229,8 @@ pub(super) async fn handle_socket(
                                             slow_consumer_timeout,
                                             &active_player_id,
                                             ServerMessage::AuthenticationError {
-                                                error: "A connect_token is required to \
-                                                        authenticate this application. Obtain \
-                                                        a token from the game's backend and \
-                                                        retry."
+                                                error: ErrorCode::ConnectTokenRequired
+                                                    .description()
                                                     .to_string(),
                                                 error_code: ErrorCode::ConnectTokenRequired,
                                             },

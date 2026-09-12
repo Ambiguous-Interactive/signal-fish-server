@@ -1288,3 +1288,42 @@ async fn connect_token_required_refusal_loop_exhausting_the_reply_budget_closes_
     assert_eq!(reason, "inbound_rate_limited");
     running_server.shutdown().await;
 }
+
+/// With the issue-#574 enforcement posture armed, an open-policy socket that
+/// never sends `Authenticate` is no longer admitted through the endpoint
+/// default: the handshake starts incomplete and silence hits the
+/// `4001 auth_timeout` deadline like any enforced-mode connection.
+#[tokio::test]
+async fn open_mode_enforcement_closes_silent_sockets_with_4001_auth_timeout() {
+    use base64::Engine as _;
+    use ed25519_dalek::SigningKey;
+    use sha2::{Digest, Sha256};
+
+    let mut config = base_config();
+    config.websocket_config.auth_timeout_secs = 5;
+    let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
+
+    let trusted = SigningKey::from_bytes(&Sha256::digest(b"open-required").into());
+    let security = signal_fish_server::config::SecurityConfig {
+        connect_token: Some(signal_fish_server::config::ConnectTokenConfig {
+            public_key: base64::engine::general_purpose::STANDARD.encode(trusted.verifying_key()),
+            public_key_path: None,
+            required: true,
+        }),
+        ..signal_fish_server::config::SecurityConfig::default()
+    };
+    server
+        .install_connect_token_key(&security)
+        .expect("test key installs");
+
+    let running_server = start_server(server).await;
+    let mut ws = connect(running_server.addr()).await;
+
+    let (code, reason) = read_close_frame(&mut ws, "open-mode enforcement deadline").await;
+    assert_eq!(
+        code, 4001,
+        "an uncredentialed silent socket must hit the auth deadline ({reason})"
+    );
+    assert_eq!(reason, "auth_timeout");
+    running_server.shutdown().await;
+}

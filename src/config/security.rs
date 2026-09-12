@@ -137,6 +137,18 @@ pub struct SecurityConfig {
     pub connect_token: Option<ConnectTokenConfig>,
 }
 
+impl SecurityConfig {
+    /// The server-global tenant-credential enforcement default (issue
+    /// #574): `security.connect_token.required`. `false` when the block is
+    /// absent (the flag lives inside it, so it cannot exist without a key).
+    #[must_use]
+    pub fn connect_token_required(&self) -> bool {
+        self.connect_token
+            .as_ref()
+            .is_some_and(|connect_token| connect_token.required)
+    }
+}
+
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
@@ -185,8 +197,10 @@ pub struct ConnectTokenConfig {
     /// overrides this default per tenant (`Some(false)` opts that app out
     /// of an enforced deployment, `Some(true)` enforces a single app).
     /// Open-policy mode has no registry, so only this global default
-    /// reaches it. Enforcement posture reloads on `SIGHUP` together with
-    /// the verification key.
+    /// reaches it; arming it there also closes the legacy
+    /// skip-`Authenticate` path (the handshake must complete within the
+    /// auth deadline). Enforcement posture reloads on `SIGHUP` together
+    /// with the verification key.
     #[serde(default)]
     pub required: bool,
 }

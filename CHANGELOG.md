@@ -19,7 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`true` enforces one app under a lax deployment, `false` exempts one app
   from an enforcing deployment; `None` inherits the global default). The
   refusal is retryable and budget-charged like every handshake refusal, and
-  exhausting it closes `4006 inbound_rate_limited`. The posture installs
+  exhausting it closes `4006 inbound_rate_limited`. In open-policy mode the
+  global knob also closes the legacy skip-`Authenticate` path: application
+  frames before `Authenticate` are refused with `MISSING_APP_ID`, and a
+  socket that never authenticates is closed with `4001 auth_timeout`, so
+  released clients that skip the handshake stop working under enforcement.
+  The posture installs
   and reloads on SIGHUP together with the verification key; a failed
   (corrupt-key) reload keeps the running posture. Startup validation (and
   the SIGHUP gate) rejects a `require_connect_token: true` entry with no
