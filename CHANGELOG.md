@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Optional tenant-credential enforcement (issue #574): a deployment can now
+  make the `connect_token` field mandatory server-side. The server-global
+  knob `security.connect_token.required` (default `false`) refuses a
+  token-less `Authenticate` with the new `CONNECT_TOKEN_REQUIRED` error code
+  instead of falling back to public-`app_id` semantics; it reaches every
+  mode, including open-policy mode where no allowlist registry exists. The
+  per-tenant rollout uses `require_connect_token` on an `allowed_apps` entry
+  (`true` enforces one app under a lax deployment, `false` exempts one app
+  from an enforcing deployment; `None` inherits the global default). The
+  refusal is retryable and budget-charged like every handshake refusal, and
+  exhausting it closes `4006 inbound_rate_limited`. The posture installs
+  and reloads on SIGHUP together with the verification key; a failed
+  (corrupt-key) reload keeps the running posture. Startup validation (and
+  the SIGHUP gate) rejects a `require_connect_token: true` entry with no
+  verification key configured — dead config that could never admit.
+  Documented in `docs/authentication.md`, the protocol reference, and the
+  error-code reference.
 - Optional tenant `connect_token` verification (issue #517): `Authenticate`
   gains one optional field, `connect_token`, minted and Ed25519-signed by the
   deployment's control plane and verified against a configured public key

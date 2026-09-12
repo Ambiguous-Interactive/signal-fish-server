@@ -131,6 +131,7 @@ mod tests {
             max_players_per_room: None,
             rate_limit_per_minute: None,
             max_relay_bytes: None,
+            require_connect_token: None,
         }];
         config.session.ice_servers = vec![IceServer {
             urls: vec!["turn:turn.example.com:3478".to_string()],

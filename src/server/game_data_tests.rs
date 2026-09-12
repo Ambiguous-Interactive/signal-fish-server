@@ -689,6 +689,7 @@ mod admission_and_budget {
             max_players_per_room: None,
             rate_limit_per_minute: None,
             max_relay_bytes: None,
+            require_connect_token: None,
             rate_limits: crate::auth::middleware::RateLimits {
                 per_minute: 1000,
                 per_hour: 60_000,
@@ -806,6 +807,7 @@ mod admission_and_budget {
             max_players_per_room: None,
             rate_limit_per_minute: None,
             max_relay_bytes: Some(300),
+            require_connect_token: None,
             rate_limits: RateLimits {
                 per_minute: 1000,
                 per_hour: 60_000,
@@ -820,6 +822,7 @@ mod admission_and_budget {
             max_players_per_room: None,
             rate_limit_per_minute: None,
             max_relay_bytes: None,
+            require_connect_token: None,
             rate_limits: RateLimits {
                 per_minute: 1000,
                 per_hour: 60_000,
@@ -1000,6 +1003,7 @@ mod admission_and_budget {
             // the wire path never sets one, and this test pins that even a
             // hand-built one is ignored in open mode.
             max_relay_bytes: Some(u64::MAX),
+            require_connect_token: None,
             rate_limits: RateLimits {
                 per_minute: 1000,
                 per_hour: 60_000,

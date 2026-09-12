@@ -237,6 +237,7 @@ mod constructor_validation_tests {
                         max_players_per_room: None,
                         rate_limit_per_minute: None,
                         max_relay_bytes: None,
+                        require_connect_token: None,
                     });
                 },
                 expected: "allowed_apps[0].app_name must not be blank",
@@ -251,6 +252,7 @@ mod constructor_validation_tests {
                         max_players_per_room: None,
                         rate_limit_per_minute: None,
                         max_relay_bytes: None,
+                        require_connect_token: None,
                     });
                 },
                 expected: "allowed_apps[0].app_id contains control characters",
@@ -265,6 +267,7 @@ mod constructor_validation_tests {
                         max_players_per_room: None,
                         rate_limit_per_minute: None,
                         max_relay_bytes: None,
+                        require_connect_token: None,
                     });
                 },
                 expected: "allowed_apps[0].app_id contains control characters or exceeds",
@@ -443,6 +446,13 @@ pub struct EnhancedGameServer {
     /// startup and on SIGHUP reload); empty until then, which refuses every
     /// presented token fail-closed.
     connect_token_keys: crate::security::connect_token::ConnectTokenKeyState,
+    /// Server-global tenant-credential enforcement posture (issue #574):
+    /// `security.connect_token.required`, installed with the key by the
+    /// embedding layer. Applications without a per-app
+    /// `require_connect_token` override inherit this flag; a token-less
+    /// `Authenticate` for such an application is refused with
+    /// `CONNECT_TOKEN_REQUIRED`.
+    connect_token_required: std::sync::atomic::AtomicBool,
     /// Mapping from room IDs to owning application IDs (for relay policies)
     room_applications: Arc<DashMap<RoomId, Uuid>>,
     /// Sticky per-room session decision recorded at finalize (protocol v3):
@@ -812,6 +822,7 @@ impl EnhancedGameServer {
             reconnection_manager,
             app_id_allowlist,
             connect_token_keys: crate::security::connect_token::ConnectTokenKeyState::default(),
+            connect_token_required: std::sync::atomic::AtomicBool::new(false),
             room_applications,
             active_session_plans: Arc::new(DashMap::new()),
             pending_durable_player_detaches: Arc::new(DashMap::new()),
@@ -1112,11 +1123,13 @@ impl EnhancedGameServer {
     /// Called by the embedding layer at startup and on SIGHUP reload. The
     /// key is public material; the private key stays in the control plane.
     /// Removing a previously installed key is deliberate: tokens are refused
-    /// fail-closed while no key is configured. Returns whether a key is now
-    /// active, so callers can log the posture change.
+    /// fail-closed while no key is configured. Also installs the
+    /// server-global enforcement posture (`security.connect_token.required`,
+    /// issue #574) with the key. Returns whether a key is now active, so
+    /// callers can log the posture change.
     ///
-    /// Fails without touching the running key when the configured key does
-    /// not parse, so a reload with a corrupt key keeps the current key.
+    /// Fails without touching the running key or posture when the configured
+    /// key does not parse, so a reload with a corrupt key keeps both.
     pub fn install_connect_token_key(
         &self,
         security: &crate::config::SecurityConfig,
@@ -1131,7 +1144,13 @@ impl EnhancedGameServer {
             }
             None => None,
         };
+        let required = security
+            .connect_token
+            .as_ref()
+            .is_some_and(|connect_token| connect_token.required);
         self.connect_token_keys.replace(verifier);
+        self.connect_token_required
+            .store(required, std::sync::atomic::Ordering::Release);
         Ok(security.connect_token.is_some())
     }
 
@@ -1141,6 +1160,16 @@ impl EnhancedGameServer {
     #[must_use]
     pub fn connect_token_verification_enabled(&self) -> bool {
         self.connect_token_keys.current().is_some()
+    }
+
+    /// The server-global tenant-credential enforcement posture (issue
+    /// #574): `security.connect_token.required` as installed by the
+    /// embedding layer. Applications whose allowlist entry carries no
+    /// per-app `require_connect_token` override inherit this flag.
+    #[must_use]
+    pub fn connect_token_required(&self) -> bool {
+        self.connect_token_required
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Verify one presented tenant `connect_token` against the configured
@@ -4729,6 +4758,7 @@ mod relay_projection_cache_tests {
             max_players_per_room: None,
             rate_limit_per_minute: Some(1),
             max_relay_bytes: None,
+            require_connect_token: None,
         }];
         let server = super::EnhancedGameServer::new(
             config,
@@ -4833,6 +4863,7 @@ mod relay_projection_cache_tests {
                 max_players_per_room: None,
                 rate_limit_per_minute: None,
                 max_relay_bytes: None,
+                require_connect_token: None,
             }
         }
 
@@ -5107,6 +5138,7 @@ mod connect_token_tests {
         crate::config::ConnectTokenConfig {
             public_key: base64::engine::general_purpose::STANDARD.encode(signing.verifying_key()),
             public_key_path: None,
+            required: false,
         }
     }
 
@@ -5222,6 +5254,7 @@ mod connect_token_tests {
             connect_token: Some(crate::config::ConnectTokenConfig {
                 public_key: "not-a-valid-key".to_string(),
                 public_key_path: None,
+                required: false,
             }),
             ..crate::config::SecurityConfig::default()
         };
@@ -5239,5 +5272,55 @@ mod connect_token_tests {
         server
             .verify_connect_token("app", &token)
             .expect("the running key survives the failed install");
+    }
+
+    /// The server-global enforcement posture (issue #574) installs with the
+    /// key and survives a failed install untouched, exactly like the key
+    /// itself.
+    #[tokio::test]
+    async fn enforcement_posture_installs_and_survives_failed_installs() {
+        let server = test_server().await.expect("server constructs");
+        assert!(
+            !server.connect_token_required(),
+            "no posture is armed on a fresh server"
+        );
+
+        let signing = SigningKey::from_bytes(&seed(b"posture-key"));
+        let mut security = crate::config::SecurityConfig {
+            connect_token: Some(key_config(&signing)),
+            ..crate::config::SecurityConfig::default()
+        };
+        security.connect_token.as_mut().expect("key set").required = true;
+        server
+            .install_connect_token_key(&security)
+            .expect("valid key installs");
+        assert!(server.connect_token_required());
+
+        // A corrupt install (required arm, but a broken key) is rejected
+        // before either store is touched: the running posture stays armed.
+        let mut corrupt = crate::config::SecurityConfig {
+            connect_token: Some(key_config(&signing)),
+            ..crate::config::SecurityConfig::default()
+        };
+        corrupt.connect_token.as_mut().expect("key set").public_key = "not-a-valid-key".to_string();
+        corrupt.connect_token.as_mut().expect("key set").required = true;
+        assert!(server.install_connect_token_key(&corrupt).is_err());
+        assert!(server.connect_token_required());
+
+        // Re-arming with the flag off (key still configured) disarms it.
+        server
+            .install_connect_token_key(&security_with_key(&signing))
+            .expect("optional posture installs");
+        assert!(!server.connect_token_required());
+
+        // Removing the block disarms a formerly-required deployment too.
+        let removed = crate::config::SecurityConfig {
+            connect_token: None,
+            ..crate::config::SecurityConfig::default()
+        };
+        server
+            .install_connect_token_key(&removed)
+            .expect("removal applies");
+        assert!(!server.connect_token_required());
     }
 }

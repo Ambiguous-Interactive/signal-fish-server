@@ -160,6 +160,7 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
         reconnection_manager,
         app_id_allowlist: Arc::new(crate::auth::AppIdAllowlist::disabled()),
         connect_token_keys: crate::security::connect_token::ConnectTokenKeyState::default(),
+        connect_token_required: std::sync::atomic::AtomicBool::new(false),
         room_applications,
         active_session_plans: Arc::new(DashMap::new()),
         pending_durable_player_detaches: Arc::new(DashMap::new()),

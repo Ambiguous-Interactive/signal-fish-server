@@ -11,7 +11,7 @@ do not (see [the two invariants](../concepts/protocol-versions.md#the-two-invari
 
 | Feature | Protocol version | Server config required | Client support required |
 | --- | --- | --- | --- |
-| Connect-token tenant authentication | both | `security.connect_token.public_key` (or `public_key_path`); optional and absent by default | Obtain a control-plane-minted token from the game's backend; send `Authenticate` with `connect_token`; handle `CONNECT_TOKEN_INVALID` on `AuthenticationError` and retry with a fresh token |
+| Connect-token tenant authentication | both | `security.connect_token.public_key` (or `public_key_path`); optional and absent by default. `security.connect_token.required` (or a per-app `require_connect_token` registration) makes the credential mandatory | Obtain a control-plane-minted token from the game's backend; send `Authenticate` with `connect_token`; handle `CONNECT_TOKEN_INVALID` and `CONNECT_TOKEN_REQUIRED` on `AuthenticationError` and retry with a fresh token |
 | Lobby ready-up / start | both | none (always available); `max_players` (via `JoinRoom`) is a ceiling, not a required count | Send `PlayerReady` to toggle readiness; send `StartGame` to finalize once every current player is ready; handle `LobbyStateChanged` and `GameStarting` |
 | Reconnection | both | `server.enable_reconnection` (default `true`); `server.reconnection_window`, `server.event_buffer_size` tune it | Store `player_id` / `room_id` / `auth_token`; send `Reconnect`; handle `Reconnected` / `ReconnectionFailed` |
 | Spectators | both | none (always available) | Send `JoinAsSpectator` / `LeaveSpectator`; handle `SpectatorJoined` and related events |

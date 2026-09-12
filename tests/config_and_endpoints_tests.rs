@@ -2556,6 +2556,7 @@ fn test_config_validation_scenarios() {
                     max_players_per_room: None,
                     rate_limit_per_minute: None,
                     max_relay_bytes: None,
+                    require_connect_token: None,
                 }];
             }),
             false,

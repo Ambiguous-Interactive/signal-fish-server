@@ -169,6 +169,15 @@ pub enum ErrorCode {
     /// binding). The reason is in the `error` text; the token itself is never
     /// quoted.
     ConnectTokenInvalid,
+    // Authentication errors (1xxx category). Appended at the END; see the
+    // signaling-errors note above. Raised by tenant `connect_token`
+    // enforcement (issue #574) when the deployment requires the credential.
+    /// `Authenticate` carried no `connect_token`, but this deployment (or
+    /// this application's registration) requires one. Obtain a token from
+    /// the game's backend and retry. Distinct from
+    /// [`Self::ConnectTokenInvalid`] so clients can tell "obtain a token
+    /// first" from "your token is bad".
+    ConnectTokenRequired,
 }
 
 impl ErrorCode {
@@ -398,6 +407,9 @@ impl ErrorCode {
             }
             Self::ConnectTokenInvalid => {
                 "The optional connect token was rejected (malformed, wrong signature, expired, or minted for a different app id). Obtain a fresh token from your game's backend."
+            }
+            Self::ConnectTokenRequired => {
+                "This deployment requires a connect token for this application, but Authenticate carried none. Obtain a token from your game's backend and send it in the connect_token field."
             }
         }
     }

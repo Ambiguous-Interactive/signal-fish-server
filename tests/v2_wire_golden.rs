@@ -1358,6 +1358,10 @@ fn golden_enum_error_code_all_variants() {
             r#""TRANSFER_TARGET_NOT_FOUND""#,
         ),
         (ErrorCode::ConnectTokenInvalid, r#""CONNECT_TOKEN_INVALID""#),
+        (
+            ErrorCode::ConnectTokenRequired,
+            r#""CONNECT_TOKEN_REQUIRED""#,
+        ),
     ];
     for (code, expected) in cases {
         assert_json_str(code, expected);
@@ -1427,12 +1431,13 @@ fn golden_enum_error_code_all_variants() {
         | ErrorCode::PasswordRequired
         | ErrorCode::Banned
         | ErrorCode::TransferTargetNotFound
-        | ErrorCode::ConnectTokenInvalid => (),
+        | ErrorCode::ConnectTokenInvalid
+        | ErrorCode::ConnectTokenRequired => (),
     };
     covered(ErrorCode::Unauthorized);
     assert_eq!(
         cases.len(),
-        61,
+        62,
         "golden table entry count must track the ErrorCode variant count \
          (update alongside the exhaustive guard above)"
     );

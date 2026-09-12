@@ -37,6 +37,7 @@ fn sample_app_entry() -> AppRegistrationEntry {
         max_players_per_room: Some(8),
         rate_limit_per_minute: Some(60),
         max_relay_bytes: None,
+        require_connect_token: None,
     }
 }
 
@@ -48,6 +49,7 @@ fn secondary_app_entry() -> AppRegistrationEntry {
         max_players_per_room: None,
         rate_limit_per_minute: None,
         max_relay_bytes: None,
+        require_connect_token: None,
     }
 }
 
@@ -59,6 +61,7 @@ fn rate_limited_app_entry(limit: u32) -> AppRegistrationEntry {
         max_players_per_room: Some(4),
         rate_limit_per_minute: Some(limit),
         max_relay_bytes: None,
+        require_connect_token: None,
     }
 }
 
@@ -269,6 +272,7 @@ async fn test_rate_limits_are_per_app() {
             max_players_per_room: None,
             rate_limit_per_minute: Some(2),
             max_relay_bytes: None,
+            require_connect_token: None,
         },
     ];
     let mw = AppIdAllowlist::new(entries).expect("unique app IDs");
@@ -332,6 +336,7 @@ async fn test_app_context_rate_limits_are_computed_correctly() {
         max_players_per_room: None,
         rate_limit_per_minute: Some(10),
         max_relay_bytes: None,
+        require_connect_token: None,
     };
     let mw = AppIdAllowlist::new(vec![entry]).expect("unique app IDs");
 
@@ -470,6 +475,7 @@ async fn real_websocket_handshake_binds_room_and_spectator_policy_to_public_app_
             max_players_per_room: Some(8),
             rate_limit_per_minute: None,
             max_relay_bytes: None,
+            require_connect_token: None,
         },
         AppRegistrationEntry {
             app_id: "app-b".to_string(),
@@ -478,6 +484,7 @@ async fn real_websocket_handshake_binds_room_and_spectator_policy_to_public_app_
             max_players_per_room: Some(8),
             rate_limit_per_minute: None,
             max_relay_bytes: None,
+            require_connect_token: None,
         },
     ];
     let server = signal_fish_server::server::EnhancedGameServer::new(
@@ -742,8 +749,6 @@ async fn connect_socket(addr: std::net::SocketAddr) -> WsStream {
 
 /// A server with one allowlisted app and the test verification key installed.
 async fn connect_token_server() -> (RunningTestServer, ed25519_dalek::SigningKey) {
-    let mut config = test_server_config();
-    config.app_id_allowlist_enabled = true;
     let apps = vec![AppRegistrationEntry {
         app_id: "token-app".to_string(),
         app_name: "Token App".to_string(),
@@ -751,7 +756,31 @@ async fn connect_token_server() -> (RunningTestServer, ed25519_dalek::SigningKey
         max_players_per_room: Some(8),
         rate_limit_per_minute: None,
         max_relay_bytes: None,
+        require_connect_token: None,
     }];
+    let signing = connect_token_support::signing_key(b"e2e-control-plane");
+    let security = signal_fish_server::config::SecurityConfig {
+        connect_token: Some(signal_fish_server::config::ConnectTokenConfig {
+            public_key: connect_token_support::encoded_public_key(&signing),
+            public_key_path: None,
+            required: false,
+        }),
+        ..signal_fish_server::config::SecurityConfig::default()
+    };
+    let running = spawn_connect_token_server(apps, Some(security), true).await;
+    (running, signing)
+}
+
+/// Spawn an allowlist-enabled server and install the optional tenant
+/// connect-token configuration (`None` installs no key). This is the shared
+/// seam for the issue-#574 enforcement tests.
+async fn spawn_connect_token_server(
+    apps: Vec<AppRegistrationEntry>,
+    security: Option<signal_fish_server::config::SecurityConfig>,
+    allowlist_enabled: bool,
+) -> RunningTestServer {
+    let mut config = test_server_config();
+    config.app_id_allowlist_enabled = allowlist_enabled;
     let server = signal_fish_server::server::EnhancedGameServer::new(
         config,
         signal_fish_server::config::ProtocolConfig::default(),
@@ -766,20 +795,25 @@ async fn connect_token_server() -> (RunningTestServer, ed25519_dalek::SigningKey
     )
     .await
     .expect("construct server");
-    let signing = connect_token_support::signing_key(b"e2e-control-plane");
-    let security = signal_fish_server::config::SecurityConfig {
-        connect_token: Some(signal_fish_server::config::ConnectTokenConfig {
-            public_key: connect_token_support::encoded_public_key(&signing),
-            public_key_path: None,
-        }),
-        ..signal_fish_server::config::SecurityConfig::default()
-    };
-    server
-        .install_connect_token_key(&security)
-        .expect("test key installs");
+    if let Some(security) = security {
+        server
+            .install_connect_token_key(&security)
+            .expect("test key installs");
+    }
     let router = create_router("http://localhost:3000").with_state(server.clone());
-    let running = RunningTestServer::spawn(server, router).await;
-    (running, signing)
+    RunningTestServer::spawn(server, router).await
+}
+
+fn registered_app(app_id: &str, require_connect_token: Option<bool>) -> AppRegistrationEntry {
+    AppRegistrationEntry {
+        app_id: app_id.to_string(),
+        app_name: format!("App {app_id}"),
+        max_rooms: Some(10),
+        max_players_per_room: Some(8),
+        rate_limit_per_minute: None,
+        max_relay_bytes: None,
+        require_connect_token,
+    }
 }
 
 #[tokio::test]
@@ -904,6 +938,7 @@ async fn token_without_configured_key_is_refused_fail_closed() {
         max_players_per_room: Some(8),
         rate_limit_per_minute: None,
         max_relay_bytes: None,
+        require_connect_token: None,
     }];
     let server = signal_fish_server::server::EnhancedGameServer::new(
         config,
@@ -938,6 +973,155 @@ async fn token_without_configured_key_is_refused_fail_closed() {
     // field = today's public-app_id semantics.
     assert!(matches!(
         attempt_authenticate(&mut ws, "token-app", None).await,
+        AuthHandshake::Accepted
+    ));
+
+    running.shutdown().await;
+}
+
+/// The issue-#574 enforcement posture, layered as ratified: the
+/// server-global `required` default applies to applications without a
+/// per-app override, and a per-app `Some(false)` opts one tenant out of an
+/// otherwise-enforcing deployment. A token-less handshake is refused with
+/// the distinct `CONNECT_TOKEN_REQUIRED` code and the remedy (presenting a
+/// valid token) works on the same socket.
+#[tokio::test]
+async fn required_enforcement_layers_global_default_and_per_app_overrides() {
+    let signing = connect_token_support::signing_key(b"e2e-control-plane");
+    let security = signal_fish_server::config::SecurityConfig {
+        connect_token: Some(signal_fish_server::config::ConnectTokenConfig {
+            public_key: connect_token_support::encoded_public_key(&signing),
+            public_key_path: None,
+            required: true,
+        }),
+        ..signal_fish_server::config::SecurityConfig::default()
+    };
+    let running = spawn_connect_token_server(
+        vec![
+            registered_app("gated-app", None),
+            registered_app("exempt-app", Some(false)),
+        ],
+        Some(security),
+        true,
+    )
+    .await;
+
+    // The default-inheriting app is refused with the dedicated code.
+    let mut ws = connect_socket(running.addr()).await;
+    assert!(matches!(
+        attempt_authenticate(&mut ws, "gated-app", None).await,
+        AuthHandshake::Rejected(ErrorCode::ConnectTokenRequired)
+    ));
+
+    // The refusal is retryable: presenting a valid token completes on the
+    // same socket.
+    assert!(matches!(
+        attempt_authenticate(
+            &mut ws,
+            "gated-app",
+            Some(connect_token_support::mint(&signing, "gated-app", 300, "n")),
+        )
+        .await,
+        AuthHandshake::Accepted
+    ));
+    drop(ws);
+
+    // The per-app opt-out overrides the global default for its tenant only.
+    let mut ws = connect_socket(running.addr()).await;
+    assert!(matches!(
+        attempt_authenticate(&mut ws, "exempt-app", None).await,
+        AuthHandshake::Accepted
+    ));
+
+    running.shutdown().await;
+}
+
+/// A per-app `require_connect_token = Some(true)` enforces a single tenant
+/// while the server-global default stays off: unflagged apps keep the
+/// ratified absent-field-is-today semantics, and the flagged app accepts a
+/// valid token.
+#[tokio::test]
+async fn per_app_flag_enforces_only_the_flagged_tenant() {
+    let signing = connect_token_support::signing_key(b"e2e-control-plane");
+    let security = signal_fish_server::config::SecurityConfig {
+        connect_token: Some(signal_fish_server::config::ConnectTokenConfig {
+            public_key: connect_token_support::encoded_public_key(&signing),
+            public_key_path: None,
+            required: false,
+        }),
+        ..signal_fish_server::config::SecurityConfig::default()
+    };
+    let running = spawn_connect_token_server(
+        vec![
+            registered_app("gated-app", Some(true)),
+            registered_app("plain-app", None),
+        ],
+        Some(security),
+        true,
+    )
+    .await;
+
+    // The flagged app refuses the token-less handshake...
+    let mut ws = connect_socket(running.addr()).await;
+    assert!(matches!(
+        attempt_authenticate(&mut ws, "gated-app", None).await,
+        AuthHandshake::Rejected(ErrorCode::ConnectTokenRequired)
+    ));
+    // ...and accepts its credential on the same socket.
+    assert!(matches!(
+        attempt_authenticate(
+            &mut ws,
+            "gated-app",
+            Some(connect_token_support::mint(&signing, "gated-app", 300, "n")),
+        )
+        .await,
+        AuthHandshake::Accepted
+    ));
+    drop(ws);
+
+    // The unflagged app keeps public-app_id semantics (global default off).
+    let mut ws = connect_socket(running.addr()).await;
+    assert!(matches!(
+        attempt_authenticate(&mut ws, "plain-app", None).await,
+        AuthHandshake::Accepted
+    ));
+
+    running.shutdown().await;
+}
+
+/// The global knob is the only one that reaches open-policy mode: there is
+/// no registry, so every token-less `Authenticate` is refused while the
+/// posture is armed, and a valid token admits.
+#[tokio::test]
+async fn global_required_posture_reaches_open_mode() {
+    let signing = connect_token_support::signing_key(b"e2e-control-plane");
+    let security = signal_fish_server::config::SecurityConfig {
+        connect_token: Some(signal_fish_server::config::ConnectTokenConfig {
+            public_key: connect_token_support::encoded_public_key(&signing),
+            public_key_path: None,
+            required: true,
+        }),
+        ..signal_fish_server::config::SecurityConfig::default()
+    };
+    let running = spawn_connect_token_server(Vec::new(), Some(security), false).await;
+
+    let mut ws = connect_socket(running.addr()).await;
+    assert!(matches!(
+        attempt_authenticate(&mut ws, "open-label", None).await,
+        AuthHandshake::Rejected(ErrorCode::ConnectTokenRequired)
+    ));
+    assert!(matches!(
+        attempt_authenticate(
+            &mut ws,
+            "open-label",
+            Some(connect_token_support::mint(
+                &signing,
+                "open-label",
+                300,
+                "n"
+            )),
+        )
+        .await,
         AuthHandshake::Accepted
     ));
 

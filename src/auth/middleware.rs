@@ -59,6 +59,12 @@ pub struct AppContext {
     /// Optional per-sender relay byte budget override (issue #530); `None`
     /// falls back to the server-wide `rate_limit.max_relay_bytes`.
     pub max_relay_bytes: Option<u64>,
+    /// Optional per-app tenant-credential override (issue #574); `None`
+    /// falls back to the server-global `security.connect_token.required`.
+    /// Open-policy contexts are always `None`: they resolve from a
+    /// client-chosen label, so they can only ever inherit the global
+    /// default.
+    pub require_connect_token: Option<bool>,
     pub rate_limits: RateLimits,
 }
 
@@ -256,6 +262,7 @@ impl AppIdAllowlist {
                 max_players_per_room: entry.max_players_per_room,
                 rate_limit_per_minute: entry.rate_limit_per_minute,
                 max_relay_bytes: entry.max_relay_bytes,
+                require_connect_token: entry.require_connect_token,
                 rate_limits: RateLimits {
                     per_minute,
                     per_hour: per_minute.saturating_mul(60),
@@ -519,8 +526,12 @@ impl AppIdAllowlist {
             // Open-mode identity is a client-chosen label (see below), so it
             // can never carry a per-app relay budget override (issue #530):
             // a spoofable context must not be able to raise or lower the
-            // server-wide budget.
+            // server-wide budget. The same holds for a per-app
+            // tenant-credential requirement (issue #574): an open-mode label
+            // resolves no registry entry, so it can only inherit the
+            // server-global `security.connect_token.required` default.
             max_relay_bytes: None,
+            require_connect_token: None,
             rate_limits: RateLimits {
                 per_minute: DEFAULT_RATE_LIMIT_PER_MINUTE,
                 per_hour: DEFAULT_RATE_LIMIT_PER_HOUR,
@@ -561,6 +572,7 @@ mod tests {
                 max_players_per_room: Some(8),
                 rate_limit_per_minute: Some(60),
                 max_relay_bytes: None,
+                require_connect_token: None,
             },
             AppRegistrationEntry {
                 app_id: "game-2".to_string(),
@@ -569,6 +581,7 @@ mod tests {
                 max_players_per_room: None,
                 rate_limit_per_minute: None,
                 max_relay_bytes: None,
+                require_connect_token: None,
             },
         ]
     }
@@ -595,6 +608,7 @@ mod tests {
             max_players_per_room: None,
             rate_limit_per_minute: None,
             max_relay_bytes: Some(4096),
+            require_connect_token: None,
         };
         let untiered = AppRegistrationEntry {
             app_id: "game-1".to_string(),
@@ -603,6 +617,7 @@ mod tests {
             max_players_per_room: None,
             rate_limit_per_minute: None,
             max_relay_bytes: None,
+            require_connect_token: None,
         };
 
         let mw = AppIdAllowlist::new(vec![tiered, untiered]).expect("unique app IDs");
@@ -626,6 +641,57 @@ mod tests {
         assert_eq!(
             resolved.max_relay_bytes, None,
             "open-mode contexts never carry an override: the label is spoofable"
+        );
+    }
+
+    /// The per-app tenant-credential override (#574) resolves from the
+    /// allowlist entry into the connection's [`AppContext`]; an entry
+    /// without a flag — and every open-policy context — resolves with
+    /// `None` so those applications inherit the server-global
+    /// `security.connect_token.required` default.
+    #[tokio::test]
+    async fn per_app_require_connect_token_projects_into_the_context() {
+        let gated = AppRegistrationEntry {
+            app_id: "gated-game".to_string(),
+            app_name: "Gated Game".to_string(),
+            max_rooms: None,
+            max_players_per_room: None,
+            rate_limit_per_minute: None,
+            max_relay_bytes: None,
+            require_connect_token: Some(true),
+        };
+        let exempt = AppRegistrationEntry {
+            app_id: "exempt-game".to_string(),
+            app_name: "Exempt Game".to_string(),
+            max_rooms: None,
+            max_players_per_room: None,
+            rate_limit_per_minute: None,
+            max_relay_bytes: None,
+            require_connect_token: Some(false),
+        };
+        let inheriting = AppRegistrationEntry {
+            app_id: "game-1".to_string(),
+            app_name: "Test Game".to_string(),
+            max_rooms: None,
+            max_players_per_room: None,
+            rate_limit_per_minute: None,
+            max_relay_bytes: None,
+            require_connect_token: None,
+        };
+
+        let mw = AppIdAllowlist::new(vec![gated, exempt, inheriting]).expect("unique app IDs");
+        let resolved = mw.resolve_app_id("gated-game", LOCALHOST).await.unwrap();
+        assert_eq!(resolved.require_connect_token, Some(true));
+        let resolved = mw.resolve_app_id("exempt-game", LOCALHOST).await.unwrap();
+        assert_eq!(resolved.require_connect_token, Some(false));
+        let resolved = mw.resolve_app_id("game-1", LOCALHOST).await.unwrap();
+        assert_eq!(resolved.require_connect_token, None);
+
+        let open = AppIdAllowlist::disabled();
+        let resolved = open.resolve_app_id("gated-game", LOCALHOST).await.unwrap();
+        assert_eq!(
+            resolved.require_connect_token, None,
+            "open-mode contexts never carry a per-app requirement: the label is spoofable"
         );
     }
 
@@ -662,6 +728,7 @@ mod tests {
                 max_players_per_room: None,
                 rate_limit_per_minute: None,
                 max_relay_bytes: None,
+                require_connect_token: None,
             }]);
             assert!(
                 matches!(constructed, Err(AuthError::InvalidAppId)),
@@ -695,6 +762,7 @@ mod tests {
             max_players_per_room: None,
             rate_limit_per_minute: Some(1),
             max_relay_bytes: None,
+            require_connect_token: None,
         });
 
         assert!(matches!(
@@ -741,6 +809,7 @@ mod tests {
             max_players_per_room: None,
             rate_limit_per_minute: Some(3),
             max_relay_bytes: None,
+            require_connect_token: None,
         }];
         let mw = AppIdAllowlist::new(entries).expect("unique app IDs");
 
@@ -773,6 +842,7 @@ mod tests {
                 max_players_per_room: None,
                 rate_limit_per_minute: Some(limit),
                 max_relay_bytes: None,
+                require_connect_token: None,
             }];
             let mw = AppIdAllowlist::new(entries).expect("unique app IDs");
             let abuser = source_for(0);
@@ -861,6 +931,7 @@ mod tests {
                 max_players_per_room: None,
                 rate_limit_per_minute: Some(4),
                 max_relay_bytes: None,
+                require_connect_token: None,
             },
             AppRegistrationEntry {
                 app_id: "other".to_string(),
@@ -869,6 +940,7 @@ mod tests {
                 max_players_per_room: None,
                 rate_limit_per_minute: Some(2),
                 max_relay_bytes: None,
+                require_connect_token: None,
             },
         ];
         let mw = AppIdAllowlist::new(entries).expect("unique app IDs");
@@ -902,6 +974,7 @@ mod tests {
             max_players_per_room: None,
             rate_limit_per_minute: Some(1),
             max_relay_bytes: None,
+            require_connect_token: None,
         }];
         let metrics = Arc::new(crate::metrics::ServerMetrics::new());
         let mw = AppIdAllowlist::with_metrics(entries, metrics.clone()).expect("unique app IDs");
@@ -933,6 +1006,7 @@ mod tests {
             max_players_per_room: None,
             rate_limit_per_minute: None,
             max_relay_bytes: None,
+            require_connect_token: None,
         }];
         let mw = AppIdAllowlist::new(entries).expect("unique app IDs");
 
@@ -1026,6 +1100,7 @@ mod tests {
             max_players_per_room: None,
             rate_limit_per_minute,
             max_relay_bytes: None,
+            require_connect_token: None,
         }
     }
 

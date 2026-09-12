@@ -717,6 +717,7 @@ async fn connect_token_refusal_loop_exhausting_the_reply_budget_closes_with_4006
         connect_token: Some(signal_fish_server::config::ConnectTokenConfig {
             public_key: base64::engine::general_purpose::STANDARD.encode(trusted.verifying_key()),
             public_key_path: None,
+            required: false,
         }),
         ..signal_fish_server::config::SecurityConfig::default()
     };
@@ -1222,4 +1223,68 @@ async fn authority_kick_closes_target_with_4007() {
     }
 
     running.shutdown().await;
+}
+
+/// The issue-#574 missing-token refusal is the same polite per-frame reply
+/// class: a loop of token-less `Authenticate` frames against an enforcing
+/// deployment must charge the per-connection budget and close with
+/// `4006 inbound_rate_limited` once it is exhausted — an uncredentialed
+/// client cannot buy unbounded replies either.
+#[tokio::test]
+async fn connect_token_required_refusal_loop_exhausting_the_reply_budget_closes_with_4006() {
+    use base64::Engine as _;
+    use ed25519_dalek::SigningKey;
+    use sha2::{Digest, Sha256};
+
+    let mut config = base_config();
+    config.rate_limit_config.max_inbound_error_replies = 3;
+    let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
+
+    let trusted = SigningKey::from_bytes(&Sha256::digest(b"budget-required-trusted").into());
+    let security = signal_fish_server::config::SecurityConfig {
+        connect_token: Some(signal_fish_server::config::ConnectTokenConfig {
+            public_key: base64::engine::general_purpose::STANDARD.encode(trusted.verifying_key()),
+            public_key_path: None,
+            required: true,
+        }),
+        ..signal_fish_server::config::SecurityConfig::default()
+    };
+    server
+        .install_connect_token_key(&security)
+        .expect("test key installs");
+
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
+
+    let mut ws = connect(addr).await;
+
+    let auth = ClientMessage::Authenticate {
+        app_id: "close-code-test".to_string(),
+        connect_token: None,
+        sdk_version: None,
+        platform: None,
+        game_data_format: None,
+        protocol_version: None,
+        supported_transports: None,
+        supported_topologies: None,
+        requested_capabilities: None,
+    };
+    let auth_frame = Message::Text(
+        serde_json::to_string(&auth)
+            .expect("serialize Authenticate")
+            .into(),
+    );
+    for _ in 0..4 {
+        ws.send(auth_frame.clone())
+            .await
+            .expect("send refusing Authenticate");
+    }
+
+    let (code, reason) = read_close_frame(&mut ws, "connect-token-required refusal loop").await;
+    assert_eq!(
+        code, 4006,
+        "missing-token refusal exhaustion must close with 4006 ({reason})"
+    );
+    assert_eq!(reason, "inbound_rate_limited");
+    running_server.shutdown().await;
 }

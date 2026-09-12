@@ -607,6 +607,7 @@ components:
         - BANNED
         - TRANSFER_TARGET_NOT_FOUND
         - CONNECT_TOKEN_INVALID
+        - CONNECT_TOKEN_REQUIRED
 
     ReliableDeliveryCounters:
       type: object
@@ -925,10 +926,13 @@ components:
                 `sfct_v1.<base64url(payload)>.<base64url(signature)>` and
                 signed with the Ed25519 key configured on the server under
                 `security.connect_token.public_key`. Absent field keeps the
-                public-app_id semantics. Only meaningful when the server
-                configures a verification key; every verification failure is
-                reported as CONNECT_TOKEN_INVALID. Never logged or echoed by
-                the server.
+                public-app_id semantics unless the deployment enforces the
+                credential (`security.connect_token.required`, or a per-app
+                `require_connect_token` registration), in which case the
+                token-less handshake is refused with CONNECT_TOKEN_REQUIRED.
+                Only meaningful when the server configures a verification
+                key; every verification failure is reported as
+                CONNECT_TOKEN_INVALID. Never logged or echoed by the server.
             sdk_version: { type: string }
             platform: { type: string }
             game_data_format: { $ref: '#/components/schemas/GameDataEncoding' }

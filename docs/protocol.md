@@ -63,7 +63,9 @@ Optional fields:
   `sfct_v1.<base64url(payload)>.<base64url(signature)>` and Ed25519-signed. Verified against the key configured
   under `security.connect_token.public_key` after the app-ID allowlist resolves; every failure is reported as
   `CONNECT_TOKEN_INVALID` and the connection stays open for a retry with a fresh token. Absent field keeps the
-  public-app_id semantics. See [the credential documentation](authentication.md#optional-tenant-connect-tokens)
+  public-app_id semantics unless the deployment enforces the credential (`security.connect_token.required`,
+  or a per-app `require_connect_token` registration); an enforcing deployment refuses the token-less handshake
+  with `CONNECT_TOKEN_REQUIRED`. See [the credential documentation](authentication.md#optional-tenant-connect-tokens)
   for the exact format, expiry rules, and the accepted replay trade-off
 
 `Authenticate` MUST be the first application message on a connection (and the
@@ -1091,6 +1093,8 @@ Common error codes:
 - `INVALID_APP_ID` - Invalid app ID
 - `CONNECT_TOKEN_INVALID` - The optional `connect_token` failed verification (malformed, wrong signature, expired, or
   minted for a different app id)
+- `CONNECT_TOKEN_REQUIRED` - The deployment or the application's registration requires a `connect_token`, but none
+  was presented
 - `INVALID_DELIVERY_CLASS` - Well-typed but illegal v3 class/key pairing
 - `INVALID_INPUT` - Malformed message or delivery metadata
 

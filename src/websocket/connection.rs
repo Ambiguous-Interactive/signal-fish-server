@@ -2158,13 +2158,20 @@ pub(super) async fn handle_socket(
                                     // Optional tenant credential (issue
                                     // #517): verified after the allowlist
                                     // resolves the app and before any
-                                    // capability negotiation. The refusal
-                                    // is retryable, so it charges the
-                                    // per-connection error-reply budget
-                                    // (issue #518) exactly like the SDK
-                                    // refusal below, and mutates no
-                                    // admission state (`app_handshake_complete`
-                                    // is only committed on full success).
+                                    // capability negotiation. When the
+                                    // deployment (or the resolved app's
+                                    // registration) requires the
+                                    // credential (issue #574), its absence
+                                    // is refused the same way — retryable,
+                                    // so it charges the per-connection
+                                    // error-reply budget (issue #518)
+                                    // exactly like a failed verification,
+                                    // and mutates no admission state
+                                    // (`app_handshake_complete` is only
+                                    // committed on full success).
+                                    let token_required = info
+                                        .require_connect_token
+                                        .unwrap_or_else(|| server_clone.connect_token_required());
                                     if let Some(token) = connect_token.as_deref() {
                                         if let Err(error) =
                                             server_clone.verify_connect_token(&app_id, token)
@@ -2197,6 +2204,34 @@ pub(super) async fn handle_socket(
                                             .await;
                                             continue;
                                         }
+                                    } else if token_required {
+                                        tracing::warn!(
+                                            %active_player_id,
+                                            app_id = %app_id,
+                                            "Connect token required but absent"
+                                        );
+                                        if !server_clone.charge_error_reply(&active_player_id).await
+                                        {
+                                            break;
+                                        }
+                                        let _ = enqueue_connection_message(
+                                            &tx_clone,
+                                            &close_signal,
+                                            &server_clone,
+                                            slow_consumer_timeout,
+                                            &active_player_id,
+                                            ServerMessage::AuthenticationError {
+                                                error: "A connect_token is required to \
+                                                        authenticate this application. Obtain \
+                                                        a token from the game's backend and \
+                                                        retry."
+                                                    .to_string(),
+                                                error_code: ErrorCode::ConnectTokenRequired,
+                                            },
+                                            "connect token required",
+                                        )
+                                        .await;
+                                        continue;
                                     }
 
                                     let compatibility = match server_clone

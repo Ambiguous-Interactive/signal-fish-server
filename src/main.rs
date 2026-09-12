@@ -268,11 +268,24 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     // Install the optional tenant connect-token verification key (issue
-    // #517). Configuration validation already parsed the key, so this only
+    // #517) and the server-global enforcement posture (issue #574).
+    // Configuration validation already parsed the key, so this only
     // fails on a race with a config rewrite; a failed startup install is
     // fatal (fail closed) rather than a keyless server.
     if game_server.install_connect_token_key(&cfg.security)? {
-        tracing::info!("Connect-token verification enabled (security.connect_token)");
+        if cfg
+            .security
+            .connect_token
+            .as_ref()
+            .is_some_and(|connect_token| connect_token.required)
+        {
+            tracing::info!(
+                "Connect-token verification enabled and required (security.connect_token); \
+                 token-less handshakes are refused with CONNECT_TOKEN_REQUIRED"
+            );
+        } else {
+            tracing::info!("Connect-token verification enabled (security.connect_token)");
+        }
     }
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -681,10 +694,23 @@ async fn reload_allowed_apps_from_config(
     // The connect-token verification key reloads with the allowlist (issue
     // #517): the config went through the same load + validation gate, and a
     // failure keeps the running key. Removal (block deleted) is applied
-    // verbatim — presented tokens are then refused fail-closed.
+    // verbatim — presented tokens are then refused fail-closed. The
+    // enforcement posture (issue #574) reloads with the key.
     match server.install_connect_token_key(&cfg.security) {
         Ok(true) => {
-            tracing::info!("SIGHUP reload: connect-token verification enabled");
+            if cfg
+                .security
+                .connect_token
+                .as_ref()
+                .is_some_and(|connect_token| connect_token.required)
+            {
+                tracing::info!(
+                    "SIGHUP reload: connect-token verification enabled and required; \
+                     token-less handshakes are refused with CONNECT_TOKEN_REQUIRED"
+                );
+            } else {
+                tracing::info!("SIGHUP reload: connect-token verification enabled");
+            }
         }
         Ok(false) => {
             tracing::info!(
@@ -1359,6 +1385,7 @@ mod connect_token_reload_tests {
         ConnectTokenConfig {
             public_key: base64::engine::general_purpose::STANDARD.encode(signing.verifying_key()),
             public_key_path: None,
+            required: false,
         }
     }
 
@@ -1447,6 +1474,7 @@ mod connect_token_reload_tests {
             connect_token: Some(ConnectTokenConfig {
                 public_key: "not-a-key".to_string(),
                 public_key_path: None,
+                required: false,
             }),
             ..SecurityConfig::default()
         };
