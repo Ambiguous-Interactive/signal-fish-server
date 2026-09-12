@@ -147,6 +147,19 @@ impl SecurityConfig {
             .as_ref()
             .is_some_and(|connect_token| connect_token.required)
     }
+
+    /// Whether any allowlist registration enforces the tenant credential
+    /// per app (issue #574). Open mode never consults the registry, so the
+    /// answer there is always `false` — per-app flags are inert without
+    /// `enforce_app_id_allowlist`.
+    #[must_use]
+    pub fn any_app_requires_connect_token(&self) -> bool {
+        self.enforce_app_id_allowlist
+            && self
+                .allowed_apps
+                .iter()
+                .any(|app| app.require_connect_token == Some(true))
+    }
 }
 
 impl Default for SecurityConfig {

@@ -71,9 +71,10 @@ pub const CONNECT_TOKEN_CLOCK_SKEW_SECS: i64 = 60;
 /// `ttl_ceiling_constant_tracks_the_two_policy_constants`.
 const CONNECT_TOKEN_MAX_REMAINING_SECS: i128 = 360;
 
-/// Largest accepted encoded token. The payload is bounded by its field caps
-/// (app id <= [`crate::auth::middleware::MAX_APP_ID_LENGTH`] bytes, nonce
-/// <= 128 bytes), so 2048 bytes is generous headroom, and a handshake never
+/// Largest accepted encoded token. The payload is bounded by the token cap
+/// itself (a 2048-byte token leaves ~1.9 KiB for the JSON), and acceptance
+/// additionally requires byte-equality between the signed `app_id` and the
+/// presented (allowlist-length-capped) `app_id`, so a handshake never
 /// buffers an unbounded credential string just to reject it.
 pub const CONNECT_TOKEN_MAX_ENCODED_LENGTH: usize = 2048;
 
@@ -270,9 +271,12 @@ fn split_token(token: &str) -> Result<(Vec<u8>, &[u8], Vec<u8>), ConnectTokenErr
 /// The server-side holder for the configured verification key.
 ///
 /// The key swaps atomically under a write lock (SIGHUP reload, issue #517);
-/// verifiers clone the current [`Arc`] snapshot so an in-flight handshake
-/// finishes against the key it started with — the same snapshot contract as
-/// the app-ID allowlist reload.
+/// each verification call clones the current [`Arc`] snapshot, so one call
+/// never sees a half-swapped key. A handshake that straddles a reload
+/// verifies against whatever key is installed when it reaches verification:
+/// a token minted under a replaced key fails closed (retryable
+/// `CONNECT_TOKEN_INVALID`) until the client presents a token under the new
+/// key — the same direction as the app-ID allowlist reload.
 #[derive(Debug, Default)]
 pub struct ConnectTokenKeyState {
     verifier: RwLock<Option<Arc<ConnectTokenVerifier>>>,
@@ -500,6 +504,14 @@ mod tests {
         let signing = SigningKey::from_bytes(&seed(b"mal"));
         let verifier = test_verifier(&signing);
         let good = mint(&signing, "app", 1_700_000_300, "n");
+        // One byte short of / one byte past a 64-byte Ed25519 signature.
+        let good_sig_b64 = &good[good.rfind('.').unwrap() + 1..];
+        let sig_63 = format!(
+            "{}.{}",
+            &good[..good.rfind('.').unwrap()],
+            &good_sig_b64[..84]
+        );
+        let sig_65 = format!("{}.{}x", &good[..good.rfind('.').unwrap()], good_sig_b64);
         for (name, bad) in [
             (
                 "no prefix",
@@ -515,11 +527,21 @@ mod tests {
                 "short signature",
                 format!("{}.abc", &good[..good.rfind('.').unwrap()]),
             ),
+            ("63-byte signature", sig_63),
+            ("65-byte signature", sig_65),
             (
                 "oversized token",
                 format!(
                     "{CONNECT_TOKEN_PREFIX}.{}.{}",
                     "A".repeat(2100),
+                    "B".repeat(86)
+                ),
+            ),
+            (
+                "one byte past the size cap",
+                format!(
+                    "{CONNECT_TOKEN_PREFIX}.{}.{}",
+                    "A".repeat(1954),
                     "B".repeat(86)
                 ),
             ),
@@ -532,6 +554,85 @@ mod tests {
                 "{name} must be Malformed"
             );
         }
+    }
+
+    /// The size cap is inclusive (`>`): the largest reachable token length at
+    /// or under [`CONNECT_TOKEN_MAX_ENCODED_LENGTH`] reaches signature
+    /// verification and is accepted when it genuinely verifies, and anything
+    /// past the cap is refused before any byte is trusted.
+    #[test]
+    fn token_at_the_size_cap_boundary_verifies() {
+        let signing = SigningKey::from_bytes(&seed(b"cap"));
+        let verifier = test_verifier(&signing);
+        // Widen the payload with a tolerated filler field; keep the last
+        // candidate that still fits under the cap (a handful of iterations
+        // from the computed starting point).
+        let base_len = serde_json::to_vec(&serde_json::json!({
+            "app_id": "app", "exp": 1_700_000_300, "nonce": "n"
+        }))
+        .expect("payload serializes")
+        .len();
+        let build = |filler: usize| {
+            mint_with_payload(
+                &signing,
+                &serde_json::json!({
+                    "app_id": "app",
+                    "exp": 1_700_000_300,
+                    "nonce": "n",
+                    "pad": "p".repeat(filler),
+                }),
+            )
+        };
+        // ~1.33 encoded bytes per filler byte lands just under the cap.
+        let mut filler = (CONNECT_TOKEN_MAX_ENCODED_LENGTH - 95 - base_len) * 3 / 4;
+        while build(filler).len() > CONNECT_TOKEN_MAX_ENCODED_LENGTH {
+            filler -= 1;
+        }
+        let token = build(filler);
+        assert!(
+            token.len() >= CONNECT_TOKEN_MAX_ENCODED_LENGTH - 4,
+            "boundary search must reach the cap: {}",
+            token.len()
+        );
+        assert!(verifier.verify(&token, "app", 1_700_000_000).is_ok());
+    }
+
+    /// `exp` extremes cannot wrap into a pass: the arithmetic is total in
+    /// `i128`, so an absurd remaining window fails the TTL ceiling and a
+    /// far-past instant fails `Expired`. (The at-expiry boundary is pinned by
+    /// `expiry_boundary_fails_at_and_below_now`.)
+    #[test]
+    fn exp_extremes_fail_closed() {
+        let signing = SigningKey::from_bytes(&seed(b"ext"));
+        let verifier = test_verifier(&signing);
+        let now = 1_700_000_000i64;
+        let max = mint(&signing, "app", i64::MAX, "n");
+        assert!(matches!(
+            verifier.verify(&max, "app", now),
+            Err(ConnectTokenError::TtlTooLong)
+        ));
+        let min = mint(&signing, "app", i64::MIN, "n");
+        assert!(matches!(
+            verifier.verify(&min, "app", now),
+            Err(ConnectTokenError::Expired)
+        ));
+    }
+
+    /// The nonce cap is inclusive (accept at 128 bytes, refuse 129).
+    #[test]
+    fn nonce_boundary_is_inclusive() {
+        let signing = SigningKey::from_bytes(&seed(b"nonce"));
+        let verifier = test_verifier(&signing);
+        let at_cap = mint(&signing, "app", 1_700_000_300, &"n".repeat(128));
+        assert!(
+            verifier.verify(&at_cap, "app", 1_700_000_000).is_ok(),
+            "128-byte nonce is accepted"
+        );
+        let over_cap = mint(&signing, "app", 1_700_000_300, &"n".repeat(129));
+        assert!(matches!(
+            verifier.verify(&over_cap, "app", 1_700_000_000),
+            Err(ConnectTokenError::Malformed)
+        ));
     }
 
     #[test]
