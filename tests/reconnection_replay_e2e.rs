@@ -152,6 +152,7 @@ async fn authenticate(ws: &mut WsStream, protocol_version: Option<u16>) {
         ws,
         &ClientMessage::Authenticate {
             app_id: APP_ID.to_string(),
+            connect_token: None,
             sdk_version: None,
             platform: None,
             game_data_format: None,

@@ -409,6 +409,7 @@ fn arb_authenticate() -> impl Strategy<Value = ClientMessage> {
         proptest::option::of(proptest::collection::vec(arb_transport(), 0..4)),
         proptest::option::of(proptest::collection::vec(arb_topology(), 0..4)),
         proptest::option::of(proptest::collection::vec("[a-z_]{1,24}", 0..4)),
+        proptest::option::of("sfct_v1\\.[A-Za-z0-9_-]{8,64}\\.[A-Za-z0-9_-]{86}"),
     )
         .prop_map(
             |(
@@ -420,8 +421,10 @@ fn arb_authenticate() -> impl Strategy<Value = ClientMessage> {
                 supported_transports,
                 supported_topologies,
                 requested_capabilities,
+                connect_token,
             )| ClientMessage::Authenticate {
                 app_id,
+                connect_token,
                 sdk_version,
                 platform,
                 game_data_format,
@@ -457,6 +460,7 @@ proptest! {
             supported_transports,
             supported_topologies,
             requested_capabilities,
+            connect_token,
             ..
         } = &message
         else {
@@ -479,6 +483,10 @@ proptest! {
         prop_assert_eq!(
             data.contains_key("requested_capabilities"),
             requested_capabilities.is_some()
+        );
+        prop_assert_eq!(
+            data.contains_key("connect_token"),
+            connect_token.is_some()
         );
     }
 }

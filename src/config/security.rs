@@ -123,6 +123,18 @@ pub struct SecurityConfig {
     /// values between the two lists are rejected by startup validation.
     #[serde(default)]
     pub app_auth_path: Option<String>,
+    /// Optional tenant `connect_token` verification (issue #517).
+    ///
+    /// When configured, `Authenticate` may carry a `connect_token` minted and
+    /// Ed25519-signed by the deployment's control plane; the server verifies
+    /// the signature against this public key after the app-ID allowlist
+    /// resolves. The key is PUBLIC material (the matching private key stays
+    /// in the control plane), so it needs no secret handling — the path
+    /// option exists for mount/rotation convenience, not secrecy. When the
+    /// block is absent, presented tokens are refused fail-closed and absent
+    /// tokens keep the public-app_id semantics.
+    #[serde(default)]
+    pub connect_token: Option<ConnectTokenConfig>,
 }
 
 impl Default for SecurityConfig {
@@ -141,8 +153,30 @@ impl Default for SecurityConfig {
             transport: TransportSecurityConfig::default(),
             allowed_apps: Vec::new(),
             app_auth_path: None,
+            connect_token: None,
         }
     }
+}
+
+/// Verification-key configuration for optional tenant `connect_token`s
+/// (issue #517).
+///
+/// Configure exactly one source: the inline `public_key`, or a
+/// `public_key_path` file whose trimmed contents are the same base64 key
+/// (the loader folds the file into `public_key` at load time, so runtime
+/// code only ever reads the inline value). The key is the control plane's
+/// Ed25519 *public* key — 32 bytes, standard or URL-safe base64.
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectTokenConfig {
+    /// Base64-encoded 32-byte Ed25519 public verification key.
+    #[serde(default)]
+    pub public_key: String,
+    /// Path to a file whose trimmed contents are the same base64 key.
+    /// Consulted only when `public_key` is empty; configuring both is a
+    /// startup error (dead configuration).
+    #[serde(default)]
+    pub public_key_path: Option<String>,
 }
 
 /// Transport-level security configuration.

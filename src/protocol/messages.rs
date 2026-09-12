@@ -61,6 +61,18 @@ pub enum ClientMessage {
     Authenticate {
         /// Public App ID (safe to embed in game builds, e.g., "mb_app_abc123...")
         app_id: String,
+        /// Optional tenant credential (issue #517), minted and Ed25519-signed
+        /// by the deployment's control plane; verified against the
+        /// `security.connect_token.public_key` after the app-ID allowlist
+        /// resolves. Absent keeps the public-app_id semantics, so released
+        /// SDKs and self-hosted deployments are unaffected. Presented on a
+        /// server without a configured key is refused (fail closed) with
+        /// `CONNECT_TOKEN_INVALID`. Every verification failure reports that
+        /// same code; the `error` text carries the reason and the token is
+        /// never logged or echoed. Format:
+        /// `sfct_v1.<base64url(payload)>.<base64url(signature)>`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connect_token: Option<String>,
         /// SDK version for debugging and analytics
         #[serde(skip_serializing_if = "Option::is_none")]
         sdk_version: Option<String>,

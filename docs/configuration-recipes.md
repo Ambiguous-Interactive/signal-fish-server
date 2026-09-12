@@ -59,6 +59,42 @@ app, so startup validation refuses it (omit the field
 instead). See [Application identification](authentication.md) for the exact
 trust boundary.
 
+## Tenant connect tokens (`connect_token`)
+
+Add protocol-level tenant authentication on top of the allowlist
+(issue #517). Your control plane signs short-lived tokens with an Ed25519
+private key; the server verifies them with the matching public key. The
+private key never reaches the server.
+
+```json
+{
+  "security": {
+    "connect_token": {
+      "public_key_path": "/etc/signal-fish/connect-token-key.b64"
+    }
+  }
+}
+```
+
+Environment equivalent (inline key):
+
+```bash
+export SIGNAL_FISH__SECURITY__CONNECT_TOKEN='{"public_key":"<base64 32-byte Ed25519 public key>"}'
+```
+
+When to use: hosted or multi-tenant deployments where a replayed public
+`app_id` is not enough. Clients send one optional `connect_token` field in
+`Authenticate`; failures surface as `CONNECT_TOKEN_INVALID` and are
+retryable. Absent field and absent config keep today's semantics, so this
+composes with existing SDKs. Set exactly one of `public_key` or
+`public_key_path` (the loader folds the file into the inline key; a missing
+file is a startup error). The key reloads on SIGHUP with the allowlist.
+Tokens are valid at most 300 seconds (server-enforced, plus a fixed
+60-second clock-skew allowance), and replay within the window is accepted —
+send them only over TLS. See
+[Application identification](authentication.md#optional-tenant-connect-tokens)
+for the full wire contract.
+
 ## TURN/STUN
 
 Self-hosted TURN: the server mints short-lived coturn REST credentials from a

@@ -65,6 +65,7 @@ async fn connect(addr: std::net::SocketAddr) -> WsStream {
 async fn authenticate(ws: &mut WsStream, protocol_version: u16) {
     let auth = ClientMessage::Authenticate {
         app_id: "v3-relay-stats-test".to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: None,
         game_data_format: None,

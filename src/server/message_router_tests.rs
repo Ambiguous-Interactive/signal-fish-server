@@ -99,6 +99,7 @@ async fn delayed_authenticate_is_rejected_with_warning_only() {
             &player_id,
             ClientMessage::Authenticate {
                 app_id: "ignored".to_string(),
+                connect_token: None,
                 sdk_version: None,
                 platform: None,
                 game_data_format: None,

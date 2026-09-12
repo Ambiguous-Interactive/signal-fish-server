@@ -783,6 +783,7 @@ async fn authenticate_v3(ws: &mut WsStream) {
         ws,
         &ClientMessage::Authenticate {
             app_id: RECONNECT_APP_ID.to_string(),
+            connect_token: None,
             sdk_version: None,
             platform: None,
             game_data_format: None,

@@ -79,6 +79,7 @@ fn webrtc_token_deserializes_back_to_variant() {
 fn authenticate_without_new_fields_is_pure_v2() {
     let msg = ClientMessage::Authenticate {
         app_id: "app".to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: None,
         game_data_format: None,
@@ -116,6 +117,7 @@ fn authenticate_without_new_fields_is_pure_v2() {
 fn authenticate_with_new_fields_round_trips() {
     let msg = ClientMessage::Authenticate {
         app_id: "app".to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: Some("godot".to_string()),
         game_data_format: Some(GameDataEncoding::MessagePack),

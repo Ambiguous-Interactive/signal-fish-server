@@ -591,6 +591,7 @@ async fn join_room_raw(
 ) -> PlayerId {
     let authenticate = ClientMessage::Authenticate {
         app_id: "reference-native-app".to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: Some("starved-runtime-e2e".to_string()),
         game_data_format: None,

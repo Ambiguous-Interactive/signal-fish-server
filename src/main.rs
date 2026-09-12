@@ -267,6 +267,14 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
+    // Install the optional tenant connect-token verification key (issue
+    // #517). Configuration validation already parsed the key, so this only
+    // fails on a race with a config rewrite; a failed startup install is
+    // fatal (fail closed) rather than a keyless server.
+    if game_server.install_connect_token_key(&cfg.security)? {
+        tracing::info!("Connect-token verification enabled (security.connect_token)");
+    }
+
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Start cleanup task
@@ -278,11 +286,13 @@ async fn main() -> anyhow::Result<()> {
             .await;
     });
 
-    // SIGHUP reloads the application allowlist from the same configuration
-    // sources as startup (issue #522). Only `security.allowed_apps` is
-    // applied live; every other field still requires a restart, and the
-    // reload log says so. A reload that fails to load or fails security
-    // validation keeps the running allowlist and logs the error.
+    // SIGHUP reloads the application allowlist — and the tenant
+    // connect-token verification key (issue #517) — from the same
+    // configuration sources as startup (issue #522). Only those two security
+    // surfaces are applied live; every other field still requires a restart,
+    // and the reload log says so. A reload that fails to load or fails
+    // security validation keeps the running allowlist and key, and logs the
+    // error.
     #[cfg(unix)]
     {
         let reload_server = game_server.clone();
@@ -667,6 +677,29 @@ async fn reload_allowed_apps_from_config(
             return;
         }
     };
+
+    // The connect-token verification key reloads with the allowlist (issue
+    // #517): the config went through the same load + validation gate, and a
+    // failure keeps the running key. Removal (block deleted) is applied
+    // verbatim — presented tokens are then refused fail-closed.
+    match server.install_connect_token_key(&cfg.security) {
+        Ok(true) => {
+            tracing::info!("SIGHUP reload: connect-token verification enabled");
+        }
+        Ok(false) => {
+            tracing::info!(
+                "SIGHUP reload: connect-token verification disabled (no key configured); \
+                 presented tokens are refused"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "SIGHUP reload: connect-token key was rejected; keeping the running key"
+            );
+        }
+    }
+
     if outcome.applied {
         // The applied+diff log lives in `reload_allowed_apps`. One case needs
         // an extra word: the NEW configuration turned enforcement off, but
@@ -1297,5 +1330,142 @@ mod shutdown_drain_tests {
             "an idle drain must skip the grace wait: no handler remains to receive \
              the shutdown close frames"
         );
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod connect_token_reload_tests {
+    use base64::Engine as _;
+    use ed25519_dalek::SigningKey;
+    use sha2::{Digest, Sha256};
+    use signal_fish_server::config;
+    use signal_fish_server::config::{
+        ConnectTokenConfig, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
+        SecurityConfig, SessionConfig, TransportSecurityConfig, TurnConfig,
+    };
+    use signal_fish_server::database::DatabaseConfig;
+    use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
+    use signature::Signer;
+    use std::sync::Arc;
+
+    use super::reload_allowed_apps_from_config;
+
+    fn seed(label: &[u8]) -> [u8; 32] {
+        Sha256::digest(label).into()
+    }
+
+    fn key_config(signing: &SigningKey) -> ConnectTokenConfig {
+        ConnectTokenConfig {
+            public_key: base64::engine::general_purpose::STANDARD.encode(signing.verifying_key()),
+            public_key_path: None,
+        }
+    }
+
+    fn security_with(signing: &SigningKey) -> SecurityConfig {
+        SecurityConfig {
+            connect_token: Some(key_config(signing)),
+            ..SecurityConfig::default()
+        }
+    }
+
+    fn loaded_config(
+        security: SecurityConfig,
+    ) -> Result<anyhow::Result<config::Config>, tokio::task::JoinError> {
+        let mut cfg = config::Config {
+            security,
+            ..config::Config::default()
+        };
+        // Default-on metrics auth with no token fails security validation;
+        // the reload must pass that gate to reach the key swap.
+        cfg.security.require_metrics_auth = false;
+        Ok(Ok(cfg))
+    }
+
+    async fn test_server() -> Arc<EnhancedGameServer> {
+        EnhancedGameServer::new(
+            ServerConfig::default(),
+            ProtocolConfig::default(),
+            RelayTypeConfig::default(),
+            SessionConfig::default(),
+            TurnConfig::default(),
+            DatabaseConfig::InMemory,
+            MetricsConfig::default(),
+            CoordinationConfig::default(),
+            TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("server constructs")
+    }
+
+    fn mint(signing: &SigningKey, app_id: &str, ttl_secs: i64) -> String {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_secs(),
+        )
+        .expect("unix seconds fit i64");
+        let payload = serde_json::json!({ "app_id": app_id, "exp": now + ttl_secs, "nonce": "n" });
+        let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let signed = format!("sfct_v1.{payload_b64}");
+        let signature = signing.sign(signed.as_bytes());
+        format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()))
+    }
+
+    /// The SIGHUP glue (issue #517): a valid reload rotates the key, a
+    /// corrupt key keeps the running key verifying, a removed block disables
+    /// verification, and an allowlist-invalid config is skipped before the
+    /// key reload is even attempted.
+    #[tokio::test]
+    async fn sighup_reload_rotates_keeps_and_removes_the_connect_token_key() {
+        let server = test_server().await;
+        let first = SigningKey::from_bytes(&seed(b"reload-first"));
+        let second = SigningKey::from_bytes(&seed(b"reload-second"));
+
+        // Startup install of key one.
+        assert!(server
+            .install_connect_token_key(&security_with(&first))
+            .expect("initial key installs"));
+
+        // SIGHUP with key two: the rotation applies and old tokens stop
+        // verifying.
+        reload_allowed_apps_from_config(&server, loaded_config(security_with(&second))).await;
+        assert!(server.connect_token_verification_enabled());
+        assert!(server
+            .verify_connect_token("app", &mint(&first, "app", 60))
+            .is_err());
+        server
+            .verify_connect_token("app", &mint(&second, "app", 60))
+            .expect("the reloaded key verifies fresh tokens");
+
+        // SIGHUP with a corrupt key: the reload fails closed onto the
+        // running key.
+        let corrupt = SecurityConfig {
+            connect_token: Some(ConnectTokenConfig {
+                public_key: "not-a-key".to_string(),
+                public_key_path: None,
+            }),
+            ..SecurityConfig::default()
+        };
+        reload_allowed_apps_from_config(&server, loaded_config(corrupt)).await;
+        assert!(
+            server.connect_token_verification_enabled(),
+            "a corrupt reload must keep the running key"
+        );
+        server
+            .verify_connect_token("app", &mint(&second, "app", 60))
+            .expect("the running key survives the corrupt reload");
+
+        // SIGHUP with the block removed: verification is disabled and
+        // presented tokens are refused.
+        reload_allowed_apps_from_config(&server, loaded_config(SecurityConfig::default())).await;
+        assert!(!server.connect_token_verification_enabled());
+        assert!(matches!(
+            server.verify_connect_token("app", &mint(&second, "app", 60)),
+            Err(signal_fish_server::security::connect_token::ConnectTokenError::NoKeyConfigured)
+        ));
     }
 }

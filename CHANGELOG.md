@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Optional tenant `connect_token` verification (issue #517): `Authenticate`
+  gains one optional field, `connect_token`, minted and Ed25519-signed by the
+  deployment's control plane and verified against a configured public key
+  (`security.connect_token.public_key`, inline base64 or via
+  `public_key_path`; the key is public material and reloads on SIGHUP with
+  the allowlist). Verification runs after the app-ID allowlist resolves, in
+  the ratified order: encoding, signature, expiry, a server-enforced maximum
+  validity of 300 seconds plus a fixed 60-second clock-skew allowance, then
+  byte equality with the presented `app_id`. Every failure reports the new
+  `CONNECT_TOKEN_INVALID` error code on an `AuthenticationError` frame; the
+  refusal is retryable on the same connection and charges the per-connection
+  error-reply budget like every polite per-frame reply. Absent field keeps
+  the exact public-`app_id` semantics, so released SDKs and self-hosted
+  deployments are unaffected; a token presented to a server without a
+  configured key is refused fail closed. The token is never logged or echoed.
+  Token format, expiry rules, and the accepted within-window replay
+  trade-off are documented in `docs/authentication.md`; the AsyncAPI
+  `Authenticate` schema and the error-code reference list the new field and
+  code.
 - Admission lock lease renewal (issue #550): the room-cap critical sections
   (join lock and the per-app, per-game, and server-wide room-cap locks) now
   renew their distributed-lock lease every third of its TTL while held, so a

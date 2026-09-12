@@ -97,6 +97,7 @@ fn base_config() -> ServerConfig {
 async fn authenticate(ws: &mut WsStream) {
     let auth = ClientMessage::Authenticate {
         app_id: "close-code-test".to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: None,
         game_data_format: None,
@@ -114,6 +115,7 @@ async fn authenticate(ws: &mut WsStream) {
 async fn authenticate_v3(ws: &mut WsStream) {
     let auth = ClientMessage::Authenticate {
         app_id: "close-code-test".to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: None,
         game_data_format: None,
@@ -609,6 +611,7 @@ async fn oversized_binary_flood_exhausting_the_reply_budget_closes_with_4006() {
     // refusal in the receive loop.
     let auth = ClientMessage::Authenticate {
         app_id: "close-code-test".to_string(),
+        connect_token: None,
         sdk_version: None,
         platform: None,
         game_data_format: Some(signal_fish_server::protocol::GameDataEncoding::MessagePack),
@@ -662,6 +665,7 @@ async fn sdk_refusal_loop_exhausting_the_reply_budget_closes_with_4006() {
     // fails the compatibility check on every attempt and stays retryable.
     let auth = ClientMessage::Authenticate {
         app_id: "close-code-test".to_string(),
+        connect_token: None,
         sdk_version: Some("0.0.1".to_string()),
         platform: Some("unity".to_string()),
         game_data_format: None,
@@ -685,6 +689,89 @@ async fn sdk_refusal_loop_exhausting_the_reply_budget_closes_with_4006() {
     assert_eq!(
         code, 4006,
         "SDK-refusal exhaustion must close with 4006 ({reason})"
+    );
+    assert_eq!(reason, "inbound_rate_limited");
+    running_server.shutdown().await;
+}
+
+/// The tenant connect-token refusal (issue #517) is the same polite
+/// per-frame reply class: a loop of invalidly-signed tokens must charge the
+/// per-connection budget and close with `4006 inbound_rate_limited` once it
+/// is exhausted — a bad-credential loop cannot buy unbounded replies.
+#[tokio::test]
+async fn connect_token_refusal_loop_exhausting_the_reply_budget_closes_with_4006() {
+    use base64::Engine as _;
+    use ed25519_dalek::SigningKey;
+    use sha2::{Digest, Sha256};
+    use signature::Signer;
+
+    let mut config = base_config();
+    config.rate_limit_config.max_inbound_error_replies = 3;
+    let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
+
+    // Install a verification key; the loop then presents tokens signed by a
+    // different key, so every attempt fails signature verification.
+    let trusted = SigningKey::from_bytes(&Sha256::digest(b"budget-trusted").into());
+    let rogue = SigningKey::from_bytes(&Sha256::digest(b"budget-rogue").into());
+    let security = signal_fish_server::config::SecurityConfig {
+        connect_token: Some(signal_fish_server::config::ConnectTokenConfig {
+            public_key: base64::engine::general_purpose::STANDARD.encode(trusted.verifying_key()),
+            public_key_path: None,
+        }),
+        ..signal_fish_server::config::SecurityConfig::default()
+    };
+    server
+        .install_connect_token_key(&security)
+        .expect("test key installs");
+
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
+
+    let mut ws = connect(addr).await;
+
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_secs(),
+    )
+    .unwrap_or(0);
+    let payload = serde_json::json!({ "app_id": "close-code-test", "exp": now + 60, "nonce": "n" });
+    let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&payload).expect("payload serializes"));
+    let signed = format!("sfct_v1.{payload_b64}");
+    let signature = rogue.sign(signed.as_bytes());
+    let bad_token = format!(
+        "{signed}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.to_bytes())
+    );
+
+    let auth = ClientMessage::Authenticate {
+        app_id: "close-code-test".to_string(),
+        connect_token: Some(bad_token),
+        sdk_version: None,
+        platform: None,
+        game_data_format: None,
+        protocol_version: None,
+        supported_transports: None,
+        supported_topologies: None,
+        requested_capabilities: None,
+    };
+    let auth_frame = Message::Text(
+        serde_json::to_string(&auth)
+            .expect("serialize Authenticate")
+            .into(),
+    );
+    for _ in 0..4 {
+        ws.send(auth_frame.clone())
+            .await
+            .expect("send refusing Authenticate");
+    }
+
+    let (code, reason) = read_close_frame(&mut ws, "connect-token refusal loop").await;
+    assert_eq!(
+        code, 4006,
+        "connect-token refusal exhaustion must close with 4006 ({reason})"
     );
     assert_eq!(reason, "inbound_rate_limited");
     running_server.shutdown().await;
@@ -1006,6 +1093,7 @@ async fn authority_kick_closes_target_with_4007() {
             .expect("connect failed");
         let auth = ClientMessage::Authenticate {
             app_id: "close-code-test".to_string(),
+            connect_token: None,
             sdk_version: None,
             platform: None,
             game_data_format: None,

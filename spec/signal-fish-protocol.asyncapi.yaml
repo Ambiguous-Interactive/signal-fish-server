@@ -606,6 +606,7 @@ components:
         - PASSWORD_REQUIRED
         - BANNED
         - TRANSFER_TARGET_NOT_FOUND
+        - CONNECT_TOKEN_INVALID
 
     ReliableDeliveryCounters:
       type: object
@@ -916,6 +917,18 @@ components:
             app_id:
               type: string
               description: Public App ID (safe to embed in builds).
+            connect_token:
+              type: string
+              description: >-
+                Optional tenant credential (issue #517), minted by the
+                deployment's control plane as
+                `sfct_v1.<base64url(payload)>.<base64url(signature)>` and
+                signed with the Ed25519 key configured on the server under
+                `security.connect_token.public_key`. Absent field keeps the
+                public-app_id semantics. Only meaningful when the server
+                configures a verification key; every verification failure is
+                reported as CONNECT_TOKEN_INVALID. Never logged or echoed by
+                the server.
             sdk_version: { type: string }
             platform: { type: string }
             game_data_format: { $ref: '#/components/schemas/GameDataEncoding' }

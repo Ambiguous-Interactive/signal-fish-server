@@ -403,6 +403,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("null"),
     },
     ConfigReferenceRow {
+        env: "SIGNAL_FISH__SECURITY__CONNECT_TOKEN",
+        path: "security.connect_token",
+        default: Some("null"),
+    },
+    ConfigReferenceRow {
         env: "SIGNAL_FISH__COORDINATION__MEMBERSHIP_SNAPSHOT_INTERVAL_SECS",
         path: "coordination.membership_snapshot_interval_secs",
         default: Some("30"),

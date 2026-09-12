@@ -549,6 +549,10 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
 async fn authenticate(ws: &mut WsStream, cli: &Cli) -> Result<u16, FatalError> {
     let message = ClientMessage::Authenticate {
         app_id: cli.app_id.clone(),
+        // The reference client targets public-app_id deployments and never
+        // holds control-plane credentials, so the optional tenant
+        // `connect_token` (issue #517) stays unset.
+        connect_token: None,
         sdk_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         platform: Some(cli.platform.clone()),
         game_data_format: Some(GameDataEncoding::Json),

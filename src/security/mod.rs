@@ -4,11 +4,18 @@
 /// - TLS/mTLS support (gated behind `tls` feature)
 /// - Envelope encryption (AES-GCM)
 /// - Token binding and channel security
+/// - Optional tenant `connect_token` verification (issue #517)
+pub mod connect_token;
 pub mod crypto;
 pub mod origin;
 pub mod tls;
 pub mod token_binding; // Always include tls module (ClientCertificateFingerprint is always needed)
 pub mod turn_credentials;
+
+pub use connect_token::{
+    ConnectTokenClaims, ConnectTokenError, ConnectTokenKeyError, ConnectTokenKeyState,
+    ConnectTokenVerifier,
+};
 
 pub use crypto::EnvelopeEncryptor;
 pub use origin::{OriginPolicy, OriginPolicyError};
@@ -34,14 +41,19 @@ pub use tls::{build_rustls_config, VerifiedClientCertificate, VerifiedClientCert
 /// the metrics bearer token (`websocket::metrics`), reconnection tokens
 /// (`reconnection`), and token-binding proofs (`security::token_binding`) all
 /// route through it, so the constant-time guarantee can never silently drift
-/// between call sites.
+/// between call sites. Non-secret string comparisons (for example the
+/// `connect_token` app-id binding, `security::connect_token`) route through
+/// it deliberately: they inherit the hardened path at zero cost and cannot
+/// silently downgrade to an early-exit compare.
 ///
 /// Length is intentionally **not** treated as secret: an early length check
 /// short-circuits. Every secret compared here is fixed-width for a given
 /// deployment (UUID tokens, hex/base64 bearer tokens, HMAC signatures), so the
 /// length is not attacker-controlled information, and revealing "wrong length"
 /// in variable time is the standard, accepted trade-off (`subtle` itself
-/// documents length as non-secret).
+/// documents length as non-secret). Call sites that compare attacker-controlled
+/// variable-length strings must not treat length as secret and accept this
+/// trade-off explicitly.
 #[must_use]
 pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
     use subtle::ConstantTimeEq;

@@ -79,6 +79,7 @@ async fn connect_with_public_app_id(addr: std::net::SocketAddr, app_id: &str) ->
         &mut ws,
         &ClientMessage::Authenticate {
             app_id: app_id.to_string(),
+            connect_token: None,
             sdk_version: None,
             platform: None,
             game_data_format: None,
@@ -620,6 +621,7 @@ async fn test_unloggable_app_id_fails_authentication_with_invalid_app_id() {
             &mut ws,
             &ClientMessage::Authenticate {
                 app_id,
+                connect_token: None,
                 sdk_version: None,
                 platform: None,
                 game_data_format: None,
@@ -641,6 +643,303 @@ async fn test_unloggable_app_id_fails_authentication_with_invalid_app_id() {
 
     // A well-formed ID still authenticates on the same deployment.
     let _ = connect_with_public_app_id(running.addr(), "legitimate-app").await;
+
+    running.shutdown().await;
+}
+
+// ===========================================================================
+// Optional tenant `connect_token` verification (issue #517)
+// ===========================================================================
+
+mod connect_token_support {
+    use base64::Engine as _;
+    use ed25519_dalek::SigningKey;
+    use sha2::{Digest, Sha256};
+    use signature::Signer;
+
+    /// Deterministic 32-byte test seed from a label.
+    pub fn seed(label: &[u8]) -> [u8; 32] {
+        Sha256::digest(label).into()
+    }
+
+    pub fn signing_key(label: &[u8]) -> SigningKey {
+        SigningKey::from_bytes(&seed(label))
+    }
+
+    /// The base64 verification-key configuration value for a keypair.
+    pub fn encoded_public_key(signing: &SigningKey) -> String {
+        base64::engine::general_purpose::STANDARD.encode(signing.verifying_key())
+    }
+
+    /// Mint a token exactly the way the control plane would:
+    /// `sfct_v1.<base64url(payload)>.<base64url(signature)>`.
+    pub fn mint(signing: &SigningKey, app_id: &str, ttl_secs: i64, nonce: &str) -> String {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_secs(),
+        )
+        .expect("unix seconds fit i64");
+        let payload = serde_json::json!({
+            "app_id": app_id,
+            "exp": now + ttl_secs,
+            "nonce": nonce,
+        });
+        let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let signed = format!("sfct_v1.{payload_b64}");
+        let signature = signing.sign(signed.as_bytes());
+        format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()))
+    }
+}
+
+/// Outcome of one `Authenticate` handshake attempt over a real socket.
+enum AuthHandshake {
+    Accepted,
+    Rejected(ErrorCode),
+}
+
+/// Send one Authenticate (with an optional token) and classify the first
+/// reply. The socket stays open for further use by the caller.
+async fn attempt_authenticate(
+    ws: &mut WsStream,
+    app_id: &str,
+    connect_token: Option<String>,
+) -> AuthHandshake {
+    send_client_message(
+        ws,
+        &ClientMessage::Authenticate {
+            app_id: app_id.to_string(),
+            connect_token,
+            sdk_version: None,
+            platform: None,
+            game_data_format: None,
+            protocol_version: Some(2),
+            supported_transports: None,
+            supported_topologies: None,
+            requested_capabilities: None,
+        },
+    )
+    .await;
+    match next_server_message_within(ws, SOCKET_DEADLINE, "authenticate reply").await {
+        ServerMessage::Authenticated { .. } => AuthHandshake::Accepted,
+        ServerMessage::AuthenticationError { error_code, .. } => {
+            AuthHandshake::Rejected(error_code)
+        }
+        other => panic!("unexpected reply to Authenticate: {other:?}"),
+    }
+}
+
+async fn connect_socket(addr: std::net::SocketAddr) -> WsStream {
+    let url = format!("ws://{addr}/ws");
+    let (ws, _) = tokio::time::timeout(SOCKET_DEADLINE, connect_async(url))
+        .await
+        .expect("WebSocket connect timed out")
+        .expect("WebSocket connects");
+    ws
+}
+
+/// A server with one allowlisted app and the test verification key installed.
+async fn connect_token_server() -> (RunningTestServer, ed25519_dalek::SigningKey) {
+    let mut config = test_server_config();
+    config.app_id_allowlist_enabled = true;
+    let apps = vec![AppRegistrationEntry {
+        app_id: "token-app".to_string(),
+        app_name: "Token App".to_string(),
+        max_rooms: Some(10),
+        max_players_per_room: Some(8),
+        rate_limit_per_minute: None,
+        max_relay_bytes: None,
+    }];
+    let server = signal_fish_server::server::EnhancedGameServer::new(
+        config,
+        signal_fish_server::config::ProtocolConfig::default(),
+        signal_fish_server::config::RelayTypeConfig::default(),
+        signal_fish_server::config::SessionConfig::default(),
+        signal_fish_server::config::TurnConfig::default(),
+        signal_fish_server::database::DatabaseConfig::InMemory,
+        signal_fish_server::config::MetricsConfig::default(),
+        signal_fish_server::config::CoordinationConfig::default(),
+        signal_fish_server::config::TransportSecurityConfig::default(),
+        apps,
+    )
+    .await
+    .expect("construct server");
+    let signing = connect_token_support::signing_key(b"e2e-control-plane");
+    let security = signal_fish_server::config::SecurityConfig {
+        connect_token: Some(signal_fish_server::config::ConnectTokenConfig {
+            public_key: connect_token_support::encoded_public_key(&signing),
+            public_key_path: None,
+        }),
+        ..signal_fish_server::config::SecurityConfig::default()
+    };
+    server
+        .install_connect_token_key(&security)
+        .expect("test key installs");
+    let router = create_router("http://localhost:3000").with_state(server.clone());
+    let running = RunningTestServer::spawn(server, router).await;
+    (running, signing)
+}
+
+#[tokio::test]
+async fn valid_connect_token_is_accepted_and_never_echoed() {
+    let (running, signing) = connect_token_server().await;
+    let mut ws = connect_socket(running.addr()).await;
+
+    assert!(matches!(
+        attempt_authenticate(
+            &mut ws,
+            "token-app",
+            Some(connect_token_support::mint(
+                &signing,
+                "token-app",
+                300,
+                "nonce-1"
+            )),
+        )
+        .await,
+        AuthHandshake::Accepted
+    ));
+
+    // The token is a credential: it must not be echoed by the handshake
+    // reply stream (Authenticated + ProtocolInfo).
+    let protocol_info =
+        next_server_message_within(&mut ws, SOCKET_DEADLINE, "protocol negotiated").await;
+    assert!(matches!(protocol_info, ServerMessage::ProtocolInfo(_)));
+    let rendered = serde_json::to_string(&protocol_info).expect("reply serializes");
+    assert!(
+        !rendered.contains("sfct_v1"),
+        "the token must never be echoed in a server reply: {rendered}"
+    );
+
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn invalid_token_refuses_with_connect_token_invalid_and_allows_retry() {
+    let (running, signing) = connect_token_server().await;
+
+    // A token signed by a different (untrusted) key.
+    let rogue = connect_token_support::signing_key(b"rogue-key");
+    let mut ws = connect_socket(running.addr()).await;
+    assert!(matches!(
+        attempt_authenticate(
+            &mut ws,
+            "token-app",
+            Some(connect_token_support::mint(&rogue, "token-app", 300, "n")),
+        )
+        .await,
+        AuthHandshake::Rejected(ErrorCode::ConnectTokenInvalid)
+    ));
+
+    // The refusal is retryable: a valid token on the SAME socket completes.
+    assert!(matches!(
+        attempt_authenticate(
+            &mut ws,
+            "token-app",
+            Some(connect_token_support::mint(
+                &signing,
+                "token-app",
+                300,
+                "n2"
+            )),
+        )
+        .await,
+        AuthHandshake::Accepted
+    ));
+
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn connect_token_refusal_classes_pin_the_ratified_checks() {
+    let (running, signing) = connect_token_server().await;
+
+    // App-id binding: a validly signed token minted for another app.
+    let mut ws = connect_socket(running.addr()).await;
+    assert!(matches!(
+        attempt_authenticate(
+            &mut ws,
+            "token-app",
+            Some(connect_token_support::mint(&signing, "other-app", 300, "n")),
+        )
+        .await,
+        AuthHandshake::Rejected(ErrorCode::ConnectTokenInvalid)
+    ));
+    drop(ws);
+
+    // Malformed token bytes (wrong prefix, so unsigned garbage).
+    let mut ws = connect_socket(running.addr()).await;
+    assert!(matches!(
+        attempt_authenticate(&mut ws, "token-app", Some("not_even_a_token".to_string()),).await,
+        AuthHandshake::Rejected(ErrorCode::ConnectTokenInvalid)
+    ));
+    drop(ws);
+
+    // An expired token (negative TTL from the real clock).
+    let mut ws = connect_socket(running.addr()).await;
+    assert!(matches!(
+        attempt_authenticate(
+            &mut ws,
+            "token-app",
+            Some(connect_token_support::mint(&signing, "token-app", -10, "n")),
+        )
+        .await,
+        AuthHandshake::Rejected(ErrorCode::ConnectTokenInvalid)
+    ));
+
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn token_without_configured_key_is_refused_fail_closed() {
+    // Same shape as `connect_token_server`, but no key installed.
+    let mut config = test_server_config();
+    config.app_id_allowlist_enabled = true;
+    let apps = vec![AppRegistrationEntry {
+        app_id: "token-app".to_string(),
+        app_name: "Token App".to_string(),
+        max_rooms: Some(10),
+        max_players_per_room: Some(8),
+        rate_limit_per_minute: None,
+        max_relay_bytes: None,
+    }];
+    let server = signal_fish_server::server::EnhancedGameServer::new(
+        config,
+        signal_fish_server::config::ProtocolConfig::default(),
+        signal_fish_server::config::RelayTypeConfig::default(),
+        signal_fish_server::config::SessionConfig::default(),
+        signal_fish_server::config::TurnConfig::default(),
+        signal_fish_server::database::DatabaseConfig::InMemory,
+        signal_fish_server::config::MetricsConfig::default(),
+        signal_fish_server::config::CoordinationConfig::default(),
+        signal_fish_server::config::TransportSecurityConfig::default(),
+        apps,
+    )
+    .await
+    .expect("construct server");
+    let router = create_router("http://localhost:3000").with_state(server.clone());
+    let running = RunningTestServer::spawn(server, router).await;
+
+    let signing = connect_token_support::signing_key(b"e2e-control-plane");
+    let mut ws = connect_socket(running.addr()).await;
+    assert!(matches!(
+        attempt_authenticate(
+            &mut ws,
+            "token-app",
+            Some(connect_token_support::mint(&signing, "token-app", 300, "n")),
+        )
+        .await,
+        AuthHandshake::Rejected(ErrorCode::ConnectTokenInvalid)
+    ));
+
+    // A token-less handshake on the same deployment keeps working: absent
+    // field = today's public-app_id semantics.
+    assert!(matches!(
+        attempt_authenticate(&mut ws, "token-app", None).await,
+        AuthHandshake::Accepted
+    ));
 
     running.shutdown().await;
 }

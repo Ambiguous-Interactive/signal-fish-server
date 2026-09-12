@@ -438,6 +438,11 @@ pub struct EnhancedGameServer {
     reconnection_manager: Option<Arc<crate::reconnection::ReconnectionManager>>,
     /// Public app-ID allowlist and accounting-context resolver.
     pub(crate) app_id_allowlist: Arc<crate::auth::AppIdAllowlist>,
+    /// Optional tenant `connect_token` verification key (issue #517).
+    /// Installed from configuration by the embedding layer (`main.rs` at
+    /// startup and on SIGHUP reload); empty until then, which refuses every
+    /// presented token fail-closed.
+    connect_token_keys: crate::security::connect_token::ConnectTokenKeyState,
     /// Mapping from room IDs to owning application IDs (for relay policies)
     room_applications: Arc<DashMap<RoomId, Uuid>>,
     /// Sticky per-room session decision recorded at finalize (protocol v3):
@@ -806,6 +811,7 @@ impl EnhancedGameServer {
             instance_id,
             reconnection_manager,
             app_id_allowlist,
+            connect_token_keys: crate::security::connect_token::ConnectTokenKeyState::default(),
             room_applications,
             active_session_plans: Arc::new(DashMap::new()),
             pending_durable_player_detaches: Arc::new(DashMap::new()),
@@ -1093,10 +1099,88 @@ impl EnhancedGameServer {
                 added = ?reload.added,
                 removed = ?reload.removed,
                 pruned_relay_series = pruned,
-                "App-ID allowlist reloaded; other configuration changes still require a restart"
+                "App-ID allowlist reloaded; other configuration changes (besides the \
+                 connect-token key) still require a restart"
             );
         }
         Ok(reload)
+    }
+
+    /// Install (or remove) the tenant `connect_token` verification key from
+    /// loaded configuration (issue #517).
+    ///
+    /// Called by the embedding layer at startup and on SIGHUP reload. The
+    /// key is public material; the private key stays in the control plane.
+    /// Removing a previously installed key is deliberate: tokens are refused
+    /// fail-closed while no key is configured. Returns whether a key is now
+    /// active, so callers can log the posture change.
+    ///
+    /// Fails without touching the running key when the configured key does
+    /// not parse, so a reload with a corrupt key keeps the current key.
+    pub fn install_connect_token_key(
+        &self,
+        security: &crate::config::SecurityConfig,
+    ) -> anyhow::Result<bool> {
+        let verifier = match &security.connect_token {
+            Some(connect_token) => {
+                let key = crate::security::connect_token::ConnectTokenVerifier::from_encoded_key(
+                    &connect_token.public_key,
+                )
+                .map_err(|error| anyhow::anyhow!("security.connect_token: {error}"))?;
+                Some(Arc::new(key))
+            }
+            None => None,
+        };
+        self.connect_token_keys.replace(verifier);
+        Ok(security.connect_token.is_some())
+    }
+
+    /// Whether a connect-token verification key is currently installed
+    /// (issue #517). Introspection for operators and tests; the connection
+    /// path refuses presented tokens when this is `false`.
+    #[must_use]
+    pub fn connect_token_verification_enabled(&self) -> bool {
+        self.connect_token_keys.current().is_some()
+    }
+
+    /// Verify one presented tenant `connect_token` against the configured
+    /// key at the current Unix time (issue #517).
+    pub fn verify_connect_token(
+        &self,
+        presented_app_id: &str,
+        token: &str,
+    ) -> Result<(), crate::security::connect_token::ConnectTokenError> {
+        // Thin clock wrapper (injectable-time convention): all logic lives
+        // in `verify_connect_token_at`.
+        let now_unix_secs = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        {
+            Ok(elapsed) => i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX),
+            Err(error) => {
+                // A clock before the epoch breaks every `exp` comparison in
+                // unpredictable ways; refuse closed rather than guess.
+                tracing::warn!(
+                    error = %error,
+                    "system clock is before the Unix epoch; refusing connect-token verification"
+                );
+                return Err(crate::security::connect_token::ConnectTokenError::Expired);
+            }
+        };
+        self.verify_connect_token_at(presented_app_id, token, now_unix_secs)
+    }
+
+    /// [`Self::verify_connect_token`] with the Unix time injected.
+    pub fn verify_connect_token_at(
+        &self,
+        presented_app_id: &str,
+        token: &str,
+        now_unix_secs: i64,
+    ) -> Result<(), crate::security::connect_token::ConnectTokenError> {
+        let Some(verifier) = self.connect_token_keys.current() else {
+            return Err(crate::security::connect_token::ConnectTokenError::NoKeyConfigured);
+        };
+        verifier
+            .verify(token, presented_app_id, now_unix_secs)
+            .map(|_| ())
     }
 
     /// Resolve the sender's relay-relevant allowlist policy (issue #530), or
@@ -5003,5 +5087,157 @@ mod relay_projection_cache_tests {
                 .contains("max_signal_bytes (65537) must not exceed security.max_message_size"),
             "constructor must name the dead signal cap: {error}"
         );
+    }
+}
+
+#[cfg(test)]
+mod connect_token_tests {
+    use super::EnhancedGameServer;
+    use base64::Engine as _;
+    use ed25519_dalek::SigningKey;
+    use sha2::{Digest, Sha256};
+    use signature::Signer;
+
+    /// Deterministic 32-byte test seed from a label.
+    fn seed(label: &[u8]) -> [u8; 32] {
+        Sha256::digest(label).into()
+    }
+
+    fn key_config(signing: &SigningKey) -> crate::config::ConnectTokenConfig {
+        crate::config::ConnectTokenConfig {
+            public_key: base64::engine::general_purpose::STANDARD.encode(signing.verifying_key()),
+            public_key_path: None,
+        }
+    }
+
+    fn security_with_key(signing: &SigningKey) -> crate::config::SecurityConfig {
+        crate::config::SecurityConfig {
+            connect_token: Some(key_config(signing)),
+            ..crate::config::SecurityConfig::default()
+        }
+    }
+
+    fn mint(signing: &SigningKey, app_id: &str, exp: i64, nonce: &str) -> String {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let payload = serde_json::json!({ "app_id": app_id, "exp": exp, "nonce": nonce });
+        let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let signed = format!("sfct_v1.{payload_b64}");
+        let signature = signing.sign(signed.as_bytes());
+        format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()))
+    }
+
+    /// Current Unix seconds, matching the wall clock the server verifies
+    /// against.
+    fn unix_now() -> i64 {
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_secs(),
+        )
+        .expect("unix seconds fit i64")
+    }
+
+    async fn test_server() -> anyhow::Result<std::sync::Arc<EnhancedGameServer>> {
+        EnhancedGameServer::new(
+            super::ServerConfig::default(),
+            crate::config::ProtocolConfig::default(),
+            crate::config::RelayTypeConfig::default(),
+            crate::config::SessionConfig::default(),
+            crate::config::TurnConfig::default(),
+            crate::database::DatabaseConfig::InMemory,
+            crate::config::MetricsConfig::default(),
+            crate::config::CoordinationConfig::default(),
+            crate::config::TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Issue #517: install/verify round trip, fail-closed refusal before any
+    /// key is installed, and reload rotation + removal semantics.
+    #[tokio::test]
+    async fn connect_token_key_installs_verifies_rotates_and_removes() {
+        let server = test_server().await.expect("server constructs");
+
+        // Fail closed: a presented token without any configured key.
+        assert!(matches!(
+            server.verify_connect_token("app", "sfct_v1.A.B"),
+            Err(crate::security::connect_token::ConnectTokenError::NoKeyConfigured)
+        ));
+
+        let signing = SigningKey::from_bytes(&seed(b"server-key"));
+        assert!(server
+            .install_connect_token_key(&security_with_key(&signing))
+            .expect("valid key installs"));
+
+        let now = unix_now();
+        let token = mint(&signing, "mb_app_one", now + 120, "nonce-1");
+        server
+            .verify_connect_token("mb_app_one", &token)
+            .expect("a freshly minted token for the right app verifies");
+        // Expiry and binding failures surface as the one wire-relevant
+        // rejection class.
+        assert!(server.verify_connect_token("other-app", &token).is_err());
+        assert!(server
+            .verify_connect_token("mb_app_one", &mint(&signing, "mb_app_one", now - 1, "n"))
+            .is_err());
+
+        // Rotation: a new key verifies new tokens and refuses old ones.
+        let rotated = SigningKey::from_bytes(&seed(b"rotated-key"));
+        assert!(server
+            .install_connect_token_key(&security_with_key(&rotated))
+            .expect("rotated key installs"));
+        assert!(server.verify_connect_token("mb_app_one", &token).is_err());
+        let fresh = mint(&rotated, "mb_app_one", now + 120, "nonce-2");
+        server
+            .verify_connect_token("mb_app_one", &fresh)
+            .expect("token minted by the rotated key verifies");
+
+        // Removal refuses presented tokens again.
+        let removed = crate::config::SecurityConfig {
+            connect_token: None,
+            ..crate::config::SecurityConfig::default()
+        };
+        assert!(!server
+            .install_connect_token_key(&removed)
+            .expect("removal applies"));
+        assert!(matches!(
+            server.verify_connect_token("mb_app_one", &fresh),
+            Err(crate::security::connect_token::ConnectTokenError::NoKeyConfigured)
+        ));
+    }
+
+    /// A corrupt configured key is rejected by the installer without
+    /// touching the running key (the SIGHUP fail-closed contract).
+    #[tokio::test]
+    async fn corrupt_key_is_refused_and_keeps_the_running_key() {
+        let server = test_server().await.expect("server constructs");
+        let signing = SigningKey::from_bytes(&seed(b"running-key"));
+        server
+            .install_connect_token_key(&security_with_key(&signing))
+            .expect("valid key installs");
+
+        let corrupt = crate::config::SecurityConfig {
+            connect_token: Some(crate::config::ConnectTokenConfig {
+                public_key: "not-a-valid-key".to_string(),
+                public_key_path: None,
+            }),
+            ..crate::config::SecurityConfig::default()
+        };
+        let error = server
+            .install_connect_token_key(&corrupt)
+            .expect_err("corrupt key must be refused");
+        assert!(
+            error.to_string().contains("security.connect_token"),
+            "the error must name the config seam: {error}"
+        );
+
+        // The running key still verifies.
+        let now = unix_now();
+        let token = mint(&signing, "app", now + 60, "n");
+        server
+            .verify_connect_token("app", &token)
+            .expect("the running key survives the failed install");
     }
 }
