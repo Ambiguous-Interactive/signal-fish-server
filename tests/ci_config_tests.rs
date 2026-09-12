@@ -5385,9 +5385,106 @@ fn test_docker_publish_builds_multi_arch_manifest() {
     );
     assert!(
         content.contains("docker/setup-qemu-action"),
-        "docker-publish.yml must set up docker/setup-qemu-action so the non-native runtime \
-         stages (useradd + apt-get for arm64/armv7) can run under emulation."
+        "docker-publish.yml must set up docker/setup-qemu-action; multi-platform \
+         manifests cannot be produced by the classic builder."
     );
+}
+
+#[test]
+fn test_docker_publish_push_paths_cover_image_inputs() {
+    // The push trigger of docker-publish.yml is path-scoped to the image's
+    // byte-relevant inputs (issue #512): a merge touching none of the paths
+    // cannot change image bytes and skips the rebuild. This test keeps the
+    // filter in lockstep with the Dockerfile: every repository path the
+    // image builds from must be covered by the push `paths` filter, or a
+    // content-relevant merge would silently stop publishing `:latest`.
+    //
+    // Direction of failure is deliberate: the test demands *coverage* of
+    // build inputs (a missing filter entry fails here) while extra,
+    // intentional entries (self-trigger, rust-toolchain.toml) are asserted
+    // explicitly so their removal is a conscious edit.
+    let root = repo_root();
+    let dockerfile = read_live_file(&root.join("Dockerfile"));
+    let workflow = read_live_file(&root.join(".github/workflows/docker-publish.yml"));
+
+    // Collect repository-root sources from non-stage COPY instructions
+    // (the same extraction rule as test_dockerfile_copy_targets_exist:
+    // flags like --chown are skipped, `COPY --from=<stage>` lines are
+    // build-stage copies and read nothing from the repository).
+    let mut build_inputs: Vec<String> = Vec::new();
+    for line in dockerfile.lines() {
+        let trimmed = line.trim();
+        if !(trimmed.starts_with("COPY ") || trimmed.starts_with("ADD "))
+            || trimmed.contains("--from=")
+        {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed
+            .trim_start_matches("COPY ")
+            .trim_start_matches("ADD ")
+            .split_whitespace()
+            .filter(|token| !token.starts_with("--"))
+            .collect();
+        // The last whitespace-separated token is the destination.
+        for source in parts.iter().take(parts.len().saturating_sub(1)) {
+            let root_source = source.trim_end_matches('/');
+            if !build_inputs.iter().any(|existing| existing == root_source) {
+                build_inputs.push(root_source.to_string());
+            }
+        }
+    }
+    assert!(
+        !build_inputs.is_empty(),
+        "Dockerfile must contain repository COPY sources for this lockstep check to be \
+         meaningful"
+    );
+
+    let push_paths: BTreeSet<String> = extract_workflow_event_paths(&workflow, "push")
+        .into_iter()
+        .collect();
+    assert!(
+        !push_paths.is_empty(),
+        "docker-publish.yml must keep a `paths` filter on its push trigger; without it \
+         every merge rebuilds the multi-arch image (issue #512)"
+    );
+
+    let covers = |input: &str, filter: &str| {
+        if filter == input || filter == format!("{input}/**") {
+            return true;
+        }
+        // A directory filter covers deeper inputs only at a path boundary:
+        // `src/**` covers `src/foo`, never `srcfoo`.
+        filter.ends_with("/**")
+            && input.starts_with(&(filter.trim_end_matches("/**").to_string() + "/"))
+    };
+    let mut uncovered = Vec::new();
+    for input in &build_inputs {
+        if !push_paths.iter().any(|filter| covers(input, filter)) {
+            uncovered.push(input.clone());
+        }
+    }
+    assert!(
+        uncovered.is_empty(),
+        "docker-publish.yml push `paths` must cover every Dockerfile build input; \
+         uncovered: {uncovered:?}.\nCurrent filters: {push_paths:?}.\n\
+         A merge changing an uncovered input would rebuild image bytes without \
+         republishing, leaving `:latest` behind main."
+    );
+
+    // Intentional non-COPY entries: removal must be a conscious edit.
+    for required in [
+        "Dockerfile",
+        ".dockerignore",
+        "rust-toolchain.toml",
+        ".github/workflows/docker-publish.yml",
+    ] {
+        assert!(
+            push_paths.contains(required),
+            "docker-publish.yml push `paths` must keep `{required}`: the image definition, \
+             its context filtering, the pinned toolchain, and the workflow itself all \
+             affect publish behavior"
+        );
+    }
 }
 
 #[test]

@@ -14,12 +14,45 @@
 # verified digest and repair missing aliases, but never move an existing version
 # tag to different bytes. Mutable :latest and X.Y aliases are applied only after
 # their immutable digest is verified and their current Git authority is checked.
+#
+# The push trigger is path-scoped to the image's content (issue #512): the
+# image copies only Cargo.toml, Cargo.lock, build.rs, src/, and benches/ into
+# the cargo-chef build, so a merge that touches none of those (docs, .llm,
+# workflow, or script-only changes) produces byte-identical image content and
+# skips the rebuild. Measured over 2026-09-06..12: 4 of the last 20 main-push
+# runs were such no-op rebuilds (~7 billed minutes each plus a multi-arch
+# runner setup). workflow_call (release.yml) and workflow_dispatch paths are
+# unaffected and always publish.
+#
+# Alias consequence: the mutable-alias step only moves :latest when the
+# publication source is the current main head, so a no-op merge landing
+# during a build leaves :latest pinned at the last byte-relevant commit.
+# Its bytes are identical to that head's would-be image (that is the
+# filter's guarantee, enforced by
+# test_docker_publish_push_paths_cover_image_inputs), so pulls are never
+# stale in content — only the OCI revision label can lag main until the
+# next image-relevant merge.
 
 name: Docker Publish
 
 on:
   push:
     branches: [main]
+    # Byte-relevant image inputs only (see header comment): a merge touching
+    # none of these cannot change image bytes, so it skips the rebuild.
+    # rust-toolchain.toml is a conservative extra: the chef base image tag
+    # governs the build toolchain, but the rolling image should republish in
+    # lockstep with the project's pinned toolchain.
+    paths:
+      - 'src/**'
+      - 'benches/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'rust-toolchain.toml'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.github/workflows/docker-publish.yml'
   workflow_dispatch:
     inputs:
       release_tag:
