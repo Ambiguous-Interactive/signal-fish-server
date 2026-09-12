@@ -1518,7 +1518,11 @@ SDK-compatibility capability tokens may appear alongside it.
 `/v2/client-config` and `/v3/client-config` companions return the current receive-limit metadata. `/v3/ws` only
 changes the _default_ protocol version to 3 when the client omits `protocol_version`; an explicit
 `protocol_version` in `Authenticate` always wins (then capped downward at the server maximum, or rejected below
-its minimum). `/v2/ws` behavior is unchanged.
+its minimum). A below-minimum explicit `Authenticate` is a retryable refusal on any handshake-pending socket.
+Handshake-pending sockets are allowlist-mode sockets, and open-policy sockets in an enforcing deployment (their
+handshake starts incomplete). On an open-policy socket with enforcement disarmed, the socket has been usable on
+the endpoint default since connect. There the same refusal closes the socket, so a declared-v2 client cannot
+continue as v3. `/v2/ws` behavior is unchanged.
 
 **Back-compat invariant.** A non-relay plan requires _every_ member of a room to be v3-capable and to support the
 chosen topology and transport. A single v2 (or relay-only) member forces the whole room to the relay floor. Every

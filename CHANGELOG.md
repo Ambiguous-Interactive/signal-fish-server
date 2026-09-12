@@ -572,6 +572,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Below-minimum protocol negotiation is retryable in enforced open-policy
+  mode (issue #396 seam sweep). A socket in open-policy mode with tenant
+  credential enforcement armed starts handshake-incomplete (issue #574), so
+  an explicit `Authenticate` whose `protocol_version` falls below
+  `protocol.min_protocol_version` is now a retryable refusal — the same
+  contract as allowlist mode — instead of closing the socket like the legacy
+  open-mode path does for contradicting a provisionally completed endpoint
+  default. The pre-upgrade endpoint floor check now also applies only while
+  enforcement is disarmed: an enforcing socket's endpoint default never
+  governs, so it survives connect and the explicit `Authenticate` decides.
+  Legacy open-mode behavior (refuse-and-close) is unchanged and pinned.
+
 - The release preflight no longer blocks every release (issue #512 follow-up
   to the issue #557 CI consolidation). `scripts/check-release-preflight.sh`
   required a completed successful `push` run of the workflow named "CI" at

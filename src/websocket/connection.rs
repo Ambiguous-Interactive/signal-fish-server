@@ -1344,7 +1344,11 @@ pub(super) async fn handle_socket(
     // Open app-ID-policy endpoints normally use their path version immediately. A
     // deployment floor above that endpoint cannot be satisfied without lying
     // about the client's capabilities, so reject before starting socket tasks.
+    // Tenant-credential enforcement (issue #574) keeps the handshake
+    // incomplete instead — the endpoint default never governs, so the explicit
+    // `Authenticate` negotiation decides (and may retry) below.
     if !server.config().app_id_allowlist_enabled
+        && !server.connect_token_required()
         && default_protocol_version < server.protocol_config().min_protocol_version
     {
         let minimum = server.protocol_config().min_protocol_version;
@@ -2155,8 +2159,12 @@ pub(super) async fn handle_socket(
                                 continue;
                             }
 
-                            // Validate App ID (the connection's source keys the
-                            // per-source share of the app rate budget)
+                            // Validate App ID. In allowlist mode the
+                            // connection's source keys the per-source share of
+                            // the app rate budget; open mode resolves an
+                            // unauthenticated default context with no
+                            // app-level budget (per-connection bounds still
+                            // apply).
                             match server_clone
                                 .app_id_allowlist
                                 .resolve_app_id(&app_id, addr.ip())
@@ -2325,14 +2333,20 @@ pub(super) async fn handle_socket(
                                             "protocol version compatibility error",
                                         )
                                         .await;
-                                        // Open-policy sockets provisionally completed
-                                        // the handshake from the endpoint default.
-                                        // Once an optional Authenticate contradicts
-                                        // that default below the deployment floor,
-                                        // continuing would leave a declared-v2 client
-                                        // usable as v3. Enforced-policy clients may retry
-                                        // their incomplete app-ID handshake.
-                                        if !server_clone.config().app_id_allowlist_enabled {
+                                        // Only sockets that provisionally completed
+                                        // the handshake from the endpoint default
+                                        // (open policy, enforcement disarmed) are
+                                        // usable without an explicit
+                                        // `Authenticate`; once their optional
+                                        // Authenticate contradicts that default
+                                        // below the deployment floor, continuing
+                                        // would leave a declared-v2 client usable
+                                        // as v3. Handshake-pending sockets
+                                        // (allowlist mode, or open mode with
+                                        // tenant-credential enforcement, issue
+                                        // #574) may retry their incomplete
+                                        // handshake.
+                                        if app_handshake_complete {
                                             break;
                                         }
                                         continue;

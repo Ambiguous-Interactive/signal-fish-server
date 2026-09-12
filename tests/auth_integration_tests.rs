@@ -779,11 +779,28 @@ async fn spawn_connect_token_server(
     security: Option<signal_fish_server::config::SecurityConfig>,
     allowlist_enabled: bool,
 ) -> RunningTestServer {
+    spawn_connect_token_server_with_protocol(
+        apps,
+        security,
+        allowlist_enabled,
+        signal_fish_server::config::ProtocolConfig::default(),
+    )
+    .await
+}
+
+/// [`spawn_connect_token_server`] with an explicit protocol configuration,
+/// for tests that move the negotiation floor.
+async fn spawn_connect_token_server_with_protocol(
+    apps: Vec<AppRegistrationEntry>,
+    security: Option<signal_fish_server::config::SecurityConfig>,
+    allowlist_enabled: bool,
+    protocol: signal_fish_server::config::ProtocolConfig,
+) -> RunningTestServer {
     let mut config = test_server_config();
     config.app_id_allowlist_enabled = allowlist_enabled;
     let server = signal_fish_server::server::EnhancedGameServer::new(
         config,
-        signal_fish_server::config::ProtocolConfig::default(),
+        protocol,
         signal_fish_server::config::RelayTypeConfig::default(),
         signal_fish_server::config::SessionConfig::default(),
         signal_fish_server::config::TurnConfig::default(),
@@ -1154,6 +1171,95 @@ async fn open_mode_enforcement_closes_the_skip_authenticate_bypass() {
             ..
         } => {}
         other => panic!("expected MISSING_APP_ID refusal, got {other:?}"),
+    }
+
+    running.shutdown().await;
+}
+
+/// An enforced open-policy socket starts handshake-incomplete (issue #574),
+/// so an explicit `Authenticate` that fails protocol negotiation is a
+/// retryable refusal of an incomplete handshake — exactly like the identical
+/// state in allowlist mode — and not the legacy close for contradicting a
+/// provisionally completed endpoint default (issue #396 sweep).
+#[tokio::test]
+async fn enforced_open_mode_below_floor_authenticate_is_retryable() {
+    let signing = connect_token_support::signing_key(b"e2e-control-plane");
+    let security = signal_fish_server::config::SecurityConfig {
+        connect_token: Some(signal_fish_server::config::ConnectTokenConfig {
+            public_key: connect_token_support::encoded_public_key(&signing),
+            public_key_path: None,
+            required: true,
+        }),
+        ..signal_fish_server::config::SecurityConfig::default()
+    };
+    let protocol = signal_fish_server::config::ProtocolConfig {
+        min_protocol_version: 3,
+        ..signal_fish_server::config::ProtocolConfig::default()
+    };
+    let running =
+        spawn_connect_token_server_with_protocol(Vec::new(), Some(security), false, protocol).await;
+
+    let mut ws = connect_socket(running.addr()).await;
+    // Valid token, explicit v2 below the v3 floor: refused, not closed.
+    send_client_message(
+        &mut ws,
+        &ClientMessage::Authenticate {
+            app_id: "open-label".to_string(),
+            connect_token: Some(connect_token_support::mint(
+                &signing,
+                "open-label",
+                300,
+                "n",
+            )),
+            sdk_version: None,
+            platform: None,
+            game_data_format: None,
+            protocol_version: Some(2),
+            supported_transports: None,
+            supported_topologies: None,
+            requested_capabilities: None,
+        },
+    )
+    .await;
+    match next_server_message_within(&mut ws, SOCKET_DEADLINE, "negotiation refusal").await {
+        ServerMessage::AuthenticationError {
+            error,
+            error_code: ErrorCode::UnsupportedProtocolVersion,
+        } => {
+            assert!(
+                error.contains("Client protocol version"),
+                "the refusal must be the Authenticate negotiation refusal, not the \
+                 connect-time endpoint floor refusal: {error}"
+            );
+        }
+        other => panic!("expected UnsupportedProtocolVersion refusal, got {other:?}"),
+    }
+
+    // The handshake stays retryable on the same socket: a floor-legal retry
+    // completes with the same credential.
+    send_client_message(
+        &mut ws,
+        &ClientMessage::Authenticate {
+            app_id: "open-label".to_string(),
+            connect_token: Some(connect_token_support::mint(
+                &signing,
+                "open-label",
+                300,
+                "n",
+            )),
+            sdk_version: None,
+            platform: None,
+            game_data_format: None,
+            protocol_version: Some(3),
+            supported_transports: None,
+            supported_topologies: None,
+            requested_capabilities: None,
+        },
+    )
+    .await;
+    match next_server_message_within(&mut ws, SOCKET_DEADLINE, "handshake retry").await {
+        ServerMessage::Authenticated { .. } => {}
+        other => panic!("expected the retry to complete the handshake, got {other:?}"),
     }
 
     running.shutdown().await;
