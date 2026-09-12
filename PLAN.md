@@ -140,6 +140,18 @@ correctness evidence appears.
     the second job re-paid one runner setup and a duplicate two-workspace
     compile on every schedule and pull-request event; each lane keeps its
     own step and the consolidated job summary keeps per-suite sections).
+    The 2026-09-12 session-239 audit (7-day complete API measurement,
+    ~1000 runs, ~890 billed min/day) found every remaining per-event
+    workflow already path-narrowed, cache-warmed, and cohort-consolidated;
+    it scoped the last owner-input-free duplication: docker-publish's
+    push-to-main trigger rebuilt the multi-arch image for content-irrelevant
+    merges (4 of the prior 20 runs; dry-run replay of the last 40 main
+    pushes shows a byte-relevant `paths` filter skips 9, fires 31, and never
+    skips an image-relevant change — that filter landed this session).
+    Verified from the API: `main` has **zero required status checks** and no
+    required reviews (one disabled Copilot ruleset; required linear history
+    on), so the #379 owner-inventory prerequisite is exported and
+    path-filter changes cannot strand a required check.
     Remaining levers still
     need owner input: self-hosted runner labels and the #379 path-awareness
     inventory (the per-PR interop-quartet cohort question was decided
