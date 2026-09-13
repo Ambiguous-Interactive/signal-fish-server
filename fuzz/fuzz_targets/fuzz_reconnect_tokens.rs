@@ -152,7 +152,10 @@ impl From<&PlayerInfo> for PlayerInfoSnapshot {
             name: info.name.clone(),
             is_authority: info.is_authority,
             is_ready: info.is_ready,
-            connected_at_micros: info.connected_at.timestamp_micros(),
+            connected_at_micros: info
+                .connected_at
+                .unwrap_or_default()
+                .timestamp_micros(),
             has_connection_info: info.connection_info.is_some(),
             epoch: info.epoch,
             seq: info.seq,
@@ -227,7 +230,7 @@ fn player_info(player: Uuid, was_authority: bool, last_epoch: u32) -> Option<Pla
         name: format!("fuzz-{player}"),
         is_authority: true,
         is_ready: last_epoch % 2 == 0,
-        connected_at: chrono::Utc::now(),
+        connected_at: Some(chrono::Utc::now()),
         connection_info: None,
         epoch: Some(last_epoch),
         seq: Some(u64::from(last_epoch)),
