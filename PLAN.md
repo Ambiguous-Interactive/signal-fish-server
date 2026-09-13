@@ -69,15 +69,20 @@ correctness evidence appears.
   session-237 enforcement-seam sweep). The sweep practice continues
   opportunistically wherever new features open seams; per-session closure
   evidence lives in the closed issue, session notes, and merged PRs.
-- #539 — the release-preparation chain is unblocked and merged in
-  `signal-fish-client-rust`: the tolerant `connected_at` parse (#257) rides
-  the 0.13.0 release commit (PR #264, merged 2026-09-13), after PR #263 fixed
-  the release tooling whose inventory drift had failed the Prepare Release
-  dry run closed. Remaining: owner-dispatch the SDK `Release` workflow
-  (crates.io publish, human-authorized), then bump the `clients/fortress` and
-  `clients/fortress-wasm` pins, prove the Fortress interop run, then re-land
-  the v3 `connected_at` trim (the #538 first-cut design) with the AsyncAPI
-  `V3PlayerInfo`/spectator schema split in the same change.
+- #539 — the SDK half is complete on `signal-fish-client-rust` main: the
+  tolerant `connected_at` parse (#257) rides the 0.13.0 release commit
+  (PR #264, merged 2026-09-13; verified from SDK main —
+  `PlayerInfo::connected_at` and `SpectatorInfo::connected_at` are
+  `#[serde(default)]`). Remaining: owner-dispatch the SDK `Release` workflow
+  (crates.io publish, human-authorized; crates.io still maxes at 0.12.0 for
+  both `signal-fish-client` and `signal-fish-client-godot`), then bump the
+  `clients/fortress` and `clients/fortress-wasm` pins (the wasm bump covers
+  its `signal-fish-client-godot` pin), prove the Fortress interop run, then
+  re-land the v3 `connected_at` trim (the #538 first-cut design). The spec's
+  v2/v3 `PlayerInfo` split already exists (#153/#267; #538 landed the
+  `connection_info` trim); the trim change adds the v3 spectator schema split
+  and rewrites `V3PlayerInfo`'s `required` list and description, which still
+  name `connected_at` as required.
 - #525 — CLOSED (minimal moderation set, access-control tier, and spectator
   fan-out slimming landed across sessions 217-220; the #546 squat design
   resolved in session 220). Follow-on credential work is tracked under #517.
