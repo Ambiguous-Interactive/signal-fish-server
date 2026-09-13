@@ -1230,7 +1230,7 @@ Successfully joined a room as spectator.
     "current_spectators": [
       {
         "id": "spectator-id",
-        "name": "Observer1",
+        "name": "Observer1"
       }
     ],
     "lobby_state": "lobby",
