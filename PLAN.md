@@ -69,13 +69,15 @@ correctness evidence appears.
   session-237 enforcement-seam sweep). The sweep practice continues
   opportunistically wherever new features open seams; per-session closure
   evidence lives in the closed issue, session notes, and merged PRs.
-- #539 — still blocked on the human-run crates.io release of
-  `signal-fish-client` (latest remains 0.12.0 as of 2026-09-12; the tolerant
-  client half is merged in `signal-fish-client-rust#257`, awaiting release).
-  After release: bump the `clients/fortress` and `clients/fortress-wasm`
-  pins, prove the Fortress interop run, then re-land the v3 `connected_at`
-  trim (the #538 first-cut design) with the AsyncAPI `V3PlayerInfo`/
-  spectator schema split in the same change.
+- #539 — the release-preparation chain is unblocked and merged in
+  `signal-fish-client-rust`: the tolerant `connected_at` parse (#257) rides
+  the 0.13.0 release commit (PR #264, merged 2026-09-13), after PR #263 fixed
+  the release tooling whose inventory drift had failed the Prepare Release
+  dry run closed. Remaining: owner-dispatch the SDK `Release` workflow
+  (crates.io publish, human-authorized), then bump the `clients/fortress` and
+  `clients/fortress-wasm` pins, prove the Fortress interop run, then re-land
+  the v3 `connected_at` trim (the #538 first-cut design) with the AsyncAPI
+  `V3PlayerInfo`/spectator schema split in the same change.
 - #525 — CLOSED (minimal moderation set, access-control tier, and spectator
   fan-out slimming landed across sessions 217-220; the #546 squat design
   resolved in session 220). Follow-on credential work is tracked under #517.
