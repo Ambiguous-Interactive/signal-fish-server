@@ -313,6 +313,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so a fail-open deployment is visible in `docker logs` instead of silent
   (issue #515). `--validate-config` gained `App-ID allowlist enforced` and
   `Registered applications` summary lines.
+- TURN over TLS and coturn monitoring in the documented deployment (PLAN P8):
+  the compose `turn` profile gains an opt-in TLS listener (`turns:`, port
+  5349, DTLS included) via `TURN_TLS_CERT`/`TURN_TLS_PKEY` host paths, with a
+  fail-fast guard for a half-configured pair or a mounted PEM that is empty,
+  non-PEM, or unreadable by the coturn user (uid 65534), and always-on
+  Prometheus metrics published on host loopback port 9641.
+  `docs/deployment-turn.md` gains "TURN over TLS (turns:)" and "Monitoring"
+  sections with the setup steps, live series names, and scrape paths.
 
 ### Changed
 

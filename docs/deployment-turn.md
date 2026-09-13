@@ -72,6 +72,61 @@ Three production notes on the compose profile:
 - **No secrets in the repository.** `TURN_STATIC_AUTH_SECRET` is interpolated from
   the environment (or an uncommitted `.env` file); nothing secret is checked in.
 
+## TURN over TLS (turns:)
+
+Some player networks block UDP and plain TCP but permit TLS. TURN over TLS
+(`turns:`) wraps TURN in TLS over TCP port 5349 and reaches those clients.
+Relayed traffic costs more over TLS/TCP than over UDP — plan capacity for it.
+
+The compose `turn` profile enables TLS when you give it a PEM certificate
+chain and its private key (host paths), and you publish the TLS port:
+
+```bash
+# The container reads the key as uid 65534 (nobody), gid 65533; a
+# root-owned 0600 key (certbot's host default) is not readable by it.
+# Expose a readable copy:
+mkdir -p /srv/coturn-tls
+install -o 65534 -g 65533 -m 640 \
+  /etc/letsencrypt/live/turn.yourgame.com/privkey.pem /srv/coturn-tls/privkey.pem
+export TURN_TLS_CERT="/etc/letsencrypt/live/turn.yourgame.com/fullchain.pem"
+export TURN_TLS_PKEY="/srv/coturn-tls/privkey.pem"
+# Uncomment the "- 5349" port mappings in docker-compose.yml, then:
+docker compose --profile turn up -d
+```
+
+Compose mounts both files at `/etc/coturn/tls.crt` and `/etc/coturn/tls.key`
+inside the container; coturn reads only those fixed paths. The entrypoint
+guard refuses to start when only one variable is set, or when a mounted file
+is empty, not a regular file, unreadable, or carries no PEM data — a silently
+absent TLS listener would make `turns:` clients fail with no server-side
+signal. Without the variables, TLS stays off and the profile behaves as in
+the quick start above.
+
+Use a certificate the clients trust: browsers reject `turns:` with
+self-signed certificates. A public CA certificate (for example one obtained
+from Let's Encrypt via `certbot`) or a CA already trusted by your game's
+client platforms both work. A certificate/key mismatch (valid PEMs, wrong
+pair) cannot be caught at start; it appears in the coturn log as a failed
+TLS listener start.
+
+Advertise the TLS relay by adding a `turns:` URL to `turn.urls`:
+
+```json
+{
+  "turn": {
+    "urls": [
+      "turn:turn.yourgame.com:3478",
+      "turns:turn.yourgame.com:5349"
+    ]
+  }
+}
+```
+
+Clients treat the list as a standard ICE server list. `turns:` carries the
+same short-lived credentials as `turn:` — no extra secret. The published UDP
+side of port 5349 serves DTLS (TURN over UDP with TLS semantics) for clients
+that support it.
+
 ## How the ephemeral credential scheme works
 
 When TURN is enabled the server implements the coturn REST API
@@ -207,6 +262,41 @@ examples in the [reverse proxy setup](deployment.md#reverse-proxy-setup) — ful
 satisfies this: clients connect to `wss://signal.yourgame.com/v3/ws` and the
 proxy forwards to the server over the loopback interface. Pair it with the
 hardening items in the [security checklist](deployment.md#security-checklist).
+
+## Monitoring
+
+The compose `turn` profile starts coturn with Prometheus metrics: port 9641,
+path `/metrics`, published on the host loopback only:
+
+```bash
+curl http://localhost:9641/metrics
+```
+
+Two supported scrape paths: a monitoring container on the same compose
+network scrapes `http://coturn:9641/metrics`, or a local Prometheus scrapes
+the loopback publish. Do not publish metrics to a public interface. Caveat:
+with `network_mode: host` (advised for large relay port ranges above),
+compose ignores `ports:` entirely and coturn binds 9641 on every host
+interface — keep that port firewalled in such setups.
+
+Useful series in the coturn exposition:
+
+- `turn_total_allocations` — live relay allocations. This is actual relay use.
+- `turn_total_traffic_sentb` / `turn_total_traffic_rcvb` — relayed bytes.
+  TURN bandwidth dominates deployment cost; chart it against your budget.
+- `stun_binding_error` — failed STUN binding requests. Internet background
+  noise produces these constantly; only a step change needs attention.
+
+Allocation failures from credential drift (wrong or rotated secret) appear in
+the coturn log as `4xx` allocation responses, not as a Prometheus series —
+check the log after every secret rotation.
+
+The signaling server side exports
+`signal_fish_transport_turn_credentials_issued_total` (credential minting,
+including ICE pre-gather). Minting scales with joins; allocations measure
+actual relay use. A large, growing gap is expected for abandoned lobbies —
+see the TTL discussion above — while zero allocations with live sessions on
+restrictive networks points at reachability (relay port range, firewall).
 
 ## Capacity planning
 
