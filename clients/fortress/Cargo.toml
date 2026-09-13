@@ -17,7 +17,7 @@ unsafe_code = "forbid"
 fortress-rollback = "=0.12.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-signal-fish-client = { version = "=0.8.0", features = ["polling-client"] }
+signal-fish-client = { version = "=0.13.0", features = ["polling-client"] }
 tokio = { version = "1.52", features = ["fs", "macros", "rt", "time"] }
 uuid = { version = "1.23", features = ["serde", "v4"] }
 

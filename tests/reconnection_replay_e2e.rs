@@ -558,7 +558,7 @@ async fn replayed_player_joined_trims_connection_info_for_v3_and_keeps_it_verbat
                         name: "Legacy".to_string(),
                         is_authority: false,
                         is_ready: false,
-                        connected_at: chrono::Utc::now(),
+                        connected_at: Some(chrono::Utc::now()),
                         connection_info: Some(
                             signal_fish_server::protocol::ConnectionInfo::Relay {
                                 host: "relay.example.test".to_string(),
@@ -657,8 +657,9 @@ async fn replayed_player_joined_trims_connection_info_for_v3_and_keeps_it_verbat
                     "the trim is surgical: the v3 incarnation epoch survives: {raw}"
                 );
                 assert!(
-                    replayed_player.contains_key("connected_at"),
-                    "connected_at stays on the v3 wire (released SDKs require it): {raw}"
+                    !replayed_player.contains_key("connected_at"),
+                    "the v3 write-layer projection must trim the server-internal \
+                     join timestamp from the nested replay copy (issue #539): {raw}"
                 );
             }
         }

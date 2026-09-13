@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Protocol v3 room snapshots no longer carry the server-internal
+  `connected_at` join timestamp (issue #539, follow-up of #529). The write
+  layer strips it from `RoomJoined`, `PlayerJoined`, `SpectatorJoined`,
+  `Reconnected` (including nested replay events), the spectator fan-outs
+  (`NewSpectatorJoined`, `SpectatorDisconnected`, `SpectatorLeft`), and the
+  correlated `RoomOperationResult` envelopes, for players and spectators
+  alike. Negotiated v2 connections keep the frozen legacy wire shape. The
+  field was always server-internal diagnostics; no peer has a protocol use
+  for another member's join time. Client SDK 0.13.0 parses the omitted
+  field tolerantly; the in-repo Fortress fixtures now pin 0.13.0. Server
+  storage, diagnostics, and the `GameStarting` handoff surface are
+  unchanged.
+
+  Deployment pairing: v3 clients built on client SDK 0.8.0-0.12.0 fail to
+  parse these snapshots. Pair this server release with client SDK 0.13.0+
+  for protocol v3. v2 clients are unaffected.
+
 ## [0.9.0] - 2026-09-13
 
 ### Added

@@ -449,8 +449,8 @@ function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser,
     assert(report.role === name, `${name}: role mismatch`);
     assert(report.room_code === roomCode, `${name}: room mismatch`);
     assert(report.build_sha === buildSha, `${name}: current-checkout identity mismatch`);
-    assert(report.signal_fish_client_version === "0.9.0", `${name}: client version drift`);
-    assert(report.signal_fish_client_godot_version === "0.9.0", `${name}: Godot adapter version drift`);
+    assert(report.signal_fish_client_version === "0.13.0", `${name}: client version drift`);
+    assert(report.signal_fish_client_godot_version === "0.13.0", `${name}: Godot adapter version drift`);
     assert(report.fortress_rollback_version === "0.12.0", `${name}: Fortress version drift`);
     assert(report.godot_rust_version === "0.4.5", `${name}: godot-rust version drift`);
     assertExactKeys(

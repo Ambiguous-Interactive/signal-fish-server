@@ -28883,7 +28883,7 @@ fn test_fortress_interop_gate_is_pinned_and_runs_current_server() {
 
     for dependency in [
         "fortress-rollback = \"=0.12.0\"",
-        "signal-fish-client = { version = \"=0.8.0\"",
+        "signal-fish-client = { version = \"=0.13.0\"",
     ] {
         assert!(
             manifest.contains(dependency),
@@ -30090,8 +30090,8 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
 
     for dependency in [
         "fortress-rollback = \"=0.12.0\"",
-        "signal-fish-client = { version = \"=0.9.0\", default-features = false, features = [\"polling-client\"] }",
-        "signal-fish-client-godot = \"=0.9.0\"",
+        "signal-fish-client = { version = \"=0.13.0\", default-features = false, features = [\"polling-client\"] }",
+        "signal-fish-client-godot = \"=0.13.0\"",
         "godot = { version = \"=0.4.5\", features = [\"api-custom\", \"experimental-wasm\", \"experimental-wasm-nothreads\", \"lazy-function-tables\"] }",
     ] {
         assert!(
@@ -30106,8 +30106,8 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     for (name, version) in [
         ("fortress-rollback", "0.12.0"),
         ("bincode-next", "2.1.0"),
-        ("signal-fish-client", "0.9.0"),
-        ("signal-fish-client-godot", "0.9.0"),
+        ("signal-fish-client", "0.13.0"),
+        ("signal-fish-client-godot", "0.13.0"),
         ("godot", "0.4.5"),
     ] {
         let package = cargo_lock_package(&lockfile, name, version);
@@ -30172,7 +30172,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "relay_sent_sequence_hash",
         "relay_received_sequence_hash",
         "use signal_fish_client_godot::GodotWebSocketTransport;",
-        "const SIGNAL_FISH_CLIENT_GODOT_VERSION: &str = \"0.9.0\";",
+        "const SIGNAL_FISH_CLIENT_GODOT_VERSION: &str = \"0.13.0\";",
         "const FORTRESS_ROLLBACK_VERSION: &str = \"0.12.0\";",
         "signal_fish_client_godot_version: SIGNAL_FISH_CLIENT_GODOT_VERSION",
         "const REPORT_SCHEMA_VERSION: u32 = 3;",
@@ -30216,7 +30216,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "room.schema_version === 3",
         "schema_version: 3,",
         "report.schema_version === 3",
-        "report.signal_fish_client_godot_version === \"0.9.0\"",
+        "report.signal_fish_client_godot_version === \"0.13.0\"",
         "report.fortress_rollback_version === \"0.12.0\"",
         "report.godot_runtime.string === \"4.5-stable (official)\"",
         "assertExactKeys(report, reportKeys",
@@ -30359,10 +30359,10 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "negative \"${EXPORT_DIR}\"",
         "timeout --foreground 180s",
         "timeout --foreground",
-        "signal-fish-client v0.9.0",
-        "signal-fish-client-godot v0.9.0",
+        "signal-fish-client v0.13.0",
+        "signal-fish-client-godot v0.13.0",
         "fortress-rollback v0.12.0",
-        "HEALTHY: released Signal Fish client 0.9.0",
+        "HEALTHY: released Signal Fish client 0.13.0",
     ] {
         assert!(
             runner.contains(required),

@@ -472,7 +472,7 @@ fn player_with_stamp(player_id: PlayerId, epoch: Option<u32>, seq: Option<u64>) 
         name: format!("player-{player_id}"),
         is_authority: false,
         is_ready: false,
-        connected_at: Utc::now(),
+        connected_at: Some(Utc::now()),
         connection_info: None,
         epoch,
         seq,

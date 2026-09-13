@@ -26,7 +26,7 @@ fn make_player(player_id: Uuid) -> PlayerInfo {
         name: format!("Player-{}", &player_id.to_string()[..8]),
         is_authority: false,
         is_ready: false,
-        connected_at: chrono::Utc::now(),
+        connected_at: Some(chrono::Utc::now()),
         connection_info: None,
         epoch: None,
         seq: None,

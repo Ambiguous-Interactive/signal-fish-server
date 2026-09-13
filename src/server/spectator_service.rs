@@ -524,7 +524,7 @@ impl SpectatorService {
             name: spectator_name.clone(),
             // Wall clock (durable record): membership stamp on a durable
             // room-state row.
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
         };
 
         // From here until the local role is published, a panic must be
@@ -3012,7 +3012,7 @@ mod tests {
                 SpectatorInfo {
                     id: ghost_id,
                     name: "Ghost Watcher".to_string(),
-                    connected_at: chrono::Utc::now(),
+                    connected_at: Some(chrono::Utc::now()),
                 },
             )
             .await
@@ -3084,7 +3084,7 @@ mod tests {
                 SpectatorInfo {
                     id: ghost_id,
                     name: "Ghost Watcher".to_string(),
-                    connected_at: chrono::Utc::now(),
+                    connected_at: Some(chrono::Utc::now()),
                 },
             )
             .await
@@ -3161,7 +3161,7 @@ mod tests {
                 SpectatorInfo {
                     id: ghost_id,
                     name: "Ghost Watcher".to_string(),
-                    connected_at: chrono::Utc::now(),
+                    connected_at: Some(chrono::Utc::now()),
                 },
             )
             .await

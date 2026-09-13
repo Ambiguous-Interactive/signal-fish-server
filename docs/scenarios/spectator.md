@@ -52,7 +52,6 @@ The server admits Observer1 and replies with the current room snapshot:
         "name": "Alice",
         "is_authority": false,
         "is_ready": true,
-        "connected_at": "2026-06-14T10:00:00Z",
         "epoch": 1
       },
       {
@@ -60,15 +59,13 @@ The server admits Observer1 and replies with the current room snapshot:
         "name": "Bob",
         "is_authority": false,
         "is_ready": true,
-        "connected_at": "2026-06-14T10:00:30Z",
         "epoch": 2
       }
     ],
     "current_spectators": [
       {
         "id": "00000000-0000-0000-0000-000000000051",
-        "name": "Observer1",
-        "connected_at": "2026-06-14T10:05:00Z"
+        "name": "Observer1"
       }
     ],
     "lobby_state": "finalized",

@@ -53,7 +53,6 @@ room state:
         "name": "Alice",
         "is_authority": false,
         "is_ready": true,
-        "connected_at": "2025-01-15T10:30:00Z",
         "epoch": 1,
         "seq": 17
       },
@@ -62,7 +61,6 @@ room state:
         "name": "Bob",
         "is_authority": false,
         "is_ready": true,
-        "connected_at": "2025-01-15T10:31:00Z",
         "epoch": 2,
         "seq": 0
       }
@@ -70,8 +68,7 @@ room state:
     "current_spectators": [
       {
         "id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
-        "name": "Observer1",
-        "connected_at": "2025-01-15T10:35:00Z"
+        "name": "Observer1"
       }
     ],
     "lobby_state": "lobby",
