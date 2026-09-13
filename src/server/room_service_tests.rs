@@ -4079,7 +4079,8 @@ async fn aborting_leave_while_ack_is_backpressured_still_publishes_terminal_even
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: chrono::Utc::now(),
+                connected_at: Some(chrono::Utc::now()),
+
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -4175,7 +4176,8 @@ async fn aborting_reconnect_while_baseline_is_backpressured_still_restores_ident
         name: "reconnecting".to_string(),
         is_authority: false,
         is_ready: false,
-        connected_at: chrono::Utc::now(),
+        connected_at: Some(chrono::Utc::now()),
+
         connection_info: None,
         epoch: None,
         seq: None,
@@ -4537,7 +4539,8 @@ async fn delayed_leave_terminal_event_commits_before_a_concurrent_join() {
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: chrono::Utc::now(),
+                connected_at: Some(chrono::Utc::now()),
+
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -5514,7 +5517,8 @@ async fn draining_unregister_removes_membership_without_roomleft_noise() {
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: chrono::Utc::now(),
+                connected_at: Some(chrono::Utc::now()),
+
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -6457,7 +6461,8 @@ async fn draining_unregister_discards_reconnect_when_drain_starts_during_leave()
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: chrono::Utc::now(),
+                connected_at: Some(chrono::Utc::now()),
+
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -6589,7 +6594,8 @@ async fn draining_leave_room_skips_roomleft_when_drain_starts_inside_send() {
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: chrono::Utc::now(),
+                connected_at: Some(chrono::Utc::now()),
+
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -6672,7 +6678,8 @@ async fn missing_terminal_tail_suppresses_incomplete_player_left() {
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: chrono::Utc::now(),
+                connected_at: Some(chrono::Utc::now()),
+
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -6811,7 +6818,8 @@ async fn draining_leave_room_skips_playerleft_when_drain_starts_inside_broadcast
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: chrono::Utc::now(),
+                connected_at: Some(chrono::Utc::now()),
+
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -6915,7 +6923,8 @@ async fn draining_leave_room_cancels_backpressured_playerleft_and_replay() {
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: chrono::Utc::now(),
+                connected_at: Some(chrono::Utc::now()),
+
                 connection_info: None,
                 epoch: None,
                 seq: None,

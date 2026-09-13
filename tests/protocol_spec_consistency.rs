@@ -1333,10 +1333,11 @@ fn accountability_message_schemas_accept_rust_wire_shapes_and_reject_hybrids() {
         name: "Alice".to_string(),
         is_authority: true,
         is_ready: false,
-        // `connected_at` stays on the wire for BOTH cohorts: every released
-        // client SDK deserializes it as a required field (issue #529
-        // follow-up). The v3 trim covers `connection_info` only.
-        connected_at,
+        // Cohort-shaped fixture (issue #539): a v2 snapshot carries the
+        // frozen legacy `connected_at`; the server strips it from every v3
+        // snapshot before the frame is written, so the v3 wire shape omits
+        // it.
+        connected_at: (!accountable).then_some(connected_at),
         connection_info: None,
         epoch: accountable.then_some(3),
         seq: accountable.then_some(7),

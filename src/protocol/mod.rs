@@ -88,7 +88,8 @@ mod tests {
             name: "Player1".to_string(),
             is_authority: false,
             is_ready: false,
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
+
             connection_info: None,
             epoch: None,
             seq: None,
@@ -100,7 +101,8 @@ mod tests {
             name: "Player2".to_string(),
             is_authority: false,
             is_ready: false,
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
+
             connection_info: None,
             epoch: None,
             seq: None,
@@ -116,7 +118,8 @@ mod tests {
             name: "Player3".to_string(),
             is_authority: false,
             is_ready: false,
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
+
             connection_info: None,
             epoch: None,
             seq: None,
@@ -142,7 +145,8 @@ mod tests {
             name: "Authority Player".to_string(),
             is_authority: false,
             is_ready: false,
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
+
             connection_info: None,
             epoch: None,
             seq: None,
@@ -171,7 +175,8 @@ mod tests {
             name: "Authority Player".to_string(),
             is_authority: false,
             is_ready: false,
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
+
             connection_info: None,
             epoch: None,
             seq: None,
@@ -244,7 +249,8 @@ mod tests {
                 name: "Player1".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: chrono::Utc::now(),
+                connected_at: Some(chrono::Utc::now()),
+
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -311,7 +317,8 @@ mod tests {
             name: "Player1".to_string(),
             is_authority: true, // First player should get authority
             is_ready: false,
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
+
             connection_info: None,
             epoch: None,
             seq: None,
@@ -331,7 +338,8 @@ mod tests {
             name: "Player2".to_string(),
             is_authority: false,
             is_ready: false,
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
+
             connection_info: None,
             epoch: None,
             seq: None,
@@ -364,7 +372,8 @@ mod tests {
             name: "Player1".to_string(),
             is_authority: true,
             is_ready: false,
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
+
             connection_info: None,
             epoch: None,
             seq: None,
@@ -375,7 +384,8 @@ mod tests {
             name: "Player2".to_string(),
             is_authority: false,
             is_ready: false,
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
+
             connection_info: None,
             epoch: None,
             seq: None,
@@ -423,7 +433,8 @@ mod tests {
             name: "AuthorityPlayer".to_string(),
             is_authority: true,
             is_ready: false,
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
+
             connection_info: None,
             epoch: None,
             seq: None,
@@ -434,7 +445,8 @@ mod tests {
             name: "RegularPlayer".to_string(),
             is_authority: false,
             is_ready: false,
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
+
             connection_info: None,
             epoch: None,
             seq: None,
@@ -473,7 +485,8 @@ mod tests {
             name: "Player".to_string(),
             is_authority: false,
             is_ready: false,
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
+
             connection_info: None,
             epoch: None,
             seq: None,
@@ -502,7 +515,8 @@ mod tests {
             name: "Player2".to_string(),
             is_authority: false,
             is_ready: false,
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
+
             connection_info: None,
             epoch: None,
             seq: None,
@@ -540,7 +554,8 @@ mod tests {
             name: "Player1".to_string(),
             is_authority: true,
             is_ready: false,
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
+
             connection_info: None,
             epoch: None,
             seq: None,
@@ -569,7 +584,8 @@ mod tests {
             name: "Player2".to_string(),
             is_authority: false,
             is_ready: false,
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
+
             connection_info: None,
             epoch: None,
             seq: None,
@@ -614,7 +630,8 @@ mod tests {
                 name: name.to_string(),
                 is_authority: id == player1_id,
                 is_ready: false,
-                connected_at: chrono::Utc::now(),
+                connected_at: Some(chrono::Utc::now()),
+
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -660,7 +677,8 @@ mod tests {
             name: "Authority".to_string(),
             is_authority: true,
             is_ready: false,
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
+
             connection_info: None,
             epoch: None,
             seq: None,
@@ -672,7 +690,8 @@ mod tests {
             name: "Player".to_string(),
             is_authority: false,
             is_ready: false,
-            connected_at: chrono::Utc::now(),
+            connected_at: Some(chrono::Utc::now()),
+
             connection_info: None,
             epoch: None,
             seq: None,
@@ -712,7 +731,8 @@ mod tests {
                 name: format!("Player{id}"),
                 is_authority: false,
                 is_ready: false,
-                connected_at: chrono::Utc::now(),
+                connected_at: Some(chrono::Utc::now()),
+
                 connection_info: None,
                 epoch: None,
                 seq: None,

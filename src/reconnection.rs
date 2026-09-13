@@ -2787,7 +2787,8 @@ mod tests {
             name: "Player".to_string(),
             is_authority: true,
             is_ready: false,
-            connected_at: Utc::now(),
+            connected_at: Some(Utc::now()),
+
             connection_info: None,
             epoch: None,
             seq: None,
@@ -3070,7 +3071,8 @@ mod tests {
             name: "Player".to_string(),
             is_authority: false,
             is_ready: false,
-            connected_at: Utc::now(),
+            connected_at: Some(Utc::now()),
+
             connection_info: None,
             epoch: None,
             seq: None,
@@ -3079,7 +3081,7 @@ mod tests {
         let spectator = SpectatorInfo {
             id: player_id,
             name: "Spectator".to_string(),
-            connected_at: Utc::now(),
+            connected_at: Some(Utc::now()),
         };
 
         // Every room-uniform control event buffers.

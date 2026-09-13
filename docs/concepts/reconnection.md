@@ -119,7 +119,6 @@ the completeness contract):
         "name": "Alice",
         "is_authority": true,
         "is_ready": false,
-        "connected_at": "2025-01-15T10:30:00Z",
         "epoch": 1
       },
       {
@@ -127,7 +126,6 @@ the completeness contract):
         "name": "Bob",
         "is_authority": false,
         "is_ready": true,
-        "connected_at": "2025-01-15T10:31:00Z",
         "epoch": 2
       }
     ],
@@ -147,7 +145,6 @@ the completeness contract):
             "name": "Bob",
             "is_authority": false,
             "is_ready": false,
-            "connected_at": "2025-01-15T10:31:00Z"
           }
         }
       },

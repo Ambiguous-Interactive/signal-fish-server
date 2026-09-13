@@ -1080,7 +1080,8 @@ async fn setup_claimable_reconnect(
                 name: "victim".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: chrono::Utc::now(),
+                connected_at: Some(chrono::Utc::now()),
+
                 connection_info: None,
                 epoch: None,
                 seq: None,
