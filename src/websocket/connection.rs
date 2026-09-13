@@ -3850,6 +3850,14 @@ mod tests {
     }
 
     fn ledger_data(seq: u64) -> crate::coordination::outbound_queue::OutboundData {
+        class_ledger_data(seq, crate::protocol::DeliveryClass::Reliable, None)
+    }
+
+    fn class_ledger_data(
+        seq: u64,
+        class: crate::protocol::DeliveryClass,
+        key: Option<u32>,
+    ) -> crate::coordination::outbound_queue::OutboundData {
         let from_player = PlayerId::from_u128(9);
         let room_id = crate::protocol::RoomId::from_u128(11);
         crate::coordination::outbound_queue::OutboundData::new(
@@ -3858,12 +3866,12 @@ mod tests {
                 data: serde_json::json!({ "n": seq }),
                 seq: Some(seq),
                 epoch: Some(1),
-                class: Some(crate::protocol::DeliveryClass::Reliable),
-                key: None,
+                class: Some(class),
+                key,
             }),
             crate::coordination::outbound_queue::DataDeliveryMetadata {
-                class: crate::protocol::DeliveryClass::Reliable,
-                key: None,
+                class,
+                key,
                 from_player,
                 room_id,
                 epoch: 1,
@@ -3956,6 +3964,167 @@ mod tests {
             );
             pair.shutdown().await;
         }
+    }
+
+    /// Issue #396 sweep pin: on a v3 connection the writer re-checks the
+    /// control lane before every data write, so a queued control message
+    /// bypasses a staged data batch instead of trailing it
+    /// (`OutboundReceiver::try_recv_control` documents the bypass). The data
+    /// batch itself keeps its FIFO order.
+    ///
+    /// The queue-level pins cover `try_recv_control` in isolation; this pins
+    /// the writer-level interleave on a real socket, because that drain loop
+    /// is exactly the code a batching refactor could silently flatten into
+    /// "flush the batch first, controls after". Pre-v3 connections keep
+    /// strict legacy-lane FIFO by design, so this negotiates v3.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
+    async fn send_batch_control_bypasses_the_data_batch_mid_drain() {
+        let server = test_server().await;
+        let player_id = PlayerId::from_u128(9);
+        let (tx, mut rx) = crate::coordination::outbound_queue::channel(16, 16);
+        tx.set_protocol_version(3);
+        for seq in 1..=2 {
+            tx.try_enqueue_data(ledger_data(seq))
+                .unwrap_or_else(|_| panic!("queue seq {seq}"));
+        }
+        // Stage the data batch the way the live writer loop does: popped from
+        // the queue, held by the batcher between writes.
+        let mut batcher = MessageBatcher::new(1, 1);
+        for _ in 0..2 {
+            let queued = rx
+                .recv()
+                .await
+                .expect("data item available")
+                .expect("receiver open");
+            assert_eq!(
+                queued.class(),
+                Some(crate::protocol::DeliveryClass::Reliable)
+            );
+            batcher.queue(queued);
+        }
+        tx.try_enqueue_control(Arc::new(ServerMessage::Error {
+            message: "control bypasses the batch".into(),
+            error_code: None,
+        }))
+        .expect("control lane has capacity");
+
+        let (close_signal, _close_listener) = ConnectionCloseSignal::channel();
+        let (probe_state, _probe_updates) = watch::channel(PingProbeState::default());
+        let mut pair = UpgradedSocketPair::connect().await;
+        send_batch(
+            &mut pair.server_sink,
+            &mut batcher,
+            &mut rx,
+            &player_id,
+            &server,
+            &close_signal,
+            &probe_state,
+            Duration::from_secs(5),
+            WritePhase::Live,
+        )
+        .await
+        .expect("batch drains cleanly");
+
+        let mut observed = Vec::new();
+        for _ in 0..3 {
+            let frame = tokio::time::timeout(Duration::from_secs(10), pair.client.next())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "frame arrives; observed={observed:?} rx_len={} batcher_len={}",
+                        rx.len(),
+                        batcher.len()
+                    )
+                })
+                .expect("client stream healthy")
+                .expect("frame decodes");
+            match frame {
+                TungsteniteMessage::Text(text) => {
+                    let message: ServerMessage = serde_json::from_str(&text)
+                        .unwrap_or_else(|error| panic!("decode {text}: {error}"));
+                    match message {
+                        ServerMessage::GameData { data, .. } => observed.push(format!(
+                            "data:{}",
+                            data.get("n")
+                                .and_then(serde_json::Value::as_u64)
+                                .expect("frame carries its n")
+                        )),
+                        ServerMessage::Error { .. } => observed.push("control".to_string()),
+                        other => panic!("unexpected frame {other:?}"),
+                    }
+                }
+                other => panic!("unexpected ws frame {other:?}"),
+            }
+        }
+        assert_eq!(
+            observed,
+            vec!["control", "data:1", "data:2"],
+            "the queued control precedes the staged data batch; the batch stays FIFO"
+        );
+        pair.shutdown().await;
+    }
+
+    /// Issue #396 sweep pin: teardown abandonment accounting covers the batcher
+    /// and the queue together, per delivery class, and class-less control
+    /// traffic stays out of the per-class ledger.
+    ///
+    /// Every finalize test stages an empty batcher, so a refactor that dropped
+    /// `batcher.len()`/`batcher.count_by_class()` from
+    /// `record_abandoned_by_class` (or folded control traffic into a class)
+    /// would pass the whole suite. This pins the per-class ledger directly
+    /// with a non-empty batcher and a queued control.
+    #[tokio::test]
+    async fn record_abandoned_by_class_covers_batcher_and_excludes_control() {
+        let metrics = Arc::new(crate::metrics::ServerMetrics::new());
+        let (tx, mut rx) =
+            crate::coordination::outbound_queue::channel_with_metrics(16, 16, Arc::clone(&metrics));
+        tx.set_protocol_version(3);
+        let reliable =
+            |seq: u64| class_ledger_data(seq, crate::protocol::DeliveryClass::Reliable, None);
+        let latest = |seq: u64, key: u32| {
+            class_ledger_data(seq, crate::protocol::DeliveryClass::Latest, Some(key))
+        };
+        let volatile =
+            |seq: u64| class_ledger_data(seq, crate::protocol::DeliveryClass::Volatile, None);
+        // Queue holds [reliable, latest, volatile, reliable, latest]; the
+        // batcher will stage the first two pops [reliable, latest]. The
+        // control stays queued and must appear in no per-class ledger.
+        tx.try_enqueue_data(reliable(1)).expect("queue reliable");
+        tx.try_enqueue_data(latest(2, 20)).expect("queue latest");
+        tx.try_enqueue_data(volatile(3)).expect("queue volatile");
+        tx.try_enqueue_data(reliable(4)).expect("queue reliable");
+        tx.try_enqueue_data(latest(5, 50)).expect("queue latest");
+        let mut batcher = MessageBatcher::new(1, 1);
+        for expected_class in [
+            crate::protocol::DeliveryClass::Reliable,
+            crate::protocol::DeliveryClass::Latest,
+        ] {
+            let queued = rx
+                .recv()
+                .await
+                .expect("data item available")
+                .expect("receiver open");
+            assert_eq!(queued.class(), Some(expected_class));
+            batcher.queue(queued);
+        }
+        tx.try_enqueue_control(Arc::new(ServerMessage::Error {
+            message: "class-less control".into(),
+            error_code: None,
+        }))
+        .expect("control lane has capacity");
+        super::record_abandoned_by_class(&rx, &batcher);
+
+        let by_class = metrics.delivery_metrics_by_class();
+        assert_eq!(by_class.reliable.abandoned, 2, "one batched, one queued");
+        assert_eq!(by_class.latest.abandoned, 2, "one batched, one queued");
+        assert_eq!(by_class.volatile.abandoned, 1, "queued only");
+        assert_eq!(batcher.len(), 2, "accounting never drains the batcher");
+        assert_eq!(
+            rx.len(),
+            4,
+            "three data items plus the class-less control stay queued"
+        );
     }
 
     /// The server→client messages documented as v3-only must fail closed on a
