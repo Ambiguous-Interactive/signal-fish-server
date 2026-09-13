@@ -17,8 +17,8 @@ fortress-rollback = "=0.12.0"
 godot = { version = "=0.4.5", features = ["api-custom", "experimental-wasm", "experimental-wasm-nothreads", "lazy-function-tables"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-signal-fish-client = { version = "=0.9.0", default-features = false, features = ["polling-client"] }
-signal-fish-client-godot = "=0.9.0"
+signal-fish-client = { version = "=0.13.0", default-features = false, features = ["polling-client"] }
+signal-fish-client-godot = "=0.13.0"
 uuid = { version = "1.23", features = ["serde", "v4", "js"] }
 web-time = "=1.1.0"
 
