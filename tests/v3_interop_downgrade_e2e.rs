@@ -1855,11 +1855,80 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
             "{cohort:?} NewSpectatorJoined must use the cohort spectator_count shape: {raw}"
         );
 
-        // 5b. The spectator leaves; the players' SpectatorDisconnected
+        // 5a. The joining spectator's own SpectatorJoined snapshot must use
+        // the cohort spectator shape for every roster entry, including its
+        // own (issues #529/#539: the snapshot projection is recipient-wide,
+        // not delta-only).
+        let raw = next_matching_raw_server_message(
+            &mut spectator,
+            "SpectatorJoined",
+            "spectator sees its own join snapshot",
+        )
+        .await;
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("SpectatorJoined is JSON");
+        let own_roster = value
+            .pointer("/data/current_spectators")
+            .and_then(serde_json::Value::as_array)
+            .expect("SpectatorJoined carries current_spectators");
+        assert_eq!(
+            own_roster.len(),
+            1,
+            "the join snapshot carries the joiner: {raw}"
+        );
+        let entry = own_roster[0]
+            .as_object()
+            .expect("snapshot spectator entry is an object");
+        let keys: BTreeSet<_> = entry.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys, expected_spectator_keys,
+            "{cohort:?} SpectatorJoined roster must use the exact cohort key set: {raw}"
+        );
+
+        // 5a-bis. A second spectator joins; its own snapshot now carries
+        // BOTH spectators in the cohort shape — the pre-existing member's
+        // stored join time is trimmed for v3 exactly like the joiner's own.
+        let (mut keeper, _) = connect_and_authenticate("keeper").await;
+        send(
+            &mut keeper,
+            &ClientMessage::JoinAsSpectator {
+                game_name: game.to_string(),
+                room_code: room_code.clone(),
+                spectator_name: "Keeper".to_string(),
+
+                password: None,
+            },
+        )
+        .await;
+        let raw = next_matching_raw_server_message(
+            &mut keeper,
+            "SpectatorJoined",
+            "keeper sees its own join snapshot",
+        )
+        .await;
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).expect("keeper SpectatorJoined is JSON");
+        let keeper_roster = value
+            .pointer("/data/current_spectators")
+            .and_then(serde_json::Value::as_array)
+            .expect("keeper snapshot carries current_spectators");
+        assert_eq!(
+            keeper_roster.len(),
+            2,
+            "the keeper's snapshot carries both spectators: {raw}"
+        );
+        for member in keeper_roster {
+            let member = member.as_object().expect("snapshot spectator is an object");
+            let keys: BTreeSet<_> = member.keys().map(String::as_str).collect();
+            assert_eq!(
+                keys, expected_spectator_keys,
+                "{cohort:?} SpectatorJoined roster must use the exact cohort key set: {raw}"
+            );
+        }
+
+        // 5b. The first spectator leaves. The players' SpectatorDisconnected
         // broadcast must use the same cohort roster/count shape (issue
-        // #525). The departing spectator is the room's only one, so both
-        // cohorts observe an empty remaining roster; the v3 count is 0 and
-        // present, the v2 count key is absent.
+        // #525): the remaining Keeper fills the v2 roster, while the v3
+        // slim shape keeps the roster empty with `spectator_count` = 1.
         send(&mut spectator, &ClientMessage::LeaveSpectator).await;
         let raw = next_matching_raw_server_message(
             &mut observer,
@@ -1873,21 +1942,52 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
             .pointer("/data/current_spectators")
             .and_then(serde_json::Value::as_array)
             .expect("SpectatorDisconnected carries current_spectators");
-        assert!(
-            leave_roster.is_empty(),
+        let expected_leave = match cohort {
+            Cohort::V2 => (1_usize, None),
+            Cohort::V3 => (0_usize, Some(1_u64)),
+        };
+        assert_eq!(
+            leave_roster.len(),
+            expected_leave.0,
             "{cohort:?} SpectatorDisconnected carries the post-departure roster: {raw}"
         );
-        let expected_leave_count = match cohort {
-            Cohort::V2 => None,
-            Cohort::V3 => Some(0_u64),
-        };
         assert_eq!(
             value
                 .pointer("/data/spectator_count")
                 .and_then(serde_json::Value::as_u64),
-            expected_leave_count,
+            expected_leave.1,
             "{cohort:?} SpectatorDisconnected must use the cohort spectator_count shape: {raw}"
         );
+
+        // 5c. The leaver's own SpectatorLeft acknowledgement carries the
+        // remaining-spectator roster (issues #529/#539: the full-roster
+        // fan-out is not slimmed, but the v2-only spectator metadata is
+        // stripped for v3).
+        let raw = next_matching_raw_server_message(
+            &mut spectator,
+            "SpectatorLeft",
+            "leaver sees its own acknowledgement",
+        )
+        .await;
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("SpectatorLeft is JSON");
+        let left_roster = value
+            .pointer("/data/current_spectators")
+            .and_then(serde_json::Value::as_array)
+            .expect("SpectatorLeft carries current_spectators");
+        assert_eq!(
+            left_roster.len(),
+            1,
+            "the acknowledgement carries the remaining spectator: {raw}"
+        );
+        let entry = left_roster[0]
+            .as_object()
+            .expect("acknowledgement spectator entry is an object");
+        let keys: BTreeSet<_> = entry.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys, expected_spectator_keys,
+            "{cohort:?} SpectatorLeft roster must use the exact cohort key set: {raw}"
+        );
+        keeper.close(None).await.expect("close keeper socket");
 
         // 6. A same-cohort reconnect must receive cohort-shaped snapshot
         // members AND — for v3 — a cohort-shaped nested replay event (issue

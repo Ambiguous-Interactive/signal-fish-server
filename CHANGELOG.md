@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   storage, diagnostics, and the `GameStarting` handoff surface are
   unchanged.
 
+  Deployment pairing: v3 clients built on client SDK 0.8.0-0.12.0 fail to
+  parse these snapshots. Pair this server release with client SDK 0.13.0+
+  for protocol v3. v2 clients are unaffected.
+
 ## [0.9.0] - 2026-09-13
 
 ### Added

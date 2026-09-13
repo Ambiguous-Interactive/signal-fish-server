@@ -1621,7 +1621,6 @@ fn player_info(id: PlayerId, name: &str, is_authority: bool) -> PlayerInfo {
         is_authority,
         is_ready: true,
         connected_at: Some(base_time()),
-
         connection_info: None,
         epoch: None,
         seq: None,

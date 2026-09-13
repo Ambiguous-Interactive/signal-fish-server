@@ -653,7 +653,6 @@ mod tests {
                     is_authority: false,
                     is_ready: false,
                     connected_at: Some(last_activity),
-
                     connection_info: None,
                     epoch: None,
                     seq: None,

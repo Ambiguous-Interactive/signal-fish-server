@@ -846,7 +846,6 @@ impl EnhancedGameServer {
                                 // Wall clock (durable record): membership
                                 // stamp on a durable room-state row.
                                 connected_at: Some(chrono::Utc::now()),
-
                                 connection_info: None,
                                 epoch: None,
                                 seq: None,
@@ -905,7 +904,6 @@ impl EnhancedGameServer {
                             // Wall clock (durable record): membership stamp
                             // on a durable room-state row.
                             connected_at: Some(chrono::Utc::now()),
-
                             connection_info: None,
                             epoch: None,
                             seq: None,
@@ -2094,7 +2092,6 @@ impl EnhancedGameServer {
                             // Wall clock (durable record): membership stamp
                             // on a durable room-state row.
                             connected_at: Some(chrono::Utc::now()),
-
                             connection_info: None,
                             // Room-state record (stored in the DB + `room.players`),
                             // not a wire snapshot: the v3 epoch is filled at

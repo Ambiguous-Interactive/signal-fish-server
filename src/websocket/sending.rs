@@ -2351,7 +2351,6 @@ mod tests {
             is_authority: true,
             is_ready: false,
             connected_at: Some(Utc::now()),
-
             connection_info: Some(ConnectionInfo::WebRTC {
                 sdp: Some("s".repeat(512)),
                 ice_candidates: vec!["candidate".repeat(32)],
@@ -2482,6 +2481,59 @@ mod tests {
                 ..
             } if current_spectators.is_empty()
         ));
+    }
+
+    /// Issues #529/#539: a correlated `SpectatorLeft` result nests the same
+    /// remaining-spectator roster the top-level fan-out carries, so the v3
+    /// projection must cover the correlated form too (production path: the
+    /// leaving spectator's acknowledgement).
+    #[test]
+    fn correlated_spectator_left_projection_trims_the_v2_only_roster() {
+        let rosters = |connected_at: Option<chrono::DateTime<chrono::Utc>>| {
+            vec![
+                SpectatorInfo {
+                    id: player_a(),
+                    name: "Keeper".to_string(),
+                    connected_at,
+                },
+                SpectatorInfo {
+                    id: Uuid::from_u128(2),
+                    name: "Watcher".to_string(),
+                    connected_at,
+                },
+            ]
+        };
+        let seeded = RoomOperationResult::SpectatorLeft {
+            room_id: None,
+            room_code: None,
+            reason: None,
+            current_spectators: rosters(Some(Utc::now())),
+        };
+        assert!(room_operation_result_needs_v3_projection(&seeded));
+        let mut projected = seeded;
+        project_room_operation_result_for_v3(&mut projected);
+        match projected {
+            RoomOperationResult::SpectatorLeft {
+                current_spectators, ..
+            } => {
+                assert!(
+                    current_spectators
+                        .iter()
+                        .all(|spectator| spectator.connected_at.is_none()),
+                    "the correlated projection must strip every roster join time"
+                );
+                assert_eq!(current_spectators.len(), 2, "the roster itself survives");
+            }
+            other => panic!("variant drifted: {other:?}"),
+        }
+
+        let clean = RoomOperationResult::SpectatorLeft {
+            room_id: None,
+            room_code: None,
+            reason: None,
+            current_spectators: rosters(None),
+        };
+        assert!(!room_operation_result_needs_v3_projection(&clean));
     }
 
     /// Issue #274: only an unresolved socket write fences the queue behind it.

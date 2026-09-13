@@ -2788,7 +2788,6 @@ mod tests {
             is_authority: true,
             is_ready: false,
             connected_at: Some(Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,
@@ -3072,7 +3071,6 @@ mod tests {
             is_authority: false,
             is_ready: false,
             connected_at: Some(Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,

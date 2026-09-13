@@ -8,7 +8,7 @@ the current checkout:
 - one separately spawned signaling-server process;
 - two separately spawned `fortress-relay-peer` game processes;
 - `fortress-rollback` exactly `0.12.0` in each game;
-- `signal-fish-client` exactly `0.8.0` using
+- `signal-fish-client` exactly `0.13.0` using
   `SignalFishPollingClient<WebSocketTransport>`;
 - protocol-v3 MessagePack game-data relay over real loopback WebSockets.
 

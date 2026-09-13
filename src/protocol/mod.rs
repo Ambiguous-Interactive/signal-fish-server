@@ -89,7 +89,6 @@ mod tests {
             is_authority: false,
             is_ready: false,
             connected_at: Some(chrono::Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,
@@ -102,7 +101,6 @@ mod tests {
             is_authority: false,
             is_ready: false,
             connected_at: Some(chrono::Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,
@@ -119,7 +117,6 @@ mod tests {
             is_authority: false,
             is_ready: false,
             connected_at: Some(chrono::Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,
@@ -146,7 +143,6 @@ mod tests {
             is_authority: false,
             is_ready: false,
             connected_at: Some(chrono::Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,
@@ -176,7 +172,6 @@ mod tests {
             is_authority: false,
             is_ready: false,
             connected_at: Some(chrono::Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,
@@ -250,7 +245,6 @@ mod tests {
                 is_authority: false,
                 is_ready: false,
                 connected_at: Some(chrono::Utc::now()),
-
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -318,7 +312,6 @@ mod tests {
             is_authority: true, // First player should get authority
             is_ready: false,
             connected_at: Some(chrono::Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,
@@ -339,7 +332,6 @@ mod tests {
             is_authority: false,
             is_ready: false,
             connected_at: Some(chrono::Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,
@@ -373,7 +365,6 @@ mod tests {
             is_authority: true,
             is_ready: false,
             connected_at: Some(chrono::Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,
@@ -385,7 +376,6 @@ mod tests {
             is_authority: false,
             is_ready: false,
             connected_at: Some(chrono::Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,
@@ -434,7 +424,6 @@ mod tests {
             is_authority: true,
             is_ready: false,
             connected_at: Some(chrono::Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,
@@ -446,7 +435,6 @@ mod tests {
             is_authority: false,
             is_ready: false,
             connected_at: Some(chrono::Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,
@@ -486,7 +474,6 @@ mod tests {
             is_authority: false,
             is_ready: false,
             connected_at: Some(chrono::Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,
@@ -516,7 +503,6 @@ mod tests {
             is_authority: false,
             is_ready: false,
             connected_at: Some(chrono::Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,
@@ -555,7 +541,6 @@ mod tests {
             is_authority: true,
             is_ready: false,
             connected_at: Some(chrono::Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,
@@ -585,7 +570,6 @@ mod tests {
             is_authority: false,
             is_ready: false,
             connected_at: Some(chrono::Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,
@@ -631,7 +615,6 @@ mod tests {
                 is_authority: id == player1_id,
                 is_ready: false,
                 connected_at: Some(chrono::Utc::now()),
-
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -678,7 +661,6 @@ mod tests {
             is_authority: true,
             is_ready: false,
             connected_at: Some(chrono::Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,
@@ -691,7 +673,6 @@ mod tests {
             is_authority: false,
             is_ready: false,
             connected_at: Some(chrono::Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,
@@ -732,7 +713,6 @@ mod tests {
                 is_authority: false,
                 is_ready: false,
                 connected_at: Some(chrono::Utc::now()),
-
                 connection_info: None,
                 epoch: None,
                 seq: None,

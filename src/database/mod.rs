@@ -1155,7 +1155,6 @@ impl GameDatabase for InMemoryDatabase {
             // Wall clock (durable record): membership stamp on a durable
             // room-state row.
             connected_at: Some(chrono::Utc::now()),
-
             connection_info: None,
             // Room-state record, not a wire snapshot: the v3 incarnation epoch
             // is filled at snapshot-send time, so this stays `None`.
@@ -2556,7 +2555,6 @@ mod tests {
             is_authority: false,
             is_ready: false,
             connected_at: Some(chrono::Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,
@@ -3023,7 +3021,6 @@ mod tests {
                 is_authority: false,
                 is_ready: false,
                 connected_at: Some(chrono::Utc::now()),
-
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -3388,7 +3385,6 @@ mod tests {
             is_authority: false,
             is_ready: false,
             connected_at: Some(chrono::Utc::now()),
-
             connection_info: None,
             epoch: None,
             seq: None,

@@ -2,7 +2,7 @@
 
 This standalone fixture is the browser half of the issue-242 regression. It
 compiles the registry releases `fortress-rollback` 0.12.0,
-`signal-fish-client` 0.9.0, and `signal-fish-client-godot` 0.9.0 into a Godot
+`signal-fish-client` 0.13.0, and `signal-fish-client-godot` 0.13.0 into a Godot
 4.5 GDExtension for
 `wasm32-unknown-emscripten`, exports with the official no-thread web template,
 and drives two independent browser processes through the server built from the
@@ -39,7 +39,7 @@ recommendations remain forbidden, as do every existing
 loss, overflow, throughput, queue-age, lag, rollback, checksum, and conservation
 violation. The native Fortress gate retains its stricter zero-stall boundary.
 
-Exact-head CI with the released 0.9.0 graph passed the complete primary cell:
+Exact-head CI with the released 0.13.0 graph passed the complete primary cell:
 both reports satisfied every health and identity invariant and printed
 `HEALTHY`. The following capped control printed its expected `BUSTED` verdict.
 

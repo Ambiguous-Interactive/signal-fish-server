@@ -728,15 +728,17 @@ impl EnhancedGameServer {
             .iter()
             .map(|player| {
                 let proto = self.client_protocol(&player.id);
+                // Server-internal room state always carries a join timestamp;
+                // `now` only covers a hand-built snapshot.
+                debug_assert!(
+                    player.connected_at.is_some(),
+                    "stored room member lost its join timestamp"
+                );
                 SessionMember {
                     player_id: player.id,
                     player_name: player.name.clone(),
                     is_authority: player.is_authority,
-                    joined_at: player
-                        .connected_at
-                        // Server-internal room state always carries a join
-                        // timestamp; `now` only covers a hand-built snapshot.
-                        .unwrap_or_else(chrono::Utc::now),
+                    joined_at: player.connected_at.unwrap_or_else(chrono::Utc::now),
                     connection_info: player.connection_info.clone(),
                     version: proto.version,
                     transports: proto.transports.clone(),
@@ -769,12 +771,16 @@ impl EnhancedGameServer {
                 .iter()
                 .map(|player| {
                     let protocol = connection_manager.protocol(&player.id);
+                    // See `session_members_from`: `now` only covers a
+                    // hand-built snapshot without a join timestamp.
+                    debug_assert!(
+                        player.connected_at.is_some(),
+                        "stored room member lost its join timestamp"
+                    );
                     SessionMember {
                         player_id: player.id,
                         player_name: player.name.clone(),
                         is_authority: player.is_authority,
-                        // See `session_members_from`: `now` only covers a
-                        // hand-built snapshot without a join timestamp.
                         joined_at: player.connected_at.unwrap_or_else(chrono::Utc::now),
                         connection_info: player.connection_info.clone(),
                         version: protocol.version,

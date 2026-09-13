@@ -174,7 +174,6 @@ fn player_info(id: PlayerId, name: &str) -> PlayerInfo {
         is_authority: false,
         is_ready: false,
         connected_at: Some(chrono::Utc::now()),
-
         connection_info: None,
         epoch: None,
         seq: None,

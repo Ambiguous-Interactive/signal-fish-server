@@ -42,7 +42,6 @@ A room is created when a player sends a `JoinRoom` message **without** a
         "name": "Alice",
         "is_authority": true,
         "is_ready": false,
-        "connected_at": "2025-01-15T10:30:00Z"
       }
     ],
     "is_authority": true,
@@ -105,7 +104,6 @@ existing players in the room receive a `PlayerJoined` broadcast:
       "name": "Bob",
       "is_authority": false,
       "is_ready": false,
-      "connected_at": "2025-01-15T10:31:00Z"
     }
   }
 }
