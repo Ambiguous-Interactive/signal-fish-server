@@ -65,7 +65,7 @@ The server admits Observer1 and replies with the current room snapshot:
     "current_spectators": [
       {
         "id": "00000000-0000-0000-0000-000000000051",
-        "name": "Observer1",
+        "name": "Observer1"
       }
     ],
     "lobby_state": "finalized",

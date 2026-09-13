@@ -68,7 +68,7 @@ room state:
     "current_spectators": [
       {
         "id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
-        "name": "Observer1",
+        "name": "Observer1"
       }
     ],
     "lobby_state": "lobby",

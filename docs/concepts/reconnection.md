@@ -144,7 +144,7 @@ the completeness contract):
             "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
             "name": "Bob",
             "is_authority": false,
-            "is_ready": false,
+            "is_ready": false
           }
         }
       },
