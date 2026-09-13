@@ -36,6 +36,16 @@ services:
   # (HMAC-SHA1) and coturn recomputes that HMAC to authenticate clients.
   # Never commit the secret; supply it via the environment or an .env file.
   #
+  # Optional TURN over TLS (`turns:`): set TURN_TLS_CERT / TURN_TLS_PKEY to
+  # the HOST paths of a PEM certificate chain and its private key. Compose
+  # mounts them at /etc/coturn/tls.crt and /etc/coturn/tls.key and the
+  # entrypoint guard enables the TLS listener (port 5349) only when both are
+  # regular, non-empty, readable-by-coturn PEM files. The image runs coturn
+  # as uid 65534 (nobody), so the mounted key must be readable by that uid —
+  # a root-owned 0600 key (certbot's default) would pass a daemon-level
+  # check yet leave the TLS listener silently down. See
+  # docs/deployment-turn.md (TURN over TLS).
+  #
   # See docs/deployment-turn.md for the full TURN deployment guide.
   coturn:
     image: coturn/coturn:4.12.0-alpine
@@ -48,11 +58,26 @@ services:
       # operators who never use the turn profile (verified empirically). The
       # fail-fast guard lives in the entrypoint below instead.
       TURN_STATIC_AUTH_SECRET: ${TURN_STATIC_AUTH_SECRET:-}
-    # Runtime guard: refuse to start with an unset/empty secret. coturn in
+      # HOST paths of the TLS certificate chain and private key. Mount
+      # sources only — coturn reads the fixed container paths /etc/coturn/
+      # tls.crt and /etc/coturn/tls.key (flags added by the guard below).
+      # Unset stays empty here (the guard reads that); the volume sources
+      # below default the empty value to a harmless /dev/null placeholder.
+      TURN_TLS_CERT: ${TURN_TLS_CERT:-}
+      TURN_TLS_PKEY: ${TURN_TLS_PKEY:-}
+    volumes:
+      - ${TURN_TLS_CERT:-/dev/null}:/etc/coturn/tls.crt:ro
+      - ${TURN_TLS_PKEY:-/dev/null}:/etc/coturn/tls.key:ro
+    # Runtime guards: refuse to start with an unset/empty secret — coturn in
     # `--use-auth-secret` mode would otherwise mint-and-accept credentials
     # HMAC'd with an EMPTY key — an open relay anyone can derive credentials
-    # for. After the check, hand off to the image's own entrypoint
-    # (`docker-entrypoint.sh`) with the original command intact.
+    # for. Then refuse a half-configured TLS pair, or a mounted PEM that is
+    # empty, not a regular file, unreadable by the coturn user (uid 65534 —
+    # the guard runs as that same user, so `-r` is meaningful), or lacking a
+    # PEM header. A silently absent TLS listener would make `turns:` clients
+    # fail with no server-side signal. After the checks, hand off to the
+    # image's own entrypoint (`docker-entrypoint.sh`) with the original
+    # command intact plus the validated TLS flags.
     entrypoint:
       - /bin/sh
       - -ec
@@ -67,12 +92,58 @@ services:
           echo "See docs/deployment-turn.md." >&2
           exit 1
         fi
+        if [ -n "$${TURN_TLS_CERT:-}" ] || [ -n "$${TURN_TLS_PKEY:-}" ]; then
+          if [ -z "$${TURN_TLS_CERT:-}" ] || [ -z "$${TURN_TLS_PKEY:-}" ]; then
+            echo "ERROR: set BOTH TURN_TLS_CERT and TURN_TLS_PKEY, or neither." >&2
+            echo "See docs/deployment-turn.md (TURN over TLS)." >&2
+            exit 1
+          fi
+          for f in /etc/coturn/tls.crt /etc/coturn/tls.key; do
+            if [ ! -f "$$f" ] || [ ! -s "$$f" ] || [ ! -r "$$f" ]; then
+              echo "ERROR: TURN TLS file is missing, empty, or not readable: $$f" >&2
+              echo "The TURN_TLS_CERT / TURN_TLS_PKEY host paths must be regular" >&2
+              echo "PEM files readable by the coturn user in the container" >&2
+              echo "(uid 65534; e.g. chown/chmod the mounted key for that uid)." >&2
+              echo "See docs/deployment-turn.md (TURN over TLS)." >&2
+              exit 1
+            fi
+          done
+          if ! grep -q "BEGIN CERTIFICATE" /etc/coturn/tls.crt; then
+            echo "ERROR: /etc/coturn/tls.crt carries no PEM certificate" >&2
+            echo "(no BEGIN CERTIFICATE header)." >&2
+            echo "See docs/deployment-turn.md (TURN over TLS)." >&2
+            exit 1
+          fi
+          if ! grep -qE "BEGIN [A-Z ]*PRIVATE KEY" /etc/coturn/tls.key; then
+            echo "ERROR: /etc/coturn/tls.key carries no PEM private key" >&2
+            echo "(no BEGIN ... PRIVATE KEY header)." >&2
+            echo "See docs/deployment-turn.md (TURN over TLS)." >&2
+            exit 1
+          fi
+          set -- "$$@" --cert /etc/coturn/tls.crt --pkey /etc/coturn/tls.key --tls-listening-port=5349
+        fi
         exec docker-entrypoint.sh "$$@"
       - coturn-secret-guard
     ports:
       # STUN/TURN listening port (both transports).
       - "3478:3478/udp"
       - "3478:3478/tcp"
+      # TLS/DTLS listener for `turns:` URLs (tcp = TLS, udp = DTLS). The
+      # listener exists only when TURN_TLS_CERT and TURN_TLS_PKEY are
+      # configured (see the entrypoint guard). Commented out so enabling TLS
+      # stays an explicit host-port commitment: dockerd binds published ports
+      # on the host even while the in-container listener is off. Uncomment
+      # together with the TLS variables.
+      # - "5349:5349/tcp"
+      # - "5349:5349/udp"
+      # coturn Prometheus metrics (see --prometheus below, path /metrics).
+      # Loopback-only on purpose. Scrape from a monitoring container on the
+      # compose network (http://coturn:9641/metrics) or through an SSH
+      # tunnel; do not publish metrics to the public interface. Note: with
+      # `network_mode: host` (the relay-range note below) compose ignores
+      # ports: entirely and coturn binds 9641 on every interface — keep the
+      # port firewalled in that setup.
+      - "127.0.0.1:9641:9641"
       # Relay port range: coturn allocates one relay port per TURN allocation
       # from min-port..max-port. Every port in that range must be reachable by
       # remote peers, so the WHOLE range has to be published — an unpublished
@@ -93,6 +164,13 @@ services:
       # each argument), reading the env var the guard above just validated.
       - --use-auth-secret
       - --static-auth-secret=$$TURN_STATIC_AUTH_SECRET
+      # Prometheus metrics on 9641 under /metrics; published loopback-only
+      # above. The explicit IPv4 bind is deliberate robustness: coturn's
+      # default ("any") binds the IPv6-any socket, which on hosts with
+      # net.ipv6.bindv6only=1 would not accept the IPv4 port forward.
+      # See docs/deployment-turn.md ("Monitoring").
+      - --prometheus
+      - --prometheus-address=0.0.0.0
       # Relay port range — keep in sync with the published range above.
       # - --min-port=49160
       # - --max-port=49200
