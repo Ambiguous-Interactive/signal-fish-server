@@ -100,7 +100,9 @@ fn read_raw(path: &str) -> String {
 }
 
 /// Extract every `cargo-nextest@<version>` pin from `content` (workflow
-/// `tool:` lines and Dockerfile `cargo binstall` list entries).
+/// `tool:` lines and Dockerfile `cargo binstall` list entries). Unpinned
+/// forms (`cargo-nextest@latest`, a bare `@`) return nothing: they are the
+/// drift this guard exists to catch.
 fn cargo_nextest_pins(content: &str) -> Vec<String> {
     content
         .lines()
@@ -110,7 +112,12 @@ fn cargo_nextest_pins(content: &str) -> Vec<String> {
             let end = version
                 .find(|c: char| !(c.is_ascii_digit() || c == '.'))
                 .unwrap_or(version.len());
-            Some(line[start..start + "cargo-nextest@".len() + end].to_string())
+            let pin = line[start..start + "cargo-nextest@".len() + end].to_string();
+            let version = pin["cargo-nextest@".len()..].trim_end_matches('.');
+            if version.is_empty() {
+                return None;
+            }
+            Some(pin.trim_end_matches('.').to_string())
         })
         .collect()
 }
@@ -391,20 +398,27 @@ fn cargo_nextest_pin_matches_the_ci_lanes() {
                     per-profile timeout and filter semantics that drift \
                     between nextest versions (issue #597).";
 
-    let mut pins: Vec<String> = [
+    let workflows = [
         ".github/workflows/ci.yml",
         ".github/workflows/mutation.yml",
         ".github/workflows/verification-nightly.yml",
-    ]
-    .into_iter()
-    .flat_map(|path| cargo_nextest_pins(&read_live(path)))
-    .collect();
+    ];
+    let mut pins: Vec<String> = Vec::new();
+    for path in workflows {
+        let found = cargo_nextest_pins(&read_live(path));
+        assert!(
+            !found.is_empty(),
+            "{path} must pin cargo-nextest@<version>: an unpinned lane \
+             drifts .config/nextest.toml timeout and filter semantics"
+        );
+        pins.extend(found);
+    }
     pins.sort();
     pins.dedup();
     assert_eq!(
         pins.len(),
         1,
-        "all CI lanes must pin one cargo-nextest version, found: {pins:?}"
+        "all CI lanes must pin the same cargo-nextest version, found: {pins:?}"
     );
 
     let dockerfile = read_live(".devcontainer/Dockerfile");

@@ -171,6 +171,9 @@ misread.
 - If you change `YQ_VERSION` or `TAPLO_CLI_VERSION` in
   `.github/workflows/doc-validation.yml`, update matching ARG values in
   `.devcontainer/Dockerfile` in the same PR.
+- If you change the `cargo-nextest@` pin in the CI lanes (ci.yml,
+  mutation.yml, verification-nightly.yml), update
+  `.devcontainer/Dockerfile` in the same PR, and vice versa.
 - Keep Docker CLI support enabled in `.devcontainer/devcontainer.json` for local
   Docker CI parity.
 - Keep `docker-outside-of-docker` configured with `"moby": false` in

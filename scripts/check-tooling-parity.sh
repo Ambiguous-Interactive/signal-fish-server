@@ -227,16 +227,23 @@ fi
 
 # cargo-nextest pin parity (#597): the devcontainer must install the exact
 # version the CI lanes pin — .config/nextest.toml encodes per-profile timeout
-# and filter semantics that drift between nextest versions.
-NEXTTEST_CI_PINS=$(grep -hEo 'cargo-nextest@[0-9]+\.[0-9]+\.[0-9]+' \
-    "$CI_WORKFLOW" "$MUTATION_WORKFLOW" "$VERIFICATION_NIGHTLY_WORKFLOW" \
-    | sort -u)
-if [ "$(printf '%s' "$NEXTTEST_CI_PINS" | grep -c .)" -ne 1 ]; then
-    error_item "Expected exactly one unique CI cargo-nextest pin, found: ${NEXTTEST_CI_PINS:-none}"
-else
-    assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "$NEXTTEST_CI_PINS" \
-        "Devcontainer pins cargo-nextest to the CI version ($NEXTTEST_CI_PINS)"
+# and filter semantics that drift between nextest versions. Every lane and
+# the Dockerfile must each carry exactly one identical pin.
+NEXTTEST_DOCKERFILE_PIN=$(grep -Eo 'cargo-nextest@[0-9]+\.[0-9]+\.[0-9]+' \
+    "$DEVCONTAINER_DOCKERFILE" | sort -u || true)
+if [ "$(printf '%s' "$NEXTTEST_DOCKERFILE_PIN" | grep -c .)" -ne 1 ]; then
+    error_item "Expected exactly one cargo-nextest pin in $DEVCONTAINER_DOCKERFILE, found: ${NEXTTEST_DOCKERFILE_PIN:-none}"
 fi
+for NEXTTEST_WORKFLOW in "$CI_WORKFLOW" "$MUTATION_WORKFLOW" "$VERIFICATION_NIGHTLY_WORKFLOW"; do
+    NEXTTEST_WORKFLOW_PIN=$(grep -Eo 'cargo-nextest@[0-9]+\.[0-9]+\.[0-9]+' \
+        "$NEXTTEST_WORKFLOW" | sort -u || true)
+    if [ "$(printf '%s' "$NEXTTEST_WORKFLOW_PIN" | grep -c .)" -ne 1 ]; then
+        error_item "Expected exactly one cargo-nextest pin in $NEXTTEST_WORKFLOW, found: ${NEXTTEST_WORKFLOW_PIN:-none}"
+    else
+        assert_equal "cargo-nextest pin parity ($NEXTTEST_WORKFLOW)" \
+            "$NEXTTEST_DOCKERFILE_PIN" "$NEXTTEST_WORKFLOW_PIN"
+    fi
+done
 
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "fd-find" "Devcontainer installs fd-find"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "ln -sf /usr/bin/fdfind /usr/local/bin/fd" "Devcontainer maps fdfind to fd"
