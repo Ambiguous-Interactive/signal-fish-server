@@ -402,7 +402,7 @@ jobs:
           echo "✓ All YAML blocks valid ($total checked)"
 
       - name: Install TOML validator
-        uses: taiki-e/install-action@v2.87.5
+        uses: taiki-e/install-action@v2.87.11
         with:
           tool: taplo-cli@${{ env.TAPLO_CLI_VERSION }}
           fallback: none
