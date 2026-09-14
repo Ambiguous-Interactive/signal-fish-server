@@ -313,6 +313,17 @@ jobs:
         uses: taiki-e/install-action@v2.87.5
         with:
           tool: cargo-nextest
+      - name: Install cargo-mutants (mutation inventory guard)
+        # Installs the mutation workflow's pinned cargo-mutants so
+        # test_mutation_total_mutants_constant_matches_list enforces the
+        # measured inventory on this per-PR lane instead of skipping
+        # (motivation and failure history:
+        # test_ci_nextest_lane_installs_cargo_mutants_for_inventory_guard).
+        # Cost: one prebuilt-binary download; no extra compile.
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@v2.87.5
+        with:
+          tool: cargo-mutants@27.1.0
 
       - name: Run nextest
         # nextest does not support doc-tests; those are validated by doc-validation.yml

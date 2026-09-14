@@ -11,6 +11,13 @@
 # full mutant report is always uploaded; the job fails when any mutant survives
 # so the survivors are triaged deliberately.
 #
+# Exception: the measured mutant INVENTORY is enforced per-PR. ci.yml's
+# `nextest` job installs this workflow's pinned cargo-mutants so
+# test_mutation_total_mutants_constant_matches_list cannot silently skip there
+# and a count drift fails the change that caused it instead of surfacing here up
+# to a week later (three consecutive red Mondays, runs #218/#219/#220,
+# motivated this).
+#
 # PERFORMANCE (each shard must finish <5 min — see
 # .llm/skills/mutation-testing-performance/SKILL.md). cargo-mutants builds in a /tmp
 # scratch dir and excludes ./target from its copy, so without help every shard
