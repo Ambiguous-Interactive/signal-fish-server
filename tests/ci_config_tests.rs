@@ -32177,6 +32177,99 @@ fn test_mutation_oracle_does_not_use_all_features() {
     );
 }
 
+/// Every `[[profile.mutants.overrides]]` filter must name a test that still
+/// exists under src/. These overrides carry the deliberately-slow #550
+/// lease-renewal pins past the mutants profile's 10s per-test termination
+/// (mutation run #221 red-waved four Mondays: #218/#219 inventory drift, #220
+/// one missed mutant, #221 these timeouts at the unmutated green-gate). A test
+/// rename or removal would silently orphan its filter, re-arm the 10s kill,
+/// and re-red the weekly baseline green-gate up to a week later. The oracle is
+/// `--lib`, so src/ is the only surface to check.
+#[test]
+fn test_mutants_profile_overrides_target_existing_lib_tests() {
+    let nextest_config = read_file(&repo_root().join(".config/nextest.toml"));
+
+    let mut filters: Vec<String> = Vec::new();
+    let mut in_overrides = false;
+    for line in nextest_config.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_overrides = trimmed == "[[profile.mutants.overrides]]";
+            continue;
+        }
+        if !in_overrides {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("filter") {
+            if let Some(value) = rest.trim_start().strip_prefix('=') {
+                filters.push(value.trim().trim_matches('\'').to_string());
+            }
+        }
+    }
+    assert!(
+        !filters.is_empty(),
+        ".config/nextest.toml must keep a [[profile.mutants.overrides]] entry for the \
+         deliberately-slow lease-renewal pins; deleting it re-arms the 10s per-test kill \
+         that red-waved the weekly mutation baseline (runs #218-#221)"
+    );
+
+    let mut src_fns: Vec<String> = Vec::new();
+    let mut stack = vec![repo_root().join("src")];
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir).expect("src tree must be readable");
+        for entry in entries {
+            let path = entry.expect("src entry must be readable").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().is_some_and(|ext| ext == "rs") {
+                for line in read_file(&path).lines() {
+                    let trimmed = line.trim_start();
+                    let body = trimmed
+                        .strip_prefix("async fn ")
+                        .or_else(|| trimmed.strip_prefix("fn "));
+                    if let Some(body) = body {
+                        let name: String = body
+                            .chars()
+                            .take_while(|c| c.is_alphanumeric() || *c == '_')
+                            .collect();
+                        src_fns.push(name);
+                    }
+                }
+            }
+        }
+    }
+
+    for filter in &filters {
+        let mut names: Vec<&str> = Vec::new();
+        let mut rest = filter.as_str();
+        while let Some(pos) = rest.find("test(") {
+            let after = &rest[pos + 5..];
+            let Some(close) = after.find(')') else {
+                break;
+            };
+            names.push(&after[..close]);
+            rest = &after[close + 1..];
+        }
+        assert!(
+            !names.is_empty(),
+            "mutants-profile override filter {filter:?} must select tests with \
+             test(<name>) selectors so renames stay detectable"
+        );
+        for name in names {
+            assert!(
+                src_fns.iter().any(|defined| defined == name),
+                "mutants-profile override names test {name:?}, but no `fn {name}` exists \
+                 under src/. The test was renamed or removed: update the \
+                 [[profile.mutants.overrides]] filter (or delete the override). Otherwise \
+                 the 10s mutants-profile kill returns for that test and re-reds the weekly \
+                 mutation baseline (run #221)."
+            );
+        }
+    }
+}
+
 /// Jobs that run the FULL test suite under a Swatinem/rust-cache and therefore
 /// must drop trybuild's nested `<target>/tests` artifacts before the cache save
 /// (otherwise rust-cache's restore-time cleanup emits a noisy `##[error]ENOENT`).
