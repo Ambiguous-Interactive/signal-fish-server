@@ -169,7 +169,7 @@ ed25519-dalek = { version = "2.2", default-features = false, features = [
 ] }
 # Trait-only surface (`Verifier`/`Signer`) ed25519-dalek's verify/sign methods
 # resolve through; the import keeps the method calls explicit.
-signature = "2"
+signature = "3"
 
 # Data structures
 hdrhistogram = "7.5"
