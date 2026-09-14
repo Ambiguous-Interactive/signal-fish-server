@@ -26690,6 +26690,208 @@ fn test_audit_job_covers_every_dependabot_managed_npm_graph() {
 }
 
 #[test]
+fn test_npm_audit_retry_steps_fail_closed() {
+    // Issue #601: `status=$?` after a false `if` condition is always 0 (the
+    // if-statement's own exit code), so `exit "$status"` passed the step even
+    // when every `npm audit` attempt reported vulnerabilities. The retry must
+    // keep the transient-5xx absorption and terminate fail closed.
+    let root = repo_root();
+    let content = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let documents = Yaml::load_from_str(&content).expect("ci.yml must parse as YAML");
+    let steps = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .and_then(|jobs| jobs.as_mapping_get("deny"))
+        .and_then(|job| job.as_mapping_get("steps"))
+        .and_then(Yaml::as_sequence)
+        .unwrap_or_else(|| panic!("ci.yml must define jobs.deny.steps"));
+
+    let audit_runs = steps
+        .iter()
+        .filter_map(|step| {
+            let name = step.as_mapping_get("name").and_then(Yaml::as_str)?;
+            if !name.starts_with("Run npm audit") {
+                return None;
+            }
+            step.as_mapping_get("run")
+                .and_then(Yaml::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        audit_runs.len(),
+        dependabot_npm_directories().len(),
+        "every Dependabot-managed npm graph must keep its `Run npm audit` step"
+    );
+
+    for run in &audit_runs {
+        assert!(
+            run.contains("if npm audit; then"),
+            "npm audit steps must keep the retry form `if npm audit; then`"
+        );
+        assert!(
+            !run.contains("status=$?"),
+            "npm audit steps must not capture `status=$?` after the `if`: a false \
+             `if` condition leaves the if-statement's exit code at 0, so `exit \
+             \"$status\"` passes despite vulnerabilities (issue #601)"
+        );
+        assert!(
+            run.trim_end().ends_with("exit 1"),
+            "npm audit steps must terminate with an explicit `exit 1` after the \
+             final attempt so genuine advisory findings fail the step"
+        );
+    }
+}
+
+/// Line-level scan for the issue-#601 failure class: an exit-code capture on
+/// the first effective line after `fi` reads the if-statement's own exit code
+/// (branch-dependent: 0 for a false condition with no `else`, else the taken
+/// branch's last command), never reliably the guarded command's. Also fires
+/// inside nested blocks, where the captured value is equally ambiguous. The
+/// scan targets the plain `status=$?` shape; quoted, commented, same-line, or
+/// `local`-prefixed retypings evade it and are out of scope.
+fn shell_exit_code_swallow_points(script: &str) -> Vec<String> {
+    let mut swallow_points = Vec::new();
+    let mut previous_close_was_fi = false;
+    for (index, line) in script.lines().enumerate() {
+        let trimmed = line.trim();
+        if previous_close_was_fi {
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            previous_close_was_fi = false;
+            let captures_exit_code = trimmed.ends_with("$?")
+                && trimmed.contains('=')
+                && trimmed.split('=').next().is_some_and(|name| {
+                    !name.is_empty()
+                        && name
+                            .chars()
+                            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+                });
+            if captures_exit_code {
+                swallow_points.push(format!("line {}: `{trimmed}`", index + 1));
+            }
+        }
+        if trimmed == "fi" {
+            previous_close_was_fi = true;
+        }
+    }
+    swallow_points
+}
+
+#[test]
+fn test_shell_exit_codes_are_not_captured_after_if_blocks() {
+    // Issue #601 class guard: `status=$?` directly after `fi` always saw 0 in
+    // the npm audit retry loops, so every advisory finding passed the step.
+    // Capture exit codes directly (`set +e`, command, capture) or inline
+    // (`cmd || status=$?`) so the captured value is the command's.
+    let root = repo_root();
+    let mut sources = Vec::new();
+    let workflows_dir = root.join(".github/workflows");
+    for entry in fs::read_dir(&workflows_dir)
+        .unwrap_or_else(|error| panic!("Failed to read {}: {error}", workflows_dir.display()))
+    {
+        let path = entry
+            .unwrap_or_else(|error| panic!("Failed to read workflow entry: {error}"))
+            .path();
+        if path.extension().and_then(|extension| extension.to_str()) == Some("yml") {
+            sources.push(path);
+        }
+    }
+    for directory in [root.join("scripts"), root.join(".github/scripts")] {
+        collect_shell_scripts(&directory, &mut sources);
+    }
+    assert!(
+        sources.len() > 50,
+        "the sweep must cover the workflow and shell-script inventory (found {})",
+        sources.len()
+    );
+
+    let mut violations = Vec::new();
+    for path in &sources {
+        // Raw file, not the comment-stripped live view: the scanner skips
+        // comments itself and reported line numbers must match the file.
+        let text = read_file(path);
+        for swallow_point in shell_exit_code_swallow_points(&text) {
+            violations.push(format!("{}: {swallow_point}", path.display()));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "exit-code captures directly after `fi` read the if-statement's exit \
+         code (0 when the condition was false), swallowing failures (issue \
+         #601):\n\n{}\n\n\
+         Fix: capture directly (`set +e`, command, capture) or inline \
+         (`cmd || status=$?`).",
+        violations.join("\n")
+    );
+}
+
+fn collect_shell_scripts(directory: &Path, sources: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("Failed to read {}: {error}", directory.display()))
+    {
+        let path = entry
+            .unwrap_or_else(|error| panic!("Failed to read entry: {error}"))
+            .path();
+        if path.is_dir() {
+            collect_shell_scripts(&path, sources);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("sh") {
+            sources.push(path);
+        }
+    }
+}
+
+/// A `major.minor.patch` triple for advisory-range comparisons; unknown
+/// components parse as 0 so malformed versions fail closed (flagged).
+fn npm_version_triple(version: &str) -> (u64, u64, u64) {
+    let mut parts = version.split('.');
+    let mut component = || {
+        parts
+            .next()
+            .and_then(|part| part.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    (component(), component(), component())
+}
+
+#[test]
+fn test_root_npm_lock_resolves_patched_smol_toml() {
+    // GHSA-7w5x-hrqm-74c2: smol-toml <=1.7.0 has a high-severity DoS via
+    // malformed TOML documents. markdownlint-cli2 0.23.2 still pins 1.7.0, so
+    // package.json carries an npm `override`; this pin keeps the lockfile
+    // honest while the override is in place and flags the vulnerable range if
+    // it sneaks back into the installed graph.
+    let root = repo_root();
+    let text = read_live_file(&root.join("package-lock.json"));
+    let lock: serde_json::Value = serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("package-lock.json must parse as JSON: {error}"));
+    let packages = lock
+        .get("packages")
+        .and_then(|packages| packages.as_object())
+        .expect("package-lock.json must define a packages map");
+
+    let vulnerable = packages
+        .iter()
+        .filter(|(path, entry)| {
+            path.contains("smol-toml")
+                && entry
+                    .get("version")
+                    .and_then(|version| version.as_str())
+                    .is_some_and(|version| npm_version_triple(version) <= (1, 7, 0))
+        })
+        .map(|(path, _)| path.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        vulnerable.is_empty(),
+        "package-lock.json resolves smol-toml versions in the vulnerable \
+         GHSA-7w5x-hrqm-74c2 range (<=1.7.0): {vulnerable:?}.\n\
+         Fix: keep the `smol-toml` override in package.json at a patched \
+         release (>=1.7.1) and regenerate the lockfile."
+    );
+}
+
+#[test]
 fn test_markdownlint_workflow_uses_supported_node_runtime() {
     let root = repo_root();
     let path = root.join(".github/workflows/markdownlint.yml");

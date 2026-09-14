@@ -34,6 +34,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parse these snapshots. Pair this server release with client SDK 0.13.0+
   for protocol v3. v2 clients are unaffected.
 
+### Fixed
+
+- CI: the `npm audit` retry steps now fail closed. The retry loop captured
+  `status=$?` after a false `if` condition, which is always 0, so every
+  finding — transient or genuine — exited the step green after three
+  attempts (issue #601; visible in Dependency Audit run 34877650340). The
+  transient-5xx retry with backoff is unchanged; a finding now fails the
+  step. The loop's failure class had exactly two instances; both fixed, and
+  a guard test now sweeps every workflow and the repo `scripts/**` shell
+  scripts for exit-code captures directly after `fi` (the class), so a
+  copy-paste reintroduction fails CI.
+- Supply chain: the root npm graph resolves `smol-toml` 1.8.0 instead of
+  the vulnerable 1.7.0 (GHSA-7w5x-hrqm-74c2, high, DoS via malformed TOML).
+  `markdownlint-cli2` 0.23.2 still pins 1.7.0, so the root `package.json`
+  carries an npm `override` and guard tests keep the lockfile patched
+  (>=1.7.1). Drop the override once upstream bumps past the advisory.
+
 ## [0.9.0] - 2026-09-13
 
 ### Added

@@ -563,9 +563,11 @@ jobs:
       # The npm advisory bulk endpoint answers 503 under registry load, which
       # failed the whole audit lane on an otherwise-green tree (PR #533,
       # 2026-09-04). A bounded retry with backoff absorbs the transient
-      # class; a genuine advisory finding still fails on the first
-      # successful response because `npm audit` exits non-zero on
-      # vulnerabilities.
+      # class; a genuine advisory finding still fails because `npm audit`
+      # exits non-zero on vulnerabilities and the loop exits 1 after the
+      # last attempt. Do not capture `status=$?` after the `if`: a false
+      # `if` condition leaves $? at 0 for the if-statement, which would
+      # swallow every finding (issue #601).
       - name: Run npm audit (repository tooling)
         if: ${{ !cancelled() }}
         run: |
@@ -573,12 +575,11 @@ jobs:
             if npm audit; then
               exit 0
             fi
-            status=$?
-            echo "npm audit attempt $attempt exited $status; retrying after backoff" >&2
+            echo "npm audit attempt $attempt failed; retrying after backoff" >&2
             sleep $((attempt * 15))
           done
           echo "npm audit failed after 3 attempts" >&2
-          exit "$status"
+          exit 1
       - name: Run npm audit (browser reference client)
         if: ${{ !cancelled() }}
         working-directory: clients/browser
@@ -587,12 +588,11 @@ jobs:
             if npm audit; then
               exit 0
             fi
-            status=$?
-            echo "npm audit attempt $attempt exited $status; retrying after backoff" >&2
+            echo "npm audit attempt $attempt failed; retrying after backoff" >&2
             sleep $((attempt * 15))
           done
           echo "npm audit failed after 3 attempts" >&2
-          exit "$status"
+          exit 1
       - name: Read Rust toolchain
         if: ${{ !cancelled() }}
         id: toolchain
