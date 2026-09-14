@@ -183,6 +183,9 @@ ENV CARGO_HTTP_TIMEOUT=120
 # invalidations without baking those caches into the final image.
 # cargo-mutants (mutation testing) and cargo-fuzz (coverage-guided fuzzing) back
 # the mutation.yml / fuzz.yml CI jobs; keep them in dev/CI parity.
+# cargo-nextest is pinned to the exact version the CI lanes install:
+# .config/nextest.toml encodes per-profile timeout and filter semantics that
+# drift between nextest versions (issue #597).
 RUN --mount=type=cache,id=signal-fish-cargo-registry-v2,target=/usr/local/cargo/registry,sharing=locked,uid=1000,gid=1000 \
     --mount=type=cache,id=signal-fish-cargo-git-v2,target=/usr/local/cargo/git,sharing=locked,uid=1000,gid=1000 \
     --mount=type=cache,id=signal-fish-cargo-install-target-${TARGETARCH}-v2,target=/tmp/cargo-install-target,sharing=locked,uid=1000,gid=1000 \
@@ -203,7 +206,7 @@ RUN --mount=type=cache,id=signal-fish-cargo-registry-v2,target=/usr/local/cargo/
     cargo-watch \
     cargo-expand \
     cargo-llvm-cov \
-    cargo-nextest \
+    cargo-nextest@0.9.143 \
     cargo-mutants@27.1.0 \
     cargo-fuzz \
     && cargo install --locked taplo-cli --version "$TAPLO_CLI_VERSION" \

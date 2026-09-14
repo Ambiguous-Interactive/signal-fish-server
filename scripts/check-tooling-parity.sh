@@ -70,6 +70,9 @@ REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo ".")
 cd "$REPO_ROOT"
 
 DOC_VALIDATION_WORKFLOW=".github/workflows/doc-validation.yml"
+CI_WORKFLOW=".github/workflows/ci.yml"
+MUTATION_WORKFLOW=".github/workflows/mutation.yml"
+VERIFICATION_NIGHTLY_WORKFLOW=".github/workflows/verification-nightly.yml"
 DEVCONTAINER_DOCKERFILE=".devcontainer/Dockerfile"
 DEVCONTAINER_JSON=".devcontainer/devcontainer.json"
 DEVCONTAINER_POST_CREATE=".devcontainer/post-create.sh"
@@ -182,6 +185,9 @@ assert_not_contains_literal() {
 info "Validating CI/devcontainer tooling parity"
 
 require_file "$DOC_VALIDATION_WORKFLOW"
+require_file "$CI_WORKFLOW"
+require_file "$MUTATION_WORKFLOW"
+require_file "$VERIFICATION_NIGHTLY_WORKFLOW"
 require_file "$DEVCONTAINER_DOCKERFILE"
 require_file "$DEVCONTAINER_JSON"
 require_file "$DEVCONTAINER_POST_CREATE"
@@ -217,6 +223,19 @@ if [ -n "$WORKFLOW_YQ_VERSION" ] && [ -n "$DOCKERFILE_YQ_VERSION" ]; then
 fi
 if [ -n "$WORKFLOW_TAPLO_VERSION" ] && [ -n "$DOCKERFILE_TAPLO_VERSION" ]; then
     assert_equal "TAPLO version parity" "$WORKFLOW_TAPLO_VERSION" "$DOCKERFILE_TAPLO_VERSION"
+fi
+
+# cargo-nextest pin parity (#597): the devcontainer must install the exact
+# version the CI lanes pin — .config/nextest.toml encodes per-profile timeout
+# and filter semantics that drift between nextest versions.
+NEXTTEST_CI_PINS=$(grep -hEo 'cargo-nextest@[0-9]+\.[0-9]+\.[0-9]+' \
+    "$CI_WORKFLOW" "$MUTATION_WORKFLOW" "$VERIFICATION_NIGHTLY_WORKFLOW" \
+    | sort -u)
+if [ "$(printf '%s' "$NEXTTEST_CI_PINS" | grep -c .)" -ne 1 ]; then
+    error_item "Expected exactly one unique CI cargo-nextest pin, found: ${NEXTTEST_CI_PINS:-none}"
+else
+    assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "$NEXTTEST_CI_PINS" \
+        "Devcontainer pins cargo-nextest to the CI version ($NEXTTEST_CI_PINS)"
 fi
 
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "fd-find" "Devcontainer installs fd-find"

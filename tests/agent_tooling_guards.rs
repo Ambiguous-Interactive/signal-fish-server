@@ -99,6 +99,22 @@ fn read_raw(path: &str) -> String {
     read_file(&full)
 }
 
+/// Extract every `cargo-nextest@<version>` pin from `content` (workflow
+/// `tool:` lines and Dockerfile `cargo binstall` list entries).
+fn cargo_nextest_pins(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .filter_map(|line| {
+            let start = line.find("cargo-nextest@")?;
+            let version = &line[start + "cargo-nextest@".len()..];
+            let end = version
+                .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+                .unwrap_or(version.len());
+            Some(line[start..start + "cargo-nextest@".len() + end].to_string())
+        })
+        .collect()
+}
+
 #[test]
 fn npm_global_installs_never_need_sudo() {
     let contract = "Devcontainer npm global installs must be routed through the \
@@ -366,6 +382,33 @@ fn github_mcp_server_is_pinned_and_checksum_verified() {
         ],
         contract,
     );
+}
+
+#[test]
+fn cargo_nextest_pin_matches_the_ci_lanes() {
+    let contract = "The devcontainer must install cargo-nextest at the exact \
+                    version the CI lanes pin: .config/nextest.toml encodes \
+                    per-profile timeout and filter semantics that drift \
+                    between nextest versions (issue #597).";
+
+    let mut pins: Vec<String> = [
+        ".github/workflows/ci.yml",
+        ".github/workflows/mutation.yml",
+        ".github/workflows/verification-nightly.yml",
+    ]
+    .into_iter()
+    .flat_map(|path| cargo_nextest_pins(&read_live(path)))
+    .collect();
+    pins.sort();
+    pins.dedup();
+    assert_eq!(
+        pins.len(),
+        1,
+        "all CI lanes must pin one cargo-nextest version, found: {pins:?}"
+    );
+
+    let dockerfile = read_live(".devcontainer/Dockerfile");
+    require_fragments(&dockerfile, &[&pins[0]], contract);
 }
 
 #[test]
