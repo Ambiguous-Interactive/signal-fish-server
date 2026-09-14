@@ -158,6 +158,10 @@ every change, so rely on it in CI and on the static guards above.
   registry work back on the editor attach path.
 - Bumping `GITHUB_MCP_VERSION` without fresh SHA256 ARGs → build fails
   checksum verification (that is the supply-chain guard working).
+- Bumping the CI `cargo-nextest@` pin without the matching
+  `.devcontainer/Dockerfile` pin (or vice versa) → local and hosted lanes
+  drift on nextest filter/timeout semantics; the tooling-parity guards fail.
+  Bump both in the same commit (issue #597).
 - Making post-start fail the container on a network error → violates
   best-effort; warn and continue instead.
 - Deleting or skipping `devcontainer-build.yml` → devcontainer-only build

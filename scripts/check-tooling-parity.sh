@@ -70,6 +70,9 @@ REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo ".")
 cd "$REPO_ROOT"
 
 DOC_VALIDATION_WORKFLOW=".github/workflows/doc-validation.yml"
+CI_WORKFLOW=".github/workflows/ci.yml"
+MUTATION_WORKFLOW=".github/workflows/mutation.yml"
+VERIFICATION_NIGHTLY_WORKFLOW=".github/workflows/verification-nightly.yml"
 DEVCONTAINER_DOCKERFILE=".devcontainer/Dockerfile"
 DEVCONTAINER_JSON=".devcontainer/devcontainer.json"
 DEVCONTAINER_POST_CREATE=".devcontainer/post-create.sh"
@@ -182,6 +185,9 @@ assert_not_contains_literal() {
 info "Validating CI/devcontainer tooling parity"
 
 require_file "$DOC_VALIDATION_WORKFLOW"
+require_file "$CI_WORKFLOW"
+require_file "$MUTATION_WORKFLOW"
+require_file "$VERIFICATION_NIGHTLY_WORKFLOW"
 require_file "$DEVCONTAINER_DOCKERFILE"
 require_file "$DEVCONTAINER_JSON"
 require_file "$DEVCONTAINER_POST_CREATE"
@@ -218,6 +224,26 @@ fi
 if [ -n "$WORKFLOW_TAPLO_VERSION" ] && [ -n "$DOCKERFILE_TAPLO_VERSION" ]; then
     assert_equal "TAPLO version parity" "$WORKFLOW_TAPLO_VERSION" "$DOCKERFILE_TAPLO_VERSION"
 fi
+
+# cargo-nextest pin parity (#597): the devcontainer must install the exact
+# version the CI lanes pin — .config/nextest.toml encodes per-profile timeout
+# and filter semantics that drift between nextest versions. Every lane and
+# the Dockerfile must each carry exactly one identical pin.
+NEXTTEST_DOCKERFILE_PIN=$(grep -Eo 'cargo-nextest@[0-9]+\.[0-9]+\.[0-9]+' \
+    "$DEVCONTAINER_DOCKERFILE" | sort -u || true)
+if [ "$(printf '%s' "$NEXTTEST_DOCKERFILE_PIN" | grep -c .)" -ne 1 ]; then
+    error_item "Expected exactly one cargo-nextest pin in $DEVCONTAINER_DOCKERFILE, found: ${NEXTTEST_DOCKERFILE_PIN:-none}"
+fi
+for NEXTTEST_WORKFLOW in "$CI_WORKFLOW" "$MUTATION_WORKFLOW" "$VERIFICATION_NIGHTLY_WORKFLOW"; do
+    NEXTTEST_WORKFLOW_PIN=$(grep -Eo 'cargo-nextest@[0-9]+\.[0-9]+\.[0-9]+' \
+        "$NEXTTEST_WORKFLOW" | sort -u || true)
+    if [ "$(printf '%s' "$NEXTTEST_WORKFLOW_PIN" | grep -c .)" -ne 1 ]; then
+        error_item "Expected exactly one cargo-nextest pin in $NEXTTEST_WORKFLOW, found: ${NEXTTEST_WORKFLOW_PIN:-none}"
+    else
+        assert_equal "cargo-nextest pin parity ($NEXTTEST_WORKFLOW)" \
+            "$NEXTTEST_DOCKERFILE_PIN" "$NEXTTEST_WORKFLOW_PIN"
+    fi
+done
 
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "fd-find" "Devcontainer installs fd-find"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "ln -sf /usr/bin/fdfind /usr/local/bin/fd" "Devcontainer maps fdfind to fd"
