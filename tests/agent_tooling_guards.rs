@@ -452,6 +452,16 @@ fn amd64_binstall_fails_fast_instead_of_doomed_musl_source_compiles() {
         ],
         contract,
     );
+
+    // Exactly one --disable-strategies occurrence: the per-arch amd64 arm. An
+    // unconditional flag on the invocation line would disable arm64's
+    // source-compile fallback, which cargo-watch still needs.
+    assert_eq!(
+        dockerfile.matches("--disable-strategies").count(),
+        1,
+        "{contract}\n\n--disable-strategies must appear exactly once (the amd64 \
+         case arm); extra occurrences would also strip arm64's fallback."
+    );
 }
 
 #[test]

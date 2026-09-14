@@ -264,7 +264,7 @@ assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "signal-fish-cargo-install-ta
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" 'cargo_binstall_target="x86_64-unknown-linux-musl"' "Devcontainer uses portable x86_64 MUSL Cargo tool binaries"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" 'cargo_binstall_target="aarch64-unknown-linux-musl"' "Devcontainer uses portable aarch64 MUSL Cargo tool binaries"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" 'cargo binstall --no-confirm --locked --target "$cargo_binstall_target"' "Devcontainer applies the portable target to cargo-binstall"
-assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "musl-tools" "Devcontainer supports source fallback for MUSL Cargo tools"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "musl-tools" "Devcontainer keeps musl-tools for the arm64 source-compile fallback"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" 'rustup target add "$cargo_binstall_target"' "Devcontainer installs the MUSL Rust standard library for binstall fallback"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "USER vscode" "Devcontainer installs Rust tooling as the non-root runtime user"
 assert_not_contains_literal "$DEVCONTAINER_DOCKERFILE" "chown -R vscode:vscode /usr/local/cargo /usr/local/rustup" "Devcontainer avoids a large recursive ownership layer"
