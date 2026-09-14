@@ -660,9 +660,8 @@ async fn test_unloggable_app_id_fails_authentication_with_invalid_app_id() {
 
 mod connect_token_support {
     use base64::Engine as _;
-    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::{Signer, SigningKey};
     use sha2::{Digest, Sha256};
-    use signature::Signer;
 
     /// Deterministic 32-byte test seed from a label.
     pub fn seed(label: &[u8]) -> [u8; 32] {

@@ -1365,6 +1365,7 @@ mod shutdown_drain_tests {
 #[cfg(unix)]
 mod connect_token_reload_tests {
     use base64::Engine as _;
+    use ed25519_dalek::Signer;
     use ed25519_dalek::SigningKey;
     use sha2::{Digest, Sha256};
     use signal_fish_server::config;
@@ -1374,7 +1375,6 @@ mod connect_token_reload_tests {
     };
     use signal_fish_server::database::DatabaseConfig;
     use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
-    use signature::Signer;
     use std::sync::Arc;
 
     use super::reload_allowed_apps_from_config;

@@ -701,9 +701,8 @@ async fn sdk_refusal_loop_exhausting_the_reply_budget_closes_with_4006() {
 #[tokio::test]
 async fn connect_token_refusal_loop_exhausting_the_reply_budget_closes_with_4006() {
     use base64::Engine as _;
-    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::{Signer, SigningKey};
     use sha2::{Digest, Sha256};
-    use signature::Signer;
 
     let mut config = base_config();
     config.rate_limit_config.max_inbound_error_replies = 3;
