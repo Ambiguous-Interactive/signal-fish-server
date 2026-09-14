@@ -186,12 +186,21 @@ ENV CARGO_HTTP_TIMEOUT=120
 # cargo-nextest is pinned to the exact version the CI lanes install:
 # .config/nextest.toml encodes per-profile timeout and filter semantics that
 # drift between nextest versions (issue #597).
+# cargo-binstall resolves releases through the unauthenticated GitHub API. A
+# degraded API response silently falls back to compiling from source; the musl
+# source build is doomed on this image (openssl-sys has no vendored OpenSSL),
+# which turns a transient flake into a multi-minute hard failure (issue #599).
+# Every amd64-musl tool in the list below has a prebuilt artifact (GitHub
+# release or QuickInstall), so the amd64 build disables the source-compile
+# strategy and fails fast instead. arm64 keeps source fallback: cargo-watch
+# ships no aarch64-musl release artifact.
 RUN --mount=type=cache,id=signal-fish-cargo-registry-v2,target=/usr/local/cargo/registry,sharing=locked,uid=1000,gid=1000 \
     --mount=type=cache,id=signal-fish-cargo-git-v2,target=/usr/local/cargo/git,sharing=locked,uid=1000,gid=1000 \
     --mount=type=cache,id=signal-fish-cargo-install-target-${TARGETARCH}-v2,target=/tmp/cargo-install-target,sharing=locked,uid=1000,gid=1000 \
     export CARGO_TARGET_DIR=/tmp/cargo-install-target \
+    && binstall_args=() \
     && case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
-    amd64) cargo_binstall_target="x86_64-unknown-linux-musl" ;; \
+    amd64) cargo_binstall_target="x86_64-unknown-linux-musl"; binstall_args+=(--disable-strategies compile) ;; \
     arm64) cargo_binstall_target="aarch64-unknown-linux-musl" ;; \
     *) \
     echo "Unsupported target architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; \
@@ -200,7 +209,7 @@ RUN --mount=type=cache,id=signal-fish-cargo-registry-v2,target=/usr/local/cargo/
     esac \
     && rustup target add "$cargo_binstall_target" \
     && cargo install --locked cargo-binstall \
-    && cargo binstall --no-confirm --locked --target "$cargo_binstall_target" \
+    && cargo binstall --no-confirm --locked --target "$cargo_binstall_target" "${binstall_args[@]}" \
     cargo-deny \
     cargo-tarpaulin \
     cargo-watch \

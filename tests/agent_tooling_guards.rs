@@ -426,6 +426,45 @@ fn cargo_nextest_pin_matches_the_ci_lanes() {
 }
 
 #[test]
+fn amd64_binstall_fails_fast_instead_of_doomed_musl_source_compiles() {
+    let contract = "cargo-binstall resolves releases through the unauthenticated \
+                    GitHub API. A degraded API response must fail fast on amd64: \
+                    every amd64-musl tool in the binstall list has a prebuilt \
+                    artifact (GitHub release or QuickInstall), while the \
+                    source-compile fallback is doomed on this image — a musl \
+                    build of an OpenSSL-dependent crate (e.g. cargo-tarpaulin) \
+                    dies on openssl-sys after several wasted minutes (issue \
+                    #599). arm64 keeps the source-compile fallback: some tools \
+                    (cargo-watch) ship no aarch64-musl release artifact.";
+
+    let dockerfile = read_live(".devcontainer/Dockerfile");
+    require_fragments(
+        &dockerfile,
+        &[
+            // amd64 arm disables the source-compile strategy outright.
+            "amd64) cargo_binstall_target=\"x86_64-unknown-linux-musl\"; \
+             binstall_args+=(--disable-strategies compile) ;;",
+            // arm64 arm keeps the default strategies (compile fallback intact).
+            "arm64) cargo_binstall_target=\"aarch64-unknown-linux-musl\" ;;",
+            // The invocation must actually forward the per-arch strategy args.
+            "cargo binstall --no-confirm --locked --target \
+             \"$cargo_binstall_target\" \"${binstall_args[@]}\"",
+        ],
+        contract,
+    );
+
+    // Exactly one --disable-strategies occurrence: the per-arch amd64 arm. An
+    // unconditional flag on the invocation line would disable arm64's
+    // source-compile fallback, which cargo-watch still needs.
+    assert_eq!(
+        dockerfile.matches("--disable-strategies").count(),
+        1,
+        "{contract}\n\n--disable-strategies must appear exactly once (the amd64 \
+         case arm); extra occurrences would also strip arm64's fallback."
+    );
+}
+
+#[test]
 fn every_harness_is_wired_to_the_github_mcp_server() {
     let contract = "Every agent harness must be wired to the pinned GitHub MCP \
                     server binary (github-mcp-server), authenticated through the \
