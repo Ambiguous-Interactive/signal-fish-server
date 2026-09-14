@@ -2142,6 +2142,84 @@ fn test_ci_enforces_relay_allocation_ceilings() {
 }
 
 #[test]
+fn test_ci_nextest_lane_installs_cargo_mutants_for_inventory_guard() {
+    // `test_mutation_total_mutants_constant_matches_list` silently skips in
+    // any lane without cargo-mutants, so a PR that drifted the measured
+    // mutant count used to land red only in the weekly scheduled Mutation
+    // Testing run: three consecutive red Mondays (runs #218/#219 failed on
+    // count drift, #220 then exposed a real missed mutant once the count was
+    // fixed). The `nextest` job's ubuntu leg installs the exact pinned
+    // cargo-mutants the mutation workflow uses, so the inventory guard
+    // enforces at the per-PR seam for the cost of one prebuilt-binary
+    // download (no extra compile: the suite already builds
+    // tests/ci_config_tests.rs).
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let job = extract_workflow_job_block(&workflow, "nextest")
+        .expect("ci.yml must define the nextest job");
+
+    let step_start = job
+        .find("- name: Install cargo-mutants (mutation inventory guard)")
+        .expect(
+            "ci.yml `nextest` must install cargo-mutants so the mutation \
+             inventory guard stops skipping on the per-PR ubuntu lane",
+        );
+    let step_end = step_start
+        + job[step_start..]
+            .find("\n      - name:")
+            .unwrap_or(job.len() - step_start);
+    let step = &job[step_start..step_end];
+
+    assert!(
+        step.contains("if: matrix.os == 'ubuntu-latest'"),
+        "ci.yml `nextest` cargo-mutants install must stay ubuntu-only: the \
+         guard is platform-independent, and the scheduled macOS/Windows \
+         nextest legs plus the MSRV full-suite lane keep their no-tool skip \
+         path"
+    );
+    assert!(
+        step.contains("uses: taiki-e/install-action@"),
+        "ci.yml `nextest` must install cargo-mutants through \
+         taiki-e/install-action, mirroring the mutation workflow's pin"
+    );
+    let mutation_workflow = read_live_file(&root.join(".github/workflows/mutation.yml"));
+    let pinned_versions = |text: &str| -> Vec<String> {
+        text.lines()
+            .map(str::trim)
+            .filter_map(|line| line.strip_prefix("tool: cargo-mutants@"))
+            .map(str::to_string)
+            .collect()
+    };
+    let ci_versions = pinned_versions(step);
+    assert!(
+        !ci_versions.is_empty(),
+        "ci.yml nextest must pin cargo-mutants@<version>"
+    );
+    let ci_version = ci_versions[0].clone();
+    let mutation_versions = pinned_versions(&mutation_workflow);
+    assert!(
+        !mutation_versions.is_empty(),
+        "mutation.yml must pin cargo-mutants@<version>"
+    );
+    assert!(
+        mutation_versions
+            .iter()
+            .all(|version| *version == ci_version),
+        "every mutation.yml cargo-mutants pin must equal the per-PR guard's \
+         pin ({ci_version}): a version skew can change the generated mutant \
+         set and count. Found: {mutation_versions:?}"
+    );
+
+    assert!(
+        job.find("- name: Run nextest")
+            .expect("ci.yml `nextest` must run the suite")
+            > step_start,
+        "ci.yml `nextest` must install cargo-mutants before the suite runs so \
+         the inventory guard executes inside the standard nextest lane"
+    );
+}
+
+#[test]
 fn test_ci_lint_job_runs_panic_policy_check() {
     // Issue #558: the zero-panic production policy (scripts/check-no-panics.sh:
     // the nested syn-backed scan plus panic-lint clippy passes over the server
@@ -32354,15 +32432,42 @@ fn test_mutation_workflow_is_periodic_not_per_pr() {
 }
 
 /// Count the mutants `cargo mutants --list` generates for the current config, or
-/// `None` if cargo-mutants is not installed / errored (so the test skips rather
-/// than failing in environments without the tool — mirrors `cargo_deny_available`).
+/// `None` when cargo-mutants is unavailable, probed via `cargo mutants
+/// --version` (cargo itself always spawns, so a missing tool shows up as
+/// cargo's own "no such command" exit, not a spawn error) — the skip path is
+/// for lanes that deliberately do not install the tool, mirroring
+/// `cargo_deny_available`. Where the tool IS installed and CI is running (the
+/// per-PR ubuntu `nextest` leg, the scheduled mutation baseline), a `--list`
+/// failure panics: a silent skip there would defeat the inventory guard this
+/// binary exists to run.
 fn cargo_mutants_list_count() -> Option<usize> {
-    let output = Command::new("cargo")
-        .args(["mutants", "--list"])
+    let on_ci = std::env::var_os("CI").is_some();
+    let probe = Command::new("cargo")
+        .args(["mutants", "--version"])
         .current_dir(repo_root())
         .output()
         .ok()?;
+    if !probe.status.success() {
+        return None;
+    }
+    let output = match Command::new("cargo")
+        .args(["mutants", "--list"])
+        .current_dir(repo_root())
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if on_ci => panic!("failed to spawn `cargo mutants --list` on CI: {error}"),
+        Err(_) => return None,
+    };
     if !output.status.success() {
+        if on_ci {
+            panic!(
+                "`cargo mutants --list` failed on CI (exit status {:?}) with \
+                 cargo-mutants installed; the inventory guard must not skip \
+                 silently there",
+                output.status.code()
+            );
+        }
         return None;
     }
     let count = String::from_utf8_lossy(&output.stdout)
@@ -32379,8 +32484,11 @@ fn test_mutation_total_mutants_constant_matches_list() {
     // test_mutation_shard_budget_is_feasible_vs_timeout honest — if the scope
     // changes (a mutated module added/removed, exclude_re edited, or the scoped
     // source materially changed), the count drifts and the budget must be
-    // re-evaluated. Skips when cargo-mutants is not installed (e.g. the standard
-    // CI test lanes); it runs for local devs and any cargo-mutants-equipped lane.
+    // re-evaluated. Skips on lanes without cargo-mutants; the per-PR ubuntu
+    // `nextest` lane (ci.yml) and the scheduled mutation baseline (mutation.yml)
+    // both install it, so a count drift fails the change that caused it instead
+    // of waiting up to a week for the scheduled run (see
+    // test_ci_nextest_lane_installs_cargo_mutants_for_inventory_guard).
     let Some(count) = cargo_mutants_list_count() else {
         eprintln!(
             "Skipping test_mutation_total_mutants_constant_matches_list: cargo-mutants is not \
