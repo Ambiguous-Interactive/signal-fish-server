@@ -143,7 +143,7 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2.87.11
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest@0.9.143
       - name: Run relay delivery soak
         shell: bash
         run: |
@@ -262,7 +262,7 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2.87.11
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest@0.9.143
       - name: Build the native reference client
         shell: bash
         run: |
@@ -413,7 +413,7 @@ jobs:
         id: install-nextest
         uses: taiki-e/install-action@v2.87.11
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest@0.9.143
       # --run-ignored all: the PR-lane profiles (already covered by the ci.yml
       # nextest job) PLUS the nightly-only backgrounded-tab profile.
       - name: Run real-world scenario profiles

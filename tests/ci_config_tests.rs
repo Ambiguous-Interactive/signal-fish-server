@@ -32251,9 +32251,7 @@ fn test_mutants_profile_overrides_target_existing_lib_tests() {
                             None => break,
                         }
                     }
-                    let body = body
-                        .strip_prefix("fn ")
-                        .or_else(|| body.strip_prefix("async fn "));
+                    let body = body.strip_prefix("fn ");
                     if let Some(body) = body {
                         let name: String = body
                             .chars()
