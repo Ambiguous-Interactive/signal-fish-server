@@ -32202,7 +32202,12 @@ fn test_mutants_profile_overrides_target_existing_lib_tests() {
         }
         if let Some(rest) = trimmed.strip_prefix("filter") {
             if let Some(value) = rest.trim_start().strip_prefix('=') {
-                filters.push(value.trim().trim_matches('\'').to_string());
+                let value = value.trim();
+                let quoted = value
+                    .strip_prefix('\'')
+                    .and_then(|v| v.strip_suffix('\''))
+                    .unwrap_or(value);
+                filters.push(quoted.to_string());
             }
         }
     }
@@ -32226,9 +32231,29 @@ fn test_mutants_profile_overrides_target_existing_lib_tests() {
             if path.extension().is_some_and(|ext| ext == "rs") {
                 for line in read_file(&path).lines() {
                     let trimmed = line.trim_start();
-                    let body = trimmed
-                        .strip_prefix("async fn ")
-                        .or_else(|| trimmed.strip_prefix("fn "));
+                    if trimmed.starts_with("//") {
+                        continue;
+                    }
+                    let mut body = trimmed;
+                    // Strip item qualifiers so `pub async fn`, `pub(crate)
+                    // fn`, `const fn`, etc. are recognized too.
+                    loop {
+                        body = body.trim_start();
+                        let next = body
+                            .strip_prefix("pub(crate) ")
+                            .or_else(|| body.strip_prefix("pub(super) "))
+                            .or_else(|| body.strip_prefix("pub "))
+                            .or_else(|| body.strip_prefix("const "))
+                            .or_else(|| body.strip_prefix("unsafe "))
+                            .or_else(|| body.strip_prefix("async "));
+                        match next {
+                            Some(stripped) => body = stripped,
+                            None => break,
+                        }
+                    }
+                    let body = body
+                        .strip_prefix("fn ")
+                        .or_else(|| body.strip_prefix("async fn "));
                     if let Some(body) = body {
                         let name: String = body
                             .chars()
@@ -32258,6 +32283,12 @@ fn test_mutants_profile_overrides_target_existing_lib_tests() {
              test(<name>) selectors so renames stay detectable"
         );
         for name in names {
+            if name.starts_with('/') && name.ends_with('/') {
+                panic!(
+                    "mutants-profile override filter {filter:?} uses a regex selector; \
+                     exact test(<name>) selectors are required so renames stay detectable"
+                );
+            }
             assert!(
                 src_fns.iter().any(|defined| defined == name),
                 "mutants-profile override names test {name:?}, but no `fn {name}` exists \
