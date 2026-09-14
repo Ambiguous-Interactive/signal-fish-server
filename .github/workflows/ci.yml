@@ -305,14 +305,14 @@ jobs:
         continue-on-error: true
         uses: taiki-e/install-action@v2.87.11
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest@0.9.143
       - name: Install cargo-nextest (retry on transient runner failure)
         # Only runs when attempt 1 failed (e.g., the Windows bash-startup flake).
         # No continue-on-error here, so a second failure correctly fails the job.
         if: steps.install_nextest.outcome == 'failure'
         uses: taiki-e/install-action@v2.87.11
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest@0.9.143
       - name: Install cargo-mutants (mutation inventory guard)
         # Installs the mutation workflow's pinned cargo-mutants so
         # test_mutation_total_mutants_constant_matches_list enforces the

@@ -45,9 +45,8 @@ use base64::engine::general_purpose::{
     URL_SAFE_NO_PAD as BASE64_URL_SAFE_NO_PAD,
 };
 use base64::Engine as _;
-use ed25519_dalek::{Signature, VerifyingKey};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::Deserialize;
-use signature::Verifier;
 use thiserror::Error;
 
 /// Wire format version prefix. A future format change mints under a new
@@ -309,9 +308,8 @@ impl ConnectTokenKeyState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::{Signer, SigningKey};
     use sha2::{Digest, Sha256};
-    use signature::Signer;
 
     /// Deterministic 32-byte test seed from a label.
     fn seed(label: &[u8]) -> [u8; 32] {

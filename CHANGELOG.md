@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Dependency hygiene: the direct `signature` dependency is gone. The
+  `Signer`/`Verifier` traits now import through `ed25519-dalek`'s own
+  re-exports, which are the exact trait versions the crate implements. A
+  future direct `signature` major bump can no longer version-skew them
+  (the Dependabot `signature` 3 bump broke every sign/verify call site).
+  `rustls` moved to 0.23.45 (RUSTSEC-2026-0285). No wire, config, or
+  behavioral change.
+
 - Protocol v3 room snapshots no longer carry the server-internal
   `connected_at` join timestamp (issue #539, follow-up of #529). The write
   layer strips it from `RoomJoined`, `PlayerJoined`, `SpectatorJoined`,

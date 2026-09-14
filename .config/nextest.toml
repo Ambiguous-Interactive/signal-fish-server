@@ -105,3 +105,14 @@ fail-fast = true
 failure-output = "immediate-final"
 success-output = "never"
 slow-timeout = { period = "10s", terminate-after = 1 }
+
+# The two #550 distributed-lease pins hold a real lease through its renewal
+# cycle and deliberately sleep 10.4 s (past acquire + TTL) before probing, so
+# they cannot fit the 10 s hang-termination budget and killed the unmutated
+# baseline green-gate (mutation run #221). The renewed-lease code is outside
+# .cargo/mutants.toml's examine_globs, so this override cannot mask a
+# mutation-induced hang in it; it only lets the baseline and unrelated-mutant
+# oracle runs carry these two tests to their assertion.
+[[profile.mutants.overrides]]
+filter = 'test(stalled_app_cap_count_read_keeps_its_lease_alive) or test(stalled_room_code_rotation_keeps_its_mutex_lease_alive)'
+slow-timeout = { period = "30s", terminate-after = 1 }

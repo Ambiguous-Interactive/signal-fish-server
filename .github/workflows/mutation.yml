@@ -95,9 +95,15 @@ jobs:
           tool: cargo-mutants@27.1.0
 
       - name: Install cargo-nextest
+        # Pinned: the [[profile.mutants.overrides]] per-test timeouts in
+        # .config/nextest.toml depend on nextest's filter-matching semantics;
+        # a surprise upgrade that changed matching would silently no-op the
+        # overrides and re-red the baseline green-gate (the guard
+        # test_mutants_profile_overrides_target_existing_lib_tests checks the
+        # test names, not the installed nextest's matching).
         uses: taiki-e/install-action@v2.87.11
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest@0.9.143
 
       - name: Verify measured mutation inventory
         # This integration test can only enforce the count when cargo-mutants is
@@ -221,11 +227,10 @@ jobs:
           tool: cargo-mutants@27.1.0
 
       - name: Install cargo-nextest
-        # The mutation oracle uses nextest process isolation plus the dedicated
-        # profile's per-test termination for progress-removing mutants.
+        # Pinned, same reason as the baseline job above.
         uses: taiki-e/install-action@v2.87.11
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest@0.9.143
 
       - name: Run mutation testing (shard ${{ matrix.shard }}/42)
         # All flags/env (mold, --in-place, --sharding slice, --profile mutants,
