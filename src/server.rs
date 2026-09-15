@@ -1556,7 +1556,13 @@ impl EnhancedGameServer {
     /// Shrink every coordination-lock lease on this server instance to
     /// `millis` (`0` restores the production constants). Instance-local, so
     /// concurrent tests never see each other's override.
+    ///
+    /// Gated like the `*_tests.rs` modules that call it: the packaged-crate
+    /// build runs `--lib` without `signal_fish_repository_tests`, so a
+    /// `#[cfg(test)]`-only setter would be dead code under `-D warnings`
+    /// there (the package-contents gate caught exactly that).
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) fn coordination_lock_ttl_override_ms_for_test(&self, millis: u64) {
         self.coordination_lock_ttl_override_ms
             .store(millis, std::sync::atomic::Ordering::Relaxed);
