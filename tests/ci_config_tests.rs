@@ -26893,12 +26893,19 @@ fn test_root_npm_lock_resolves_patched_smol_toml() {
          release (>=1.7.1) and regenerate the lockfile."
     );
 
+    let package_json: serde_json::Value =
+        serde_json::from_str(&read_live_file(&root.join("package.json")))
+            .unwrap_or_else(|error| panic!("package.json must parse as JSON: {error}"));
+    let override_present = package_json
+        .get("overrides")
+        .and_then(|overrides| overrides.get("smol-toml"))
+        .is_some();
     let declared_range = packages
         .get("node_modules/markdownlint-cli2")
         .and_then(|entry| entry.get("dependencies"))
         .and_then(|dependencies| dependencies.get("smol-toml"))
         .and_then(|range| range.as_str());
-    if let Some(declared_range) = declared_range {
+    if let (true, Some(declared_range)) = (override_present, declared_range) {
         // The first version-like token of the range npm/Dependabot writes is
         // its minimum. Ranges the token cannot represent parse as (0, 0, 0),
         // which reads as "not known to be patched" and keeps the override —
