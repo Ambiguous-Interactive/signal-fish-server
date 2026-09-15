@@ -60,6 +60,15 @@ outside this plan's architecture scope.
 These items remain live but are not active phases. Re-rank them whenever new
 correctness evidence appears.
 
+- #604 — prove the Mutation Testing weekly cron green on its 2026-09-21
+  schedule-triggered first attempt (runs #218-#221 failed first-try on
+  inventory drift, one missed mutant, and the 10.4 s lease pins vs the 10 s
+  mutants-profile hang budget; fixes landed in #596 and the
+  mixed-membership pins). Do not count dispatch reruns.
+- #603 — blocked upstream: markdownlint-cli2's smol-toml fix is merged on
+  its main (2026-08-24) but unreleased. The lockfile guard now flags the
+  `smol-toml` override as redundant once upstream ships a patched minimum,
+  so the Dependabot bump arrives red with removal instructions.
 - #581 — latent only: `handle_bus_message` ignores
   `SequencedMessage::excluded_players`; untriggerable until a real
   cross-instance bus is designed (multi-node fan-out stays outside
