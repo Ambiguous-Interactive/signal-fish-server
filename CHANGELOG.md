@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The two #550 stalled-lease pins (`stalled_app_cap_count_read_keeps_its_lease_alive`,
+  `stalled_room_code_rotation_keeps_its_mutex_lease_alive`) shrink their
+  coordination-lock lease to 2 s through a test-only
+  `coordination_lock_ttl_override_ms` on the server instance, cutting each from
+  a real 10.4 s sleep to ~2.5 s. The 30 s mutants-profile slow-timeout override
+  those sleeps forced (mutation run #221 red-waved the weekly baseline; issue
+  #604) is removed, and a replacement guard pins the class: no
+  `[[profile.mutants.overrides]]` relief while nothing needs it, and no
+  `sleep(...)` under `src/` at or past the mutants profile's 10 s budget.
+  Production lease TTLs, renewal behavior, and lock order are unchanged.
+
 - Dependency hygiene: the direct `signature` dependency is gone. The
   `Signer`/`Verifier` traits now import through `ed25519-dalek`'s own
   re-exports, which are the exact trait versions the crate implements. A

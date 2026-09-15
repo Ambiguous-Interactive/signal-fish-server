@@ -477,10 +477,16 @@ async fn regenerate_room_code_rotates_registry_and_drops_the_old_code() {
 /// `room_join:{game}:{candidate}` across the storage swap, so the lease must
 /// stay renewed while the swap stalls — the candidate-code mutex must still
 /// exclude a racing joiner after the raw TTL has elapsed.
+///
+/// The lease TTL is shrunk to 2 s (test-only override): the probe sleeps
+/// 2.5 s, past one raw TTL, instead of a real 10.4 s sleep past the
+/// production 10 s lease that red-waved the weekly mutation baseline against
+/// the mutants profile's 10 s hang budget (issue #604).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg_attr(miri, ignore)]
 async fn stalled_room_code_rotation_keeps_its_mutex_lease_alive() {
     let server = create_test_server_with(ServerConfig::default()).await;
+    server.coordination_lock_ttl_override_ms_for_test(2_000);
     let database = server
         .database
         .as_any()
@@ -503,7 +509,7 @@ async fn stalled_room_code_rotation_keeps_its_mutex_lease_alive() {
     // Outlast the room-join lease TTL with the swap stalled. An expired lease
     // would leave the candidate-code mutex free to take; a renewed lease must
     // still report it busy.
-    tokio::time::sleep(Duration::from_millis(10_400)).await;
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
     let stolen = server
         .distributed_lock_for_test()
         .try_acquire("room_join:moderation-game:NEWCOD", Duration::from_secs(1))

@@ -472,6 +472,14 @@ pub struct EnhancedGameServer {
     scripted_room_codes: StdMutex<VecDeque<String>>,
     #[cfg(test)]
     owned_room_operation_panic: Arc<AtomicU8>,
+    /// Test-only coordination-lock lease TTL in milliseconds. `0` keeps the
+    /// production constants (`ROOM_JOIN_LOCK_TTL` and siblings). The #550
+    /// stalled-lease pins shrink the lease so the renewal probe outlasts one
+    /// raw TTL in milliseconds instead of real-sleeping past the production
+    /// 10 s TTL — the real sleep red-waved the weekly mutation baseline
+    /// against the mutants profile's 10 s hang budget (issue #604).
+    #[cfg(test)]
+    coordination_lock_ttl_override_ms: AtomicU64,
     /// Spectator lifecycle manager
     spectator_service: SpectatorService,
     /// Transport-level security options (TLS, token binding, etc.)
@@ -834,6 +842,8 @@ impl EnhancedGameServer {
             scripted_room_codes: StdMutex::new(VecDeque::new()),
             #[cfg(test)]
             owned_room_operation_panic: Arc::new(AtomicU8::new(0)),
+            #[cfg(test)]
+            coordination_lock_ttl_override_ms: AtomicU64::new(0),
             spectator_service,
             transport_security,
             dashboard_metrics_cache: dashboard_metrics_cache.clone(),
@@ -1541,6 +1551,15 @@ impl EnhancedGameServer {
     pub(crate) fn fail_retain_room_publication_snapshot_for_test(&self, fail: bool) {
         self.fail_retain_room_publication_snapshot
             .store(fail, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Shrink every coordination-lock lease on this server instance to
+    /// `millis` (`0` restores the production constants). Instance-local, so
+    /// concurrent tests never see each other's override.
+    #[cfg(test)]
+    pub(crate) fn coordination_lock_ttl_override_ms_for_test(&self, millis: u64) {
+        self.coordination_lock_ttl_override_ms
+            .store(millis, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[cfg(test)]

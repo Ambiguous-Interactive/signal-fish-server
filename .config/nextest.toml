@@ -100,19 +100,15 @@ slow-timeout = { period = "120s", terminate-after = 3 }
 # the nontermination as a caught mutant rather than exhausting its 120s outer
 # scenario timeout. The baseline runs the same profile and Cargo build target via
 # `cargo nextest run --lib --cargo-profile mutants --profile mutants --locked`.
+#
+# No [[profile.mutants.overrides]] entries: the two #550 stalled-lease pins
+# shrink their lease TTL to 2 s (test-only `coordination_lock_ttl_override_ms`
+# on the server instance), so their 2.5 s probe fits this budget without relief.
+# The former 30 s override for their real 10.4 s sleeps (mutation run #221) is
+# gone; `test_mutants_profile_stays_relief_free_and_sleep_bounded` keeps it from
+# creeping back and pins the no-≥10s-real-sleep class.
 [profile.mutants]
 fail-fast = true
 failure-output = "immediate-final"
 success-output = "never"
 slow-timeout = { period = "10s", terminate-after = 1 }
-
-# The two #550 distributed-lease pins hold a real lease through its renewal
-# cycle and deliberately sleep 10.4 s (past acquire + TTL) before probing, so
-# they cannot fit the 10 s hang-termination budget and killed the unmutated
-# baseline green-gate (mutation run #221). The renewed-lease code is outside
-# .cargo/mutants.toml's examine_globs, so this override cannot mask a
-# mutation-induced hang in it; it only lets the baseline and unrelated-mutant
-# oracle runs carry these two tests to their assertion.
-[[profile.mutants.overrides]]
-filter = 'test(stalled_app_cap_count_read_keeps_its_lease_alive) or test(stalled_room_code_rotation_keeps_its_mutex_lease_alive)'
-slow-timeout = { period = "30s", terminate-after = 1 }
