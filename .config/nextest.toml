@@ -102,8 +102,8 @@ slow-timeout = { period = "120s", terminate-after = 3 }
 # `cargo nextest run --lib --cargo-profile mutants --profile mutants --locked`.
 #
 # No [[profile.mutants.overrides]] entries: the two #550 stalled-lease pins
-# shrink their lease TTL to 2 s (test-only `coordination_lock_ttl_override_ms`
-# on the server instance), so their 2.5 s probe fits this budget without relief.
+# shrink their lease TTL to 3 s (test-only `coordination_lock_ttl_override_ms`
+# on the server instance), so their 3.5 s probe fits this budget without relief.
 # The former 30 s override for their real 10.4 s sleeps (mutation run #221) is
 # gone; `test_mutants_profile_stays_relief_free_and_sleep_bounded` keeps it from
 # creeping back and pins the no-≥10s-real-sleep class.

@@ -32442,7 +32442,8 @@ fn test_mutants_profile_stays_relief_free_and_sleep_bounded() {
 
     let mut overrides = 0usize;
     for line in nextest_config.lines() {
-        if line.trim() == "[[profile.mutants.overrides]]" {
+        // Whitespace-tolerant: TOML allows `[[ profile.mutants.overrides ]]`.
+        if line.trim().replace(' ', "") == "[[profile.mutants.overrides]]" {
             overrides += 1;
         }
     }
@@ -32457,8 +32458,11 @@ fn test_mutants_profile_stays_relief_free_and_sleep_bounded() {
 
     // Any literal `tokio::time::sleep`/`std::thread::sleep` duration of 10s or
     // more under src/ re-arms the run-#221 failure class at the mutants
-    // profile's 10s budget. Named constants are out of reach for this textual
-    // guard; keep sleep literals well under the budget like the rest of src/.
+    // profile's 10s budget. Known textual gaps, accepted deliberately: sleeps
+    // split across lines, sleeps backed by a named constant (e.g.
+    // DRAIN_IDLE_HANDLER_SETTLE) or a let-bound literal, and `from_secs_f32`.
+    // All are visible in review; keep sleep literals well under the budget
+    // like the rest of src/.
     const BUDGET_MS: u128 = 10_000;
     const BUDGET_SECS: f64 = 10.0; // kept equal to BUDGET_MS
     let mut offenders: Vec<String> = Vec::new();
