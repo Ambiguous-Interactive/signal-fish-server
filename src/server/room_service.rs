@@ -1946,9 +1946,9 @@ impl EnhancedGameServer {
         let lock_key = format!("room_join:{game_name}:{room_code}");
         let mut lock_renewal = self.keep_lock_renewed(
             self.distributed_lock
-                .acquire(&lock_key, ROOM_JOIN_LOCK_TTL)
+                .acquire(&lock_key, self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL))
                 .await?,
-            ROOM_JOIN_LOCK_TTL,
+            self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL),
         );
         let mut application_cap_lock: Option<LeaseRenewalGuard> = None;
         let mut game_cap_lock: Option<LeaseRenewalGuard> = None;
@@ -2217,14 +2217,17 @@ impl EnhancedGameServer {
                         let cap_lock_key = format!("game_room_cap:{game_name}");
                         game_cap_lock = Some(self.keep_lock_renewed(
                             self.distributed_lock
-                                .acquire(&cap_lock_key, GAME_ROOM_CAP_LOCK_TTL)
+                                .acquire(
+                                    &cap_lock_key,
+                                    self.coordination_lock_ttl(GAME_ROOM_CAP_LOCK_TTL),
+                                )
                                 .await
                                 .map_err(|error| {
                                     tracing::error!(%game_name, %error, "Failed to acquire game room-cap lock");
                                     self.metrics.increment_room_cap_lock_failures();
                                     JoinRoomError::Internal(error)
                                 })?,
-                            GAME_ROOM_CAP_LOCK_TTL,
+                            self.coordination_lock_ttl(GAME_ROOM_CAP_LOCK_TTL),
                         ));
                         self.metrics.increment_room_cap_lock_acquisitions();
 
@@ -2250,14 +2253,17 @@ impl EnhancedGameServer {
                         // overshoot, mirroring the per-game and per-app caps.
                         server_cap_lock = Some(self.keep_lock_renewed(
                             self.distributed_lock
-                                .acquire("server_room_cap", SERVER_ROOM_CAP_LOCK_TTL)
+                                .acquire(
+                                    "server_room_cap",
+                                    self.coordination_lock_ttl(SERVER_ROOM_CAP_LOCK_TTL),
+                                )
                                 .await
                                 .map_err(|error| {
                                     tracing::error!(%error, "Failed to acquire server room-cap lock");
                                     self.metrics.increment_room_cap_lock_failures();
                                     JoinRoomError::Internal(error)
                                 })?,
-                            SERVER_ROOM_CAP_LOCK_TTL,
+                            self.coordination_lock_ttl(SERVER_ROOM_CAP_LOCK_TTL),
                         ));
                         self.metrics.increment_room_cap_lock_acquisitions();
 
@@ -2557,6 +2563,25 @@ impl EnhancedGameServer {
         )
     }
 
+    /// The effective coordination-lock TTL: `default` in production, or a
+    /// test's per-instance override (`coordination_lock_ttl_override_ms_for_test`).
+    /// The override exists so the #550 stalled-hold pins can outlast a raw TTL
+    /// in milliseconds instead of real-sleeping past the production 10 s lease,
+    /// which red-waved the weekly mutation baseline against the mutants
+    /// profile's 10 s hang budget (issue #604).
+    pub(super) fn coordination_lock_ttl(&self, default: Duration) -> Duration {
+        #[cfg(test)]
+        {
+            let millis = self
+                .coordination_lock_ttl_override_ms
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if millis != 0 {
+                return Duration::from_millis(millis);
+            }
+        }
+        default
+    }
+
     /// Stop the lease renewal, then release the lock with accounting.
     ///
     /// Stopping the renewal first prevents a final tick from extending — and
@@ -2585,14 +2610,17 @@ impl EnhancedGameServer {
         // second claimer acquire the expired key and pass the same check.
         let mut cap_lock = self.keep_lock_renewed(
             self.distributed_lock
-                .acquire(&cap_lock_key, APPLICATION_ROOM_CAP_LOCK_TTL)
+                .acquire(
+                    &cap_lock_key,
+                    self.coordination_lock_ttl(APPLICATION_ROOM_CAP_LOCK_TTL),
+                )
                 .await
                 .map_err(|error| {
                     tracing::error!(%app_id, %error, "Failed to acquire application room-cap lock");
                     self.metrics.increment_room_cap_lock_failures();
                     JoinRoomError::Internal(error)
                 })?,
-            APPLICATION_ROOM_CAP_LOCK_TTL,
+            self.coordination_lock_ttl(APPLICATION_ROOM_CAP_LOCK_TTL),
         );
         self.metrics.increment_room_cap_lock_acquisitions();
         let current = match self.database.get_application_room_count(&app_id).await {

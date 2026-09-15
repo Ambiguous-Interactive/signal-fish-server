@@ -605,10 +605,18 @@ async fn legacy_room_claims_share_the_atomic_application_room_cap() {
 /// moderation rotation pin): a direct `try_acquire` probe after the raw TTL
 /// has elapsed is wake-order-independent, so the test cannot pass on the
 /// pre-fix code by scheduling luck.
+///
+/// The lease TTL is shrunk to 3 s (test-only override), so the probe sleeps
+/// 3.5 s — past one raw TTL in milliseconds, not a real 10.4 s sleep past the
+/// production 10 s lease. That real sleep red-waved the weekly mutation
+/// baseline against the mutants profile's 10 s per-test hang budget (issue
+/// #604). The renewal slack at 3 s is 2 s (TTL minus the TTL/3 tick), well
+/// clear of runner-load jitter.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg_attr(miri, ignore)]
 async fn stalled_app_cap_count_read_keeps_its_lease_alive() {
     let server = create_server(true, vec![app_entry(APP_A, Some(1), Some(8))]).await;
+    server.coordination_lock_ttl_override_ms_for_test(3_000);
     let database = server
         .database
         .as_any()
@@ -652,7 +660,7 @@ async fn stalled_app_cap_count_read_keeps_its_lease_alive() {
     // Outlast the application room-cap lease TTL with zero storage progress.
     // An unrenewed lease died at acquire+TTL, well before this probe; a
     // renewed lease must still report the key busy.
-    tokio::time::sleep(Duration::from_millis(10_400)).await;
+    tokio::time::sleep(Duration::from_millis(3_500)).await;
     let stolen = server
         .distributed_lock_for_test()
         .try_acquire(

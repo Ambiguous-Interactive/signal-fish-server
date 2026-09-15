@@ -64,7 +64,9 @@ correctness evidence appears.
   schedule-triggered first attempt (runs #218-#221 failed first-try on
   inventory drift, one missed mutant, and the 10.4 s lease pins vs the 10 s
   mutants-profile hang budget; fixes landed in #596 and the
-  mixed-membership pins). Do not count dispatch reruns.
+  mixed-membership pins; the lease pins now shrink their TTL test-only, the
+  30 s override is gone, and a relief-free/sleep-bounded guard pins the
+  class). Do not count dispatch reruns.
 - #603 — blocked upstream: markdownlint-cli2's smol-toml fix is merged on
   its main (2026-08-24) but unreleased. The lockfile guard now flags the
   `smol-toml` override as redundant once upstream ships a patched minimum,

@@ -32421,48 +32421,51 @@ fn test_mutation_oracle_does_not_use_all_features() {
     );
 }
 
-/// Every `[[profile.mutants.overrides]]` filter must name a test that still
-/// exists under src/. These overrides carry the deliberately-slow #550
-/// lease-renewal pins past the mutants profile's 10s per-test termination
-/// (mutation run #221 red-waved four Mondays: #218/#219 inventory drift, #220
-/// one missed mutant, #221 these timeouts at the unmutated green-gate). A test
-/// rename or removal would silently orphan its filter, re-arm the 10s kill,
-/// and re-red the weekly baseline green-gate up to a week later. The oracle is
-/// `--lib`, so src/ is the only surface to check.
+/// The mutants profile must stay relief-free and every lib test must fit its
+/// 10s per-test hang budget.
+///
+/// History: the #550 stalled-lease pins real-slept 10.4s past the production
+/// 10s lease TTL, so the unmutated baseline green-gate hit the 10s kill and
+/// red-waved the Monday cron (runs #218-#221; #604). #596 papered over it with
+/// a 30s `[[profile.mutants.overrides]]` plus a rename-drift guard. The pins
+/// now shrink their lease to 2s via the test-only
+/// `coordination_lock_ttl_override_ms`, the override is gone, and this guard
+/// pins the whole class: no slow-timeout relief may reappear while nothing
+/// needs it, and no `sleep(...)` under src/ may carry a literal duration of
+/// 10s or longer — a mutant that removes a progress guard turns such a sleep
+/// into a caught hang, but an unmutated test at or past the budget re-reds the
+/// weekly baseline exactly like run #221. The oracle is `--lib`, so src/ is the
+/// only surface to check.
 #[test]
-fn test_mutants_profile_overrides_target_existing_lib_tests() {
+fn test_mutants_profile_stays_relief_free_and_sleep_bounded() {
     let nextest_config = read_file(&repo_root().join(".config/nextest.toml"));
 
-    let mut filters: Vec<String> = Vec::new();
-    let mut in_overrides = false;
+    let mut overrides = 0usize;
     for line in nextest_config.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_overrides = trimmed == "[[profile.mutants.overrides]]";
-            continue;
-        }
-        if !in_overrides {
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("filter") {
-            if let Some(value) = rest.trim_start().strip_prefix('=') {
-                let value = value.trim();
-                let quoted = value
-                    .strip_prefix('\'')
-                    .and_then(|v| v.strip_suffix('\''))
-                    .unwrap_or(value);
-                filters.push(quoted.to_string());
-            }
+        // Whitespace-tolerant: TOML allows `[[ profile.mutants.overrides ]]`.
+        if line.trim().replace(' ', "") == "[[profile.mutants.overrides]]" {
+            overrides += 1;
         }
     }
-    assert!(
-        !filters.is_empty(),
-        ".config/nextest.toml must keep a [[profile.mutants.overrides]] entry for the \
-         deliberately-slow lease-renewal pins; deleting it re-arms the 10s per-test kill \
-         that red-waved the weekly mutation baseline (runs #218-#221)"
+    assert_eq!(
+        overrides, 0,
+        ".config/nextest.toml defines {overrides} [[profile.mutants.overrides]] entries, \
+         but no test needs slow-timeout relief anymore. If you are adding one for a \
+         genuinely slow test, shrink the test instead (see the #550 lease pins and \
+         `coordination_lock_ttl_override_ms`); only reintroduce relief together with \
+         replacing this guard."
     );
 
-    let mut src_fns: Vec<String> = Vec::new();
+    // Any literal `tokio::time::sleep`/`std::thread::sleep` duration of 10s or
+    // more under src/ re-arms the run-#221 failure class at the mutants
+    // profile's 10s budget. Known textual gaps, accepted deliberately: sleeps
+    // split across lines, sleeps backed by a named constant (e.g.
+    // DRAIN_IDLE_HANDLER_SETTLE) or a let-bound literal, and `from_secs_f32`.
+    // All are visible in review; keep sleep literals well under the budget
+    // like the rest of src/.
+    const BUDGET_MS: u128 = 10_000;
+    const BUDGET_SECS: f64 = 10.0; // kept equal to BUDGET_MS
+    let mut offenders: Vec<String> = Vec::new();
     let mut stack = vec![repo_root().join("src")];
     while let Some(dir) = stack.pop() {
         let entries = std::fs::read_dir(&dir).expect("src tree must be readable");
@@ -32472,75 +32475,71 @@ fn test_mutants_profile_overrides_target_existing_lib_tests() {
                 stack.push(path);
                 continue;
             }
-            if path.extension().is_some_and(|ext| ext == "rs") {
-                for line in read_file(&path).lines() {
-                    let trimmed = line.trim_start();
-                    if trimmed.starts_with("//") {
-                        continue;
-                    }
-                    let mut body = trimmed;
-                    // Strip item qualifiers so `pub async fn`, `pub(crate)
-                    // fn`, `const fn`, etc. are recognized too.
-                    loop {
-                        body = body.trim_start();
-                        let next = body
-                            .strip_prefix("pub(crate) ")
-                            .or_else(|| body.strip_prefix("pub(super) "))
-                            .or_else(|| body.strip_prefix("pub "))
-                            .or_else(|| body.strip_prefix("const "))
-                            .or_else(|| body.strip_prefix("unsafe "))
-                            .or_else(|| body.strip_prefix("async "));
-                        match next {
-                            Some(stripped) => body = stripped,
-                            None => break,
+            if path.extension().is_none_or(|ext| ext != "rs") {
+                continue;
+            }
+            for (lineno, line) in read_file(&path).lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("//") || !trimmed.contains("sleep(") {
+                    continue;
+                }
+                // Some(duration) renders the over-budget duration for the
+                // report; None skips unparsable or sub-budget literals.
+                let over_budget = |unit: &str, value: &str| -> Option<String> {
+                    let digits: String = value.chars().filter(|c| *c != '_').collect();
+                    match unit {
+                        "from_millis" => {
+                            let n: u128 = digits.parse().ok()?;
+                            (n >= BUDGET_MS).then(|| format!("{n}ms"))
                         }
+                        "from_secs" => {
+                            let ms: u128 = digits.parse::<u128>().ok()?.checked_mul(1_000)?;
+                            (ms >= BUDGET_MS).then(|| format!("{ms}ms"))
+                        }
+                        // Float literals parse and compare in float space.
+                        "from_secs_f64" => {
+                            let secs: f64 = digits.parse().ok()?;
+                            (secs >= BUDGET_SECS).then(|| format!("{secs}s"))
+                        }
+                        _ => None,
                     }
-                    let body = body.strip_prefix("fn ");
-                    if let Some(body) = body {
-                        let name: String = body
-                            .chars()
-                            .take_while(|c| c.is_alphanumeric() || *c == '_')
-                            .collect();
-                        src_fns.push(name);
+                };
+                for unit in ["from_millis", "from_secs", "from_secs_f64"] {
+                    let needle = format!("{unit}(");
+                    let mut from = 0usize;
+                    while let Some(pos) = trimmed[from..].find(needle.as_str()) {
+                        let rest = &trimmed[from + pos + needle.len()..];
+                        let Some(close) = rest.find(')') else {
+                            break;
+                        };
+                        let value = rest[..close].trim();
+                        if let Some(rendered) = over_budget(unit, value) {
+                            offenders.push(format!(
+                                "{}:{}: {unit}({value}) = {rendered}",
+                                path.strip_prefix(repo_root()).unwrap_or(&path).display(),
+                                lineno + 1
+                            ));
+                        }
+                        from += pos + needle.len() + close + 1;
+                        if from >= trimmed.len() {
+                            break;
+                        }
                     }
                 }
             }
         }
     }
-
-    for filter in &filters {
-        let mut names: Vec<&str> = Vec::new();
-        let mut rest = filter.as_str();
-        while let Some(pos) = rest.find("test(") {
-            let after = &rest[pos + 5..];
-            let Some(close) = after.find(')') else {
-                break;
-            };
-            names.push(&after[..close]);
-            rest = &after[close + 1..];
-        }
-        assert!(
-            !names.is_empty(),
-            "mutants-profile override filter {filter:?} must select tests with \
-             test(<name>) selectors so renames stay detectable"
-        );
-        for name in names {
-            if name.starts_with('/') && name.ends_with('/') {
-                panic!(
-                    "mutants-profile override filter {filter:?} uses a regex selector; \
-                     exact test(<name>) selectors are required so renames stay detectable"
-                );
-            }
-            assert!(
-                src_fns.iter().any(|defined| defined == name),
-                "mutants-profile override names test {name:?}, but no `fn {name}` exists \
-                 under src/. The test was renamed or removed: update the \
-                 [[profile.mutants.overrides]] filter (or delete the override). Otherwise \
-                 the 10s mutants-profile kill returns for that test and re-reds the weekly \
-                 mutation baseline (run #221)."
-            );
-        }
-    }
+    assert!(
+        offenders.is_empty(),
+        "src/ contains real-time sleeps at or past the mutants profile's 10s per-test \
+         hang budget:\n{}\n\n\
+         Why this matters: the unmutated weekly mutation baseline runs under that \
+         budget; a longer real sleep re-reds it like run #221 (issue #604).\n\
+         Fix: shrink the sleep. For stalled-hold pins, shrink the lease TTL via \
+         `coordination_lock_ttl_override_ms_for_test` instead of sleeping past the \
+         production TTL.",
+        offenders.join("\n")
+    );
 }
 
 /// Jobs that run the FULL test suite under a Swatinem/rust-cache and therefore

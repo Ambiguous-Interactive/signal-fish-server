@@ -726,10 +726,15 @@ impl EnhancedGameServer {
         let old_lock_key = format!("room_join:{}:{}", room.game_name, room.code);
         let mut old_lock_renewal = match self
             .distributed_lock
-            .acquire(&old_lock_key, ROOM_JOIN_LOCK_TTL)
+            .acquire(
+                &old_lock_key,
+                self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL),
+            )
             .await
         {
-            Ok(handle) => self.keep_lock_renewed(handle, ROOM_JOIN_LOCK_TTL),
+            Ok(handle) => {
+                self.keep_lock_renewed(handle, self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL))
+            }
             Err(error) => {
                 tracing::error!(%authority_id, %room_id, %error, "Failed to acquire old room-code lock");
                 self.fail_operation(
@@ -751,7 +756,7 @@ impl EnhancedGameServer {
             let lock_key = format!("room_join:{}:{}", room.game_name, candidate);
             let lock_handle = match self
                 .distributed_lock
-                .acquire(&lock_key, ROOM_JOIN_LOCK_TTL)
+                .acquire(&lock_key, self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL))
                 .await
             {
                 Ok(handle) => handle,
@@ -770,7 +775,8 @@ impl EnhancedGameServer {
             };
             // The hold spans the storage swap; keep the lease renewed so the
             // mutual exclusion cannot silently expire mid-hold (issue #550).
-            let mut lock_renewal = self.keep_lock_renewed(lock_handle, ROOM_JOIN_LOCK_TTL);
+            let mut lock_renewal =
+                self.keep_lock_renewed(lock_handle, self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL));
             match self.database.update_room_code(&room_id, candidate).await {
                 Ok(room) => {
                     self.release_renewed_lock(&mut lock_renewal).await;
