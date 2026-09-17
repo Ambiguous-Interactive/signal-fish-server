@@ -22,7 +22,7 @@ Other ways to run the server:
 
   ```bash
   curl --fail --location --output config.json \
-    https://raw.githubusercontent.com/Ambiguous-Interactive/signal-fish-server/v0.9.0/config.example.json
+    https://raw.githubusercontent.com/Ambiguous-Interactive/signal-fish-server/v0.9.1/config.example.json
   ./signal-fish-server
   ```
 

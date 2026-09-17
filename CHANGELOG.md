@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-09-17
+
 ### Changed
 
 - The two #550 stalled-lease pins (`stalled_app_cap_count_read_keeps_its_lease_alive`,
@@ -3330,7 +3332,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optional TLS/mTLS support via `rustls` (`tls` feature).
 - Optional legacy full-mesh mode (`legacy-fullmesh` feature).
 
-[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.6.0...v0.7.0
