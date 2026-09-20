@@ -25,7 +25,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   corpora vendor these samples; the new lines follow the frozen v2 shapes in
   `docs/protocol.md` and `tests/v2_wire_golden.rs`.
 
-
 ## [0.9.1] - 2026-09-17
 
 ### Changed
