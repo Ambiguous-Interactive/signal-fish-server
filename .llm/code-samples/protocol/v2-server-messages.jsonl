@@ -1,10 +1,10 @@
 {"type": "Authenticated", "data": {"app_name": "my-game", "organization": "Ambiguous Interactive", "rate_limits": {"per_minute": 60, "per_hour": 3600, "per_day": 86400}}}
 {"type": "ProtocolInfo", "data": {"capabilities": ["reconnection", "spectators", "authority"], "game_data_formats": ["json", "message_pack"]}}
-{"type": "RoomJoined", "data": {"room_id": "...", "room_code": "ABC123"}}
-{"type": "PlayerJoined", "data": {"player": {"id": "...", "name": "..."}}}
-{"type": "PlayerLeft", "data": {"player_id": "..."}}
-{"type": "GameData", "data": {"from_player": "...", "data": {}}}
-{"type": "LobbyStateChanged", "data": {"lobby_state": "lobby", "all_ready": false}}
+{"type": "RoomJoined", "data": {"room_id": "11111111-1111-1111-1111-111111111111", "room_code": "ABC123", "player_id": "00000000-0000-0000-0000-00000000000a", "game_name": "my-game", "max_players": 8, "supports_authority": true, "current_players": [{"id": "00000000-0000-0000-0000-00000000000a", "name": "Player 1", "is_authority": true, "is_ready": false, "connected_at": "2026-09-20T12:00:00Z"}], "is_authority": true, "lobby_state": "waiting", "ready_players": [], "relay_type": "matchbox", "current_spectators": []}}
+{"type": "PlayerJoined", "data": {"player": {"id": "00000000-0000-0000-0000-00000000000b", "name": "Player 2", "is_authority": false, "is_ready": false, "connected_at": "2026-09-20T12:00:01Z"}}}
+{"type": "PlayerLeft", "data": {"player_id": "00000000-0000-0000-0000-00000000000b"}}
+{"type": "GameData", "data": {"from_player": "00000000-0000-0000-0000-00000000000b", "data": {}}}
+{"type": "LobbyStateChanged", "data": {"lobby_state": "lobby", "ready_players": ["00000000-0000-0000-0000-00000000000a"], "all_ready": false}}
 {"type": "AuthorityResponse", "data": {"granted": true, "reason": null}}
 {"type": "Error", "data": {"message": "Room is full", "error_code": "ROOM_FULL"}}
 {"type": "Error", "data": {"message": "Cannot start the game: every player must be ready first.", "error_code": "GAME_START_NOT_READY"}}
@@ -12,13 +12,13 @@
 {"type": "AuthenticationError", "data": {"error": "Invalid app_id", "error_code": "INVALID_APP_ID"}}
 {"type": "RoomJoinFailed", "data": {"reason": "Room is full", "error_code": "ROOM_FULL"}}
 {"type": "RoomLeft"}
-{"type": "GameStarting", "data": {"peer_connections": [{"player_id": "...", "player_name": "Player 1", "is_authority": false, "relay_type": "matchbox"}]}}
-{"type": "AuthorityChanged", "data": {"authority_player": "...", "you_are_authority": false}}
-{"type": "Reconnected", "data": {"room_id": "...", "room_code": "ABC123", "player_id": "...", "game_name": "my-game", "max_players": 8, "supports_authority": true, "current_players": [], "is_authority": false, "lobby_state": "lobby", "ready_players": [], "relay_type": "matchbox", "current_spectators": [], "missed_events": []}}
+{"type": "GameStarting", "data": {"peer_connections": [{"player_id": "00000000-0000-0000-0000-00000000000a", "player_name": "Player 1", "is_authority": true, "relay_type": "matchbox", "connection_info": {"type": "direct", "host": "192.0.2.10", "port": 7777}}, {"player_id": "00000000-0000-0000-0000-00000000000b", "player_name": "Player 2", "is_authority": false, "relay_type": "matchbox"}]}}
+{"type": "AuthorityChanged", "data": {"authority_player": "00000000-0000-0000-0000-00000000000a", "you_are_authority": false}}
+{"type": "Reconnected", "data": {"room_id": "11111111-1111-1111-1111-111111111111", "room_code": "ABC123", "player_id": "00000000-0000-0000-0000-00000000000a", "game_name": "my-game", "max_players": 8, "supports_authority": true, "current_players": [], "is_authority": false, "lobby_state": "lobby", "ready_players": [], "relay_type": "matchbox", "current_spectators": [], "missed_events": []}}
 {"type": "ReconnectionFailed", "data": {"reason": "Invalid reconnection token", "error_code": "RECONNECTION_TOKEN_INVALID"}}
-{"type": "PlayerReconnected", "data": {"player_id": "..."}}
-{"type": "SpectatorJoined", "data": {"room_id": "...", "room_code": "ABC123", "spectator_id": "...", "game_name": "my-game", "current_players": [], "current_spectators": [], "lobby_state": "lobby"}}
+{"type": "PlayerReconnected", "data": {"player_id": "00000000-0000-0000-0000-00000000000b"}}
+{"type": "SpectatorJoined", "data": {"room_id": "11111111-1111-1111-1111-111111111111", "room_code": "ABC123", "spectator_id": "00000000-0000-0000-0000-00000000000c", "game_name": "my-game", "current_players": [], "current_spectators": [], "lobby_state": "lobby"}}
 {"type": "SpectatorJoinFailed", "data": {"reason": "Room not found", "error_code": "ROOM_NOT_FOUND"}}
-{"type": "SpectatorLeft", "data": {"room_id": "...", "room_code": "ABC123", "reason": "voluntary_leave", "current_spectators": []}}
-{"type": "NewSpectatorJoined", "data": {"spectator": {"id": "...", "name": "Observer2", "connected_at": "..."}, "current_spectators": [], "reason": "joined"}}
-{"type": "SpectatorDisconnected", "data": {"spectator_id": "...", "reason": "disconnected", "current_spectators": []}}
+{"type": "SpectatorLeft", "data": {"room_id": "11111111-1111-1111-1111-111111111111", "room_code": "ABC123", "reason": "voluntary_leave", "current_spectators": []}}
+{"type": "NewSpectatorJoined", "data": {"spectator": {"id": "00000000-0000-0000-0000-00000000000c", "name": "Observer2", "connected_at": "2026-09-20T12:00:02Z"}, "current_spectators": [], "reason": "joined"}}
+{"type": "SpectatorDisconnected", "data": {"spectator_id": "00000000-0000-0000-0000-00000000000c", "reason": "disconnected", "current_spectators": []}}

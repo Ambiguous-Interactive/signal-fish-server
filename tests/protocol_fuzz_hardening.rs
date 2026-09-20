@@ -175,7 +175,7 @@ proptest! {
 // ---------------------------------------------------------------------------
 
 /// Load the non-blank lines of a canonical sample file (same anchoring as
-/// tests/v3_protocol_samples.rs).
+/// tests/protocol_samples.rs).
 fn sample_lines(relative: &str) -> Vec<Vec<u8>> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
     let content = std::fs::read_to_string(&path)

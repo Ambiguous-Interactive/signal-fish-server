@@ -1,14 +1,15 @@
-//! Enforceable proof that the v3 wire samples match the real Rust types.
+//! Enforceable proof that every wire sample matches the real Rust types.
 //!
-//! Every non-blank line of the v3 JSONL sample files MUST deserialize
-//! into the production [`ClientMessage`] / [`ServerMessage`] enums via
-//! `serde_json::from_str` AND round-trip back to a `serde_json::Value` that is
-//! **exactly equal** to the parsed source line. This is the acceptance test for
-//! the protocol sample contract: wire samples exactly match the actual Rust types.
+//! Every non-blank line of every JSONL sample file (v2 and v3, client and
+//! server) MUST deserialize into the production [`ClientMessage`] /
+//! [`ServerMessage`] enums via `serde_json::from_str` AND round-trip back to a
+//! `serde_json::Value` that is **exactly equal** to the parsed source line.
+//! This is the acceptance test for the protocol sample contract: wire samples
+//! exactly match the actual Rust types.
 //!
 //! The value-equality check is what makes the guarantee real for *optional*
 //! fields. `ClientMessage` / `ServerMessage` and their payloads do NOT use
-//! `#[serde(deny_unknown_fields)]`, and the v3 fields are `Option` /
+//! `#[serde(deny_unknown_fields)]`, and the optional fields are `Option` /
 //! `#[serde(default)]`. A misspelled or renamed optional field in a sample
 //! (e.g. `supported_transport` instead of `supported_transports`) would silently
 //! deserialize to `None` and be dropped on re-serialize. By comparing the source
@@ -19,14 +20,14 @@
 //!
 //! For this to hold, sample lines must contain ONLY real wire fields with values
 //! that round-trip exactly — including not carrying any field that the type would
-//! drop via `skip_serializing_if` (e.g. an empty vec or a `None`).
+//! drop via `skip_serializing_if` (e.g. an empty vec or a `None`), and including
+//! every field the type would always emit (a bare `Option` serializes `null`).
 //!
-//! NOTE: only the v3 samples are checked here. The v2 samples are intentionally
-//! *partial* — they use `"..."` placeholders and abbreviate nested payloads (e.g.
-//! `"data": {}`, `{"id": "...", "name": "..."}`) for documentation brevity, so
-//! they are not required to deserialize into a full message. The v2 wire contract
-//! is already frozen byte-for-byte by `tests/v2_wire_golden.rs`. The v3 samples,
-//! by contrast, are fully-populated concrete frames and MUST deserialize.
+//! The v2 samples are concrete, fully-populated frames in the frozen v2 wire
+//! shape (no v3-only fields; `tests/v2_wire_golden.rs` freezes those bytes
+//! independently). Client SDK codec corpora vendor these files, so a drift in
+//! either direction — a v3 field leaking into a v2 frame, or a v2 field going
+//! stale after a type change — fails here first.
 
 use serde_json::Value;
 use signal_fish_server::protocol::{ClientMessage, PlayerInfo, ServerMessage};
@@ -120,17 +121,23 @@ where
 }
 
 #[test]
-fn v3_client_message_samples_deserialize_into_client_message() {
-    assert_samples_deserialize::<ClientMessage>(
+fn client_message_samples_deserialize_into_client_message() {
+    for relative in [
+        ".llm/code-samples/protocol/v2-client-messages.jsonl",
         ".llm/code-samples/protocol/v3-client-messages.jsonl",
-    );
+    ] {
+        assert_samples_deserialize::<ClientMessage>(relative);
+    }
 }
 
 #[test]
-fn v3_server_message_samples_deserialize_into_server_message() {
-    assert_samples_deserialize::<ServerMessage>(
+fn server_message_samples_deserialize_into_server_message() {
+    for relative in [
+        ".llm/code-samples/protocol/v2-server-messages.jsonl",
         ".llm/code-samples/protocol/v3-server-messages.jsonl",
-    );
+    ] {
+        assert_samples_deserialize::<ServerMessage>(relative);
+    }
 }
 
 fn assert_runtime_v3_snapshot_baselines(players: &[PlayerInfo], line_no: usize, kind: &str) {

@@ -1,7 +1,7 @@
 //! Property-based wire-format invariants for the Protocol v3 surface
 //! (Deliverable C2, wire level).
 //!
-//! Complements the example-based suites (`tests/v3_protocol_samples.rs` pins
+//! Complements the example-based suites (`tests/protocol_samples.rs` pins
 //! the canonical samples; `tests/v2_wire_golden.rs` freezes the v2 bytes) with
 //! randomized round-trip properties over the v3 message types:
 //!
