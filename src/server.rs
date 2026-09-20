@@ -2389,6 +2389,36 @@ impl InMemoryMessageCoordinator {
         recipients
     }
 
+    /// Same routing snapshot as [`Self::collect_routed_recipients`], but
+    /// skipping every player in `excluded_players` (bus loopback exclusion
+    /// lists; issue #581). Exclusion lists are tiny, so membership is a linear
+    /// scan rather than a set build.
+    fn collect_routed_recipients_excluding(
+        room_players: &HashMap<RoomId, HashSet<PlayerId>>,
+        clients: &HashMap<PlayerId, ClientDeliveryHandle>,
+        room_id: &RoomId,
+        excluded_players: &[PlayerId],
+    ) -> Vec<(PlayerId, ClientDeliveryHandle)> {
+        let Some(players) = room_players.get(room_id) else {
+            return Vec::new();
+        };
+        let capacity = players
+            .len()
+            .saturating_sub(excluded_players.len().min(players.len()));
+        let mut recipients = Vec::with_capacity(capacity);
+        recipients.extend(
+            players
+                .iter()
+                .filter(|player_id| !excluded_players.contains(player_id))
+                .filter_map(|player_id| {
+                    clients
+                        .get(player_id)
+                        .map(|handle| (*player_id, handle.clone()))
+                }),
+        );
+        recipients
+    }
+
     /// Snapshot the delivery handles for a room's members (optionally skipping
     /// one player) and release the room gate plus both map guards before any
     /// await on delivery, so a backpressured recipient can never stall
@@ -2404,6 +2434,46 @@ impl InMemoryMessageCoordinator {
         let room_players = self.room_players.read().await;
         let clients = self.local_clients.read().await;
         Self::collect_routed_recipients(&room_players, &clients, room_id, except_player)
+    }
+
+    /// Snapshot the delivery handles for a room's members, skipping every
+    /// player in `excluded_players`, with the same lock discipline and
+    /// early-release contract as [`Self::collect_room_recipients`].
+    async fn collect_room_recipients_excluding(
+        &self,
+        room_id: &RoomId,
+        excluded_players: &[PlayerId],
+    ) -> Vec<(PlayerId, ClientDeliveryHandle)> {
+        let _routing = self.room_routing_gates.read(*room_id).await;
+        // Lock ordering: room_players first, then local_clients (matches
+        // register/unregister to prevent ABBA deadlocks).
+        let room_players = self.room_players.read().await;
+        let clients = self.local_clients.read().await;
+        Self::collect_routed_recipients_excluding(
+            &room_players,
+            &clients,
+            room_id,
+            excluded_players,
+        )
+    }
+
+    /// Broadcast to a room while skipping every listed player.
+    ///
+    /// The bus loopback fan-out path (issue #581): a cross-instance relay
+    /// re-broadcast carries `SequencedMessage::excluded_players` so the
+    /// originating sender is not echoed its own frame.
+    async fn broadcast_to_room_excluding_players(
+        &self,
+        room_id: &RoomId,
+        excluded_players: &[PlayerId],
+        message: Arc<ServerMessage>,
+    ) -> anyhow::Result<()> {
+        let recipients = self
+            .collect_room_recipients_excluding(room_id, excluded_players)
+            .await;
+        self.deliver_to_all(recipients, message, Some(*room_id))
+            .await;
+        Ok(())
     }
 
     async fn lock_player_routing_write(
@@ -4310,8 +4380,22 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                     .await
             }
             (None, Some(room_id)) => {
-                self.broadcast_to_room(&room_id, Arc::new(message.message))
+                // Issue #581: the loopback fan-out honors the sequenced
+                // exclusion list (e.g. a relayed frame's original sender is
+                // not echoed its own frame). Targeted messages keep
+                // explicit-target semantics; an empty list is the plain
+                // broadcast so today's loopback stays byte-identical.
+                if message.excluded_players.is_empty() {
+                    self.broadcast_to_room(&room_id, Arc::new(message.message))
+                        .await
+                } else {
+                    self.broadcast_to_room_excluding_players(
+                        &room_id,
+                        &message.excluded_players,
+                        Arc::new(message.message),
+                    )
                     .await
+                }
             }
             (None, None) => Ok(()),
         }

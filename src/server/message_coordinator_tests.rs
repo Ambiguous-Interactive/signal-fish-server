@@ -3917,3 +3917,60 @@ async fn targeted_bus_delivery_scopes_stamped_data_to_the_recipient_room() {
         "the innocent recipient must not be fail-closed by a cross-instance delivery"
     );
 }
+
+#[tokio::test]
+async fn bus_room_broadcast_honors_the_sequenced_exclusion_list() {
+    // Issue #581: `handle_bus_message` dispatched on `(target_player, room_id)`
+    // only, so a loopback room broadcast carrying `excluded_players` echoed to
+    // the excluded player (e.g. a relayed frame's original sender) instead of
+    // skipping them.
+    let coordinator = InMemoryMessageCoordinator::new();
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0403);
+    let sender_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0404);
+    let recipient_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0405);
+    let (sender, mut sender_receiver) = mpsc::channel(2);
+    let (recipient, mut recipient_receiver) = mpsc::channel(2);
+    coordinator
+        .register_local_client(
+            sender_id,
+            Some(room_id),
+            ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+        )
+        .await
+        .expect("register the excluded room member");
+    coordinator
+        .register_local_client(
+            recipient_id,
+            Some(room_id),
+            ClientDeliveryHandle::new(recipient, ConnectionCloseSignal::detached()),
+        )
+        .await
+        .expect("register the remaining room member");
+
+    let sequenced = crate::distributed::SequencedMessage {
+        sequence_id: 1,
+        instance_id: uuid::Uuid::new_v4(),
+        timestamp: chrono::Utc::now(),
+        message: ServerMessage::Pong,
+        room_id: Some(room_id),
+        target_player: None,
+        excluded_players: vec![sender_id],
+    };
+    coordinator
+        .handle_bus_message(sequenced)
+        .await
+        .expect("a room-broadcast bus message delivers to the remaining members");
+
+    let delivered = recipient_receiver
+        .try_recv()
+        .expect("the non-excluded member still receives the bus broadcast");
+    assert!(
+        matches!(delivered.as_ref(), ServerMessage::Pong),
+        "the broadcast payload itself reaches the non-excluded member"
+    );
+    let excluded_delivery = sender_receiver.try_recv();
+    assert!(
+        matches!(excluded_delivery, Err(mpsc::error::TryRecvError::Empty)),
+        "the excluded player must not receive the bus broadcast"
+    );
+}

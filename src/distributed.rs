@@ -369,6 +369,11 @@ pub struct SequencedMessage {
     pub message: crate::protocol::ServerMessage,
     pub room_id: Option<crate::protocol::RoomId>,
     pub target_player: Option<crate::protocol::PlayerId>,
+    /// Players skipped by the room-broadcast fan-out when this message is
+    /// re-broadcast on a bus loopback (issue #581; e.g. a relayed frame's
+    /// original sender). Only the broadcast path honors this list — a
+    /// targeted message names exactly one recipient, so `target_player`
+    /// always wins over `excluded_players`.
     #[serde(default)]
     pub excluded_players: Vec<crate::protocol::PlayerId>,
 }
