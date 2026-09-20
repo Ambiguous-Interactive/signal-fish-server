@@ -17,7 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coordinator dispatches bus messages, and nothing external constructs them
   yet, so no observable single-instance behavior changes.
 
-- Protocol v2 server wire samples now cover every v2-visible server message:
+- Protocol v2 server wire samples now cover every v2-visible `{type, data}`
+  envelope server message:
   `AuthenticationError`, `RoomJoinFailed`, `RoomLeft`, `GameStarting`,
   `AuthorityChanged`, `Reconnected`, `ReconnectionFailed`,
   `PlayerReconnected`, the spectator join/leave family, and an

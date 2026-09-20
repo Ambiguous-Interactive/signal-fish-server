@@ -2445,6 +2445,8 @@ impl InMemoryMessageCoordinator {
         excluded_players: &[PlayerId],
     ) -> Vec<(PlayerId, ClientDeliveryHandle)> {
         let _routing = self.room_routing_gates.read(*room_id).await;
+        // Lock ordering: room_players first, then local_clients (matches
+        // register/unregister to prevent ABBA deadlocks).
         let room_players = self.room_players.read().await;
         let clients = self.local_clients.read().await;
         Self::collect_routed_recipients_excluding(
