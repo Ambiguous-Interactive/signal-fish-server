@@ -3968,11 +3968,9 @@ async fn bus_room_broadcast_honors_the_sequenced_exclusion_list() {
         matches!(delivered.as_ref(), ServerMessage::Pong),
         "the broadcast payload itself reaches the non-excluded member"
     );
+    let excluded_delivery = sender_receiver.try_recv();
     assert!(
-        matches!(
-            sender_receiver.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ),
+        matches!(excluded_delivery, Err(mpsc::error::TryRecvError::Empty)),
         "the excluded player must not receive the bus broadcast"
     );
 }
