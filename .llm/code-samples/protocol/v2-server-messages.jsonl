@@ -7,4 +7,18 @@
 {"type": "LobbyStateChanged", "data": {"lobby_state": "lobby", "all_ready": false}}
 {"type": "AuthorityResponse", "data": {"granted": true, "reason": null}}
 {"type": "Error", "data": {"message": "Room is full", "error_code": "ROOM_FULL"}}
+{"type": "Error", "data": {"message": "Cannot start the game: every player must be ready first.", "error_code": "GAME_START_NOT_READY"}}
 {"type": "Pong"}
+{"type": "AuthenticationError", "data": {"error": "Invalid app_id", "error_code": "INVALID_APP_ID"}}
+{"type": "RoomJoinFailed", "data": {"reason": "Room is full", "error_code": "ROOM_FULL"}}
+{"type": "RoomLeft"}
+{"type": "GameStarting", "data": {"peer_connections": [{"player_id": "...", "player_name": "Player 1", "is_authority": false, "relay_type": "matchbox"}]}}
+{"type": "AuthorityChanged", "data": {"authority_player": "...", "you_are_authority": false}}
+{"type": "Reconnected", "data": {"room_id": "...", "room_code": "ABC123", "player_id": "...", "game_name": "my-game", "max_players": 8, "supports_authority": true, "current_players": [], "is_authority": false, "lobby_state": "lobby", "ready_players": [], "relay_type": "matchbox", "current_spectators": [], "missed_events": []}}
+{"type": "ReconnectionFailed", "data": {"reason": "Invalid reconnection token", "error_code": "RECONNECTION_TOKEN_INVALID"}}
+{"type": "PlayerReconnected", "data": {"player_id": "..."}}
+{"type": "SpectatorJoined", "data": {"room_id": "...", "room_code": "ABC123", "spectator_id": "...", "game_name": "my-game", "current_players": [], "current_spectators": [], "lobby_state": "lobby"}}
+{"type": "SpectatorJoinFailed", "data": {"reason": "Room not found", "error_code": "ROOM_NOT_FOUND"}}
+{"type": "SpectatorLeft", "data": {"room_id": "...", "room_code": "ABC123", "reason": "voluntary_leave", "current_spectators": []}}
+{"type": "NewSpectatorJoined", "data": {"spectator": {"id": "...", "name": "Observer2", "connected_at": "..."}, "current_spectators": [], "reason": "joined"}}
+{"type": "SpectatorDisconnected", "data": {"spectator_id": "...", "reason": "disconnected", "current_spectators": []}}

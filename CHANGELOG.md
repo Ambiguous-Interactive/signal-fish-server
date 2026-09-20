@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coordinator dispatches bus messages, and nothing external constructs them
   yet, so no observable single-instance behavior changes.
 
+- Protocol v2 server wire samples now cover every v2-visible server message:
+  `AuthenticationError`, `RoomJoinFailed`, `RoomLeft`, `GameStarting`,
+  `AuthorityChanged`, `Reconnected`, `ReconnectionFailed`,
+  `PlayerReconnected`, the spectator join/leave family, and an
+  `Error` frame with a start-game code (issue #611). Client SDK codec test
+  corpora vendor these samples; the new lines follow the frozen v2 shapes in
+  `docs/protocol.md` and `tests/v2_wire_golden.rs`.
+
 
 ## [0.9.1] - 2026-09-17
 
