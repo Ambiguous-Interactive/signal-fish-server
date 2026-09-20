@@ -71,11 +71,6 @@ correctness evidence appears.
   its main (2026-08-24) but unreleased. The lockfile guard now flags the
   `smol-toml` override as redundant once upstream ships a patched minimum,
   so the Dependabot bump arrives red with removal instructions.
-- #581 — latent only: `handle_bus_message` ignores
-  `SequencedMessage::excluded_players`; untriggerable until a real
-  cross-instance bus is designed (multi-node fan-out stays outside
-  architecture scope). Honor or strip the field, with a conformance pin,
-  when that design lands.
 - #396 — CLOSED 2026-09-12 (standing correctness/perf sweep, closed with the
   session-237 enforcement-seam sweep). The sweep practice continues
   opportunistically wherever new features open seams; per-session closure
