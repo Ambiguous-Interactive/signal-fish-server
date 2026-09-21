@@ -303,14 +303,14 @@ jobs:
       - name: Install cargo-nextest (attempt 1)
         id: install_nextest
         continue-on-error: true
-        uses: taiki-e/install-action@v2.87.11
+        uses: taiki-e/install-action@v2.87.15
         with:
           tool: cargo-nextest@0.9.143
       - name: Install cargo-nextest (retry on transient runner failure)
         # Only runs when attempt 1 failed (e.g., the Windows bash-startup flake).
         # No continue-on-error here, so a second failure correctly fails the job.
         if: steps.install_nextest.outcome == 'failure'
-        uses: taiki-e/install-action@v2.87.11
+        uses: taiki-e/install-action@v2.87.15
         with:
           tool: cargo-nextest@0.9.143
       - name: Install cargo-mutants (mutation inventory guard)
@@ -321,7 +321,7 @@ jobs:
         # test_ci_nextest_lane_installs_cargo_mutants_for_inventory_guard).
         # Cost: one prebuilt-binary download; no extra compile.
         if: matrix.os == 'ubuntu-latest'
-        uses: taiki-e/install-action@v2.87.11
+        uses: taiki-e/install-action@v2.87.15
         with:
           tool: cargo-mutants@27.1.0
 
@@ -617,7 +617,7 @@ jobs:
       # nothing.
       - name: Install cargo-audit
         if: ${{ !cancelled() }}
-        uses: taiki-e/install-action@v2.87.11
+        uses: taiki-e/install-action@v2.87.15
         with:
           tool: cargo-audit@0.22.2
           fallback: none
@@ -641,7 +641,7 @@ jobs:
         run: cargo audit --file clients/fortress-wasm/Cargo.lock
       - name: Install cargo-sbom
         if: ${{ !cancelled() && github.event_name != 'schedule' }}
-        uses: taiki-e/install-action@v2.87.11
+        uses: taiki-e/install-action@v2.87.15
         with:
           tool: cargo-sbom
 
@@ -758,9 +758,9 @@ jobs:
         # Buildx unlocks the GitHub Actions layer cache below. Mirrors the proven
         # pattern in docker-publish.yml (same pinned action versions), turning a
         # cold ~3-5 min image build into a warm sub-minute one on cache hits.
-        uses: docker/setup-buildx-action@v4.3.0
+        uses: docker/setup-buildx-action@v4.4.1
       - name: Build Docker image
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@v7.4.0
         with:
           context: .
           # load (not push): import the built image into the local Docker daemon
@@ -881,7 +881,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2.87.11
+        uses: taiki-e/install-action@v2.87.15
         with:
           tool: cargo-llvm-cov
 
