@@ -1,12 +1,13 @@
-{"type": "Authenticate", "data": {"app_id": "...", "sdk_version": "1.2.3", "platform": "unity"}}
-{"type": "JoinRoom", "data": {"game_name": "...", "player_name": "Player1", "room_code": "ABC123"}}
+{"type": "Authenticate", "data": {"app_id": "mb_app_abc123", "sdk_version": "1.2.3", "platform": "unity"}}
+{"type": "JoinRoom", "data": {"game_name": "my-game", "room_code": "ABC123", "player_name": "Player1", "max_players": 8, "supports_authority": true, "relay_transport": null}}
+{"type": "JoinRoom", "data": {"game_name": "my-game", "room_code": null, "player_name": "Player1", "max_players": null, "supports_authority": null, "relay_transport": null}}
 {"type": "GameData", "data": {"data": {"action": "move", "x": 10}}}
 {"type": "AuthorityRequest", "data": {"become_authority": true}}
 {"type": "PlayerReady"}
 {"type": "StartGame"}
 {"type": "ProvideConnectionInfo", "data": {"connection_info": {"type": "direct", "host": "127.0.0.1", "port": 7777}}}
-{"type": "Reconnect", "data": {"player_id": "...", "room_id": "...", "auth_token": "..."}}
-{"type": "JoinAsSpectator", "data": {"game_name": "...", "room_code": "ABC123", "spectator_name": "Observer"}}
+{"type": "Ping"}
+{"type": "Reconnect", "data": {"player_id": "00000000-0000-0000-0000-00000000000a", "room_id": "11111111-1111-1111-1111-111111111111", "auth_token": "sf_rt_example_token"}}
+{"type": "JoinAsSpectator", "data": {"game_name": "my-game", "room_code": "ABC123", "spectator_name": "Observer"}}
 {"type": "LeaveSpectator"}
 {"type": "LeaveRoom"}
-{"type": "Ping"}

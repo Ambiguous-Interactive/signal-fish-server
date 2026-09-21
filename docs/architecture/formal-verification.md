@@ -16,7 +16,7 @@ spec ⇄ code correspondence table lives in
 | proptest invariants        | **Real-code** selection / election / peer-list / TURN invariants | `src/server/session_policy_tests.rs::properties`                 |
 | proptest wire round-trips  | v3 **wire** encode/decode fidelity (JSON + MessagePack)         | `tests/v3_wire_properties.rs`                                     |
 | proptest fuzz hardening    | **Parser robustness** — no panic on hostile bytes               | `tests/protocol_fuzz_hardening.rs`                                |
-| e2e / golden suites        | End-to-end **wire conformance** and the frozen v2 contract      | `tests/v3_*_e2e.rs`, `tests/v3_protocol_samples.rs`, `tests/v2_wire_golden.rs` |
+| e2e / golden suites        | End-to-end **wire conformance** and the frozen v2 contract      | `tests/v3_*_e2e.rs`, `tests/protocol_samples.rs`, `tests/v2_wire_golden.rs` |
 
 The layers are complementary: TLC reasons about _event orderings_ a unit test
 would never script; proptest reasons about _input distributions_ over the real

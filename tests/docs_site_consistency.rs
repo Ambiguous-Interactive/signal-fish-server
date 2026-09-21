@@ -1,7 +1,7 @@
 //! Enforceable accuracy + rendering guards for the public documentation site.
 //!
 //! The `.llm/code-samples/protocol/*.jsonl` files are already type-checked
-//! against the real Rust message enums (`tests/v3_protocol_samples.rs`,
+//! against the real Rust message enums (`tests/protocol_samples.rs`,
 //! `tests/v2_wire_golden.rs`). The user-facing MkDocs pages under `docs/`,
 //! however, had **no** automated guard tying them to the source of truth — so
 //! they could silently drift as the v2/v3 protocol evolved. This module closes

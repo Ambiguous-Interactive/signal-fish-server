@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The v2 wire samples (`.llm/code-samples/protocol/v2-client-messages.jsonl`,
+  `v2-server-messages.jsonl`) are now concrete, complete frames. Every line
+  deserializes into the real `ClientMessage`/`ServerMessage` enums and
+  round-trips exactly, per the frozen v2 shapes in `tests/v2_wire_golden.rs`.
+  The sample round-trip guard (`tests/protocol_samples.rs`) now covers the v2
+  files, so sample drift fails here instead of surfacing in client SDK codec
+  corpora (issue #611).
+
 ### Fixed
 
 - The bus loopback fan-out now honors `SequencedMessage::excluded_players`
