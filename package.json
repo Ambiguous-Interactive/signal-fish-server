@@ -1,8 +1,5 @@
 {
   "devDependencies": {
-    "markdownlint-cli2": "0.23.2"
-  },
-  "overrides": {
-    "smol-toml": "^1.8.0"
+    "markdownlint-cli2": "0.23.3"
   }
 }

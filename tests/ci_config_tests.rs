@@ -5156,6 +5156,27 @@ fn test_markdownlint_version_file_exists_and_is_semver() {
         ".markdownlint-version must contain a plain semantic version (X.Y.Z).\n\
          Found: '{version}'"
     );
+
+    // scripts/check-markdown.sh requires the installed markdownlint-cli2 to
+    // equal .markdownlint-version exactly, and prefers the npm-installed
+    // runner. The two pins must move in the same commit or the Markdownlint
+    // CI job fails on version mismatch.
+    let lock: serde_json::Value =
+        serde_json::from_str(&read_live_file(&root.join("package-lock.json")))
+            .unwrap_or_else(|error| panic!("package-lock.json must parse as JSON: {error}"));
+    let installed = lock
+        .get("packages")
+        .and_then(|packages| packages.get("node_modules/markdownlint-cli2"))
+        .and_then(|entry| entry.get("version"))
+        .and_then(|version| version.as_str())
+        .expect("package-lock.json must install markdownlint-cli2");
+    assert_eq!(
+        version, installed,
+        ".markdownlint-version ({version}) and the npm-installed markdownlint-cli2 \
+         ({installed}) must match exactly.\n\
+         Fix: bump both pins in the same commit (package.json + `npm install` \
+         + .markdownlint-version)."
+    );
 }
 
 #[test]
@@ -26858,13 +26879,10 @@ fn npm_version_triple(version: &str) -> (u64, u64, u64) {
 #[test]
 fn test_root_npm_lock_resolves_patched_smol_toml() {
     // GHSA-7w5x-hrqm-74c2: smol-toml <=1.7.0 has a high-severity DoS via
-    // malformed TOML documents. markdownlint-cli2 0.23.2 still pins 1.7.0, so
-    // package.json carries an npm `override`; this pin keeps the lockfile
-    // honest while the override is in place and flags the vulnerable range if
-    // it sneaks back into the installed graph. It also flags the override as
-    // redundant once markdownlint-cli2 itself declares a patched minimum, so
-    // the Dependabot bump that crosses that line fails here with removal
-    // instructions instead of silently carrying dead config (issue #603).
+    // malformed TOML documents. The temporary root `override` is gone:
+    // markdownlint-cli2 0.23.3 declares smol-toml 1.8.0 itself (issue #603).
+    // This pin keeps the installed graph honest and flags the vulnerable
+    // range if it ever sneaks back in.
     let root = repo_root();
     let text = read_live_file(&root.join("package-lock.json"));
     let lock: serde_json::Value = serde_json::from_str(&text)
@@ -26889,48 +26907,10 @@ fn test_root_npm_lock_resolves_patched_smol_toml() {
         vulnerable.is_empty(),
         "package-lock.json resolves smol-toml versions in the vulnerable \
          GHSA-7w5x-hrqm-74c2 range (<=1.7.0): {vulnerable:?}.\n\
-         Fix: keep the `smol-toml` override in package.json at a patched \
-         release (>=1.7.1) and regenerate the lockfile."
+         Fix: raise every smol-toml source to a patched release (>=1.7.1) — \
+         prefer a markdownlint-cli2 bump that declares it — and regenerate \
+         the lockfile."
     );
-
-    let package_json: serde_json::Value =
-        serde_json::from_str(&read_live_file(&root.join("package.json")))
-            .unwrap_or_else(|error| panic!("package.json must parse as JSON: {error}"));
-    let override_present = package_json
-        .get("overrides")
-        .and_then(|overrides| overrides.get("smol-toml"))
-        .is_some();
-    let declared_range = packages
-        .get("node_modules/markdownlint-cli2")
-        .and_then(|entry| entry.get("dependencies"))
-        .and_then(|dependencies| dependencies.get("smol-toml"))
-        .and_then(|range| range.as_str());
-    if let (true, Some(declared_range)) = (override_present, declared_range) {
-        // The first version-like token of the range npm/Dependabot writes is
-        // its minimum. Ranges the token cannot represent parse as (0, 0, 0),
-        // which reads as "not known to be patched" and keeps the override —
-        // the safe side. The installed-graph check above still guards the
-        // resolved version either way.
-        let declared_minimum = npm_version_triple(&range_minimum_token(declared_range));
-        assert!(
-            declared_minimum < (1, 7, 1),
-            "markdownlint-cli2 itself declares smol-toml {declared_range} (patched minimum \
-             >=1.7.1), so the `smol-toml` override in package.json is redundant (issue \
-             #603).\n\
-             Fix: remove the `overrides` block from package.json, regenerate \
-             package-lock.json (`npm install`), and close #603."
-        );
-    }
-}
-
-/// The first version-like token of an npm range — the minimum for the plain
-/// pins, caret, tilde, and comparison ranges npm writes.
-fn range_minimum_token(range: &str) -> String {
-    range
-        .chars()
-        .skip_while(|character| !character.is_ascii_digit())
-        .take_while(|character| character.is_ascii_digit() || *character == '.')
-        .collect()
 }
 
 #[test]
