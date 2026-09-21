@@ -90,7 +90,7 @@ jobs:
           shared-key: "mutants"
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@v2.87.11
+        uses: taiki-e/install-action@v2.87.15
         with:
           tool: cargo-mutants@27.1.0
 
@@ -99,7 +99,7 @@ jobs:
         # .config/nextest.toml decides whether a nonterminating mutant is a
         # caught mutant or an outer-timeout; its semantics must stay stable,
         # and the baseline green-gate depends on every lib test fitting it.
-        uses: taiki-e/install-action@v2.87.11
+        uses: taiki-e/install-action@v2.87.15
         with:
           tool: cargo-nextest@0.9.143
 
@@ -220,13 +220,13 @@ jobs:
           save-if: false
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@v2.87.11
+        uses: taiki-e/install-action@v2.87.15
         with:
           tool: cargo-mutants@27.1.0
 
       - name: Install cargo-nextest
         # Pinned, same reason as the baseline job above.
-        uses: taiki-e/install-action@v2.87.11
+        uses: taiki-e/install-action@v2.87.15
         with:
           tool: cargo-nextest@0.9.143
 
