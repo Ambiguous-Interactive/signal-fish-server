@@ -91,9 +91,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copy-paste reintroduction fails CI.
 - Supply chain: the root npm graph resolves `smol-toml` 1.8.0 instead of
   the vulnerable 1.7.0 (GHSA-7w5x-hrqm-74c2, high, DoS via malformed TOML).
-  `markdownlint-cli2` 0.23.2 still pins 1.7.0, so the root `package.json`
-  carries an npm `override` and guard tests keep the lockfile patched
-  (>=1.7.1). Drop the override once upstream bumps past the advisory.
+  `markdownlint-cli2` 0.23.3 declares the patched `smol-toml` itself, so the
+  temporary npm `override` is removed and `.markdownlint-version` moves to
+  0.23.3 in lockstep; a guard test pins the two versions together (issue
+  #603).
 
 ## [0.9.0] - 2026-09-13
 
