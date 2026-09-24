@@ -18,8 +18,8 @@ unsafe_code = "forbid"
 signal-fish-server = { path = "../.." }
 
 # Real WebRTC stack (peer connections + data channels).
-webrtc = "0.20"
-rtc = "0.20"
+webrtc = "0.21"
+rtc = "0.21"
 async-trait = "0.1"
 # webrtc 0.20 binds exactly the addresses supplied by the application. Enumerate
 # concrete interfaces so host ICE candidates never advertise a wildcard address.
