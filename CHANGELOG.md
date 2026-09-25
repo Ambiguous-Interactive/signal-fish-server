@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Devcontainer: `opencode.json` now uses the native OpenCode V2 config shape.
+  Servers live under `mcp.servers`; the V1-only `enabled` key is gone. The
+  four Z.AI relay entries set `protocol: "auto"` (probe the 2026-07-28 MCP
+  revision, fall back to the classic handshake). `github-mcp-server` keeps
+  the classic handshake and its `#496` token pass-through. Enforced by
+  `tests/agent_tooling_guards.rs` and `scripts/check-tooling-parity.sh`.
+
+- Devcontainer: OpenCode now installs from the V2 npm package
+  `@opencode/cli@latest`. The legacy `opencode-ai` package still serves V1
+  from npm's `latest` tag, so a one-time idempotent migration
+  (`migrate_opencode_to_v2` in `.devcontainer/lib-agent-tools.sh`) uninstalls
+  it before V2 installs — both own the `opencode` bin symlink, so order
+  matters. Offline launches keep V1; a pinned `OPENCODE_NPM_SPEC` skips the
+  migration.
+
+- Devcontainer: the pinned GitHub MCP server binary is bumped from 1.11.0 to
+  1.12.2, with fresh SHA256 ARGs taken from the release's checksums.txt.
+
 ## [0.9.2] - 2026-09-21
 
 ### Changed

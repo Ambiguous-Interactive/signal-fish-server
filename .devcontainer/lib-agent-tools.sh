@@ -6,8 +6,10 @@
 #   1. Routes npm global installs through a user-owned prefix
 #      (~/.npm-global) so `npm install -g ...` never needs sudo — the
 #      nvm-managed Node under /usr/local/share/nvm is root-owned.
-#   2. Installs/refreshes the terminal agent CLIs (OpenAI Codex, OpenCode,
-#      Nanocoder) and the Z.AI Vision MCP server (latest, from npm). A
+#   2. Installs/refreshes the terminal agent CLIs (OpenAI Codex, OpenCode via
+#      the @opencode/cli V2 package, Nanocoder) and the Z.AI Vision MCP server
+#      (latest, from npm). A one-time migration removes the legacy opencode-ai
+#      V1 package before V2 installs — both own the `opencode` bin symlink. A
 #      version-check fast path probes the registry and skips the reinstall when
 #      the installed version is already current, so post-start stays cheap; an
 #      unreachable registry keeps whatever is already installed.
@@ -222,8 +224,8 @@ load_node_toolchain() {
 }
 
 # Strip an optional tag/version suffix from an npm spec: "@openai/codex@latest"
-# -> "@openai/codex", "opencode-ai@latest" -> "opencode-ai", a bare package name
-# (scoped or not) passes through unchanged.
+# -> "@openai/codex", "@opencode/cli@latest" -> "@opencode/cli", a bare package
+# name (scoped or not) passes through unchanged.
 npm_spec_package_name() {
     local spec="$1"
     local pkg="${spec%@*}"
@@ -380,8 +382,14 @@ install_codex_cli() {
     install_npm_global_cli "codex" "${CODEX_NPM_SPEC:-@openai/codex@latest}"
 }
 
+# OpenCode V2 ships as @opencode/cli; the legacy opencode-ai package still
+# serves V1 1.x from npm's latest tag. Both own the `opencode` bin symlink in
+# the shared npm prefix, so migrate_opencode_to_v2 must remove V1 BEFORE this
+# installs V2 — uninstalling V1 afterwards would delete the bin link V2 just
+# created. A user-pinned OPENCODE_NPM_SPEC overrides the default and skips the
+# automatic migration.
 install_opencode_cli() {
-    install_npm_global_cli "opencode" "${OPENCODE_NPM_SPEC:-opencode-ai@latest}"
+    install_npm_global_cli "opencode" "${OPENCODE_NPM_SPEC:-@opencode/cli@latest}"
 }
 
 install_nanocoder_cli() {
@@ -392,6 +400,36 @@ install_zai_vision_mcp() {
     install_npm_global_cli "zai-mcp-server" "${ZAI_MCP_NPM_SPEC:-@z_ai/mcp-server@latest}"
 }
 
+# One-time OpenCode V1→V2 migration: remove the legacy opencode-ai package
+# before @opencode/cli installs. Both packages own the `opencode` bin symlink
+# in the shared npm prefix, so installing V2 over a present V1 and
+# uninstalling V1 afterwards would delete the bin link V2 just created. A
+# user-pinned OPENCODE_NPM_SPEC is respected untouched (no-op), and the check
+# is offline-safe: an absent V1 package no-ops, and the caller only invokes
+# this when the registry is reachable, so an offline launch keeps V1 until the
+# next online launch. Prints the removed V1 version on stdout (empty when
+# nothing was removed); non-zero exit means the uninstall failed and the
+# caller must skip the V2 install for this launch.
+migrate_opencode_to_v2() {
+    local installed_state="$1"
+    local v1_installed
+
+    if [[ -n "${OPENCODE_NPM_SPEC:-}" ]]; then
+        return 0
+    fi
+
+    v1_installed="$(npm_global_installed_version "opencode-ai" "$installed_state")"
+    if [[ -z "$v1_installed" ]]; then
+        return 0
+    fi
+
+    if ! npm uninstall --global opencode-ai; then
+        echo "[setup] ERROR: could not uninstall the legacy opencode-ai package." >&2
+        return 1
+    fi
+    printf '%s\n' "$v1_installed"
+}
+
 # Refresh all npm-delivered agent tools after one bulk registry request. On an
 # ordinary launch `npm outdated` reports an empty object, allowing every
 # current package to skip with one network round trip instead of four.
@@ -399,7 +437,7 @@ refresh_agent_npm_tools() {
     local binaries=(codex opencode nanocoder zai-mcp-server)
     local specs=(
         "${CODEX_NPM_SPEC:-@openai/codex@latest}"
-        "${OPENCODE_NPM_SPEC:-opencode-ai@latest}"
+        "${OPENCODE_NPM_SPEC:-@opencode/cli@latest}"
         "${NANOCODER_NPM_SPEC:-@nanocollective/nanocoder@latest}"
         "${ZAI_MCP_NPM_SPEC:-@z_ai/mcp-server@latest}"
     )
@@ -407,6 +445,7 @@ refresh_agent_npm_tools() {
     local installed_state
     local outdated_state
     local registry_available=1
+    local migrate_opencode_v1_failed=0
     local failures=0
     local index
     local spec
@@ -432,6 +471,20 @@ refresh_agent_npm_tools() {
         registry_available=0
     fi
 
+    # One-time OpenCode V1→V2 migration, only when the registry is reachable:
+    # an offline launch must keep V1 intact rather than leave no `opencode` at
+    # all. A failed uninstall skips the V2 install for this launch — never
+    # install V2 over a present V1 — and the next launch retries.
+    local opencode_v1_removed=""
+    if ((registry_available == 1)); then
+        if ! opencode_v1_removed="$(migrate_opencode_to_v2 "$installed_state")"; then
+            echo "[setup] Warning: legacy opencode-ai could not be removed; skipping the @opencode/cli install this launch."
+            migrate_opencode_v1_failed=1
+        elif [[ -n "$opencode_v1_removed" ]]; then
+            echo "[setup] Removed legacy OpenCode V1 package (opencode-ai ${opencode_v1_removed})."
+        fi
+    fi
+
     for index in "${!binaries[@]}"; do
         local binary="${binaries[$index]}"
         local spec="${specs[$index]}"
@@ -449,6 +502,19 @@ refresh_agent_npm_tools() {
                 echo "[setup] Registry unreachable and ${binary} is not installed; skipping install (rerun post-create when online)."
             fi
             continue
+        fi
+
+        if [[ "$binary" == "opencode" ]]; then
+            if [[ "$migrate_opencode_v1_failed" == 1 ]]; then
+                echo "[setup] Skipping ${binary} this launch: the legacy opencode-ai package must be removed before installing @opencode/cli."
+                failures=$((failures + 1))
+                continue
+            fi
+            # V1 was just removed and its bin link went with it, so reinstall
+            # V2 even when the version check would call it current.
+            if [[ -n "$opencode_v1_removed" ]]; then
+                installed=""
+            fi
         fi
 
         latest="$(npm_outdated_package_field "$outdated_state" "$pkg" latest)"

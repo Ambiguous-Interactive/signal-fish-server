@@ -325,6 +325,8 @@ assert_contains_literal "$DEVCONTAINER_JSON" '"Z_AI_MODE": "ZAI"' "Devcontainer 
 assert_contains_literal "$DEVCONTAINER_POST_START" "refresh_agent_npm_tools" "Post-start refreshes all npm-delivered agent tools"
 assert_contains_literal "$DEVCONTAINER_POST_START" "configure_codex_mcp_servers" "Post-start re-applies the Codex GitHub and Z.AI MCP wiring"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "install_opencode_cli" "Agent tooling library installs OpenCode"
+assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "@opencode/cli@latest" "Agent tooling library installs OpenCode V2 from @opencode/cli"
+assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "migrate_opencode_to_v2" "Agent tooling library removes legacy opencode-ai before installing V2"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "install_nanocoder_cli" "Agent tooling library installs Nanocoder"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" '@z_ai/mcp-server@latest' "Agent tooling library installs the latest Z.AI Vision MCP server"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" '--allow-scripts="$pkg"' "Agent tooling library explicitly allows only the selected package lifecycle scripts"
@@ -335,6 +337,11 @@ assert_contains_literal "$ROOT_MCP_JSON" '"github"' "Claude Code/Nanocoder MCP c
 assert_contains_literal "$ROOT_MCP_JSON" "github-mcp-server" "Claude Code/Nanocoder MCP config uses the pinned GitHub MCP server binary"
 assert_contains_literal "$OPENCODE_JSON" '"github"' "OpenCode config registers the GitHub MCP server"
 assert_contains_literal "$OPENCODE_JSON" "github-mcp-server" "OpenCode config uses the pinned GitHub MCP server binary"
+# OpenCode V2 groups servers under mcp.servers; a name directly under mcp is
+# the V1 layout, and `enabled` is the V1-only key (V2 inverts it as `disabled`).
+assert_contains_literal "$OPENCODE_JSON" '"servers"' "OpenCode config uses the V2 mcp.servers grouping"
+assert_not_contains_literal "$OPENCODE_JSON" '"enabled"' "OpenCode config avoids the V1-only enabled key"
+assert_contains_literal "$OPENCODE_JSON" '"protocol": "auto"' "OpenCode Z.AI relay entries probe the 2026-07-28 MCP revision with legacy fallback"
 assert_contains_literal "$OPENCODE_JSON" '"type": "local"' "OpenCode config registers GitHub MCP as a local server"
 # Observed in #496: the opencode-launched github-mcp-server device-flowed
 # every session even with the token present in the container shell, so the

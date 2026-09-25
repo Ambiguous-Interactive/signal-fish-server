@@ -34,11 +34,15 @@ description: >-
    NPM_CONFIG_PREFIX environment variable"), failing every image build.
    The root and browser-client `node_modules` named volumes must be writable by
    the remote user. `sudo npm install` (local or global) is always a bug.
-2. **Latest npm agent tools**: `@openai/codex@latest`, `opencode-ai@latest`,
-   `@nanocollective/nanocoder@latest`, and `@z_ai/mcp-server@latest` install on
-   create and refresh on every start via `.devcontainer/lib-agent-tools.sh`.
-   Pass `--allow-scripts="$pkg"` so npm 11 runs OpenCode's required postinstall
-   while authorizing lifecycle scripts only for the selected package.
+2. **Latest npm agent tools**: `@openai/codex@latest`, `@opencode/cli@latest`
+   (OpenCode V2), `@nanocollective/nanocoder@latest`, and
+   `@z_ai/mcp-server@latest` install on create and refresh on every start via
+   `.devcontainer/lib-agent-tools.sh`. Pass `--allow-scripts="$pkg"` so npm 11
+   runs OpenCode's required postinstall while authorizing lifecycle scripts
+   only for the selected package. `migrate_opencode_to_v2` uninstalls the
+   legacy `opencode-ai` V1 package before `@opencode/cli` installs: both
+   packages own the `opencode` bin symlink, so a user-pinned
+   `OPENCODE_NPM_SPEC` is the only way to keep V1.
 3. **Fast launches**: the refresh is gated by a registry version-check fast
    path — use one bulk `npm outdated -g --json` request with local
    `npm ls -g --json` state, use `npm view` only for a missing tool, and skip
@@ -81,12 +85,19 @@ description: >-
 | VS Code + Copilot | `.vscode/mcp.json` | `servers.github`, `command`, `${env:GITHUB_PERSONAL_ACCESS_TOKEN}` |
 | Claude Code | `.mcp.json` | `mcpServers.github`, **`"type": "stdio"`** |
 | Nanocoder | `.mcp.json` (same file) | `mcpServers.github`, **`"transport": "stdio"`** |
-| OpenCode | `opencode.json` | `mcp.github`, `"type": "local"`, `command: [...]`, **`environment: { GITHUB_PERSONAL_ACCESS_TOKEN: "{env:GITHUB_PERSONAL_ACCESS_TOKEN}" }`** |
+| OpenCode (V2) | `opencode.json` | `mcp.servers.github`, `"type": "local"`, `command: [...]`, **`environment: { GITHUB_PERSONAL_ACCESS_TOKEN: "{env:GITHUB_PERSONAL_ACCESS_TOKEN}" }`** |
 
 Each config also registers `zai-vision`, `zai-web-search`, `zai-web-reader`,
 and `zai-zread`. Local Vision always invokes the preinstalled
 `/home/vscode/.npm-global/bin/zai-mcp-server`; do not replace it with `npx`,
 which introduces a network/cache dependency during MCP startup.
+
+**OpenCode V2 native config**: `opencode.json` uses the V2 shape — servers
+under `mcp.servers`, no V1-only `enabled` key (servers connect unless
+`disabled`), and the published `$schema` URL retained. The four Z.AI relay
+entries set `protocol: "auto"` so V2 probes the 2026-07-28 MCP revision and
+falls back to the classic handshake; `github-mcp-server` keeps the default
+classic handshake.
 
 **Dual-key invariant**: `.mcp.json` must carry BOTH `type` (Claude Code) and
 `transport` (Nanocoder) — dropping either silently unwires one harness.
@@ -148,6 +159,14 @@ every change, so rely on it in CI and on the static guards above.
 - Removing the `environment` pass-through from `opencode.json` → the OpenCode
   GitHub MCP server starts unauthenticated and prompts the OAuth device flow
   every session (issue #496).
+- Installing `@opencode/cli` while `opencode-ai` is still present, or
+  uninstalling V1 after V2 installs → both packages own the `opencode` bin
+  symlink, so the later uninstall deletes V2's link and `opencode` vanishes.
+  Always run `migrate_opencode_to_v2` (uninstall-first), and skip the V2
+  install whenever the uninstall fails.
+- Flat `mcp.<name>` entries or the V1-only `enabled` key in `opencode.json` →
+  V1 syntax still loads in V2, but the native-V2 guards fail; keep the
+  `mcp.servers` grouping.
 - Replacing the preinstalled Z.AI Vision command with `npx` → every MCP startup
   can wait on the registry and becomes unreliable offline.
 - Dropping the package-scoped `--allow-scripts` option → npm 11 can skip
