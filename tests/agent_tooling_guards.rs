@@ -349,6 +349,11 @@ fn opencode_config_is_native_v2() {
         5,
         "{contract}\n\nExpected exactly five local stdio servers in opencode.json."
     );
+    assert_eq!(
+        opencode.matches("\"protocol\": \"auto\"").count(),
+        4,
+        "{contract}\n\nExpected exactly four Z.AI relay entries with protocol auto."
+    );
     // Absence reads the RAW file: a commented-out V1 leftover is still a real
     // occurrence worth flagging.
     forbid_fragments(

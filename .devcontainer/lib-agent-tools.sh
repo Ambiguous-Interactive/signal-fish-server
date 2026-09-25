@@ -354,7 +354,12 @@ install_npm_global_cli() {
         return 0
     fi
 
-    if [[ -n "$latest" && "$latest" = "$installed" ]]; then
+    # Current version alone is not enough: a package can be recorded while
+    # its bin link is gone (for example a sibling package's uninstall removed
+    # a shared bin shim). Reinstall a "current" install whose binary cannot
+    # be resolved, so the recorded state matches a working command.
+    if [[ -n "$latest" && "$latest" = "$installed" ]] \
+        && command -v "$binary" >/dev/null 2>&1; then
         echo "[setup] ${binary} is current (v${installed}); skipping reinstall."
         return 0
     fi
@@ -426,7 +431,7 @@ migrate_opencode_to_v2() {
         return 0
     fi
 
-    if ! npm uninstall --global opencode-ai >/dev/null 2>&1; then
+    if ! npm uninstall --global opencode-ai >/dev/null; then
         echo "[setup] ERROR: could not uninstall the legacy opencode-ai package." >&2
         return 1
     fi
@@ -501,6 +506,9 @@ refresh_agent_npm_tools() {
         if ((registry_available == 0)); then
             if [[ -n "$installed" ]]; then
                 echo "[setup] Registry unreachable; keeping installed ${binary} (${installed})."
+            elif [[ "$binary" == "opencode" ]] \
+                && [[ -n "$(npm_global_installed_version "opencode-ai" "$installed_state")" ]]; then
+                echo "[setup] Registry unreachable; keeping the legacy opencode-ai package for ${binary}."
             else
                 echo "[setup] Registry unreachable and ${binary} is not installed; skipping install (rerun post-create when online)."
             fi
