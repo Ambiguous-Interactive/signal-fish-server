@@ -21,7 +21,7 @@ signal-fish-server = { path = "../.." }
 webrtc = "0.21"
 rtc = "0.21"
 async-trait = "0.1"
-# webrtc 0.20 binds exactly the addresses supplied by the application. Enumerate
+# webrtc 0.21 binds exactly the addresses supplied by the application. Enumerate
 # concrete interfaces so host ICE candidates never advertise a wildcard address.
 if-addrs = "0.15"
 
