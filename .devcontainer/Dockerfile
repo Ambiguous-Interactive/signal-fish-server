@@ -17,9 +17,12 @@ ARG LYCHEE_AARCH64_MUSL_SHA256=5d0b0e3aeab240f41920c633a6eaf97599be6eedda034b36e
 # Official GitHub MCP server (github/github-mcp-server), pinned for reproducible
 # builds. Wired into every agent harness via .vscode/mcp.json, .mcp.json,
 # opencode.json, and ~/.codex/config.toml (see .devcontainer/post-create.sh).
-ARG GITHUB_MCP_VERSION=1.11.0
-ARG GITHUB_MCP_X86_64_SHA256=3b73bb7be0c8b043f861e90410df8ebdfc71b83128c54ced75fb32c4ff697fc5
-ARG GITHUB_MCP_ARM64_SHA256=3f7615254f6b619469c471c5d275029299ff7431c93d6075496ea4b2eec020cb
+# SHA256s are the Linux x86_64/arm64 lines of the release's checksums.txt
+# (github-mcp-server_1.12.2_checksums.txt), cross-checked against the release
+# asset digests.
+ARG GITHUB_MCP_VERSION=1.12.2
+ARG GITHUB_MCP_X86_64_SHA256=95843162759da2c31dde082dd145be35db82164594796c294414b69790c2290e
+ARG GITHUB_MCP_ARM64_SHA256=2b30f9fcc061b57456cbe38ddc0f13c88863bad49557508a9196f2d1c4cb17a5
 ARG POWERSHELL_VERSION=7.6.2
 ARG POWERSHELL_X64_SHA256=6cbcfbf20e376aa62ffd91c973493c41a7a52ddfd5a5db3ff9bc12f0d0fe9292
 ARG POWERSHELL_ARM64_SHA256=a8d4e386dfafda385d0604045eed03ce6f3a843d45fc8f0b9588b836ca17cdb8
