@@ -198,14 +198,22 @@ async fn two_instances_produce_the_documented_split_brain_catalog() {
     assert_eq!(joined_a.current_players.len(), 1);
     assert_eq!(joined_b.current_players.len(), 1);
 
-    // A routed join with `join_only: true` (issue #625) refuses on the wrong
-    // home instead of silently creating the duplicate room above.
+    // A second room exists only on process A. A routed join with
+    // `join_only: true` (issue #625) aimed at process B must refuse instead
+    // of silently creating that room on the wrong home — the directory
+    // misroute case the flag exists for.
+    let mut peer_a2 = connect_v3(instance_a.port).await;
+    let joined_a2 = join_room(&mut peer_a2, None, "InstanceASecondPlayer").await;
+    assert_ne!(
+        joined_a2.room_id, joined_a.room_id,
+        "the second join must create its own room on process A"
+    );
     let mut peer_c = connect_v3(instance_b.port).await;
     send(
         &mut peer_c,
         &ClientMessage::JoinRoom {
             game_name: GAME_NAME.to_string(),
-            room_code: Some(joined_a.room_code.clone()),
+            room_code: Some(joined_a2.room_code.clone()),
             player_name: "InstanceCJoinOnlyPlayer".to_string(),
             max_players: Some(2),
             supports_authority: Some(false),
@@ -228,7 +236,7 @@ async fn two_instances_produce_the_documented_split_brain_catalog() {
             assert_eq!(reason, "Room not found");
         }
         ServerMessage::RoomJoined(payload) => panic!(
-            "a join-only join must not create the duplicate room {:?} on process B",
+            "a join-only join must not create the room {:?} on process B",
             payload.room_id
         ),
         other => panic!("expected RoomJoinFailed, got {other:?}"),
