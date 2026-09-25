@@ -620,6 +620,7 @@ async fn required_mtls_without_token_binding_keeps_unsigned_json_and_binary_path
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
     socket
         .send(Message::Text(
@@ -719,6 +720,7 @@ async fn reconnect_token_is_bound_to_issuing_certificate_without_consuming_misma
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
         Some(&fingerprint_a),
     )
@@ -827,6 +829,7 @@ async fn reconnect_token_is_bound_to_issuing_certificate_without_consuming_misma
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
         Some(&fingerprint_b),
     )

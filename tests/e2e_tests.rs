@@ -485,6 +485,7 @@ async fn test_room_creation_and_joining() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
 
     let response1 = send_and_receive(&mut sender1, &mut receiver1, join_msg1)
@@ -511,6 +512,7 @@ async fn test_room_creation_and_joining() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
 
     let response2 = send_and_receive(&mut sender2, &mut receiver2, join_msg2)
@@ -687,6 +689,7 @@ async fn test_binary_game_data_broadcasting_preserves_v2_and_stamps_v3() {
             relay_transport: None,
 
             password: None,
+            join_only: None,
         };
         let player1_id = match send_and_receive(&mut sender1, &mut receiver1, join_msg)
             .await
@@ -705,6 +708,7 @@ async fn test_binary_game_data_broadcasting_preserves_v2_and_stamps_v3() {
             relay_transport: None,
 
             password: None,
+            join_only: None,
         };
         let _ = send_and_receive(&mut sender2, &mut receiver2, join_msg2)
             .await
@@ -765,6 +769,7 @@ async fn test_room_capacity_limit() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
     let _ = send_and_receive(&mut sender1, &mut receiver1, join_msg1)
         .await
@@ -780,6 +785,7 @@ async fn test_room_capacity_limit() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
     let _ = send_and_receive(&mut sender2, &mut receiver2, join_msg2)
         .await
@@ -795,6 +801,7 @@ async fn test_room_capacity_limit() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
 
     let response3 = send_and_receive(&mut sender3, &mut receiver3, join_msg3)
@@ -825,6 +832,7 @@ async fn test_validation_errors() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, invalid_join)
@@ -866,6 +874,7 @@ async fn test_e2e_custom_protocol_limits() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, long_name_msg)
@@ -888,6 +897,7 @@ async fn test_e2e_custom_protocol_limits() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, wrong_length_msg)
@@ -910,6 +920,7 @@ async fn test_e2e_custom_protocol_limits() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, long_player_msg)
@@ -932,6 +943,7 @@ async fn test_e2e_custom_protocol_limits() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, too_many_players_msg)
@@ -954,6 +966,7 @@ async fn test_e2e_custom_protocol_limits() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, valid_msg)
@@ -1037,6 +1050,7 @@ async fn test_e2e_config_with_file_and_env() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, test_msg)
@@ -1059,6 +1073,7 @@ async fn test_e2e_config_with_file_and_env() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, valid_msg)
@@ -1095,6 +1110,7 @@ async fn test_e2e_authority_protocol_enforcement() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
 
     let response1 = send_and_receive(&mut sender1, &mut receiver1, create_msg)
@@ -1121,6 +1137,7 @@ async fn test_e2e_authority_protocol_enforcement() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
 
     let response2 = send_and_receive(&mut sender2, &mut receiver2, join_msg)
@@ -1319,6 +1336,7 @@ async fn test_simple_authority_release() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, join_msg)
@@ -1388,6 +1406,7 @@ async fn test_two_player_authority_release() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
 
     let response1 = send_and_receive(&mut sender1, &mut receiver1, join_msg1)
@@ -1410,6 +1429,7 @@ async fn test_two_player_authority_release() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
 
     let response2 = send_and_receive(&mut sender2, &mut receiver2, join_msg2)
@@ -1495,6 +1515,7 @@ async fn test_e2e_authority_disabled_rooms() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, create_msg)
@@ -1570,6 +1591,7 @@ async fn test_e2e_room_code_generation_with_custom_length() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
 
     let response = send_and_receive(&mut creator_sender, &mut creator_receiver, auto_room_msg)
@@ -1608,6 +1630,7 @@ async fn test_e2e_room_code_generation_with_custom_length() {
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await
@@ -1662,6 +1685,7 @@ async fn test_e2e_invalid_inline_config_is_a_hard_error() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
 
     let response = send_and_receive(&mut sender, &mut receiver, test_msg)
@@ -1753,6 +1777,7 @@ async fn test_idle_client_is_disconnected_after_idle_timeout() {
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await
@@ -1839,6 +1864,7 @@ async fn test_silent_client_is_reaped_with_activity_timeout() {
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await
@@ -1913,6 +1939,7 @@ async fn test_active_client_survives_past_idle_timeout_window() {
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await
@@ -1949,6 +1976,7 @@ async fn test_idle_timeout_zero_disables_idle_enforcement() {
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await

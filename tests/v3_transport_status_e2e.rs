@@ -259,6 +259,7 @@ async fn join_room(
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await;
@@ -424,6 +425,7 @@ async fn v2_join_and_settle(
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await;

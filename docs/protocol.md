@@ -84,6 +84,16 @@ message. `JoinRoom` behavior depends on `room_code`:
 2. Provide `room_code` and room exists for that `game_name`: join that room.
 3. Provide `room_code` and no room exists for that `game_name`: create a new
    room with that room code.
+4. Provide `room_code` with `join_only: true` and no room exists for that
+   `game_name`: refused with `ROOM_NOT_FOUND`. No room is created.
+
+Rule 4 is the collision-safe admission shape (issue #625). A room directory
+sets `join_only: true` on routed joins: a stale directory entry then surfaces
+as a refusal the client can re-resolve, instead of silently creating a
+duplicate room on the wrong home. `join_only: true` without a `room_code` is
+refused with `INVALID_INPUT`. A server older than `join_only` ignores the
+flag and creates the room; a client that requires join-only semantics must
+treat an unexpected `RoomJoined` as version skew and re-resolve.
 
 Rooms are scoped to the application identity presented in the `Authenticate`
 handshake (issue #520). A created room is stamped with its creator's
@@ -121,6 +131,8 @@ Optional fields:
 - `supports_authority` - Authority support (applied only when a new room is created)
 - `relay_transport` - Reserved compatibility hint (`tcp`, `udp`, `websocket`, or `auto`). The server currently
   ignores this field: omission and every accepted value use the same authenticated WebSocket relay path.
+- `join_only` - With `true`, an unknown `room_code` is refused `ROOM_NOT_FOUND`
+  and never creates a room (issue #625). Requires `room_code`.
 
 New clients should omit `relay_transport`. It remains accepted so existing
 protocol-v2 payloads continue to decode, but it will not become actionable
@@ -964,9 +976,12 @@ rejects new room creation with `SERVER_DRAINING`, refuses reconnection
 attempts (`ReconnectionFailed` with `SERVER_DRAINING`) and spectator joins
 (`SpectatorJoinFailed` with `SERVER_DRAINING`), sends v3 clients a best-effort
 [`GoingAway`](#goingaway) advisory, then closes remaining sockets with `4000
-server_shutdown` after `server.drain_grace_secs` (default 30). Shutdown-drain
-disconnects do not arm reconnection tokens; the instance is going away, so
-clients should create or join a fresh room on another healthy instance.
+server_shutdown` after `server.drain_grace_secs` (default 30). Existing-room
+`JoinRoom` joins stay admitted during drain; a `join_only` join whose code
+does not resolve answers its truthful `ROOM_NOT_FOUND`, not `SERVER_DRAINING`
+(issue #625). Shutdown-drain disconnects do not arm reconnection tokens; the
+instance is going away, so clients should create or join a fresh room on
+another healthy instance.
 
 ### LobbyStateChanged
 
@@ -1605,8 +1620,9 @@ The moderation operations are authority-only (v3 only):
   `INVALID_INPUT` (the authority cannot kick itself).
 - `RegenerateRoomCode` replaces the room code with a freshly generated one. Existing members stay connected and
   reconnection tokens are unaffected. The requester receives `RoomCodeRegenerated` carrying the new code; the old
-  code stops resolving to the room immediately, and a join that names it behaves like any unknown code
-  (join-creates-room may open a fresh, unrelated room under it). The result goes only to the acting authority, and
+  code stops resolving to the room immediately, and a join that names it behaves like any unknown code:
+  join-creates-room may open a fresh, unrelated room under it, while a `join_only` join is refused `ROOM_NOT_FOUND`
+  (issue #625). The result goes only to the acting authority, and
   no message queries the current code. If the authority role moves after a rotation, share the new code with the
   successor out of band before the transfer (issue #566).
 - `SetRoomAccess` takes `password` (non-empty string, max 256 bytes, or `null`). A password seals the room: every

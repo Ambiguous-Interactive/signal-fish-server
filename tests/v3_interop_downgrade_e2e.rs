@@ -272,6 +272,7 @@ async fn join_room(
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await;
@@ -597,6 +598,7 @@ async fn incompatible_seat_fills_of_a_running_session_are_rejected() {
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await;
@@ -622,6 +624,7 @@ async fn incompatible_seat_fills_of_a_running_session_are_rejected() {
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await;
@@ -729,6 +732,7 @@ async fn sticky_relay_floor_survives_v2_leave_then_v3_full_join() {
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await;
@@ -1320,6 +1324,7 @@ async fn v2_member_leaves_relay_floored_session_no_replan() {
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await;
@@ -1656,6 +1661,7 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
                 relay_transport: None,
 
                 password: None,
+                join_only: None,
             },
         )
         .await;
@@ -1796,6 +1802,7 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
                 relay_transport: None,
 
                 password: None,
+                join_only: None,
             },
         )
         .await;
@@ -2124,6 +2131,7 @@ async fn room_snapshots_trim_peer_metadata_for_v3_and_keep_the_frozen_v2_shape()
                         relay_transport: None,
 
                         password: None,
+                        join_only: None,
                     }),
                 },
             )

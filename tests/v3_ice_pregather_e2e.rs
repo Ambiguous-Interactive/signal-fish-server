@@ -324,6 +324,7 @@ fn join_message(game_name: &str, room_code: Option<String>, player_name: &str) -
         relay_transport: None,
 
         password: None,
+        join_only: None,
     }
 }
 

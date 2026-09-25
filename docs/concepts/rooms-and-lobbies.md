@@ -71,6 +71,7 @@ request using the `(game_name, room_code)` pair:
 | `room_code` omitted | Implicit room creation | New room + generated code in `RoomJoined` |
 | `room_code` provided and room exists for `game_name` | Join existing room | `RoomJoined` + `PlayerJoined` broadcast to others |
 | `room_code` provided and room does not exist for `game_name` | Explicit room creation | New room using requested `room_code` |
+| `room_code` provided with `join_only: true` and room does not exist | Refused | `RoomJoinFailed` with `ROOM_NOT_FOUND`; no room is created |
 
 Creation-specific fields such as `max_players` and `supports_authority`
 apply only when a room is created (implicit or explicit). When joining an
@@ -142,6 +143,13 @@ and whoever joins an unused code first owns its room and authority. A player
 who learns or guesses another group's planned code can claim it first and
 withhold `StartGame`; the group's recourse is to pick another code.
 
+`join_only: true` removes the first-claim surprise for joins that must not
+create (issue #625). A join naming an unused code is refused
+`ROOM_NOT_FOUND` instead of creating the room and claiming its authority.
+Routed joins from a room directory should always set it: the directory owns
+creation, and a join that lands where the room does not exist must not
+silently open a duplicate room on the wrong home.
+
 Operators should therefore:
 
 - Prefer auto-generated codes (omit `room_code`). They are random, and the
@@ -158,9 +166,11 @@ Operators should therefore:
 Rotation does not reserve the old code. `RegenerateRoomCode` makes the old
 code stop resolving, and a join that names it afterwards behaves like any
 unknown code: join-creates-room opens a fresh, unrelated room under it, and
-the joiner becomes that room's authority. Clients must therefore treat any
-`RoomJoined` for a code the user did not just create as a new room, never as
-a return to the previous one. After a rotation, share only the new code.
+the joiner becomes that room's authority. With `join_only: true`, the same
+stale join is refused `ROOM_NOT_FOUND` instead (issue #625). Clients must
+therefore treat any `RoomJoined` for a code the user did not just create as a
+new room, never as a return to the previous one. After a rotation, share only
+the new code.
 The current code reaches a member only at join time, in `Reconnected`, or
 out of band from the authority. A member who receives the authority role
 after a rotation never learns the new code in-protocol (issue #566); share

@@ -56,7 +56,9 @@ server's `/v2/ws` (or `/v3/ws`) endpoint, then:
    followed by `ProtocolInfo`; a rejected one returns `AuthenticationError`.
 2. **JoinRoom** — create or join a room. Omit `room_code` to create a new room
    (the server generates one); provide a `room_code` to join an existing room, or
-   to create one with that specific code if none exists yet. The server replies
+   to create one with that specific code if none exists yet. Set `join_only:
+   true` when a join must never create — an unknown code is then refused
+   `ROOM_NOT_FOUND` instead (issue #625). The server replies
    `RoomJoined` (with your `player_id`, the current players, and the lobby state).
    On failure you get `RoomJoinFailed`. While in the room you receive
    `PlayerJoined` / `PlayerLeft` as others come and go.

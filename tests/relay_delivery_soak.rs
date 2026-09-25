@@ -103,6 +103,7 @@ async fn join_room(sink: &mut WsSink, receiver: &mut WsReceiver, room: &str, pla
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
     let json = serde_json::to_string(&join).expect("serialize JoinRoom");
     sink.send(Message::Text(json.into()))

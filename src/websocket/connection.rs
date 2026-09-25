@@ -3679,6 +3679,7 @@ mod tests {
                 relay_transport: None,
 
                 password: None,
+                join_only: None,
             };
 
             let json_message =

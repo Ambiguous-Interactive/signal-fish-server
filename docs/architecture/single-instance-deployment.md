@@ -51,7 +51,7 @@ the unsupported behavior:
 
 | Misrouted operation | Observed result | Why |
 | --- | --- | --- |
-| Join the same `(game_name, room_code)` on process B after creation on process A | B silently creates a second room with the same public code and a different `room_id`; each room contains only its local player | Join-by-code creates an unknown room locally; there is no shared room directory |
+| Join the same `(game_name, room_code)` on process B after creation on process A | B silently creates a second room with the same public code and a different `room_id`; each room contains only its local player | Join-by-code creates an unknown room locally; there is no shared room directory. A routed join with `join_only: true` refuses `ROOM_NOT_FOUND` on B instead (issue #625), so the directory can re-resolve; the legacy flag-off contract still creates |
 | Present A's real reconnect identity and token to B | `ReconnectionFailed` / `RECONNECTION_FAILED`, “No disconnection record found” | Reconnection records and token claims are process-local |
 | Signal from A's player to B's player ID | `SignalTargetNotFound`, “Signal target is not in any room” | B's player is absent from A's local registry, so A cannot even classify it as a different local room |
 

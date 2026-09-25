@@ -112,6 +112,7 @@ impl EnhancedGameServer {
                 supports_authority,
                 relay_transport,
                 password,
+                join_only,
             } => {
                 self.handle_join_room(
                     player_id,
@@ -122,6 +123,7 @@ impl EnhancedGameServer {
                     supports_authority,
                     relay_transport,
                     password,
+                    join_only,
                 )
                 .await;
             }
@@ -231,6 +233,7 @@ impl EnhancedGameServer {
                         supports_authority,
                         relay_transport,
                         password,
+                        join_only,
                     } => {
                         self.handle_join_room_operation(
                             player_id,
@@ -242,6 +245,7 @@ impl EnhancedGameServer {
                             supports_authority,
                             relay_transport,
                             password,
+                            join_only,
                         )
                         .await;
                     }

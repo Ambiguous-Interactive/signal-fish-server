@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Protocol: `JoinRoom.join_only` (optional, additive on v2 and the v3
+  correlated envelope). With `true`, a join naming an explicit `room_code`
+  that does not resolve is refused `ROOM_NOT_FOUND` and never creates a
+  room — collision-safe admission for directory-driven joins (#625).
+  Absent or `false` keeps the legacy create-on-join contract;
+  `true` without a `room_code` is refused `INVALID_INPUT`.
 - Observability: WebSocket deadline cuts (`4001 auth_timeout`,
   `4004 idle_timeout`) now log the upgrade `request_id`, `received_frames`,
   and `elapsed_ms`, tying the cut to the accepted-upgrade correlation chain.

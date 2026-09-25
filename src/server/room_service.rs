@@ -28,8 +28,16 @@ const GENERATED_ROOM_CODE_MAX_ATTEMPTS: u8 = 8;
 
 #[derive(Clone, Copy)]
 enum RoomAdmissionIntent {
+    /// A client-supplied code: join when it resolves, otherwise create the
+    /// room under that code (the legacy create-on-join contract).
     ExistingOrCreate,
+    /// Internal generated-code creation: an occupied code is a collision,
+    /// never a join.
     CreateOnly,
+    /// Directory-style join (issue #625): the code must resolve to an
+    /// existing, visible room. A miss is [`JoinRoomError::RoomNotFound`]
+    /// and never creates a room.
+    JoinOnly,
 }
 
 #[derive(Clone)]
@@ -102,8 +110,9 @@ pub(super) enum JoinRoomError {
     /// A creator requested a capacity above its configured application cap.
     #[error(transparent)]
     MaxPlayersPerApplicationExceeded(#[from] MaxPlayersPerApplicationExceededError),
-    /// The room is absent or belongs to another accepted app label.
-    /// Both cases intentionally share one non-enumerating wire outcome.
+    /// The room is absent, belongs to another accepted app label, or a
+    /// `join_only` join (issue #625) named a code that does not resolve.
+    /// All cases intentionally share one non-enumerating wire outcome.
     #[error("Room not found")]
     RoomNotFound,
     /// The room is password-protected and the join presented no password or
@@ -320,6 +329,7 @@ impl EnhancedGameServer {
         supports_authority: Option<bool>,
         relay_transport: Option<RelayTransport>,
         password: Option<String>,
+        join_only: Option<bool>,
     ) {
         self.handle_join_room_operation(
             player_id,
@@ -331,6 +341,7 @@ impl EnhancedGameServer {
             supports_authority,
             relay_transport,
             password,
+            join_only,
         )
         .await;
     }
@@ -347,6 +358,7 @@ impl EnhancedGameServer {
         supports_authority: Option<bool>,
         relay_transport: Option<RelayTransport>,
         password: Option<String>,
+        join_only: Option<bool>,
     ) {
         let server = Arc::clone(self);
         let player_id = *player_id;
@@ -377,6 +389,7 @@ impl EnhancedGameServer {
                 supports_authority,
                 relay_transport,
                 password,
+                join_only,
                 operation_id,
                 terminal_response_committed_in_task,
                 lifecycle_finalized_in_task,
@@ -457,6 +470,7 @@ impl EnhancedGameServer {
         supports_authority: Option<bool>,
         _relay_transport: Option<RelayTransport>,
         password: Option<String>,
+        join_only: Option<bool>,
         operation_id: Option<crate::protocol::RoomOperationId>,
         terminal_response_committed: Arc<AtomicBool>,
         lifecycle_finalized: Arc<AtomicBool>,
@@ -485,17 +499,31 @@ impl EnhancedGameServer {
         );
 
         let is_room_creation = room_code.is_none();
-        if self
-            .join_would_create_room_while_draining(&game_name, room_code.as_deref())
-            .await
+        let join_only = join_only.unwrap_or(false);
+
+        // A join-only join never creates (issue #625), so the drain
+        // fast-path for room creation does not apply: an unknown code gets
+        // its truthful `ROOM_NOT_FOUND` from the admission lookup instead of
+        // the drain-specific refusal. Existing-room joins stay admitted
+        // during drain, and a join-only join is exactly that class. A
+        // join-only miss replies through the ordinary failure path, so only
+        // its own join task can wait on a full queue; the create-while-
+        // draining rejection stays non-blocking (`try_send`) because a
+        // draining server must not park join tasks on full queues.
+        if !join_only
+            && self
+                .join_would_create_room_while_draining(&game_name, room_code.as_deref())
+                .await
         {
             self.reject_join_for_shutdown_drain(player_id, operation_id)
                 .await;
             return;
         }
 
-        // Rate limiting check
-        let rate_limit_result = if is_room_creation {
+        // Rate limiting check. A `join_only` join states join intent even
+        // when it is malformed (no code), so it always spends the join
+        // bucket, never the creation bucket (issue #625).
+        let rate_limit_result = if is_room_creation && !join_only {
             self.rate_limiter.check_room_creation(player_id).await
         } else {
             self.rate_limiter.check_join_attempt(player_id).await
@@ -554,6 +582,22 @@ impl EnhancedGameServer {
                     player_id,
                     reason,
                     Some(crate::protocol::ErrorCode::InvalidMaxPlayers),
+                    operation_id,
+                )
+                .await;
+            return;
+        }
+
+        // Collision-safe admission shape (issue #625): `join_only` states the
+        // intent to enter an existing room. Omitting the code requests
+        // creation, which contradicts that intent, so the malformed request
+        // is refused instead of silently reinterpreted as a create.
+        if join_only && room_code.is_none() {
+            let _ = self
+                .send_join_failure_to_player(
+                    player_id,
+                    "join_only requires an explicit room_code".to_string(),
+                    Some(crate::protocol::ErrorCode::InvalidInput),
                     operation_id,
                 )
                 .await;
@@ -628,7 +672,11 @@ impl EnhancedGameServer {
                     &player_name,
                     max_players,
                     supports_authority,
-                    RoomAdmissionIntent::ExistingOrCreate,
+                    if join_only {
+                        RoomAdmissionIntent::JoinOnly
+                    } else {
+                        RoomAdmissionIntent::ExistingOrCreate
+                    },
                     join_password,
                 )
                 .await
@@ -1959,6 +2007,13 @@ impl EnhancedGameServer {
         let result = match self.database.get_room(game_name, room_code).await {
             Ok(Some(_)) if matches!(admission_intent, RoomAdmissionIntent::CreateOnly) => {
                 Err(JoinRoomError::RoomCodeCollision)
+            }
+            Ok(None) if matches!(admission_intent, RoomAdmissionIntent::JoinOnly) => {
+                // Directory-style join (issue #625): a code that does not
+                // resolve is refused, never created. Like the app-scoping
+                // check below, the refusal does not distinguish an absent
+                // room from an invisible one.
+                Err(JoinRoomError::RoomNotFound)
             }
             Ok(Some(room_lane)) => {
                 // Admission, routing publication, the directed RoomJoined

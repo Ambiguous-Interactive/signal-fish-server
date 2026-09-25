@@ -133,6 +133,17 @@ pub enum ClientMessage {
         /// server.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         password: Option<String>,
+        /// Collision-safe admission (issue #625). With `true`, a join naming
+        /// an explicit `room_code` must resolve to an existing, visible room;
+        /// an unknown code is refused `ROOM_NOT_FOUND` and never creates a
+        /// room. Application room directories set this on routed joins, so a
+        /// stale directory entry surfaces as a refusal the client can
+        /// re-resolve instead of silently creating a duplicate room on the
+        /// wrong home. Absent or `false` keeps the legacy contract: an
+        /// unknown code creates the room. Requires `room_code`; `true`
+        /// without one is refused `INVALID_INPUT`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        join_only: Option<bool>,
     },
     /// Leave the current room
     LeaveRoom,
@@ -258,6 +269,11 @@ pub enum RoomOperationRequest {
         /// is refused (issue #546).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         password: Option<String>,
+        /// Collision-safe admission (issue #625). See
+        /// [`ClientMessage::JoinRoom`]: with `true` an unknown code is
+        /// refused `ROOM_NOT_FOUND` and never creates a room.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        join_only: Option<bool>,
     },
     LeaveRoom,
     Reconnect {
@@ -298,8 +314,9 @@ pub enum RoomOperationRequest {
     ///
     /// Only the room's designated authority may rotate the code. The old code
     /// stops resolving to this room immediately; joins that name it behave
-    /// like any unknown code (join-creates-room may open a fresh, unrelated
-    /// room under it). Existing members stay connected and reconnection
+    /// like any unknown code: join-creates-room may open a fresh, unrelated
+    /// room under it, while a `join_only` join is refused `ROOM_NOT_FOUND`
+    /// (issue #625). Existing members stay connected and reconnection
     /// tokens are unaffected; the success response
     /// ([`RoomOperationResult::RoomCodeRegenerated`]) carries the new code,
     /// which the authority distributes to future invitees.

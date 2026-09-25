@@ -296,6 +296,7 @@ async fn join_room_raw(
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
     let json = serde_json::to_string(&join).expect("serialize JoinRoom");
     sink.send(Message::Text(json.into()))

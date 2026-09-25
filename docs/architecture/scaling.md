@@ -41,6 +41,13 @@ does not resolve it, redirect a WebSocket, or prevent another process from
 creating the same code. Adding or removing homes while rooms are live requires
 application-level drain and rebuild, not consistent-hash remapping.
 
+Directory-driven joins must be collision-safe. A routed join sets
+`join_only: true` on `JoinRoom` (issue #625): the join then refuses
+`ROOM_NOT_FOUND` when its code does not resolve on that home, so a stale
+directory entry surfaces as a refusal the client can re-resolve instead of a
+second room silently opening under the same public code. The directory, not
+the server, owns creation on the chosen home.
+
 Two consequences follow:
 
 - Relay and signaling share the same boundary. A room's `GameData`, WebRTC

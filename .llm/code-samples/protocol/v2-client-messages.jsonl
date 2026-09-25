@@ -1,5 +1,6 @@
 {"type": "Authenticate", "data": {"app_id": "mb_app_abc123", "sdk_version": "1.2.3", "platform": "unity"}}
 {"type": "JoinRoom", "data": {"game_name": "my-game", "room_code": "ABC123", "player_name": "Player1", "max_players": 8, "supports_authority": true, "relay_transport": null}}
+{"type": "JoinRoom", "data": {"game_name": "my-game", "room_code": "ABC123", "player_name": "Player1", "max_players": 8, "supports_authority": true, "relay_transport": null, "join_only": true}}
 {"type": "JoinRoom", "data": {"game_name": "my-game", "room_code": null, "player_name": "Player1", "max_players": null, "supports_authority": null, "relay_transport": null}}
 {"type": "GameData", "data": {"data": {"action": "move", "x": 10}}}
 {"type": "AuthorityRequest", "data": {"become_authority": true}}

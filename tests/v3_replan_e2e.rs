@@ -224,6 +224,7 @@ async fn join_room(
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await;

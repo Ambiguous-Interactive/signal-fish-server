@@ -58,6 +58,7 @@ async fn join_room(ws: &mut WsStream, room: &str, name: &str) {
             relay_transport: None,
 
             password: None,
+            join_only: None,
         })
         .expect("serialize JoinRoom")
         .into(),
@@ -670,6 +671,7 @@ async fn client_protocol_pings_refresh_activity_reaper_liveness() {
             relay_transport: None,
 
             password: None,
+            join_only: None,
         })
         .expect("serialize JoinRoom")
         .into(),

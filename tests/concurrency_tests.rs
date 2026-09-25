@@ -42,6 +42,7 @@ async fn test_concurrent_room_creation() {
                     Some(true),
                     None,
                     None,
+                    None,
                 )
                 .await;
 
@@ -119,6 +120,7 @@ async fn test_max_rooms_per_game_cap_is_enforced_under_concurrency() {
                     format!("Player{i}"),
                     Some(4),
                     Some(true),
+                    None,
                     None,
                     None,
                 )
@@ -205,6 +207,7 @@ async fn test_server_room_cap_is_enforced_across_games_under_concurrency() {
                     Some(true),
                     None,
                     None,
+                    None,
                 )
                 .await;
 
@@ -278,6 +281,7 @@ async fn test_concurrent_authority_requests() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
 
@@ -298,6 +302,7 @@ async fn test_concurrent_authority_requests() {
                 format!("Player{i}"),
                 Some(10),
                 Some(true),
+                None,
                 None,
                 None,
             )
@@ -373,6 +378,7 @@ async fn test_concurrent_room_joining_at_capacity() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
 
@@ -400,6 +406,7 @@ async fn test_concurrent_room_joining_at_capacity() {
                     format!("Player{i}"),
                     Some(3),
                     Some(true),
+                    None,
                     None,
                     None,
                 )
@@ -454,6 +461,7 @@ async fn test_concurrent_authority_player_disconnect() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
 
@@ -472,6 +480,7 @@ async fn test_concurrent_authority_player_disconnect() {
                 format!("Player{i}"),
                 Some(5),
                 Some(true),
+                None,
                 None,
                 None,
             )
@@ -599,6 +608,7 @@ async fn test_concurrent_room_cleanup_and_activity() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
 
@@ -646,6 +656,7 @@ async fn test_concurrent_room_cleanup_and_activity() {
                 "NewPlayer".to_string(),
                 Some(4),
                 Some(true),
+                None,
                 None,
                 None,
             )
@@ -697,6 +708,7 @@ async fn test_concurrent_room_cleanup_across_instances() {
             "PlayerA".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )

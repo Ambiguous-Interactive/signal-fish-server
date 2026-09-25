@@ -60,12 +60,16 @@ outside this plan's architecture scope.
 These items remain live but are not active phases. Re-rank them whenever new
 correctness evidence appears.
 
-- #625 — room lifecycle visibility + collision-safe join admission. The
-  correctness core is a join against an unknown `(game_name, room_code)`
-  silently creating a duplicate room on the wrong home; fail-on-unknown-code
-  join is the smallest contract change. Lifecycle events/lookup API or
-  app-dimensioned room metrics are the visibility half (cloud #847/#695
-  scoping).
+- #625 — room lifecycle visibility. The correctness half landed (session 259):
+  `JoinRoom.join_only` (v2 and v3, default off, byte-identical when absent)
+  refuses an explicit code that does not resolve with `ROOM_NOT_FOUND`
+  instead of silently creating a room — the collision-safe admission shape
+  for directory-driven joins (drain truthfulness and the v3 correlated
+  envelope included; split-brain catalog updated). Remaining: the visibility
+  half — room-created/room-joined/room-closed events or a lookup API, or
+  app-dimensioned room metrics as a partial step (cloud #847/#695 scoping) —
+  and optional client adoption of `join_only` for `--join-code` modes
+  (SDK/client repos own their halves).
 - #627 — fully spec and implement the rkv and protobuf binary endpoints.
 - #396 — CLOSED 2026-09-12 (standing correctness/perf sweep, closed with the
   session-237 enforcement-seam sweep). The sweep practice continues
