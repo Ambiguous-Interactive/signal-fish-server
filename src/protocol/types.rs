@@ -451,6 +451,13 @@ pub struct ProtocolInfoPayload {
     /// WebSocket framing. `None` preserves the frozen v2 wire contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_outbound_message_size: Option<usize>,
+    /// Exact release of this server implementation, e.g. `"0.9.2"` (v3+ only).
+    ///
+    /// Disclosed behind authentication so clients can pin the deployment they
+    /// test against and tell a protocol change from a newer deploy (issue
+    /// #631). `None` preserves the frozen v2 wire contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implementation_version: Option<String>,
 }
 
 /// Preserve omission as `None` while rejecting an explicitly null wire value.
@@ -697,5 +704,34 @@ mod tests {
         assert_eq!(peers[0].player_id, players[0].id);
         assert_eq!(peers[1].player_id, players[1].id);
         assert!(peers.iter().all(|peer| peer.relay_type == "matchbox"));
+    }
+
+    #[test]
+    fn protocol_info_v2_wire_omits_v3_only_fields_and_tolerates_old_payloads() {
+        // A payload shaped like the frozen v2 wire (no v3-only keys) must
+        // deserialize with every v3-only field `None` and re-serialize without
+        // leaking any v3-only key, so the v2 `ProtocolInfo` bytes stay
+        // byte-identical.
+        let payload: ProtocolInfoPayload = serde_json::from_str(
+            r#"{"capabilities":["reconnection"],"game_data_formats":["json"]}"#,
+        )
+        .expect("v2-shaped payload deserializes");
+
+        assert_eq!(payload.implementation_version, None);
+
+        let wire = serde_json::to_string(&payload).expect("payload serializes");
+        for v3_only in [
+            "protocol_version",
+            "min_protocol_version",
+            "max_protocol_version",
+            "transports",
+            "max_outbound_message_size",
+            "implementation_version",
+        ] {
+            assert!(
+                !wire.contains(v3_only),
+                "v2-shaped ProtocolInfo must stay byte-identical: `{v3_only}` leaked into {wire}"
+            );
+        }
     }
 }

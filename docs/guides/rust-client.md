@@ -283,6 +283,8 @@ pub struct ProtocolInfoPayload {
     pub transports: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_outbound_message_size: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implementation_version: Option<String>,
 }
 
 /// Messages sent from the server to the client.
@@ -1439,6 +1441,8 @@ pub struct ProtocolInfoPayload {
     pub transports: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_outbound_message_size: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implementation_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

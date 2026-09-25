@@ -203,7 +203,11 @@ async fn main() -> anyhow::Result<()> {
     let port: u16 = cfg.port;
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
-    tracing::info!(%addr, "Starting Signal Fish server");
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        %addr,
+        "Starting Signal Fish server"
+    );
     tracing::info!(
         deployment_mode = "single_instance",
         room_state = "in_memory",

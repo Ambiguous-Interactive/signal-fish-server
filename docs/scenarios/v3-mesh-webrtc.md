@@ -48,7 +48,8 @@ The server replies with `Authenticated` (identical shape to the v2 scenario) fol
     "min_protocol_version": 2,
     "max_protocol_version": 3,
     "transports": ["websocket"],
-    "max_outbound_message_size": 8388608
+    "max_outbound_message_size": 8388608,
+    "implementation_version": "0.9.2"
   }
 }
 ```

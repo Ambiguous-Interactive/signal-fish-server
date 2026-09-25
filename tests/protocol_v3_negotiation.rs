@@ -198,6 +198,7 @@ fn protocol_info_version_fields_skipped_when_none() {
         max_protocol_version: None,
         transports: None,
         max_outbound_message_size: None,
+        implementation_version: None,
     };
     let value = serde_json::to_value(&payload).unwrap();
     let obj = value.as_object().unwrap();
@@ -206,6 +207,7 @@ fn protocol_info_version_fields_skipped_when_none() {
     assert!(!obj.contains_key("max_protocol_version"));
     assert!(!obj.contains_key("transports"));
     assert!(!obj.contains_key("max_outbound_message_size"));
+    assert!(!obj.contains_key("implementation_version"));
 }
 
 #[test]
@@ -224,6 +226,7 @@ fn protocol_info_v3_fields_present_when_some() {
         max_protocol_version: Some(3),
         transports: Some(vec![PROTOCOL_INFO_TRANSPORT_WEBSOCKET.to_string()]),
         max_outbound_message_size: Some(8 * 1024 * 1024),
+        implementation_version: Some("0.9.2".to_string()),
     };
     let value = serde_json::to_value(&payload).unwrap();
     assert_eq!(value["protocol_version"], json!(3));
@@ -231,6 +234,7 @@ fn protocol_info_v3_fields_present_when_some() {
     assert_eq!(value["max_protocol_version"], json!(3));
     assert_eq!(value["transports"], json!(["websocket"]));
     assert_eq!(value["max_outbound_message_size"], json!(8 * 1024 * 1024));
+    assert_eq!(value["implementation_version"], json!("0.9.2"));
 }
 
 // ---------------------------------------------------------------------------

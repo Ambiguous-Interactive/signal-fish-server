@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Protocol: `ProtocolInfo.implementation_version` on negotiated v3 — the
+  exact server release (for example `0.9.2`) disclosed behind authentication,
+  so a client can pin the deployment it tested against. Absent on negotiated
+  v2, whose wire shape stays byte-identical (#631). The startup log now also
+  carries the version.
 - Protocol: `JoinRoom.join_only` (optional, additive on v2 and the v3
   correlated envelope). With `true`, a join naming an explicit `room_code`
   that does not resolve is refused `ROOM_NOT_FOUND` and never creates a
