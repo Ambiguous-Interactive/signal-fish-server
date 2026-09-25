@@ -513,6 +513,7 @@ fn golden_server_protocol_info() {
         max_protocol_version: None,
         transports: None,
         max_outbound_message_size: None,
+        implementation_version: None,
     }));
     assert_json(
         &msg,

@@ -2541,6 +2541,8 @@ pub(super) async fn handle_socket(
                                                 .then_some(
                                                     server_clone.config().max_outbound_message_size,
                                                 ),
+                                            implementation_version: (negotiated_version >= 3)
+                                                .then(|| env!("CARGO_PKG_VERSION").to_string()),
                                         },
                                     ));
 

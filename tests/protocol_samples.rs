@@ -199,3 +199,32 @@ fn v3_server_snapshot_samples_include_runtime_epoch_seq_pairs() {
 
     assert!(saw_room_joined, "v3 server samples must include RoomJoined");
 }
+
+/// The canonical v3 `ProtocolInfo` sample discloses the running release. Pin
+/// the value to this build's package version so a release bump refreshes the
+/// sample in the same commit instead of advertising a stale version to the
+/// SDK corpora that vendor these files (issue #631).
+#[test]
+fn v3_protocol_info_sample_discloses_the_current_release_version() {
+    let relative = ".llm/code-samples/protocol/v3-server-messages.jsonl";
+    let mut saw_protocol_info = false;
+
+    for (line_no, line) in numbered_nonblank_lines(relative) {
+        let message: ServerMessage = serde_json::from_str(&line).unwrap_or_else(|error| {
+            panic!("invalid server sample at {relative}:{line_no}: {error}")
+        });
+        if let ServerMessage::ProtocolInfo(info) = message {
+            saw_protocol_info = true;
+            assert_eq!(
+                info.implementation_version,
+                Some(env!("CARGO_PKG_VERSION").to_string()),
+                "v3 sample line {line_no} must advertise the current package version"
+            );
+        }
+    }
+
+    assert!(
+        saw_protocol_info,
+        "v3 server samples must include ProtocolInfo"
+    );
+}

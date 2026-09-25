@@ -552,8 +552,11 @@ Negotiated-v3 responses also include `max_outbound_message_size`, the maximum
 aggregate encoded application payload the deployment will send in one
 WebSocket message. Native clients can read the same decimal byte value from
 the `x-signal-fish-max-outbound-message-size` HTTP upgrade response header.
-The field remains absent from negotiated-v2 `ProtocolInfo` to preserve its
-frozen wire shape.
+They also include `implementation_version`, the exact release of the server
+implementation (for example `0.9.2`). A client can pin the deployment it
+tested against and tell a protocol change from a newer deploy. These fields
+remain absent from negotiated-v2 `ProtocolInfo` to preserve its frozen wire
+shape.
 
 Every client, including browser and negotiated-v2 clients, can fetch the same
 version-neutral JSON before opening a socket: replace the endpoint's `/ws`
@@ -1515,7 +1518,8 @@ The negotiated result is echoed back in an extended `ProtocolInfo` (the v2 field
     "min_protocol_version": 2,
     "max_protocol_version": 3,
     "transports": ["websocket"],
-    "max_outbound_message_size": 8388608
+    "max_outbound_message_size": 8388608,
+    "implementation_version": "0.9.2"
   }
 }
 ```
@@ -1528,6 +1532,8 @@ does not participate in the `Authenticate.supported_transports` data-path negoti
 encoded WebSocket application-payload ceiling; clients should configure their
 receive limit to at least this value. Browser and v2 clients obtain the same
 value before connecting from `/v2/client-config` or `/v3/client-config`.
+`ProtocolInfo.implementation_version` is the exact release of the running
+server implementation. It is disclosed only to authenticated connections.
 The reserved `room_operation_ids` token is absent unless explicitly requested and successfully negotiated;
 SDK-compatibility capability tokens may appear alongside it.
 

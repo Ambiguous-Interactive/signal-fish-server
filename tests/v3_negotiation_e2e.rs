@@ -181,6 +181,11 @@ async fn v3_client_negotiates_v3_and_protocol_info_reports_it() {
                 info.max_outbound_message_size,
                 Some(test_server_config().max_outbound_message_size)
             );
+            assert_eq!(
+                info.implementation_version,
+                Some(env!("CARGO_PKG_VERSION").to_string()),
+                "authenticated v3 clients learn the exact server release (issue #631)"
+            );
             assert!(
                 !info
                     .capabilities
@@ -382,6 +387,10 @@ async fn v2_client_stays_v2_on_default_server() {
             assert_eq!(info.max_protocol_version, None);
             assert_eq!(info.transports, None);
             assert_eq!(info.max_outbound_message_size, None);
+            assert_eq!(
+                info.implementation_version, None,
+                "the frozen v2 ProtocolInfo stays byte-identical: no implementation_version"
+            );
         }
         other => panic!("expected ProtocolInfo, got {other:?}"),
     }
