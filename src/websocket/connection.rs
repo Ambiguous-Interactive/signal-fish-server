@@ -1179,6 +1179,7 @@ pub(super) async fn handle_socket(
     addr: SocketAddr,
     token_binding: Option<TokenBindingHandshake>,
     default_protocol_version: u16,
+    request_id: String,
 ) {
     let _socket_task_guard = server.track_socket_task();
     let (mut sender, mut receiver) = socket.split();
@@ -1966,11 +1967,16 @@ pub(super) async fn handle_socket(
     let lifecycle_for_receive = Arc::clone(&connection_lifecycle);
     let auth_timeout_secs = server.config().websocket_config.auth_timeout_secs;
     let close_signal_for_receive = close_signal.clone();
+    let request_id_for_receive = request_id;
     let mut receive_task = tokio::spawn(async move {
         let mut active_player_id = player_id;
         let token_binding = token_binding_for_receive;
         let close_signal = close_signal_for_receive;
+        let request_id = request_id_for_receive;
         let auth_deadline = checked_deadline(connection_start, auth_timeout);
+        // Every inbound WebSocket frame — Text, Binary, Ping, Pong, Close —
+        // counts as received activity (it also resets the idle window).
+        let mut received_frames: u64 = 0;
 
         // Post-handshake idle timeout (0 = disabled). Wrapping each `receiver.next()`
         // means ANY inbound frame — Text, Binary, Ping, Pong, Close — counts as
@@ -1999,13 +2005,25 @@ pub(super) async fn handle_socket(
                     );
                     break;
                 }
-                InboundRead::Completed(Some(msg)) => msg,
+                InboundRead::Completed(Some(msg)) => {
+                    received_frames = received_frames.saturating_add(1);
+                    msg
+                }
                 InboundRead::Completed(None) => break,
                 InboundRead::DeadlineElapsed => {
+                    // The upgrade's request id ties this cut to the accepted-
+                    // upgrade log and the edge's own request logs, so "the
+                    // upgrade succeeded but no client data arrived" is
+                    // provable from the server's output alone.
+                    let elapsed_ms =
+                        u64::try_from(connection_start.elapsed().as_millis()).unwrap_or(u64::MAX);
                     match inbound_deadline.kind {
                         InboundDeadlineKind::Authentication => {
                             tracing::warn!(
                                 %active_player_id,
+                                request_id = %request_id,
+                                received_frames,
+                                elapsed_ms,
                                 timeout_secs = inbound_deadline.timeout_secs,
                                 "Authentication timeout, closing connection"
                             );
@@ -2013,10 +2031,18 @@ pub(super) async fn handle_socket(
                         InboundDeadlineKind::Idle => {
                             tracing::info!(
                                 %active_player_id,
+                                request_id = %request_id,
+                                received_frames,
+                                elapsed_ms,
                                 timeout_secs = inbound_deadline.timeout_secs,
-                                "Idle timeout - no frames received, closing connection"
+                                "Idle timeout, closing connection"
                             );
                         }
+                    }
+                    if received_frames == 0 {
+                        server_clone
+                            .metrics()
+                            .increment_websocket_zero_frame_timeout_disconnects();
                     }
                     // Timeout farewells use this connection's own outbound
                     // channel and never wait for capacity. The semantic close

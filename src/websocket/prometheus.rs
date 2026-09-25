@@ -191,6 +191,12 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     );
     counter(
         &mut buf,
+        "signal_fish_websocket_zero_frame_timeout_disconnects_total",
+        "Deadline cuts whose session never received a frame: the upgrade succeeded but no client data ever arrived; the cut's log line carries the upgrade request_id",
+        snapshot.connections.websocket_zero_frame_timeout_disconnects,
+    );
+    counter(
+        &mut buf,
         "signal_fish_websocket_ping_timeouts_total",
         "Server-initiated WebSocket pings that missed their matching Pong deadline",
         snapshot.connections.websocket_ping_timeouts,
@@ -883,6 +889,10 @@ mod tests {
         assert!(
             rendered.contains("signal_fish_websocket_ping_probes_cancelled_activity_total 0"),
             "expected activity-cancelled websocket ping counter line"
+        );
+        assert!(
+            rendered.contains("signal_fish_websocket_zero_frame_timeout_disconnects_total 0"),
+            "expected zero-frame deadline-cut counter line"
         );
         assert!(
             rendered.contains("signal_fish_websocket_ping_rtt_samples_total 0"),

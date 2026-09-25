@@ -1732,6 +1732,10 @@ async fn test_idle_client_is_disconnected_after_idle_timeout() {
     let mult = idle_timeout_test_multiplier();
     let config = idle_timeout_server_config(2 * mult);
     let game_server = create_test_server_with_config(config, test_protocol_config()).await;
+    let metrics = game_server.metrics();
+    let zero_frame_before = metrics
+        .websocket_zero_frame_timeout_disconnects
+        .load(std::sync::atomic::Ordering::Relaxed);
     let running_server = start_server_with_instance(game_server).await;
     let addr = running_server.addr();
     let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
@@ -1780,6 +1784,15 @@ async fn test_idle_client_is_disconnected_after_idle_timeout() {
     assert!(
         idle_error_seen,
         "expected an Error frame with CONNECTION_IDLE_TIMEOUT before close, got frames: {frames:?}"
+    );
+    // This session received frames (the join exchange), so its idle cut must
+    // NOT count as a zero-frame deadline disconnect (issue #624).
+    let zero_frame_after = metrics
+        .websocket_zero_frame_timeout_disconnects
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        zero_frame_after, zero_frame_before,
+        "an idle cut with received frames must not count as zero-frame"
     );
     running_server.shutdown().await;
 }
