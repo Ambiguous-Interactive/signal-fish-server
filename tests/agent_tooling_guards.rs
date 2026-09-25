@@ -252,7 +252,6 @@ fn agent_clis_refresh_to_latest_on_every_launch() {
             "migrate_opencode_to_v2",
             "@nanocollective/nanocoder@latest",
             "@z_ai/mcp-server@latest",
-            "--allow-scripts=\"$pkg\"",
         ],
         contract,
     );

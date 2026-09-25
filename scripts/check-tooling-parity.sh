@@ -329,7 +329,6 @@ assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "@opencode/cli@latest" "Agent 
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "migrate_opencode_to_v2" "Agent tooling library removes legacy opencode-ai before installing V2"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "install_nanocoder_cli" "Agent tooling library installs Nanocoder"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" '@z_ai/mcp-server@latest' "Agent tooling library installs the latest Z.AI Vision MCP server"
-assert_contains_literal "$DEVCONTAINER_AGENT_LIB" '--allow-scripts="$pkg"' "Agent tooling library explicitly allows only the selected package lifecycle scripts"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "NPM_CONFIG_PREFIX" "Agent tooling library enforces the user-owned npm prefix"
 assert_contains_literal "$VSCODE_MCP_JSON" '"github"' "VS Code/Copilot MCP config registers the GitHub server"
 assert_contains_literal "$VSCODE_MCP_JSON" "github-mcp-server" "VS Code/Copilot MCP config uses the pinned GitHub MCP server binary"

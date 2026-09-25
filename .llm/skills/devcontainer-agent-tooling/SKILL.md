@@ -37,9 +37,11 @@ description: >-
 2. **Latest npm agent tools**: `@openai/codex@latest`, `@opencode/cli@latest`
    (OpenCode V2), `@nanocollective/nanocoder@latest`, and
    `@z_ai/mcp-server@latest` install on create and refresh on every start via
-   `.devcontainer/lib-agent-tools.sh`. Pass `--allow-scripts="$pkg"` so npm 11
-   runs OpenCode's required postinstall while authorizing lifecycle scripts
-   only for the selected package. `migrate_opencode_to_v2` uninstalls the
+   `.devcontainer/lib-agent-tools.sh`. npm runs lifecycle scripts by default
+   (OpenCode's postinstall selects its platform binary on its own); do not
+   add script-gating flags — `--allow-scripts` is an unknown,
+   deprecation-warned npm config. `--include=optional` ships the
+   per-platform binary packages. `migrate_opencode_to_v2` uninstalls the
    legacy `opencode-ai` V1 package before `@opencode/cli` installs: both
    packages own the `opencode` bin symlink, so a user-pinned
    `OPENCODE_NPM_SPEC` is the only way to keep V1.
@@ -159,18 +161,20 @@ every change, so rely on it in CI and on the static guards above.
 - Removing the `environment` pass-through from `opencode.json` → the OpenCode
   GitHub MCP server starts unauthenticated and prompts the OAuth device flow
   every session (issue #496).
-- Installing `@opencode/cli` while `opencode-ai` is still present, or
-  uninstalling V1 after V2 installs → both packages own the `opencode` bin
-  symlink, so the later uninstall deletes V2's link and `opencode` vanishes.
-  Always run `migrate_opencode_to_v2` (uninstall-first), and skip the V2
-  install whenever the uninstall fails.
+- Installing `@opencode/cli` while `opencode-ai` is present fails: npm
+  refuses the install (EEXIST on the shared `opencode` bin shim). And
+  uninstalling V1 after V2 installs deletes the bin link V2 owns, so
+  `opencode` vanishes. Always uninstall V1 first (`migrate_opencode_to_v2`),
+  and skip the V2 install whenever the uninstall fails.
+- Adding lifecycle-script gates (such as `--allow-scripts`) to the npm
+  global installs → npm treats the flag as unknown config and deprecation-
+  warns on every install; scripts run by default anyway. Keep the plain
+  `npm install --global --include=optional` form.
 - Flat `mcp.<name>` entries or the V1-only `enabled` key in `opencode.json` →
   V1 syntax still loads in V2, but the native-V2 guards fail; keep the
   `mcp.servers` grouping.
 - Replacing the preinstalled Z.AI Vision command with `npx` → every MCP startup
   can wait on the registry and becomes unreliable offline.
-- Dropping the package-scoped `--allow-scripts` option → npm 11 can skip
-  OpenCode's platform-binary postinstall and leave a fresh install unusable.
 - Hardcoding `Z_AI_API_KEY` or derived authorization headers → leaks a secret;
   use the shared dotenv-aware launcher.
 - Removing `waitFor: updateContentCommand` → future default changes can put

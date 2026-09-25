@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matters. Offline launches keep V1; a pinned `OPENCODE_NPM_SPEC` skips the
   migration.
 
+- Devcontainer: npm global agent installs no longer pass `--allow-scripts`.
+  npm runs lifecycle scripts by default; the flag is an unknown config there
+  and deprecation-warned on every install. `--include=optional` still ships
+  the per-platform binary packages (verified on npm 11: identical install
+  results with and without the flag).
+
 - Devcontainer: the pinned GitHub MCP server binary is bumped from 1.11.0 to
   1.12.2, with fresh SHA256 ARGs taken from the release's checksums.txt.
 

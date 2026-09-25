@@ -360,11 +360,12 @@ install_npm_global_cli() {
     fi
 
     echo "[setup] Installing ${binary} CLI from npm: ${spec} (${installed:-absent} -> ${latest:-latest})"
-    # npm 11 blocks dependency lifecycle scripts unless explicitly allowed.
-    # OpenCode uses a postinstall to select/copy its platform binary, so allow
-    # scripts only for the package being deliberately installed.
-    if ! run_with_retries "$max_attempts" 3 npm install --global --include=optional \
-        --allow-scripts="$pkg" "$spec"; then
+    # npm runs lifecycle scripts by default; --allow-scripts is an unknown,
+    # deprecation-warned config there. The postinstall that selects the
+    # platform binary runs on its own, and --include=optional is what ships
+    # the per-platform package. Revisit only if npm ever gates lifecycle
+    # scripts by default.
+    if ! run_with_retries "$max_attempts" 3 npm install --global --include=optional "$spec"; then
         return 1
     fi
 
@@ -384,10 +385,12 @@ install_codex_cli() {
 
 # OpenCode V2 ships as @opencode/cli; the legacy opencode-ai package still
 # serves V1 1.x from npm's latest tag. Both own the `opencode` bin symlink in
-# the shared npm prefix, so migrate_opencode_to_v2 must remove V1 BEFORE this
-# installs V2 — uninstalling V1 afterwards would delete the bin link V2 just
-# created. A user-pinned OPENCODE_NPM_SPEC overrides the default and skips the
-# automatic migration.
+# the shared npm prefix: npm refuses an install over a present V1 (EEXIST on
+# the shared bin shim), and uninstalling V1 afterwards would delete the bin
+# link V2 just created. refresh_agent_npm_tools is the only sanctioned entry
+# point — it runs migrate_opencode_to_v2 first and skips this install while
+# V1 cannot be removed. A user-pinned OPENCODE_NPM_SPEC overrides the default
+# and skips the automatic migration.
 install_opencode_cli() {
     install_npm_global_cli "opencode" "${OPENCODE_NPM_SPEC:-@opencode/cli@latest}"
 }
@@ -423,7 +426,7 @@ migrate_opencode_to_v2() {
         return 0
     fi
 
-    if ! npm uninstall --global opencode-ai; then
+    if ! npm uninstall --global opencode-ai >/dev/null 2>&1; then
         echo "[setup] ERROR: could not uninstall the legacy opencode-ai package." >&2
         return 1
     fi

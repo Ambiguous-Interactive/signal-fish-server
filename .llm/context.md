@@ -214,9 +214,11 @@ misread.
   start. Keep `waitFor: updateContentCommand` so network refreshes remain
   behind the editor attach point. Every lifecycle step stays best-effort
   (`return`, never `exit`) so optional setup cannot prevent a usable attach.
-- Keep npm 11 lifecycle scripts explicitly scoped to the selected package via
-  `--allow-scripts="$pkg"`; OpenCode's platform-binary selection depends on its
-  postinstall, while a broad script allowlist needlessly expands trust.
+- Do not add lifecycle-script gates (such as `--allow-scripts`) to npm global
+  installs: npm runs lifecycle scripts by default and treats that flag as an
+  unknown, deprecation-warned config. OpenCode's postinstall selects its
+  platform binary on its own; `--include=optional` ships the per-platform
+  package.
 - Keep the pinned GitHub MCP server (`GITHUB_MCP_VERSION` in
   `.devcontainer/Dockerfile`) wired into every harness:
   `.vscode/mcp.json` (VS Code + Copilot), `.mcp.json` (Claude Code +
