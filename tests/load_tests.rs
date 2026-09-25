@@ -340,6 +340,7 @@ async fn test_load_room_creation_throughput() {
                         Some(true),
                         None,
                         None,
+                        None,
                     ),
                 )
                 .await;
@@ -429,6 +430,7 @@ async fn test_load_sustained_concurrent_connections() {
                     format!("Player{i}"),
                     Some(4),
                     Some(true),
+                    None,
                     None,
                     None,
                 )
@@ -546,6 +548,7 @@ async fn test_load_message_latency_distribution() {
                     format!("Player{player_idx}"),
                     Some(4),
                     Some(true),
+                    None,
                     None,
                     None,
                 )
@@ -682,6 +685,7 @@ async fn test_load_stress_to_failure() {
                             Some(true),
                             None,
                             None,
+                            None,
                         )
                         .await;
 
@@ -764,6 +768,7 @@ async fn test_load_memory_usage() {
                     format!("Player{i}"),
                     Some(4),
                     Some(true),
+                    None,
                     None,
                     None,
                 )
@@ -900,6 +905,7 @@ async fn test_load_rate_limiting() {
                 "RateTester".to_string(),
                 Some(4),
                 Some(true),
+                None,
                 None,
                 None,
             )

@@ -84,6 +84,14 @@ message. `JoinRoom` behavior depends on `room_code`:
 2. Provide `room_code` and room exists for that `game_name`: join that room.
 3. Provide `room_code` and no room exists for that `game_name`: create a new
    room with that room code.
+4. Provide `room_code` with `join_only: true` and no room exists for that
+   `game_name`: refused with `ROOM_NOT_FOUND`. No room is created.
+
+Rule 4 is the collision-safe admission shape (issue #625). A room directory
+sets `join_only: true` on routed joins: a stale directory entry then surfaces
+as a refusal the client can re-resolve, instead of silently creating a
+duplicate room on the wrong home. `join_only: true` without a `room_code` is
+refused with `INVALID_INPUT`.
 
 Rooms are scoped to the application identity presented in the `Authenticate`
 handshake (issue #520). A created room is stamped with its creator's
@@ -121,6 +129,8 @@ Optional fields:
 - `supports_authority` - Authority support (applied only when a new room is created)
 - `relay_transport` - Reserved compatibility hint (`tcp`, `udp`, `websocket`, or `auto`). The server currently
   ignores this field: omission and every accepted value use the same authenticated WebSocket relay path.
+- `join_only` - With `true`, an unknown `room_code` is refused `ROOM_NOT_FOUND`
+  and never creates a room (issue #625). Requires `room_code`.
 
 New clients should omit `relay_transport`. It remains accepted so existing
 protocol-v2 payloads continue to decode, but it will not become actionable

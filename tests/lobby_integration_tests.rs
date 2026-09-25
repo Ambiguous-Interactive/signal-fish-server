@@ -33,6 +33,7 @@ async fn test_lobby_integration_full_flow() {
                 Some(true),
                 None,
                 None,
+                None,
             )
             .await;
     }
@@ -147,6 +148,7 @@ async fn test_lobby_player_leaves_during_ready_phase() {
                 Some(true),
                 None,
                 None,
+                None,
             )
             .await;
     }
@@ -239,6 +241,7 @@ async fn test_lobby_ready_toggle_resets_ready_state() {
                 Some(true),
                 None,
                 None,
+                None,
             )
             .await;
     }
@@ -290,6 +293,7 @@ async fn test_lobby_room_authority_preservation() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
 
@@ -301,6 +305,7 @@ async fn test_lobby_room_authority_preservation() {
             "Regular".to_string(),
             Some(2),
             Some(true),
+            None,
             None,
             None,
         )
@@ -391,6 +396,7 @@ async fn test_spectator_state_updates_include_snapshots_and_reasons() {
             "HostPlayer".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -606,6 +612,7 @@ async fn spectator_and_seated_joins_share_the_attempt_budget() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     expect_room_joined(&mut player_rx, "seated attempt consumes shared budget");
@@ -660,6 +667,7 @@ async fn spectator_and_seated_joins_share_the_attempt_budget() {
             "Player".to_string(),
             Some(2),
             Some(true),
+            None,
             None,
             None,
         )
@@ -783,6 +791,7 @@ async fn spectator_join_during_shutdown_drain_is_rejected_with_server_draining()
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     let _room = expect_room_joined(&mut host_rx, "host join before drain");
@@ -832,6 +841,7 @@ async fn spectator_admission_uses_configured_name_and_room_code_boundaries() {
             "Host".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -936,6 +946,7 @@ async fn spectator_join_failures_answer_with_spectator_join_failed() {
             "Host".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )

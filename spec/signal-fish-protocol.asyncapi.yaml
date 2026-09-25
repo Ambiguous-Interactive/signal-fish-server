@@ -1010,6 +1010,18 @@ components:
                 mismatch. When the join creates the room, this password seals
                 it from birth. Non-empty, at most 256 bytes. Never logged by
                 the server.
+            join_only:
+              type: [boolean, 'null']
+              description: >-
+                Collision-safe admission (issue #625). With true, a join
+                naming an explicit room_code must resolve to an existing,
+                visible room; an unknown code is refused ROOM_NOT_FOUND and
+                never creates a room. Room directories set this on routed
+                joins, so a stale directory entry surfaces as a refusal the
+                client can re-resolve instead of silently creating a duplicate
+                room on the wrong home. Absent or false keeps the legacy
+                contract: an unknown code creates the room. true without a
+                room_code is refused INVALID_INPUT.
       required: [type, data]
     LeaveRoom:
       type: object

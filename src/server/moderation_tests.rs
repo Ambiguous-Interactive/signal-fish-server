@@ -94,6 +94,7 @@ async fn join_seated_player(
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     let joined = timeout(Duration::from_secs(1), receiver.recv())
@@ -1036,6 +1037,7 @@ async fn creation_applies_the_default_spectator_capacity() {
                 Some(false),
                 None,
                 None,
+                None,
             )
             .await;
         let joined = timeout(Duration::from_secs(1), rx.recv())
@@ -1464,6 +1466,7 @@ async fn join_with_password(
             Some(true),
             None,
             password.map(str::to_string),
+            None,
         )
         .await;
     let terminal = recv_until(receiver, |message| {

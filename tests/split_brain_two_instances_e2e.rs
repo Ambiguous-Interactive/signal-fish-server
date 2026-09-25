@@ -5,7 +5,9 @@
 //! operation. Its product is the executable failure catalog consumed by the
 //! single-instance deployment contract:
 //!
-//! - the same `(game_name, room_code)` silently creates one room per instance;
+//! - the same `(game_name, room_code)` silently creates one room per instance
+//!   (a routed join with `join_only: true` refuses `ROOM_NOT_FOUND` instead,
+//!   issue #625);
 //! - reconnect state is stranded on the instance that issued the token; and
 //! - a cross-instance WebRTC target is explicitly rejected, never relayed.
 
@@ -98,6 +100,7 @@ async fn join_room(
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await;
@@ -194,6 +197,42 @@ async fn two_instances_produce_the_documented_split_brain_catalog() {
     );
     assert_eq!(joined_a.current_players.len(), 1);
     assert_eq!(joined_b.current_players.len(), 1);
+
+    // A routed join with `join_only: true` (issue #625) refuses on the wrong
+    // home instead of silently creating the duplicate room above.
+    let mut peer_c = connect_v3(instance_b.port).await;
+    send(
+        &mut peer_c,
+        &ClientMessage::JoinRoom {
+            game_name: GAME_NAME.to_string(),
+            room_code: Some(joined_a.room_code.clone()),
+            player_name: "InstanceCJoinOnlyPlayer".to_string(),
+            max_players: Some(2),
+            supports_authority: Some(false),
+            relay_transport: None,
+
+            password: None,
+            join_only: Some(true),
+        },
+    )
+    .await;
+    let join_only_miss = next_server_message_within(
+        &mut peer_c,
+        SERVER_MESSAGE_TIMEOUT,
+        "join-only cross-instance refusal",
+    )
+    .await;
+    match join_only_miss {
+        ServerMessage::RoomJoinFailed { reason, error_code } => {
+            assert_eq!(error_code, Some(ErrorCode::RoomNotFound));
+            assert_eq!(reason, "Room not found");
+        }
+        ServerMessage::RoomJoined(payload) => panic!(
+            "a join-only join must not create the duplicate room {:?} on process B",
+            payload.room_id
+        ),
+        other => panic!("expected RoomJoinFailed, got {other:?}"),
+    }
 
     // The second process has neither the player identity nor the pending
     // disconnection registry entry, even when presented with the real token.

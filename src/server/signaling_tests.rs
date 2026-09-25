@@ -993,6 +993,7 @@ async fn missing_join_publication_snapshot_preserves_open_then_terminal_order() 
             Some(false),
             None,
             None,
+            None,
         )
         .await;
     let room_id = server
@@ -1021,6 +1022,7 @@ async fn missing_join_publication_snapshot_preserves_open_then_terminal_order() 
             "joiner".to_string(),
             Some(2),
             Some(false),
+            None,
             None,
             None,
         )

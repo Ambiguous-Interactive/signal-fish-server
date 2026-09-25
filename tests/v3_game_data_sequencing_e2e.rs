@@ -148,6 +148,7 @@ fn join_message(room_code: &str, player_name: &str) -> ClientMessage {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     }
 }
 

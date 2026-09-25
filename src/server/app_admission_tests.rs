@@ -103,6 +103,7 @@ async fn join_room(
             Some(true),
             None,
             None,
+            None,
         )
         .await;
 }

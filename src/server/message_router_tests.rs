@@ -518,6 +518,7 @@ async fn transport_status_is_ordered_before_concurrent_leave() {
                 relay_transport: None,
 
                 password: None,
+                join_only: None,
             },
         )
         .await;
@@ -550,6 +551,7 @@ async fn transport_status_is_ordered_before_concurrent_leave() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
     server
         .handle_client_message(&reporter, join_message())
@@ -658,6 +660,7 @@ async fn join_room_request_is_forwarded_to_room_service() {
                 relay_transport: None,
 
                 password: None,
+                join_only: None,
             },
         )
         .await;
@@ -708,6 +711,7 @@ async fn correlated_room_operations_echo_ids_and_reject_stale_responses() {
                     relay_transport: None,
 
                     password: None,
+                    join_only: None,
                 }),
             },
         )
@@ -755,6 +759,7 @@ async fn correlated_room_operations_echo_ids_and_reject_stale_responses() {
                             relay_transport: None,
 
                             password: None,
+                            join_only: None,
                         }),
                     },
                 )
@@ -908,6 +913,7 @@ async fn correlated_spectator_operations_echo_success_and_failure_ids() {
                 relay_transport: None,
 
                 password: None,
+                join_only: None,
             },
         )
         .await;

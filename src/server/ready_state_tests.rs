@@ -427,6 +427,7 @@ async fn start_game_rejections_map_to_exact_wire_error_codes() {
             Some(false),
             None,
             None,
+            None,
         )
         .await;
     let room_code = match recv(&mut rx_a).await.as_ref() {
@@ -439,6 +440,7 @@ async fn start_game_rejections_map_to_exact_wire_error_codes() {
             "start-not-ready".to_string(),
             Some(room_code),
             "PlayerB".to_string(),
+            None,
             None,
             None,
             None,
@@ -494,6 +496,7 @@ async fn start_game_rejections_map_to_exact_wire_error_codes() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     let authority_code = match recv(&mut rx_owner).await.as_ref() {
@@ -506,6 +509,7 @@ async fn start_game_rejections_map_to_exact_wire_error_codes() {
             "start-forbidden".to_string(),
             Some(authority_code),
             "Member".to_string(),
+            None,
             None,
             None,
             None,
@@ -606,6 +610,7 @@ async fn join_breaks_cached_all_ready_without_a_corrective_broadcast() {
             Some(false),
             None,
             None,
+            None,
         )
         .await;
     let room_code = match recv(&mut rx_a).await.as_ref() {
@@ -619,6 +624,7 @@ async fn join_breaks_cached_all_ready_without_a_corrective_broadcast() {
             "all-ready-staleness".to_string(),
             Some(room_code),
             "PlayerB".to_string(),
+            None,
             None,
             None,
             None,
@@ -649,6 +655,7 @@ async fn join_breaks_cached_all_ready_without_a_corrective_broadcast() {
             "all-ready-staleness".to_string(),
             Some(latecomer_code),
             "Latecomer".to_string(),
+            None,
             None,
             None,
             None,
@@ -781,6 +788,7 @@ async fn stale_generation_ready_and_start_game_are_silent_noops_after_reclaim() 
             Some(false),
             None,
             None,
+            None,
         )
         .await;
     let (room_id, room_code) = match recv(&mut rx_a).await.as_ref() {
@@ -793,6 +801,7 @@ async fn stale_generation_ready_and_start_game_are_silent_noops_after_reclaim() 
             "stale-generation-fence".to_string(),
             Some(room_code),
             "PlayerB".to_string(),
+            None,
             None,
             None,
             None,
@@ -911,6 +920,7 @@ async fn rejoining_a_room_does_not_restore_stale_readiness() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     let (room_id, room_code) = match recv(&mut rx_a).await.as_ref() {
@@ -923,6 +933,7 @@ async fn rejoining_a_room_does_not_restore_stale_readiness() {
             "ready-rejoin-game".to_string(),
             Some(room_code.clone()),
             "PlayerB".to_string(),
+            None,
             None,
             None,
             None,
@@ -975,6 +986,7 @@ async fn rejoining_a_room_does_not_restore_stale_readiness() {
             "ready-rejoin-game".to_string(),
             Some(room_code),
             "PlayerA".to_string(),
+            None,
             None,
             None,
             None,
@@ -1042,6 +1054,7 @@ async fn reconnecting_into_a_finalized_room_restores_that_members_readiness() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     server
@@ -1050,6 +1063,7 @@ async fn reconnecting_into_a_finalized_room_restores_that_members_readiness() {
             "finalized-reconnect".to_string(),
             Some("FINAL2".to_string()),
             "PlayerB".to_string(),
+            None,
             None,
             None,
             None,
@@ -1162,6 +1176,7 @@ async fn snapshots_of_a_finalized_room_report_its_final_readiness() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     server
@@ -1170,6 +1185,7 @@ async fn snapshots_of_a_finalized_room_report_its_final_readiness() {
             "finalized-spectate".to_string(),
             Some("FINAL1".to_string()),
             "PlayerB".to_string(),
+            None,
             None,
             None,
             None,
@@ -1249,6 +1265,7 @@ async fn spectator_snapshot_reports_live_readiness() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     server
@@ -1257,6 +1274,7 @@ async fn spectator_snapshot_reports_live_readiness() {
             "spectated-game".to_string(),
             Some("SPECT1".to_string()),
             "PlayerB".to_string(),
+            None,
             None,
             None,
             None,

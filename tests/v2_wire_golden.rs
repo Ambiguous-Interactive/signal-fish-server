@@ -213,6 +213,7 @@ fn golden_client_join_room() {
         relay_transport: Some(RelayTransport::Udp),
 
         password: None,
+        join_only: None,
     };
     assert_json(
         &msg,
@@ -234,9 +235,11 @@ fn golden_client_join_room() {
 
 #[test]
 fn golden_client_join_room_minimal() {
-    // No JoinRoom field has `skip_serializing_if`, so every optional field
-    // serializes explicitly as `null` — uniquely freezing the `relay_transport:
-    // None` form (and the other `None` optionals) that production emits.
+    // The pre-password optional JoinRoom fields have no
+    // `skip_serializing_if`, so they serialize explicitly as `null` —
+    // uniquely freezing the `relay_transport: None` form (and the other
+    // `None` optionals) that production emits. `password` (issue #525) and
+    // `join_only` (issue #625), added later, omit when `None`.
     let msg = ClientMessage::JoinRoom {
         game_name: "test_game".to_string(),
         room_code: None,
@@ -246,6 +249,7 @@ fn golden_client_join_room_minimal() {
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
     assert_json(
         &msg,
@@ -263,6 +267,54 @@ fn golden_client_join_room_minimal() {
         r#"{"type":"JoinRoom","data":{"game_name":"test_game","room_code":null,"player_name":"Alice","max_players":null,"supports_authority":null,"relay_transport":null}}"#,
     );
     assert_msgpack(&msg, "82a474797065a84a6f696e526f6f6da46461746186a967616d655f6e616d65a9746573745f67616d65a9726f6f6d5f636f6465c0ab706c617965725f6e616d65a5416c696365ab6d61785f706c6179657273c0b2737570706f7274735f617574686f72697479c0af72656c61795f7472616e73706f7274c0");
+}
+
+#[test]
+fn golden_client_join_room_join_only() {
+    // Collision-safe admission (issue #625): `join_only: true` is the
+    // directory-driven join shape. It serializes when present and parses
+    // back; a missing flag keeps the frames above byte-identical.
+    let msg = ClientMessage::JoinRoom {
+        game_name: "test_game".to_string(),
+        room_code: Some("ABC123".to_string()),
+        player_name: "Alice".to_string(),
+        max_players: Some(4),
+        supports_authority: Some(false),
+        relay_transport: None,
+
+        password: None,
+        join_only: Some(true),
+    };
+    let encoded = r#"{"type":"JoinRoom","data":{"game_name":"test_game","room_code":"ABC123","player_name":"Alice","max_players":4,"supports_authority":false,"relay_transport":null,"join_only":true}}"#;
+    assert_json(
+        &msg,
+        json!({
+            "type": "JoinRoom",
+            "data": {
+                "game_name": "test_game",
+                "room_code": "ABC123",
+                "player_name": "Alice",
+                "max_players": 4,
+                "supports_authority": false,
+                "relay_transport": null,
+                "join_only": true
+            }
+        }),
+        encoded,
+    );
+    assert_msgpack(&msg, "82a474797065a84a6f696e526f6f6da46461746187a967616d655f6e616d65a9746573745f67616d65a9726f6f6d5f636f6465a6414243313233ab706c617965725f6e616d65a5416c696365ab6d61785f706c617965727304b2737570706f7274735f617574686f72697479c2af72656c61795f7472616e73706f7274c0a96a6f696e5f6f6e6c79c3");
+
+    let parsed: ClientMessage = serde_json::from_str(encoded).expect("join_only frame must parse");
+    assert!(
+        matches!(
+            parsed,
+            ClientMessage::JoinRoom {
+                join_only: Some(true),
+                ..
+            }
+        ),
+        "the parsed join must carry join_only: true"
+    );
 }
 
 #[test]

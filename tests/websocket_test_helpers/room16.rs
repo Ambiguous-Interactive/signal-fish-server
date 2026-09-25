@@ -124,6 +124,7 @@ pub async fn try_join(
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await;

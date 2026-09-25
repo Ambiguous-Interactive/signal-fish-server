@@ -204,6 +204,7 @@ async fn join_room(
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await;
@@ -1352,6 +1353,7 @@ async fn v2_room_joined_has_no_reconnection_token_key() {
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await;

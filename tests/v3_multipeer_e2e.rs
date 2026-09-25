@@ -259,6 +259,7 @@ async fn join_room(
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await;
@@ -624,6 +625,7 @@ async fn mixed_v2_v3_n3_relay_floor_is_explicit_only_for_v3() {
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await;
@@ -1419,6 +1421,7 @@ async fn mixed_v2_v3_n3_transport_status_v2_member_hears_nothing() {
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await;

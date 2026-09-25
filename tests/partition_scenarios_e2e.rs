@@ -77,6 +77,7 @@ async fn join_room(ws: &mut WsStream, room: &str, player_name: &str) -> Box<Room
         relay_transport: None,
 
         password: None,
+        join_only: None,
     };
     send_client_message(ws, &join).await;
 

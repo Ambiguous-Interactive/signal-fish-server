@@ -516,6 +516,7 @@ async fn real_websocket_handshake_binds_room_and_spectator_policy_to_public_app_
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await;
@@ -536,6 +537,7 @@ async fn real_websocket_handshake_binds_room_and_spectator_policy_to_public_app_
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await;
@@ -588,6 +590,7 @@ async fn real_websocket_handshake_binds_room_and_spectator_policy_to_public_app_
             relay_transport: None,
 
             password: None,
+            join_only: None,
         },
     )
     .await;

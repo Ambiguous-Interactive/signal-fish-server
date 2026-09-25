@@ -215,6 +215,7 @@ async fn generated_room_code_collision_retries_instead_of_joining_existing_room(
             Some(true),
             None,
             None,
+            None,
         )
         .await;
 
@@ -263,6 +264,7 @@ async fn room_join_rejects_unicode_case_fold_equivalent_player_name() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     let created = timeout(Duration::from_secs(1), creator_rx.recv())
@@ -284,6 +286,7 @@ async fn room_join_rejects_unicode_case_fold_equivalent_player_name() {
             "STRASSE".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -343,6 +346,7 @@ async fn legacy_adapter_untyped_atomic_collision_is_confirmed_and_retried() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
 
@@ -400,6 +404,7 @@ async fn ambiguous_commit_for_a_password_creation_is_refused_not_adopted_unlocke
             Some(true),
             None,
             Some("secret".to_string()),
+            None,
         )
         .await;
 
@@ -462,6 +467,7 @@ async fn legacy_adapter_ambiguous_success_is_adopted_without_duplicate_room() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
 
@@ -517,6 +523,7 @@ async fn generated_room_code_retry_budget_exhaustion_is_bounded_and_observable()
             "creator".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -589,6 +596,7 @@ async fn explicit_room_code_keeps_existing_join_semantics_without_retry() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
 
@@ -604,6 +612,348 @@ async fn explicit_room_code_keeps_existing_join_semantics_without_retry() {
     let race = server.metrics.snapshot().await.race_conditions;
     assert_eq!(race.room_code_collisions, 0);
     assert_eq!(race.room_code_retry_operations, 0);
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn join_only_admission_never_creates_and_preserves_legacy_create_on_join() {
+    // Issue #625: a directory-driven join must not silently create a room
+    // when its code does not resolve. `join_only` refuses such a join with
+    // the non-enumerating `ROOM_NOT_FOUND` and creates nothing; an absent or
+    // explicit-false flag keeps the legacy create-on-join contract.
+    #[derive(Debug)]
+    enum Expect {
+        /// Join the fixture room; nothing is created.
+        Existing,
+        /// Create a room under the requested code (legacy contract).
+        Created,
+        /// Refused with this code; nothing is created.
+        Refused(ErrorCode),
+    }
+    struct Case {
+        name: &'static str,
+        join_only: Option<bool>,
+        room_code: Option<&'static str>,
+        expect: Expect,
+    }
+    let cases = [
+        Case {
+            name: "join_only miss refuses an unknown code without creating",
+            join_only: Some(true),
+            room_code: Some("MISSJ1"),
+            expect: Expect::Refused(ErrorCode::RoomNotFound),
+        },
+        Case {
+            name: "join_only hit joins the existing room",
+            join_only: Some(true),
+            room_code: Some("EXPLJ2"),
+            expect: Expect::Existing,
+        },
+        Case {
+            name: "absent join_only keeps legacy create-on-join",
+            join_only: None,
+            room_code: Some("NEWJM3"),
+            expect: Expect::Created,
+        },
+        Case {
+            name: "explicit false keeps legacy create-on-join",
+            join_only: Some(false),
+            room_code: Some("NEWJM4"),
+            expect: Expect::Created,
+        },
+        Case {
+            name: "join_only without a code is a malformed request",
+            join_only: Some(true),
+            room_code: None,
+            expect: Expect::Refused(ErrorCode::InvalidInput),
+        },
+    ];
+
+    for (index, case) in cases.iter().enumerate() {
+        let server = create_test_server().await;
+        let fixture = server
+            .database
+            .create_room(
+                "join-only-game".to_string(),
+                Some("EXPLJ2".to_string()),
+                4,
+                true,
+                PlayerId::new_v4(),
+                "udp".to_string(),
+                "region-a".to_string(),
+                None,
+            )
+            .await
+            .expect("fixture room should be created");
+
+        let index = u16::try_from(index).expect("case index fits a port offset");
+        let port: u16 = 48350 + index;
+        let (joiner, mut receiver) =
+            register_client(&server, format!("127.0.0.1:{port}").parse().unwrap()).await;
+        server
+            .handle_join_room(
+                &joiner,
+                "join-only-game".to_string(),
+                case.room_code.map(str::to_string),
+                "distinct-joiner".to_string(),
+                Some(4),
+                Some(true),
+                None,
+                None,
+                case.join_only,
+            )
+            .await;
+
+        let response = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap_or_else(|_| panic!("case '{}' should finish", case.name))
+            .expect("case should return a response");
+        match (&case.expect, response.as_ref()) {
+            (Expect::Refused(code), ServerMessage::RoomJoinFailed { error_code, .. }) => {
+                assert_eq!(
+                    error_code,
+                    &Some(code.clone()),
+                    "case '{}' refused with the wrong code",
+                    case.name
+                );
+            }
+            (Expect::Existing, ServerMessage::RoomJoined(payload)) => {
+                assert_eq!(
+                    payload.room_id, fixture.id,
+                    "case '{}' must join the fixture room",
+                    case.name
+                );
+            }
+            (Expect::Created, ServerMessage::RoomJoined(payload)) => {
+                assert_eq!(
+                    payload.room_code,
+                    case.room_code.expect("created case names a code"),
+                    "case '{}' must create the requested code",
+                    case.name
+                );
+            }
+            (expect, other) => panic!("case '{}' expected {expect:?}, got {other:?}", case.name),
+        }
+
+        let expected_created = matches!(case.expect, Expect::Created) as u64;
+        let expected_joined = matches!(case.expect, Expect::Existing) as u64;
+        let metrics = server.metrics.snapshot().await.rooms;
+        assert_eq!(
+            metrics.rooms_created, expected_created,
+            "case '{}' room-creation counter",
+            case.name
+        );
+        assert_eq!(
+            metrics.rooms_joined, expected_joined,
+            "case '{}' existing-join counter",
+            case.name
+        );
+        if let Expect::Refused(_) = case.expect {
+            if let Some(code) = case.room_code {
+                assert!(
+                    server
+                        .database
+                        .get_room("join-only-game", code)
+                        .await
+                        .expect("room lookup succeeds")
+                        .is_none(),
+                    "case '{}' must not create the refused code",
+                    case.name
+                );
+                assert!(
+                    !server
+                        .distributed_lock
+                        .is_locked(&format!("room_join:join-only-game:{code}"))
+                        .await
+                        .expect("room join lock check succeeds"),
+                    "case '{}' must release the room-join lock",
+                    case.name
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn join_only_admission_while_draining_is_truthful_and_admits_existing_rooms() {
+    // While draining, a join-only miss reports its truthful `ROOM_NOT_FOUND`
+    // (it can never be a creation), a join-only hit still joins the existing
+    // room, and the legacy absent-code join keeps the drain fast-path
+    // refusal (issue #625).
+    let server = create_test_server().await;
+    let fixture = server
+        .database
+        .create_room(
+            "drain-join-game".to_string(),
+            Some("EXPLD5".to_string()),
+            4,
+            true,
+            PlayerId::new_v4(),
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("fixture room should be created");
+    server.begin_shutdown_drain();
+
+    let (miss_player, mut miss_receiver) =
+        register_client(&server, "127.0.0.1:48360".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &miss_player,
+            "drain-join-game".to_string(),
+            Some("ABSDJ6".to_string()),
+            "miss-joiner".to_string(),
+            Some(4),
+            Some(true),
+            None,
+            None,
+            Some(true),
+        )
+        .await;
+    let miss = timeout(Duration::from_secs(1), miss_receiver.recv())
+        .await
+        .expect("join-only drain miss should finish")
+        .expect("join-only drain miss should return a response");
+    let ServerMessage::RoomJoinFailed {
+        reason: _,
+        error_code,
+    } = miss.as_ref()
+    else {
+        panic!("expected join-only drain miss refusal, got {miss:?}");
+    };
+    assert_eq!(
+        *error_code,
+        Some(ErrorCode::RoomNotFound),
+        "a join-only miss during drain reports the missing room, not the drain"
+    );
+    assert!(
+        server
+            .database
+            .get_room("drain-join-game", "ABSDJ6")
+            .await
+            .expect("room lookup succeeds")
+            .is_none(),
+        "a join-only miss during drain must not create a room"
+    );
+
+    let (hit_player, mut hit_receiver) =
+        register_client(&server, "127.0.0.1:48361".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &hit_player,
+            "drain-join-game".to_string(),
+            Some("EXPLD5".to_string()),
+            "hit-joiner".to_string(),
+            Some(4),
+            Some(true),
+            None,
+            None,
+            Some(true),
+        )
+        .await;
+    let hit = timeout(Duration::from_secs(1), hit_receiver.recv())
+        .await
+        .expect("join-only drain hit should finish")
+        .expect("join-only drain hit should return a response");
+    let ServerMessage::RoomJoined(payload) = hit.as_ref() else {
+        panic!("expected join-only drain hit to join, got {hit:?}");
+    };
+    assert_eq!(
+        payload.room_id, fixture.id,
+        "existing-room joins stay admitted during drain"
+    );
+
+    let (legacy_player, mut legacy_receiver) =
+        register_client(&server, "127.0.0.1:48362".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &legacy_player,
+            "drain-join-game".to_string(),
+            Some("ABSDJ7".to_string()),
+            "legacy-joiner".to_string(),
+            Some(4),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await;
+    let legacy = timeout(Duration::from_secs(1), legacy_receiver.recv())
+        .await
+        .expect("legacy drain join should finish")
+        .expect("legacy drain join should return a response");
+    let ServerMessage::RoomJoinFailed { error_code, .. } = legacy.as_ref() else {
+        panic!("expected legacy drain refusal, got {legacy:?}");
+    };
+    assert_eq!(
+        *error_code,
+        Some(ErrorCode::ServerDraining),
+        "the legacy absent-code join keeps the drain fast-path refusal"
+    );
+    assert_eq!(
+        server.metrics.snapshot().await.rooms.rooms_created,
+        0,
+        "no case may create a room during drain"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn join_only_room_operation_miss_correlates_room_not_found() {
+    // The v3 correlated envelope carries the same collision-safe refusal,
+    // correlated by operation id (issue #625).
+    let server = create_test_server().await;
+    let (player, mut receiver) = register_client(&server, "127.0.0.1:48363".parse().unwrap()).await;
+    let operation_id = uuid::Uuid::from_u128(0x48363);
+
+    server
+        .handle_join_room_operation(
+            &player,
+            Some(operation_id),
+            "join-only-op".to_string(),
+            Some("MISSJ8".to_string()),
+            "joiner".to_string(),
+            Some(4),
+            Some(true),
+            None,
+            None,
+            Some(true),
+        )
+        .await;
+
+    let response = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("correlated join-only miss should finish")
+        .expect("correlated join-only miss should return a response");
+    match response.as_ref() {
+        ServerMessage::RoomOperationResult {
+            operation_id: received,
+            result,
+        } => {
+            assert_eq!(*received, operation_id, "the refusal must correlate");
+            match result.as_ref() {
+                crate::protocol::RoomOperationResult::RoomJoinFailed {
+                    error_code: Some(ErrorCode::RoomNotFound),
+                    ..
+                } => {}
+                other => panic!("expected correlated ROOM_NOT_FOUND, got {other:?}"),
+            }
+        }
+        other => panic!("expected a correlated operation result, got {other:?}"),
+    }
+    assert_eq!(server.get_client_room(&player).await, None);
+    assert!(
+        server
+            .database
+            .get_room("join-only-op", "MISSJ8")
+            .await
+            .expect("room lookup succeeds")
+            .is_none(),
+        "the correlated miss must not create a room"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -625,6 +975,7 @@ async fn concurrent_generated_creators_retry_shared_candidate_without_cross_join
             Some(true),
             None,
             None,
+            None,
         ),
         server.handle_join_room(
             &second,
@@ -633,6 +984,7 @@ async fn concurrent_generated_creators_retry_shared_candidate_without_cross_join
             "second".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -1733,6 +2085,7 @@ async fn setup_joined_pair_with_reconnection() -> JoinedPairFixture {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     let initial_messages = drain_queued_messages(&mut leaver_rx);
@@ -1756,6 +2109,7 @@ async fn setup_joined_pair_with_reconnection() -> JoinedPairFixture {
             "survivor".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -1874,6 +2228,7 @@ async fn same_room_rejoin_supersedes_the_pending_reconnection_record() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     let first_token = drain_queued_messages(&mut player_rx)
@@ -1927,6 +2282,7 @@ async fn same_room_rejoin_supersedes_the_pending_reconnection_record() {
             "rejoiner".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -1986,6 +2342,7 @@ async fn spectator_join_supersedes_the_pending_reconnection_record() {
             "spectator-superseder".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -2101,6 +2458,7 @@ async fn seated_room_join_rejects_an_existing_spectator_role() {
             "Dual Role".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -2453,6 +2811,7 @@ async fn aborting_join_while_baseline_is_backpressured_still_completes_admission
                     Some(true),
                     None,
                     None,
+                    None,
                 )
                 .await;
         })
@@ -2518,6 +2877,7 @@ async fn correlated_join_baseline_failure_rolls_back_and_returns_terminal_failur
             "joiner".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -2662,6 +3022,7 @@ async fn correlated_reconnect_panic_fixture() -> CorrelatedReconnectPanicFixture
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     let peer_baseline = timeout(Duration::from_secs(1), peer_receiver.recv())
@@ -2737,6 +3098,7 @@ async fn correlated_join_panic_returns_terminal_internal_failure() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
 
@@ -2757,6 +3119,7 @@ async fn correlated_join_panic_after_admission_rolls_back_the_prepared_generatio
             "creator".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -2783,6 +3146,7 @@ async fn correlated_join_panic_after_admission_rolls_back_the_prepared_generatio
             "joiner".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -2846,6 +3210,7 @@ async fn correlated_leave_event_panic_with_fallback_failure_has_one_terminal_and
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     let join_baseline = timeout(Duration::from_secs(1), receiver.recv())
@@ -2866,6 +3231,7 @@ async fn correlated_leave_event_panic_with_fallback_failure_has_one_terminal_and
             "peer".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -2952,6 +3318,7 @@ async fn correlated_leave_repairs_an_ordinary_authority_publication_failure_in_l
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     let room_code = match timeout(Duration::from_secs(1), receiver.recv())
@@ -2973,6 +3340,7 @@ async fn correlated_leave_repairs_an_ordinary_authority_publication_failure_in_l
             "peer".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -3163,6 +3531,7 @@ async fn correlated_leave_retains_room_gate_across_outer_completion_failure() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     let room_code = match timeout(Duration::from_secs(1), receiver.recv())
@@ -3188,6 +3557,7 @@ async fn correlated_leave_retains_room_gate_across_outer_completion_failure() {
             "peer".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -3305,6 +3675,7 @@ async fn correlated_join_panic_after_terminal_does_not_send_a_second_result() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     let creator_baseline = timeout(Duration::from_secs(1), creator_receiver.recv())
@@ -3329,6 +3700,7 @@ async fn correlated_join_panic_after_terminal_does_not_send_a_second_result() {
             "joiner".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -3402,6 +3774,7 @@ async fn correlated_leave_panic_after_terminal_does_not_send_a_second_result() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     let join_baseline = timeout(Duration::from_secs(1), receiver.recv())
@@ -3422,6 +3795,7 @@ async fn correlated_leave_panic_after_terminal_does_not_send_a_second_result() {
             "peer".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -3647,6 +4021,7 @@ async fn stalled_incumbent_does_not_hide_fresh_join_or_evict_healthy_peers() {
                 name.to_string(),
                 Some(8),
                 Some(false),
+                None,
                 None,
                 None,
             )
@@ -4330,6 +4705,7 @@ async fn delayed_ready_event_commits_before_a_concurrent_join_mutates_membership
                     Some(true),
                     None,
                     None,
+                    None,
                 )
                 .await
         })
@@ -4437,6 +4813,7 @@ async fn two_concurrent_joins_publish_in_database_mutation_order() {
                     name.to_string(),
                     Some(4),
                     Some(true),
+                    None,
                     None,
                     None,
                 )
@@ -4579,6 +4956,7 @@ async fn delayed_leave_terminal_event_commits_before_a_concurrent_join() {
                     Some(true),
                     None,
                     None,
+                    None,
                 )
                 .await
         })
@@ -4692,6 +5070,7 @@ async fn room_join_snapshot_baselines_preexisting_relay_tail_before_player_left(
             "late-joiner".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -5095,6 +5474,7 @@ async fn disconnect_storage_error_retries_without_reconnection_support() {
             Some(false),
             None,
             None,
+            None,
         )
         .await;
     drain_queued_messages(&mut leaver_rx);
@@ -5110,6 +5490,7 @@ async fn disconnect_storage_error_retries_without_reconnection_support() {
             "survivor".to_string(),
             Some(4),
             Some(false),
+            None,
             None,
             None,
         )
@@ -5174,6 +5555,7 @@ async fn unpublished_join_rollback_retries_storage_and_conserves_activity() {
             Some(false),
             None,
             None,
+            None,
         )
         .await;
     drain_queued_messages(&mut survivor_rx);
@@ -5201,6 +5583,7 @@ async fn unpublished_join_rollback_retries_storage_and_conserves_activity() {
             "joiner".to_string(),
             Some(4),
             Some(false),
+            None,
             None,
             None,
         )
@@ -5597,6 +5980,7 @@ async fn max_room_cap_denial_releases_join_coordination_locks() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
 
@@ -5666,6 +6050,7 @@ async fn server_room_cap_denial_releases_join_coordination_locks() {
             "player".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -5749,6 +6134,7 @@ async fn server_room_cap_is_atomic_across_games() {
                 Some(true),
                 None,
                 None,
+                None,
             )
             .await;
     });
@@ -5767,6 +6153,7 @@ async fn server_room_cap_is_atomic_across_games() {
                 "two".to_string(),
                 Some(4),
                 Some(true),
+                None,
                 None,
                 None,
             )
@@ -5812,6 +6199,7 @@ async fn server_room_cap_is_atomic_across_games() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     let third_response = timeout(Duration::from_secs(1), third_rx.recv())
@@ -5855,6 +6243,7 @@ async fn draining_server_rejects_room_creation_without_consuming_join_locks() {
                 "player".to_string(),
                 Some(4),
                 Some(true),
+                None,
                 None,
                 None,
             )
@@ -5936,6 +6325,7 @@ async fn draining_room_creation_rechecks_after_cap_lock_race() {
             "player".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -6020,6 +6410,7 @@ async fn draining_room_creation_rolls_back_after_create_race() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
 
@@ -6093,6 +6484,7 @@ async fn unpublished_created_room_rollback_counts_rooms_deleted() {
             "creator".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -6221,6 +6613,7 @@ async fn draining_room_creation_rejection_does_not_wait_on_full_queue() {
             "player".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         ),
@@ -7014,6 +7407,7 @@ async fn draining_server_allows_existing_room_join() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
 
@@ -7077,6 +7471,7 @@ async fn join_into_full_room_classifies_as_room_full_not_creation_failed() {
             Some(false),
             None,
             None,
+            None,
         )
         .await;
     match timeout(Duration::from_secs(1), creator_rx.recv())
@@ -7100,6 +7495,7 @@ async fn join_into_full_room_classifies_as_room_full_not_creation_failed() {
             "joiner".to_string(),
             Some(1),
             Some(false),
+            None,
             None,
             None,
         )
@@ -7212,6 +7608,7 @@ async fn empty_room_cleanup_preserves_reconnect_registered_during_its_snapshot()
             "player".to_string(),
             Some(2),
             Some(true),
+            None,
             None,
             None,
         )
@@ -7359,6 +7756,7 @@ async fn inactive_cleanup_winner_discards_reconnect_for_deleted_room() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     let joined = timeout(Duration::from_secs(1), receiver.recv())
@@ -7478,6 +7876,7 @@ async fn inactive_room_cleanup_terminally_unroutes_seated_players() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     server
@@ -7488,6 +7887,7 @@ async fn inactive_room_cleanup_terminally_unroutes_seated_players() {
             "peer".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -7514,6 +7914,7 @@ async fn inactive_room_cleanup_terminally_unroutes_seated_players() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
     server
@@ -7524,6 +7925,7 @@ async fn inactive_room_cleanup_terminally_unroutes_seated_players() {
             "active peer".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -8160,6 +8562,7 @@ async fn join_racing_room_deletion_reports_room_not_found() {
                 Some(true),
                 None,
                 None,
+                None,
             )
             .await;
     });
@@ -8326,6 +8729,7 @@ async fn test_join_flow_counts_backend_release_errors() {
             Some(true),
             None,
             None,
+            None,
         )
         .await;
 
@@ -8371,6 +8775,7 @@ async fn test_join_flow_releases_do_not_count_as_release_failures() {
             "creator".to_string(),
             Some(4),
             Some(true),
+            None,
             None,
             None,
         )
@@ -8495,6 +8900,7 @@ async fn creator_name_failure_keeps_published_snapshot_consistent_with_storage()
             None,
             None,
             None,
+            None,
         )
         .await;
     let room_id = server
@@ -8548,6 +8954,7 @@ async fn creator_name_failure_keeps_published_snapshot_consistent_with_storage()
             "rename-integrity".to_string(),
             Some("RNM001".to_string()),
             "Joiner".to_string(),
+            None,
             None,
             None,
             None,
@@ -8640,6 +9047,7 @@ async fn transfer_authority_announcement_cannot_be_overtaken_by_a_departure() {
                 name.to_string(),
                 Some(4),
                 Some(true),
+                None,
                 None,
                 None,
             )
