@@ -96,10 +96,11 @@ which introduces a network/cache dependency during MCP startup.
 
 **OpenCode V2 native config**: `opencode.json` uses the V2 shape — servers
 under `mcp.servers`, no V1-only `enabled` key (servers connect unless
-`disabled`), and the published `$schema` URL retained. The four Z.AI relay
-entries set `protocol: "auto"` so V2 probes the 2026-07-28 MCP revision and
-falls back to the classic handshake; `github-mcp-server` keeps the default
-classic handshake.
+`disabled`), and the published `$schema` URL retained. All five servers keep
+the default classic MCP handshake: the Z.AI relay's bundled MCP SDK predates
+the 2026-07-28 revision, so `protocol: "auto"` probes can never succeed
+there and only cost a startup process per relay. Revisit only if Z.AI ships
+2026-07-28 support.
 
 **Dual-key invariant**: `.mcp.json` must carry BOTH `type` (Claude Code) and
 `transport` (Nanocoder) — dropping either silently unwires one harness.

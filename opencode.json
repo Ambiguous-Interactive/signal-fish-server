@@ -18,8 +18,7 @@
                     "node",
                     ".devcontainer/zai-mcp.mjs",
                     "vision"
-                ],
-                "protocol": "auto"
+                ]
             },
             "zai-web-search": {
                 "type": "local",
@@ -27,8 +26,7 @@
                     "node",
                     ".devcontainer/zai-mcp.mjs",
                     "web-search"
-                ],
-                "protocol": "auto"
+                ]
             },
             "zai-web-reader": {
                 "type": "local",
@@ -36,8 +34,7 @@
                     "node",
                     ".devcontainer/zai-mcp.mjs",
                     "web-reader"
-                ],
-                "protocol": "auto"
+                ]
             },
             "zai-zread": {
                 "type": "local",
@@ -45,8 +42,7 @@
                     "node",
                     ".devcontainer/zai-mcp.mjs",
                     "zread"
-                ],
-                "protocol": "auto"
+                ]
             }
         }
     }

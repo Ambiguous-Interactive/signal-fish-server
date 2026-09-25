@@ -324,19 +324,16 @@ fn opencode_config_is_native_v2() {
                     names directly under mcp), the V1-only `enabled` key absent \
                     (V2 inverts it as `disabled`, defaulting to enabled), and \
                     the published $schema URL retained for editor integration. \
-                    The four Z.AI relay entries probe the 2026-07-28 MCP \
-                    revision with `protocol: \"auto\"` (safe legacy fallback); \
-                    github-mcp-server stays on the default classic handshake.";
+                    Servers keep the default classic MCP handshake: the Z.AI \
+                    relay's bundled MCP SDK predates the 2026-07-28 revision, \
+                    so a `protocol: \"auto\"` probe can never succeed there and \
+                    only costs a startup process per relay; revisit only if \
+                    Z.AI ships 2026-07-28 support.";
 
     let opencode = read_live("opencode.json");
     require_fragments(
         &opencode,
-        &[
-            "\"$schema\": \"https://opencode.ai/config.json\"",
-            "\"mcp\"",
-            "\"servers\"",
-            "\"protocol\": \"auto\"",
-        ],
+        &["\"$schema\": \"https://opencode.ai/config.json\"", "\"mcp\"", "\"servers\""],
         contract,
     );
     // Five servers total — github plus the four Z.AI relays — and every one
@@ -349,16 +346,11 @@ fn opencode_config_is_native_v2() {
         5,
         "{contract}\n\nExpected exactly five local stdio servers in opencode.json."
     );
-    assert_eq!(
-        opencode.matches("\"protocol\": \"auto\"").count(),
-        4,
-        "{contract}\n\nExpected exactly four Z.AI relay entries with protocol auto."
-    );
     // Absence reads the RAW file: a commented-out V1 leftover is still a real
     // occurrence worth flagging.
     forbid_fragments(
         &read_raw("opencode.json"),
-        &["\"enabled\""],
+        &["\"enabled\"", "\"protocol\""],
         contract,
     );
 }
