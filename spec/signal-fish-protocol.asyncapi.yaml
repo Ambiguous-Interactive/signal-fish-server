@@ -1021,7 +1021,9 @@ components:
                 client can re-resolve instead of silently creating a duplicate
                 room on the wrong home. Absent or false keeps the legacy
                 contract: an unknown code creates the room. true without a
-                room_code is refused INVALID_INPUT.
+                room_code is refused INVALID_INPUT. A server older than this
+                field ignores the flag and creates; treat an unexpected
+                RoomJoined as version skew and re-resolve.
       required: [type, data]
     LeaveRoom:
       type: object

@@ -504,7 +504,10 @@ impl EnhancedGameServer {
         // fast-path for room creation does not apply: an unknown code gets
         // its truthful `ROOM_NOT_FOUND` from the admission lookup instead of
         // the drain-specific refusal. Existing-room joins stay admitted
-        // during drain, and a join-only join is exactly that class.
+        // during drain, and a join-only join is exactly that class. A
+        // join-only miss replies through the ordinary failure path, so only
+        // its own join task can wait on a full queue — the drain loop, which
+        // must never block, uses the non-blocking fast-path rejection.
         if !join_only
             && self
                 .join_would_create_room_while_draining(&game_name, room_code.as_deref())
@@ -515,8 +518,10 @@ impl EnhancedGameServer {
             return;
         }
 
-        // Rate limiting check
-        let rate_limit_result = if is_room_creation {
+        // Rate limiting check. A `join_only` join states join intent even
+        // when it is malformed (no code), so it always spends the join
+        // bucket, never the creation bucket (issue #625).
+        let rate_limit_result = if is_room_creation && !join_only {
             self.rate_limiter.check_room_creation(player_id).await
         } else {
             self.rate_limiter.check_join_attempt(player_id).await

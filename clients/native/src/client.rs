@@ -635,6 +635,9 @@ async fn join_room(
         relay_transport: None,
 
         password: None,
+        // Flag-off keeps the legacy create-on-join contract; adopting
+        // `join_only` for `--join-code` is tracked in issue #630.
+        join_only: None,
     };
     wire::send_client_message(ws, &message)
         .await

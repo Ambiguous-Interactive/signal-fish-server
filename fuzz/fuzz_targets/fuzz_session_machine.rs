@@ -305,6 +305,7 @@ impl Harness {
                             relay_transport: None,
 
                             password: None,
+                            join_only: None,
                         },
                     )
                     .await;

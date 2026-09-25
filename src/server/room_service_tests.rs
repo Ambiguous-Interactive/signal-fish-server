@@ -748,6 +748,20 @@ async fn join_only_admission_never_creates_and_preserves_legacy_create_on_join()
             "case '{}' existing-join counter",
             case.name
         );
+        // Every case names join intent (even the malformed one), so all of
+        // them spend the join bucket, never the creation bucket (issue
+        // #625); refused joins still consume their attempt.
+        let rate_stats = server
+            .rate_limiter
+            .get_player_stats(&joiner)
+            .await
+            .expect("a join attempt creates rate-limit stats");
+        assert_eq!(
+            (rate_stats.room_creations, rate_stats.join_attempts),
+            (0, 1),
+            "case '{}' rate-limit buckets",
+            case.name
+        );
         if let Expect::Refused(_) = case.expect {
             if let Some(code) = case.room_code {
                 assert!(

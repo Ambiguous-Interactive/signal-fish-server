@@ -314,9 +314,9 @@ pub enum RoomOperationRequest {
     ///
     /// Only the room's designated authority may rotate the code. The old code
     /// stops resolving to this room immediately; joins that name it behave
-    /// like any unknown code (join-creates-room may open a fresh, unrelated
-    /// room under it, while a `join_only` join is refused `ROOM_NOT_FOUND` —
-    /// issue #625). Existing members stay connected and reconnection
+    /// like any unknown code: join-creates-room may open a fresh, unrelated
+    /// room under it, while a `join_only` join is refused `ROOM_NOT_FOUND`
+    /// (issue #625). Existing members stay connected and reconnection
     /// tokens are unaffected; the success response
     /// ([`RoomOperationResult::RoomCodeRegenerated`]) carries the new code,
     /// which the authority distributes to future invitees.

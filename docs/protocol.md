@@ -91,7 +91,9 @@ Rule 4 is the collision-safe admission shape (issue #625). A room directory
 sets `join_only: true` on routed joins: a stale directory entry then surfaces
 as a refusal the client can re-resolve, instead of silently creating a
 duplicate room on the wrong home. `join_only: true` without a `room_code` is
-refused with `INVALID_INPUT`.
+refused with `INVALID_INPUT`. A server older than `join_only` ignores the
+flag and creates the room; a client that requires join-only semantics must
+treat an unexpected `RoomJoined` as version skew and re-resolve.
 
 Rooms are scoped to the application identity presented in the `Authenticate`
 handshake (issue #520). A created room is stamped with its creator's
