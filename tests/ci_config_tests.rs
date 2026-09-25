@@ -5587,6 +5587,94 @@ fn test_docker_publish_push_paths_cover_image_inputs() {
 }
 
 #[test]
+fn test_ci_docker_job_skips_image_irrelevant_pull_requests() {
+    // Issue #512: the CI `docker` job detects image-irrelevant pull requests
+    // and skips its buildx build and smoke test, mirroring
+    // docker-publish.yml's byte-relevant push filter. Two invariants keep
+    // the skip honest: (1) the relevance path set covers docker-publish.yml's
+    // push filter verbatim, so the two filters cannot drift — and through
+    // test_docker_publish_push_paths_cover_image_inputs it transitively
+    // covers every Dockerfile build input; (2) the gate fails open: an
+    // unresolvable base commit builds the image.
+    let root = repo_root();
+    let ci = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let docker_publish = read_live_file(&root.join(".github/workflows/docker-publish.yml"));
+
+    let docker_block = extract_workflow_job_block(&ci, "docker")
+        .unwrap_or_else(|| panic!("ci.yml must define the `docker` job"));
+
+    assert!(
+        docker_block.contains("Detect image-relevant changes"),
+        "ci.yml `docker` job must keep the image-relevance gate; without it every \
+         pull request rebuilds and smokes an image that cannot have changed (issue #512)"
+    );
+    assert!(
+        docker_block.contains("fetch-depth: 0"),
+        "ci.yml `docker` job must fetch enough history to diff against the pull \
+         request's base commit"
+    );
+
+    let push_paths = extract_workflow_event_paths(&docker_publish, "push");
+    assert!(
+        !push_paths.is_empty(),
+        "docker-publish.yml must keep a `paths` filter on its push trigger; the ci.yml \
+         relevance gate is pinned in lockstep with it"
+    );
+    for path in &push_paths {
+        assert!(
+            docker_block.contains(path.as_str()),
+            "ci.yml `docker` relevance gate must cover `{path}` from docker-publish.yml's \
+             push filter; a diverging filter would validate a different image than the \
+             one published"
+        );
+    }
+    assert!(
+        docker_block.contains(".github/workflows/ci.yml|")
+            || docker_block.contains(".github/workflows/ci.yml)"),
+        "ci.yml `docker` relevance gate must list this workflow file, so gate changes \
+         themselves always rebuild the image"
+    );
+
+    // The gate must start pessimistic (no match means skip is impossible
+    // until a pattern fires): an initializer of `RELEVANT="true"` would
+    // silently restore the every-PR build this gate exists to remove.
+    assert!(
+        docker_block.contains("RELEVANT=\"false\""),
+        "ci.yml `docker` relevance gate must default to not-relevant so only a \
+         matching image input flips it; a `RELEVANT=\"true\"` default rebuilds on \
+         every pull request (issue #512)"
+    );
+
+    // The fail-open branch must stay an explicit part of the gate: a broken
+    // diff (force-pushed base, lost objects) must build the image, never
+    // fail the job red or silently skip it.
+    assert!(
+        docker_block.contains("if ! git -c core.quotepath=off diff --name-only")
+            && docker_block.contains("failing open (build the image)"),
+        "ci.yml `docker` relevance gate must keep the explicit fail-open branch for \
+         an unresolvable base diff; a fail-closed refactor would turn gate noise into \
+         red builds, and a silently-skipping one would drop image validation"
+    );
+
+    for step in ["Set up Docker Buildx", "Build Docker image", "Smoke test"] {
+        let start = docker_block
+            .find(step)
+            .unwrap_or_else(|| panic!("ci.yml `docker` job must keep the `{step}` step"));
+        let window = &docker_block[start..(start + 400).min(docker_block.len())];
+        assert!(
+            window.contains("if: steps.image-relevance.outputs.relevant == 'true'"),
+            "ci.yml `docker` job step `{step}` must run only when the relevance gate \
+             reports an image-relevant change"
+        );
+    }
+    assert!(
+        docker_block.contains("echo \"relevant=true\" >> \"$GITHUB_OUTPUT\""),
+        "ci.yml `docker` relevance gate must fail open (build the image) when the \
+         base commit cannot be resolved"
+    );
+}
+
+#[test]
 fn test_dockerfile_cross_compiles_for_target_platform() {
     // The chosen strategy is cross-compilation, not QEMU emulation: the builder
     // stage runs natively on the build platform and cross-compiles to the target

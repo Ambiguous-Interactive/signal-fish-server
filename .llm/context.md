@@ -89,7 +89,8 @@ relevant source, test, documentation, issue, or pull request.
   that budget, pick smaller work.
 
 ```bash
-# Rust changes (ALWAYS run in order)
+# Rust changes: run in order. Full local gate — once before publication;
+# while iterating, use the scoped checks in "Local vs hosted-CI work split".
 cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-features
 ```
 
@@ -97,9 +98,16 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
 
 ### Local vs hosted-CI work split (Required)
 
-- Locally, agents run `cargo fmt` and `cargo clippy --all-targets
-  --all-features`, plus narrowly targeted red-green checks only:
-  `cargo nextest run -E 'test(<name>)'` filtered to the changed seams.
+- Locally, agents run `cargo fmt`, plus narrowly targeted red-green checks
+  for the changed seams, scoped to the owning test target so the edit-test
+  loop stays fast (measured: a bare `-E 'test(<name>)'` filterset still
+  rebuilds every test binary, ~20 s; a target-scoped run rebuilds one,
+  ~6 s): `cargo nextest run --test <target> -E 'test(<name>)'` — use
+  `--lib` for unit tests under `src/`. Find the owning target with
+  `cargo nextest list`. While iterating, scope clippy the same way:
+  `cargo clippy --test <target> --all-features`.
+- Run the full local gate once before publication, not every loop:
+  `cargo fmt` + `cargo clippy --all-targets --all-features`, zero warnings.
 - Do NOT run expensive suites locally: full `cargo test`/nextest sweeps,
   `cargo doc`, `cargo deny`, mutation testing, or whole integration binaries.
   Those belong to hosted CI; replicate them only when RCA-ing an actual red
