@@ -340,6 +340,7 @@ assert_contains_literal "$OPENCODE_JSON" "github-mcp-server" "OpenCode config us
 # the V1 layout, and `enabled` is the V1-only key (V2 inverts it as `disabled`).
 assert_contains_literal "$OPENCODE_JSON" '"servers"' "OpenCode config uses the V2 mcp.servers grouping"
 assert_not_contains_literal "$OPENCODE_JSON" '"enabled"' "OpenCode config avoids the V1-only enabled key"
+assert_not_contains_literal "$OPENCODE_JSON" '"protocol"' "OpenCode config keeps the default classic MCP handshake (no protocol key)"
 assert_contains_literal "$OPENCODE_JSON" '"type": "local"' "OpenCode config registers GitHub MCP as a local server"
 # Observed in #496: the opencode-launched github-mcp-server device-flowed
 # every session even with the token present in the container shell, so the
