@@ -197,12 +197,16 @@ misread.
   installs only fail at image-build time, so this workflow is the only check
   that catches devcontainer-only breakage and upstream base-image/feature
   drift.
-- Keep the terminal agent CLIs (OpenAI Codex, OpenCode, Nanocoder) and the
-  Z.AI Vision MCP package (`@z_ai/mcp-server@latest`) installed and refreshed
-  through `.devcontainer/lib-agent-tools.sh` (sourced by
+- Keep the terminal agent CLIs (OpenAI Codex, OpenCode via the `@opencode/cli`
+  V2 npm package, Nanocoder) and the Z.AI Vision MCP package
+  (`@z_ai/mcp-server@latest`) installed and refreshed through
+  `.devcontainer/lib-agent-tools.sh` (sourced by
   `post-create.sh` on create and `post-start.sh` on every launch) and through
   the user-owned npm prefix (`NPM_CONFIG_PREFIX=/home/vscode/.npm-global`) —
-  `npm install -g` must never require sudo.
+  `npm install -g` must never require sudo. The legacy `opencode-ai` V1
+  package is removed by `migrate_opencode_to_v2` before `@opencode/cli`
+  installs: both own the `opencode` bin symlink, so a user-pinned
+  `OPENCODE_NPM_SPEC` is the only way to keep V1.
 - Keep the launch-path CLI refresh behind the registry version-check fast
   path (one bulk `npm outdated -g --json` plus local installed state;
   `npm view` only for a missing tool, offline-safe, skip when current) — never
@@ -210,13 +214,16 @@ misread.
   start. Keep `waitFor: updateContentCommand` so network refreshes remain
   behind the editor attach point. Every lifecycle step stays best-effort
   (`return`, never `exit`) so optional setup cannot prevent a usable attach.
-- Keep npm 11 lifecycle scripts explicitly scoped to the selected package via
-  `--allow-scripts="$pkg"`; OpenCode's platform-binary selection depends on its
-  postinstall, while a broad script allowlist needlessly expands trust.
+- Do not add lifecycle-script gates (such as `--allow-scripts`) to npm global
+  installs: npm runs lifecycle scripts by default and treats that flag as an
+  unknown, deprecation-warned config. OpenCode's postinstall selects its
+  platform binary on its own; `--include=optional` ships the per-platform
+  package.
 - Keep the pinned GitHub MCP server (`GITHUB_MCP_VERSION` in
   `.devcontainer/Dockerfile`) wired into every harness:
   `.vscode/mcp.json` (VS Code + Copilot), `.mcp.json` (Claude Code +
-  Nanocoder), `opencode.json` (OpenCode), and `~/.codex/config.toml`
+  Nanocoder), `opencode.json` (OpenCode V2, `mcp.servers` grouping), and
+  `~/.codex/config.toml`
   (written idempotently for Codex). It authenticates via
   `GITHUB_PERSONAL_ACCESS_TOKEN` passed through `remoteEnv`;
   `opencode.json` must additionally forward the token through its

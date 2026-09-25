@@ -25,15 +25,20 @@ class ZaiTests(unittest.TestCase):
         self.addCleanup(mock.stop)
 
     def test_every_frontend_uses_same_launcher_and_server_names(self):
-        for filename, section in [(".mcp.json", "mcpServers"),
-                                  (".vscode/mcp.json", "servers"), ("opencode.json", "mcp")]:
+        # OpenCode V2 groups servers under mcp.servers; the other harnesses
+        # keep their flat sections.
+        for filename, section_path in [(".mcp.json", ("mcpServers",)),
+                                       (".vscode/mcp.json", ("servers",)),
+                                       ("opencode.json", ("mcp", "servers"))]:
             text = (ROOT / filename).read_text()
             config = json.loads("\n".join(line for line in text.splitlines()
-                                        if not line.startswith("//")))[section]
+                                        if not line.startswith("//")))
+            for key in section_path:
+                config = config[key]
             for name in ("vision", "web-search", "web-reader", "zread"):
                 entry = config["zai-" + name]
                 command = entry["command"]
-                if section == "mcp":
+                if filename == "opencode.json":
                     self.assertEqual(entry["type"], "local")
                     command, args = command[0], command[1:]
                 else:
@@ -44,7 +49,7 @@ class ZaiTests(unittest.TestCase):
                 self.assertEqual(args[0].removeprefix("${workspaceFolder}/"),
                                  ".devcontainer/zai-mcp.mjs")
                 self.assertNotIn("headers", entry)
-                if section == "mcpServers":
+                if section_path == ("mcpServers",):
                     self.assertEqual(entry["transport"], "stdio")
 
     def test_env_file_is_data_and_last_assignment_wins(self):

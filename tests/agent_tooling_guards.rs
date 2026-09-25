@@ -246,10 +246,12 @@ fn agent_clis_refresh_to_latest_on_every_launch() {
         &lib,
         &[
             "@openai/codex@latest",
-            "opencode-ai@latest",
+            // OpenCode V2 ships in the @opencode/cli npm package; the legacy
+            // opencode-ai package still serves V1 1.x from npm's latest tag.
+            "@opencode/cli@latest",
+            "migrate_opencode_to_v2",
             "@nanocollective/nanocoder@latest",
             "@z_ai/mcp-server@latest",
-            "--allow-scripts=\"$pkg\"",
         ],
         contract,
     );
@@ -288,6 +290,19 @@ fn zai_mcp_suite_is_wired_to_every_harness() {
             contract,
         );
     }
+    // OpenCode V2 groups servers under mcp.servers; the four Z.AI entries must
+    // live inside that map, not directly under mcp (the V1 layout).
+    require_fragments(
+        &read_live("opencode.json"),
+        &[
+            "\"servers\"",
+            "zai-vision",
+            "zai-web-search",
+            "zai-web-reader",
+            "zai-zread",
+        ],
+        contract,
+    );
     require_fragments(
         &read_live(".devcontainer/lib-agent-tools.sh"),
         &["configure_codex_mcp_servers", "configure-zai-mcp.py"],
@@ -304,6 +319,54 @@ fn zai_mcp_suite_is_wired_to_every_harness() {
             "https://api.z.ai/api/mcp/web_reader/mcp",
             "https://api.z.ai/api/mcp/zread/mcp",
         ],
+        contract,
+    );
+}
+
+#[test]
+fn opencode_config_is_native_v2() {
+    let contract = "opencode.json must use the native OpenCode V2 config shape: \
+                    servers grouped under mcp.servers (V2 does not place server \
+                    names directly under mcp), the V1-only `enabled` key absent \
+                    (V2 inverts it as `disabled`, defaulting to enabled), and \
+                    the published $schema URL retained for editor integration. \
+                    Servers keep the default classic MCP handshake: the Z.AI \
+                    relay's bundled MCP SDK predates the 2026-07-28 revision, \
+                    so a `protocol: \"auto\"` probe can never succeed there and \
+                    only costs a startup process per relay; revisit only if \
+                    Z.AI ships 2026-07-28 support.";
+
+    let opencode = read_live("opencode.json");
+    require_fragments(
+        &opencode,
+        &[
+            "\"$schema\": \"https://opencode.ai/config.json\"",
+            "\"mcp\"",
+            "\"servers\"",
+        ],
+        contract,
+    );
+    // Five servers total — github plus the four Z.AI relays — and every one
+    // of them is a local stdio command in this harness.
+    for server in [
+        "github",
+        "zai-vision",
+        "zai-web-search",
+        "zai-web-reader",
+        "zai-zread",
+    ] {
+        require_fragments(&opencode, &[&format!("\"{server}\"")], contract);
+    }
+    assert_eq!(
+        opencode.matches("\"type\": \"local\"").count(),
+        5,
+        "{contract}\n\nExpected exactly five local stdio servers in opencode.json."
+    );
+    // Absence reads the RAW file: a commented-out V1 leftover is still a real
+    // occurrence worth flagging.
+    forbid_fragments(
+        &read_raw("opencode.json"),
+        &["\"enabled\"", "\"protocol\""],
         contract,
     );
 }
@@ -500,6 +563,9 @@ fn every_harness_is_wired_to_the_github_mcp_server() {
     require_fragments(
         &opencode,
         &[
+            // V2 groups servers under mcp.servers; a server name directly
+            // under mcp is the V1 layout.
+            "\"servers\"",
             "\"github\"",
             "github-mcp-server",
             "\"type\": \"local\"",
