@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reference clients: `--join-code` now sends `JoinRoom.join_only` on both the
+  native and browser clients. A code that does not resolve is refused
+  `ROOM_NOT_FOUND` as a visible protocol error instead of silently creating
+  a room; `--create-room` keeps the legacy create-by-omission wire form
+  (#630).
 - Native reference client: webrtc-rs/rtc bumped to 0.21. The engine migrates
   to the `SettingEngineBuilder` API, and unknown future data-channel events
   log at debug instead of failing the build (#621).

@@ -47,7 +47,7 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 |------|---------|---------|
 | `--server-url <URL>` | (required) | Full WebSocket URL of the signaling endpoint (e.g. `ws://127.0.0.1:3536/v3/ws`; use `/v2/ws` for a faithful v2 run) |
 | `--create-room` | — | Create a new room (the `room_created` event carries the code for sibling processes) |
-| `--join-code <CODE>` | — | Join an existing room by code |
+| `--join-code <CODE>` | — | Join an existing room by code. Sets `JoinRoom.join_only`: a code that does not resolve is refused `ROOM_NOT_FOUND` instead of silently creating a room (issue #630) |
 | `--peers <N>` | `2` | Expected member count incl. self; `PlayerReady` is sent once N members are seated AND the room is in the Lobby state. Also the default room capacity (`max_players`) when creating |
 | `--max-players <N>` | `--peers` | Creator-only room capacity; conflicts with `--join-code`. Values above `--peers` leave open seats after the room finalizes, so a late joiner can seat-fill the running session without any prior departure. Must not sit below `--peers` (the ready barrier could never be reached) |
 | `--expect-total-peers <N>` | `--peers` | Distinct members (incl. self, cumulative across departures) that must have been OBSERVED before a successful exit. Late-join incumbents set this above `--peers` so they outlive the session until the joiner arrives; room capacity is `--peers` unless `--max-players` raises it |

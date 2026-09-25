@@ -5,7 +5,9 @@
 // stdout event ordering:
 //
 // 1. Connect + Authenticate (v2 mode omits every v3 field).
-// 2. Room: `JoinRoom` with no code creates; `--join-code` joins by code.
+// 2. Room: `JoinRoom` with no code creates; `--join-code` joins by code with
+//    `join_only` set, so an unresolvable code is refused instead of silently
+//    creating a room (issue #630).
 // 3. Ready barrier: send `PlayerReady` only once the room is in the Lobby
 //    state AND `--peers N` members are present (counting members alone races
 //    the server's Waiting→Lobby transition). The lobby no longer auto-starts
@@ -51,6 +53,7 @@ import {
   classifyJsonNegotiatedServerInput,
   clientFrame,
   connect,
+  joinRoomFrameData,
   negotiatedProtocolVersion,
   sendGameData,
   type ServerFrame,
@@ -794,15 +797,7 @@ class Orchestrator {
 
   /** Create or join the room; returns the room's lobby state at join time. */
   private async joinRoom(): Promise<string> {
-    this.sendFrame(
-      clientFrame('JoinRoom', {
-        game_name: this.config.gameName,
-        room_code: this.config.joinCode,
-        player_name: this.config.playerName,
-        max_players: this.config.maxPlayers ?? this.config.peers,
-        supports_authority: false,
-      }),
-    );
+    this.sendFrame(clientFrame('JoinRoom', joinRoomFrameData(this.config)));
 
     // Read until the atomic `RoomJoined` membership baseline. Connection-level
     // accountability frames can legitimately precede it. Membership deltas
