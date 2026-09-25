@@ -41,6 +41,30 @@ export function clientFrame(type: string, data?: Record<string, unknown>): strin
   return JSON.stringify(data === undefined ? { type } : { type, data });
 }
 
+/**
+ * Build the JoinRoom payload for one run. A `joinCode` run joins
+ * collision-safe (`join_only: true`, issue #630): an unresolvable code is
+ * refused `ROOM_NOT_FOUND` instead of silently creating the room. A
+ * create-room run omits `join_only` entirely, keeping the legacy
+ * create-by-omission wire form byte-identical.
+ */
+export function joinRoomFrameData(config: {
+  gameName: string;
+  joinCode: string | null;
+  playerName: string;
+  maxPlayers: number | null;
+  peers: number;
+}): Record<string, unknown> {
+  return {
+    game_name: config.gameName,
+    room_code: config.joinCode,
+    player_name: config.playerName,
+    max_players: config.maxPlayers ?? config.peers,
+    supports_authority: false,
+    ...(config.joinCode !== null ? { join_only: true } : {}),
+  };
+}
+
 /** Send reliable GameData while preserving the legacy omitted class/key shape. */
 export function sendGameData(sendFrame: (frame: string) => void, data: unknown): void {
   const normalized = normalizeOutgoingJsonValue(data);

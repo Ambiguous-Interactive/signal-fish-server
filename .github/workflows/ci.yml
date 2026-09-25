@@ -32,7 +32,13 @@
 #   - deny: Supply-chain job (issue #512): cargo-deny policy over every
 #     tracked Cargo graph, RustSec + npm vulnerability scans, and CycloneDX
 #     SBOM generation — one runner setup instead of three jobs
-#   - docker: Docker image build and smoke test with health check
+#   - docker: Docker image build and smoke test with health check. Image-
+#     irrelevant pull requests skip the build (issue #512): a change that
+#     touches none of the image's byte-relevant inputs cannot change image
+#     bytes, so the build would reprove an identical image. This is the same
+#     byte-relevant filter docker-publish.yml applies to its push trigger;
+#     release commits always change Cargo.toml/Cargo.lock, so releases keep
+#     full image validation.
 #   - coverage: Linux code coverage gate via cargo-llvm-cov (daily schedule
 #     only — the instrumented suite duplicates the per-event nextest run)
 #   - msrv: MSRV verification (compilation per push/PR; the full test suite
@@ -754,12 +760,56 @@ jobs:
         run: test "$QUICK_CHECK_RESULT" = success
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
+        with:
+          # Full history so the relevance gate can diff against the pull
+          # request's base (same pattern as the doc-consistency job).
+          fetch-depth: 0
+      - name: Detect image-relevant changes
+        id: image-relevance
+        # Issue #512: a pull request touching none of the image's
+        # byte-relevant inputs cannot change image bytes, so building here
+        # would reprove an identical image. The path set mirrors the
+        # docker-publish.yml push filter (pinned in lockstep by
+        # test_ci_docker_job_skips_image_irrelevant_pull_requests) plus this
+        # workflow file, so gate changes always rebuild. Fail-open: any
+        # resolution problem builds the image.
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.sha }}"
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git -c core.quotepath=off diff --name-only "$BASE_SHA...$HEAD_SHA" > changed-files.txt; then
+            echo "could not diff against $BASE_SHA; failing open (build the image)"
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          RELEVANT="false"
+          while IFS= read -r f; do
+            case "$f" in
+              src/**|benches/**|Cargo.toml|Cargo.lock|build.rs|rust-toolchain.toml)
+                RELEVANT="true"
+                break
+                ;;
+              Dockerfile|.dockerignore|.github/workflows/ci.yml|.github/workflows/docker-publish.yml)
+                RELEVANT="true"
+                break
+                ;;
+            esac
+          done < changed-files.txt
+          echo "Image-relevant change: $RELEVANT"
+          echo "relevant=$RELEVANT" >> "$GITHUB_OUTPUT"
       - name: Set up Docker Buildx
+        if: steps.image-relevance.outputs.relevant == 'true'
         # Buildx unlocks the GitHub Actions layer cache below. Mirrors the proven
         # pattern in docker-publish.yml (same pinned action versions), turning a
         # cold ~3-5 min image build into a warm sub-minute one on cache hits.
         uses: docker/setup-buildx-action@v4.4.1
       - name: Build Docker image
+        if: steps.image-relevance.outputs.relevant == 'true'
         uses: docker/build-push-action@v7.4.0
         with:
           context: .
@@ -776,6 +826,7 @@ jobs:
           cache-to: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'type=gha,mode=max' || '' }}
 
       - name: Smoke test
+        if: steps.image-relevance.outputs.relevant == 'true'
         run: |
           # Secure compiled defaults stand (issue #515): the image ships no
           # ENV configuration, so the smoke run supplies a metrics token to

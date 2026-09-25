@@ -43,7 +43,9 @@ description: >-
 # 1. Before any change - read the code first
 # NEVER modify code you haven't read
 
-# 2. After Rust changes (ALWAYS run in order)
+# 2. After Rust changes, run in order. This is the FULL local gate: run it
+#    once before publication. While iterating, use the scoped commands in
+#    "Local vs hosted-CI work split" below instead.
 cargo fmt
 cargo clippy --all-targets --all-features  # Zero warnings allowed
 cargo test --all-features
@@ -66,9 +68,16 @@ rejects it, and only the `Rustdoc Validation` workflow catches that.
 
 Expensive verification belongs to hosted CI, not the local agent loop:
 
-- **Run locally**: `cargo fmt` + `cargo clippy --all-targets --all-features`,
-  and narrowly targeted red-green checks for the change under review:
-  `cargo nextest run -E 'test(<name>)'`.
+- **Run locally**: `cargo fmt`, plus narrowly targeted red-green checks for
+  the changed seams, scoped to the owning test target so the edit-test loop
+  stays fast (measured: a bare `-E 'test(<name>)'` filterset still rebuilds
+  every test binary, ~20 s; a target-scoped run rebuilds one, ~6 s):
+  `cargo nextest run --test <target> -E 'test(<name>)'` — use `--lib` for
+  unit tests under `src/`. Find the owning target with
+  `cargo nextest list`. While iterating, scope clippy the same way:
+  `cargo clippy --test <target> --all-features`.
+- **Run once before publication, not every loop**: the full local gate
+  `cargo fmt` + `cargo clippy --all-targets --all-features` (zero warnings).
 - **Do NOT run locally**: full `cargo test`/nextest sweeps, `cargo doc`,
   `cargo deny`, mutation testing, or whole integration binaries. Open the PR
   and let hosted CI run them; a red hosted check is the RCA signal, and any

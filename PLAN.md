@@ -65,11 +65,12 @@ correctness evidence appears.
   refuses an explicit code that does not resolve with `ROOM_NOT_FOUND`
   instead of silently creating a room — the collision-safe admission shape
   for directory-driven joins (drain truthfulness and the v3 correlated
-  envelope included; split-brain catalog updated). Remaining: the visibility
-  half — room-created/room-joined/room-closed events or a lookup API, or
+  envelope included; split-brain catalog updated). The in-repo client half
+  landed (session 261): native and browser `--join-code` runs send
+  `join_only` (issue #630). Remaining: the visibility half —
+  room-created/room-joined/room-closed events or a lookup API, or
   app-dimensioned room metrics as a partial step (cloud #847/#695 scoping) —
-  and optional client adoption of `join_only` for `--join-code` modes
-  (SDK/client repos own their halves).
+  and SDK/fortress adoption (SDK repos own those halves).
 - #627 — fully spec and implement the rkv and protobuf binary endpoints.
 - #396 — CLOSED 2026-09-12 (standing correctness/perf sweep, closed with the
   session-237 enforcement-seam sweep). The sweep practice continues
@@ -152,6 +153,14 @@ correctness evidence appears.
     merges (4 of the prior 20 runs; dry-run replay of the last 40 main
     pushes shows a byte-relevant `paths` filter skips 9, fires 31, and never
     skips an image-relevant change — that filter landed this session).
+    Session 261 extended the same byte-relevant shape to the per-PR
+    `docker` job in ci.yml: image-irrelevant pull requests skip the buildx
+    build and smoke (measured: Docker Build averaged 2.2 billed minutes per
+    run, and 6 of the last 13 merged PRs were image-irrelevant), pinned in
+    lockstep with the `docker-publish` filter by
+    `test_ci_docker_job_skips_image_irrelevant_pull_requests`; release
+    commits always change Cargo.toml/Cargo.lock, so releases keep full
+    image validation.
     Verified from the API: `main` has **zero required status checks** and no
     required reviews (one disabled Copilot ruleset; required linear history
     on), so the #379 owner-inventory prerequisite is exported and

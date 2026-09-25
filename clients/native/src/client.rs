@@ -8,7 +8,9 @@
 //!    `Authenticated` then `ProtocolInfo` (with the negotiated version on v3).
 //! 2. **Room** — `JoinRoom` with no code creates a room (the creator's
 //!    `room_created` stdout event carries the code for sibling processes);
-//!    `--join-code` joins by code.
+//!    `--join-code` joins by code with `join_only`, so an unresolvable code
+//!    is refused `ROOM_NOT_FOUND` instead of silently creating a room
+//!    (issue #630).
 //! 3. **Ready barrier** — once `--peers N` members are present, send
 //!    `PlayerReady`. The lobby no longer auto-starts on a full ready set:
 //!    finalization is driven by an explicit `StartGame`. When every current
@@ -607,6 +609,23 @@ fn negotiated_version_from(
     }
 }
 
+/// Build the `JoinRoom` message for one run (issue #630): `--join-code` sets
+/// `join_only` so an unresolvable code refuses `ROOM_NOT_FOUND` instead of
+/// silently creating the room; `--create-room` keeps the legacy
+/// create-by-omission contract with no `join_only` key.
+fn build_join_room_message(cli: &Cli, max_players: u8) -> ClientMessage {
+    ClientMessage::JoinRoom {
+        game_name: cli.game_name.clone(),
+        room_code: cli.join_code.clone(),
+        player_name: cli.player_name.clone(),
+        max_players: Some(max_players),
+        supports_authority: Some(false),
+        relay_transport: None,
+        password: None,
+        join_only: cli.join_code.as_ref().map(|_| true),
+    }
+}
+
 /// Create or join the room; returns our player id, the seated member ids, the
 /// room's lobby state and readiness baseline at join time.
 async fn join_room(
@@ -626,19 +645,7 @@ async fn join_room(
     // Validated in `run_inner`'s preflight (before any network touch); this
     // recomputation is infallible for any `Cli` that got this far.
     let max_players = cli.join_max_players().map_err(FatalError::protocol)?;
-    let message = ClientMessage::JoinRoom {
-        game_name: cli.game_name.clone(),
-        room_code: cli.join_code.clone(),
-        player_name: cli.player_name.clone(),
-        max_players: Some(max_players),
-        supports_authority: Some(false),
-        relay_transport: None,
-
-        password: None,
-        // Flag-off keeps the legacy create-on-join contract; adopting
-        // `join_only` for `--join-code` is tracked in issue #630.
-        join_only: None,
-    };
+    let message = build_join_room_message(cli, max_players);
     wire::send_client_message(ws, &message)
         .await
         .map_err(|error| FatalError::connection(format!("{error:#}")))?;
@@ -3217,6 +3224,40 @@ mod tests {
             direct_plan_rejection_message(None),
             "direct SessionPlan without a validated endpoint is unsupported by the native reference client; using relay fallback"
         );
+    }
+
+    #[test]
+    fn join_code_mode_sends_join_only_and_create_mode_keeps_omission() {
+        // Issue #630: `--join-code` adopts the collision-safe admission
+        // shape — `join_only: true` makes an unresolvable code refuse
+        // `ROOM_NOT_FOUND` instead of silently creating the room.
+        // `--create-room` keeps the legacy create-by-omission contract:
+        // no `join_only` key, byte-identical wire form.
+        let cases: [(&[&str], Option<&str>, Option<bool>); 2] = [
+            (&["--join-code", "ABC123"], Some("ABC123"), Some(true)),
+            (&["--create-room"], None, None),
+        ];
+        for (flags, room_code, join_only) in cases {
+            let cli = Cli::try_parse_from(
+                std::iter::once("signal-fish-reference-native")
+                    .chain(flags.iter().copied())
+                    .chain(["--server-url", "ws://127.0.0.1:3536/v2/ws", "--peers", "3"]),
+            )
+            .expect("cli parses");
+            let message = super::build_join_room_message(&cli, 3);
+            let ClientMessage::JoinRoom {
+                room_code: sent_code,
+                join_only: sent_only,
+                max_players,
+                ..
+            } = &message
+            else {
+                panic!("expected JoinRoom, got {message:?}");
+            };
+            assert_eq!(sent_code.as_deref(), room_code, "room_code for {flags:?}");
+            assert_eq!(*sent_only, join_only, "join_only for {flags:?}");
+            assert_eq!(*max_players, Some(3), "max_players for {flags:?}");
+        }
     }
 
     #[tokio::test]
