@@ -40,7 +40,7 @@ use webrtc::peer_connection::{
     PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
     RTCIceCandidateInit, RTCIceGatheringState, RTCIceServer, RTCIceTransportPolicy,
     RTCPeerConnectionIceEvent, RTCPeerConnectionState, RTCSessionDescription, RTCStatsReport,
-    RTCStatsReportEntry, SettingEngine, StatsSelector,
+    RTCStatsReportEntry, SettingEngineBuilder, StatsSelector,
 };
 use webrtc::runtime::{default_runtime, Runtime};
 
@@ -310,17 +310,17 @@ impl Engine {
                 RTCIceTransportPolicy::All
             })
             .build();
-        let mut setting_engine = SettingEngine::default();
+        let mut setting_engine = SettingEngineBuilder::new();
         if self.settings.disable_mdns {
-            setting_engine.set_multicast_dns_mode(MulticastDnsMode::Disabled);
+            setting_engine = setting_engine.with_multicast_dns_mode(MulticastDnsMode::Disabled);
         }
         if self.settings.crippled {
-            // The 0.20 driver requires at least one socket, but the ICE agent
+            // The driver requires at least one socket, but the ICE agent
             // must never register that dummy UDP socket as a usable local
             // candidate. Permit only TCP4 candidates while supplying no TCP
             // listeners. This also rejects UDP candidates embedded directly
             // in remote SDP, below the signaling layer's candidate filters.
-            setting_engine.set_network_types(vec![NetworkType::Tcp4]);
+            setting_engine = setting_engine.with_network_types(vec![NetworkType::Tcp4]);
         }
         let handler = Arc::new(PeerHandler {
             peer,
@@ -337,7 +337,7 @@ impl Engine {
         let pc: Arc<dyn PeerConnection> = Arc::new(
             PeerConnectionBuilder::new()
                 .with_configuration(config)
-                .with_setting_engine(setting_engine)
+                .with_setting_engine(setting_engine.build())
                 .with_handler(handler)
                 .with_runtime(self.runtime.clone())
                 .with_udp_addrs(udp_addrs)
@@ -1108,6 +1108,17 @@ fn spawn_channel_event_loop(
                 DataChannelEvent::OnClosing
                 | DataChannelEvent::OnBufferedAmountLow
                 | DataChannelEvent::OnBufferedAmountHigh => {}
+                // The 0.21 event enum is `#[non_exhaustive]`; unknown future
+                // driver events stay visible no-ops instead of failing the
+                // client build.
+                other => {
+                    tracing::debug!(
+                        ?other,
+                        %peer,
+                        channel = %label,
+                        "unhandled data channel event"
+                    );
+                }
             }
         }
     }));

@@ -59,7 +59,7 @@
 //!    one connected peer, and proves the survivor fails closed with the
 //!    departed peer's logical exchange debt still named.
 //! 8. `ipv6_only_mesh_pair_exchanges_on_a_host_ipv6_path` — the only cell whose
-//!    live path is IPv6. webrtc 0.20 turns each application-supplied UDP bind
+//!    live path is IPv6. webrtc 0.21 turns each application-supplied UDP bind
 //!    directly into a host candidate, so the bound family decides the
 //!    negotiated family; every other cell leaves `--ip-family any`, and a
 //!    dual-family host then selects IPv4 (verified: the same scenario with
@@ -135,7 +135,7 @@ const UNRELIABLE: &str = "unreliable";
 const CLIENT_NAMES: [&str; 3] = ["c0", "c1", "c2"];
 const TWO_CLIENT_NAMES: [&str; 2] = ["c0", "c1"];
 /// Scenario 8 only: bind IPv6 exclusively, so an IPv6 host candidate is the
-/// only thing this client can advertise. (No `--disable-mdns`: rtc 0.20's
+/// only thing this client can advertise. (No `--disable-mdns`: rtc 0.21's
 /// default multicast-DNS mode is query-only, so native host candidates are
 /// raw addresses either way.)
 const IPV6_ARGS: [&str; 2] = ["--ip-family", "ipv6"];
@@ -1982,7 +1982,7 @@ fn assert_direct_host_path(
 /// Assert the cross-platform, no-STUN/no-TURN smoke cell selected a direct
 /// path. rtc can learn the remote host socket from an inbound connectivity
 /// check before its signaled candidate is registered, exposing that side as
-/// `prflx` with no address in rtc 0.20's public statistics. That shape is safe
+/// `prflx` with no address in rtc 0.21's public statistics. That shape is safe
 /// only for this baseline: both processes prove they advertised host-only
 /// candidates, and the cell configures neither STUN nor TURN. IPv6 and TURN
 /// assertions retain their exact address/type requirements.

@@ -1,7 +1,7 @@
 # signal-fish-reference-native
 
 A **native Rust reference client** for the Signal Fish protocol v3 with a **real WebRTC stack**
-([webrtc-rs](https://github.com/webrtc-rs/webrtc) 0.20: actual ICE gathering, DTLS handshakes, and SCTP data
+([webrtc-rs](https://github.com/webrtc-rs/webrtc) 0.21: actual ICE gathering, DTLS handshakes, and SCTP data
 channels). It exists for **conformance and reference** — executable documentation of the client side of
 [`docs/protocol.md`](../../docs/protocol.md) and the engine of the in-repo multi-process interop suite. It is
 **not a product**: no reconnection logic, no game loop, no API stability promises.
@@ -63,7 +63,7 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--relay-payload <TEXT>` | — | After `GameStarting` (+250 ms settle), send one `GameData {"relay_msg": TEXT}` over the WebSocket relay floor and require the other `--peers - 1` members' payloads. A late joiner (entry into a finalized room) arms the send on entry instead — `GameStarting` pre-dates the join — and its receive requirement is waived: payloads sent before the join are never replayed |
 | `--cripple-ice` | off | Deterministically break ICE: bind an isolated dummy UDP transport while allowing only unconfigured TCP candidates in the ICE agent, then drop all outbound/inbound `IceCandidate` signals (SDP offer/answer and gathering completion still flow). Forces the relay fallback |
 | `--disable-mdns` | off | Test harness only: disable resolution of remote `.local` candidates so packet-loss experiments do not fault their mDNS discovery control plane. Native host candidates are raw IPs in either mode; normal mode retains mDNS query support for browser peers |
-| `--ip-family <FAMILY>` | `any` | Restrict the ICE sockets this client binds — and therefore the family of every host candidate it advertises — to `ipv4` or `ipv6`. `any` binds every usable interface address. webrtc 0.20 turns each supplied bind directly into a host candidate, so this is what pins the negotiated path's family. A requested family the host cannot serve fails the process before the WebSocket opens (exit 2), instead of falling back to the other one or degrading to the relay floor. `--cripple-ice` is exempt: that transport is a deliberate dead end and always binds the IPv4 loopback |
+| `--ip-family <FAMILY>` | `any` | Restrict the ICE sockets this client binds — and therefore the family of every host candidate it advertises — to `ipv4` or `ipv6`. `any` binds every usable interface address. webrtc 0.21 turns each supplied bind directly into a host candidate, so this is what pins the negotiated path's family. A requested family the host cannot serve fails the process before the WebSocket opens (exit 2), instead of falling back to the other one or degrading to the relay floor. `--cripple-ice` is exempt: that transport is a deliberate dead end and always binds the IPv4 loopback |
 | `--drop-ice-from <N>` | — | Matrix-harness fault injection: drop inbound `IceCandidate` signals from the planned peer named `cNN`, while preserving offer/answer signaling, every other P2P edge, and the relay floor. The flag fails loudly if the ordinal does not resolve to exactly one planned peer |
 | `--ice-transport-policy <POLICY>` | `all` | ICE candidate policy: `all` permits every gathered candidate type; `relay` requires a TURN-relayed path. The repository's local coturn gate uses `relay` to prove production-minted TURN credentials rather than a direct host path |
 | `--p2p-release-file <PATH>` | — | Test harness only: keep processing WebSocket traffic but defer peer-connection creation until PATH exists. The TURN gate uses this to prove the relay floor before ICE establishment begins |
@@ -147,7 +147,7 @@ process continues to its normal bounded exit.
 | `channel_message` | `peer`, `label`, `text` | A data-channel text message arrived |
 | `p2p_pair_connected` | `peer` | BOTH channels toward `peer` are open |
 | `p2p_pair_reconnected` | `peer` | BOTH channels reopened for a coordinated PairRetry generation |
-| `selected_candidate_pair` | `peer`, `local_candidate_type`, `remote_candidate_type`, `local_candidate_address`, `remote_candidate_address` | Native-only selected ICE pair after both channels open. Exchange is not delayed while the stack's eventually consistent statistics snapshot catches up, but a connected physical link cannot satisfy clean-exit criteria until this event is emitted. The local TURN gate requires both candidate types to be `relay`, and the IPv6 cell requires both addresses to be concrete dialable IPv6. Either address is `null` when the stack redacts or omits it — including rtc 0.20's omitted registry entry for a dynamically learned `prflx` remote candidate — and a harness asserting on the family must treat that as a failure |
+| `selected_candidate_pair` | `peer`, `local_candidate_type`, `remote_candidate_type`, `local_candidate_address`, `remote_candidate_address` | Native-only selected ICE pair after both channels open. Exchange is not delayed while the stack's eventually consistent statistics snapshot catches up, but a connected physical link cannot satisfy clean-exit criteria until this event is emitted. The local TURN gate requires both candidate types to be `relay`, and the IPv6 cell requires both addresses to be concrete dialable IPv6. Either address is `null` when the stack redacts or omits it — including rtc 0.21's omitted registry entry for a dynamically learned `prflx` remote candidate — and a harness asserting on the family must treat that as a failure |
 | `exchange_ready` | — | Harness-only barrier: every planned pair is open and local ICE gathering is complete, while `--exchange-release-file` still holds application exchange |
 | `exchange_reliable_ready` | — | Loss-harness barrier: every planned pair has sent and received its exact reliable exchange, while `--unreliable-exchange-release-file` still holds the unreliable half |
 | `transport_status_sent` | `transport`, `connected` | An overall `TransportStatus` state change went out under the transport-fallback contract |
@@ -266,7 +266,7 @@ anyway.
 
 `--ip-family` decides which families this client binds; two rules decide _which addresses_:
 
-1. **Every usable interface address.** webrtc 0.20 turns each supplied bind directly into a host candidate, so
+1. **Every usable interface address.** webrtc 0.21 turns each supplied bind directly into a host candidate, so
    a wildcard bind would advertise `0.0.0.0`. Unspecified, multicast, and IPv6 link-local addresses are dropped
    (the candidate grammar cannot carry a scope ID).
 2. **The kernel's own source address for each configured STUN/TURN server.** Interface enumeration reports only
