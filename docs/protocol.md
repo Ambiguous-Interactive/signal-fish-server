@@ -976,9 +976,12 @@ rejects new room creation with `SERVER_DRAINING`, refuses reconnection
 attempts (`ReconnectionFailed` with `SERVER_DRAINING`) and spectator joins
 (`SpectatorJoinFailed` with `SERVER_DRAINING`), sends v3 clients a best-effort
 [`GoingAway`](#goingaway) advisory, then closes remaining sockets with `4000
-server_shutdown` after `server.drain_grace_secs` (default 30). Shutdown-drain
-disconnects do not arm reconnection tokens; the instance is going away, so
-clients should create or join a fresh room on another healthy instance.
+server_shutdown` after `server.drain_grace_secs` (default 30). Existing-room
+`JoinRoom` joins stay admitted during drain; a `join_only` join whose code
+does not resolve answers its truthful `ROOM_NOT_FOUND`, not `SERVER_DRAINING`
+(issue #625). Shutdown-drain disconnects do not arm reconnection tokens; the
+instance is going away, so clients should create or join a fresh room on
+another healthy instance.
 
 ### LobbyStateChanged
 
@@ -1617,8 +1620,9 @@ The moderation operations are authority-only (v3 only):
   `INVALID_INPUT` (the authority cannot kick itself).
 - `RegenerateRoomCode` replaces the room code with a freshly generated one. Existing members stay connected and
   reconnection tokens are unaffected. The requester receives `RoomCodeRegenerated` carrying the new code; the old
-  code stops resolving to the room immediately, and a join that names it behaves like any unknown code
-  (join-creates-room may open a fresh, unrelated room under it). The result goes only to the acting authority, and
+  code stops resolving to the room immediately, and a join that names it behaves like any unknown code:
+  join-creates-room may open a fresh, unrelated room under it, while a `join_only` join is refused `ROOM_NOT_FOUND`
+  (issue #625). The result goes only to the acting authority, and
   no message queries the current code. If the authority role moves after a rotation, share the new code with the
   successor out of band before the transfer (issue #566).
 - `SetRoomAccess` takes `password` (non-empty string, max 256 bytes, or `null`). A password seals the room: every

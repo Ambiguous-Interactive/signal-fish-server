@@ -110,8 +110,9 @@ pub(super) enum JoinRoomError {
     /// A creator requested a capacity above its configured application cap.
     #[error(transparent)]
     MaxPlayersPerApplicationExceeded(#[from] MaxPlayersPerApplicationExceededError),
-    /// The room is absent or belongs to another accepted app label.
-    /// Both cases intentionally share one non-enumerating wire outcome.
+    /// The room is absent, belongs to another accepted app label, or a
+    /// `join_only` join (issue #625) named a code that does not resolve.
+    /// All cases intentionally share one non-enumerating wire outcome.
     #[error("Room not found")]
     RoomNotFound,
     /// The room is password-protected and the join presented no password or
@@ -506,8 +507,9 @@ impl EnhancedGameServer {
         // the drain-specific refusal. Existing-room joins stay admitted
         // during drain, and a join-only join is exactly that class. A
         // join-only miss replies through the ordinary failure path, so only
-        // its own join task can wait on a full queue — the drain loop, which
-        // must never block, uses the non-blocking fast-path rejection.
+        // its own join task can wait on a full queue; the create-while-
+        // draining rejection stays non-blocking (`try_send`) because a
+        // draining server must not park join tasks on full queues.
         if !join_only
             && self
                 .join_would_create_room_while_draining(&game_name, room_code.as_deref())

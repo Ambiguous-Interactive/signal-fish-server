@@ -1190,8 +1190,9 @@ components:
       description: >-
         Authority-only: replace the room code with a freshly generated one.
         The old code stops resolving to this room immediately; joins that name
-        it behave like any unknown code (join-creates-room may open a fresh,
-        unrelated room under it). Existing members stay connected and
+        it behave like any unknown code: join-creates-room may open a fresh,
+        unrelated room under it, while a join_only join is refused
+        ROOM_NOT_FOUND (issue #625). Existing members stay connected and
         reconnection tokens are unaffected. Success responses use the
         RoomCodeRegenerated result, which carries the new code for the
         authority to distribute to future invitees. The result goes only to

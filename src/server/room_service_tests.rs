@@ -748,9 +748,10 @@ async fn join_only_admission_never_creates_and_preserves_legacy_create_on_join()
             "case '{}' existing-join counter",
             case.name
         );
-        // Every case names join intent (even the malformed one), so all of
-        // them spend the join bucket, never the creation bucket (issue
-        // #625); refused joins still consume their attempt.
+        // Cases 1-4 carry a `room_code`, so they spend the join bucket both
+        // before and after this change; case 5 (join-only, no code) is the
+        // new conjunct and must also stay off the creation bucket. Refused
+        // joins still consume their attempt (issue #625).
         let rate_stats = server
             .rate_limiter
             .get_player_stats(&joiner)
