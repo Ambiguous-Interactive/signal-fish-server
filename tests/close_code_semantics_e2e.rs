@@ -282,7 +282,15 @@ async fn auth_timeout_closes_with_4001() {
     // pre-auth deadline never arms); this scenario is ABOUT that deadline.
     config.app_id_allowlist_enabled = true;
     config.websocket_config.auth_timeout_secs = 5;
+    // Disable server pings: an auto-answered Ping would arrive as an inbound
+    // frame and break this test's zero-received-frames premise if the ping
+    // interval ever dropped below the auth window.
+    config.websocket_config.server_ping_interval_secs = 0;
     let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
+    let metrics = server.metrics();
+    let zero_frame_before = metrics
+        .websocket_zero_frame_timeout_disconnects
+        .load(std::sync::atomic::Ordering::Relaxed);
     let running_server = start_server(server).await;
     let addr = running_server.addr();
 
@@ -290,6 +298,17 @@ async fn auth_timeout_closes_with_4001() {
     let (code, reason) = read_close_frame(&mut ws, "auth timeout").await;
     assert_eq!(code, 4001, "auth timeout must close with 4001 ({reason})");
     assert_eq!(reason, "auth_timeout");
+    // The cut session never received a frame, so it must be counted as a
+    // zero-frame deadline disconnect (upgrade accepted, no client data ever
+    // arrived — the edge-black-hole signal from issue #624).
+    let zero_frame_after = metrics
+        .websocket_zero_frame_timeout_disconnects
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        zero_frame_after,
+        zero_frame_before + 1,
+        "a deadline cut with zero received frames must be counted"
+    );
     running_server.shutdown().await;
 }
 

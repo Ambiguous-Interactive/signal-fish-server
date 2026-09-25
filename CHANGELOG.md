@@ -7,7 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Observability: WebSocket deadline cuts (`4001 auth_timeout`,
+  `4004 idle_timeout`) now log the upgrade `request_id`, `received_frames`,
+  and `elapsed_ms`, tying the cut to the accepted-upgrade correlation chain.
+  A cut whose session never received a frame bumps the new
+  `signal_fish_websocket_zero_frame_timeout_disconnects_total` Prometheus
+  counter (#624): an accepted upgrade whose client data never arrived is
+  provable from server output alone.
+
 ### Changed
+
+- Native reference client: webrtc-rs/rtc bumped to 0.21. The engine migrates
+  to the `SettingEngineBuilder` API, and unknown future data-channel events
+  log at debug instead of failing the build (#621).
 
 - Devcontainer: `opencode.json` now uses the native OpenCode V2 config shape.
   Servers live under `mcp.servers` and the V1-only `enabled` key is gone.

@@ -954,6 +954,11 @@ assignments that are never renumbered:
 | `1000` | `unregistered` | Normal closure (leave, replaced connection, ordinary teardown) |
 | `1009` | `outbound_message_too_large` | A complete encoded server application message exceeded the advertised outbound payload limit; no prefix of that message was written |
 
+A deadline cut (`4001`/`4004`) whose session never received a frame is counted by the
+`signal_fish_websocket_zero_frame_timeout_disconnects_total` Prometheus counter. The cut's
+log line carries the upgrade `request_id`, `received_frames`, and `elapsed_ms`. An accepted
+upgrade whose client data never arrived is therefore provable from server output alone.
+
 During a shutdown drain the process stops accepting new WebSocket upgrades,
 rejects new room creation with `SERVER_DRAINING`, refuses reconnection
 attempts (`ReconnectionFailed` with `SERVER_DRAINING`) and spectator joins

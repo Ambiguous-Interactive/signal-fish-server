@@ -276,6 +276,7 @@ async fn websocket_handler_with_default(
     let socket_server = Arc::clone(&server);
     let failure_server = Arc::clone(&server);
     let failure_request_id = request_id.clone();
+    let socket_request_id = request_id.clone();
     let response = upgrade
         .on_failed_upgrade(move |error| {
             // The 101 + correlation headers were already sent, but the socket
@@ -300,6 +301,7 @@ async fn websocket_handler_with_default(
                 addr,
                 binding_session,
                 default_protocol_version,
+                socket_request_id,
             )
         });
     finish_upgrade_response(

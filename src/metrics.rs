@@ -121,6 +121,11 @@ pub struct ServerMetrics {
     /// Connections force-closed because their outbound queue stayed full past
     /// `websocket.slow_consumer_timeout_ms`.
     pub websocket_slow_consumer_disconnects: AtomicU64,
+    /// Deadline cuts (authentication or idle) whose session never received a
+    /// single frame: the upgrade succeeded but no client data ever arrived,
+    /// which distinguishes an edge/transport black hole from a misbehaving
+    /// client. The cut's log line carries the upgrade `request_id`.
+    pub websocket_zero_frame_timeout_disconnects: AtomicU64,
     /// Server-initiated RFC 6455 WebSocket pings that did not receive their
     /// matching Pong before `websocket.pong_timeout_secs`.
     pub websocket_ping_timeouts: AtomicU64,
@@ -401,6 +406,7 @@ pub struct ConnectionMetrics {
     pub websocket_messages_dropped: u64,
     pub websocket_backpressure_events: u64,
     pub websocket_slow_consumer_disconnects: u64,
+    pub websocket_zero_frame_timeout_disconnects: u64,
     pub websocket_ping_timeouts: u64,
     pub websocket_ping_probes_skipped_activity: u64,
     pub websocket_ping_probes_cancelled_activity: u64,
@@ -655,6 +661,7 @@ impl ServerMetrics {
             websocket_messages_dropped: AtomicU64::new(0),
             websocket_backpressure_events: AtomicU64::new(0),
             websocket_slow_consumer_disconnects: AtomicU64::new(0),
+            websocket_zero_frame_timeout_disconnects: AtomicU64::new(0),
             websocket_ping_timeouts: AtomicU64::new(0),
             websocket_ping_probes_skipped_activity: AtomicU64::new(0),
             websocket_ping_probes_cancelled_activity: AtomicU64::new(0),
@@ -811,6 +818,11 @@ impl ServerMetrics {
 
     pub fn increment_websocket_slow_consumer_disconnects(&self) {
         self.websocket_slow_consumer_disconnects
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn increment_websocket_zero_frame_timeout_disconnects(&self) {
+        self.websocket_zero_frame_timeout_disconnects
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -1547,6 +1559,9 @@ impl ServerMetrics {
                     .load(Ordering::Relaxed),
                 websocket_slow_consumer_disconnects: self
                     .websocket_slow_consumer_disconnects
+                    .load(Ordering::Relaxed),
+                websocket_zero_frame_timeout_disconnects: self
+                    .websocket_zero_frame_timeout_disconnects
                     .load(Ordering::Relaxed),
                 websocket_ping_timeouts: self.websocket_ping_timeouts.load(Ordering::Relaxed),
                 websocket_ping_probes_skipped_activity: self
