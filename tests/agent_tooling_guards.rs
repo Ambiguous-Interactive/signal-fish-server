@@ -294,7 +294,13 @@ fn zai_mcp_suite_is_wired_to_every_harness() {
     // live inside that map, not directly under mcp (the V1 layout).
     require_fragments(
         &read_live("opencode.json"),
-        &["\"servers\"", "zai-vision", "zai-web-search", "zai-web-reader", "zai-zread"],
+        &[
+            "\"servers\"",
+            "zai-vision",
+            "zai-web-search",
+            "zai-web-reader",
+            "zai-zread",
+        ],
         contract,
     );
     require_fragments(
@@ -333,12 +339,22 @@ fn opencode_config_is_native_v2() {
     let opencode = read_live("opencode.json");
     require_fragments(
         &opencode,
-        &["\"$schema\": \"https://opencode.ai/config.json\"", "\"mcp\"", "\"servers\""],
+        &[
+            "\"$schema\": \"https://opencode.ai/config.json\"",
+            "\"mcp\"",
+            "\"servers\"",
+        ],
         contract,
     );
     // Five servers total — github plus the four Z.AI relays — and every one
     // of them is a local stdio command in this harness.
-    for server in ["github", "zai-vision", "zai-web-search", "zai-web-reader", "zai-zread"] {
+    for server in [
+        "github",
+        "zai-vision",
+        "zai-web-search",
+        "zai-web-reader",
+        "zai-zread",
+    ] {
         require_fragments(&opencode, &[&format!("\"{server}\"")], contract);
     }
     assert_eq!(
