@@ -72,6 +72,22 @@ correctness evidence appears.
   app-dimensioned room metrics as a partial step (cloud #847/#695 scoping) —
   and SDK/fortress adoption (SDK repos own those halves).
 - #627 — fully spec and implement the rkv and protobuf binary endpoints.
+  Owner decisions 2026-09-25: "rkv" is rkyv; the ask is ENCODINGS, not new
+  endpoints; ship rkyv + protobuf on v2 and v3 inside the existing
+  WebSocket envelope under existing limits/budgets. Session 262 landed the
+  server half: `GameDataEncoding::Protobuf` (wire token `protobuf`), opt-in
+  knobs `protocol.enable_rkyv_game_data` /
+  `protocol.enable_protobuf_game_data` (default off = byte-identical
+  `ProtocolInfo.game_data_formats`), canonical advertisement order, opaque
+  relay semantics (no server decode; cross-format delivery reports
+  `unsupported_format`), v2 passthrough extension, strict v3 envelope
+  decoder token, budgets inherited unchanged, docs/spec/samples/guards
+  updated, and a live four-encoding relay e2e
+  (`opaque_opt_in_encodings_relay_directly_and_report_cross_format`).
+  Remaining: reference clients (native + browser) driving one opaque
+  encoding end to end and the interop lanes extending to it; per-protocol
+  message-size budgets (owner "potentially", filed as #634); SDK/fortress
+  adoption (SDK repos own those halves).
 - #396 — CLOSED 2026-09-12 (standing correctness/perf sweep, closed with the
   session-237 enforcement-seam sweep). The sweep practice continues
   opportunistically wherever new features open seams; per-session closure
