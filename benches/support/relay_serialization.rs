@@ -1,4 +1,5 @@
 use axum::extract::ws::Message;
+use bytes::Bytes;
 use sha2::{Digest, Sha256};
 use signal_fish_server::coordination::allocation_benchmark::{
     channel_with_metrics, OutboundPayload, OutboundReceiver, OutboundSender,
@@ -26,6 +27,11 @@ const CONTROL_CAPACITY: usize = 8;
 const ROOM_ID: RoomId = RoomId::from_u128(0x222);
 const SENDER_ID: PlayerId = PlayerId::from_u128(0x2220);
 
+/// Issue #627's canonical opaque relay payload: it is deliberately not valid
+/// JSON or MessagePack, so any fallback decode attempt fails loudly instead of
+/// fabricating meaning that was never on the wire.
+const OPAQUE_RKYV_PAYLOAD: &[u8] = &[0x52, 0x4b, 0x59, 0x56, 0x00, 0xff];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scenario {
     V2JsonBinary,
@@ -33,15 +39,17 @@ pub enum Scenario {
     V3JsonText,
     V3MessagePackBinary,
     MixedMessagePackSource,
+    MixedRkyvSource,
 }
 
 impl Scenario {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::V2JsonBinary,
         Self::V2RkyvBinary,
         Self::V3JsonText,
         Self::V3MessagePackBinary,
         Self::MixedMessagePackSource,
+        Self::MixedRkyvSource,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -51,6 +59,7 @@ impl Scenario {
             Self::V3JsonText => "v3_json_text",
             Self::V3MessagePackBinary => "v3_message_pack_binary",
             Self::MixedMessagePackSource => "mixed_message_pack_source",
+            Self::MixedRkyvSource => "mixed_rkyv_source",
         }
     }
 }
@@ -93,6 +102,15 @@ pub fn assert_expected_output_digest(scenario: Scenario, room_size: usize, ledge
         (Scenario::MixedMessagePackSource, 16) => {
             "1c461f688ee193d43e61695e07536caad92f8e46254787641ac59dc7db012658"
         }
+        (Scenario::MixedRkyvSource, 2) => {
+            "418bc2cb2cbccc980ab687552be68e3d6df1bdc44ce9310f8632bc6b96ac1f39"
+        }
+        (Scenario::MixedRkyvSource, 8) => {
+            "da795b8eb20527b7360bc8c634f740abdae7d8f6604f7b79a264088f1ca0a6a7"
+        }
+        (Scenario::MixedRkyvSource, 16) => {
+            "d8ac608d7e0947d4911f263f11970607d6c854e11c0cbbf1ac86d595af0c7060"
+        }
         _ => panic!("room-{room_size} has no checked-in wire digest"),
     };
     let actual: String = ledger
@@ -132,6 +150,10 @@ pub struct Ledger {
     pub json_encodes: u64,
     pub message_pack_encodes: u64,
     pub message_pack_decodes: u64,
+    /// Dequeued relays production answers with the accounted unsupported-format
+    /// path instead of a data frame: no payload is written, and the omission is
+    /// reported through the exact `DeliveryReport` plus rate-limited advisory.
+    pub unsupported_format: u64,
     pub output_sha256: [u8; 32],
 }
 
@@ -249,6 +271,7 @@ impl Fixture {
                 json_encodes: 0,
                 message_pack_encodes: 0,
                 message_pack_decodes: 0,
+                unsupported_format: 0,
                 output_sha256: [0; 32],
             };
             let mut digest = Sha256::new();
@@ -284,9 +307,31 @@ impl Fixture {
                             panic!("relay serialization fixture received a delivery report")
                         }
                     };
+                    // Opaque cross-format cohorts take the production
+                    // fail-closed path: materialization refuses to guess a
+                    // lossy shape, no data frame is written for this
+                    // recipient, and the omission is counted as an
+                    // unsupported-format gap. The benchmark seam only measures
+                    // the materialization decision, so the ledger records the
+                    // accounted omission without the queue-write bookkeeping
+                    // the socket writer performs around it.
                     let projected =
-                        materialize_game_data(&delivery, profile.supports_v3(), profile.format)
-                            .expect("production game-data projection must succeed");
+                        match materialize_game_data(&delivery, profile.supports_v3(), profile.format)
+                        {
+                            Ok(projected) => projected,
+                            // Opaque refusal reasons are the fail-closed
+                            // unsupported-format path (issue #627): recorded
+                            // as an accounted omission, never silently
+                            // dropped.
+                            Err(reason) => {
+                                ledger.unsupported_format += 1;
+                                tracing::debug!(
+                                    reason = %reason,
+                                    "opaque payload undeliverable cross-format"
+                                );
+                                continue;
+                            }
+                        };
                     ledger.materialized += 1;
                     ledger.json_encodes += projected.json_encodes;
                     ledger.message_pack_encodes += projected.message_pack_encodes;
@@ -351,11 +396,12 @@ impl Fixture {
         assert_eq!(ledger.enqueued, expected, "successful enqueues disagree");
         assert_eq!(ledger.dequeued, expected, "dequeued frames disagree");
         assert_eq!(
-            ledger.materialized, expected,
-            "materialized frames disagree"
+            ledger.materialized + ledger.unsupported_format,
+            expected,
+            "accounted materializations disagree"
         );
         assert_eq!(
-            ledger.text_frames + ledger.binary_frames,
+            ledger.text_frames + ledger.binary_frames + ledger.unsupported_format,
             expected,
             "wire frame cohorts disagree"
         );
@@ -416,6 +462,23 @@ impl Fixture {
                 assert_eq!(ledger.message_pack_decodes, relays as u64);
                 assert_eq!(ledger.message_pack_encodes, relays as u64 * binary_cohorts);
             }
+            Scenario::MixedRkyvSource => {
+                let rkyv_recipients = (0..recipients).filter(|index| index % 4 == 0).count() as u64;
+                let opaque_served = relays as u64 * rkyv_recipients;
+                assert_eq!(ledger.materialized, opaque_served);
+                assert_eq!(ledger.text_frames, 0);
+                assert_eq!(ledger.binary_frames, opaque_served);
+                assert_eq!(
+                    ledger.unsupported_format,
+                    relays as u64 * (recipients as u64 - rkyv_recipients)
+                );
+                assert_eq!(ledger.json_encodes, 0);
+                assert_eq!(ledger.message_pack_decodes, 0);
+                // Every served cohort shares the relay frame cache, so the v3
+                // binary envelope is one MessagePack encode per relay rather
+                // than one per rkyv recipient.
+                assert_eq!(ledger.message_pack_encodes, relays as u64);
+            }
         }
     }
 }
@@ -455,6 +518,31 @@ fn recipient_profile(scenario: Scenario, recipient_index: usize) -> RecipientPro
                 RecipientProfile {
                     protocol_version: 3,
                     format: GameDataEncoding::MessagePack,
+                },
+            ];
+            PROFILES[recipient_index % PROFILES.len()]
+        }
+        Scenario::MixedRkyvSource => {
+            // Index 0 is also the sender's profile, so the sender negotiates
+            // the Rkyv source encoding. Every cross-format cohort appears: the
+            // protobuf cohort and both JSON cohorts are served by the accounted
+            // unsupported-format path instead of a lossy conversion.
+            const PROFILES: [RecipientProfile; 4] = [
+                RecipientProfile {
+                    protocol_version: 3,
+                    format: GameDataEncoding::Rkyv,
+                },
+                RecipientProfile {
+                    protocol_version: 3,
+                    format: GameDataEncoding::Protobuf,
+                },
+                RecipientProfile {
+                    protocol_version: 3,
+                    format: GameDataEncoding::Json,
+                },
+                RecipientProfile {
+                    protocol_version: 2,
+                    format: GameDataEncoding::Json,
                 },
             ];
             PROFILES[recipient_index % PROFILES.len()]
@@ -546,5 +634,12 @@ fn relay_message(scenario: Scenario, seq: u64) -> Arc<ServerMessage> {
                 epoch: Some(1),
             })
         }
+        Scenario::MixedRkyvSource => Arc::new(ServerMessage::GameDataBinary {
+            from_player: SENDER_ID,
+            encoding: GameDataEncoding::Rkyv,
+            payload: Bytes::from_static(OPAQUE_RKYV_PAYLOAD),
+            seq: Some(seq),
+            epoch: Some(1),
+        }),
     }
 }

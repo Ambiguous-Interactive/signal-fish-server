@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Reference clients: native and browser `--game-data-format
+  <json|rkyv|protobuf>` (#627). The flag negotiates the encoding in
+  `Authenticate`, validates it against the server's advertised
+  `ProtocolInfo.game_data_formats` (an unadvertised encoding fails before
+  any room is touched, naming the enabling server knob), sends
+  `--relay-payload` bytes as raw binary frames under an opaque negotiation,
+  and receives them through the strict v3 envelope — the delivery ledger and
+  relay-receipt success criteria advance exactly as they do for JSON. Opaque
+  modes are v3-only (v2 passthrough carries no sender attribution); the
+  default `json` path is byte-identical. The browser client also accepts the
+  `protobuf` token in its binary-envelope validator and emits opaque
+  receipts (encoding token + base64 payload) with native parity.
+
+- Benchmarks: the relay serialization benches gained a `mixed_rkyv_source`
+  scenario — an rkyv sender in a room spanning v3-rkyv, v3-protobuf,
+  v3-json, and v2-json cohorts — pinning exact wire digests, per-cohort
+  frame/encode expectations (opaque passthrough; fail-closed
+  `unsupported_format` accounting for cross-format recipients), and
+  per-relay allocation ceilings (issue #636).
+
+### Changed
+
+- CI: the `deny` supply-chain job skips dependency-irrelevant pull requests
+  (#512). Its verdict is a pure function of dependency-graph inputs, so a
+  change touching no Cargo manifest/lockfile, `deny.toml` policy, npm
+  package file, or `.cargo/**` config skips the analyzers; the daily noon
+  cron always audits. Pinned in lockstep by
+  `test_ci_deny_job_skips_dependency_irrelevant_pull_requests`.
 - Protocol: opaque game-data encodings `rkyv` and `protobuf` are negotiable on
   v2 and v3 behind the new opt-in knobs `protocol.enable_rkyv_game_data` and
   `protocol.enable_protobuf_game_data` (#627). Default off: the default
