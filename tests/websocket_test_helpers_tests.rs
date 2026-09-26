@@ -2268,8 +2268,19 @@ fn conformance_text_and_binary_entrypoints_record_once() {
             binary_auditor.record_binary_frame("receiver", &wire),
             fixture
         );
-        if encoding != GameDataEncoding::Rkyv {
+        if matches!(
+            encoding,
+            GameDataEncoding::Json | GameDataEncoding::MessagePack
+        ) {
             assert_eq!(binary_auditor.received_count("receiver", "binary"), 1);
+        } else {
+            // Opaque payloads carry no schema, so the ledger must not
+            // fabricate a decoded entry for them (#627).
+            assert_eq!(
+                binary_auditor.received_count("receiver", "binary"),
+                0,
+                "opaque {encoding:?} payload must not count as a decoded ledger entry"
+            );
         }
     }
 }
