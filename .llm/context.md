@@ -123,25 +123,20 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
 ### GitHub Access (Required for All Agents)
 
 - This policy applies to every repository agent entrypoint (Codex, Claude, and
-  GitHub Copilot).
-- GitHub authentication comes from the connected VS Code GitHub
+  GitHub Copilot). Authentication comes from the connected VS Code GitHub
   connector/extension session: `.vscode/mcp.json` signs the pinned
   `github-mcp-server` with `GITHUB_PERSONAL_ACCESS_TOKEN` injected through
-  `remoteEnv`, so harnesses running under the connector operate authenticated.
-  When a GitHub MCP tool call surfaces the server's device-authorization
-  fallback instead, retry the call through the connector's session rather than
-  treating the prompt as a blocker or downgrading to unauthenticated REST
-  reads for write operations.
-- Use local `git` for branch management, staging, commits, and pushes.
-- Use the connected VS Code GitHub extension / GitHub app for pull-request
-  creation, metadata, comments, reviewer requests, review inspection, and every
-  other GitHub operation it supports.
-- Do not block repository delivery solely because `gh auth status` is
-  unauthenticated when the connected GitHub extension/app is available and the
-  Git remote can push successfully.
-- Fall back to `gh` only for a required capability the extension/app cannot
-  supply (notably detailed GitHub Actions logs or GraphQL review-thread
-  operations), and only when an authenticated CLI session is available.
+  `remoteEnv`. If an MCP call surfaces the device-authorization fallback,
+  retry through the connector's session rather than treating the prompt as a
+  blocker or downgrading to unauthenticated REST reads for write operations.
+- Use local `git` for branches, staging, commits, and pushes. Use the
+  connected VS Code GitHub extension / GitHub app for pull requests, comments,
+  reviewers, review inspection, and every other operation it supports. Fall
+  back to `gh` only for a capability the extension/app cannot supply (notably
+  detailed Actions logs or GraphQL review-thread operations), and only when an
+  authenticated CLI session exists. Never block delivery solely because
+  `gh auth status` is unauthenticated while the extension/app and the Git
+  remote work.
 
 ### Writing Style for User-Facing Text (Required)
 
@@ -149,6 +144,10 @@ Write every user-facing text in Simplified Technical English (STE): short,
 simple, direct, and extremely brief. This applies to PR titles and
 descriptions, issue text and comments, commit messages, code review comments,
 documentation, CHANGELOG entries, and operator-facing log messages.
+
+PR descriptions follow `.github/pull_request_template.md` (short Why/What
+shape, adopted from `ambiguous-interactive/unity-helpers`): 1-2 "why"
+sentences, 2-5 one-line "what" bullets; detail belongs in the linked issue.
 
 - Keep it extremely short. A few sentences is the maximum, not the target.
   No fluff, no verbosity, no filler.
