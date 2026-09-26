@@ -21,6 +21,17 @@ warn() { echo "[no-panics] WARNING: $*" >&2; }
 
 FAILED=0
 
+# Env vars that would poison a policy scan if inherited by the nested Cargo
+# (instrumentation flags, sanitizer runtimes, redirected target dirs). The
+# script scrubs all of them whenever it must isolate, and isolates ONLY when at
+# least one is present (or isolation is explicitly requested via
+# NESTED_CARGO_TARGET_DIR): a clean environment reuses the ambient target dir,
+# so the policy scan shares the dependency graph the rest of the lint/test
+# pipeline already compiled instead of paying a duplicate cold build (#512).
+NESTED_CARGO_TARGET_DIR_EXPLICIT=0
+if [ -n "${NESTED_CARGO_TARGET_DIR+x}" ]; then
+    NESTED_CARGO_TARGET_DIR_EXPLICIT=1
+fi
 NESTED_CARGO_TARGET_DIR="${NESTED_CARGO_TARGET_DIR:-$REPO_ROOT/target/no-panic-policy-scan}"
 NESTED_CARGO_ENV_VARS=(
     RUSTFLAGS
@@ -47,19 +58,29 @@ run_nested_cargo() {
         fi
     done
 
-    if [ -n "$inherited" ]; then
-        log "Scrubbing inherited Cargo instrumentation env for nested Cargo: $inherited"
+    local nested=0
+    if [ "$inherited" != "" ] || [ "$NESTED_CARGO_TARGET_DIR_EXPLICIT" -eq 1 ]; then
+        nested=1
     fi
-    log "Nested Cargo command: cargo $*"
-    log "Nested Cargo target dir: $NESTED_CARGO_TARGET_DIR"
 
-    (
-        for var in "${NESTED_CARGO_ENV_VARS[@]}"; do
-            unset "$var"
-        done
-        export CARGO_TARGET_DIR="$NESTED_CARGO_TARGET_DIR"
+    if [ "$nested" -eq 1 ]; then
+        if [ "$inherited" != "" ]; then
+            log "Scrubbing inherited Cargo instrumentation env for nested Cargo: $inherited"
+        fi
+        log "Nested Cargo command: cargo $*"
+        log "Nested Cargo target dir: $NESTED_CARGO_TARGET_DIR"
+
+        (
+            for var in "${NESTED_CARGO_ENV_VARS[@]}"; do
+                unset "$var"
+            done
+            export CARGO_TARGET_DIR="$NESTED_CARGO_TARGET_DIR"
+            cargo "$@"
+        )
+    else
+        log "Clean Cargo env detected; reusing the ambient target dir: cargo $*"
         cargo "$@"
-    )
+    fi
 }
 
 # ============================================================================

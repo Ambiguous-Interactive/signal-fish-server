@@ -252,8 +252,10 @@ jobs:
       # native-client production targets) runs inside this job so one runner
       # setup covers both (the standalone panic-policy job was 2.8 billed
       # minutes plus a runner startup per event). The script scrubs inherited
-      # instrumentation env and builds in its own nested target dir
-      # (see scripts/check-no-panics.sh). ubuntu-only: the policy is
+      # instrumentation env when present and only then builds in its own
+      # nested target dir; on this clean runner it reuses the job's target
+      # dir, sharing the dependency graph the clippy step already compiled
+      # (issue #512). ubuntu-only: the policy is
       # platform-independent and Linux is the deployment platform.
       - name: Run panic-policy check
         if: matrix.os == 'ubuntu-latest'
