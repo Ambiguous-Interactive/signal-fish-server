@@ -171,6 +171,10 @@ every change, so rely on it in CI and on the static guards above.
   validating only the second (self-healed) run → one full run loses the
   block (PR #638 review). Decide against the rewritten artifact, and pin
   each legacy shape's FIRST run in `scripts/test_zai_mcp.py`.
+- Widening a managed-block strip pattern (greedy `.*` under DOTALL) to span
+  sibling blocks → sibling managed blocks are deleted and recreated on every
+  post-start. Bound the label class (`zai [a-z ]+ mcp`) and pin run-2==run-3
+  convergence separately from run-1 properties (PR #638 review).
 - Removing the `environment` pass-through from `opencode.json` → the OpenCode
   GitHub MCP server starts unauthenticated and prompts the OAuth device flow
   every session (issue #496).

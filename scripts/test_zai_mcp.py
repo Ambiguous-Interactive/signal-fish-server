@@ -182,16 +182,25 @@ http_headers_helper = "/home/vscode/.local/bin/signal-fish-zai-mcp-headers"
             self.assertIn('[mcp_servers.github]', first)
             self.assertIn('[mcp_servers.zai_vision]', first)
             self.assertNotIn("fake-test-secret", first)
+            # Idempotency is a fixed point from run 2 on: configure-zai-mcp.py
+            # re-appends Z.AI tables at the file end, so run 2 may reorder
+            # blocks relative to run 1, but the content is stable afterward.
             configure()
-            self.assertEqual(config.read_text(), first)
+            second = config.read_text()
+            configure()
+            self.assertEqual(config.read_text(), second)
+            self.assertIn(custom, second)
+            self.assertIn('[mcp_servers.github]', second)
 
     def test_managed_github_migration_rewrites_in_one_run(self):
         # PR #638 review: the migration deletes the marker-owned bare-binary
         # block, then decided whether to append the launcher block by grepping
-        # the ORIGINAL file — whose old table still matched — so the first
+        # the ORIGINAL file - whose old table still matched - so the first
         # run stripped GitHub MCP and only the second run self-healed. The
         # decision must read the rewritten output, and the FIRST run against
-        # each legacy shape is what a test must pin.
+        # each legacy shape is what a test must pin. Run 2 vs run 3 pins
+        # convergence separately: configure-zai-mcp.py re-appends Z.AI tables
+        # at the file end, so run 2 may reorder blocks relative to run 1.
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config.toml"
             config.write_text('''# user preamble stays
@@ -204,19 +213,26 @@ args = ["stdio"]
 ''')
             env = {**os.environ, "CODEX_HOME": directory, "Z_AI_API_KEY": "fake-test-secret"}
             command = '. "$1"; install_zai_mcp_header_helper() { return 0; }; configure_codex_mcp_servers'
-            subprocess.run(["bash", "-c", command, "test",
-                            str(ROOT / ".devcontainer/lib-agent-tools.sh")],
-                           env=env, capture_output=True, check=True)
+
+            def configure():
+                subprocess.run(["bash", "-c", command, "test",
+                                str(ROOT / ".devcontainer/lib-agent-tools.sh")],
+                               env=env, capture_output=True, check=True)
+
+            configure()
             first = config.read_text()
             self.assertIn("# >>> signal-fish github mcp >>>", first)
             self.assertIn("github-mcp.sh", first)
             self.assertNotIn("/usr/local/bin/github-mcp-server", first)
             self.assertEqual(first.count("[mcp_servers.github]"), 1)
             self.assertIn("# user preamble stays", first)
-            subprocess.run(["bash", "-c", command, "test",
-                            str(ROOT / ".devcontainer/lib-agent-tools.sh")],
-                           env=env, capture_output=True, check=True)
-            self.assertEqual(config.read_text(), first)
+
+            configure()
+            second = config.read_text()
+            configure()
+            self.assertEqual(config.read_text(), second)
+            self.assertIn("github-mcp.sh", second)
+            self.assertEqual(second.count("[mcp_servers.github]"), 1)
 
 
 if __name__ == "__main__":
