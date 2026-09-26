@@ -213,9 +213,10 @@ fi
 
 # Resolve every pattern first, grouping patterns by owning target so each
 # target costs ONE cargo invocation — one build, one nextest pass — no matter
-# how many patterns map to it (issue #512, session 266).
-declare -A OWNER_PATTERNS=()
-owner_order=()
+# how many patterns map to it (issue #512, session 266). The groups live in
+# the parallel indexed arrays owner_keys/owner_patterns (Bash 3.2-compatible).
+owner_keys=()
+owner_patterns=()
 
 for pattern in "${PATTERN_ARGS[@]}"; do
     # Resolve ownership from a plain function name: strip an exact-match `=`
@@ -271,11 +272,23 @@ for pattern in "${PATTERN_ARGS[@]}"; do
             lib) key="@lib" ;;
             test:*) key="t:${owner#test:}" ;;
         esac
-        if [ -z "${OWNER_PATTERNS[$key]+x}" ]; then
-            owner_order+=("$key")
-            OWNER_PATTERNS[$key]="$pattern"
+        # Parallel indexed arrays (Bash 3.2-compatible: no associative
+        # arrays — the repo guard forbids them). Linear scan matches the
+        # small owner count per invocation.
+        key_index=""
+        idx=0
+        for existing in ${owner_keys[@]+"${owner_keys[@]}"}; do
+            if [ "$existing" = "$key" ]; then
+                key_index=$idx
+                break
+            fi
+            idx=$((idx + 1))
+        done
+        if [ -z "$key_index" ]; then
+            owner_keys+=("$key")
+            owner_patterns+=("$pattern")
         else
-            OWNER_PATTERNS[$key]="${OWNER_PATTERNS[$key]} $pattern"
+            owner_patterns[$key_index]="${owner_patterns[$key_index]} $pattern"
         fi
     done
 done
@@ -294,11 +307,13 @@ join_filter() {
     printf '%s' "$expr"
 }
 
-for key in "${owner_order[@]}"; do
-    filterset=$(join_filter "${OWNER_PATTERNS[$key]}")
+idx=0
+while [ "$idx" -lt "${#owner_keys[@]}" ]; do
+    key="${owner_keys[$idx]}"
+    filterset=$(join_filter "${owner_patterns[$idx]}")
     case "$key" in
         @lib)
-            echo "dev-loop: patterns [${OWNER_PATTERNS[$key]}] -> unit tests (src/, --lib)"
+            echo "dev-loop: patterns [${owner_patterns[$idx]}] -> unit tests (src/, --lib)"
             run_cargo cargo nextest run ${feature_args[@]+"${feature_args[@]}"} --no-tests warn --lib -E "$filterset" || overall=1
             if [ "$WITH_CLIPPY" -eq 1 ]; then
                 run_cargo cargo clippy ${feature_args[@]+"${feature_args[@]}"} --lib -- -D warnings || overall=1
@@ -306,13 +321,14 @@ for key in "${owner_order[@]}"; do
             ;;
         t:*)
             target="${key#t:}"
-            echo "dev-loop: patterns [${OWNER_PATTERNS[$key]}] -> integration target $target"
+            echo "dev-loop: patterns [${owner_patterns[$idx]}] -> integration target $target"
             run_cargo cargo nextest run ${feature_args[@]+"${feature_args[@]}"} --no-tests warn --test "$target" -E "$filterset" || overall=1
             if [ "$WITH_CLIPPY" -eq 1 ]; then
                 run_cargo cargo clippy ${feature_args[@]+"${feature_args[@]}"} --test "$target" -- -D warnings || overall=1
             fi
             ;;
     esac
+    idx=$((idx + 1))
 done
 
 exit "$overall"
