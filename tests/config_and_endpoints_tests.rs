@@ -343,6 +343,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("8192"),
     },
     ConfigReferenceRow {
+        env: "SIGNAL_FISH__SECURITY__MAX_GAME_DATA_BYTES",
+        path: "security.max_game_data_bytes",
+        default: None,
+    },
+    ConfigReferenceRow {
         env: "SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP",
         path: "security.max_connections_per_ip",
         default: Some("24"),

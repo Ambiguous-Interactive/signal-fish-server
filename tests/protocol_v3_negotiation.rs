@@ -7,8 +7,8 @@
 
 use serde_json::json;
 use signal_fish_server::protocol::{
-    ClientMessage, DirectEndpoint, GameDataEncoding, IceServer, PlayerId, ProtocolInfoPayload,
-    ServerMessage, SessionPeer, SessionPlanPayload, Topology, Transport,
+    ClientMessage, DirectEndpoint, GameDataEncoding, GameDataLimitPayload, IceServer, PlayerId,
+    ProtocolInfoPayload, ServerMessage, SessionPeer, SessionPlanPayload, Topology, Transport,
     PROTOCOL_INFO_TRANSPORT_WEBSOCKET,
 };
 
@@ -199,6 +199,7 @@ fn protocol_info_version_fields_skipped_when_none() {
         transports: None,
         max_outbound_message_size: None,
         implementation_version: None,
+        game_data_limits: None,
     };
     let value = serde_json::to_value(&payload).unwrap();
     let obj = value.as_object().unwrap();
@@ -208,6 +209,7 @@ fn protocol_info_version_fields_skipped_when_none() {
     assert!(!obj.contains_key("transports"));
     assert!(!obj.contains_key("max_outbound_message_size"));
     assert!(!obj.contains_key("implementation_version"));
+    assert!(!obj.contains_key("game_data_limits"));
 }
 
 #[test]
@@ -227,6 +229,10 @@ fn protocol_info_v3_fields_present_when_some() {
         transports: Some(vec![PROTOCOL_INFO_TRANSPORT_WEBSOCKET.to_string()]),
         max_outbound_message_size: Some(8 * 1024 * 1024),
         implementation_version: Some("0.9.2".to_string()),
+        game_data_limits: Some(vec![GameDataLimitPayload {
+            encoding: GameDataEncoding::Rkyv,
+            max_bytes: 4096,
+        }]),
     };
     let value = serde_json::to_value(&payload).unwrap();
     assert_eq!(value["protocol_version"], json!(3));
@@ -235,6 +241,10 @@ fn protocol_info_v3_fields_present_when_some() {
     assert_eq!(value["transports"], json!(["websocket"]));
     assert_eq!(value["max_outbound_message_size"], json!(8 * 1024 * 1024));
     assert_eq!(value["implementation_version"], json!("0.9.2"));
+    assert_eq!(
+        value["game_data_limits"],
+        json!([{"encoding": "rkyv", "max_bytes": 4096}])
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -27,12 +27,13 @@ pub use error_codes::ErrorCode;
 
 // From types
 pub use types::{
-    ConnectionInfo, DirectEndpoint, GameDataEncoding, IceServer, PeerConnectionInfo, PlayerId,
-    PlayerInfo, PlayerNameRulesPayload, ProtocolInfoPayload, RateLimitInfo, RelayTransport, RoomId,
-    RoomOperationId, SessionGeneration, SessionPeer, SessionPlanPayload, SpectatorInfo,
-    SpectatorStateChangeReason, Topology, Transport, DEFAULT_MAX_GAME_NAME_LENGTH,
-    DEFAULT_MAX_PLAYERS_LIMIT, DEFAULT_MAX_PLAYER_NAME_LENGTH, DEFAULT_REGION_ID,
-    DEFAULT_ROOM_CODE_LENGTH, PROTOCOL_INFO_TRANSPORT_WEBSOCKET, ROOM_OPERATION_IDS_CAPABILITY,
+    ConnectionInfo, DirectEndpoint, GameDataEncoding, GameDataLimitPayload, IceServer,
+    PeerConnectionInfo, PlayerId, PlayerInfo, PlayerNameRulesPayload, ProtocolInfoPayload,
+    RateLimitInfo, RelayTransport, RoomId, RoomOperationId, SessionGeneration, SessionPeer,
+    SessionPlanPayload, SpectatorInfo, SpectatorStateChangeReason, Topology, Transport,
+    DEFAULT_MAX_GAME_NAME_LENGTH, DEFAULT_MAX_PLAYERS_LIMIT, DEFAULT_MAX_PLAYER_NAME_LENGTH,
+    DEFAULT_REGION_ID, DEFAULT_ROOM_CODE_LENGTH, PROTOCOL_INFO_TRANSPORT_WEBSOCKET,
+    ROOM_OPERATION_IDS_CAPABILITY,
 };
 
 // From messages

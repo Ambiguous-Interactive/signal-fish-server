@@ -568,6 +568,14 @@ tested against and tell a protocol change from a newer deploy. These fields
 remain absent from negotiated-v2 `ProtocolInfo` to preserve its frozen wire
 shape.
 
+Negotiated-v3 responses also include `game_data_limits` when the deployment
+configures `security.max_game_data_bytes`: one entry per capped encoding the
+connection can negotiate (`encoding` + `max_bytes`), in canonical encoding
+order. A client that honors the cap avoids sending payloads the server will
+refuse with `MESSAGE_TOO_LARGE`. The field is absent when no cap is
+configured, when every capped encoding is disabled, and from negotiated-v2
+`ProtocolInfo` (frozen wire shape).
+
 Every client, including browser and negotiated-v2 clients, can fetch the same
 version-neutral JSON before opening a socket: replace the endpoint's `/ws`
 suffix with `/client-config` (`GET /v2/client-config` or
@@ -1543,6 +1551,10 @@ does not participate in the `Authenticate.supported_transports` data-path negoti
 encoded WebSocket application-payload ceiling; clients should configure their
 receive limit to at least this value. Browser and v2 clients obtain the same
 value before connecting from `/v2/client-config` or `/v3/client-config`.
+`ProtocolInfo.game_data_limits` names the deployment's per-encoding
+game-data payload ceilings (`security.max_game_data_bytes`) for the encodings
+this connection can negotiate; a payload over its encoding's cap is refused
+at admission with `MESSAGE_TOO_LARGE` and is never relayed or budget-charged.
 `ProtocolInfo.implementation_version` is the exact release of the running
 server implementation. It is disclosed only to authenticated connections.
 The reserved `room_operation_ids` token is absent unless explicitly requested and successfully negotiated;

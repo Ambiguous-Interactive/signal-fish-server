@@ -1,6 +1,6 @@
 //! Configuration validation functions.
 
-use super::security::ClientAuthMode;
+use super::security::{ClientAuthMode, GameDataBytesLimits};
 use super::{Config, RelayTypeConfig};
 use std::path::Path;
 use std::time::Duration;
@@ -28,6 +28,7 @@ struct RuntimeServerValidation<'a> {
     max_outbound_message_size: usize,
     max_signal_bytes: usize,
     max_connection_info_bytes: usize,
+    max_game_data_bytes: Option<GameDataBytesLimits>,
     max_connections_per_ip: usize,
     max_connections: usize,
     reconnection_window: Duration,
@@ -56,6 +57,7 @@ impl<'a> RuntimeServerValidation<'a> {
             max_outbound_message_size: config.security.max_outbound_message_size,
             max_signal_bytes: config.security.max_signal_bytes,
             max_connection_info_bytes: config.security.max_connection_info_bytes,
+            max_game_data_bytes: config.security.max_game_data_bytes.clone(),
             max_connections_per_ip: config.security.max_connections_per_ip,
             max_connections: config.security.max_connections,
             reconnection_window: Duration::from_secs(config.server.reconnection_window),
@@ -84,6 +86,7 @@ impl<'a> RuntimeServerValidation<'a> {
             max_outbound_message_size: config.max_outbound_message_size,
             max_signal_bytes: config.max_signal_bytes,
             max_connection_info_bytes: config.max_connection_info_bytes,
+            max_game_data_bytes: config.max_game_data_bytes.clone(),
             max_connections_per_ip: config.max_connections_per_ip,
             max_connections: config.max_connections,
             reconnection_window: config.reconnection_window,
@@ -160,6 +163,35 @@ impl<'a> RuntimeServerValidation<'a> {
                  every ProvideConnectionInfo, so peers could never exchange legacy handoff \
                  metadata"
             );
+        }
+        if let Some(limits) = &self.max_game_data_bytes {
+            if limits.is_empty() {
+                anyhow::bail!(
+                    "security.max_game_data_bytes configures no encoding cap: drop the block \
+                     (every encoding keeps the max_message_size cap) or name at least one \
+                     encoding to cap"
+                );
+            }
+            for (encoding, cap) in limits.configured_in_canonical_order() {
+                if cap == 0 {
+                    anyhow::bail!(
+                        "security.max_game_data_bytes.{} must be greater than 0: a zero cap \
+                         rejects every game-data payload for that encoding (issue #634)",
+                        encoding.as_wire_str()
+                    );
+                }
+                if cap > self.max_message_size {
+                    anyhow::bail!(
+                        "security.max_game_data_bytes.{} ({}) must not exceed \
+                         security.max_message_size ({}): a payload that large would be \
+                         rejected by the message size cap first, so the configured cap could \
+                         never take effect",
+                        encoding.as_wire_str(),
+                        cap,
+                        self.max_message_size
+                    );
+                }
+            }
         }
         if self.max_connection_info_bytes > self.max_message_size {
             anyhow::bail!(
@@ -1580,6 +1612,87 @@ mod tests {
                 .contains("can produce a roster payload of 6553600 bytes"),
             "error must state the aggregate it rejects: {err}"
         );
+    }
+
+    /// Per-encoding game-data size ceilings (issue #634): dead caps (zero,
+    /// above the frame cap, an empty block) fail startup validation; a
+    /// well-formed block passes and keeps every unlisted encoding on the
+    /// frame cap.
+    #[test]
+    fn game_data_byte_caps_reject_dead_configurations() {
+        struct Case {
+            name: &'static str,
+            limits: crate::config::GameDataBytesLimits,
+            expected: &'static str,
+        }
+
+        let cases = [
+            Case {
+                name: "zero rkyv cap",
+                limits: crate::config::GameDataBytesLimits {
+                    rkyv: Some(0),
+                    ..Default::default()
+                },
+                expected: "security.max_game_data_bytes.rkyv must be greater than 0",
+            },
+            Case {
+                name: "zero protobuf cap",
+                limits: crate::config::GameDataBytesLimits {
+                    protobuf: Some(0),
+                    ..Default::default()
+                },
+                expected: "security.max_game_data_bytes.protobuf must be greater than 0",
+            },
+            Case {
+                name: "cap above the frame cap can never take effect",
+                limits: crate::config::GameDataBytesLimits {
+                    rkyv: Some(4097),
+                    ..Default::default()
+                },
+                expected: "security.max_game_data_bytes.rkyv (4097) must not exceed \
+                           security.max_message_size (4096)",
+            },
+            Case {
+                name: "block without any configured cap",
+                limits: crate::config::GameDataBytesLimits::default(),
+                expected: "security.max_game_data_bytes configures no encoding cap",
+            },
+        ];
+
+        for case in cases {
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.security.max_message_size = 4096;
+            config.security.max_signal_bytes = 4096;
+            config.security.max_connection_info_bytes = 4096;
+            config.security.max_game_data_bytes = Some(case.limits);
+
+            let error = match validate_config_security(&config) {
+                Ok(()) => panic!("{} must fail startup validation", case.name),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains(case.expected),
+                "{}: expected `{}`, got `{error}`",
+                case.name,
+                case.expected
+            );
+        }
+
+        // The healthy shape: caps under the frame cap validate cleanly.
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.security.max_message_size = 4096;
+        config.security.max_signal_bytes = 4096;
+        config.security.max_connection_info_bytes = 4096;
+        config.security.max_game_data_bytes = Some(crate::config::GameDataBytesLimits {
+            json: Some(4096),
+            rkyv: Some(16),
+            protobuf: Some(16),
+            ..Default::default()
+        });
+        validate_config_security(&config)
+            .expect("caps at or under the frame cap are valid configuration");
     }
 
     /// The relay byte budget shares the other rate budgets' admission shape

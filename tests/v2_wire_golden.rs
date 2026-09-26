@@ -514,6 +514,7 @@ fn golden_server_protocol_info() {
         transports: None,
         max_outbound_message_size: None,
         implementation_version: None,
+        game_data_limits: None,
     }));
     assert_json(
         &msg,

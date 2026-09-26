@@ -50,6 +50,7 @@
     "max_message_size": 65536,
     "max_outbound_message_size": 8388608,
     "max_signal_bytes": 16384,
+    "max_game_data_bytes": {"rkyv": 262144, "protobuf": 262144},
     "max_connections_per_ip": 24,
     "max_connections": 10000,
     "transport": {

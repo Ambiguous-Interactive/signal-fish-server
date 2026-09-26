@@ -238,7 +238,12 @@ components:
         `max_relay_bytes` allowlist override), measured on the sender-controlled
         payload, and the relaying room's aggregate per-window ceiling
         (`rate_limit.max_room_relay_bytes`). An over-budget frame is answered
-        with RATE_LIMIT_EXCEEDED and is not relayed.
+        with RATE_LIMIT_EXCEEDED and is not relayed. A frame whose
+        sender-controlled payload exceeds the security.max_game_data_bytes cap
+        for its encoding (when the deployment configures one, issue #634) is
+        answered with MESSAGE_TOO_LARGE, is not relayed, and charges no
+        budget; unlisted encodings keep the security.max_message_size frame
+        cap.
       payload: { $ref: '#/components/schemas/ClientGameData' }
     ClientSignal:
       title: Signal
@@ -1442,7 +1447,8 @@ components:
       description: >-
         Payload is a flattened ProtocolInfoPayload (newtype variant). v3 fields
         protocol_version / min_protocol_version / max_protocol_version /
-        transports / max_outbound_message_size are absent on negotiated v2
+        transports / max_outbound_message_size / implementation_version /
+        game_data_limits are absent on negotiated v2
         connections.
       properties:
         type: { const: ProtocolInfo }
@@ -1482,6 +1488,27 @@ components:
                 Maximum complete encoded WebSocket application payload, in
                 bytes, this deployment sends to the client. Counted after
                 Signal Fish protocol encoding and before WebSocket framing.
+            game_data_limits:
+              type: array
+              description: >-
+                Per-encoding game-data payload ceilings (issue #634), present
+                only on negotiated v3 connections and only when the deployment
+                configures security.max_game_data_bytes. One entry per capped
+                encoding the connection can negotiate, in canonical encoding
+                order.
+              items:
+                type: object
+                required: [encoding, max_bytes]
+                properties:
+                  encoding: { $ref: '#/components/schemas/GameDataEncoding' }
+                  max_bytes:
+                    type: integer
+                    minimum: 1
+                    description: >-
+                      Maximum sender-controlled payload bytes for the
+                      encoding: raw bytes for binary encodings, canonical JSON
+                      bytes for the json text lane. A payload over the cap is
+                      refused at admission with MESSAGE_TOO_LARGE.
       required: [type, data]
     AuthenticationError:
       type: object

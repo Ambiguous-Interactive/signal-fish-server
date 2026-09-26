@@ -466,6 +466,49 @@ pub struct ProtocolInfoPayload {
     /// #631). `None` preserves the frozen v2 wire contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub implementation_version: Option<String>,
+    /// Per-encoding game-data payload ceilings configured on this deployment
+    /// (v3+ only, issue #634).
+    ///
+    /// Disclosed in canonical encoding order, and only for encodings the
+    /// connection can actually negotiate — a cap on a disabled encoding is
+    /// inert and is not advertised. Absent when the deployment configures no
+    /// `security.max_game_data_bytes`, which preserves both the frozen v2
+    /// wire contract and the default no-knob v3 shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_data_limits: Option<Vec<GameDataLimitPayload>>,
+}
+
+/// One per-encoding game-data payload ceiling disclosed in `ProtocolInfo`
+/// (issue #634). `max_bytes` bounds the sender-controlled payload bytes in
+/// the encoding's own measure: raw bytes for binary encodings, canonical
+/// JSON bytes for the `json` text lane.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GameDataLimitPayload {
+    pub encoding: GameDataEncoding,
+    pub max_bytes: usize,
+}
+
+impl GameDataLimitPayload {
+    /// Project the deployment's configured per-encoding caps (issue #634)
+    /// for the formats a connection can negotiate, in canonical encoding
+    /// order. `None` when no negotiated format has a configured cap, so the
+    /// field stays absent instead of advertising an empty list.
+    #[must_use]
+    pub fn disclosure_for(
+        limits: Option<&crate::config::GameDataBytesLimits>,
+        supported_formats: &[GameDataEncoding],
+    ) -> Option<Vec<Self>> {
+        let limits = limits?;
+        let disclosed: Vec<Self> = limits
+            .configured_in_canonical_order()
+            .filter(|(encoding, _)| supported_formats.contains(encoding))
+            .map(|(encoding, max_bytes)| Self {
+                encoding,
+                max_bytes,
+            })
+            .collect();
+        (!disclosed.is_empty()).then_some(disclosed)
+    }
 }
 
 /// Preserve omission as `None` while rejecting an explicitly null wire value.

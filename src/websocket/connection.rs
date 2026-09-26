@@ -6,8 +6,8 @@ use crate::coordination::{
     ConnectionCloseSignal, DeliveryOutcome,
 };
 use crate::protocol::{
-    ClientMessage, ErrorCode, GameDataEncoding, PlayerId, PlayerNameRulesPayload,
-    ProtocolInfoPayload, RateLimitInfo, ServerMessage, Topology, Transport,
+    ClientMessage, ErrorCode, GameDataEncoding, GameDataLimitPayload, PlayerId,
+    PlayerNameRulesPayload, ProtocolInfoPayload, RateLimitInfo, ServerMessage, Topology, Transport,
     PROTOCOL_INFO_TRANSPORT_WEBSOCKET, ROOM_OPERATION_IDS_CAPABILITY,
 };
 use crate::server::{EnhancedGameServer, NegotiatedProtocol, RegisterClientError};
@@ -2518,6 +2518,19 @@ pub(super) async fn handle_socket(
                                     } else {
                                         (None, None, None, None)
                                     };
+                                    // Computed before `supported_formats` moves into the
+                                    // payload: the disclosure is projection-only, so the
+                                    // borrow must end before the field consumes the vec.
+                                    // v2 connections keep the frozen wire shape: no
+                                    // disclosure even when caps are configured.
+                                    let game_data_limits = (negotiated_version >= 3)
+                                        .then(|| {
+                                            GameDataLimitPayload::disclosure_for(
+                                                server_clone.config().max_game_data_bytes.as_ref(),
+                                                &supported_formats,
+                                            )
+                                        })
+                                        .flatten();
                                     let protocol_info = ServerMessage::ProtocolInfo(Box::new(
                                         ProtocolInfoPayload {
                                             platform: compatibility.platform.clone(),
@@ -2543,6 +2556,7 @@ pub(super) async fn handle_socket(
                                                 ),
                                             implementation_version: (negotiated_version >= 3)
                                                 .then(|| env!("CARGO_PKG_VERSION").to_string()),
+                                            game_data_limits,
                                         },
                                     ));
 

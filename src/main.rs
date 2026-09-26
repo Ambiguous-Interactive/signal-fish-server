@@ -240,6 +240,7 @@ async fn main() -> anyhow::Result<()> {
         max_outbound_message_size: cfg.security.max_outbound_message_size,
         max_signal_bytes: cfg.security.max_signal_bytes,
         max_connection_info_bytes: cfg.security.max_connection_info_bytes,
+        max_game_data_bytes: cfg.security.max_game_data_bytes.clone(),
         max_connections_per_ip: cfg.security.max_connections_per_ip,
         max_connections: cfg.security.max_connections,
         require_metrics_auth: cfg.security.require_metrics_auth,
