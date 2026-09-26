@@ -480,11 +480,13 @@ async fn regenerate_room_code_rotates_registry_and_drops_the_old_code() {
 /// exclude a racing joiner after the raw TTL has elapsed.
 ///
 /// The lease TTL is shrunk to 3 s (test-only override): the probe sleeps
-/// 3.5 s, past one raw TTL, instead of a real 10.4 s sleep past the
-/// production 10 s lease that red-waved the weekly mutation baseline against
-/// the mutants profile's 10 s hang budget (issue #604). The renewal slack at
-/// 3 s is 2 s (TTL minus the TTL/3 tick), well clear of runner-load jitter.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// 3.5 s, past one raw TTL, instead of a 10.4 s sleep past the production
+/// 10 s lease that red-waved the weekly mutation baseline against the
+/// mutants profile's 10 s hang budget (issue #604). The test runs on the
+/// paused tokio clock (`start_paused`): the sleep is virtual, renewal ticks
+/// still fire in deadline order, and the runner-load jitter the real sleep
+/// was sized against is gone.
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn stalled_room_code_rotation_keeps_its_mutex_lease_alive() {
     let server = create_test_server_with(ServerConfig::default()).await;
@@ -861,7 +863,9 @@ async fn a_stale_rotated_code_behaves_like_an_unknown_code() {
 /// duplicate room, seated as creator. The held lock hard-blocks the fixed
 /// rotation, so "the swap did not run while the lock was held" cannot pass
 /// by timing — an unfixed rotation reaches the swap within microseconds.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// The 2 s wait bound runs on the paused tokio clock (`start_paused`), so
+/// the provably-blocked wait costs no wall time.
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn rotation_waits_for_an_in_flight_old_code_admission_lock() {
     let server = create_test_server_with(ServerConfig::default()).await;

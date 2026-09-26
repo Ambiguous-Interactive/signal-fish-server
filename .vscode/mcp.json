@@ -1,9 +1,10 @@
-// Z.AI reads .env.local at MCP startup; GitHub inherits its container token.
+// Z.AI and GitHub read .env.local at MCP startup; no keys live in config.
 {
     "servers": {
         "github": {
-            "command": "github-mcp-server",
+            "command": "bash",
             "args": [
+                "${workspaceFolder}/.devcontainer/github-mcp.sh",
                 "stdio"
             ],
             "env": {

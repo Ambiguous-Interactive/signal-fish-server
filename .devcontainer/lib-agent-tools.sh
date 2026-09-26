@@ -613,16 +613,12 @@ configure_codex_mcp_servers() {
         return 1
     fi
 
-    # Older versions of this repository wrote the marker-owned GitHub table
-    # before Codex added env_vars support. Repair only our managed block; a
-    # user-authored [mcp_servers.github] table remains untouched.
+    # Older managed blocks pointed at the bare server binary (before the
+    # dotenv-aware launcher, and before Codex gained env_vars support).
+    # Repair only our marker-owned block; a user-authored
+    # [mcp_servers.github] table remains untouched.
     if grep -Fq '# >>> signal-fish github mcp >>>' "$config_toml" \
-        && ! awk '
-            $0 == "# >>> signal-fish github mcp >>>" { managed = 1 }
-            managed && /^[[:space:]]*env_vars[[:space:]]*=.*GITHUB_PERSONAL_ACCESS_TOKEN/ { found = 1 }
-            $0 == "# <<< signal-fish github mcp <<<" { managed = 0 }
-            END { exit(found ? 0 : 1) }
-        ' "$config_toml"; then
+        && ! grep -Fq 'github-mcp.sh' "$config_toml"; then
         migrate_managed_github_env=1
         changed=1
     fi
@@ -633,31 +629,31 @@ configure_codex_mcp_servers() {
         return 1
     fi
 
-    {
-        awk -v migrate_github="$migrate_managed_github_env" '
-            $0 == "# >>> signal-fish github mcp >>>" { github = 1 }
-            github && migrate_github && /^[[:space:]]*\[mcp_servers\.github\][[:space:]]*$/ {
-                print
-                print "env_vars = [\"GITHUB_PERSONAL_ACCESS_TOKEN\"]"
-                next
-            }
-            { print }
-            $0 == "# <<< signal-fish github mcp <<<" { github = 0 }
-        ' "$config_toml"
+    awk -v migrate_github="$migrate_managed_github_env" '
+        $0 == "# >>> signal-fish github mcp >>>" { managed = 1; if (migrate_github) next }
+        managed && migrate_github && $0 == "# <<< signal-fish github mcp <<<" { managed = 0; pending_blank = 1; next }
+        managed && migrate_github { next }
+        pending_blank && $0 == "" { pending_blank = 0; next }
+        { pending_blank = 0; print }
+        $0 == "# <<< signal-fish github mcp <<<" { managed = 0 }
+    ' "$config_toml" >"$tmp_toml"
 
-        if ! grep -Eq '^[[:space:]]*\[mcp_servers\.github\]' "$config_toml"; then
-            changed=1
-            cat <<'EOF'
+    # Decide against the REWRITTEN output. After a migration pass the
+    # original file still holds the old managed table, so appending while
+    # reading it strips GitHub MCP for a full launch until a second run
+    # self-heals (PR #638 review).
+    if ! grep -Eq '^[[:space:]]*\[mcp_servers\.github\]' "$tmp_toml"; then
+        changed=1
+        cat >>"$tmp_toml" <<EOF
 
 # >>> signal-fish github mcp >>>
 [mcp_servers.github]
-command = "/usr/local/bin/github-mcp-server"
-args = ["stdio"]
+command = "bash"
+args = ["${AGENT_TOOLS_LIB_DIR}/github-mcp.sh", "stdio"]
 env_vars = ["GITHUB_PERSONAL_ACCESS_TOKEN"]
 # <<< signal-fish github mcp <<<
 EOF
-        fi
-    } >"$tmp_toml"
+    fi
 
     if ((changed == 0)); then
         rm -f "$tmp_toml"

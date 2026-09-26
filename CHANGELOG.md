@@ -113,6 +113,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Devcontainer: every agent harness now launches the GitHub MCP server
+  through the dotenv-aware `.devcontainer/github-mcp.sh` instead of the bare
+  binary (`.vscode/mcp.json`, `.mcp.json`, `opencode.json`, and the Codex
+  block). The launcher prefers the `GITHUB_MCP_PAT` /
+  `GITHUB_PERSONAL_ACCESS_TOKEN` key in `.env.local` over the inherited
+  environment and falls back to it, so a harness whose env var is empty no
+  longer device-flows on every MCP call while a working key sits in
+  `.env.local` (#496 family). Marker-owned Codex blocks migrate to the
+  launcher idempotently; user-authored tables are untouched.
+
 - The bus loopback fan-out now honors `SequencedMessage::excluded_players`
   (issue #581). A room-broadcast relay re-broadcast skipped the listed
   players, so a future cross-instance bus no longer echoes a relayed frame

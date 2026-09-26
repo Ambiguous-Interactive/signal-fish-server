@@ -193,7 +193,18 @@ correctness evidence appears.
     scoped warm); session 263 added `--changed [base-ref]`, which maps the
     working tree's Rust deltas onto owning targets and runs each owning
     target's full suite once — the whole edit-test loop in one command with
-    no name filter to remember.
+    no name filter to remember. Session 264 profiled the remaining
+    scoped-loop floor with nextest's libtest-JSON per-test timings (1165 unit
+    tests, 57.9 s of execution, 8.4 s wall on 12 workers) and converted the
+    three slowest real-time stall/lease waits to the paused tokio clock: two
+    3.5 s TTL outlasts and one 2 s blocked-wait bound now run in 11-17 ms
+    each with identical semantics (renewal ticks still fire in deadline
+    order), which also stops these tests from approaching the mutants
+    profile's 10 s per-test hang budget (#604 family). Remaining measured
+    floor: the lib makespan is bound by
+    `v3_only_messages_fail_closed_on_a_pre_v3_wire` (4.07 s of real loopback
+    WebSocket handshakes); converting it needs an in-memory duplex socket
+    pair, not a clock change.
     Verified from the API: `main` has **zero required status checks** and no
     required reviews (one disabled Copilot ruleset; required linear history
     on), so the #379 owner-inventory prerequisite is exported and

@@ -251,6 +251,8 @@ For `must_not_contain` assertions, use error-line-specific prefixes (e.g.,
 3. Test stays forever → prevents regression
 ```
 
+Pin every transition state: a rewrite that self-heals on run 2 can hide a run-1 data-loss window (PR #638).
+
 ```rust
 // Regression test: Issue #142 — player count not updated on disconnect
 #[tokio::test]

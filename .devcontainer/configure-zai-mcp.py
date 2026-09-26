@@ -8,7 +8,11 @@ import tomllib
 
 def configure(path):
     original = path.read_text()
-    text = re.sub(r'^# >>> signal-fish zai .* mcp >>>\n.*?^# <<< signal-fish zai .* mcp <<<\n?',
+    # The label class is deliberately bounded: with `.*` and DOTALL this
+    # pattern spanned from the first Z.AI start marker to the last
+    # `mcp <<<` line in the file and swallowed sibling managed blocks
+    # (the GitHub launcher, PR #638 review).
+    text = re.sub(r'^# >>> signal-fish zai [a-z ]+ mcp >>>\n.*?^# <<< signal-fish zai [a-z ]+ mcp <<<\n?',
                   '', original, flags=re.M | re.S)
     tables = tomllib.loads(text).get('mcp_servers', {})
     launcher = str(Path(__file__).resolve().with_name('zai-mcp.mjs'))

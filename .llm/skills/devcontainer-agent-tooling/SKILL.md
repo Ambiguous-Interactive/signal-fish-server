@@ -59,8 +59,13 @@ description: >-
    Bootstrap functions `return`, never `exit`.
 6. **GitHub MCP everywhere**: the pinned, checksum-verified
    `github-mcp-server` binary (`ARG GITHUB_MCP_VERSION` in the Dockerfile)
-   is wired into every harness below. Auth is environmental
-   (`GITHUB_PERSONAL_ACCESS_TOKEN` via runtime `.env.local` and `remoteEnv`), never stored in config.
+   is wired into every harness below through `.devcontainer/github-mcp.sh`.
+   The launcher prefers the `GITHUB_PERSONAL_ACCESS_TOKEN`/`GITHUB_MCP_PAT`
+   key in repository `.env.local` over the inherited environment
+   (zai-mcp.mjs precedence) and falls back to the inherited value; with
+   neither it starts unauthenticated (interactive device flow), so
+   credential-free containers never hard-fail. Auth is never stored in
+   config.
 
 7. **Z.AI MCP everywhere**: all frontends invoke `.devcontainer/zai-mcp.mjs`
    over stdio. It parses repository `.env.local` at startup using Node `parseEnv`;
@@ -83,8 +88,8 @@ description: >-
 
 | Harness | Config | Key fields |
 | --- | --- | --- |
-| Codex | `~/.codex/config.toml` (written idempotently) | `[mcp_servers.github]`, `command = "/usr/local/bin/github-mcp-server"`, `args = ["stdio"]` |
-| VS Code + Copilot | `.vscode/mcp.json` | `servers.github`, `command`, `${env:GITHUB_PERSONAL_ACCESS_TOKEN}` |
+| Codex | `~/.codex/config.toml` (written idempotently) | `[mcp_servers.github]`, `command = "bash"`, `args = ["<devcontainer>/github-mcp.sh", "stdio"]` |
+| VS Code + Copilot | `.vscode/mcp.json` | `servers.github`, `bash .devcontainer/github-mcp.sh`, `${env:GITHUB_PERSONAL_ACCESS_TOKEN}` |
 | Claude Code | `.mcp.json` | `mcpServers.github`, **`"type": "stdio"`** |
 | Nanocoder | `.mcp.json` (same file) | `mcpServers.github`, **`"transport": "stdio"`** |
 | OpenCode (V2) | `opencode.json` | `mcp.servers.github`, `"type": "local"`, `command: [...]`, **`environment: { GITHUB_PERSONAL_ACCESS_TOKEN: "{env:GITHUB_PERSONAL_ACCESS_TOKEN}" }`** |
@@ -159,6 +164,17 @@ every change, so rely on it in CI and on the static guards above.
   the NPM_CONFIG_PREFIX environment variable", exit code 11) and the container
   never starts. The prefix belongs in `containerEnv` only.
 - Removing `type` or `transport` from `.mcp.json` → a harness loses GitHub.
+- Bypassing `.devcontainer/github-mcp.sh` (launching the bare binary again) →
+  an empty harness `GITHUB_PERSONAL_ACCESS_TOKEN` makes the server device-flow
+  on every call even when `.env.local` holds `GITHUB_MCP_PAT` (PR #638).
+- Deciding a managed-block rewrite by grepping the pre-rewrite file, or
+  validating only the second (self-healed) run → one full run loses the
+  block (PR #638 review). Decide against the rewritten artifact, and pin
+  each legacy shape's FIRST run in `scripts/test_zai_mcp.py`.
+- Widening a managed-block strip pattern (greedy `.*` under DOTALL) to span
+  sibling blocks → sibling managed blocks are deleted and recreated on every
+  post-start. Bound the label class (`zai [a-z ]+ mcp`) and pin run-2==run-3
+  convergence separately from run-1 properties (PR #638 review).
 - Removing the `environment` pass-through from `opencode.json` → the OpenCode
   GitHub MCP server starts unauthenticated and prompts the OAuth device flow
   every session (issue #496).

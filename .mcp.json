@@ -3,8 +3,9 @@
         "github": {
             "type": "stdio",
             "transport": "stdio",
-            "command": "github-mcp-server",
+            "command": "bash",
             "args": [
+                ".devcontainer/github-mcp.sh",
                 "stdio"
             ],
             "env": {
