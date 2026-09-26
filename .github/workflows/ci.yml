@@ -31,7 +31,11 @@
 #   - doc-consistency: Version/changelog/doc drift checks (diff-aware changelog gate)
 #   - deny: Supply-chain job (issue #512): cargo-deny policy over every
 #     tracked Cargo graph, RustSec + npm vulnerability scans, and CycloneDX
-#     SBOM generation — one runner setup instead of three jobs
+#     SBOM generation — one runner setup instead of three jobs.
+#     Dependency-irrelevant pull requests skip the analyzers (the job's
+#     verdict is a pure function of dependency-graph inputs, so a change
+#     touching none of them would reprove an identical graph); the daily
+#     noon cron always audits to reprove advisory data
 #   - docker: Docker image build and smoke test with health check. Image-
 #     irrelevant pull requests skip the build (issue #512): a change that
 #     touches none of the image's byte-relevant inputs cannot change image
@@ -511,7 +515,10 @@ jobs:
     # cargo-audit second opinion, and the CycloneDX SBOM share one runner
     # setup instead of three jobs. The SBOM stays a per-event artifact (it is
     # skipped on the daily schedule, exactly like the standalone sbom job it
-    # absorbed).
+    # absorbed). Dependency-irrelevant pull requests skip the analyzers via
+    # the in-job relevance gate below — the same byte-relevant-path lever the
+    # docker job pulls — while every non-pull_request event (the daily noon
+    # cron's advisory reproof) always audits.
     timeout-minutes: 40
     # cargo-deny handles Rust licenses, banned dependencies, source
     # verification, and the advisory pass. cargo-audit scans Rust lockfiles
@@ -521,7 +528,66 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
+        with:
+          # Full history so the relevance gate can diff against the pull
+          # request's base (same pattern as the doc-consistency job).
+          fetch-depth: 0
+      - name: Detect dependency-relevant changes
+        id: dep-relevance
+        # Issue #512: every analyzer in this job reads only dependency-graph
+        # inputs — Cargo manifests and lockfiles, npm package files, the
+        # cargo-deny policy, and the .cargo config — so a pull request that
+        # touches none of them cannot change the audit's verdict and would
+        # reprove an identical dependency graph. The path set covers the
+        # server, native, fuzz, Fortress, and Fortress-WASM Cargo graphs plus
+        # both npm graphs (and this workflow file, so gate changes always
+        # re-audit) and is pinned in lockstep by
+        # test_ci_deny_job_skips_dependency_irrelevant_pull_requests.
+        # Fail-open: any resolution problem runs the full audit.
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "Event ${{ github.event_name }} always audits (the schedule reproofs advisory data)"
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.sha }}"
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git -c core.quotepath=off diff --name-only "$BASE_SHA...$HEAD_SHA" > changed-files.txt; then
+            echo "could not diff against $BASE_SHA; failing open (run the audit)"
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          RELEVANT="false"
+          while IFS= read -r f; do
+            case "$f" in
+              Cargo.toml|Cargo.lock|**/Cargo.toml|**/Cargo.lock)
+                RELEVANT="true"
+                break
+                ;;
+              deny.toml|**/deny.toml|.cargo/**)
+                RELEVANT="true"
+                break
+                ;;
+              **/package.json|**/package-lock.json)
+                RELEVANT="true"
+                break
+                ;;
+              .github/workflows/ci.yml)
+                RELEVANT="true"
+                break
+                ;;
+            esac
+          done < changed-files.txt
+          echo "Dependency-relevant change: $RELEVANT"
+          echo "relevant=$RELEVANT" >> "$GITHUB_OUTPUT"
       - name: Extract MSRV for cargo-deny toolchain
+        if: steps.dep-relevance.outputs.relevant == 'true'
         id: deny-msrv
         run: |
           set -euo pipefail
@@ -532,6 +598,10 @@ jobs:
           fi
           echo "version=$MSRV" >> "$GITHUB_OUTPUT"
       - name: Run cargo-deny
+        # No !cancelled(): like the original unguarded step, a failure in an
+        # earlier step still short-circuits the deny pass; the gate clause is
+        # what lets a dependency-irrelevant pull request skip it entirely.
+        if: steps.dep-relevance.outputs.relevant == 'true'
         uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
           arguments: --all-features
@@ -540,31 +610,35 @@ jobs:
           # aliases like `stable` that may be absent in the container image.
           rust-version: ${{ steps.deny-msrv.outputs.version }}
       - name: Run cargo-deny (native reference client)
+        if: steps.dep-relevance.outputs.relevant == 'true'
         uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
           manifest-path: clients/native/Cargo.toml
           arguments: --all-features
           rust-version: ${{ steps.deny-msrv.outputs.version }}
       - name: Run cargo-deny (fuzz package)
+        if: steps.dep-relevance.outputs.relevant == 'true'
         uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
           manifest-path: fuzz/Cargo.toml
           arguments: --all-features
           rust-version: ${{ steps.deny-msrv.outputs.version }}
       - name: Run cargo-deny (Fortress fixture)
+        if: steps.dep-relevance.outputs.relevant == 'true'
         uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
           manifest-path: clients/fortress/Cargo.toml
           arguments: --all-features
           rust-version: ${{ steps.deny-msrv.outputs.version }}
       - name: Run cargo-deny (Fortress WASM fixture)
+        if: steps.dep-relevance.outputs.relevant == 'true'
         uses: EmbarkStudios/cargo-deny-action@v2.1.1
         with:
           manifest-path: clients/fortress-wasm/Cargo.toml
           arguments: --all-features
           rust-version: 1.94.0
       - name: Install Node.js for npm audits
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         uses: actions/setup-node@v7.0.0
         with:
           node-version: "22"
@@ -577,7 +651,7 @@ jobs:
       # `if` condition leaves $? at 0 for the if-statement, which would
       # swallow every finding (issue #601).
       - name: Run npm audit (repository tooling)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         run: |
           for attempt in 1 2 3; do
             if npm audit; then
@@ -589,7 +663,7 @@ jobs:
           echo "npm audit failed after 3 attempts" >&2
           exit 1
       - name: Run npm audit (browser reference client)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         working-directory: clients/browser
         run: |
           for attempt in 1 2 3; do
@@ -602,7 +676,7 @@ jobs:
           echo "npm audit failed after 3 attempts" >&2
           exit 1
       - name: Read Rust toolchain
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         id: toolchain
         shell: bash
         run: |
@@ -615,7 +689,7 @@ jobs:
       - name: Install Rust toolchain
         # cargo-sbom shells out to `cargo metadata`, so this job needs a cargo
         # even though nothing here compiles the workspace.
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
@@ -624,44 +698,45 @@ jobs:
       # registry index, so a per-job rust-cache would be written and read by
       # nothing.
       - name: Install cargo-audit
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         uses: taiki-e/install-action@v2.87.15
         with:
           tool: cargo-audit@0.22.2
           fallback: none
       - name: Verify cargo-audit version
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         run: cargo-audit --version | grep -Fxq 'cargo-audit 0.22.2'
       - name: Run cargo-audit
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         run: cargo audit
       - name: Run cargo-audit (native reference client)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         run: cargo audit --file clients/native/Cargo.lock
       - name: Run cargo-audit (fuzz package)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         run: cargo audit --file fuzz/Cargo.lock
       - name: Run cargo-audit (Fortress fixture)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         run: cargo audit --file clients/fortress/Cargo.lock
       - name: Run cargo-audit (Fortress WASM fixture)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         run: cargo audit --file clients/fortress-wasm/Cargo.lock
       - name: Install cargo-sbom
-        if: ${{ !cancelled() && github.event_name != 'schedule' }}
+        if: ${{ !cancelled() && github.event_name != 'schedule' && steps.dep-relevance.outputs.relevant == 'true' }}
         uses: taiki-e/install-action@v2.87.15
         with:
           tool: cargo-sbom
 
       - name: Generate SBOM (CycloneDX)
-        if: ${{ !cancelled() && github.event_name != 'schedule' }}
+        if: ${{ !cancelled() && github.event_name != 'schedule' && steps.dep-relevance.outputs.relevant == 'true' }}
         run: cargo sbom --output-format cyclone_dx_json_1_5 > sbom.cdx.json
 
       - name: Upload SBOM artifact
         # `success()` keeps a failed generation from uploading an empty or
         # invalid artifact; the schedule guard preserves the standalone sbom
-        # job's cron exclusion.
-        if: success() && github.event_name != 'schedule'
+        # job's cron exclusion, and the relevance gate keeps a
+        # dependency-irrelevant pull request from uploading a stale SBOM.
+        if: success() && github.event_name != 'schedule' && steps.dep-relevance.outputs.relevant == 'true'
         uses: actions/upload-artifact@v7.0.1
         with:
           name: sbom-cyclonedx-${{ github.sha }}
