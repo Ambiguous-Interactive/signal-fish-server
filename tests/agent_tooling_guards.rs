@@ -15,7 +15,12 @@
 //!      agent harness: Codex (`~/.codex/config.toml`, written idempotently by
 //!      `.devcontainer/lib-agent-tools.sh`), VS Code + Copilot
 //!      (`.vscode/mcp.json`), Claude Code + Nanocoder (`.mcp.json`), and
-//!      OpenCode (`opencode.json`). The same harnesses receive the official
+//!      OpenCode (`opencode.json`) — all through the dotenv-aware launcher
+//!      `.devcontainer/github-mcp.sh`, which prefers the `GITHUB_MCP_PAT` /
+//!      `GITHUB_PERSONAL_ACCESS_TOKEN` key in `.env.local` over the inherited
+//!      environment (PR #638: an empty harness env var made the server
+//!      device-flow on every call while a working key sat in `.env.local`).
+//!      The same harnesses receive the official
 //!      Z.AI Vision, Web Search, Web Reader, and Zread MCP servers without
 //!      storing the Z.AI API key in the repository.
 //!   4. Every lifecycle step is best-effort so an optional network/tooling
@@ -530,16 +535,17 @@ fn amd64_binstall_fails_fast_instead_of_doomed_musl_source_compiles() {
 #[test]
 fn every_harness_is_wired_to_the_github_mcp_server() {
     let contract = "Every agent harness must be wired to the pinned GitHub MCP \
-                    server binary (github-mcp-server), authenticated through the \
-                    environment (GITHUB_PERSONAL_ACCESS_TOKEN), never a stored \
-                    token.";
+                    server binary (github-mcp-server) through the dotenv-aware \
+                    launcher (.devcontainer/github-mcp.sh), authenticated from \
+                    .env.local or the environment (GITHUB_PERSONAL_ACCESS_TOKEN), \
+                    never a stored token.";
 
     let vscode = read_live(".vscode/mcp.json");
     require_fragments(
         &vscode,
         &[
             "\"github\"",
-            "github-mcp-server",
+            "github-mcp.sh",
             "${env:GITHUB_PERSONAL_ACCESS_TOKEN}",
         ],
         contract,
@@ -550,7 +556,7 @@ fn every_harness_is_wired_to_the_github_mcp_server() {
         &claude_nanocoder,
         &[
             "\"github\"",
-            "github-mcp-server",
+            "github-mcp.sh",
             // Claude Code requires `type`; Nanocoder requires `transport`.
             "\"type\": \"stdio\"",
             "\"transport\": \"stdio\"",
@@ -567,7 +573,7 @@ fn every_harness_is_wired_to_the_github_mcp_server() {
             // under mcp is the V1 layout.
             "\"servers\"",
             "\"github\"",
-            "github-mcp-server",
+            "github-mcp.sh",
             "\"type\": \"local\"",
             // Observed in #496: the opencode-launched server device-flowed
             // even with the token in the container shell — the pass-through
@@ -578,14 +584,29 @@ fn every_harness_is_wired_to_the_github_mcp_server() {
         contract,
     );
 
+    // The launcher is the single credential seam: file key first, inherited
+    // env second, and the pinned binary reached only through `exec` so no
+    // extra shell process outlives the handshake.
+    require_fragments(
+        &read_live(".devcontainer/github-mcp.sh"),
+        &[
+            "../.env.local",
+            "GITHUB_PERSONAL_ACCESS_TOKEN|GITHUB_MCP_PAT",
+            "GITHUB_PERSONAL_ACCESS_TOKEN:-",
+            "exec github-mcp-server",
+        ],
+        contract,
+    );
+
     let lib = read_live(".devcontainer/lib-agent-tools.sh");
     require_fragments(
         &lib,
         &[
             "configure_codex_github_mcp",
             "[mcp_servers.github]",
-            "command = \"/usr/local/bin/github-mcp-server\"",
-            "args = [\"stdio\"]",
+            "command = \"bash\"",
+            "github-mcp.sh",
+            "args = [\"${AGENT_TOOLS_LIB_DIR}/github-mcp.sh\", \"stdio\"]",
             "migrate_managed_github_env",
             "env_vars = [\"GITHUB_PERSONAL_ACCESS_TOKEN\"]",
         ],
@@ -613,6 +634,7 @@ fn ci_enforces_the_agent_tooling_contract() {
             "\"transport\": \"stdio\"",
             "\"type\": \"local\"",
             "\"GITHUB_PERSONAL_ACCESS_TOKEN\": \"{env:GITHUB_PERSONAL_ACCESS_TOKEN}\"",
+            "github-mcp.sh",
             "@z_ai/mcp-server@latest",
             "for endpoint in web_search_prime web_reader zread",
             "https://api.z.ai/api/mcp/$endpoint/mcp",

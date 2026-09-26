@@ -5,7 +5,8 @@
             "github": {
                 "type": "local",
                 "command": [
-                    "github-mcp-server",
+                    "bash",
+                    ".devcontainer/github-mcp.sh",
                     "stdio"
                 ],
                 "environment": {

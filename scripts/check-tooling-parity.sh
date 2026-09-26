@@ -331,11 +331,11 @@ assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "install_nanocoder_cli" "Agent
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" '@z_ai/mcp-server@latest' "Agent tooling library installs the latest Z.AI Vision MCP server"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "NPM_CONFIG_PREFIX" "Agent tooling library enforces the user-owned npm prefix"
 assert_contains_literal "$VSCODE_MCP_JSON" '"github"' "VS Code/Copilot MCP config registers the GitHub server"
-assert_contains_literal "$VSCODE_MCP_JSON" "github-mcp-server" "VS Code/Copilot MCP config uses the pinned GitHub MCP server binary"
+assert_contains_literal "$VSCODE_MCP_JSON" "github-mcp.sh" "VS Code/Copilot launches GitHub MCP through the dotenv-aware launcher"
 assert_contains_literal "$ROOT_MCP_JSON" '"github"' "Claude Code/Nanocoder MCP config registers the GitHub server"
-assert_contains_literal "$ROOT_MCP_JSON" "github-mcp-server" "Claude Code/Nanocoder MCP config uses the pinned GitHub MCP server binary"
+assert_contains_literal "$ROOT_MCP_JSON" "github-mcp.sh" "Claude Code/Nanocoder launches GitHub MCP through the dotenv-aware launcher"
 assert_contains_literal "$OPENCODE_JSON" '"github"' "OpenCode config registers the GitHub MCP server"
-assert_contains_literal "$OPENCODE_JSON" "github-mcp-server" "OpenCode config uses the pinned GitHub MCP server binary"
+assert_contains_literal "$OPENCODE_JSON" "github-mcp.sh" "OpenCode launches GitHub MCP through the dotenv-aware launcher"
 # OpenCode V2 groups servers under mcp.servers; a name directly under mcp is
 # the V1 layout, and `enabled` is the V1-only key (V2 inverts it as `disabled`).
 assert_contains_literal "$OPENCODE_JSON" '"servers"' "OpenCode config uses the V2 mcp.servers grouping"
@@ -350,6 +350,14 @@ assert_contains_literal "$OPENCODE_JSON" '"GITHUB_PERSONAL_ACCESS_TOKEN": "{env:
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "[mcp_servers.github]" "Agent tooling library registers the Codex GitHub MCP server table"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "migrate_managed_github_env" "Agent tooling library migrates its older Codex GitHub MCP block"
 assert_contains_literal "$DEVCONTAINER_AGENT_LIB" 'env_vars = ["GITHUB_PERSONAL_ACCESS_TOKEN"]' "Codex explicitly forwards the GitHub token to GitHub MCP"
+assert_contains_literal "$DEVCONTAINER_AGENT_LIB" "github-mcp.sh" "Codex GitHub MCP routes through the dotenv-aware launcher"
+# PR #638: the harness env can carry an empty GITHUB_PERSONAL_ACCESS_TOKEN
+# while .env.local holds a working key; the launcher must prefer the file key
+# (zai-mcp.mjs precedence) and still reach the pinned binary.
+assert_contains_literal ".devcontainer/github-mcp.sh" "../.env.local" "GitHub MCP launcher loads the repository credential file"
+assert_contains_literal ".devcontainer/github-mcp.sh" "GITHUB_PERSONAL_ACCESS_TOKEN|GITHUB_MCP_PAT" "GitHub MCP launcher accepts both credential key names"
+assert_contains_literal ".devcontainer/github-mcp.sh" 'token="${GITHUB_PERSONAL_ACCESS_TOKEN:-}"' "GitHub MCP launcher keeps the inherited env as fallback"
+assert_contains_literal ".devcontainer/github-mcp.sh" "exec github-mcp-server" "GitHub MCP launcher execs the pinned server binary"
 
 assert_contains_literal "$DEVCONTAINER_JSON" '"--env-file"' "Devcontainer imports runtime credentials from an env file"
 assert_contains_literal "$DEVCONTAINER_JSON" '${localWorkspaceFolder}/.env.local' "Devcontainer loads the workspace credential file"

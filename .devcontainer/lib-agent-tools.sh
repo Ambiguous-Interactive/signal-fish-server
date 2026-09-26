@@ -613,16 +613,12 @@ configure_codex_mcp_servers() {
         return 1
     fi
 
-    # Older versions of this repository wrote the marker-owned GitHub table
-    # before Codex added env_vars support. Repair only our managed block; a
-    # user-authored [mcp_servers.github] table remains untouched.
+    # Older managed blocks pointed at the bare server binary (before the
+    # dotenv-aware launcher, and before Codex gained env_vars support).
+    # Repair only our marker-owned block; a user-authored
+    # [mcp_servers.github] table remains untouched.
     if grep -Fq '# >>> signal-fish github mcp >>>' "$config_toml" \
-        && ! awk '
-            $0 == "# >>> signal-fish github mcp >>>" { managed = 1 }
-            managed && /^[[:space:]]*env_vars[[:space:]]*=.*GITHUB_PERSONAL_ACCESS_TOKEN/ { found = 1 }
-            $0 == "# <<< signal-fish github mcp <<<" { managed = 0 }
-            END { exit(found ? 0 : 1) }
-        ' "$config_toml"; then
+        && ! grep -Fq 'github-mcp.sh' "$config_toml"; then
         migrate_managed_github_env=1
         changed=1
     fi
@@ -635,24 +631,21 @@ configure_codex_mcp_servers() {
 
     {
         awk -v migrate_github="$migrate_managed_github_env" '
-            $0 == "# >>> signal-fish github mcp >>>" { github = 1 }
-            github && migrate_github && /^[[:space:]]*\[mcp_servers\.github\][[:space:]]*$/ {
-                print
-                print "env_vars = [\"GITHUB_PERSONAL_ACCESS_TOKEN\"]"
-                next
-            }
+            $0 == "# >>> signal-fish github mcp >>>" { managed = 1; if (migrate_github) next }
+            managed && migrate_github && $0 == "# <<< signal-fish github mcp <<<" { managed = 0; next }
+            managed && migrate_github { next }
             { print }
-            $0 == "# <<< signal-fish github mcp <<<" { github = 0 }
+            $0 == "# <<< signal-fish github mcp <<<" { managed = 0 }
         ' "$config_toml"
 
         if ! grep -Eq '^[[:space:]]*\[mcp_servers\.github\]' "$config_toml"; then
             changed=1
-            cat <<'EOF'
+            cat <<EOF
 
 # >>> signal-fish github mcp >>>
 [mcp_servers.github]
-command = "/usr/local/bin/github-mcp-server"
-args = ["stdio"]
+command = "bash"
+args = ["${AGENT_TOOLS_LIB_DIR}/github-mcp.sh", "stdio"]
 env_vars = ["GITHUB_PERSONAL_ACCESS_TOKEN"]
 # <<< signal-fish github mcp <<<
 EOF

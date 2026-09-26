@@ -234,17 +234,18 @@ misread.
   platform binary on its own; `--include=optional` ships the per-platform
   package.
 - Keep the pinned GitHub MCP server (`GITHUB_MCP_VERSION` in
-  `.devcontainer/Dockerfile`) wired into every harness:
+  `.devcontainer/Dockerfile`) wired into every harness through the
+  dotenv-aware launcher `.devcontainer/github-mcp.sh`:
   `.vscode/mcp.json` (VS Code + Copilot), `.mcp.json` (Claude Code +
   Nanocoder), `opencode.json` (OpenCode V2, `mcp.servers` grouping), and
-  `~/.codex/config.toml`
-  (written idempotently for Codex). It authenticates via
-  `GITHUB_PERSONAL_ACCESS_TOKEN` passed through `remoteEnv`;
-  `opencode.json` must additionally forward the token through its
-  `environment` map (`{env:GITHUB_PERSONAL_ACCESS_TOKEN}`) — observed in
-  #496, an opencode-launched MCP server device-flowed even with the token
-  present in the container shell, so shell-environment inheritance must
-  not be relied on. The shared
+  `~/.codex/config.toml` (written idempotently for Codex). The launcher
+  prefers the `GITHUB_MCP_PAT`/`GITHUB_PERSONAL_ACCESS_TOKEN` key in
+  `.env.local` over the inherited environment (zai-mcp.mjs precedence;
+  PR #638: an empty env var made the server device-flow on every call)
+  and falls back to the inherited value. `opencode.json` must still
+  forward the token through its `environment` map
+  (`{env:GITHUB_PERSONAL_ACCESS_TOKEN}`) — observed in #496,
+  shell-environment inheritance must not be relied on. The shared
   `.mcp.json` must keep BOTH keys — `type` (Claude Code) and `transport`
   (Nanocoder) — or one harness silently loses GitHub.
 - Keep the official Z.AI MCP suite wired through `.devcontainer/zai-mcp.mjs`
