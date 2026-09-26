@@ -17,9 +17,12 @@ export const EXIT_HARD_TIMEOUT = 4;
 export const TOPOLOGIES = ['relay', 'host', 'mesh'] as const;
 /** Wire tokens for data-path transports (CLI tokens are identical). */
 export const TRANSPORTS = ['relay', 'direct', 'webrtc'] as const;
+/** Wire tokens for the `Authenticate.game_data_format` opt-in (#627). */
+export const GAME_DATA_FORMATS = ['json', 'rkyv', 'protobuf'] as const;
 
 export type Topology = (typeof TOPOLOGIES)[number];
 export type Transport = (typeof TRANSPORTS)[number];
+export type GameDataFormat = (typeof GAME_DATA_FORMATS)[number];
 
 /**
  * The full run configuration handed from the CLI to the page engine via
@@ -54,6 +57,12 @@ export interface RunConfig {
   protocolVersion: number;
   supportedTopologies: Topology[];
   supportedTransports: Transport[];
+  /**
+   * Requested `Authenticate.game_data_format` (#627). `json` keeps the legacy
+   * text-frame game-data path byte-identical; an opaque token switches game
+   * data to raw binary frames once ProtocolInfo advertises the format.
+   */
+  gameDataFormat: GameDataFormat;
   sdkVersion: string;
   /**
    * Milliseconds the CLI spent before the page engine started (Chromium

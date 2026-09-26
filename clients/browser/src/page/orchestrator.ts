@@ -50,12 +50,16 @@ import { DeliveryAccountability, DeliveryAccountabilityViolation } from './accou
 import {
   HANDSHAKE_TIMEOUT_MS,
   NON_TEXT_APPLICATION_FRAME,
+  bytesToBase64,
   classifyJsonNegotiatedServerInput,
+  classifyOpaqueNegotiatedServerInput,
   clientFrame,
   connect,
   joinRoomFrameData,
+  negotiatedGameDataFormat,
   negotiatedProtocolVersion,
   sendGameData,
+  sendOpaqueGameData,
   type ServerFrame,
 } from './wire.js';
 
@@ -759,7 +763,8 @@ class Orchestrator {
       app_id: this.config.appId,
       sdk_version: this.config.sdkVersion,
       platform: this.config.platform,
-      game_data_format: 'json',
+      // Opaque game-data encodings are an explicit opt-in (#627).
+      game_data_format: this.config.gameDataFormat,
     };
     if (v3) {
       // v2 mode omits every v3 field so the wire shape is pure v2.
@@ -787,6 +792,16 @@ class Orchestrator {
       negotiated = negotiatedProtocolVersion(infoResponse, this.config.protocolVersion);
     } catch (error) {
       throw FatalError.protocol(describe(error));
+    }
+    // An opaque request must appear in ProtocolInfo.game_data_formats before
+    // any opaque byte goes on the wire (#627): a knob-off deployment
+    // advertises exactly ["json"] and silently downgraded the request.
+    if (this.config.gameDataFormat !== 'json') {
+      try {
+        negotiatedGameDataFormat(infoResponse, this.config.gameDataFormat);
+      } catch (error) {
+        throw FatalError.protocol(describe(error));
+      }
     }
     emit({
       event: 'protocol_info',
@@ -926,7 +941,12 @@ class Orchestrator {
   private onServerInput(data: unknown): void {
     let frame: ServerFrame;
     try {
-      frame = classifyJsonNegotiatedServerInput(data);
+      // The negotiated game-data format owns the physical frame grammar (#627);
+      // json keeps today's text-only classifier byte-for-byte.
+      frame =
+        this.config.gameDataFormat === 'json'
+          ? classifyJsonNegotiatedServerInput(data)
+          : classifyOpaqueNegotiatedServerInput(data);
     } catch (error) {
       this.failFatal(FatalError.protocol(`invalid ServerMessage frame: ${describe(error)}`));
       return;
@@ -1437,10 +1457,24 @@ class Orchestrator {
           break;
         }
         const payload = data['payload'];
+        const bytes = payload instanceof Uint8Array ? payload : new Uint8Array(0);
         console.debug(
           `received accountable opaque binary GameData from ${from} ` +
-            `(${String(data['encoding'])}, ${payload instanceof Uint8Array ? payload.byteLength : 0} bytes)`,
+            `(${String(data['encoding'])}, ${bytes.byteLength} bytes)`,
         );
+        // Opaque negotiation carries the relay floor's payloads as binary
+        // frames, so every decoded frame from a peer satisfies the
+        // relay-received criterion exactly like the text `relay_msg` arm
+        // (#627); the opaque payload cannot be inspected for that key.
+        this.relayReceivedFrom.add(from);
+        // Event-stream parity with the native client (#627): surface the
+        // receipt losslessly (encoding token + base64 payload) instead of
+        // guessing at the opaque bytes.
+        emit({
+          event: 'game_data_received',
+          from,
+          payload: { encoding: String(data['encoding']), payload: bytesToBase64(bytes) },
+        });
         break;
       }
       case NON_TEXT_APPLICATION_FRAME:
@@ -1877,9 +1911,14 @@ class Orchestrator {
       this.relaySent = true;
       return;
     }
-    sendGameData((frame) => this.sendFrame(frame), {
-      relay_msg: this.config.relayPayload,
-    });
+    if (this.config.gameDataFormat === 'json') {
+      sendGameData((frame) => this.sendFrame(frame), {
+        relay_msg: this.config.relayPayload,
+      });
+    } else {
+      // Opaque negotiation relays the raw payload as one binary frame (#627).
+      sendOpaqueGameData((frame) => this.sendBinaryFrame(frame), this.config.relayPayload);
+    }
     this.relaySent = true;
     this.relaySendAt = null;
     emit({ event: 'game_data_sent' });
@@ -1900,6 +1939,14 @@ class Orchestrator {
   }
 
   private sendFrame(frame: string): void {
+    this.sendRawFrame(frame);
+  }
+
+  private sendBinaryFrame(frame: ArrayBuffer): void {
+    this.sendRawFrame(frame);
+  }
+
+  private sendRawFrame(frame: string | ArrayBuffer): void {
     if (this.ws === null || this.ws.readyState !== WebSocket.OPEN) {
       throw FatalError.connection('websocket is not open');
     }

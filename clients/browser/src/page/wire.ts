@@ -5,6 +5,7 @@
 // hand-models only the envelope fields it actually reads — drift is caught by
 // the interop suite, which drives this client against the real server binary.
 
+import type { GameDataFormat } from '../shared/types.js';
 import type { DeliveryClass } from './accountability.js';
 
 const MAX_U32 = 0xffff_ffff;
@@ -18,7 +19,7 @@ export interface ServerFrame {
   data: Record<string, unknown>;
 }
 
-export type BinaryGameDataEncoding = 'json' | 'message_pack' | 'rkyv';
+export type BinaryGameDataEncoding = 'json' | 'message_pack' | 'rkyv' | 'protobuf';
 
 /** Decoded v3 metadata with the application payload left byte-for-byte opaque. */
 export interface V3BinaryGameDataFrame {
@@ -87,6 +88,37 @@ export function sendGameDataWithDelivery(
       ...(delivery.key === undefined ? {} : { key: delivery.key }),
     }),
   );
+}
+
+/**
+ * Send one opaque game-data payload as a raw binary WebSocket frame (#627):
+ * a string becomes its UTF-8 bytes, the frame body is exactly the payload
+ * bytes with no JSON envelope, and delivery is an ArrayBuffer so the server
+ * sees an unmodified binary message.
+ */
+export function sendOpaqueGameData(
+  sendBinary: (frame: ArrayBuffer) => void,
+  payload: string | Uint8Array,
+): void {
+  const bytes = typeof payload === 'string' ? new TextEncoder().encode(payload) : payload;
+  const frame = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(frame).set(bytes);
+  sendBinary(frame);
+}
+
+/**
+ * Base64-render opaque payload bytes for lossless event output (#627): the
+ * bytes are the game's business, so events must carry them verbatim (as the
+ * native client does) instead of guessing at an encoding. The `Uint8Array`
+ * overload exists for symmetric unit testing of the byte path; production
+ * callers always pass the decoded frame's payload.
+ */
+export function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
 }
 
 function serializeOutgoingGameData(data: Record<string, unknown>): string {
@@ -293,7 +325,12 @@ export function parseV3BinaryGameDataFrame(wire: ArrayBuffer | ArrayBufferView):
         break;
       case 'encoding': {
         const encoding = reader.readString('encoding');
-        if (encoding !== 'json' && encoding !== 'message_pack' && encoding !== 'rkyv') {
+        if (
+          encoding !== 'json' &&
+          encoding !== 'message_pack' &&
+          encoding !== 'rkyv' &&
+          encoding !== 'protobuf'
+        ) {
           throw new Error('v3 binary GameData encoding is invalid');
         }
         encodingValue = encoding;
@@ -542,6 +579,63 @@ export function classifyJsonNegotiatedServerInput(data: unknown): ServerFrame {
     throw new Error('received text GameDataBinary while game_data_format=json was negotiated');
   }
   return frame;
+}
+
+/**
+ * Parse the mixed stream selected by an opaque `game_data_format` (#627):
+ * server control frames stay on text, game data arrives as strict v3 binary
+ * envelopes, and a text `GameData` frame is the protocol error it is under
+ * that negotiation.
+ */
+export function classifyOpaqueNegotiatedServerInput(data: unknown): ServerFrame {
+  if (typeof data === 'string') {
+    const frame = parseServerFrame(data);
+    if (frame.type === 'GameData') {
+      throw new Error('received text GameData while an opaque game_data_format was negotiated');
+    }
+    return frame;
+  }
+  if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+    try {
+      return parseV3BinaryGameDataFrame(data);
+    } catch (error) {
+      throw new Error(
+        `received an invalid binary GameData frame while an opaque game_data_format was ` +
+          `negotiated: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  throw new Error(
+    'received a non-text non-binary WebSocket frame while an opaque game_data_format was negotiated',
+  );
+}
+
+/**
+ * Extract the ProtocolInfo `game_data_formats` advertisement and confirm it
+ * covers the negotiated request (#627). Opaque encodings are opt-in server
+ * knobs, and a server that cannot honor the request silently falls back to
+ * JSON instead of refusing — so the advertisement, not the Authenticate
+ * answer, is the authoritative signal that opaque bytes may go on the wire.
+ */
+export function negotiatedGameDataFormat(
+  frame: ServerFrame,
+  requested: GameDataFormat,
+): GameDataFormat {
+  if (frame.type !== 'ProtocolInfo') {
+    throw new Error(`expected ProtocolInfo, got ${frame.type}`);
+  }
+  const value = frame.data['game_data_formats'];
+  if (!Array.isArray(value) || value.some((token) => typeof token !== 'string')) {
+    throw new Error('ProtocolInfo.game_data_formats must be an array of format tokens');
+  }
+  if (!value.includes(requested)) {
+    throw new Error(
+      `server does not advertise game_data_format '${requested}' ` +
+        `(ProtocolInfo.game_data_formats: [${value.join(', ')}]); opaque encodings require the ` +
+        'protocol.enable_rkyv_game_data / protocol.enable_protobuf_game_data server knobs',
+    );
+  }
+  return requested;
 }
 
 /** Extract the physical connection's negotiated mode from ProtocolInfo. */
