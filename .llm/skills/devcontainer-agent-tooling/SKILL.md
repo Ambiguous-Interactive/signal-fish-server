@@ -167,6 +167,10 @@ every change, so rely on it in CI and on the static guards above.
 - Bypassing `.devcontainer/github-mcp.sh` (launching the bare binary again) →
   an empty harness `GITHUB_PERSONAL_ACCESS_TOKEN` makes the server device-flow
   on every call even when `.env.local` holds `GITHUB_MCP_PAT` (PR #638).
+- Deciding a managed-block rewrite by grepping the pre-rewrite file, or
+  validating only the second (self-healed) run → one full run loses the
+  block (PR #638 review). Decide against the rewritten artifact, and pin
+  each legacy shape's FIRST run in `scripts/test_zai_mcp.py`.
 - Removing the `environment` pass-through from `opencode.json` → the OpenCode
   GitHub MCP server starts unauthenticated and prompts the OAuth device flow
   every session (issue #496).

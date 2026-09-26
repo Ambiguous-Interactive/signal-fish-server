@@ -185,6 +185,39 @@ http_headers_helper = "/home/vscode/.local/bin/signal-fish-zai-mcp-headers"
             configure()
             self.assertEqual(config.read_text(), first)
 
+    def test_managed_github_migration_rewrites_in_one_run(self):
+        # PR #638 review: the migration deletes the marker-owned bare-binary
+        # block, then decided whether to append the launcher block by grepping
+        # the ORIGINAL file — whose old table still matched — so the first
+        # run stripped GitHub MCP and only the second run self-healed. The
+        # decision must read the rewritten output, and the FIRST run against
+        # each legacy shape is what a test must pin.
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.toml"
+            config.write_text('''# user preamble stays
+
+# >>> signal-fish github mcp >>>
+[mcp_servers.github]
+command = "/usr/local/bin/github-mcp-server"
+args = ["stdio"]
+# <<< signal-fish github mcp <<<
+''')
+            env = {**os.environ, "CODEX_HOME": directory, "Z_AI_API_KEY": "fake-test-secret"}
+            command = '. "$1"; install_zai_mcp_header_helper() { return 0; }; configure_codex_mcp_servers'
+            subprocess.run(["bash", "-c", command, "test",
+                            str(ROOT / ".devcontainer/lib-agent-tools.sh")],
+                           env=env, capture_output=True, check=True)
+            first = config.read_text()
+            self.assertIn("# >>> signal-fish github mcp >>>", first)
+            self.assertIn("github-mcp.sh", first)
+            self.assertNotIn("/usr/local/bin/github-mcp-server", first)
+            self.assertEqual(first.count("[mcp_servers.github]"), 1)
+            self.assertIn("# user preamble stays", first)
+            subprocess.run(["bash", "-c", command, "test",
+                            str(ROOT / ".devcontainer/lib-agent-tools.sh")],
+                           env=env, capture_output=True, check=True)
+            self.assertEqual(config.read_text(), first)
+
 
 if __name__ == "__main__":
     unittest.main()
