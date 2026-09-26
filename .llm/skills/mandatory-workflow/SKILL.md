@@ -76,6 +76,9 @@ Expensive verification belongs to hosted CI, not the local agent loop:
   unit tests under `src/`. Find the owning target with
   `cargo nextest list`. While iterating, scope clippy the same way:
   `cargo clippy --test <target> --all-features`.
+  `scripts/dev-loop.sh <test-name> [...]` (options: `--all-features`,
+  `--clippy`, `--dry-run`) does the resolution and runs the scoped command,
+  so the fast path is one command.
 - **Run once before publication, not every loop**: the full local gate
   `cargo fmt` + `cargo clippy --all-targets --all-features` (zero warnings).
 - **Do NOT run locally**: full `cargo test`/nextest sweeps, `cargo doc`,
