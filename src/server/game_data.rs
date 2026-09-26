@@ -170,15 +170,18 @@ impl EnhancedGameServer {
         // payload bytes (the same canonical-JSON measure the relay budgets
         // charge) before anything is charged or fanned out. Absent knob keeps
         // the frame cap as the only limit, byte-identical to the pre-#634
-        // behavior. Rejected frames charge no budget and record no liveness —
-        // a stream of rejected frames must not keep an idle client alive.
+        // behavior. Rejected frames charge no budget and relay nothing; like
+        // delivery-class rejections, the router has already recorded client
+        // liveness before dispatch (a pre-existing lane shape).
+        // One canonical-JSON measure per frame serves both this cap and the
+        // relay-byte charge below.
+        let payload_bytes = canonical_json_len(&data);
         if let Some(cap) = self
             .config
             .max_game_data_bytes
             .as_ref()
             .and_then(|limits| limits.cap_for(GameDataEncoding::Json))
         {
-            let payload_bytes = canonical_json_len(&data);
             if payload_bytes > cap {
                 let _ = self
                     .send_error_to_player(
@@ -195,10 +198,10 @@ impl EnhancedGameServer {
         }
 
         if let Some(room_id) = self.get_client_room(player_id).await {
-            // The sender-controlled JSON payload is the budget measure; the
-            // fixed relay envelope is bounded by the outbound headroom rule.
+            // The sender-controlled JSON payload is the budget measure
+            // (already computed once above for the per-encoding cap).
             if self
-                .check_and_charge_relay_bytes(player_id, &room_id, canonical_json_len(&data) as u64)
+                .check_and_charge_relay_bytes(player_id, &room_id, payload_bytes as u64)
                 .await
                 .is_err()
             {
@@ -245,31 +248,43 @@ impl EnhancedGameServer {
         // Per-encoding ceiling (issue #634): a configured
         // `security.max_game_data_bytes.<encoding>` replaces the global frame
         // cap for that encoding's raw payload bytes; absent knobs keep the
-        // frame cap, byte-identical to the pre-#634 behavior.
-        let cap = self
+        // frame cap, byte-identical to the pre-#634 behavior (same cap value
+        // AND the legacy rejection text below).
+        let configured_cap = self
             .config
             .max_game_data_bytes
             .as_ref()
-            .and_then(|limits| limits.cap_for(encoding))
-            .unwrap_or(self.config.max_message_size);
+            .and_then(|limits| limits.cap_for(encoding));
+        let cap = configured_cap.unwrap_or(self.config.max_message_size);
         if payload.len() > cap {
-            tracing::warn!(
-                %player_id,
-                encoding = encoding.as_wire_str(),
-                payload_size = payload.len(),
-                max = cap,
-                "Binary game data payload exceeds the maximum message size for its encoding"
-            );
-            let _ = self
-                .send_error_to_player(
-                    player_id,
+            // A rejection under the frame-cap fallback must stay
+            // indistinguishable from the pre-#634 wire text; only a
+            // per-encoding cap names the encoding.
+            let (log_message, client_message) = match configured_cap {
+                Some(_) => (
+                    "Binary game data payload exceeds the maximum message size for its encoding",
                     format!(
                         "Binary payload exceeded maximum size for encoding {} ({} bytes)",
                         encoding.as_wire_str(),
                         cap
                     ),
-                    Some(ErrorCode::MessageTooLarge),
-                )
+                ),
+                None => (
+                    "Binary game data payload exceeds maximum message size",
+                    format!(
+                        "Binary payload exceeded maximum size ({} bytes)",
+                        self.config.max_message_size
+                    ),
+                ),
+            };
+            tracing::warn!(
+                %player_id,
+                payload_size = payload.len(),
+                max = cap,
+                log_message
+            );
+            let _ = self
+                .send_error_to_player(player_id, client_message, Some(ErrorCode::MessageTooLarge))
                 .await;
             return;
         }

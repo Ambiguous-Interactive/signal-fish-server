@@ -214,7 +214,9 @@ impl Default for SecurityConfig {
 /// Every field is optional; an encoding left as `None` (and the whole block
 /// being absent) keeps the `security.max_message_size` frame cap for that
 /// encoding. The block itself is strict-admission, so a typo'd encoding name
-/// fails startup instead of silently capping nothing.
+/// fails startup instead of silently capping nothing. A cap on an encoding
+/// whose `protocol.enable_*_game_data` knob is off is inert: negotiation
+/// refuses the encoding regardless, and the disclosure omits it.
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GameDataBytesLimits {

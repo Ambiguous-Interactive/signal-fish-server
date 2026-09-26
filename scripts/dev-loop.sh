@@ -25,7 +25,8 @@
 # path or a leading `=` is stripped for ownership resolution only. Patterns
 # that resolve to the same owning target run in ONE scoped invocation
 # (`-E 'test(a) or test(b)'`), so multi-pattern edits cost one build, not one
-# per pattern.
+# per pattern. Each pattern must be one shell word (nextest test names cannot
+# contain spaces; a space would split the merged filterset).
 #
 # `--changed` maps the working tree's Rust deltas (vs `base-ref`, default
 # HEAD, untracked files included) onto owning targets and runs each owning
