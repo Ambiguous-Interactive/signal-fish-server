@@ -84,10 +84,15 @@ correctness evidence appears.
   decoder token, budgets inherited unchanged, docs/spec/samples/guards
   updated, and a live four-encoding relay e2e
   (`opaque_opt_in_encodings_relay_directly_and_report_cross_format`).
-  Remaining: reference clients (native + browser) driving one opaque
-  encoding end to end and the interop lanes extending to it; per-protocol
-  message-size budgets (owner "potentially", filed as #634); SDK/fortress
-  adoption (SDK repos own those halves).
+  Session 263 landed the reference-client half: native and browser
+  `--game-data-format <json|rkyv|protobuf>` (v3-only pre-flight,
+  advertisement validation naming the server knob, opaque send as raw
+  binary frames, strict-v3-envelope receive feeding the same ledger and
+  relay-receipt criteria as JSON), plus interop scenario 10 driving two
+  native clients end to end over an `enable_rkyv_game_data` deployment.
+  Remaining: interop lanes extending to the opaque encodings (browser
+  e2e cells); per-protocol message-size budgets (owner "potentially",
+  filed as #634); SDK/fortress adoption (SDK repos own those halves).
 - #396 — CLOSED 2026-09-12 (standing correctness/perf sweep, closed with the
   session-237 enforcement-seam sweep). The sweep practice continues
   opportunistically wherever new features open seams; per-session closure
@@ -177,6 +182,18 @@ correctness evidence appears.
     `test_ci_docker_job_skips_image_irrelevant_pull_requests`; release
     commits always change Cargo.toml/Cargo.lock, so releases keep full
     image validation.
+    Session 263 extended the byte-relevant shape to the `deny` supply-chain
+    job: dependency-irrelevant pull requests skip every analyzer (verdict is
+    a pure function of dependency-graph inputs; the noon cron re-proofs
+    advisory data daily), with the lockstep guard extracting the steps'
+    consumed inputs — manifests, per-graph `deny.toml` policies, audit
+    lockfiles, npm package files, SBOM graph — from the parsed workflow.
+    Session 262 also landed the local-loop accelerator
+    `scripts/dev-loop.sh` (test-name → owning target, ~47 s bare → ~10 s
+    scoped warm); session 263 added `--changed [base-ref]`, which maps the
+    working tree's Rust deltas onto owning targets and runs each owning
+    target's full suite once — the whole edit-test loop in one command with
+    no name filter to remember.
     Verified from the API: `main` has **zero required status checks** and no
     required reviews (one disabled Copilot ruleset; required linear history
     on), so the #379 owner-inventory prerequisite is exported and
