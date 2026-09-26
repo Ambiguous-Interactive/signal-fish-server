@@ -58,7 +58,7 @@ fn print_sample(scenario: Scenario, room_size: usize, sample: &Sample) {
     let recipients = room_size - 1;
     let allocation_operations = sample.stats.allocations + sample.stats.reallocations;
     println!(
-        "{},{room_size},{recipients},{RELAYS_PER_SAMPLE},{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.2},{:.4},{:.2}",
+        "{},{room_size},{recipients},{RELAYS_PER_SAMPLE},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.4},{:.2},{:.4},{:.2}",
         scenario.name(),
         sample.ledger.materialized,
         sample.ledger.text_frames,
@@ -67,6 +67,7 @@ fn print_sample(scenario: Scenario, room_size: usize, sample: &Sample) {
         sample.ledger.json_encodes,
         sample.ledger.message_pack_encodes,
         sample.ledger.message_pack_decodes,
+        sample.ledger.unsupported_format,
         hex_digest(&sample.ledger.output_sha256),
         sample.stats.allocations,
         sample.stats.reallocations,
@@ -91,6 +92,9 @@ fn assert_allocation_ceiling(scenario: Scenario, room_size: usize, sample: &Samp
             (Scenario::V3MessagePackBinary, 8 | 16) => (5, 0, 2_053),
             (Scenario::MixedMessagePackSource, 2) => (14, 0, 3_572),
             (Scenario::MixedMessagePackSource, 8 | 16) => (21, 0, 7_642),
+            (Scenario::MixedRkyvSource, 2) => (4, 0, 278),
+            (Scenario::MixedRkyvSource, 8) => (16, 0, 1_550),
+            (Scenario::MixedRkyvSource, 16) => (28, 0, 2_366),
             _ => panic!("room-{room_size} has no checked-in allocation baseline"),
         };
     let allocation_operations = sample.stats.allocations + sample.stats.reallocations;
@@ -125,7 +129,8 @@ fn assert_allocation_ceiling(scenario: Scenario, room_size: usize, sample: &Samp
 fn main() {
     println!(
         "scenario,room_size,recipients,relays,materialized,text_frames,binary_frames,\
-         wire_bytes,json_encodes,message_pack_encodes,message_pack_decodes,output_sha256,\
+         wire_bytes,json_encodes,message_pack_encodes,message_pack_decodes,\
+         unsupported_format,output_sha256,\
          allocations,reallocations,deallocations,bytes_allocated,allocation_ops_per_relay,\
          bytes_per_relay,allocation_ops_per_delivery,bytes_per_delivery"
     );

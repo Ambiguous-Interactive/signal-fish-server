@@ -109,6 +109,10 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
   Prefer `scripts/dev-loop.sh <test-name> [...]` (add `--all-features` /
   `--clippy` when needed): it resolves each pattern to its owning target
   with grep and runs the scoped command, so the fast path is one command.
+  `scripts/dev-loop.sh --changed [base-ref]` runs the whole edit-test loop
+  in one command: it maps the working tree's Rust deltas onto owning targets
+  and runs each owning target's full suite once (src/ deltas run the unit
+  tests; helper modules run every top-level target including them).
 - Run the full local gate once before publication, not every loop:
   `cargo fmt` + `cargo clippy --all-targets --all-features`, zero warnings.
 - Do NOT run expensive suites locally: full `cargo test`/nextest sweeps,

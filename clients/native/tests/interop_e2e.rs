@@ -83,6 +83,14 @@
 //!    broadcast) and its relay payload — and crucially NO `Error` frame,
 //!    guarding the issue #449 stale-latch class: a post-finalize `StartGame`
 //!    re-issue would draw `INVALID_ROOM_STATE` and surface here.
+//! 10. `opaque_rkyv_negotiation_relays_end_to_end_between_reference_clients`
+//!     — the client half of the issue #627 opaque-encoding contract: with the
+//!     server's `protocol.enable_rkyv_game_data` opt-in on, both reference
+//!     clients negotiate `rkyv` in `Authenticate`, send their `--relay-payload`
+//!     as raw binary frames, and receive the peer's payload in the strict v3
+//!     envelope (surfaced base64-rendered with its encoding token). The relay
+//!     floor carries the whole proof and both processes meet the standard
+//!     success criteria, so opaque receipts count exactly as JSON ones.
 //!
 //! Scenarios are serialized behind a mutex (each spawns 3+ OS processes and
 //! up to three concurrent WebRTC stacks; running them in parallel on small CI
@@ -96,10 +104,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, UdpSocket};
 use std::time::Duration;
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use harness::{
     advertised_candidate_addresses, advertised_candidates, event_tags, events_named, player_id_of,
     scenario_window, single_event, spawn_client, spawn_client_with_windows, spawn_server,
-    str_field, ClientProcess, ClientSpec, CLIENT_EXIT_TIMEOUT, EVENT_TIMEOUT,
+    spawn_server_with_extra_env, str_field, ClientProcess, ClientSpec, CLIENT_EXIT_TIMEOUT,
+    EVENT_TIMEOUT,
 };
 use serde_json::{json, Value};
 use signal_fish_reference_native::engine::{local_udp_addrs, EngineSettings, IpFamily};
@@ -116,17 +127,17 @@ static SCENARIO_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new((
 ///    `--max-runtime-secs 90` watchdog (see `spawn_client`) = 90 s;
 ///  - joiner wave: bounded by its own 90 s watchdog = 90 s.
 const LATE_JOIN_SCENARIO_CEILING_SECS: u64 = 45 + 90 + 90;
-/// Each of the six ordinary one-wave scenarios is bounded by server startup
+/// Each of the seven ordinary one-wave scenarios is bounded by server startup
 /// plus one 90 s client watchdog; the departure regression uses 30 s clients.
 const STANDARD_SCENARIO_CEILING_SECS: u64 = 45 + 90;
 const DEPARTURE_SCENARIO_CEILING_SECS: u64 = 45 + 30;
 /// A test may queue behind every other test. Bounding that wait by the entire
 /// suite's real composition remains conservative while keeping a degraded run
 /// within the workflow's 30-minute job policy (unlike multiplying the unique
-/// two-wave ceiling by all nine scenarios).
+/// two-wave ceiling by all ten scenarios).
 const SERIAL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(
     2 * LATE_JOIN_SCENARIO_CEILING_SECS
-        + 6 * STANDARD_SCENARIO_CEILING_SECS
+        + 7 * STANDARD_SCENARIO_CEILING_SECS
         + DEPARTURE_SCENARIO_CEILING_SECS,
 );
 
@@ -2510,5 +2521,142 @@ async fn ipv6_only_mesh_pair_exchanges_on_a_host_ipv6_path() {
         assert_no_ipv4_candidate_advertised(window, who);
         assert_exchange_sent_to(&run.logs[index], who, &peers);
         assert_exchange_received_from(&run.logs[index], who, &peers);
+    }
+}
+
+/// Issue #627, client half: with the server's `protocol.enable_rkyv_game_data`
+/// opt-in on, two reference clients negotiate `rkyv` in `Authenticate`, each
+/// `--relay-payload` leaves as one raw binary frame, and each arrives at the
+/// peer in the strict v3 envelope — surfaced as a `game_data_received` event
+/// carrying the encoding token plus the base64 payload (lossless; the client
+/// never guesses at the opaque bytes). The relay floor carries the whole
+/// proof (relay-only advertisements, no WebRTC), and both processes meet the
+/// standard success criteria, so an opaque receipt satisfies every gate a
+/// JSON receipt does.
+#[tokio::test(flavor = "multi_thread")]
+async fn opaque_rkyv_negotiation_relays_end_to_end_between_reference_clients() {
+    let _serial = acquire_serial().await;
+    let server = spawn_server_with_extra_env(
+        "relay",
+        &[(
+            "SIGNAL_FISH__PROTOCOL__ENABLE_RKYV_GAME_DATA",
+            "true".to_string(),
+        )],
+    )
+    .await;
+    let workdir = tempfile::tempdir().expect("create client workdir");
+    let url = server.v3_ws_url();
+    let success_release_file = workdir.path().join("release-successful-clients");
+    let success_release_path = success_release_file
+        .to_str()
+        .expect("temporary success-release path is UTF-8");
+    let encoding_args: [&str; 6] = [
+        "--supported-topologies",
+        "relay",
+        "--supported-transports",
+        "relay",
+        "--game-data-format",
+        "rkyv",
+    ];
+    let client_args: Vec<&str> = encoding_args
+        .iter()
+        .copied()
+        .chain(["--success-release-file", success_release_path])
+        .collect();
+
+    let mut creator = spawn_client(
+        &ClientSpec {
+            name: TWO_CLIENT_NAMES[0],
+            server_url: &url,
+            game_name: "interop-opaque-rkyv",
+            join_code: None,
+            peers: 2,
+            exchange: false,
+            relay_payload: Some(&relay_payload_for(TWO_CLIENT_NAMES[0])),
+            extra_args: &client_args,
+        },
+        workdir.path(),
+    );
+    let created = creator.await_event("room_created", EVENT_TIMEOUT).await;
+    let room_code = str_field(&created, "room_code").to_string();
+    let mut joiner = spawn_client(
+        &ClientSpec {
+            name: TWO_CLIENT_NAMES[1],
+            server_url: &url,
+            game_name: "interop-opaque-rkyv",
+            join_code: Some(&room_code),
+            peers: 2,
+            exchange: false,
+            relay_payload: Some(&relay_payload_for(TWO_CLIENT_NAMES[1])),
+            extra_args: &client_args,
+        },
+        workdir.path(),
+    );
+
+    // Independent success on both sides: the negotiated-rkyv receipt path
+    // must feed the relay-receipt criterion exactly as the JSON path does.
+    joiner
+        .await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)
+        .await;
+    creator
+        .await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)
+        .await;
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    let mut clients = vec![creator, joiner];
+    for client in &mut clients {
+        client.assert_running("while held at the shared success barrier");
+    }
+    std::fs::write(&success_release_file, b"release").expect("release successful clients together");
+
+    for client in &mut clients {
+        drain_expect_success(client).await;
+    }
+
+    for (index, who) in TWO_CLIENT_NAMES.iter().enumerate() {
+        let log = &clients[index].events;
+        let sender = TWO_CLIENT_NAMES[1 - index];
+        // The sender's id lives in the SENDER's own `room_joined` event.
+        let sender_id = player_id_of(&clients[1 - index].events, sender);
+        let expected_payload = BASE64_STANDARD.encode(relay_payload_for(sender));
+
+        let received = events_named(log, "game_data_received");
+        assert_eq!(
+            received.len(),
+            1,
+            "{who}: exactly one opaque relay payload expected;\n{}",
+            clients[index].diagnostics()
+        );
+        let event = &received[0];
+        assert_eq!(
+            event.get("from").and_then(Value::as_str),
+            Some(sender_id.as_str()),
+            "{who}: opaque payload must carry the sender attribution: {event}"
+        );
+        let payload = event
+            .get("payload")
+            .expect("game_data_received carries a payload object");
+        assert_eq!(
+            payload.get("encoding").and_then(Value::as_str),
+            Some("rkyv"),
+            "{who}: the event must name the negotiated encoding: {event}"
+        );
+        assert_eq!(
+            payload.get("payload").and_then(Value::as_str),
+            Some(expected_payload.as_str()),
+            "{who}: the relayed opaque bytes must round-trip losslessly: {event}"
+        );
+        assert!(
+            event.get("seq").and_then(Value::as_u64).is_some()
+                && event.get("epoch").and_then(Value::as_u64).is_some(),
+            "{who}: the v3 delivery stamps must survive the opaque relay: {event}"
+        );
+
+        // No accountability noise: an opaque session produces no
+        // unsupported-format advisory and no error event of any kind.
+        assert!(
+            events_named(log, "error").is_empty(),
+            "{who}: opaque relay must produce no error events;\n{}",
+            clients[index].diagnostics()
+        );
     }
 }

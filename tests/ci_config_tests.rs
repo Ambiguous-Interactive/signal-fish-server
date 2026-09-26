@@ -5674,6 +5674,305 @@ fn test_ci_docker_job_skips_image_irrelevant_pull_requests() {
     );
 }
 
+/// Extract the dependency-relevance gate's path filter patterns from the gate
+/// step's `run:` script: each `case` arm's pattern list between `case "$f" in`
+/// and `esac`, split on `|`.
+fn dependency_gate_filters(gate_run: &str) -> Vec<String> {
+    let mut filters = Vec::new();
+    let mut in_case = false;
+    for line in gate_run.lines() {
+        let trimmed = line.trim();
+        if !in_case {
+            in_case = trimmed.starts_with("case \"$f\" in");
+            continue;
+        }
+        if trimmed == "esac" {
+            break;
+        }
+        // A case arm's pattern list is a line ending in `)`; the arm body
+        // (`RELEVANT="true"`, `break`, `;;`) never is.
+        let Some(arm) = trimmed.strip_suffix(')') else {
+            continue;
+        };
+        for pattern in arm.split('|') {
+            let pattern = pattern.trim();
+            if !pattern.is_empty() {
+                filters.push(pattern.to_string());
+            }
+        }
+    }
+    filters
+}
+
+#[test]
+fn test_ci_deny_job_skips_dependency_irrelevant_pull_requests() {
+    // Issue #512: the `deny` job's verdict is a pure function of its
+    // dependency-graph inputs, so a pull request touching none of them cannot
+    // change the audit result and the job skips its analyzer steps (the same
+    // byte-relevant-path lever the `docker` job's image-relevance gate
+    // pulls). The daily noon cron always audits: advisory data is re-proven
+    // on schedule, not per pull request. Three invariants keep the skip
+    // honest: (1) the gate exists, diffs pull requests only, and fails open;
+    // (2) the relevance filter covers every manifest/lockfile/policy input
+    // the deny steps consume — consumers are extracted from the parsed
+    // workflow, so a deny step that starts consuming an input the filter does
+    // not cover (a differently named manifest, lockfile, package file, or
+    // policy) fails here until the filter follows, while the recursive globs
+    // keep any new graph under an existing name covered automatically;
+    // (3) every analyzer step is actually conditioned on the gate, so a new
+    // unguarded step cannot silently restore the every-PR audit.
+    let root = repo_root();
+    let ci = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let documents = Yaml::load_from_str(&ci).expect("ci.yml must parse as YAML");
+    let deny_steps = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .and_then(|jobs| jobs.as_mapping_get("deny"))
+        .and_then(|job| job.as_mapping_get("steps"))
+        .and_then(Yaml::as_sequence)
+        .unwrap_or_else(|| panic!("ci.yml must define jobs.deny.steps"));
+
+    // (1) The gate exists, and diffs pull requests only: every other event
+    // (the daily noon cron's advisory reproof, workflow_dispatch) takes the
+    // always-audit branch.
+    let gate_index = deny_steps
+        .iter()
+        .position(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str)
+                == Some("Detect dependency-relevant changes")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "ci.yml `deny` job must keep the dependency-relevance gate; without it every \
+                 pull request reproves a dependency graph the change cannot have affected \
+                 (issue #512)"
+            )
+        });
+    let gate_step = &deny_steps[gate_index];
+    assert_eq!(
+        gate_step.as_mapping_get("id").and_then(Yaml::as_str),
+        Some("dep-relevance"),
+        "the dependency-relevance gate must expose \
+         `steps.dep-relevance.outputs.relevant` for the analyzer steps' guards"
+    );
+    let gate_run = gate_step
+        .as_mapping_get("run")
+        .and_then(Yaml::as_str)
+        .unwrap_or_else(|| {
+            panic!(
+                "the dependency-relevance gate must compute the changed files in a `run:` script"
+            )
+        });
+    assert!(
+        gate_run.contains(r#"[ "${{ github.event_name }}" != "pull_request" ]"#),
+        "the deny relevance gate must branch on the event so schedule (and any other \
+         non-pull_request event) always audits"
+    );
+    // The gate starts pessimistic (no match means skip is impossible until a
+    // pattern fires) and fails open (an unresolvable base diff audits, never
+    // skips silently or fails red).
+    assert!(
+        gate_run.contains("RELEVANT=\"false\""),
+        "the deny relevance gate must default to not-relevant so only a matching \
+         dependency input flips it; a `RELEVANT=\"true\"` default re-audits on every \
+         pull request (issue #512)"
+    );
+    assert!(
+        gate_run.contains("if ! git -c core.quotepath=off diff --name-only")
+            && gate_run.contains("failing open"),
+        "the deny relevance gate must keep the explicit fail-open branch for an \
+         unresolvable base diff; a fail-closed refactor would turn gate noise into \
+         red runs, and a silently-skipping one would drop supply-chain validation"
+    );
+
+    // The diff needs the pull request's base commit locally.
+    let checkout = deny_steps
+        .iter()
+        .take(gate_index)
+        .find(|step| {
+            step.as_mapping_get("uses")
+                .and_then(Yaml::as_str)
+                .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+        })
+        .unwrap_or_else(|| panic!("ci.yml `deny` job must check out before the relevance gate"));
+    assert_eq!(
+        checkout
+            .as_mapping_get("with")
+            .and_then(|with| with.as_mapping_get("fetch-depth"))
+            .and_then(Yaml::as_integer),
+        Some(0),
+        "ci.yml `deny` job must fetch enough history to diff against the pull request's \
+         base commit"
+    );
+
+    // (2) The filter must cover every manifest/lockfile/policy input the deny
+    // steps consume: cargo-deny manifests and their per-directory `deny.toml`
+    // policies, cargo-audit lockfiles, npm audit package files, and the SBOM's
+    // workspace graph.
+    let filters = dependency_gate_filters(gate_run);
+    assert!(
+        !filters.is_empty(),
+        "the deny relevance gate must list its dependency-relevant path patterns in a \
+         `case` block"
+    );
+
+    let mut consumed: BTreeSet<String> = BTreeSet::new();
+    for step in deny_steps {
+        let working_directory = step
+            .as_mapping_get("working-directory")
+            .and_then(Yaml::as_str)
+            .unwrap_or(".")
+            .trim_end_matches('/')
+            .to_owned();
+        let in_directory = |file: &str| {
+            if working_directory == "." {
+                file.to_owned()
+            } else {
+                format!("{working_directory}/{file}")
+            }
+        };
+        if let Some(uses) = step.as_mapping_get("uses").and_then(Yaml::as_str) {
+            if uses.starts_with("EmbarkStudios/cargo-deny-action@") {
+                let manifest = step
+                    .as_mapping_get("with")
+                    .and_then(|with| with.as_mapping_get("manifest-path"))
+                    .and_then(Yaml::as_str)
+                    .unwrap_or("Cargo.toml");
+                consumed.insert(manifest.to_owned());
+                // cargo-deny reads its policy from the manifest's directory by
+                // default, so each sub-graph step consumes its own `deny.toml`
+                // — relaxing a sub-graph policy IS a dependency-relevant change.
+                let manifest_dir = std::path::Path::new(manifest)
+                    .parent()
+                    .and_then(std::path::Path::to_str)
+                    .unwrap_or(".");
+                if manifest_dir == "." {
+                    consumed.insert("deny.toml".to_owned());
+                } else {
+                    consumed.insert(format!("{manifest_dir}/deny.toml"));
+                }
+            }
+            continue;
+        }
+        let Some(run) = step.as_mapping_get("run").and_then(Yaml::as_str) else {
+            continue;
+        };
+        if run.contains("cargo audit") {
+            let mut scanned = false;
+            for line in run.lines() {
+                if let Some(lockfile) = line.trim().strip_prefix("cargo audit --file ") {
+                    consumed.insert(lockfile.trim().to_owned());
+                    scanned = true;
+                }
+            }
+            if !scanned {
+                // The bare invocation audits the server graph at the repo root.
+                consumed.insert("Cargo.lock".to_owned());
+            }
+        }
+        if run
+            .lines()
+            .any(|line| matches!(line.trim(), "npm audit" | "if npm audit; then"))
+        {
+            consumed.insert(in_directory("package.json"));
+            consumed.insert(in_directory("package-lock.json"));
+        }
+        if run.contains("cargo sbom") {
+            // cargo-sbom shells out to `cargo metadata` over the root graph.
+            consumed.insert("Cargo.toml".to_owned());
+            consumed.insert("Cargo.lock".to_owned());
+        }
+        if run
+            .lines()
+            .any(|line| line.contains("read-toml-string.sh Cargo.toml"))
+        {
+            consumed.insert("Cargo.toml".to_owned());
+        }
+    }
+    assert!(
+        consumed.contains("Cargo.toml") && consumed.contains("Cargo.lock"),
+        "the deny steps' consumed-input inventory must include the server graph; the \
+         lockstep check below is meaningless without it"
+    );
+
+    let covers = |path: &str, filter: &str| {
+        if filter == path {
+            return true;
+        }
+        // A `**/name` pattern (bash `case` semantics: `*` crosses `/`)
+        // covers the file at any depth, the repo root included.
+        if let Some(name) = filter.strip_prefix("**/") {
+            return path == name || path.ends_with(&format!("/{name}"));
+        }
+        // A directory pattern covers deeper inputs only at a path boundary.
+        filter.ends_with("/**") && path.starts_with(&format!("{}/", filter.trim_end_matches("/**")))
+    };
+    let mut uncovered: Vec<String> = Vec::new();
+    for path in &consumed {
+        if !filters.iter().any(|filter| covers(path, filter)) {
+            uncovered.push(path.clone());
+        }
+    }
+    assert!(
+        uncovered.is_empty(),
+        "the deny relevance gate must cover every manifest/lockfile the deny steps consume; \
+         uncovered: {uncovered:?}.\nCurrent filters: {filters:?}.\n\
+         A pull request changing an uncovered input would skip an audit whose verdict it \
+         could have changed (issue #512)"
+    );
+
+    // Entries the consumed-input extraction cannot see: the root graphs and
+    // the root cargo-deny policy file, the .cargo config the analyzers
+    // inherit, and this workflow file so gate changes always re-audit.
+    for required in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "deny.toml",
+        ".cargo/**",
+        ".github/workflows/ci.yml",
+    ] {
+        assert!(
+            filters.contains(&required.to_string()),
+            "the deny relevance gate must keep `{required}` in its filter list; removal \
+             must be a conscious edit, not drift"
+        );
+    }
+    // The recursive globs keep every tracked sub-workspace graph, npm graph,
+    // and per-graph deny policy covered without enumerating each path.
+    for required in [
+        "**/Cargo.toml",
+        "**/Cargo.lock",
+        "**/deny.toml",
+        "**/package.json",
+        "**/package-lock.json",
+    ] {
+        assert!(
+            filters.contains(&required.to_string()),
+            "the deny relevance gate must keep `{required}` in its filter list so every \
+             tracked Cargo/npm graph stays covered without enumerating each path"
+        );
+    }
+
+    // (3) Every analyzer step after the gate must be conditioned on it: an
+    // unguarded step would run on every pull request regardless of the
+    // gate's verdict.
+    for step in deny_steps.iter().skip(gate_index + 1) {
+        let name = step
+            .as_mapping_get("name")
+            .and_then(Yaml::as_str)
+            .unwrap_or("<unnamed step>");
+        let condition = step
+            .as_mapping_get("if")
+            .and_then(Yaml::as_str)
+            .unwrap_or("");
+        assert!(
+            condition.contains("steps.dep-relevance.outputs.relevant == 'true'"),
+            "ci.yml `deny` job step `{name}` must run only when the relevance gate reports \
+             a dependency-relevant change; found `if: {condition}`"
+        );
+    }
+}
+
 #[test]
 fn test_dockerfile_cross_compiles_for_target_platform() {
     // The chosen strategy is cross-compilation, not QEMU emulation: the builder

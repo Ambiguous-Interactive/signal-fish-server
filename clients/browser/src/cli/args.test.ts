@@ -123,4 +123,73 @@ for (const [args, description] of [
   assert(rejected, `--max-players must reject: ${description}`);
 }
 
+// --game-data-format: single-token enum opt-in for opaque encodings (#627).
+// Default stays json so a default run is byte-identical to today.
+const defaultFormat = parseArgs(['--server-url', 'ws://127.0.0.1/v3/ws', '--create-room']);
+assert(
+  defaultFormat?.config.gameDataFormat === 'json',
+  'game data format must default to json',
+);
+for (const value of ['rkyv', 'protobuf'] as const) {
+  const opaque = parseArgs([
+    '--server-url',
+    'ws://127.0.0.1/v3/ws',
+    '--create-room',
+    '--game-data-format',
+    value,
+  ]);
+  assert(
+    opaque?.config.gameDataFormat === value,
+    `--game-data-format ${value} must parse exactly`,
+  );
+}
+for (const value of ['message_pack', 'JSON', '']) {
+  let rejected = false;
+  try {
+    parseArgs([
+      '--server-url',
+      'ws://127.0.0.1/v3/ws',
+      '--create-room',
+      '--game-data-format',
+      value,
+    ]);
+  } catch (error) {
+    rejected = error instanceof UsageError;
+  }
+  assert(rejected, `--game-data-format must reject '${value}'`);
+}
+
 console.error('ok - browser CLI arguments preserve exact numeric values');
+
+// Opaque game-data negotiation is v3-only (#627, mirroring the native
+// client's pre-flight): a doomed run must fail at parse time.
+for (const value of ['rkyv', 'protobuf'] as const) {
+  let rejected = false;
+  try {
+    parseArgs([
+      '--server-url',
+      'ws://127.0.0.1/v2/ws',
+      '--create-room',
+      '--protocol-version',
+      '2',
+      '--game-data-format',
+      value,
+    ]);
+  } catch (error) {
+    rejected =
+      error instanceof UsageError && error.message.includes('requires --protocol-version 3');
+  }
+  assert(rejected, `--game-data-format ${value} must refuse v2 runs at parse time`);
+}
+{
+  const v3Opaque = parseArgs([
+    '--server-url',
+    'ws://127.0.0.1/v3/ws',
+    '--create-room',
+    '--protocol-version',
+    '3',
+    '--game-data-format',
+    'rkyv',
+  ]);
+  assert(v3Opaque !== null, 'opaque + v3 must parse cleanly');
+}

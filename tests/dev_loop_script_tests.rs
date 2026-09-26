@@ -224,3 +224,190 @@ fn test_dev_loop_usage_error_without_patterns() {
         "the usage error must print the help text: {output}"
     );
 }
+
+/// Prepare the fixture repository for `--changed`: commit the seeded baseline
+/// so working-tree deltas (and untracked files) are expressible.
+fn commit_fixture_repo(temp_root: &Path) {
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(temp_root)
+            .env("GIT_AUTHOR_NAME", "dev-loop-test")
+            .env("GIT_AUTHOR_EMAIL", "dev-loop-test@example.com")
+            .env("GIT_COMMITTER_NAME", "dev-loop-test")
+            .env("GIT_COMMITTER_EMAIL", "dev-loop-test@example.com")
+            .status()
+            .expect("run git for the dev-loop --changed fixture");
+        assert!(
+            status.success(),
+            "git {args:?} failed in {}",
+            temp_root.display()
+        );
+    };
+    git(&["init", "--quiet"]);
+    git(&["add", "-A"]);
+    git(&["commit", "--quiet", "--allow-empty", "-m", "baseline"]);
+}
+
+#[test]
+fn test_dev_loop_changed_mode_runs_every_owning_target_without_a_name_filter() {
+    let temp_root = unique_temp_dir("dev-loop-script-changed");
+    copy_dev_loop_script(temp_root.path());
+    seed_fixture_repo(temp_root.path());
+    commit_fixture_repo(temp_root.path());
+
+    // A src delta (unit tests), a tracked integration delta, and an untracked
+    // brand-new target must all resolve; a client-crate delta stays advisory.
+    write_file(
+        &temp_root.path().join("src/lib.rs"),
+        "#[cfg(test)]\nmod protocol_tests {\n    #[test]\n    fn test_alpha_unit_changed() {}\n}\n",
+    );
+    write_file(
+        &temp_root.path().join("tests/bar.rs"),
+        "#[test]\nfn test_other_changed() {}\n",
+    );
+    write_file(
+        &temp_root.path().join("tests/fresh.rs"),
+        "#[test]\nfn test_fresh_target() {}\n",
+    );
+
+    let (code, output) = run_dev_loop_changed(temp_root.path(), &["--dry-run", "--changed"]);
+    assert_eq!(code, 0, "changed-mode resolution must succeed: {output}");
+    assert!(
+        output.contains("--lib"),
+        "a src/ delta schedules the unit-test target: {output}"
+    );
+    assert!(
+        output.contains("--test bar"),
+        "the tracked integration delta schedules its target: {output}"
+    );
+    assert!(
+        output.contains("--test fresh"),
+        "an untracked new target is owned too: {output}"
+    );
+    assert!(
+        !output.contains("-E test("),
+        "changed mode runs whole targets, never name-filtered: {output}"
+    );
+    assert!(
+        !output.contains("--test foo") && !output.contains("--test burst"),
+        "targets with no delta must not run: {output}"
+    );
+}
+
+/// Run dev-loop inside an already-prepared fixture repo (no re-seed), merging
+/// stdout+stderr like [`run_dev_loop`].
+fn run_dev_loop_changed(temp_root: &Path, args: &[&str]) -> (i32, String) {
+    let output = bash_command()
+        .arg("scripts/dev-loop.sh")
+        .args(args)
+        .current_dir(temp_root)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run dev-loop.sh in {}: {e}", temp_root.display()));
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    (
+        output.status.code().unwrap_or(-1),
+        combined.replace("\r\n", "\n"),
+    )
+}
+
+#[test]
+fn test_dev_loop_changed_mode_runs_every_target_including_a_changed_helper_module() {
+    let temp_root = unique_temp_dir("dev-loop-script-changed-helper");
+    copy_dev_loop_script(temp_root.path());
+    seed_fixture_repo(temp_root.path());
+    commit_fixture_repo(temp_root.path());
+
+    write_file(
+        &temp_root.path().join("tests/util/proxy.rs"),
+        "#[test]\nfn test_chunk_pacing_in_helper_changed() {}\n",
+    );
+
+    let (code, output) = run_dev_loop_changed(temp_root.path(), &["--dry-run", "--changed"]);
+    assert_eq!(code, 0, "helper-module resolution must succeed: {output}");
+    assert!(
+        output.contains("--test consumer"),
+        "the module-including target must be scheduled: {output}"
+    );
+    assert!(
+        !output.contains("--test foo") && !output.contains("--test bar"),
+        "targets that do not include the module must not run: {output}"
+    );
+}
+
+#[test]
+fn test_dev_loop_changed_mode_clean_tree_and_non_crate_deltas() {
+    let temp_root = unique_temp_dir("dev-loop-script-changed-clean");
+    copy_dev_loop_script(temp_root.path());
+    seed_fixture_repo(temp_root.path());
+    commit_fixture_repo(temp_root.path());
+
+    // A clean tree is a clean no-op: exit 0, no cargo invocation.
+    let (code, output) = run_dev_loop_changed(temp_root.path(), &["--dry-run", "--changed"]);
+    assert_eq!(code, 0, "an empty delta must not fail: {output}");
+    assert!(
+        output.contains("nothing to run"),
+        "the no-op must be stated, not silent: {output}"
+    );
+    assert!(
+        !output.contains("cargo nextest"),
+        "a no-op must not schedule work: {output}"
+    );
+
+    // A clients/ delta is advisory only: never a failure, never a root-suite run.
+    write_file(
+        &temp_root.path().join("clients/native/src/lib.rs"),
+        "// changed\n",
+    );
+    let (code, output) = run_dev_loop_changed(temp_root.path(), &["--dry-run", "--changed"]);
+    assert_eq!(
+        code, 0,
+        "a client-crate delta must not fail the root loop: {output}"
+    );
+    assert!(
+        output.contains("belongs to a client crate"),
+        "the advisory must redirect to the client crate's own suite: {output}"
+    );
+    assert!(
+        !output.contains("cargo nextest"),
+        "a clients/ delta must not schedule root-crate work: {output}"
+    );
+}
+
+#[test]
+fn test_dev_loop_changed_mode_usage_and_base_ref_handling() {
+    let temp_root = unique_temp_dir("dev-loop-script-changed-usage");
+    copy_dev_loop_script(temp_root.path());
+    seed_fixture_repo(temp_root.path());
+    commit_fixture_repo(temp_root.path());
+
+    // An invalid base ref is a usage error, not a silent full diff.
+    let (code, output) =
+        run_dev_loop_changed(temp_root.path(), &["--dry-run", "--changed", "not-a-ref"]);
+    assert_eq!(code, 2, "an invalid ref must be a usage error: {output}");
+    assert!(
+        output.contains("not a valid git ref"),
+        "the failure must name the offending ref: {output}"
+    );
+
+    // A pattern-like argument after --changed is rejected.
+    let (code, output) = run_dev_loop_changed(
+        temp_root.path(),
+        &["--dry-run", "--changed", "test_alpha_runs"],
+    );
+    assert_eq!(
+        code, 2,
+        "patterns after --changed are a usage error: {output}"
+    );
+
+    // An explicit base ref diffs against that ref: the baseline commit itself
+    // is clean against HEAD, so nothing runs.
+    let (code, output) =
+        run_dev_loop_changed(temp_root.path(), &["--dry-run", "--changed", "HEAD"]);
+    assert_eq!(code, 0, "an explicit clean base must resolve: {output}");
+    assert!(
+        output.contains("nothing to run"),
+        "a clean base ref is a no-op: {output}"
+    );
+}

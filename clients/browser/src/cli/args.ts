@@ -6,8 +6,10 @@
 // native README); on that path no `exiting` event is emitted.
 
 import {
+  GAME_DATA_FORMATS,
   TOPOLOGIES,
   TRANSPORTS,
+  type GameDataFormat,
   type RunConfig,
   type Topology,
   type Transport,
@@ -68,6 +70,8 @@ Options:
   --protocol-version <V>        2 omits every v3 Authenticate field [default: 3]
   --supported-topologies <LIST> Comma-separated topologies [default: relay,host,mesh]
   --supported-transports <LIST> Comma-separated transports [default: relay,webrtc]
+  --game-data-format <FORMAT>   Authenticate game_data_format: json, rkyv, or
+                                protobuf [default: json]
   --mdns-obfuscation            Keep Chromium's mDNS candidate obfuscation ON
                                 (default: disabled for deterministic loopback)
   --help                        Print this help
@@ -97,6 +101,7 @@ export function parseArgs(argv: string[]): CliOptions | null {
     '--protocol-version',
     '--supported-topologies',
     '--supported-transports',
+    '--game-data-format',
   ]);
   const booleanFlags = new Set([
     '--create-room',
@@ -176,6 +181,19 @@ export function parseArgs(argv: string[]): CliOptions | null {
     }
     return tokens as T[];
   };
+  // Single-token sibling of `listFlag` for the `--game-data-format` enum (#627).
+  const enumFlag = <T extends string>(flag: string, allowed: readonly T[], fallback: T): T => {
+    const value = flags.get(flag);
+    if (typeof value !== 'string') {
+      return fallback;
+    }
+    if (!(allowed as readonly string[]).includes(value)) {
+      throw new UsageError(
+        `flag ${flag}: invalid value '${value}' (allowed: ${allowed.join(', ')})`,
+      );
+    }
+    return value as T;
+  };
 
   const serverUrl = flags.get('--server-url');
   if (typeof serverUrl !== 'string') {
@@ -211,6 +229,21 @@ export function parseArgs(argv: string[]): CliOptions | null {
     }
   }
 
+  // Opaque game-data negotiation is v3-only (issue #627, mirroring the
+  // native client's pre-flight): v2 passthrough delivers raw payload with no
+  // sender attribution, so the page's strict-envelope decode could never
+  // satisfy the relay-receipt criterion — a doomed run must fail at parse
+  // time, not cost a server-side room.
+  const gameDataFormat = enumFlag<GameDataFormat>(
+    '--game-data-format',
+    GAME_DATA_FORMATS,
+    'json',
+  );
+  const protocolVersion = numberFlag('--protocol-version', 3);
+  if (gameDataFormat !== 'json' && protocolVersion < 3) {
+    throw new UsageError('--game-data-format rkyv|protobuf requires --protocol-version 3');
+  }
+
   const config: RunConfig = {
     serverUrl,
     createRoom,
@@ -231,7 +264,7 @@ export function parseArgs(argv: string[]): CliOptions | null {
     p2pTimeoutSecs: numberFlag('--p2p-timeout-secs', 15),
     runForSecs: numberFlag('--run-for-secs', 30),
     successReleaseEnabled: flags.has('--success-release-file'),
-    protocolVersion: numberFlag('--protocol-version', 3),
+    protocolVersion,
     supportedTopologies: listFlag<Topology>('--supported-topologies', TOPOLOGIES, [
       'relay',
       'host',
@@ -241,6 +274,7 @@ export function parseArgs(argv: string[]): CliOptions | null {
       'relay',
       'webrtc',
     ]),
+    gameDataFormat,
     sdkVersion: SDK_VERSION,
     // Re-measured by main right before the page engine starts.
     elapsedBeforeStartMs: 0,
