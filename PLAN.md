@@ -90,8 +90,13 @@ correctness evidence appears.
   binary frames, strict-v3-envelope receive feeding the same ledger and
   relay-receipt criteria as JSON), plus interop scenario 10 driving two
   native clients end to end over an `enable_rkyv_game_data` deployment.
-  Remaining: interop lanes extending to the opaque encodings (browser
-  e2e cells); per-protocol message-size budgets (owner "potentially",
+  Session 265 landed the browser e2e cells: browser-interop scenarios 10
+  and 11 drive two Chromium reference clients end to end over
+  `enable_rkyv_game_data` / `enable_protobuf_game_data` relay-floor
+  deployments, pinning the browser receipt contract (`from` attribution +
+  encoding token + lossless base64 payload, exact key set) on real
+  Chromium.
+  Remaining: per-protocol message-size budgets (owner "potentially",
   filed as #634); SDK/fortress adoption (SDK repos own those halves).
 - #396 — CLOSED 2026-09-12 (standing correctness/perf sweep, closed with the
   session-237 enforcement-seam sweep). The sweep practice continues
@@ -200,11 +205,18 @@ correctness evidence appears.
     3.5 s TTL outlasts and one 2 s blocked-wait bound now run in 11-17 ms
     each with identical semantics (renewal ticks still fire in deadline
     order), which also stops these tests from approaching the mutants
-    profile's 10 s per-test hang budget (#604 family). Remaining measured
-    floor: the lib makespan is bound by
-    `v3_only_messages_fail_closed_on_a_pre_v3_wire` (4.07 s of real loopback
-    WebSocket handshakes); converting it needs an in-memory duplex socket
-    pair, not a clock change.
+    profile's 10 s per-test hang budget (#604 family). Session 265 removed
+    the last multi-second floor: the 4.095 s
+    `v3_only_messages_fail_closed_on_a_pre_v3_wire` spent 8 x 500 ms of real
+    sleeping in timed negative-waits; the no-leak oracle is now frame order
+    (a close frame enqueued after `send_queued` returns must be the client's
+    FIRST received event, so a leak is caught at any latency, not just within
+    the old 500 ms window) and the test runs in 36 ms. Full `--lib` suite:
+    1165 passed, 4.19 s wall (54.9 s -> 46.1 s total execution). Remaining
+    measured floor: the makespan is bound by
+    `transfer_authority_announcement_cannot_be_overtaken_by_a_departure`
+    (1.03 s of real server event-loop work), an order of magnitude below
+    where this lever started.
     Verified from the API: `main` has **zero required status checks** and no
     required reviews (one disabled Copilot ruleset; required linear history
     on), so the #379 owner-inventory prerequisite is exported and
