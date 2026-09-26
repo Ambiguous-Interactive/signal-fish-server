@@ -40,6 +40,10 @@ futures-util = { version = "0.3", features = ["std"] }
 # Serialization (JSON text frames + JSONL event output).
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Lossless base64 rendering of opaque game-data payloads in emitted events
+# (issue #627): the bytes are the game's business, so events must not guess
+# an encoding — version-matched with the server crate's base64 usage.
+base64 = "0.22"
 
 # CLI, errors, logging (all logging goes to stderr; stdout is events-only).
 clap = { version = "4.6", features = ["derive"] }

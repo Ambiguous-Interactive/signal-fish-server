@@ -6,7 +6,7 @@
 //! room mode; everything else has a sensible default.
 
 use clap::{ArgGroup, Parser, ValueEnum};
-use signal_fish_server::protocol::{Topology, Transport};
+use signal_fish_server::protocol::{GameDataEncoding, Topology, Transport};
 use std::path::PathBuf;
 
 use crate::engine::{EngineSettings, IpFamily};
@@ -209,6 +209,17 @@ pub struct Cli {
     #[arg(long, value_delimiter = ',', default_value = "relay,webrtc")]
     pub supported_transports: Vec<TransportArg>,
 
+    /// Game-data encoding negotiated in Authenticate and used for every
+    /// `--relay-payload` send (issue #627). `json` (the default) keeps the
+    /// legacy text wire shape byte-identical; `rkyv`/`protobuf` are the
+    /// server's opt-in opaque encodings: the payload relays as untouched
+    /// bytes and arrives in the strict protocol-v3 binary envelope, so the
+    /// opaque modes require `--protocol-version 3` (v2 passthrough carries
+    /// no sender attribution) and a deployment that advertises them
+    /// (`protocol.enable_rkyv_game_data` / `protocol.enable_protobuf_game_data`).
+    #[arg(long, value_enum, default_value_t = GameDataFormatArg::Json)]
+    pub game_data_format: GameDataFormatArg,
+
     /// Tokio runtime flavor driving the whole process. `multi` (the default)
     /// is the multi-threaded runtime; `current` runs everything on a single
     /// current-thread runtime — the shape most susceptible to being starved by
@@ -302,6 +313,25 @@ impl From<TransportArg> for Transport {
     }
 }
 
+/// CLI-parseable mirror of [`GameDataEncoding`] (the protocol enum does not
+/// implement `clap::ValueEnum`; wire tokens and CLI tokens are identical).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum GameDataFormatArg {
+    Json,
+    Rkyv,
+    Protobuf,
+}
+
+impl From<GameDataFormatArg> for GameDataEncoding {
+    fn from(value: GameDataFormatArg) -> Self {
+        match value {
+            GameDataFormatArg::Json => GameDataEncoding::Json,
+            GameDataFormatArg::Rkyv => GameDataEncoding::Rkyv,
+            GameDataFormatArg::Protobuf => GameDataEncoding::Protobuf,
+        }
+    }
+}
+
 impl Cli {
     /// Topologies converted to the protocol enum, in CLI order.
     pub fn topologies(&self) -> Vec<Topology> {
@@ -322,6 +352,11 @@ impl Cli {
     /// Whether this run advertises protocol v3 (v2 omits all v3 fields).
     pub fn is_v3(&self) -> bool {
         self.protocol_version >= 3
+    }
+
+    /// The game-data encoding this run negotiates (issue #627).
+    pub fn game_data_encoding(&self) -> GameDataEncoding {
+        self.game_data_format.into()
     }
 
     /// The WebRTC engine configuration this invocation asks for.

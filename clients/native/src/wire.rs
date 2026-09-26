@@ -70,6 +70,19 @@ pub async fn send_game_data_with_delivery(
     send_client_message(ws, &message).await
 }
 
+/// Send an opaque game-data payload as one raw binary WebSocket frame.
+///
+/// Issue #627: with `rkyv`/`protobuf` negotiated, the payload bytes are the
+/// game's business and relay untouched — the frame carries no JSON envelope.
+/// Requires protocol v3: the strict v3 reply envelope is the only attributed
+/// delivery shape (v2 passthrough has no sender attribution).
+pub async fn send_game_data_binary(ws: &mut WsStream, payload: Vec<u8>) -> Result<()> {
+    ws.send(Message::Binary(payload.into()))
+        .await
+        .context("send binary game-data frame")?;
+    Ok(())
+}
+
 pub(crate) fn game_data_message(data: serde_json::Value) -> ClientMessage {
     ClientMessage::GameData {
         data,

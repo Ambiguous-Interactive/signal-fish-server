@@ -216,11 +216,11 @@ fn reserve_port() -> u16 {
     port
 }
 
-/// Spawn the server binary on a fresh free port with the given default
+/// Spawn the server on a fresh free port with the given default
 /// topology, retrying with a NEW port on failure (absorbs the
 /// reserve-release-spawn race).
 pub async fn spawn_server(default_topology: &str) -> ServerProcess {
-    spawn_server_with_config(default_topology, None).await
+    spawn_server_with_config(default_topology, None, &[]).await
 }
 
 /// Spawn the server with production TURN credential minting enabled.
@@ -229,17 +229,29 @@ pub async fn spawn_server_with_turn(
     turn_url: &str,
     static_auth_secret: &str,
 ) -> ServerProcess {
-    spawn_server_with_config(default_topology, Some((turn_url, static_auth_secret))).await
+    spawn_server_with_config(default_topology, Some((turn_url, static_auth_secret)), &[]).await
+}
+
+/// Spawn the server with additional `SIGNAL_FISH__*` environment overrides
+/// applied after the ambient scrub (issue #627: the opt-in protocol knobs —
+/// e.g. `SIGNAL_FISH__PROTOCOL__ENABLE_RKYV_GAME_DATA=true` — that no config
+/// file in the harness needs to carry).
+pub async fn spawn_server_with_extra_env(
+    default_topology: &str,
+    extra_env: &[(&'static str, String)],
+) -> ServerProcess {
+    spawn_server_with_config(default_topology, None, extra_env).await
 }
 
 async fn spawn_server_with_config(
     default_topology: &str,
     turn: Option<(&str, &str)>,
+    extra_env: &[(&'static str, String)],
 ) -> ServerProcess {
     let mut failures = Vec::new();
     for attempt in 1..=SPAWN_ATTEMPTS {
         let port = reserve_port();
-        match try_spawn_server(port, default_topology, turn).await {
+        match try_spawn_server(port, default_topology, turn, extra_env).await {
             Ok(server) => return server,
             Err(failure) => failures.push(format!("attempt {attempt} (port {port}): {failure}")),
         }
@@ -256,6 +268,7 @@ async fn try_spawn_server(
     port: u16,
     default_topology: &str,
     turn: Option<(&str, &str)>,
+    extra_env: &[(&'static str, String)],
 ) -> Result<ServerProcess, String> {
     let workdir = tempfile::tempdir().expect("create temp workdir");
     let config_path = workdir.path().join("server-config.json");
@@ -342,6 +355,12 @@ async fn try_spawn_server(
     }
     command.env("SIGNAL_FISH_CONFIG_PATH", &config_path);
     command.env("SIGNAL_FISH__PORT", port.to_string());
+    // Harness-requested overrides come last (the server applies env on top of
+    // the config file), after the scrub, so they cannot be shadowed by ambient
+    // `SIGNAL_FISH*` variables.
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
 
     let child = command.spawn().expect("spawn the server binary");
     let mut server = ServerProcess {
