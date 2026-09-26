@@ -71,33 +71,21 @@ correctness evidence appears.
   room-created/room-joined/room-closed events or a lookup API, or
   app-dimensioned room metrics as a partial step (cloud #847/#695 scoping) —
   and SDK/fortress adoption (SDK repos own those halves).
-- #627 — fully spec and implement the rkv and protobuf binary endpoints.
+- #627 — fully spec and implement the rkyv and protobuf binary endpoints.
   Owner decisions 2026-09-25: "rkv" is rkyv; the ask is ENCODINGS, not new
   endpoints; ship rkyv + protobuf on v2 and v3 inside the existing
-  WebSocket envelope under existing limits/budgets. Session 262 landed the
-  server half: `GameDataEncoding::Protobuf` (wire token `protobuf`), opt-in
+  WebSocket envelope under existing limits/budgets. Landed across sessions
+  262-265: `GameDataEncoding::Protobuf` (wire token `protobuf`), opt-in
   knobs `protocol.enable_rkyv_game_data` /
   `protocol.enable_protobuf_game_data` (default off = byte-identical
   `ProtocolInfo.game_data_formats`), canonical advertisement order, opaque
   relay semantics (no server decode; cross-format delivery reports
   `unsupported_format`), v2 passthrough extension, strict v3 envelope
-  decoder token, budgets inherited unchanged, docs/spec/samples/guards
-  updated, and a live four-encoding relay e2e
-  (`opaque_opt_in_encodings_relay_directly_and_report_cross_format`).
-  Session 263 landed the reference-client half: native and browser
-  `--game-data-format <json|rkyv|protobuf>` (v3-only pre-flight,
-  advertisement validation naming the server knob, opaque send as raw
-  binary frames, strict-v3-envelope receive feeding the same ledger and
-  relay-receipt criteria as JSON), plus interop scenario 10 driving two
-  native clients end to end over an `enable_rkyv_game_data` deployment.
-  Session 265 landed the browser e2e cells: browser-interop scenarios 10
-  and 11 drive two Chromium reference clients end to end over
-  `enable_rkyv_game_data` / `enable_protobuf_game_data` relay-floor
-  deployments, pinning the browser receipt contract (`from` attribution +
-  encoding token + lossless base64 payload, exact key set) on real
-  Chromium.
-  Remaining: per-protocol message-size budgets (owner "potentially",
-  filed as #634); SDK/fortress adoption (SDK repos own those halves).
+  decoder token, reference clients (`--game-data-format`), native and
+  browser e2e cells, and the mixed-encoding bench cells.
+  Session 266 landed the last owner-scope server half: per-encoding
+  message-size budgets (`security.max_game_data_bytes`, #634). Remaining:
+  SDK/fortress adoption (SDK repos own those halves).
 - #396 — CLOSED 2026-09-12 (standing correctness/perf sweep, closed with the
   session-237 enforcement-seam sweep). The sweep practice continues
   opportunistically wherever new features open seams; per-session closure
@@ -221,6 +209,13 @@ correctness evidence appears.
     required reviews (one disabled Copilot ruleset; required linear history
     on), so the #379 owner-inventory prerequisite is exported and
     path-filter changes cannot strand a required check.
+    Session 266 added the local-loop levers: `[profile.dev]`
+    `debug = "line-tables-only"` (worst-case warm scoped `--lib` loop
+    19 s -> 11 s; CI profiles pin `debug = 0`, so hosted surface is inert)
+    and dev-loop pattern merging (patterns sharing an owning target run in
+    one `-E 'test(a) or test(b)'` invocation). Hosted CI surface stayed
+    unchanged; the session-239 audit's conclusion still stands — no further
+    owner-input-free narrowing was found.
     Remaining levers still
     need owner input: self-hosted runner labels (the per-PR interop-quartet
     cohort question was decided
@@ -228,6 +223,15 @@ correctness evidence appears.
     a cargo-deny single-container consolidation is blocked
     by the pinned action's one-manifest-per-boot input and the fortress-wasm
     1.94 toolchain pin.
+- #636 — research: optimization campaign (owner 2026-09-26): maximize
+  rooms + relays per ARM node. The #207 profiles still bound the relay core
+  (0-1 allocation ops per relay; classified queue lane at zero), so the
+  open frontier is: profile the opaque-encoding cohorts end to end (session
+  263/266 bench cells are the harness), measure per-relay cost for
+  mixed-cohort rooms, and only then pick a target (SmallVec-style small
+  collections, perfect-hash protocol dispatch, SIMD framing). Any change
+  must keep exact wire and delivery semantics (#207 rule) and carry a
+  red-first measurement.
 - #517 — the credential story is ratified (owner decisions 2026-09-11:
   no shared secret, 5-minute TTL, self-hosting must keep public-`app_id`
   mode, `connect_token` field name) and this repo's half is implemented:

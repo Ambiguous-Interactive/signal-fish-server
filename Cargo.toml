@@ -259,7 +259,13 @@ harness = false
 required-features = ["allocation-tracking"]
 
 [profile.dev]
-debug = 1
+# Line tables instead of full debug info (issue #512, session 266): backtraces
+# keep file:line resolution, but emitting and linking debuginfo shrinks, which
+# dominates the warm scoped edit-test loop (measured: ~13 s -> ~8 s for a
+# one-crate relink on the aarch64 codespace). Debuggers lose variable
+# inspection; opt back out for one session with
+# CARGO_PROFILE_DEV_DEBUG=1 without editing this file.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = 0
