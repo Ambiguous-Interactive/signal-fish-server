@@ -28,15 +28,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frame/encode expectations (opaque passthrough; fail-closed
   `unsupported_format` accounting for cross-format recipients), and
   per-relay allocation ceilings (issue #636).
-
-### Changed
-
-- CI: the `deny` supply-chain job skips dependency-irrelevant pull requests
-  (#512). Its verdict is a pure function of dependency-graph inputs, so a
-  change touching no Cargo manifest/lockfile, `deny.toml` policy, npm
-  package file, or `.cargo/**` config skips the analyzers; the daily noon
-  cron always audits. Pinned in lockstep by
-  `test_ci_deny_job_skips_dependency_irrelevant_pull_requests`.
 - Protocol: opaque game-data encodings `rkyv` and `protobuf` are negotiable on
   v2 and v3 behind the new opt-in knobs `protocol.enable_rkyv_game_data` and
   `protocol.enable_protobuf_game_data` (#627). Default off: the default
@@ -68,6 +59,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- CI: the `deny` supply-chain job skips dependency-irrelevant pull requests
+  (#512). Its verdict is a pure function of dependency-graph inputs, so a
+  change touching no Cargo manifest/lockfile, `deny.toml` policy, npm
+  package file, or `.cargo/**` config skips the analyzers; the daily noon
+  cron always audits. Pinned in lockstep by
+  `test_ci_deny_job_skips_dependency_irrelevant_pull_requests`.
 - Reference clients: `--join-code` now sends `JoinRoom.join_only` on both the
   native and browser clients. A code that does not resolve is refused
   `ROOM_NOT_FOUND` as a visible protocol error instead of silently creating
