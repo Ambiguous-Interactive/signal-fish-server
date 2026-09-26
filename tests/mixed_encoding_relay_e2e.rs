@@ -28,7 +28,7 @@ use test_helpers::{create_test_server_with_config, test_server_config, RunningTe
 use websocket_test_helpers::chaos_proxy::{ChaosProxy, Direction, PumpTermination};
 use websocket_test_helpers::conformance::{ConformanceAuditor, ReceiverProtocolMode};
 use websocket_test_helpers::delivery_ledger::{ReceiverExpectation, SenderExpectation};
-use websocket_test_helpers::room16::{authenticate_with_encoding, connect, try_join};
+use websocket_test_helpers::room16::{authenticate_with_encoding, connect, try_join, PlayerHandle};
 
 const MESSAGES_PER_SENDER: u64 = 128;
 const FRAME_DEADLINE: Duration = Duration::from_secs(30);
@@ -54,7 +54,11 @@ fn encode_game_data(encoding: GameDataEncoding, sender: &str, seq: u64) -> Messa
                 .expect("serialize MessagePack GameData")
                 .into(),
         ),
-        GameDataEncoding::Rkyv => panic!("rkyv is reserved and cannot be negotiated"),
+        GameDataEncoding::Rkyv | GameDataEncoding::Protobuf => {
+            panic!(
+                "opaque encodings need the #627 opt-in knob; this fixture runs the default config"
+            )
+        }
     }
 }
 
@@ -1367,5 +1371,161 @@ async fn unsupported_message_pack_fallback_does_not_flap_weaker_recipient() {
     drop(sender);
     drop(compatible_proxy);
     drop(fallback_proxy);
+    running_server.shutdown().await;
+}
+
+/// Issue #627: with the opt-in knobs enabled, opaque rkyv/protobuf payloads
+/// relay as untouched bytes to same-format recipients while cross-format
+/// recipients get the exact `unsupported_format` accountability path instead
+/// of a lossy conversion. This is the live-socket companion to the unit-pinned
+/// passthrough and fallback arms: it proves the negotiated encoding survives
+/// the whole fan-out, not just the encoder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn opaque_opt_in_encodings_relay_directly_and_report_cross_format() {
+    let mut protocol = ProtocolConfig::default();
+    protocol.sdk_compatibility.enforce = false;
+    protocol.enable_rkyv_game_data = true;
+    protocol.enable_protobuf_game_data = true;
+    let server = create_test_server_with_config(test_server_config(), protocol).await;
+    let metrics = server.metrics();
+    let router = create_router("http://localhost:3000").with_state(server.clone());
+    let running_server = RunningTestServer::spawn(server, router).await;
+    let addr = running_server.addr();
+
+    async fn join_opaque(
+        addr: std::net::SocketAddr,
+        encoding: GameDataEncoding,
+        player_name: &str,
+    ) -> PlayerHandle {
+        let mut ws = connect(addr).await;
+        authenticate_with_encoding(&mut ws, 3, Some(encoding)).await;
+        try_join(ws, "opaque-relay", "OPAQ01", Some(4), player_name)
+            .await
+            .unwrap_or_else(|(reason, code)| {
+                panic!("{player_name} ({encoding:?}) failed to join: {reason} ({code:?})")
+            })
+    }
+
+    let mut sender = join_opaque(addr, GameDataEncoding::Rkyv, "rkyv-sender").await;
+    let mut twin = join_opaque(addr, GameDataEncoding::Rkyv, "rkyv-twin").await;
+    let protobuf_peer = join_opaque(addr, GameDataEncoding::Protobuf, "protobuf").await;
+    let json_peer = join_opaque(addr, GameDataEncoding::Json, "json").await;
+    // The last joiner's `RoomJoined.current_players` snapshot proves all four
+    // negotiated encodings share one room.
+    assert_eq!(json_peer.room_player_count, 4);
+
+    // The opaque payload is deliberately not valid JSON or MessagePack: any
+    // conversion attempt would fabricate meaning that was never on the wire.
+    let opaque = vec![0x52, 0x4b, 0x59, 0x56, 0x00, 0xff];
+    sender
+        .ws
+        .send(Message::Binary(opaque.clone().into()))
+        .await
+        .expect("send opaque rkyv frame");
+
+    // Same-format recipient: the exact bytes inside the strict v3 envelope.
+    let deadline = tokio::time::Instant::now() + FRAME_DEADLINE;
+    let wire = loop {
+        let frame = tokio::time::timeout_at(deadline, twin.ws.next())
+            .await
+            .expect("rkyv twin timed out waiting for the relayed frame")
+            .expect("rkyv twin closed")
+            .expect("rkyv twin socket failed");
+        match frame {
+            Message::Binary(bytes) => break bytes.to_vec(),
+            Message::Text(text) => match serde_json::from_str(&text) {
+                Ok(ServerMessage::PlayerJoined { .. })
+                | Ok(ServerMessage::LobbyStateChanged { .. })
+                | Ok(ServerMessage::AuthorityChanged { .. }) => {}
+                other => panic!("rkyv twin observed unexpected text frame: {other:?}"),
+            },
+            Message::Ping(_) | Message::Pong(_) => {}
+            other => panic!("rkyv twin observed unexpected frame: {other:?}"),
+        }
+    };
+    assert_eq!(
+        decode_v3_binary_game_data(&wire).expect("strict v3 envelope for the rkyv relay"),
+        V3BinaryGameDataFrame {
+            from_player: sender.player_id,
+            encoding: GameDataEncoding::Rkyv,
+            payload: opaque.clone(),
+            seq: 1,
+            epoch: 1,
+        }
+    );
+
+    // Cross-format recipients: no payload, but an exact unsupported-format
+    // DeliveryReport plus the rate-limited advisory naming the encoding.
+    for (label, handle) in [("json", json_peer), ("protobuf", protobuf_peer)] {
+        let mut ws = handle.ws;
+        let mut saw_report = false;
+        let mut saw_advisory = false;
+        let deadline = tokio::time::Instant::now() + FRAME_DEADLINE;
+        while (!saw_report || !saw_advisory) && tokio::time::Instant::now() < deadline {
+            let Ok(Some(Ok(frame))) = tokio::time::timeout_at(deadline, ws.next()).await else {
+                break;
+            };
+            let Message::Text(text) = frame else {
+                panic!("{label} recipient must never receive the opaque payload as {frame:?}");
+            };
+            match serde_json::from_str::<ServerMessage>(&text).unwrap_or_else(|error| {
+                panic!("{label} text frame is not a ServerMessage: {error}")
+            }) {
+                ServerMessage::DeliveryReport(report) => {
+                    let unsupported: u64 = [
+                        report.per_class.reliable.unsupported_format,
+                        report.per_class.latest.unsupported_format,
+                        report.per_class.volatile.unsupported_format,
+                    ]
+                    .into_iter()
+                    .sum();
+                    assert!(
+                        unsupported >= 1,
+                        "{label} DeliveryReport lacks an unsupported_format entry: {report:?}"
+                    );
+                    assert!(
+                        report.gaps.iter().any(|gap| {
+                            gap.from_player == sender.player_id
+                                && gap.reason == DeliveryGapReason::UnsupportedFormat
+                        }),
+                        "{label} DeliveryReport lacks the sender's unsupported_format gap: {report:?}"
+                    );
+                    saw_report = true;
+                }
+                ServerMessage::Error {
+                    message,
+                    error_code,
+                } => {
+                    assert_eq!(
+                        error_code,
+                        Some(ErrorCode::UnsupportedGameDataFormat),
+                        "{label} advisory must use the fallback error code: {message}"
+                    );
+                    assert!(
+                        message.contains("rkyv"),
+                        "{label} advisory must name the requested wire token: {message}"
+                    );
+                    saw_advisory = true;
+                }
+                ServerMessage::PlayerJoined { .. }
+                | ServerMessage::LobbyStateChanged { .. }
+                | ServerMessage::AuthorityChanged { .. } => {}
+                other => {
+                    panic!("{label} recipient observed unexpected server message: {other:?}")
+                }
+            }
+        }
+        assert!(
+            saw_report && saw_advisory,
+            "{label} recipient missing accountability (report={saw_report}, advisory={saw_advisory})"
+        );
+    }
+
+    // Delivery conservation: the direct delivery is accounted, and the two
+    // cross-format omissions are accounted as unsupported-format gaps.
+    websocket_test_helpers::assert_message_conservation(&metrics).await;
+
+    drop(sender);
+    drop(twin);
     running_server.shutdown().await;
 }

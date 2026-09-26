@@ -106,6 +106,9 @@ cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-featu
   `--lib` for unit tests under `src/`. Find the owning target with
   `cargo nextest list`. While iterating, scope clippy the same way:
   `cargo clippy --test <target> --all-features`.
+  Prefer `scripts/dev-loop.sh <test-name> [...]` (add `--all-features` /
+  `--clippy` when needed): it resolves each pattern to its owning target
+  with grep and runs the scoped command, so the fast path is one command.
 - Run the full local gate once before publication, not every loop:
   `cargo fmt` + `cargo clippy --all-targets --all-features`, zero warnings.
 - Do NOT run expensive suites locally: full `cargo test`/nextest sweeps,

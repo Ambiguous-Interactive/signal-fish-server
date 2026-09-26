@@ -4,6 +4,8 @@ Signal Fish Server uses a JSON-based WebSocket protocol. All messages are JSON o
 optional `data` field.
 
 MessagePack encoding is also supported for game data when `enable_message_pack_game_data` is enabled.
+The opaque binary encodings `rkyv` and `protobuf` are additionally negotiable when their opt-in knobs
+`enable_rkyv_game_data` and `enable_protobuf_game_data` are enabled (issue #627). They default to off.
 
 Illustrative v2 examples and canonical, machine-checked v3 wire samples:
 
@@ -54,7 +56,10 @@ Optional fields:
 
 - `sdk_version` - SDK version for debugging and analytics
 - `platform` - Platform information (e.g., "unity", "godot", "unreal")
-- `game_data_format` - Preferred game data encoding (defaults to JSON text frames)
+- `game_data_format` - Preferred game data encoding (defaults to JSON text frames). One of
+  `json`, `message_pack`, `rkyv`, or `protobuf`. `rkyv` and `protobuf` are relay-only opaque
+  encodings that a deployment must enable first; an unsupported request falls back to JSON with an
+  `UnsupportedGameDataFormat` warning
 - `protocol_version`, `supported_transports`, and `supported_topologies` - v3 negotiation fields described in
   [Capability negotiation handshake](#capability-negotiation-handshake)
 - `requested_capabilities` - v3 additive extensions the client wants to use; unknown tokens are ignored and the
@@ -548,6 +553,11 @@ SDK/protocol compatibility details advertised after the app-ID handshake.
 
 ```
 
+`game_data_formats` lists exactly the encodings this deployment negotiates:
+`json` first, then `message_pack`, then the #627 opt-in opaque encodings
+`rkyv` and `protobuf` in that order when their knobs are enabled. The example
+shows the default advertisement.
+
 Negotiated-v3 responses also include `max_outbound_message_size`, the maximum
 aggregate encoded application payload the deployment will send in one
 WebSocket message. Native clients can read the same decimal byte value from
@@ -781,20 +791,21 @@ envelope encoding. The frame is not wrapped in the JSON
 ```text
 MessagePack map:
   from_player: 16 UUID bytes  # MessagePack bin, RFC 4122/network byte order
-  encoding: json | message_pack | rkyv
+  encoding: json | message_pack | rkyv | protobuf
   payload: raw bytes          # MessagePack bin
   seq: 43       # required for v3
   epoch: 1      # required for v3
 ```
 
 For a recipient whose negotiated format differs, the server attempts a JSON
-`GameData` fallback by decoding JSON or MessagePack payload bytes. An opaque
-`rkyv` payload cannot be converted without its application type: the recipient
-instead gets an `unsupported_format` DeliveryReport followed by
-`UNSUPPORTED_GAME_DATA_FORMAT` (or just the legacy error on v2). The currently
-advertised binary format is `message_pack`; `rkyv` remains reserved/internal.
-The uniform v3 envelope still covers every internal binary encoding so no v3
-binary delivery can lose its sender identity or accountability stamp.
+`GameData` fallback by decoding JSON or MessagePack payload bytes. The opaque
+`rkyv` and `protobuf` encodings cannot be converted without their application
+schema: the recipient instead gets an `unsupported_format` DeliveryReport
+followed by `UNSUPPORTED_GAME_DATA_FORMAT` (or just the legacy error on v2).
+Deployments advertise `message_pack` by default and `rkyv`/`protobuf` only
+behind their opt-in knobs (issue #627). The uniform v3 envelope still covers
+every internal binary encoding so no v3 binary delivery can lose its sender
+identity or accountability stamp.
 
 `from_player` is the UUID's canonical 16-octet sequence, in network byte order;
 it is not the UTF-8 bytes of the hyphenated UUID string. Decoders must require a
@@ -802,9 +813,9 @@ MessagePack binary value of exactly 16 bytes and render those bytes as the
 usual lowercase hyphenated UUID for application-facing identifiers.
 
 The v2 wire remains frozen: MessagePack recipients receive the historical
-three-field map (`from_player`, `encoding`, `payload`), while legacy JSON/rkyv
-binary paths pass the payload bytes through unchanged. Neither v2 form carries
-`seq` or `epoch`.
+three-field map (`from_player`, `encoding`, `payload`), while legacy JSON, rkyv,
+and protobuf binary paths pass the payload bytes through unchanged. Neither v2
+form carries `seq` or `epoch`.
 
 Binary game data is always reliable. The bare binary frame has no `class` or
 `key`, and clients must not infer a delivery class from its contents.

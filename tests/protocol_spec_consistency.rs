@@ -1810,13 +1810,13 @@ fn spec_documents_every_wire_token_enum_variant() {
     }
     {
         use GameDataEncoding::*;
-        // `rkyv` is reserved/internal (not advertised in `ProtocolInfo`) but is
-        // still a declared wire value, so the spec lists it and we check it.
-        for value in [Json, MessagePack, Rkyv] {
+        // rkyv and protobuf are negotiable behind their #627 opt-in knobs and
+        // are declared wire values, so the spec lists them and we check them.
+        for value in [Json, MessagePack, Rkyv, Protobuf] {
             assert_wire_token(&declared, value, "GameDataEncoding");
         }
         let _exhaustive = |value: GameDataEncoding| match value {
-            Json | MessagePack | Rkyv => {}
+            Json | MessagePack | Rkyv | Protobuf => {}
         };
     }
     {

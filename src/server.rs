@@ -1979,14 +1979,18 @@ fn relay_projection_cohort(
     Some(match message {
         ServerMessage::GameData { .. } if supports_v3 => RelayProjectionCohort::TextV3,
         ServerMessage::GameData { .. } => RelayProjectionCohort::TextV2,
-        // Frozen-v2 JSON and Rkyv binary frames already own shared `Bytes` and
-        // project by cloning that handle. There is no serialization/decode
-        // work to reuse, so a relay-wide frame cache would only add an
-        // allocation in rooms with multiple compatible recipients.
+        // Frozen-v2 JSON, rkyv, and protobuf binary frames already own shared
+        // `Bytes` and project by cloning that handle. There is no
+        // serialization/decode work to reuse, so a relay-wide frame cache
+        // would only add an allocation in rooms with multiple compatible
+        // recipients.
         ServerMessage::GameDataBinary { encoding, .. }
             if !supports_v3
                 && *encoding == recipient_format
-                && matches!(encoding, GameDataEncoding::Json | GameDataEncoding::Rkyv) =>
+                && matches!(
+                    encoding,
+                    GameDataEncoding::Json | GameDataEncoding::Rkyv | GameDataEncoding::Protobuf
+                ) =>
         {
             return None;
         }
@@ -4459,7 +4463,11 @@ mod relay_projection_cache_tests {
             Some(BinaryFallbackV3)
         );
 
-        for encoding in [GameDataEncoding::Json, GameDataEncoding::Rkyv] {
+        for encoding in [
+            GameDataEncoding::Json,
+            GameDataEncoding::Rkyv,
+            GameDataEncoding::Protobuf,
+        ] {
             let raw_v2 = ServerMessage::GameDataBinary {
                 from_player: Uuid::nil(),
                 encoding,

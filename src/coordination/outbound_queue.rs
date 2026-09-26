@@ -2438,6 +2438,7 @@ const fn encoding_tag(format: GameDataEncoding) -> u8 {
         GameDataEncoding::Json => 0,
         GameDataEncoding::MessagePack => 1,
         GameDataEncoding::Rkyv => 2,
+        GameDataEncoding::Protobuf => 3,
     }
 }
 
@@ -2445,6 +2446,7 @@ const fn encoding_from_tag(tag: u8) -> GameDataEncoding {
     match tag {
         1 => GameDataEncoding::MessagePack,
         2 => GameDataEncoding::Rkyv,
+        3 => GameDataEncoding::Protobuf,
         _ => GameDataEncoding::Json,
     }
 }

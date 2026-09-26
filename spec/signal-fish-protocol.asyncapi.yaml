@@ -486,8 +486,12 @@ components:
         explicitly negotiated SessionPlan for executable routing.
     GameDataEncoding:
       type: string
-      description: Game data encoding. rkyv is reserved/internal and not advertised.
-      enum: [json, message_pack, rkyv]
+      description: >-
+        Game data encoding. message_pack is advertised by default. rkyv and
+        protobuf are opaque relay-only encodings advertised only when the
+        deployment enables their opt-in knobs (enable_rkyv_game_data,
+        enable_protobuf_game_data).
+      enum: [json, message_pack, rkyv, protobuf]
     DeliveryClass:
       type: string
       description: >-

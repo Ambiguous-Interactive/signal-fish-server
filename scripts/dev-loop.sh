@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# dev-loop.sh - Run tests by name through the fastest scoped cargo invocation.
+#
+# A bare `cargo nextest run -E 'test(x)'` rebuilds every test binary (~47 s
+# warm here); the same test scoped to its owning target rebuilds one binary
+# (~10 s). This script resolves each test-name pattern to its owning target
+# with grep (no cargo involvement) and runs the scoped command, so agents and
+# humans always take the fast path during red-green iteration (issue #512,
+# session 262). It is a loop accelerator, not a gate: run the full local
+# sequence from .llm/context.md once before publication.
+#
+# Usage:
+#   scripts/dev-loop.sh [options] <test-name-pattern> [more patterns...]
+#
+# Options:
+#   --all-features   Forward --all-features to cargo (matches the mandatory
+#                    gate; slower compile).
+#   --clippy         Also run scoped clippy for each owning target.
+#   --dry-run        Print the resolved commands instead of running them.
+#   -h, --help       Show this help.
+#
+# Patterns are passed through to nextest's `test(...)` filter. A `module::`
+# path or a leading `=` is stripped for ownership resolution only.
+#
+# Exit codes: 0 all resolved work succeeded; 1 some pattern matched no target
+# or a cargo invocation failed; 2 usage error.
+
+set -euo pipefail
+
+usage() {
+    # Print the leading comment block (lines 2..first non-comment) so --help
+    # never leaks shell code regardless of how long the header grows.
+    awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' \
+        "${BASH_SOURCE[0]}"
+}
+
+DRY_RUN=0
+WITH_CLIPPY=0
+PATTERN_ARGS=()
+FEATURE_ARGS=()
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run)
+            DRY_RUN=1
+            ;;
+        --clippy)
+            WITH_CLIPPY=1
+            ;;
+        --all-features)
+            FEATURE_ARGS+=(--all-features)
+            ;;
+        -h | --help)
+            usage
+            exit 0
+            ;;
+        --*)
+            echo "dev-loop: unknown option $1" >&2
+            usage >&2
+            exit 2
+            ;;
+        -*)
+            echo "dev-loop: unknown option $1" >&2
+            usage >&2
+            exit 2
+            ;;
+        *)
+            PATTERN_ARGS+=("$1")
+            ;;
+    esac
+    shift
+done
+
+if [ "${#PATTERN_ARGS[@]}" -eq 0 ]; then
+    usage >&2
+    exit 2
+fi
+
+feature_args=("${FEATURE_ARGS[@]+"${FEATURE_ARGS[@]}"}")
+
+run_cargo() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        printf 'DRY-RUN:'
+        printf ' %q' "$@"
+        printf '\n'
+    else
+        "$@"
+    fi
+}
+
+overall=0
+
+# Append $1 to the owners list unless it is already present.
+add_owner() {
+    local candidate="$1"
+    local existing
+    for existing in ${owners[@]+"${owners[@]}"}; do
+        if [ "$existing" = "$candidate" ]; then
+            return 0
+        fi
+    done
+    owners+=("$candidate")
+}
+
+for pattern in "${PATTERN_ARGS[@]}"; do
+    # Resolve ownership from a plain function name: strip an exact-match `=`
+    # prefix and any `module::path` the caller included for the filter.
+    name="${pattern#=}"
+    name="${name##*::}"
+
+    owners=()
+    while IFS= read -r file; do
+        rel="${file#tests/}"
+        case "$rel" in
+            */*)
+                # A helper module's tests (for example
+                # tests/websocket_test_helpers/chaos_proxy.rs) compile into
+                # and run under every top-level target that includes the
+                # module, so those targets own the pattern.
+                sub="${rel%%/*}"
+                for top in tests/*.rs; do
+                    [ -f "$top" ] || continue
+                    if grep -qE "(^|[^a-zA-Z0-9_])mod ${sub}([^a-zA-Z0-9_]|$)" "$top"; then
+                        stem="${top#tests/}"
+                        add_owner "test:${stem%.rs}"
+                    fi
+                done
+                ;;
+            *)
+                # Top-level ownership mirrors nextest's substring filter, but
+                # the file must contain a runnable test form (`#[test]`,
+                # `#[tokio::test]` with or without a flavor, or a `proptest!`
+                # block); harness-only modules can never own a runnable test.
+                if grep -qF "$name" "$file" &&
+                    grep -qE '#\[(tokio::)?test(\(|\])|proptest!' "$file"; then
+                    add_owner "test:${rel%.rs}"
+                fi
+                ;;
+        esac
+    done < <(grep -rlF --include='*.rs' "$name" tests/)
+
+    if grep -rqF --include='*.rs' "$name" src/ 2>/dev/null; then
+        add_owner "lib"
+    fi
+
+    if [ "${#owners[@]}" -eq 0 ]; then
+        echo "dev-loop: no owning target found for '$pattern' (searched '$name' in tests/ and src/)" >&2
+        overall=1
+        continue
+    fi
+
+    for owner in "${owners[@]}"; do
+        case "$owner" in
+            lib)
+                echo "dev-loop: '$pattern' -> unit tests (src/, --lib)"
+                run_cargo cargo nextest run ${feature_args[@]+"${feature_args[@]}"} --no-tests warn --lib -E "test($pattern)" || overall=1
+                if [ "$WITH_CLIPPY" -eq 1 ]; then
+                    run_cargo cargo clippy ${feature_args[@]+"${feature_args[@]}"} --lib -- -D warnings || overall=1
+                fi
+                ;;
+            test:*)
+                target="${owner#test:}"
+                echo "dev-loop: '$pattern' -> integration target $target"
+                run_cargo cargo nextest run ${feature_args[@]+"${feature_args[@]}"} --no-tests warn --test "$target" -E "test($pattern)" || overall=1
+                if [ "$WITH_CLIPPY" -eq 1 ]; then
+                    run_cargo cargo clippy ${feature_args[@]+"${feature_args[@]}"} --test "$target" -- -D warnings || overall=1
+                fi
+                ;;
+        esac
+    done
+done
+
+exit "$overall"

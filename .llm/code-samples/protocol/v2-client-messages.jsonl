@@ -12,3 +12,4 @@
 {"type": "JoinAsSpectator", "data": {"game_name": "my-game", "room_code": "ABC123", "spectator_name": "Observer"}}
 {"type": "LeaveSpectator"}
 {"type": "LeaveRoom"}
+{"type": "Authenticate", "data": {"app_id": "mb_app_abc123", "sdk_version": "1.2.3", "platform": "unity", "game_data_format": "rkyv"}}

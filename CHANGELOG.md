@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Protocol: opaque game-data encodings `rkyv` and `protobuf` are negotiable on
+  v2 and v3 behind the new opt-in knobs `protocol.enable_rkyv_game_data` and
+  `protocol.enable_protobuf_game_data` (#627). Default off: the default
+  `ProtocolInfo.game_data_formats` advertisement stays byte-identical
+  (`["json", "message_pack"]`). Enabled deployments advertise them after
+  `message_pack` in canonical order; payloads relay as opaque bytes, the
+  server never decodes them, and cross-format delivery reports
+  `unsupported_format` instead of a JSON conversion. Existing per-sender and
+  per-room byte budgets and the outbound size cap apply unchanged.
+
 - Protocol: `ProtocolInfo.implementation_version` on negotiated v3 — the
   exact server release (for example `0.9.2`) disclosed behind authentication,
   so a client can pin the deployment it tested against. Absent on negotiated

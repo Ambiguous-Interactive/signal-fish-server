@@ -2033,7 +2033,9 @@ pub(super) fn encode_binary_game_data(
                 payload.len(),
             )
             .map(Bytes::from),
-            GameDataEncoding::Json | GameDataEncoding::Rkyv => Ok(payload.clone()),
+            GameDataEncoding::Json | GameDataEncoding::Rkyv | GameDataEncoding::Protobuf => {
+                Ok(payload.clone())
+            }
         },
         _ => Err("binary delivery seq and epoch must be present or absent together".to_string()),
     }
@@ -2074,7 +2076,7 @@ fn encode_binary_game_data_limited(
                 max,
             )
             .map(Bytes::from),
-            GameDataEncoding::Json | GameDataEncoding::Rkyv => {
+            GameDataEncoding::Json | GameDataEncoding::Rkyv | GameDataEncoding::Protobuf => {
                 enforce_outbound_payload_size(payload.len(), max).map_err(|error| {
                     GameDataMaterializationError::MessageTooLarge {
                         size: error.size,
@@ -2246,12 +2248,14 @@ fn decode_binary_to_json(
     match encoding {
         GameDataEncoding::MessagePack => from_slice(payload).map_err(|err| err.to_string()),
         GameDataEncoding::Json => serde_json::from_slice(payload).map_err(|err| err.to_string()),
-        GameDataEncoding::Rkyv => {
-            // Rkyv data cannot be directly converted to JSON without knowing the type.
-            // Return an opaque representation with the raw bytes.
-            // Clients using Rkyv should NOT fall back to JSON - they should use native rkyv decoding.
-            Err("Rkyv payloads cannot be converted to JSON - use native rkyv decoding".to_string())
-        }
+        // Opaque byte-oriented encodings (rkyv, protobuf) cannot be converted
+        // to JSON without their schema. Cross-format delivery reports these as
+        // `unsupported_format` gaps instead of guessing a lossy shape.
+        GameDataEncoding::Rkyv | GameDataEncoding::Protobuf => Err(format!(
+            "{} payloads cannot be converted to JSON - use native {} decoding",
+            encoding.as_wire_str(),
+            encoding.as_wire_str()
+        )),
     }
 }
 
@@ -2716,6 +2720,14 @@ mod tests {
         .is_unsupported());
         assert!(preflight_binary_fallback(
             &message(GameDataEncoding::Rkyv, &[0x01]),
+            GameDataEncoding::Json,
+            None,
+        )
+        .is_unsupported());
+        // Issue #627: protobuf is opaque to the server like rkyv — no JSON
+        // fallback, only an `unsupported_format` delivery report.
+        assert!(preflight_binary_fallback(
+            &message(GameDataEncoding::Protobuf, &[0x01]),
             GameDataEncoding::Json,
             None,
         )
@@ -3694,7 +3706,14 @@ mod tests {
     fn v2_raw_binary_encodings_return_payload_unchanged() {
         let payload = Bytes::from_static(br#"{"move":"up"}"#);
 
-        for encoding in [GameDataEncoding::Json, GameDataEncoding::Rkyv] {
+        // Issue #627: rkyv and protobuf join JSON as opaque v2 passthrough
+        // encodings — the shared payload allocation must reach the socket
+        // unmodified and zero-copy.
+        for encoding in [
+            GameDataEncoding::Json,
+            GameDataEncoding::Rkyv,
+            GameDataEncoding::Protobuf,
+        ] {
             assert_eq!(
                 encode_binary_game_data(player_a(), encoding, &payload, None, None)
                     .expect("v2 raw passthrough"),

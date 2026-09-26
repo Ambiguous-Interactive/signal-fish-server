@@ -203,6 +203,16 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         default: Some("true"),
     },
     ConfigReferenceRow {
+        env: "SIGNAL_FISH__PROTOCOL__ENABLE_RKYV_GAME_DATA",
+        path: "protocol.enable_rkyv_game_data",
+        default: Some("false"),
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__PROTOCOL__ENABLE_PROTOBUF_GAME_DATA",
+        path: "protocol.enable_protobuf_game_data",
+        default: Some("false"),
+    },
+    ConfigReferenceRow {
         env: "SIGNAL_FISH__PROTOCOL__MIN_PROTOCOL_VERSION",
         path: "protocol.min_protocol_version",
         default: Some("2"),

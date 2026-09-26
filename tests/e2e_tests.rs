@@ -311,10 +311,83 @@ async fn test_rkyv_game_data_format_request_falls_back_to_json_and_is_not_advert
             );
             assert!(
                 !info.game_data_formats.contains(&GameDataEncoding::Rkyv),
-                "Rkyv is reserved/internal and must not be advertised"
+                "Rkyv stays unadvertised while its opt-in knob is off (default)"
+            );
+            assert!(
+                !info.game_data_formats.contains(&GameDataEncoding::Protobuf),
+                "Protobuf stays unadvertised while its opt-in knob is off (default)"
             );
         }
         other => panic!("expected ProtocolInfo after auth, got {other:?}"),
+    }
+    running_server.shutdown().await;
+}
+
+/// Issue #627: with the opt-in knobs enabled, rkyv and protobuf negotiate
+/// cleanly on the v2 floor and are advertised in canonical wire-token order.
+#[tokio::test]
+async fn test_opt_in_rkyv_and_protobuf_negotiate_and_advertise() {
+    let protocol_config = test_protocol_config();
+    let protocol_config = signal_fish_server::config::ProtocolConfig {
+        enable_rkyv_game_data: true,
+        enable_protobuf_game_data: true,
+        ..protocol_config
+    };
+    let running_server =
+        start_test_server_with_config_and_protocol(test_server_config(), protocol_config).await;
+    let addr = running_server.addr();
+
+    for requested in [
+        GameDataEncoding::Rkyv,
+        GameDataEncoding::Protobuf,
+        GameDataEncoding::MessagePack,
+    ] {
+        let (mut sender, mut receiver) = connect_client(addr, "/v2/ws").await;
+
+        let auth = ClientMessage::Authenticate {
+            app_id: "opt-in-encoding-app".to_string(),
+            connect_token: None,
+            sdk_version: Some("1.0.0".to_string()),
+            platform: Some("test".to_string()),
+            game_data_format: Some(requested),
+            protocol_version: None,
+            supported_transports: None,
+            supported_topologies: None,
+            requested_capabilities: None,
+        };
+        sender
+            .send(Message::Text(
+                serde_json::to_string(&auth)
+                    .expect("auth serializes")
+                    .into(),
+            ))
+            .await
+            .expect("send auth");
+
+        match receive_server_message(&mut receiver).await {
+            ServerMessage::Authenticated { .. } => {}
+            other => panic!(
+                "opt-in {requested:?} must authenticate without a fallback warning, got {other:?}"
+            ),
+        }
+
+        match receive_server_message(&mut receiver).await {
+            ServerMessage::ProtocolInfo(info) => {
+                assert_eq!(
+                    info.game_data_formats,
+                    vec![
+                        GameDataEncoding::Json,
+                        GameDataEncoding::MessagePack,
+                        GameDataEncoding::Rkyv,
+                        GameDataEncoding::Protobuf,
+                    ],
+                    "opt-in knobs advertise every negotiable encoding in canonical order"
+                );
+            }
+            other => panic!("expected ProtocolInfo after auth, got {other:?}"),
+        }
+        drop(sender);
+        drop(receiver);
     }
     running_server.shutdown().await;
 }

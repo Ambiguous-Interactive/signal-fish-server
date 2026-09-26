@@ -61,13 +61,20 @@ pub enum GameDataEncoding {
     /// MessagePack payloads delivered over binary frames.
     #[serde(rename = "message_pack")]
     MessagePack,
-    /// Reserved/internal rkyv token.
+    /// rkyv payloads delivered over binary frames.
     ///
-    /// This server build does not advertise or negotiate rkyv in
-    /// `ProtocolInfo.game_data_formats`; clients requesting it during
-    /// authentication fall back to JSON until full runtime negotiation exists.
+    /// Negotiable only when the deployment opts in via
+    /// `protocol.enable_rkyv_game_data`. The server relays rkyv payloads as
+    /// opaque bytes; it never decodes them, so mixed-format rooms fall back to
+    /// delivery reports instead of JSON conversion.
     #[serde(rename = "rkyv")]
     Rkyv,
+    /// Protocol Buffers payloads delivered over binary frames.
+    ///
+    /// Negotiable only when the deployment opts in via
+    /// `protocol.enable_protobuf_game_data`. Like rkyv, payloads relay as
+    /// opaque bytes and never convert to JSON.
+    Protobuf,
 }
 
 impl GameDataEncoding {
@@ -77,6 +84,7 @@ impl GameDataEncoding {
             Self::Json => "json",
             Self::MessagePack => "message_pack",
             Self::Rkyv => "rkyv",
+            Self::Protobuf => "protobuf",
         }
     }
 }

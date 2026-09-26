@@ -139,6 +139,8 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__PROTOCOL__MAX_PLAYER_NAME_LENGTH` | `protocol.max_player_name_length` | `32` | Max bytes (UTF-8) in a player name (must be > 0) |
 | `SIGNAL_FISH__PROTOCOL__MAX_PLAYERS_LIMIT` | `protocol.max_players_limit` | `100` | Hard ceiling on players per room (must be > 0) |
 | `SIGNAL_FISH__PROTOCOL__ENABLE_MESSAGE_PACK_GAME_DATA` | `protocol.enable_message_pack_game_data` | `true` | Enable MessagePack game-data frames |
+| `SIGNAL_FISH__PROTOCOL__ENABLE_RKYV_GAME_DATA` | `protocol.enable_rkyv_game_data` | `false` | Negotiate opaque rkyv game-data frames (issue #627) |
+| `SIGNAL_FISH__PROTOCOL__ENABLE_PROTOBUF_GAME_DATA` | `protocol.enable_protobuf_game_data` | `false` | Negotiate opaque protobuf game-data frames (issue #627) |
 | `SIGNAL_FISH__PROTOCOL__MIN_PROTOCOL_VERSION` | `protocol.min_protocol_version` | `2` | Lowest accepted protocol version |
 | `SIGNAL_FISH__PROTOCOL__MAX_PROTOCOL_VERSION` | `protocol.max_protocol_version` | `3` | Highest negotiated protocol version (clamp back to `2` to disable v3 features) |
 | `SIGNAL_FISH__PROTOCOL__SDK_COMPATIBILITY__ENFORCE` | `protocol.sdk_compatibility.enforce` | `false` | Enforce SDK platform/version checks (opt-in: the default platform list would otherwise reject unregistered/custom clients) |
@@ -325,7 +327,9 @@ window.
     "room_code_length": 6,
     "max_player_name_length": 32,
     "max_players_limit": 100,
-    "enable_message_pack_game_data": true
+    "enable_message_pack_game_data": true,
+    "enable_rkyv_game_data": false,
+    "enable_protobuf_game_data": false
   }
 }
 

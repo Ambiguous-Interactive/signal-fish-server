@@ -34,7 +34,6 @@ use std::path::{Path, PathBuf};
 use common::{read_file, read_live_file, repo_root};
 use serde_json::Value;
 use signal_fish_server::config::ProtocolConfig;
-use signal_fish_server::protocol::GameDataEncoding;
 
 fn docs_dir() -> PathBuf {
     repo_root().join("docs")
@@ -718,16 +717,17 @@ fn protocol_reference_documents_user_facing_wire_tokens() {
     let root = repo_root();
     let doc = read_file(&root.join("docs/protocol.md"));
 
-    // Tokens a client author must know to drive v2/v3 traffic. `rkyv` is
-    // intentionally excluded: `ProtocolConfig::supported_game_data_formats`
-    // only ever advertises `json` + `message_pack`, so `rkyv` is not a
-    // negotiable, user-facing encoding.
+    // Tokens a client author must know to drive v2/v3 traffic. `rkyv` and
+    // `protobuf` are negotiable behind their #627 opt-in knobs, so the
+    // reference must document their tokens and cross-format semantics.
     let required = [
         "webrtc",       // Transport::WebRtc
         "direct",       // Transport::Direct
         "mesh",         // Topology::Mesh
         "host",         // Topology::Host
         "message_pack", // GameDataEncoding::MessagePack
+        "rkyv",         // GameDataEncoding::Rkyv (opt-in)
+        "protobuf",     // GameDataEncoding::Protobuf (opt-in)
     ];
     let missing: Vec<&str> = required
         .into_iter()
@@ -749,22 +749,35 @@ fn rust_client_guide_game_data_encoding_matches_advertised_protocol_formats() {
         "docs/guides/rust-client.md must define GameDataEncoding in its Rust samples"
     );
 
-    let expected: Vec<String> = ProtocolConfig::default()
+    // Every server advertises at least the default formats; the #627 opt-in
+    // opaque encodings (Rkyv, Protobuf) may appear only appended after them,
+    // mirroring the canonical advertisement order.
+    let defaults: Vec<String> = ProtocolConfig::default()
         .supported_game_data_formats()
         .into_iter()
         .map(|format| format!("{format:?}"))
         .collect();
     assert_eq!(
-        expected,
+        defaults,
         vec!["Json".to_string(), "MessagePack".to_string()],
         "this guard assumes the default ProtocolInfo formats remain json + message_pack"
     );
+    let opt_in = ["Rkyv".to_string(), "Protobuf".to_string()];
 
-    let reserved = format!("{:?}", GameDataEncoding::Rkyv);
     for variants in enum_blocks {
-        assert_eq!(
-            variants, expected,
-            "Rust guide GameDataEncoding samples must mirror ProtocolConfig::supported_game_data_formats(); reserved/internal variants such as {reserved} must not be presented as ProtocolInfo-advertised formats"
+        let extra: Vec<&String> = variants
+            .iter()
+            .filter(|variant| !defaults.contains(variant))
+            .collect();
+        assert!(
+            extra.is_empty() || extra.iter().all(|variant| opt_in.contains(variant)),
+            "Rust guide GameDataEncoding samples may only add the opt-in {opt_in:?} \
+             variants to the default formats; found {extra:?}"
+        );
+        assert!(
+            variants.starts_with(&defaults),
+            "Rust guide GameDataEncoding samples must list the always-advertised \
+             defaults {defaults:?} first, in canonical order; found {variants:?}"
         );
     }
 }

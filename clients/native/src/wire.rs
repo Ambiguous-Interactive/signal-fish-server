@@ -218,6 +218,7 @@ mod tests {
             GameDataEncoding::Json,
             GameDataEncoding::MessagePack,
             GameDataEncoding::Rkyv,
+            GameDataEncoding::Protobuf,
         ] {
             let expected = V3BinaryGameDataFrame {
                 from_player,
