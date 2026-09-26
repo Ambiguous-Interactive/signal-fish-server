@@ -173,22 +173,26 @@ impl EnhancedGameServer {
         // behavior. Rejected frames charge no budget and relay nothing; like
         // delivery-class rejections, the router has already recorded client
         // liveness before dispatch (a pre-existing lane shape).
-        // One canonical-JSON measure per frame serves both this cap and the
-        // relay-byte charge below.
-        let payload_bytes = canonical_json_len(&data);
+        // The canonical-JSON measure is memoized: computed only when a
+        // consumer needs it (the cap or the relay-byte charge), at most once
+        // per frame.
+        let mut payload_bytes_cache: Option<usize> = None;
+        let mut payload_bytes =
+            || *payload_bytes_cache.get_or_insert_with(|| canonical_json_len(&data));
         if let Some(cap) = self
             .config
             .max_game_data_bytes
             .as_ref()
             .and_then(|limits| limits.cap_for(GameDataEncoding::Json))
         {
-            if payload_bytes > cap {
+            if payload_bytes() > cap {
                 let _ = self
                     .send_error_to_player(
                         player_id,
                         format!(
-                            "JSON game data is {payload_bytes} bytes; the maximum allowed for \
-                             the json encoding is {cap} bytes"
+                            "JSON game data is {} bytes; the maximum allowed for \
+                             the json encoding is {cap} bytes",
+                            payload_bytes()
                         ),
                         Some(ErrorCode::MessageTooLarge),
                     )
@@ -199,9 +203,9 @@ impl EnhancedGameServer {
 
         if let Some(room_id) = self.get_client_room(player_id).await {
             // The sender-controlled JSON payload is the budget measure
-            // (already computed once above for the per-encoding cap).
+            // (memoized above, shared with the per-encoding cap).
             if self
-                .check_and_charge_relay_bytes(player_id, &room_id, payload_bytes as u64)
+                .check_and_charge_relay_bytes(player_id, &room_id, payload_bytes() as u64)
                 .await
                 .is_err()
             {
