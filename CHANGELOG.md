@@ -113,6 +113,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fortress WASM interop: the negative control's non-vacuity floor now scales
+  with the callback budget the run actually drove (>= 90%) instead of an
+  absolute 600 that sat exactly at the one-admission-per-callback cap's
+  theoretical maximum — a fully working control completing 598/600 sends on a
+  loaded runner read as vacuous (#639). The harness self-test pins the
+  run-744 shapes and both acceptance boundaries.
+
 - Devcontainer: every agent harness now launches the GitHub MCP server
   through the dotenv-aware `.devcontainer/github-mcp.sh` instead of the bare
   binary (`.vscode/mcp.json`, `.mcp.json`, `opencode.json`, and the Codex

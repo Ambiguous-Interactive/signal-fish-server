@@ -68,6 +68,14 @@
 //!    native joiner fills the open seat of the running session with no prior
 //!    departure. The seat-fill mirror of the native suite's scenario 9,
 //!    guarding the same #449 stale-latch class via zero error frames.
+//! 10. `opaque_rkyv_negotiation_relays_end_to_end_between_browser_clients` —
+//!     issue #627's rkyv browser e2e cell: with the server's
+//!     `protocol.enable_rkyv_game_data` opt-in on, two browser clients
+//!     negotiate rkyv in `Authenticate` and relay raw binary payloads end to
+//!     end on the relay floor, surfacing the strict v3 envelope as the same
+//!     `game_data_received` receipt shape the native scenario 10 pins.
+//! 11. `opaque_protobuf_negotiation_relays_end_to_end_between_browser_clients`
+//!     — the protobuf mirror of cell 10 over `protocol.enable_protobuf_game_data`.
 //!
 //! Scenario assertions are copies of the native suite's
 //! (`tests/interop_e2e.rs`) — deliberately NOT shared, so this feature-gated
@@ -83,16 +91,20 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use harness::{
     events_named, player_id_of, scenario_window, single_event, spawn_browser_client, spawn_client,
-    spawn_server, str_field, ClientProcess, ClientSpec, CLIENT_EXIT_TIMEOUT, EVENT_TIMEOUT,
+    spawn_server, spawn_server_with_extra_env, str_field, ClientProcess, ClientSpec,
+    CLIENT_EXIT_TIMEOUT, EVENT_TIMEOUT,
 };
 use serde_json::Value;
 use uuid::Uuid;
+
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 
 /// Serializes the multi-process scenarios (see module docs).
 static SCENARIO_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Number of scenarios queueing behind [`SCENARIO_SERIAL`] (keep in sync with
 /// the `#[tokio::test]` functions in this file).
-const SCENARIO_COUNT: u64 = 9;
+const SCENARIO_COUNT: u64 = 11;
 /// Generous ceiling for ONE scenario in a fully degraded run: server spawn
 /// (up to 3 attempts x 15 s health deadline = 45 s) plus one client wave
 /// hard-bounded by `--max-runtime-secs 90`, with the rest absorbing Chromium
@@ -1236,6 +1248,190 @@ async fn browser_creator_open_capacity_seat_fill_relay_floor() {
             client.diagnostics()
         );
     }
+}
+
+/// Issue #627, browser half: with the server's matching opaque-encoding opt-in
+/// on, two browser reference clients negotiate `--game-data-format <encoding>`
+/// in `Authenticate`, each `--relay-payload` leaves as one raw binary frame,
+/// and each arrives at the peer in the strict v3 envelope — surfaced as a
+/// `game_data_received` event carrying the encoding token plus the base64
+/// payload (lossless; the client never guesses at the opaque bytes). The relay
+/// floor carries the whole proof (relay-only advertisements, no WebRTC), both
+/// processes meet the standard success criteria, and the receipt feeds the
+/// same ledger criterion as JSON — mirroring the native suite's scenario 10
+/// on the Chromium wire stack.
+async fn run_opaque_browser_relay_pair(
+    encoding: &'static str,
+    encoding_env: (&'static str, String),
+    game_name: &'static str,
+) {
+    let _serial = acquire_serial().await;
+    let server = spawn_server_with_extra_env("relay", &[encoding_env]).await;
+    let workdir = tempfile::tempdir().expect("create client workdir");
+    let url = server.v3_ws_url();
+    let success_release_file = workdir.path().join("release-successful-clients");
+    let success_release_path = success_release_file
+        .to_str()
+        .expect("temporary success-release path is UTF-8");
+    let encoding_args: [&str; 6] = [
+        "--supported-topologies",
+        "relay",
+        "--supported-transports",
+        "relay",
+        "--game-data-format",
+        encoding,
+    ];
+    let client_args: Vec<&str> = encoding_args
+        .iter()
+        .copied()
+        .chain(["--success-release-file", success_release_path])
+        .collect();
+
+    let mut creator = spawn_browser_client(
+        &ClientSpec {
+            name: CLIENT_NAMES[0],
+            server_url: &url,
+            game_name,
+            join_code: None,
+            peers: 2,
+            exchange: false,
+            relay_payload: Some(&relay_payload_for(CLIENT_NAMES[0])),
+            extra_args: &client_args,
+        },
+        workdir.path(),
+    );
+    let created = creator.await_event("room_created", EVENT_TIMEOUT).await;
+    let room_code = str_field(&created, "room_code").to_string();
+    let mut joiner = spawn_browser_client(
+        &ClientSpec {
+            name: CLIENT_NAMES[1],
+            server_url: &url,
+            game_name,
+            join_code: Some(&room_code),
+            peers: 2,
+            exchange: false,
+            relay_payload: Some(&relay_payload_for(CLIENT_NAMES[1])),
+            extra_args: &client_args,
+        },
+        workdir.path(),
+    );
+
+    // Independent success on both sides: the negotiated-opaque receipt path
+    // must feed the relay-receipt criterion exactly as the JSON path does.
+    joiner
+        .await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)
+        .await;
+    creator
+        .await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)
+        .await;
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    let mut clients = vec![creator, joiner];
+    for client in &mut clients {
+        client.assert_running("while held at the shared success barrier");
+    }
+    std::fs::write(&success_release_file, b"release").expect("release successful clients together");
+
+    for client in &mut clients {
+        drain_expect_success(client).await;
+    }
+
+    for (index, who) in CLIENT_NAMES[..2].iter().enumerate() {
+        let log = &clients[index].events;
+        let sender = CLIENT_NAMES[1 - index];
+        // The sender's id lives in the SENDER's own `room_joined` event.
+        let sender_id = player_id_of(&clients[1 - index].events, sender);
+        let expected_payload = BASE64_STANDARD.encode(relay_payload_for(sender));
+
+        let received = events_named(log, "game_data_received");
+        assert_eq!(
+            received.len(),
+            1,
+            "{who}: exactly one opaque relay payload expected;\n{}",
+            clients[index].diagnostics()
+        );
+        let event = &received[0];
+        assert_eq!(
+            event.get("from").and_then(Value::as_str),
+            Some(sender_id.as_str()),
+            "{who}: opaque payload must carry the sender attribution: {event}"
+        );
+        let payload = event
+            .get("payload")
+            .expect("game_data_received carries a payload object");
+        assert_eq!(
+            payload.get("encoding").and_then(Value::as_str),
+            Some(encoding),
+            "{who}: the event must name the negotiated encoding: {event}"
+        );
+        assert_eq!(
+            payload.get("payload").and_then(Value::as_str),
+            Some(expected_payload.as_str()),
+            "{who}: the relayed opaque bytes must round-trip losslessly: {event}"
+        );
+        // The browser receipt event's shipped contract (session-263 half):
+        // exactly attribution plus the opaque receipt. The v3 delivery stamps
+        // live on the wire (pinned by the native scenario 10 and the server
+        // suites); the browser page surfaces only what its relay-received
+        // criterion consumes.
+        let event_keys: BTreeSet<&str> = event
+            .as_object()
+            .expect("game_data_received is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            event_keys,
+            BTreeSet::from(["event", "from", "payload"]),
+            "{who}: the browser receipt event shape changed deliberately or by accident: {event}"
+        );
+        let payload_keys: BTreeSet<&str> = payload
+            .as_object()
+            .expect("receipt payload is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            payload_keys,
+            BTreeSet::from(["encoding", "payload"]),
+            "{who}: the opaque receipt must carry the encoding token and the base64 bytes: {event}"
+        );
+
+        // No accountability noise: an opaque session produces no
+        // unsupported-format advisory and no error event of any kind.
+        assert!(
+            events_named(log, "error").is_empty(),
+            "{who}: opaque relay must produce no error events;\n{}",
+            clients[index].diagnostics()
+        );
+    }
+}
+
+/// Issue #627: rkyv end to end between two browser clients.
+#[tokio::test(flavor = "multi_thread")]
+async fn opaque_rkyv_negotiation_relays_end_to_end_between_browser_clients() {
+    run_opaque_browser_relay_pair(
+        "rkyv",
+        (
+            "SIGNAL_FISH__PROTOCOL__ENABLE_RKYV_GAME_DATA",
+            "true".to_string(),
+        ),
+        "interop-browser-opaque-rkyv",
+    )
+    .await;
+}
+
+/// Issue #627: protobuf end to end between two browser clients.
+#[tokio::test(flavor = "multi_thread")]
+async fn opaque_protobuf_negotiation_relays_end_to_end_between_browser_clients() {
+    run_opaque_browser_relay_pair(
+        "protobuf",
+        (
+            "SIGNAL_FISH__PROTOCOL__ENABLE_PROTOBUF_GAME_DATA",
+            "true".to_string(),
+        ),
+        "interop-browser-opaque-protobuf",
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
