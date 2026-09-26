@@ -624,16 +624,15 @@ fn negotiated_version_from(
                         GameDataEncoding::Rkyv => "protocol.enable_rkyv_game_data",
                         GameDataEncoding::Protobuf => "protocol.enable_protobuf_game_data",
                         // `message_pack` is a standard v3 encoding with no
-                        // opt-in knob; the CLI cannot request it today, so
-                        // this arm documents the invariant instead of
-                        // panicking on a legitimate encoding.
-                        GameDataEncoding::MessagePack => {
-                            return Err(FatalError::protocol(
-                                "message_pack game data is not selectable by the reference client",
-                            ));
-                        }
-                        GameDataEncoding::Json => {
-                            unreachable!("json requests skip advertisement validation")
+                        // opt-in knob; the CLI cannot request it today. Json
+                        // never reaches this branch (guarded above). Refuse
+                        // instead of panicking: the no-panic policy forbids
+                        // panic-prone macros in production code.
+                        GameDataEncoding::MessagePack | GameDataEncoding::Json => {
+                            return Err(FatalError::protocol(format!(
+                                "{} game data is not negotiable by the reference client",
+                                requested_format.as_wire_str()
+                            )));
                         }
                     };
                     return Err(FatalError::protocol(format!(
