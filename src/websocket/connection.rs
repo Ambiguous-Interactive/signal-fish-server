@@ -4169,6 +4169,15 @@ mod tests {
     /// suppresses these variants exactly where the per-recipient GameData
     /// stamp projection already lives — accounted, never fenced, never on the
     /// wire of a connection that cannot parse them.
+    ///
+    /// The no-leak half uses frame order, not a timed wait: `send_queued`
+    /// makes the suppress-or-write decision before it returns, so a close
+    /// frame enqueued afterwards sits at the end of the single ordered TCP
+    /// stream. The client observing that close (or clean EOF) as its FIRST
+    /// event proves nothing was written ahead of it — the same oracle a
+    /// fixed 500 ms negative-wait approximated, minus the 8 × 500 ms of
+    /// real sleeping that set this test's multi-second floor (and any leak
+    /// slower than the wait window was invisible to it).
     #[tokio::test(flavor = "multi_thread")]
     #[cfg_attr(miri, ignore)]
     async fn v3_only_messages_fail_closed_on_a_pre_v3_wire() {
@@ -4302,14 +4311,24 @@ mod tests {
                         other => panic!("{context}: expected a text frame, got {other:?}"),
                     }
                 } else {
-                    let leaked =
-                        tokio::time::timeout(Duration::from_millis(500), pair.client.next()).await;
-                    match leaked {
-                        Err(_elapsed) => {}
+                    pair.server_sink
+                        .send(Message::Close(None))
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!("{context}: close after the suppression decision: {error:?}")
+                        });
+                    let terminal =
+                        tokio::time::timeout(Duration::from_secs(10), pair.client.next()).await;
+                    match terminal {
+                        Err(_elapsed) => panic!(
+                            "{context}: the enqueued close never reached the client; \
+                             the suppression path must not stall the wire"
+                        ),
+                        Ok(None) => {}
                         Ok(Some(Ok(TungsteniteMessage::Close(_)))) => {}
-                        Ok(other) => {
-                            panic!("{context}: v3-only frame reached the pre-v3 wire: {other:?}")
-                        }
+                        Ok(Some(other)) => panic!(
+                            "{context}: unexpected client event ahead of the close: {other:?}"
+                        ),
                     }
                     assert!(
                         !rx.abandoned_in_flight_write(),
