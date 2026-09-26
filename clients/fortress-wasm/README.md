@@ -46,8 +46,12 @@ both reports satisfied every health and identity invariant and printed
 The runner then executes a one-admission-per-callback negative control and
 requires the same healthy validator to classify that run as the expected
 `BUSTED` result. The negative control runs the same minimum 600 active callbacks
-as the released cell, must admit and complete at least 600 workload messages
-with an observed maximum of exactly one admission per callback, and is accepted
+as the released cell. It must drain at least 90% of the callback budget it
+actually drove as enqueued relay frames and completed sends. The old gate
+demanded an absolute 600 sends. That number sat exactly at the cap's
+theoretical maximum, so a fully working 598/600 run on a loaded runner read
+as vacuous (issue #639). The control must show an observed maximum of exactly
+one admission per callback, and is accepted
 only when that cap breaks both completed-send throughput and sends-per-callback
 gates. Cap-induced waits and
 runner-dependent slow cadence may accompany those required failures but cannot

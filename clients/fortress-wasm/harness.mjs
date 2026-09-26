@@ -214,8 +214,7 @@ try {
       );
       assert(violations.length > 0, `${name}: negative control unexpectedly satisfied every healthy gate`);
       assert(
-        report.relay_frames_enqueued_during_run >= 600 &&
-          report.client_game_data_sent_during_run >= 600,
+        negativeControlDrainedItsDrivenBudget(report),
         `${name}: negative control did not exercise a non-vacuous capped workload`,
       );
       assert(
@@ -557,6 +556,24 @@ function stallCountWithinThreshold(report) {
       report.confirmed_frame * report.acceptance_thresholds.max_stall_rate_permille;
 }
 
+// The negative control's non-vacuity floor scales with the callback budget the
+// run actually drove instead of an absolute constant. The admission cap is one
+// send per callback, and measured drained runs sit at 99.5-103% of the driven
+// budget, so a floor of exactly 600 demanded a literally perfect run: on
+// fortress-wasm run 744 (issue #639) a fully working creator completed
+// 598/600 sends (99.7%) and 597/600 enqueues under merge-day runner load, and
+// this gate read the healthy control as vacuous. The 90% bound leaves ~30x
+// margin on the measured loss rate, and the sibling
+// `active_callback_count >= 600` gate still pins the unloaded 600-callback
+// budget itself. The comparison is integer cross-multiplication, so the
+// boundary has no float drift.
+function negativeControlDrainedItsDrivenBudget(report) {
+  const drivenBudget = report.active_callback_count;
+  return drivenBudget >= 600 &&
+    report.relay_frames_enqueued_during_run * 10 >= drivenBudget * 9 &&
+    report.client_game_data_sent_during_run * 10 >= drivenBudget * 9;
+}
+
 function runHealthGateSelfTests() {
   for (const [stallCount, confirmedFrame, expected] of [
     [0, 600, true],
@@ -578,6 +595,30 @@ function runHealthGateSelfTests() {
     assert(
       stallCountWithinThreshold(report) === expected,
       `stall threshold case ${stallCount}/${confirmedFrame} expected ${expected}`,
+    );
+  }
+  // Issue #639: the run-744 creators and joiner are the documented
+  // load-starved shapes the floor must accept; the remaining rows bound the
+  // 90%-of-driven-budget acceptance from both sides, including the vacuous
+  // runs the floor exists to reject.
+  for (const [callbacks, enqueued, sent, expected] of [
+    [600, 597, 598, true],
+    [600, 618, 619, true],
+    [600, 540, 540, true],
+    [600, 541, 539, false],
+    [600, 539, 600, false],
+    [600, 0, 0, false],
+    [599, 599, 599, false],
+    [0, 0, 0, false],
+  ]) {
+    const report = {
+      active_callback_count: callbacks,
+      relay_frames_enqueued_during_run: enqueued,
+      client_game_data_sent_during_run: sent,
+    };
+    assert(
+      negativeControlDrainedItsDrivenBudget(report) === expected,
+      `driven-budget case ${callbacks}/${enqueued}/${sent} expected ${expected}`,
     );
   }
 }
