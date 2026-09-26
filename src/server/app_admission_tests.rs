@@ -608,12 +608,13 @@ async fn legacy_room_claims_share_the_atomic_application_room_cap() {
 /// pre-fix code by scheduling luck.
 ///
 /// The lease TTL is shrunk to 3 s (test-only override), so the probe sleeps
-/// 3.5 s — past one raw TTL in milliseconds, not a real 10.4 s sleep past the
-/// production 10 s lease. That real sleep red-waved the weekly mutation
-/// baseline against the mutants profile's 10 s per-test hang budget (issue
-/// #604). The renewal slack at 3 s is 2 s (TTL minus the TTL/3 tick), well
-/// clear of runner-load jitter.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// 3.5 s — past one raw TTL in milliseconds, not a 10.4 s sleep past the
+/// production 10 s lease that red-waved the weekly mutation baseline against
+/// the mutants profile's 10 s per-test hang budget (issue #604). The test
+/// runs on the paused tokio clock (`start_paused`): the sleep is virtual,
+/// renewal ticks still fire in deadline order, and the runner-load jitter the
+/// real sleep was sized against is gone.
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn stalled_app_cap_count_read_keeps_its_lease_alive() {
     let server = create_server(true, vec![app_entry(APP_A, Some(1), Some(8))]).await;
