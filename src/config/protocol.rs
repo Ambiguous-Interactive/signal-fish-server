@@ -46,6 +46,18 @@ pub struct ProtocolConfig {
     /// Allow MessagePack (binary) payloads for game data transport.
     #[serde(default = "default_enable_message_pack_game_data")]
     pub enable_message_pack_game_data: bool,
+    /// Allow rkyv (opaque binary) payloads for game data transport (#627).
+    ///
+    /// Opt-in: the default (off) keeps `ProtocolInfo.game_data_formats`
+    /// byte-identical to deployments that predate rkyv negotiation. rkyv
+    /// payloads relay as opaque bytes; the server cannot convert them to
+    /// JSON, so cross-format delivery reports `unsupported_format`.
+    #[serde(default)]
+    pub enable_rkyv_game_data: bool,
+    /// Allow Protocol Buffers (opaque binary) payloads for game data
+    /// transport (#627). Same opt-in, opaque-relay semantics as rkyv.
+    #[serde(default)]
+    pub enable_protobuf_game_data: bool,
     /// Lowest protocol version this deployment accepts (the v2 floor; default 2).
     #[serde(default = "default_min_protocol_version")]
     pub min_protocol_version: u16,
@@ -68,6 +80,8 @@ impl Default for ProtocolConfig {
             max_player_name_length: default_max_player_name_length(),
             max_players_limit: default_max_players_limit(),
             enable_message_pack_game_data: default_enable_message_pack_game_data(),
+            enable_rkyv_game_data: false,
+            enable_protobuf_game_data: false,
             min_protocol_version: default_min_protocol_version(),
             max_protocol_version: default_max_protocol_version(),
             sdk_compatibility: SdkCompatibilityConfig::default(),
@@ -79,10 +93,21 @@ impl Default for ProtocolConfig {
 impl ProtocolConfig {
     /// Return the ordered list of game data encodings that this server will advertise
     /// to clients during the authentication handshake.
+    ///
+    /// JSON is always first (the universal floor), then MessagePack, then the
+    /// #627 opt-in opaque binary encodings in wire-token order. The default
+    /// configuration advertises exactly `[json, message_pack]`, byte-identical
+    /// to the pre-#627 contract.
     pub fn supported_game_data_formats(&self) -> Vec<GameDataEncoding> {
         let mut formats = vec![GameDataEncoding::Json];
         if self.enable_message_pack_game_data {
             formats.push(GameDataEncoding::MessagePack);
+        }
+        if self.enable_rkyv_game_data {
+            formats.push(GameDataEncoding::Rkyv);
+        }
+        if self.enable_protobuf_game_data {
+            formats.push(GameDataEncoding::Protobuf);
         }
         formats
     }
@@ -509,9 +534,100 @@ mod protocol_version_tests {
             assert!(
                 !cfg.supported_game_data_formats()
                     .contains(&GameDataEncoding::Rkyv),
-                "Rkyv is a reserved/internal enum variant, not a ProtocolInfo-advertised format"
+                "Rkyv stays unadvertised while its opt-in knob is off (default)"
             );
         }
+    }
+
+    /// Issue #627: rkyv and protobuf are negotiable encodings, gated behind
+    /// opt-in knobs (default off keeps every existing deployment's
+    /// `ProtocolInfo.game_data_formats` byte-identical across the upgrade).
+    #[test]
+    fn rkyv_and_protobuf_advertise_only_behind_opt_in_knobs_in_canonical_order() {
+        let default_cfg = ProtocolConfig::default();
+        assert!(
+            !default_cfg.enable_rkyv_game_data,
+            "rkyv negotiation defaults off"
+        );
+        assert!(
+            !default_cfg.enable_protobuf_game_data,
+            "protobuf negotiation defaults off"
+        );
+        assert_eq!(
+            default_cfg.supported_game_data_formats(),
+            vec![GameDataEncoding::Json, GameDataEncoding::MessagePack],
+            "default advertisement is byte-identical to the pre-#627 contract"
+        );
+
+        let all_on = ProtocolConfig {
+            enable_rkyv_game_data: true,
+            enable_protobuf_game_data: true,
+            ..ProtocolConfig::default()
+        };
+        assert_eq!(
+            all_on.supported_game_data_formats(),
+            vec![
+                GameDataEncoding::Json,
+                GameDataEncoding::MessagePack,
+                GameDataEncoding::Rkyv,
+                GameDataEncoding::Protobuf,
+            ],
+            "opt-in encodings append in canonical wire-token order after the defaults"
+        );
+
+        let individually = [
+            (
+                ProtocolConfig {
+                    enable_rkyv_game_data: true,
+                    ..ProtocolConfig::default()
+                },
+                vec![
+                    GameDataEncoding::Json,
+                    GameDataEncoding::MessagePack,
+                    GameDataEncoding::Rkyv,
+                ],
+            ),
+            (
+                ProtocolConfig {
+                    enable_protobuf_game_data: true,
+                    ..ProtocolConfig::default()
+                },
+                vec![
+                    GameDataEncoding::Json,
+                    GameDataEncoding::MessagePack,
+                    GameDataEncoding::Protobuf,
+                ],
+            ),
+        ];
+        for (cfg, expected) in individually {
+            assert_eq!(
+                cfg.supported_game_data_formats(),
+                expected,
+                "each knob gates exactly its own encoding"
+            );
+        }
+    }
+
+    /// The opaque binary encodings are relay-only by design: the server never
+    /// decodes them, so every knob combination keeps JSON as the negotiable
+    /// floor and never lets an opt-in encoding displace the defaults.
+    #[test]
+    fn message_pack_disable_keeps_opt_in_encodings_after_json() {
+        let cfg = ProtocolConfig {
+            enable_message_pack_game_data: false,
+            enable_rkyv_game_data: true,
+            enable_protobuf_game_data: true,
+            ..ProtocolConfig::default()
+        };
+        assert_eq!(
+            cfg.supported_game_data_formats(),
+            vec![
+                GameDataEncoding::Json,
+                GameDataEncoding::Rkyv,
+                GameDataEncoding::Protobuf,
+            ],
+            "JSON stays first; disabled MessagePack drops out without reordering"
+        );
     }
 
     #[test]

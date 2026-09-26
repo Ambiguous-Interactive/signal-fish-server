@@ -445,7 +445,10 @@ impl ConformanceAuditor {
         let data = match frame.encoding {
             GameDataEncoding::Json => serde_json::from_slice(&frame.payload).ok(),
             GameDataEncoding::MessagePack => rmp_serde::from_slice(&frame.payload).ok(),
-            GameDataEncoding::Rkyv => None,
+            // rkyv/protobuf are opaque to the server (#627): no client-side
+            // schema is known here either, so the ledger records the frame
+            // but not a decoded payload.
+            GameDataEncoding::Rkyv | GameDataEncoding::Protobuf => None,
         };
         if let Some(data) = data {
             self.record_ledger_payload(receiver, &data);

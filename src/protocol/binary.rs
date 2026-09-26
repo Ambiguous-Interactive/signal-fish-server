@@ -49,6 +49,7 @@ pub fn decode_v3_binary_game_data(wire: &[u8]) -> Result<V3BinaryGameDataFrame, 
                     "json" => GameDataEncoding::Json,
                     "message_pack" => GameDataEncoding::MessagePack,
                     "rkyv" => GameDataEncoding::Rkyv,
+                    "protobuf" => GameDataEncoding::Protobuf,
                     value => {
                         return Err(format!(
                             "v3 binary GameData encoding has unknown token {value:?}"
@@ -291,8 +292,37 @@ mod tests {
         let mut wire = Vec::new();
         write_map_len(&mut wire, 1).unwrap();
         write_str(&mut wire, "encoding").unwrap();
-        write_str(&mut wire, "protobuf").unwrap();
+        write_str(&mut wire, "bson").unwrap();
         assert_rejected(&wire, "unknown token");
+    }
+
+    /// Issue #627: `protobuf` joined `rkyv` as a declared opaque encoding
+    /// token, so the strict decoder must accept it end to end.
+    #[test]
+    fn accepts_every_declared_encoding_token() {
+        for (token, expected) in [
+            ("json", GameDataEncoding::Json),
+            ("message_pack", GameDataEncoding::MessagePack),
+            ("rkyv", GameDataEncoding::Rkyv),
+            ("protobuf", GameDataEncoding::Protobuf),
+        ] {
+            let mut wire = Vec::new();
+            write_map_len(&mut wire, 5).unwrap();
+            write_str(&mut wire, "from_player").unwrap();
+            write_bin(&mut wire, &[0x11; 16]).unwrap();
+            write_str(&mut wire, "encoding").unwrap();
+            write_str(&mut wire, token).unwrap();
+            write_str(&mut wire, "payload").unwrap();
+            write_bin(&mut wire, &[9]).unwrap();
+            write_str(&mut wire, "seq").unwrap();
+            write_uint(&mut wire, 1).unwrap();
+            write_str(&mut wire, "epoch").unwrap();
+            write_u32(&mut wire, 1).unwrap();
+
+            let frame = decode_v3_binary_game_data(&wire)
+                .unwrap_or_else(|error| panic!("{token} must decode: {error}"));
+            assert_eq!(frame.encoding, expected, "token {token} maps exactly");
+        }
     }
 
     #[test]

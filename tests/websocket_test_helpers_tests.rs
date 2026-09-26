@@ -2238,6 +2238,7 @@ fn conformance_text_and_binary_entrypoints_record_once() {
         GameDataEncoding::Json,
         GameDataEncoding::MessagePack,
         GameDataEncoding::Rkyv,
+        GameDataEncoding::Protobuf,
     ]
     .into_iter()
     .enumerate()
@@ -2251,7 +2252,9 @@ fn conformance_text_and_binary_entrypoints_record_once() {
             GameDataEncoding::MessagePack => {
                 rmp_serde::to_vec_named(&ledger).expect("serialize MessagePack payload")
             }
-            GameDataEncoding::Rkyv => vec![0xde, 0xad, 0xbe, 0xef],
+            // Opaque encodings (#627): the ledger fixture uses uninterpretable
+            // bytes, mirroring payloads the server never decodes.
+            GameDataEncoding::Rkyv | GameDataEncoding::Protobuf => vec![0xde, 0xad, 0xbe, 0xef],
         };
         let fixture = RecordedBinaryGameData {
             from_player: binary_sender,
@@ -2313,6 +2316,7 @@ fn conformance_binary_entrypoints_allow_rate_limited_advisory_after_exact_report
         GameDataEncoding::Json,
         GameDataEncoding::MessagePack,
         GameDataEncoding::Rkyv,
+        GameDataEncoding::Protobuf,
     ] {
         let auditor = ConformanceAuditor::new(ReceiverProtocolMode::V3);
         auditor.record_message("receiver", &room_joined(sender, 1));

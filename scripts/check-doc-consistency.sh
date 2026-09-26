@@ -561,7 +561,7 @@ validate_rust_client_game_data_formats() {
             block += 1
             has_json = 0
             has_message_pack = 0
-            has_rkyv = 0
+            has_opt_in_binary = 0
             next
         }
         in_enum {
@@ -573,8 +573,8 @@ validate_rust_client_game_data_formats() {
                     has_json = 1
                 } else if (line == "MessagePack") {
                     has_message_pack = 1
-                } else if (line == "Rkyv") {
-                    has_rkyv = 1
+                } else if (line == "Rkyv" || line == "Protobuf") {
+                    has_opt_in_binary = 1
                 }
             }
 
@@ -584,14 +584,17 @@ validate_rust_client_game_data_formats() {
             closes = gsub(/\}/, "}", text)
             depth += opens - closes
             if (depth <= 0) {
-                if (has_rkyv) {
-                    print "GameDataEncoding sample " block " must not list Rkyv; ProtocolInfo.game_data_formats only advertises json and optional message_pack"
-                }
+                # Issue #627: Rkyv/Protobuf are opt-in server knobs, so a
+                # client guide may list them only alongside the defaults that
+                # every server advertises (Json + MessagePack).
                 if (!has_json) {
                     print "GameDataEncoding sample " block " must include Json"
                 }
                 if (!has_message_pack) {
                     print "GameDataEncoding sample " block " must include MessagePack"
+                }
+                if (has_opt_in_binary && (!has_json || !has_message_pack)) {
+                    print "GameDataEncoding sample " block " must not list opt-in Rkyv or Protobuf without the default Json and MessagePack variants"
                 }
                 in_enum = 0
             }

@@ -694,7 +694,7 @@ fn test_doc_consistency_script_data_driven_cases() {
             must_not_contain: vec![],
         },
         ScriptCase {
-            name: "fails_when_rust_client_guide_lists_reserved_rkyv_as_advertised_format",
+            name: "allows_rust_client_guide_to_list_opt_in_rkyv_with_defaults",
             overrides: vec![(
                 "docs/guides/rust-client.md",
                 r#"# Rust Client Guide
@@ -709,10 +709,33 @@ pub enum GameDataEncoding {
 "#,
             )],
             args: vec![],
+            expected_exit: 0,
+            must_contain: vec![],
+            must_not_contain: vec![
+                "must not list Rkyv",
+                "must include MessagePack",
+                "must include Json",
+            ],
+        },
+        ScriptCase {
+            name: "fails_when_rust_client_guide_lists_opt_in_encodings_without_defaults",
+            overrides: vec![(
+                "docs/guides/rust-client.md",
+                r#"# Rust Client Guide
+
+```rust
+pub enum GameDataEncoding {
+    Protobuf,
+}
+```
+"#,
+            )],
+            args: vec![],
             expected_exit: 1,
             must_contain: vec![
-                "GameDataEncoding sample 1 must not list Rkyv",
-                "ProtocolInfo.game_data_formats only advertises json and optional message_pack",
+                "GameDataEncoding sample 1 must include MessagePack",
+                "GameDataEncoding sample 1 must include Json",
+                "must not list opt-in Rkyv or Protobuf without the default Json and MessagePack variants",
             ],
             must_not_contain: vec![],
         },

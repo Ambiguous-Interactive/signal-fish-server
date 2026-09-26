@@ -40,8 +40,9 @@ binary game-data transport.
   passthrough bytes.
 - Do not re-export the binary frame encoder or frame struct as public API.
 - `ProtocolInfo.game_data_formats` comes from
-  `ProtocolConfig::supported_game_data_formats()`: `json` is always advertised
-  and `message_pack` is advertised only when enabled. `rkyv` is a reserved /
-  internal enum token and must not be documented as a negotiated or advertised
-  client game-data format unless runtime support and negotiation are added in
-  the same change.
+  `ProtocolConfig::supported_game_data_formats()`: `json` is always advertised,
+  `message_pack` is advertised when enabled, and the opaque `rkyv`/`protobuf`
+  tokens (#627) are advertised only behind `enable_rkyv_game_data` /
+  `enable_protobuf_game_data` (default off keeps the pre-#627 advertisement
+  byte-identical). The server never decodes opaque encodings: cross-format
+  delivery reports `unsupported_format` instead of a JSON conversion.

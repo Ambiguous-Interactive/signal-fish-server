@@ -305,7 +305,9 @@ fn encode_client_game_data(encoding: GameDataEncoding, data: serde_json::Value) 
                 .expect("serialize matrix MessagePack payload")
                 .into(),
         ),
-        GameDataEncoding::Rkyv => panic!("rkyv is not a negotiable matrix encoding"),
+        GameDataEncoding::Rkyv | GameDataEncoding::Protobuf => {
+            panic!("opaque encodings need the #627 opt-in knob; this matrix fixture runs the default config")
+        }
     }
 }
 
