@@ -720,9 +720,9 @@ impl EnhancedGameServer {
         // this room before the swap, never observe the dropped code as free
         // and resurrect it as a duplicate. The hold spans the candidate loop;
         // the candidate acquisition below nests under it (lock order
-        // old → candidate), and a join takes exactly one code lock plus the
-        // cap locks — which rotation never touches — so the order cannot
-        // cycle. Released on every exit from the loop.
+        // old → candidate). Candidate acquisition is non-blocking: two
+        // rotations must not wait on each other's old-code locks. Released
+        // on every exit from the loop.
         let old_lock_key = format!("room_join:{}:{}", room.game_name, room.code);
         let mut old_lock_renewal = match self
             .distributed_lock
@@ -750,16 +750,23 @@ impl EnhancedGameServer {
 
         for _ in 0..REGENERATED_ROOM_CODE_MAX_ATTEMPTS {
             let candidate = self.generate_region_room_code();
+            if candidate == room.code {
+                self.metrics.increment_room_code_collisions();
+                continue;
+            }
             // Serialize against same-code joiners exactly like room creation:
             // a joiner holding this lock is mid-admission, and a joiner that
-            // arrives after the swap resolves the new code to this room.
+            // arrives after the swap resolves the new code to this room. Do
+            // not wait here while holding the old-code lock: another rotation
+            // can hold this candidate as its old code while seeking ours.
             let lock_key = format!("room_join:{}:{}", room.game_name, candidate);
             let lock_handle = match self
                 .distributed_lock
-                .acquire(&lock_key, self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL))
+                .try_acquire(&lock_key, self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL))
                 .await
             {
-                Ok(handle) => handle,
+                Ok(Some(handle)) => handle,
+                Ok(None) => continue,
                 Err(error) => {
                     tracing::error!(%authority_id, %room_id, %error, "Failed to acquire candidate room-code lock");
                     self.release_renewed_lock(&mut old_lock_renewal).await;
@@ -777,7 +784,19 @@ impl EnhancedGameServer {
             // mutual exclusion cannot silently expire mid-hold (issue #550).
             let mut lock_renewal =
                 self.keep_lock_renewed(lock_handle, self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL));
-            match self.database.update_room_code(&room_id, candidate).await {
+            // Spectators release the old-code lock after entering the room
+            // event lane. Hold that lane across the swap so a spectator that
+            // resolved the old code finishes admission before rotation, and
+            // one that starts after the swap sees only the new code. Take it
+            // after both code locks: a candidate-code join can hold its code
+            // lock while waiting for this same lane.
+            let room_event_guard = self
+                .message_coordinator
+                .lock_room_event_mutation(&room_id)
+                .await;
+            let result = self.database.update_room_code(&room_id, candidate).await;
+            drop(room_event_guard);
+            match result {
                 Ok(room) => {
                     self.release_renewed_lock(&mut lock_renewal).await;
                     self.release_renewed_lock(&mut old_lock_renewal).await;

@@ -146,6 +146,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Room-code rotation waits for an in-flight spectator admission before it
+  drops the old code. It also skips its own code or a busy candidate instead
+  of waiting on another code lock while holding the old one (#647).
+
 - Spectator joins wait until room creation sets the configured spectator cap.
   A spectator can no longer enter a new room while its temporary unlimited
   value is visible (#647).
