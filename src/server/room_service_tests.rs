@@ -6615,11 +6615,11 @@ async fn spectator_join_rolls_back_when_drain_starts_after_storage_add() {
         )
         .await;
     assert!(server.is_draining(), "storage add starts drain");
+    let response = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("spectator join responds");
     assert!(matches!(
-        timeout(Duration::from_secs(1), receiver.recv())
-            .await
-            .expect("spectator join responds")
-            .as_deref(),
+        response.as_deref(),
         Some(ServerMessage::SpectatorJoinFailed {
             error_code: Some(ErrorCode::ServerDraining),
             ..
@@ -6714,8 +6714,9 @@ async fn spectator_join_cancels_backpressured_baseline_on_drain() {
         .expect("spectator roster is readable")
         .is_empty());
     assert!(!server.spectator_service.is_spectating(&spectator));
+    let peer_message = creator_rx.try_recv();
     assert!(
-        creator_rx.try_recv().is_err(),
+        matches!(peer_message, Err(mpsc::error::TryRecvError::Empty)),
         "no join event reaches peers"
     );
 }
