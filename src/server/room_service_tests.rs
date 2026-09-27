@@ -131,6 +131,8 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
         ));
     let protocol_config = ProtocolConfig::default();
     let room_applications = Arc::new(DashMap::new());
+    let shutdown_drain_deadline_ms = Arc::new(AtomicU64::new(0));
+    let (shutdown_drain_tx, _) = watch::channel(false);
     let spectator_service = SpectatorService::new(
         Arc::clone(&database),
         Arc::clone(&room_coordinator),
@@ -142,9 +144,9 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
         reconnection_manager.clone(),
         Arc::clone(&connection_manager),
         Arc::clone(&rate_limiter),
+        Arc::clone(&shutdown_drain_deadline_ms),
+        shutdown_drain_tx.subscribe(),
     );
-
-    let (shutdown_drain_tx, _) = watch::channel(false);
     Arc::new(EnhancedGameServer {
         database,
         connection_manager,
@@ -174,7 +176,7 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
         spectator_service,
         transport_security: TransportSecurityConfig::default(),
         dashboard_metrics_cache,
-        shutdown_drain_deadline_ms: AtomicU64::new(0),
+        shutdown_drain_deadline_ms,
         shutdown_drain_tx,
         metrics_rejection_log: crate::websocket::RejectionLogThrottle::new(),
         metrics_truncation_log: crate::websocket::RejectionLogThrottle::new(),
@@ -1135,6 +1137,7 @@ struct DrainAfterCreateDatabase {
     server: StdMutex<Option<Weak<EnhancedGameServer>>>,
     triggered: AtomicBool,
     trigger_drain_after_create: bool,
+    trigger_drain_after_spectator_add: bool,
     legacy_collision_once: AtomicBool,
     ambiguous_commit_once: AtomicBool,
     pause_after_create_once: AtomicBool,
@@ -1155,6 +1158,7 @@ impl DrainAfterCreateDatabase {
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
             trigger_drain_after_create: true,
+            trigger_drain_after_spectator_add: false,
             legacy_collision_once: AtomicBool::new(false),
             ambiguous_commit_once: AtomicBool::new(false),
             pause_after_create_once: AtomicBool::new(false),
@@ -1169,12 +1173,20 @@ impl DrainAfterCreateDatabase {
         }
     }
 
+    fn with_drain_after_spectator_add(inner: Arc<dyn GameDatabase>) -> Self {
+        let mut database = Self::new(inner);
+        database.trigger_drain_after_create = false;
+        database.trigger_drain_after_spectator_add = true;
+        database
+    }
+
     fn with_legacy_collision_once(inner: Arc<dyn GameDatabase>) -> Self {
         Self {
             inner,
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
             trigger_drain_after_create: false,
+            trigger_drain_after_spectator_add: false,
             legacy_collision_once: AtomicBool::new(true),
             ambiguous_commit_once: AtomicBool::new(false),
             pause_after_create_once: AtomicBool::new(false),
@@ -1195,6 +1207,7 @@ impl DrainAfterCreateDatabase {
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
             trigger_drain_after_create: false,
+            trigger_drain_after_spectator_add: false,
             legacy_collision_once: AtomicBool::new(false),
             ambiguous_commit_once: AtomicBool::new(true),
             pause_after_create_once: AtomicBool::new(false),
@@ -1215,6 +1228,7 @@ impl DrainAfterCreateDatabase {
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
             trigger_drain_after_create: false,
+            trigger_drain_after_spectator_add: false,
             legacy_collision_once: AtomicBool::new(false),
             ambiguous_commit_once: AtomicBool::new(false),
             pause_after_create_once: AtomicBool::new(false),
@@ -1235,6 +1249,7 @@ impl DrainAfterCreateDatabase {
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
             trigger_drain_after_create: false,
+            trigger_drain_after_spectator_add: false,
             legacy_collision_once: AtomicBool::new(false),
             ambiguous_commit_once: AtomicBool::new(false),
             pause_after_create_once: AtomicBool::new(false),
@@ -1562,7 +1577,12 @@ impl GameDatabase for DrainAfterCreateDatabase {
         room_id: &RoomId,
         spectator: SpectatorInfo,
     ) -> anyhow::Result<bool> {
-        self.inner.add_spectator_to_room(room_id, spectator).await
+        let result = self.inner.add_spectator_to_room(room_id, spectator).await;
+        if self.trigger_drain_after_spectator_add && result.as_ref().is_ok_and(|inserted| *inserted)
+        {
+            self.begin_drain_once();
+        }
+        result
     }
 
     async fn remove_spectator_from_room(
@@ -6487,6 +6507,216 @@ async fn server_room_cap_is_atomic_across_games() {
         server.database.get_total_room_count().await.expect("count"),
         2,
         "server-wide ceiling bounds total rooms across games"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn spectator_join_rechecks_drain_after_code_lock() {
+    let database = create_test_database().await;
+    let room = database
+        .create_room(
+            "drain-spectator-race".to_string(),
+            Some("DRAIN1".to_string()),
+            4,
+            false,
+            PlayerId::new_v4(),
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room fixture is created");
+    let lock = Arc::new(DrainOnLockAcquire::new(
+        "room_join:drain-spectator-race:DRAIN1",
+    ));
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::clone(&lock) as Arc<dyn DistributedLock>,
+        database,
+    )
+    .await;
+    lock.attach_server(&server);
+    let (spectator, mut receiver) =
+        register_client(&server, "127.0.0.1:48390".parse().unwrap()).await;
+    server
+        .handle_join_as_spectator(
+            &spectator,
+            "drain-spectator-race".to_string(),
+            "DRAIN1".to_string(),
+            "watcher".to_string(),
+            None,
+        )
+        .await;
+    assert!(server.is_draining(), "code-lock acquisition starts drain");
+    let response = timeout(Duration::from_secs(1), receiver.recv())
+        .await
+        .expect("join produces a terminal response")
+        .expect("response channel remains open");
+    assert!(matches!(
+        response.as_ref(),
+        ServerMessage::SpectatorJoinFailed {
+            error_code: Some(ErrorCode::ServerDraining),
+            ..
+        }
+    ));
+    assert!(
+        server
+            .database
+            .get_room_by_id(&room.id)
+            .await
+            .expect("room lookup succeeds")
+            .expect("room remains")
+            .get_spectators()
+            .is_empty(),
+        "drain must not leave a spectator in storage"
+    );
+    assert!(!server.spectator_service.is_spectating(&spectator));
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn spectator_join_rolls_back_when_drain_starts_after_storage_add() {
+    let inner = create_test_database().await;
+    let room = inner
+        .create_room(
+            "drain-spectator-storage".to_string(),
+            Some("DRAIN3".to_string()),
+            4,
+            false,
+            PlayerId::new_v4(),
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room fixture is created");
+    let database = Arc::new(DrainAfterCreateDatabase::with_drain_after_spectator_add(
+        inner,
+    ));
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::new(InMemoryDistributedLock::new()),
+        Arc::clone(&database) as Arc<dyn GameDatabase>,
+    )
+    .await;
+    database.attach_server(&server);
+    let (spectator, mut receiver) =
+        register_client(&server, "127.0.0.1:48393".parse().unwrap()).await;
+    server
+        .handle_join_as_spectator(
+            &spectator,
+            "drain-spectator-storage".to_string(),
+            "DRAIN3".to_string(),
+            "watcher".to_string(),
+            None,
+        )
+        .await;
+    assert!(server.is_draining(), "storage add starts drain");
+    assert!(matches!(
+        timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("spectator join responds")
+            .as_deref(),
+        Some(ServerMessage::SpectatorJoinFailed {
+            error_code: Some(ErrorCode::ServerDraining),
+            ..
+        })
+    ));
+    assert!(
+        server
+            .database
+            .get_room_spectators(&room.id)
+            .await
+            .expect("spectator roster is readable")
+            .is_empty(),
+        "the committed row is rolled back"
+    );
+    assert!(!server.spectator_service.is_spectating(&spectator));
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn spectator_join_cancels_backpressured_baseline_on_drain() {
+    let server = create_test_server().await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48391".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &creator,
+            "drain-spectator-baseline".to_string(),
+            Some("DRAIN2".to_string()),
+            "creator".to_string(),
+            Some(4),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await;
+    let room = server
+        .database
+        .get_room("drain-spectator-baseline", "DRAIN2")
+        .await
+        .expect("room lookup succeeds")
+        .expect("creator joins the room");
+    drain_queued_messages(&mut creator_rx);
+    let (sender, mut spectator_rx) = mpsc::channel(1);
+    let fill_sender = sender.clone();
+    let spectator = server
+        .connection_manager
+        .register_client(
+            sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            "127.0.0.1:48392".parse().unwrap(),
+            server.instance_id,
+        )
+        .await
+        .expect("spectator registers");
+    fill_sender
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("fill spectator baseline queue");
+    let join_server = Arc::clone(&server);
+    let mut join = tokio::spawn(async move {
+        join_server
+            .handle_join_as_spectator(
+                &spectator,
+                "drain-spectator-baseline".to_string(),
+                "DRAIN2".to_string(),
+                "watcher".to_string(),
+                None,
+            )
+            .await;
+    });
+    wait_for_backpressure_event(&server).await;
+    assert!(server.begin_shutdown_drain().started_by_this_call);
+    assert!(matches!(
+        spectator_rx.recv().await.as_deref(),
+        Some(ServerMessage::Pong)
+    ));
+    timeout(Duration::from_secs(1), &mut join)
+        .await
+        .expect("draining join completes")
+        .expect("join task completes");
+    assert!(matches!(
+        spectator_rx.recv().await.as_deref(),
+        Some(ServerMessage::SpectatorJoinFailed {
+            error_code: Some(ErrorCode::ServerDraining),
+            ..
+        })
+    ));
+    assert!(server
+        .database
+        .get_room_spectators(&room.id)
+        .await
+        .expect("spectator roster is readable")
+        .is_empty());
+    assert!(!server.spectator_service.is_spectating(&spectator));
+    assert!(
+        creator_rx.try_recv().is_err(),
+        "no join event reaches peers"
     );
 }
 
