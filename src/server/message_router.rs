@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 #[cfg(test)]
 #[cfg(signal_fish_repository_tests)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::LazyLock;
 #[cfg(test)]
 #[cfg(signal_fish_repository_tests)]
-use std::sync::LazyLock;
+use tokio::sync::Notify;
 
 use crate::protocol::{ClientMessage, PlayerId, RoomOperationRequest, ServerMessage};
 
@@ -13,30 +13,42 @@ use super::{EnhancedGameServer, TransportStatusUpdate};
 
 #[cfg(test)]
 #[cfg(signal_fish_repository_tests)]
-static TRANSPORT_STATUS_LIFECYCLE_PROBES: LazyLock<
-    dashmap::DashMap<crate::protocol::PlayerId, Arc<AtomicBool>>,
+static TRANSPORT_STATUS_DELIVERY_PAUSES: LazyLock<
+    dashmap::DashMap<crate::protocol::PlayerId, Arc<TransportStatusDeliveryPause>>,
 > = LazyLock::new(dashmap::DashMap::new);
 
 #[cfg(test)]
 #[cfg(signal_fish_repository_tests)]
-pub(super) fn arm_transport_status_lifecycle_probe(
-    player_id: crate::protocol::PlayerId,
-) -> Arc<AtomicBool> {
-    let probe = Arc::new(AtomicBool::new(false));
-    TRANSPORT_STATUS_LIFECYCLE_PROBES.insert(player_id, Arc::clone(&probe));
-    probe
+pub(super) struct TransportStatusDeliveryPause {
+    pub(super) reached: Notify,
+    pub(super) release: Notify,
 }
 
 #[cfg(test)]
 #[cfg(signal_fish_repository_tests)]
-pub(super) fn disarm_transport_status_lifecycle_probe(player_id: &crate::protocol::PlayerId) {
-    TRANSPORT_STATUS_LIFECYCLE_PROBES.remove(player_id);
+pub(super) fn arm_transport_status_delivery_pause(
+    player_id: crate::protocol::PlayerId,
+) -> Arc<TransportStatusDeliveryPause> {
+    let pause = Arc::new(TransportStatusDeliveryPause {
+        reached: Notify::new(),
+        release: Notify::new(),
+    });
+    TRANSPORT_STATUS_DELIVERY_PAUSES.insert(player_id, Arc::clone(&pause));
+    pause
+}
+
+#[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
+pub(super) fn disarm_transport_status_delivery_pause(player_id: &crate::protocol::PlayerId) {
+    TRANSPORT_STATUS_DELIVERY_PAUSES.remove(player_id);
 }
 
 /// The prepared room fan-out of an accepted transport-state change: the exact
 /// recipient snapshot and the shared event, ready to dispatch once the caller
 /// has released its serialization gates.
 struct TransportStatusFanOut {
+    #[cfg(all(test, signal_fish_repository_tests))]
+    sender: PlayerId,
     room_id: crate::protocol::RoomId,
     recipients: Vec<PlayerId>,
     message: Arc<ServerMessage>,
@@ -49,6 +61,15 @@ impl TransportStatusFanOut {
     /// change or a reconnect identity swap that lands after the snapshot
     /// cannot direct this v3-only frame at a v2 connection.
     async fn deliver(&self, server: &EnhancedGameServer) {
+        #[cfg(test)]
+        #[cfg(signal_fish_repository_tests)]
+        if let Some(pause) = TRANSPORT_STATUS_DELIVERY_PAUSES
+            .get(&self.sender)
+            .map(|entry| Arc::clone(entry.value()))
+        {
+            pause.reached.notify_one();
+            pause.release.notified().await;
+        }
         // Deliver to all peers concurrently: one slow room member costs this
         // event one slow-consumer window, never `(N - 1)` windows. Recipient
         // filtering is v3-only but deliberately transport-agnostic: a
@@ -360,11 +381,6 @@ impl EnhancedGameServer {
         let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
             return;
         };
-        #[cfg(test)]
-        #[cfg(signal_fish_repository_tests)]
-        if let Some(probe) = TRANSPORT_STATUS_LIFECYCLE_PROBES.get(player_id) {
-            probe.store(true, Ordering::Release);
-        }
         let lifecycle_guard = lifecycle.lock().await;
         if lifecycle.player_id() != *player_id
             || !self
@@ -598,6 +614,8 @@ impl EnhancedGameServer {
             connected,
         });
         Some(TransportStatusFanOut {
+            #[cfg(all(test, signal_fish_repository_tests))]
+            sender: *player_id,
             room_id,
             recipients,
             message,
