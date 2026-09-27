@@ -14,6 +14,7 @@ use crate::coordination::{
     MessageCoordinator, RoomEventMutationGuard, RoomOperationCoordinatorTrait,
 };
 use crate::database::GameDatabase;
+use crate::distributed::{keep_lease_renewed, DistributedLock};
 use crate::protocol::{
     validation, ErrorCode, PlayerId, PlayerInfo, Room, RoomId, ServerMessage, SpectatorInfo,
     SpectatorJoinedPayload, SpectatorStateChangeReason,
@@ -22,6 +23,7 @@ use crate::rate_limit::RoomRateLimiter;
 use crate::reconnection::ReconnectionManager;
 use tokio::sync::watch;
 
+use super::room_service::ROOM_JOIN_LOCK_TTL;
 use super::ConnectionManager;
 
 /// The owed repair behind a [`SpectatorService::pending_unpublished_detaches`]
@@ -60,6 +62,8 @@ pub(crate) struct SpectatorService {
     /// reports the same lobby the members themselves see.
     room_coordinator: Arc<dyn RoomOperationCoordinatorTrait>,
     message_coordinator: Arc<dyn MessageCoordinator>,
+    distributed_lock: Arc<dyn DistributedLock>,
+    metrics: Arc<crate::metrics::ServerMetrics>,
     room_applications: Arc<DashMap<RoomId, Uuid>>,
     protocol_config: ProtocolConfig,
     /// Records this service's room-uniform broadcasts (`NewSpectatorJoined` /
@@ -126,6 +130,8 @@ impl SpectatorService {
         database: Arc<dyn GameDatabase>,
         room_coordinator: Arc<dyn RoomOperationCoordinatorTrait>,
         message_coordinator: Arc<dyn MessageCoordinator>,
+        distributed_lock: Arc<dyn DistributedLock>,
+        metrics: Arc<crate::metrics::ServerMetrics>,
         room_applications: Arc<DashMap<RoomId, Uuid>>,
         protocol_config: ProtocolConfig,
         reconnection_manager: Option<Arc<ReconnectionManager>>,
@@ -138,6 +144,8 @@ impl SpectatorService {
             database,
             room_coordinator,
             message_coordinator,
+            distributed_lock,
+            metrics,
             room_applications,
             protocol_config,
             reconnection_manager,
@@ -430,27 +438,62 @@ impl SpectatorService {
         }
         let room_code = room_code.to_ascii_uppercase();
 
-        let room = match self.database.get_room(&game_name, &room_code).await {
-            Ok(Some(room)) => room,
-            Ok(None) => {
-                return Err(SpectatorError::new(
-                    "Room not found",
-                    Some(ErrorCode::RoomNotFound),
-                ))
+        // A creator holds this code lock until it has applied the deployment
+        // spectator cap. Resolve the code and enter the room event lane while
+        // holding the same lock, or a spectator can join against the fresh
+        // room's temporary unlimited cap.
+        let lock_key = format!("room_join:{game_name}:{room_code}");
+        let lock_handle = self
+            .distributed_lock
+            .acquire(&lock_key, ROOM_JOIN_LOCK_TTL)
+            .await
+            .map_err(|error| {
+                warn!(%lock_key, %error, "Failed to acquire spectator room-code lock");
+                SpectatorError::new("Storage error", Some(ErrorCode::StorageError))
+            })?;
+        let mut lock_renewal = keep_lease_renewed(
+            Arc::clone(&self.distributed_lock),
+            lock_handle,
+            ROOM_JOIN_LOCK_TTL,
+            Arc::clone(&self.metrics),
+        );
+        let room_and_guard = async {
+            let room = match self.database.get_room(&game_name, &room_code).await {
+                Ok(Some(room)) => room,
+                Ok(None) => {
+                    return Err(SpectatorError::new(
+                        "Room not found",
+                        Some(ErrorCode::RoomNotFound),
+                    ));
+                }
+                Err(error) => {
+                    warn!(%error, "Failed to fetch room for spectator");
+                    return Err(SpectatorError::new(
+                        "Storage error",
+                        Some(ErrorCode::StorageError),
+                    ));
+                }
+            };
+            let guard = self
+                .message_coordinator
+                .lock_room_event_mutation(&room.id)
+                .await;
+            Ok((room, guard))
+        }
+        .await;
+        lock_renewal.stop_renewal();
+        match self.distributed_lock.release(lock_renewal.handle()).await {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(%lock_key, "Spectator room-code lock expired before release");
+                self.metrics.increment_distributed_lock_release_failures();
             }
-            Err(err) => {
-                warn!("Failed to fetch room for spectator: {err}");
-                return Err(SpectatorError::new(
-                    "Storage error",
-                    Some(ErrorCode::StorageError),
-                ));
+            Err(error) => {
+                warn!(%lock_key, %error, "Failed to release spectator room-code lock");
+                self.metrics.increment_distributed_lock_release_failures();
             }
-        };
-
-        let room_event_guard = self
-            .message_coordinator
-            .lock_room_event_mutation(&room.id)
-            .await;
+        }
+        let (room, room_event_guard) = room_and_guard?;
         // The lookup by code only identifies the room lane. Capacity and every
         // baseline field come from a fresh read inside that lane so an admission
         // never publishes a stale pre-lock room snapshot.
@@ -1779,10 +1822,11 @@ mod tests {
             .expect("room creation succeeds");
 
         let coordinator = Arc::new(RecordingCoordinator::new(database.clone()));
+        let metrics = Arc::new(crate::metrics::ServerMetrics::new());
         let connection_manager = Arc::new(ConnectionManager::new(
             usize::MAX,
             100,
-            Arc::new(crate::metrics::ServerMetrics::new()),
+            Arc::clone(&metrics),
             coordinator.clone(),
             false,
             (u32::MAX, tokio::time::Duration::from_secs(60)),
@@ -1797,6 +1841,8 @@ mod tests {
             database.clone() as Arc<dyn GameDatabase>,
             room_coordinator,
             coordinator.clone(),
+            Arc::new(crate::distributed::InMemoryDistributedLock::new()),
+            metrics,
             Arc::new(DashMap::new()),
             ProtocolConfig::default(),
             None,

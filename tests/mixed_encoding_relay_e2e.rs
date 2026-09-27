@@ -1456,8 +1456,11 @@ async fn opaque_opt_in_encodings_relay_directly_and_report_cross_format() {
 
     // Cross-format recipients: no payload, but an exact unsupported-format
     // DeliveryReport plus the rate-limited advisory naming the encoding.
-    for (label, handle) in [("json", json_peer), ("protobuf", protobuf_peer)] {
-        let mut ws = handle.ws;
+    // Keep both recipients connected until both accountability checks finish.
+    // Dropping the first socket early can send PlayerLeft to the second.
+    let mut cross_format_peers = [("json", json_peer), ("protobuf", protobuf_peer)];
+    for (label, handle) in &mut cross_format_peers {
+        let ws = &mut handle.ws;
         let mut saw_report = false;
         let mut saw_advisory = false;
         let deadline = tokio::time::Instant::now() + FRAME_DEADLINE;

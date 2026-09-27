@@ -744,7 +744,7 @@ impl EnhancedGameServer {
             &metrics_config.dashboard_cache_history_fields,
         ));
         // Set up process-local coordination behind the extension interfaces.
-        let distributed_lock = Arc::new(InMemoryDistributedLock::new());
+        let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
         let message_coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
             Duration::from_millis(config.websocket_config.slow_consumer_timeout_ms),
             metrics.clone(),
@@ -811,6 +811,8 @@ impl EnhancedGameServer {
             database.clone(),
             Arc::clone(&room_coordinator),
             message_coordinator.clone(),
+            Arc::clone(&distributed_lock),
+            Arc::clone(&metrics),
             room_applications.clone(),
             protocol_config.clone(),
             reconnection_manager.clone(),
