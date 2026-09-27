@@ -9,9 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Development: an ARM capacity audit ledger and experiment contract for
-  correctness-first capacity work (#636).
-
 - Security configuration: optional per-encoding game-data payload ceilings,
   `security.max_game_data_bytes` (#634). Each encoding (`json`,
   `message_pack`, `rkyv`, `protobuf`) can carry its own payload cap, checked

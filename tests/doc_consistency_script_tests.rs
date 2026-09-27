@@ -815,6 +815,18 @@ pub enum GameDataEncoding {
             must_not_contain: vec!["[ERROR]"],
         },
         ScriptCase {
+            name: "passes_changed_files_gate_for_development_records",
+            overrides: vec![],
+            args: vec![
+                "--changed-files",
+                "docs/development/arm-capacity-audit.md",
+                "docs/development.md",
+            ],
+            expected_exit: 0,
+            must_contain: vec!["No non-internal changed files detected"],
+            must_not_contain: vec!["[ERROR]"],
+        },
+        ScriptCase {
             name: "multiple_non_internal_files_all_listed_in_error",
             overrides: vec![],
             args: vec!["--changed-files", "src/main.rs", "Cargo.toml", "README.md"],

@@ -473,7 +473,7 @@ jobs:
                 .github/*|.githooks/*|.devcontainer/*|.config/*|.vscode/*|.claude/*) ;;
                 scripts/*|tests/*|test-fixtures/*|formal/*|.llm/*|target/*|progress/*) ;;
                 src/*_tests.rs|src/*_test.rs|src/*/tests.rs) ;;
-                docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md|docs/quickstart.md) ;;
+                docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md|docs/development/*|docs/quickstart.md) ;;
                 .markdownlint*|.lychee.toml|.lycheecache|.typos.toml|.yamllint.yml) ;;
                 .gitignore|.dockerignore) ;;
                 PLAN.md|AGENTS.md|CLAUDE.md|pre-push.txt) ;;
