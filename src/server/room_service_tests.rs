@@ -9095,10 +9095,18 @@ async fn transfer_authority_announcement_cannot_be_overtaken_by_a_departure() {
     .expect("the transfer announcement must commit and then pause");
 
     // Race the new authority's departure against the paused announcement.
+    // The timeout below is a branch classifier, not the oracle: a sequenced
+    // departure can never complete while the announcement holds the room
+    // mutation gate (at any latency), while an unsequenced one completes in
+    // microseconds, so a small window classifies reliably. Both branches
+    // converge on the identical durable-state and final-view assertions at
+    // the end, which are the actual no-leak oracle (issue #512, session 267:
+    // the window shrinks 1 s -> 150 ms to cut the last ~0.9 s from every
+    // full unit-suite run).
     let teardown_server = Arc::clone(&server);
     let mut teardown =
         tokio::spawn(async move { teardown_server.unregister_client(&successor).await });
-    match timeout(Duration::from_secs(1), &mut teardown).await {
+    match timeout(Duration::from_millis(150), &mut teardown).await {
         // Independent teardown: the announcement is not sequenced with the
         // room's lifecycle, so the departure can fully complete (and
         // announce the cleared role) while the stale grant is still paused.
