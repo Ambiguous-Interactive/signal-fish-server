@@ -2153,26 +2153,44 @@ async fn spectator_join_waits_for_creation_cap_before_admission() {
             .is_err(),
         "spectator admission must wait until creation applies its cap"
     );
+    let spectator_service = server.spectator_service.clone();
+    let mut second_join = tokio::spawn(async move {
+        spectator_service
+            .join(
+                &second,
+                "spectator-birth-cap".to_string(),
+                "BIRTH1".to_string(),
+                "second".to_string(),
+            )
+            .await
+    });
+    assert!(
+        timeout(Duration::from_millis(100), &mut second_join)
+            .await
+            .is_err(),
+        "both spectators must wait for the creation cap"
+    );
 
     database.unblock_create();
     creator_join.await.expect("creator task completes");
     let response = creator_rx.recv().await.expect("creator gets a response");
     assert!(matches!(response.as_ref(), ServerMessage::RoomJoined(_)));
-    first_join
-        .await
-        .expect("first spectator task completes")
-        .expect("first spectator takes the only slot");
-    let refusal = server
-        .spectator_service
-        .join(
-            &second,
-            "spectator-birth-cap".to_string(),
-            "BIRTH1".to_string(),
-            "second".to_string(),
-        )
-        .await
-        .expect_err("second spectator must be refused at the cap");
-    assert_eq!(refusal.code, Some(ErrorCode::TooManySpectators));
+    let first_result = first_join.await.expect("first spectator task completes");
+    let second_result = second_join.await.expect("second spectator task completes");
+    let results = [first_result, second_result];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| {
+                result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| error.code == Some(ErrorCode::TooManySpectators))
+            })
+            .count(),
+        1
+    );
     assert_eq!(
         server
             .database
