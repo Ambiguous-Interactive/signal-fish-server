@@ -2542,38 +2542,47 @@ impl EnhancedGameServer {
                             if let Some(app_id) = client_app_id {
                                 self.cache_room_application(&room.id, app_id);
                             }
-                            match self
+                            let admission_kind = RoomAdmissionKind::Created {
+                                application_claim_rollback: client_app_id.map(|application_id| {
+                                    PendingApplicationClaimRollback { application_id }
+                                }),
+                            };
+                            let creator_name_result = self
                                 .database
                                 .update_player_name(&room.id, player_id, player_name)
-                                .await
-                            {
-                                // Mirror the durable rename into the freshly
-                                // built room only when the store confirmed
-                                // the row (`Ok` alone used to patch memory
-                                // even for a vanished row).
+                                .await;
+                            match creator_name_result {
                                 Ok(true) => {
                                     if let Some(creator_info) = room.players.get_mut(player_id) {
                                         creator_info.name = player_name.to_string();
                                     }
+                                    Ok((room, admission_kind))
                                 }
-                                Ok(false) => tracing::warn!(
-                                    %player_id,
-                                    room_id = %room.id,
-                                    "Creator name update landed on a vanished roster row"
-                                ),
+                                Ok(false) => {
+                                    tracing::warn!(%player_id, room_id = %room.id, "Creator name update landed on a vanished roster row");
+                                    self.rollback_unpublished_player_admission(
+                                        room.id,
+                                        *player_id,
+                                        admission_kind,
+                                        "creator_name_missing",
+                                    )
+                                    .await;
+                                    Err(JoinRoomError::Internal(anyhow::anyhow!(
+                                        "Creator name update found no roster row"
+                                    )))
+                                }
                                 Err(error) => {
-                                    tracing::warn!(%player_id, %error, "Failed to update creator name")
+                                    tracing::warn!(%player_id, %error, "Failed to update creator name");
+                                    self.rollback_unpublished_player_admission(
+                                        room.id,
+                                        *player_id,
+                                        admission_kind,
+                                        "creator_name_write_failed",
+                                    )
+                                    .await;
+                                    Err(JoinRoomError::Internal(error))
                                 }
                             }
-                            let application_claim_rollback = client_app_id.map(|application_id| {
-                                PendingApplicationClaimRollback { application_id }
-                            });
-                            Ok((
-                                room,
-                                RoomAdmissionKind::Created {
-                                    application_claim_rollback,
-                                },
-                            ))
                         }
                         Err(error) => Err(error),
                     }

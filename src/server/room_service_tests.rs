@@ -9518,16 +9518,19 @@ async fn test_distributed_lock_cleanup_counters_are_wired() {
         .expect("cleanup task should not panic");
 }
 
-/// The creator rename must mirror into freshly built rooms only when the
-/// durable store confirmed the row. Standing published surfaces are
-/// storage-backed, so agreement with storage is the invariant (#396
-/// honest-failure sweep). Mid-creation the row cannot realistically vanish
-/// (no interleave between room build and rename), so the failure half is
-/// pinned via injected storage errors: the creator's own join snapshot and
-/// any later joiner's snapshot must both show the durable placeholder, and
-/// nothing may republish stale names afterwards.
+/// A failed creator name write must refuse and roll back the unpublished room.
+/// The requested code must be available for a later successful creation.
 #[tokio::test(start_paused = true)]
-async fn creator_name_failure_keeps_published_snapshot_consistent_with_storage() {
+async fn creator_name_failure_refuses_creation_and_allows_retry() {
+    assert_creator_name_write_failure_allows_retry(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn creator_name_missing_row_refuses_creation_and_allows_retry() {
+    assert_creator_name_write_failure_allows_retry(true).await;
+}
+
+async fn assert_creator_name_write_failure_allows_retry(missing_row: bool) {
     let database = Arc::new(InMemoryDatabase::new());
     database
         .initialize()
@@ -9546,9 +9549,11 @@ async fn creator_name_failure_keeps_published_snapshot_consistent_with_storage()
     let (creator, mut creator_rx) =
         register_client(&server, "127.0.0.1:48310".parse().unwrap()).await;
 
-    // Failure half: a rejected rename keeps the creation placeholder in both
-    // surfaces instead of patching memory ahead of (or against) storage.
-    database.fail_update_player_name_for_test(true);
+    if missing_row {
+        database.miss_next_update_player_name_for_test();
+    } else {
+        database.fail_update_player_name_for_test(true);
+    }
     server
         .handle_join_room(
             &creator,
@@ -9562,57 +9567,31 @@ async fn creator_name_failure_keeps_published_snapshot_consistent_with_storage()
             None,
         )
         .await;
-    let room_id = server
-        .get_client_room(&creator)
-        .await
-        .expect("join routes the creator");
     let response = timeout(Duration::from_secs(1), creator_rx.recv())
         .await
         .expect("creator join must answer")
         .expect("join response present");
-    let ServerMessage::RoomJoined(payload) = response.as_ref() else {
-        panic!("expected RoomJoined first for the creator, got {response:?}");
+    let ServerMessage::RoomJoinFailed { error_code, .. } = response.as_ref() else {
+        panic!("expected RoomJoinFailed for a rejected creator name, got {response:?}");
     };
-    assert_eq!(payload.room_id, room_id);
-
-    let published_name = payload
-        .current_players
-        .iter()
-        .find(|player| player.id == creator)
-        .expect("the creator is part of its own join snapshot")
-        .name
-        .clone();
-    let stored_name = server
-        .database()
-        .get_room_players(&room_id)
-        .await
-        .expect("roster readable after creation")
-        .iter()
-        .find(|player| player.id == creator)
-        .expect("creator row exists in storage")
-        .name
-        .clone();
-    assert_eq!(
-        published_name, stored_name,
-        "published snapshot must never disagree with storage"
-    );
-    assert_eq!(
-        published_name, "Creator",
-        "a rejected rename keeps the creation placeholder in both surfaces"
+    assert_eq!(*error_code, Some(ErrorCode::RoomCreationFailed));
+    assert!(server.get_client_room(&creator).await.is_none());
+    assert!(
+        database
+            .get_room("rename-integrity", "RNM001")
+            .await
+            .expect("room lookup succeeds")
+            .is_none(),
+        "failed creation must release its room code"
     );
 
-    // Cross-surface half: a second joiner's snapshot is built from the same
-    // storage rows, so it must also report the durable placeholder — never a
-    // memory-mirrored name that outlived the rejected write.
     database.fail_update_player_name_for_test(false);
-    let (joiner, mut joiner_rx) =
-        register_client(&server, "127.0.0.1:48311".parse().unwrap()).await;
     server
         .handle_join_room(
-            &joiner,
+            &creator,
             "rename-integrity".to_string(),
             Some("RNM001".to_string()),
-            "Joiner".to_string(),
+            "Display-Name".to_string(),
             None,
             None,
             None,
@@ -9620,47 +9599,33 @@ async fn creator_name_failure_keeps_published_snapshot_consistent_with_storage()
             None,
         )
         .await;
-    let joiner_response = timeout(Duration::from_secs(1), joiner_rx.recv())
+    let retry_response = timeout(Duration::from_secs(1), creator_rx.recv())
         .await
-        .expect("joiner join must answer")
-        .expect("joiner response present");
-    let ServerMessage::RoomJoined(joiner_payload) = joiner_response.as_ref() else {
-        panic!("expected RoomJoined for the second joiner, got {joiner_response:?}");
+        .expect("retry must answer")
+        .expect("retry response present");
+    let ServerMessage::RoomJoined(payload) = retry_response.as_ref() else {
+        panic!("expected RoomJoined on retry, got {retry_response:?}");
     };
-    let creator_seen_by_joiner = joiner_payload
+    let room_id = payload.room_id;
+    let published_name = payload
         .current_players
         .iter()
         .find(|player| player.id == creator)
-        .expect("the seated creator appears in a joiner's snapshot")
+        .expect("creator appears in its own snapshot")
         .name
         .clone();
-    assert_eq!(
-        creator_seen_by_joiner, "Creator",
-        "later joiners must observe exactly what storage holds"
-    );
-
-    // Success half: once storage confirms the row, the display name is the
-    // one truth; nothing may keep publishing a stale placeholder.
-    database.fail_update_player_name_for_test(false);
-    assert!(
-        server
-            .database()
-            .update_player_name(&room_id, &creator, "Display-Name")
-            .await
-            .expect("confirmed rename succeeds"),
-        "the seated creator's roster row must accept the rename"
-    );
-    let stored_after_rename = server
+    assert_eq!(published_name, "Display-Name");
+    let stored_name = server
         .database()
         .get_room_players(&room_id)
         .await
-        .expect("roster readable after rename")
+        .expect("roster readable after retry")
         .iter()
         .find(|player| player.id == creator)
-        .expect("creator row still present")
+        .expect("creator row exists")
         .name
         .clone();
-    assert_eq!(stored_after_rename, "Display-Name");
+    assert_eq!(stored_name, "Display-Name");
 }
 
 #[tokio::test(start_paused = true)]
