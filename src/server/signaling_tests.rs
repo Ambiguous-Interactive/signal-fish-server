@@ -3440,6 +3440,207 @@ async fn reconnect_during_shutdown_drain_is_rejected_with_server_draining() {
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
+async fn reconnect_restoring_membership_refuses_shutdown_drain_and_releases_token() {
+    let server = create_test_server().await;
+    let (existing, mut existing_rx) = register_client(&server).await;
+    let (reconnecting, _old_rx) = register_client(&server).await;
+    let (current, mut current_rx) = register_client(&server).await;
+    let room_id = create_db_room(&server, existing).await;
+    let reconnecting_info = player_info(reconnecting, "reconnecting");
+    server
+        .database
+        .add_player_to_room(&room_id, reconnecting_info.clone())
+        .await
+        .expect("add player");
+    server
+        .connection_manager
+        .assign_client_to_room(&existing, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&reconnecting, room_id)
+        .await;
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info), 0)
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &reconnecting)
+        .await
+        .expect("remove player");
+    server.connection_manager.remove_client(&reconnecting);
+    server
+        .message_coordinator
+        .unregister_local_client(&reconnecting)
+        .await
+        .expect("unroute player");
+
+    let database = server
+        .database()
+        .as_any()
+        .downcast_ref::<InMemoryDatabase>()
+        .expect("test server uses in-memory database");
+    database.pause_next_add_player_for_test();
+    let reconnect_server = Arc::clone(&server);
+    let retry_token = token.clone();
+    let reconnect_task = tokio::spawn(async move {
+        reconnect_server
+            .handle_reconnect(&current, &reconnecting, &room_id, &token)
+            .await
+    });
+    timeout(
+        Duration::from_secs(1),
+        database.wait_for_paused_add_player_for_test(),
+    )
+    .await
+    .expect("reconnect reaches membership write");
+    assert!(server.begin_shutdown_drain().started_by_this_call);
+    database.release_paused_add_player_for_test();
+    assert!(!timeout(Duration::from_secs(2), reconnect_task)
+        .await
+        .expect("reconnect finishes")
+        .expect("task lives"));
+    match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::ReconnectionFailed { error_code, .. } => {
+            assert_eq!(*error_code, ErrorCode::ServerDraining)
+        }
+        other => panic!("expected ServerDraining, got {other:?}"),
+    }
+    assert!(!server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room read")
+        .expect("room exists")
+        .players
+        .contains_key(&reconnecting));
+    assert!(!server.connection_manager.has_client(&reconnecting));
+    assert!(server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .validate_reconnection(&reconnecting, &room_id, &retry_token)
+        .await
+        .is_ok());
+    assert_silent(&mut existing_rx).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn reconnect_waiting_for_baseline_capacity_refuses_shutdown_drain() {
+    let server = create_test_server().await;
+    let (existing, mut existing_rx) = register_client(&server).await;
+    let (reconnecting, _old_rx) = register_client(&server).await;
+    let (current, mut current_rx) = register_client_with_queue_capacity(&server, 1).await;
+    let room_id = create_db_room(&server, existing).await;
+    let reconnecting_info = player_info(reconnecting, "reconnecting");
+    server
+        .database
+        .add_player_to_room(&room_id, reconnecting_info.clone())
+        .await
+        .expect("add player");
+    server
+        .connection_manager
+        .assign_client_to_room(&existing, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&reconnecting, room_id)
+        .await;
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info), 0)
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &reconnecting)
+        .await
+        .expect("remove player");
+    server.connection_manager.remove_client(&reconnecting);
+    server
+        .message_coordinator
+        .unregister_local_client(&reconnecting)
+        .await
+        .expect("unroute player");
+    assert!(server
+        .message_coordinator
+        .try_send_to_player(&current, Arc::new(ServerMessage::Pong))
+        .await
+        .expect("prefill response queue"));
+
+    let retry_token = token.clone();
+    let reconnect_server = Arc::clone(&server);
+    let reconnect_task = tokio::spawn(async move {
+        reconnect_server
+            .handle_reconnect(&current, &reconnecting, &room_id, &token)
+            .await
+    });
+    timeout(Duration::from_secs(1), async {
+        while server
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed)
+            == 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("baseline waits for outbound capacity");
+    assert!(server.begin_shutdown_drain().started_by_this_call);
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if server
+                .reconnection_manager()
+                .expect("reconnection enabled")
+                .validate_reconnection(&reconnecting, &room_id, &retry_token)
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("drain releases the claim even while response capacity is full");
+    assert!(matches!(
+        recv(&mut current_rx).await.as_ref(),
+        ServerMessage::Pong
+    ));
+    assert!(!timeout(Duration::from_secs(2), reconnect_task)
+        .await
+        .expect("reconnect finishes")
+        .expect("task lives"));
+    match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::ReconnectionFailed { error_code, .. } => {
+            assert_eq!(*error_code, ErrorCode::ServerDraining)
+        }
+        other => panic!("expected ServerDraining, got {other:?}"),
+    }
+    assert!(server.connection_manager.has_client(&current));
+    assert!(!server.connection_manager.has_client(&reconnecting));
+    assert!(!server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room read")
+        .expect("room exists")
+        .players
+        .contains_key(&reconnecting));
+    assert!(server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .validate_reconnection(&reconnecting, &room_id, &retry_token)
+        .await
+        .is_ok());
+    assert_silent(&mut existing_rx).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
 async fn reconnect_on_a_reaper_pinned_socket_is_refused_and_preserves_the_token() {
     let server = create_test_server().await;
     let (existing, _existing_rx) = register_client(&server).await;

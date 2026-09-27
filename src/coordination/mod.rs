@@ -2274,6 +2274,9 @@ pub trait MessageCoordinator: Send + Sync {
         player_id: PlayerId,
         room_id: RoomId,
         delivery: ClientDeliveryHandle,
+        should_commit: &'a (dyn Fn() -> bool + Send + Sync),
+        commit_gate: Option<&'a std::sync::Mutex<()>>,
+        _drain: Option<tokio::sync::watch::Receiver<bool>>,
         build_message: Box<
             dyn FnOnce(
                     Vec<PlayerId>,
@@ -2287,7 +2290,16 @@ pub trait MessageCoordinator: Send + Sync {
                 + 'a,
         >,
     ) -> anyhow::Result<DeliveryOutcome> {
+        // Only a coordinator that implements the atomic commit path can
+        // accept a drain-gated reconnect. Refuse a fallback implementation
+        // before it can enqueue a baseline outside that gate.
+        if commit_gate.is_some() {
+            anyhow::bail!("coordinator does not support drain-gated reconnect commit");
+        }
         let message = build_message(vec![player_id]).await?;
+        if !should_commit() {
+            return Ok(DeliveryOutcome::Canceled);
+        }
         self.register_local_client_with_initial_message(
             player_id,
             room_id,

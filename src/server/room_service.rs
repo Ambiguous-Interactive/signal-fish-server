@@ -736,6 +736,9 @@ impl EnhancedGameServer {
                         *player_id,
                         room.id,
                         delivery,
+                        &|| true,
+                        None,
+                        None,
                         Box::new(move |routed_player_ids| {
                             Box::pin(async move {
                                 let routed_player_ids: HashSet<PlayerId> =
