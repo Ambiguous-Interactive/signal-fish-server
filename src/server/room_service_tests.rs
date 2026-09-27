@@ -5,8 +5,8 @@ use crate::config::{
     TransportSecurityConfig, TurnConfig, WebSocketConfig,
 };
 use crate::coordination::{
-    ClientDeliveryHandle, MessageCoordinator, RoomEventCompletion, RoomEventJob,
-    RoomEventMutationGuard, RoomEventSequencer,
+    ClientDeliveryHandle, CloseReason, DeliveryOutcome, DeliveryTrySendError, MessageCoordinator,
+    RoomEventCompletion, RoomEventJob, RoomEventMutationGuard, RoomEventSequencer,
 };
 use crate::database::{
     create_database, DatabaseConfig, GameDatabase, InMemoryDatabase, RoomCleanupOutcome,
@@ -2014,6 +2014,58 @@ impl MessageCoordinator for DrainTriggerCoordinator {
         }
         self.clients.write().await.insert(player_id, delivery);
         Ok(())
+    }
+
+    async fn register_local_client_with_initial_message_async<'a>(
+        &'a self,
+        player_id: PlayerId,
+        room_id: RoomId,
+        delivery: ClientDeliveryHandle,
+        should_commit: &'a (dyn Fn() -> bool + Send + Sync),
+        commit_gate: Option<&'a StdMutex<()>>,
+        _drain: Option<watch::Receiver<bool>>,
+        build_message: Box<
+            dyn FnOnce(
+                    Vec<PlayerId>,
+                ) -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<Output = anyhow::Result<Arc<ServerMessage>>>
+                            + Send
+                            + 'a,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    ) -> anyhow::Result<DeliveryOutcome> {
+        // This test coordinator does not model concurrent routing. It does
+        // model the drain/commit boundary needed by created-room joins.
+        let message = build_message(vec![player_id]).await?;
+        let outcome = {
+            let _commit_guard = commit_gate
+                .map(|gate| gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+            if !should_commit() {
+                return Ok(DeliveryOutcome::Canceled);
+            }
+            match delivery.sender.try_send(message, Some(room_id)) {
+                Ok(sent) if sent.enqueued => DeliveryOutcome::Delivered,
+                Ok(sent) if sent.losses > 0 => DeliveryOutcome::AccountedDrop,
+                Ok(_) => DeliveryOutcome::Canceled,
+                Err(DeliveryTrySendError::Closed) => DeliveryOutcome::ChannelClosed,
+                Err(
+                    DeliveryTrySendError::Full(_, _)
+                    | DeliveryTrySendError::AccountabilityUnavailable
+                    | DeliveryTrySendError::InvalidMetadata,
+                ) => {
+                    delivery.close.request_close(CloseReason::SlowConsumer);
+                    DeliveryOutcome::SlowConsumer
+                }
+            }
+        };
+        if outcome == DeliveryOutcome::Delivered {
+            self.register_local_client(player_id, Some(room_id), delivery)
+                .await?;
+        }
+        Ok(outcome)
     }
 
     async fn routed_player_ids(&self, room_id: &RoomId) -> anyhow::Result<Option<Vec<PlayerId>>> {
