@@ -124,11 +124,11 @@ correctness evidence appears.
   distinct `CONNECT_TOKEN_REQUIRED` (retryable, budget-charged, 4006 on
   exhaustion), posture reloads with the key, and a required entry with no
   key is dead config rejected at startup/SIGHUP. Enforcement in open mode
-   also closes the legacy skip-`Authenticate` path (pre-auth frames refused
-   `MISSING_APP_ID`, silence hits `4001 auth_timeout`). Cloud-side edge
-   enforcement (option 1) and token minting are the control plane's work,
-   filed 2026-09-14 as signal-fish-cloud#782 (owner-directed hand-off);
-   remaining frontier: SDK mint/attach halves (tracked in the SDK repos).
-   Verified safe (session-236 sweep): enforcement × reconnect identity swap
-   (handshake guards block re-entry), enforcement × allowlist reload races
-   (fail-closed in both swap orders).
+  also closes the legacy skip-`Authenticate` path (pre-auth frames refused
+  `MISSING_APP_ID`, silence hits `4001 auth_timeout`). Cloud-side edge
+  enforcement (option 1) and token minting are the control plane's work,
+  filed 2026-09-14 as signal-fish-cloud#782 (owner-directed hand-off);
+  remaining frontier: SDK mint/attach halves (tracked in the SDK repos).
+  Verified safe (session-236 sweep): enforcement × reconnect identity swap
+  (handshake guards block re-entry), enforcement × allowlist reload races
+  (fail-closed in both swap orders).
