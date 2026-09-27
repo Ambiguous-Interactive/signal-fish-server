@@ -110,6 +110,17 @@ No new finding is confirmed by this initial inventory.
 | Confidence and reproduction | `scripts/dev-loop.sh draining_room_creation_cancels_baseline_before_it_is_queued` failed before the fix: a paused baseline room read resumed after drain and delivered `RoomJoined`. The test covers explicit and generated room codes. |
 | Disposition | Created-room baseline enqueue now shares the shutdown drain commit gate. A canceled baseline rolls back the unpublished room and returns `SERVER_DRAINING` (#647). |
 
+### ARM-C008 — Creator name write failure can publish the placeholder name
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed, medium |
+| Player impact | A room creator requesting a display name can receive `RoomJoined` with the stored placeholder `Creator` if the name write fails or reports a missing row. |
+| Source and revision | `src/server/room_service.rs` creator admission and `src/database/mod.rs::update_player_name`, reviewed at `6877e4b0`. |
+| Invariant | A successful creator join publishes the requested name. A failed name write refuses the join and releases the unpublished room and its code. |
+| Confidence and reproduction | `creator_name_failure_refuses_creation_and_allows_retry` failed before the fix with `RoomJoined` and `Creator`; `creator_name_missing_row_refuses_creation_and_allows_retry` covers `Ok(false)`. Both verify room rollback and a successful retry with the requested name. |
+| Disposition | Creator admission now requires a confirmed name write. On storage failure or missing row it rolls back the unpublished room and returns `ROOM_CREATION_FAILED` (#647). |
+
 These findings cover room-code rotation, player names, and spectator,
 reconnect, and room-creation drain seams. The rest of the C1 room and storage
 rows remain unreviewed.

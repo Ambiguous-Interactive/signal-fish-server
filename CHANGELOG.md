@@ -146,6 +146,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Room creation now fails and rolls back if the creator's requested name
+  cannot be stored, instead of joining with the `Creator` placeholder (#647).
+
 - Room creation now stops before `RoomJoined` if shutdown drain starts while
   the creator response is being built (#647).
 

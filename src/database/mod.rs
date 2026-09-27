@@ -695,6 +695,8 @@ pub struct InMemoryDatabase {
     delete_room_during_add_once: std::sync::atomic::AtomicBool,
     #[cfg(all(test, signal_fish_repository_tests))]
     fail_update_player_name: std::sync::atomic::AtomicBool,
+    #[cfg(all(test, signal_fish_repository_tests))]
+    miss_update_player_name_once: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     fail_remove_spectator_from_room: std::sync::atomic::AtomicBool,
     /// Join-race determinism gate: used only by repository-only test modules
@@ -767,6 +769,8 @@ impl InMemoryDatabase {
             delete_room_during_add_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
             fail_update_player_name: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            miss_update_player_name_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_remove_spectator_from_room: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
@@ -946,6 +950,12 @@ impl InMemoryDatabase {
     pub(crate) fn fail_update_player_name_for_test(&self, fail: bool) {
         self.fail_update_player_name
             .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn miss_next_update_player_name_for_test(&self) {
+        self.miss_update_player_name_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[cfg(test)]
@@ -1589,6 +1599,13 @@ impl GameDatabase for InMemoryDatabase {
         player_id: &PlayerId,
         name: &str,
     ) -> Result<bool> {
+        #[cfg(all(test, signal_fish_repository_tests))]
+        if self
+            .miss_update_player_name_once
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            return Ok(false);
+        }
         #[cfg(all(test, signal_fish_repository_tests))]
         if self
             .fail_update_player_name
