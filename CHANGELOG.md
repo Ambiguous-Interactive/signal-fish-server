@@ -146,6 +146,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Spectator joins now stop if shutdown drain starts while admission waits or
+  while the join response is blocked (#647).
+
 - Room-code rotation waits for an in-flight spectator admission before it
   drops the old code. It also skips its own code or a busy candidate instead
   of waiting on another code lock while holding the old one (#647).

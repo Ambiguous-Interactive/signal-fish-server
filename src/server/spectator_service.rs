@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 use std::sync::atomic::AtomicU8;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -72,6 +72,8 @@ pub(crate) struct SpectatorService {
     reconnection_manager: Option<Arc<ReconnectionManager>>,
     connection_manager: Arc<ConnectionManager>,
     rate_limiter: Arc<RoomRateLimiter>,
+    shutdown_drain_deadline_ms: Arc<AtomicU64>,
+    shutdown_drain_rx: watch::Receiver<bool>,
     /// Dev-only panic-injection slot for the owned spectator join transaction
     /// (mirrors `EnhancedGameServer::owned_room_operation_panic`).
     #[cfg(test)]
@@ -137,6 +139,8 @@ impl SpectatorService {
         reconnection_manager: Option<Arc<ReconnectionManager>>,
         connection_manager: Arc<ConnectionManager>,
         rate_limiter: Arc<RoomRateLimiter>,
+        shutdown_drain_deadline_ms: Arc<AtomicU64>,
+        shutdown_drain_rx: watch::Receiver<bool>,
     ) -> Self {
         Self {
             spectator_rooms: Arc::new(DashMap::new()),
@@ -151,11 +155,17 @@ impl SpectatorService {
             reconnection_manager,
             connection_manager,
             rate_limiter,
+            shutdown_drain_deadline_ms,
+            shutdown_drain_rx,
             #[cfg(test)]
             join_panic_point: Arc::new(AtomicU8::new(0)),
             #[cfg(test)]
             detach_panic_point: Arc::new(AtomicU8::new(0)),
         }
+    }
+
+    fn is_draining(&self) -> bool {
+        self.shutdown_drain_deadline_ms.load(Ordering::Acquire) != 0
     }
 
     #[cfg(test)]
@@ -514,6 +524,15 @@ impl SpectatorService {
             }
         };
 
+        // The handler checks drain before it starts the transaction, but the
+        // code lock and room lane can keep this join waiting past that check.
+        if self.is_draining() {
+            return Err(SpectatorError::new(
+                "Server is draining for shutdown",
+                Some(ErrorCode::ServerDraining),
+            ));
+        }
+
         // Room persistence is authoritative. The process-local room/app map is
         // only a relay cache and may be empty after restart or cache loss.
         // App scoping applies in both admission modes (issue #520): an owned
@@ -585,6 +604,14 @@ impl SpectatorService {
             .await
         {
             Ok(true) => {
+                if self.is_draining() {
+                    self.rollback_unpublished_spectator_join(player_id, &room.id, false)
+                        .await;
+                    return Err(SpectatorError::new(
+                        "Server is draining for shutdown",
+                        Some(ErrorCode::ServerDraining),
+                    ));
+                }
                 #[cfg(test)]
                 self.trigger_spectator_join_panic_for_test(
                     SpectatorJoinPanicPoint::JoinAfterDurableAdmission,
@@ -679,8 +706,8 @@ impl SpectatorService {
                 let spectator_snapshot = current_room.get_spectators();
 
                 let join_reason = SpectatorStateChangeReason::Joined;
-                let (_drain_tx, drain) = watch::channel(false);
-                let should_deliver = || true;
+                let drain = self.shutdown_drain_rx.clone();
+                let should_deliver = || !self.is_draining();
                 let baseline_delivered = self
                     .message_coordinator
                     .send_to_player_if(
@@ -706,9 +733,18 @@ impl SpectatorService {
                 if !baseline_delivered {
                     self.rollback_unpublished_spectator_join(player_id, &room.id, true)
                         .await;
+                    let draining = self.is_draining();
                     return Err(SpectatorError::new(
-                        "Spectator join response was not deliverable",
-                        Some(ErrorCode::SpectatorJoinFailed),
+                        if draining {
+                            "Server is draining for shutdown"
+                        } else {
+                            "Spectator join response was not deliverable"
+                        },
+                        Some(if draining {
+                            ErrorCode::ServerDraining
+                        } else {
+                            ErrorCode::SpectatorJoinFailed
+                        }),
                     ));
                 }
 
@@ -1837,6 +1873,7 @@ mod tests {
                 database.clone() as Arc<dyn GameDatabase>,
                 None,
             ));
+        let (_drain_tx, drain_rx) = watch::channel(false);
         let spectator_service = SpectatorService::new(
             database.clone() as Arc<dyn GameDatabase>,
             room_coordinator,
@@ -1850,6 +1887,8 @@ mod tests {
             Arc::new(RoomRateLimiter::new(
                 crate::rate_limit::RateLimitConfig::default(),
             )),
+            Arc::new(AtomicU64::new(0)),
+            drain_rx,
         );
 
         (spectator_service, room, creator_id, coordinator, database)

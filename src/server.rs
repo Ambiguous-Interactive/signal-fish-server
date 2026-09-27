@@ -488,7 +488,7 @@ pub struct EnhancedGameServer {
     dashboard_metrics_cache: Arc<DashboardMetricsCache>,
     /// Nonzero once graceful shutdown drain has started; stores the advertised
     /// Unix epoch millisecond close deadline.
-    shutdown_drain_deadline_ms: AtomicU64,
+    shutdown_drain_deadline_ms: Arc<AtomicU64>,
     /// Wakes drain-sensitive delivery paths so they can cancel backpressured
     /// normal traffic before it is enqueued after drain begins.
     shutdown_drain_tx: watch::Sender<bool>,
@@ -807,6 +807,8 @@ impl EnhancedGameServer {
         };
 
         let room_applications = Arc::new(DashMap::new());
+        let shutdown_drain_deadline_ms = Arc::new(AtomicU64::new(0));
+        let (shutdown_drain_tx, _) = watch::channel(false);
         let spectator_service = SpectatorService::new(
             database.clone(),
             Arc::clone(&room_coordinator),
@@ -818,9 +820,9 @@ impl EnhancedGameServer {
             reconnection_manager.clone(),
             Arc::clone(&connection_manager),
             Arc::clone(&rate_limiter),
+            Arc::clone(&shutdown_drain_deadline_ms),
+            shutdown_drain_tx.subscribe(),
         );
-
-        let (shutdown_drain_tx, _) = watch::channel(false);
         let server = Arc::new(Self {
             database,
             connection_manager,
@@ -855,7 +857,7 @@ impl EnhancedGameServer {
             spectator_service,
             transport_security,
             dashboard_metrics_cache: dashboard_metrics_cache.clone(),
-            shutdown_drain_deadline_ms: AtomicU64::new(0),
+            shutdown_drain_deadline_ms,
             shutdown_drain_tx,
             metrics_rejection_log: crate::websocket::RejectionLogThrottle::new(),
             metrics_truncation_log: crate::websocket::RejectionLogThrottle::new(),
