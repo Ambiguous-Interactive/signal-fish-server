@@ -1080,6 +1080,22 @@ impl EnhancedGameServer {
                     .await;
             };
 
+            if let Err(reason) = crate::protocol::validation::validate_player_name_uniqueness(
+                &player_info.name,
+                &room.players,
+            ) {
+                return self
+                    .reject_claimed_reconnect(
+                        current_player_id,
+                        claim_guard,
+                        &restore,
+                        &reason,
+                        ErrorCode::ReconnectionFailed,
+                        operation_id,
+                    )
+                    .await;
+            }
+
             match self.database.add_player_to_room(room_id, player_info).await {
                 Ok(true) => {
                     restore.restored_membership = true;

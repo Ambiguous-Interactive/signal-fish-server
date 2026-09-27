@@ -92,12 +92,12 @@ No new finding is confirmed by this initial inventory.
 
 | Field | Record |
 | --- | --- |
-| State, severity | Open, medium |
+| State, severity | Fixed, medium |
 | Player impact | Another player can join with a disconnected player's name, then the old player can restore the same name through reconnect. |
 | Source and revision | `src/server/room_service.rs` join name validation, `src/server/reconnection_service.rs` restore, and `src/database/mod.rs::add_player_to_room`, reviewed at `07952b86`. |
-| Invariant | Seated player names must remain unique under the join path's canonical comparison. Reconnect currently inserts its saved name without that check. |
-| Confidence and reproduction | Code-path audit. A focused join, disconnect, replacement join, and reconnect test remains to be written. |
-| Disposition | Carry into the next C1 session under #647. Determine whether disconnected names remain reserved or whether a conflicting reconnect is refused with a retryable token. |
+| Invariant | Seated player names must remain unique under the join path's canonical comparison. |
+| Confidence and reproduction | `reconnect_name_taken_by_new_member_rejects_without_spending_token` failed before the fix: reconnect restored `Straße` beside a seated `STRASSE`. |
+| Disposition | Reconnect now checks the saved name under the room event gate before restoring membership. A conflict returns `ReconnectionFailed` and leaves the token usable until its window expires (#647). Capacity and names are not reserved during disconnect. |
 
 These findings cover room-code rotation and spectator and reconnect drain seams. The rest of the C1 room
 and storage rows remain unreviewed.
