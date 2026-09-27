@@ -31,6 +31,22 @@ correctness and `ARM-P001`, `ARM-P002`, ... for performance:
 
 No new finding is confirmed by this initial inventory.
 
+## Correctness findings
+
+### ARM-C001 — Spectator cap during room creation
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed, medium |
+| Player impact | Spectators can enter a new room before its configured cap is set. This can exceed the cap and grow spectator fan-out. |
+| Source and revision | `src/database/mod.rs` room creation and `src/server/room_service.rs` cap application; `src/server/spectator_service.rs::join_owned`, reviewed at `684ca906`. |
+| Invariant | A spectator must see the configured cap before admission. The room row is visible with `max_spectators=None` while the creator still holds the room-code lock. The old spectator path read that row without the lock. |
+| Confidence and reproduction | Deterministic paused-create test: `scripts/dev-loop.sh spectator_join_waits_for_creation_cap_before_admission` failed before the fix with `spectator admission must wait until creation applies its cap`. |
+| Disposition | The spectator path now holds the room-code lock until it enters the room event lane, then reads the room again before admission. The paused-create and lock-failure tests pass. Fix revision: `38e2e42d`. |
+
+This finding covers one room-lifecycle seam. The rest of the C1 room and
+storage rows remain unreviewed.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -66,7 +82,7 @@ neither is a deployed capacity preset.
 | Security: `src/security/**`, `src/websocket/token_binding.rs` | Token, origin, TLS, and TURN credential checks fail closed | `tests/mtls_token_binding_e2e.rs`, `fuzz/fuzz_targets/fuzz_reconnect_tokens.rs` | Token rotation/expiry during claim; TLS variants | Unreviewed |
 | Protocol: `src/protocol/**`, `src/trace_validation.rs` | V2/V3 decoding, wire bytes, and delivery class match contract | `tests/v2_wire_golden.rs`, `tests/v3_wire_properties.rs`, `fuzz/fuzz_targets/decode_protocol.rs` | Malformed/deep frames, mixed format boundaries | Unreviewed |
 | Room and player storage: `src/database/**` | Membership and room limits stay atomic and app isolated | `tests/integration_tests.rs`, `tests/model_based_state_machines.rs` | Concurrent joins at both limits; rollback | Unreviewed |
-| Room lifecycle and moderation: `src/server/room_service.rs`, `moderation.rs`, `spectator_service.rs`, `spectator_handlers.rs` | Join, leave, kick, ban, spectator state and ownership agree | `tests/lobby_integration_tests.rs`, `src/server/room_service_tests.rs` | Join-only, leave/disconnect, kick/ban races | Unreviewed |
+| Room lifecycle and moderation: `src/server/room_service.rs`, `moderation.rs`, `spectator_service.rs`, `spectator_handlers.rs` | Join, leave, kick, ban, spectator state and ownership agree | `tests/lobby_integration_tests.rs`, `src/server/room_service_tests.rs` | ARM-C001 fixed in the spectator creation seam; join-only, leave/disconnect, kick/ban, and code-rotation races remain | Unreviewed |
 | Readiness and gameplay: `src/server/ready_state.rs`, `authority.rs`, `session_policy.rs`, `signaling.rs` | Membership and transport changes invalidate stale plans/readiness | `tests/v3_session_plan_e2e.rs`, `formal/tla/SignalFishSession.tla` | Start/leave, authority loss, reconnect publication order | Unreviewed |
 | Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs` | Mixed conversion refusal; stalled room fairness | Unreviewed |
 | Coordination and queues: `src/coordination/**`, `src/distributed.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla` | Cancellation/panic at reservation and commit | Unreviewed |
@@ -144,7 +160,8 @@ runs; do not omit them. AWS validation remains required for deployment claims.
 Start with concurrent joins at
 room and app limits, `join_only` stale-directory behavior, and leave/disconnect
 races. Inspect `src/database/mod.rs`, `src/server/room_service.rs`,
-`src/server/connection_manager.rs`, and `src/websocket/handler.rs` at the
+`src/server/connection_manager.rs`, `src/server/message_router.rs`, and
+`src/websocket/connection.rs` at the
 reviewed SHA. Use barriers or paused time to reproduce any violated invariant;
 test both accepted and refused outcomes, cleanup, and application isolation.
 Update the relevant rows and finding records. A confirmed player-impacting
