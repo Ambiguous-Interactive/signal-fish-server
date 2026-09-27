@@ -507,7 +507,7 @@ mod tests {
     /// and receives its coded `4000` close. Red condition: an immediate
     /// skip (no settle beat) completes the choreography long before the
     /// grace elapses.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn handler_armed_during_idle_settle_still_gets_the_grace() {
         let grace = Duration::from_millis(300);
         let server = EnhancedGameServer::new(
@@ -529,7 +529,10 @@ mod tests {
         .expect("failed to construct test server");
 
         let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
-        let started = std::time::Instant::now();
+        // Paused tokio time: `elapsed` measures virtual time, so the
+        // grace-waited choreography lands at ~settle + grace while an
+        // immediate skip would land near zero.
+        let started = tokio::time::Instant::now();
         let choreography = {
             let server = std::sync::Arc::clone(&server);
             tokio::spawn(async move {

@@ -156,7 +156,7 @@ mod handler_honesty {
     /// game data vanish without any response: impossible to distinguish from
     /// "relayed". Every sibling surface (ProvideConnectionInfo, Signal,
     /// Authority) replies NOT_IN_ROOM; the data lanes now match (#396 sweep).
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn roomless_text_and_binary_game_data_reply_not_in_room() {
         let server = create_test_server().await;
         let (player, mut rx) = register_client(&server).await;
@@ -179,7 +179,7 @@ mod handler_honesty {
     /// A pre-v3 sender supplying delivery metadata trips the legacy-lane
     /// guard (`class.is_none() && key.is_none()`); before this pin nothing
     /// asserted it, so reordering or deleting the arm survived silently.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn pre_v3_sender_with_delivery_metadata_rejects_invalid_delivery_class() {
         let server = create_test_server().await;
         let (player, mut rx) = register_client(&server).await;
@@ -217,7 +217,7 @@ mod handler_honesty {
     /// `Ok(false)` and pass silently — indistinguishable from stored, so the
     /// player's peers would boot with stale/missing handoff data. It must
     /// surface INTERNAL_ERROR like any other failed persistence (#396).
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn provide_connection_info_on_vanished_membership_surfaces_internal_error() {
         let server = create_test_server().await;
         let (player, mut rx) = register_client(&server).await;
@@ -460,7 +460,7 @@ mod admission_and_budget {
     /// and never stored, so a full roster of oversized entries can no longer
     /// push `GameStarting.peer_connections` past the outbound cap and close
     /// every recipient (#524 eviction primitive).
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn oversized_connection_info_is_rejected_and_not_stored() {
         let server = server_with_config(|config| {
             // 64 bytes: the test's oversized Direct entry (~74 bytes of
@@ -545,7 +545,7 @@ mod admission_and_budget {
     /// `RATE_LIMIT_EXCEEDED`, relays nothing to the room-mate, and attributes
     /// both the rejection and the accepted bytes. After the fixed window
     /// elapses the sender can relay again.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn relay_byte_budget_rejects_over_budget_frames_and_recovers() {
         // 64 KiB default window is too big for a snappy test; use 1000 bytes
         // and a 100 ms window.
@@ -625,7 +625,7 @@ mod admission_and_budget {
 
     /// The text lane shares the single relay byte budget: over-budget JSON
     /// game data is rejected with `RATE_LIMIT_EXCEEDED` without relaying.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn relay_byte_budget_covers_the_text_lane() {
         let server = server_with_config(|config| {
             config.rate_limit_config.max_relay_bytes = 1;
@@ -666,7 +666,7 @@ mod admission_and_budget {
     /// effectively frozen for its duration — and generous receive ceilings:
     /// Miri interprets this suite 10-50x slower than native, and a real-time
     /// window plus short receive deadlines would be flaky under it.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn room_relay_byte_budget_bounds_joint_senders() {
         // Each sender's own budget (1000 bytes) stays far above every frame
         // used here; only the room ceiling (1200 bytes) can reject. The
@@ -789,7 +789,7 @@ mod admission_and_budget {
     /// server-wide budget, admitted bytes are attributed to the app (and
     /// only admitted bytes), and a sender without an override keeps the
     /// global budget.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn per_app_relay_budget_override_bounds_the_apps_senders_and_attracts_their_bytes() {
         use crate::auth::middleware::{AppContext, RateLimits};
 
@@ -981,7 +981,7 @@ mod admission_and_budget {
     /// budgets and attribution must ignore any context payload, so a
     /// spoofed override can neither raise the budget nor fabricate a
     /// per-app billing series (#530).
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn open_mode_ignores_app_relay_policy_for_enforcement_and_attribution() {
         use crate::auth::middleware::{AppContext, RateLimits};
 
@@ -1063,7 +1063,7 @@ mod admission_and_budget {
     /// over is refused with `MESSAGE_TOO_LARGE` — while encodings without a
     /// configured cap keep the `max_message_size` frame cap. The rejected
     /// frame charges no relay budget and relays nothing.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn per_encoding_size_ceilings_bound_the_binary_lane() {
         // Global frame cap far above the per-encoding caps, so every verdict
         // below is attributable to the per-encoding knob alone.
@@ -1169,7 +1169,7 @@ mod admission_and_budget {
     /// cap on the canonical-JSON measure (the same bytes the relay budgets
     /// charge), and JSON without a configured cap keeps the frame cap
     /// (identity with the pre-#634 behavior).
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn per_encoding_size_ceilings_bound_the_text_lane() {
         let server = server_with_config(|config| {
             config.max_game_data_bytes = Some(crate::config::GameDataBytesLimits {

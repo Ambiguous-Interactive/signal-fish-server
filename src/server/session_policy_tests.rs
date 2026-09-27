@@ -1670,7 +1670,7 @@ async fn unpublish_room_member(server: &EnhancedGameServer, player_id: &PlayerId
         .expect("fixture route removal succeeds");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn start_game_builder_gates_each_plan_by_that_exact_members_version() {
     let server = create_server_with_session(mesh_config()).await;
@@ -1706,7 +1706,7 @@ async fn start_game_builder_gates_each_plan_by_that_exact_members_version() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn start_game_builder_accumulates_turn_credentials_for_every_recipient() {
     let server =
@@ -1748,7 +1748,7 @@ async fn start_game_builder_accumulates_turn_credentials_for_every_recipient() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn emit_all_v3_mesh_room_sends_one_plan_each_with_correct_initiate() {
     let server = create_server_with_session(mesh_config()).await;
@@ -1798,7 +1798,7 @@ async fn emit_all_v3_mesh_room_sends_one_plan_each_with_correct_initiate() {
     assert_silent(&mut bob_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn emit_host_room_pairs_clients_with_host() {
     let server = create_server_with_session(host_config()).await;
@@ -1849,7 +1849,7 @@ async fn emit_host_room_pairs_clients_with_host() {
     assert_silent(&mut client_b_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn emit_default_relay_config_sends_explicit_no_peer_plan_to_v3_room() {
     let server = create_server_with_session(SessionConfig::default()).await;
@@ -1908,7 +1908,7 @@ fn enabled_turn() -> crate::config::TurnConfig {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn emit_webrtc_room_with_turn_gives_each_recipient_distinct_credentials() {
     // Acceptance (a): with `[turn]` enabled, each recipient's SessionPlan carries
@@ -1979,7 +1979,7 @@ async fn emit_webrtc_room_with_turn_gives_each_recipient_distinct_credentials() 
 /// ICE for this session. Minting for it hands out live TURN credentials that
 /// can only be used as free relay capacity, the exact reason the pre-gather
 /// path refuses to mint for such a recipient.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn non_pairable_recipient_receives_no_minted_turn_credentials() {
     let server =
@@ -2060,7 +2060,7 @@ async fn non_pairable_recipient_receives_no_minted_turn_credentials() {
 /// Miri skips this: the observer is plain counting over an in-memory decision
 /// (no unsafe, no concurrency); the production wiring is pinned end to end by
 /// the drifted-reconnect e2e metric assertions, which run natively.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn mixed_path_membership_is_observed_per_publication() {
     let server =
@@ -2129,7 +2129,7 @@ async fn mixed_path_membership_is_observed_per_publication() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn emit_webrtc_room_with_turn_disabled_carries_only_public_stun() {
     // Acceptance (b): with `[turn]` disabled but `stun_urls` set, each plan carries
@@ -2168,7 +2168,7 @@ async fn emit_webrtc_room_with_turn_disabled_carries_only_public_stun() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn emit_webrtc_room_prepends_static_ice_then_turn() {
     // The operator's static `session.ice_servers` are preserved verbatim and come
@@ -2215,7 +2215,7 @@ async fn emit_webrtc_room_prepends_static_ice_then_turn() {
     assert!(alice_plan.ice_servers[2].username.is_some());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn emit_host_direct_room_carries_empty_ice_even_with_turn_enabled() {
     // Host+Direct is non-WebRTC: it must carry an empty ICE list regardless of the
@@ -2273,7 +2273,7 @@ async fn emit_host_direct_room_carries_empty_ice_even_with_turn_enabled() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn emit_host_direct_room_without_endpoint_falls_back_to_relay() {
     // Regression for #251: advertising Host + Direct capabilities is not enough
@@ -2351,7 +2351,7 @@ fn selection_counters(server: &EnhancedGameServer) -> SelectionCounters {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn emit_mesh_webrtc_finalize_increments_topology_transport_and_session_plans() {
     let server = create_server_with_session(mesh_config()).await;
@@ -2395,7 +2395,7 @@ async fn emit_mesh_webrtc_finalize_increments_topology_transport_and_session_pla
     assert_eq!(after.transport_relay, before.transport_relay);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn emit_mesh_webrtc_with_turn_counts_one_credential_per_recipient() {
     // Two webrtc recipients with an enabled static-secret TURN block => one minted
@@ -2436,7 +2436,7 @@ async fn emit_mesh_webrtc_with_turn_counts_one_credential_per_recipient() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn emit_relay_resolved_finalize_sends_explicit_plan_only_to_v3() {
     // One v3 + one default v2 (relay-only) member => relay floor.
@@ -2493,7 +2493,7 @@ async fn emit_relay_resolved_finalize_sends_explicit_plan_only_to_v3() {
 // Stored ActiveSessionPlan (the sticky per-room decision).
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn emit_session_plan_stores_active_plan_for_non_relay_decisions() {
     // A mesh finalize stores {Mesh, WebRtc, host: None}; a host finalize stores
@@ -2560,7 +2560,7 @@ async fn emit_session_plan_stores_active_plan_for_non_relay_decisions() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn emit_session_plan_relay_resolution_removes_stale_stored_entry() {
     // A relay-resolved finalize stores nothing AND removes any stale entry (a
@@ -2607,7 +2607,7 @@ async fn emit_session_plan_relay_resolution_removes_stale_stored_entry() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn clear_active_session_plan_removes_the_stored_entry() {
     // `clear_active_session_plan` is the room-removal seam: it must actually
@@ -2731,7 +2731,7 @@ async fn expect_plan(
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn host_departure_reemits_fresh_plans_with_reelected_host() {
     // Host failover: the stored host departs a Finalized host+webrtc room. The
@@ -2843,7 +2843,7 @@ async fn host_departure_reemits_fresh_plans_with_reelected_host() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn host_departure_replan_mints_fresh_turn_credentials_per_recipient() {
     // With an enabled [turn] block, the failover re-plan mints fresh
@@ -2926,7 +2926,7 @@ async fn host_departure_replan_mints_fresh_turn_credentials_per_recipient() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn host_departure_replan_skips_v2_members() {
     // Per-recipient v3 gate on the re-plan path: a v2 member (possible
@@ -2983,7 +2983,7 @@ async fn host_departure_replan_skips_v2_members() {
     assert_silent(&mut host_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn host_departure_election_skips_relay_only_authority() {
     // Capability-aware election: the departed host leaves behind a v3
@@ -3098,7 +3098,7 @@ async fn host_departure_election_skips_relay_only_authority() {
     assert_silent(&mut host_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn host_failover_replan_filters_peer_lists_to_session_capable_members() {
     // End-to-end failover shape of the capability filter across THREE remaining
@@ -3195,7 +3195,7 @@ async fn host_failover_replan_filters_peer_lists_to_session_capable_members() {
     assert_silent(&mut host_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn host_departure_with_no_electable_member_drops_plan_without_replan() {
     // No remaining member can run the stored host+webrtc session (one pure v2
@@ -3262,7 +3262,7 @@ async fn host_departure_with_no_electable_member_drops_plan_without_replan() {
     assert_silent(&mut host_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn non_host_departure_heals_already_missing_host() {
     // Self-heal pin: the stored host is ALREADY absent from the member list
@@ -3343,7 +3343,7 @@ async fn non_host_departure_heals_already_missing_host() {
     assert_silent(&mut member_c_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn non_host_departure_heals_present_but_unpairable_host() {
     // The widened `host_invalid` gate: the stored host is still a MEMBER but
@@ -3439,7 +3439,7 @@ async fn non_host_departure_heals_present_but_unpairable_host() {
     assert_silent(&mut departing_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn departure_with_unpairable_host_and_no_qualifier_drops_plan() {
     // The widened gate's no-qualifier arm: the stored host is a member but
@@ -3498,7 +3498,7 @@ async fn departure_with_unpairable_host_and_no_qualifier_drops_plan() {
     assert_silent(&mut legacy_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn non_host_departures_do_not_replan() {
     // Sticky plans: a departure that changes no plan parameter re-emits nothing
@@ -3609,7 +3609,7 @@ async fn non_host_departures_do_not_replan() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn departure_from_relay_floor_room_does_nothing() {
     // No stored decision (relay floor) => the hook is a no-op: no messages, no
@@ -3644,7 +3644,7 @@ async fn departure_from_relay_floor_room_does_nothing() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn departure_from_non_finalized_room_does_nothing() {
     // A stored entry with a non-Finalized room (anomalous) emits nothing — there
@@ -3705,7 +3705,7 @@ async fn departure_from_non_finalized_room_does_nothing() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn last_member_departure_keeps_sticky_decision_while_storage_holds_an_unrouted_member() {
     // A failed finalized publication can leave an admitted member whose route
@@ -3810,7 +3810,7 @@ async fn last_member_departure_keeps_sticky_decision_while_storage_holds_an_unro
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn last_member_departure_removes_stored_entry() {
     let server = create_server_with_session(host_config()).await;
@@ -3869,7 +3869,7 @@ async fn last_member_departure_removes_stored_entry() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn departure_when_room_is_gone_removes_stored_entry() {
     // The room vanished from storage (cleaned up concurrently): the stale
@@ -3896,7 +3896,7 @@ async fn departure_when_room_is_gone_removes_stored_entry() {
     assert_silent(&mut host_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn prune_active_session_plans_drops_only_dead_rooms() {
     // The maintenance sweep removes entries whose room no longer exists and
@@ -3935,7 +3935,7 @@ async fn prune_active_session_plans_drops_only_dead_rooms() {
     assert!(server.active_session_plan(&dead_room_id).is_none());
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn leave_room_host_disconnect_triggers_failover_replan() {
     // End-to-end through the real choke point: `leave_room` (the path BOTH
@@ -4882,7 +4882,7 @@ fn pregather_room(game_name: &str, lobby_state: LobbyState) -> Room {
     room
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn composed_ice_servers_orders_static_then_stun_then_turn() {
     // The single shared composition seam (used by SessionPlan emission AND
@@ -4919,7 +4919,7 @@ async fn composed_ice_servers_orders_static_then_stun_then_turn() {
     assert_eq!(minted, 1, "exactly the credentialed TURN entry is minted");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn composed_ice_servers_empty_when_nothing_configured() {
     // No static ICE, TURN disabled, no STUN urls: the composition is empty and
@@ -4932,7 +4932,7 @@ async fn composed_ice_servers_empty_when_nothing_configured() {
     assert_eq!(minted, 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn pregather_counts_emission_and_minted_credentials_when_eligible() {
     let server =
@@ -4970,7 +4970,7 @@ async fn pregather_counts_emission_and_minted_credentials_when_eligible() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn pregather_returns_empty_and_counts_nothing_when_ineligible() {
     // Finalized room and v2 recipient: both gates return empty and move no
@@ -5012,7 +5012,7 @@ async fn pregather_returns_empty_and_counts_nothing_when_ineligible() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn pregather_eligible_but_nothing_configured_emits_nothing_and_counts_nothing() {
     // Eligible recipient, but the composition is empty (no static ICE, no STUN
@@ -5032,7 +5032,7 @@ async fn pregather_eligible_but_nothing_configured_emits_nothing_and_counts_noth
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn replan_prefers_electable_authority_over_earliest_joiner() {
     // Kills the authority-membership check in `replan_host_session`: when the
@@ -5089,7 +5089,7 @@ async fn replan_prefers_electable_authority_over_earliest_joiner() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn aborted_replan_transaction_retains_the_wedged_entry_for_the_next_event() {
     // Issue #447: when a host-replan publication transaction resolves
