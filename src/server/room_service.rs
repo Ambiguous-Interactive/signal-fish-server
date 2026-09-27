@@ -730,15 +730,17 @@ impl EnhancedGameServer {
                 let response_room_id = room.id;
                 let baseline_room = Arc::new(std::sync::Mutex::new(None));
                 let baseline_room_in_builder = Arc::clone(&baseline_room);
+                let created_room = matches!(admission_kind, RoomAdmissionKind::Created { .. });
+                let should_commit = || !created_room || !self.is_draining();
                 let initial_delivery = self
                     .message_coordinator
                     .register_local_client_with_initial_message_async(
                         *player_id,
                         room.id,
                         delivery,
-                        &|| true,
-                        None,
-                        None,
+                        &should_commit,
+                        created_room.then_some(&self.shutdown_drain_commit_gate),
+                        created_room.then(|| self.shutdown_drain_receiver()),
                         Box::new(move |routed_player_ids| {
                             Box::pin(async move {
                                 let routed_player_ids: HashSet<PlayerId> =
@@ -847,6 +849,12 @@ impl EnhancedGameServer {
                     initial_delivery,
                     Ok(crate::coordination::DeliveryOutcome::Delivered)
                 ) {
+                    let drain_canceled_creation = created_room
+                        && self.is_draining()
+                        && matches!(
+                            &initial_delivery,
+                            Ok(crate::coordination::DeliveryOutcome::Canceled)
+                        );
                     tracing::warn!(%player_id, room_id = %room.id, ?initial_delivery, "Room join baseline could not be queued atomically");
                     self.rollback_unpublished_player_admission(
                         room.id,
@@ -861,7 +869,10 @@ impl EnhancedGameServer {
                         room.id,
                         membership_stamp.epoch,
                     );
-                    if let Some(operation_id) = operation_id {
+                    if drain_canceled_creation {
+                        self.reject_join_for_shutdown_drain(player_id, operation_id)
+                            .await;
+                    } else if let Some(operation_id) = operation_id {
                         let _ = self
                             .send_room_operation_failure_to_player(
                                 player_id,

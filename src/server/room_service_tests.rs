@@ -6969,6 +6969,98 @@ async fn draining_room_creation_rolls_back_after_create_race() {
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
+async fn draining_room_creation_cancels_baseline_before_it_is_queued() {
+    for (case, requested_code, expected_code) in [
+        ("explicit code", Some("DRNBSL"), "DRNBSL"),
+        ("generated code", None, "DRNBS2"),
+    ] {
+        let server = create_test_server().await;
+        if requested_code.is_none() {
+            server.script_room_codes_for_test([expected_code]);
+        }
+        let database = server
+            .database
+            .as_any()
+            .downcast_ref::<InMemoryDatabase>()
+            .expect("test server uses in-memory storage");
+        let (creator, mut receiver) =
+            register_client(&server, "127.0.0.1:48032".parse().unwrap()).await;
+        database.pause_next_get_room_by_id_for_test();
+
+        let join_task = tokio::spawn({
+            let server = Arc::clone(&server);
+            async move {
+                server
+                    .handle_join_room(
+                        &creator,
+                        "drain-baseline".to_string(),
+                        requested_code.map(str::to_string),
+                        "creator".to_string(),
+                        Some(4),
+                        Some(true),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+            }
+        });
+        timeout(
+            Duration::from_secs(1),
+            database.wait_for_paused_get_room_by_id_for_test(),
+        )
+        .await
+        .expect("creator baseline reaches room read");
+        assert!(
+            server
+                .database
+                .get_room("drain-baseline", expected_code)
+                .await
+                .expect("room lookup succeeds")
+                .is_some(),
+            "new room exists before its baseline commits: {case}"
+        );
+        assert!(server.begin_shutdown_drain().started_by_this_call);
+        database.release_paused_get_room_by_id_for_test();
+        timeout(Duration::from_secs(1), join_task)
+            .await
+            .expect("creator join finishes")
+            .expect("join task succeeds");
+
+        let response = timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("creator gets a response")
+            .expect("response exists");
+        assert!(
+            matches!(
+                response.as_ref(),
+                ServerMessage::RoomJoinFailed {
+                    error_code: Some(ErrorCode::ServerDraining),
+                    ..
+                }
+            ),
+            "creation must not publish RoomJoined after drain ({case}): {response:?}"
+        );
+        assert!(
+            server
+                .database
+                .get_room("drain-baseline", expected_code)
+                .await
+                .expect("room lookup succeeds")
+                .is_none(),
+            "unpublished room must be removed: {case}"
+        );
+        assert_eq!(server.get_client_room(&creator).await, None, "{case}");
+        assert_eq!(
+            server.metrics.rooms_deleted.load(Ordering::Relaxed),
+            1,
+            "{case}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
 async fn unpublished_created_room_rollback_counts_rooms_deleted() {
     let server = create_test_server().await;
     let (creator_id, creator_rx) =
