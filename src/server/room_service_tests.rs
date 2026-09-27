@@ -135,6 +135,8 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
         Arc::clone(&database),
         Arc::clone(&room_coordinator),
         Arc::clone(&message_coordinator),
+        Arc::clone(&distributed_lock),
+        Arc::clone(&metrics),
         Arc::clone(&room_applications),
         protocol_config.clone(),
         reconnection_manager.clone(),
@@ -1135,6 +1137,9 @@ struct DrainAfterCreateDatabase {
     trigger_drain_after_create: bool,
     legacy_collision_once: AtomicBool,
     ambiguous_commit_once: AtomicBool,
+    pause_after_create_once: AtomicBool,
+    create_committed_reached: Notify,
+    release_committed_create: Notify,
     pause_empty_cleanup_once: AtomicBool,
     empty_cleanup_reached: Notify,
     release_empty_cleanup: Notify,
@@ -1152,6 +1157,9 @@ impl DrainAfterCreateDatabase {
             trigger_drain_after_create: true,
             legacy_collision_once: AtomicBool::new(false),
             ambiguous_commit_once: AtomicBool::new(false),
+            pause_after_create_once: AtomicBool::new(false),
+            create_committed_reached: Notify::new(),
+            release_committed_create: Notify::new(),
             pause_empty_cleanup_once: AtomicBool::new(false),
             empty_cleanup_reached: Notify::new(),
             release_empty_cleanup: Notify::new(),
@@ -1169,6 +1177,9 @@ impl DrainAfterCreateDatabase {
             trigger_drain_after_create: false,
             legacy_collision_once: AtomicBool::new(true),
             ambiguous_commit_once: AtomicBool::new(false),
+            pause_after_create_once: AtomicBool::new(false),
+            create_committed_reached: Notify::new(),
+            release_committed_create: Notify::new(),
             pause_empty_cleanup_once: AtomicBool::new(false),
             empty_cleanup_reached: Notify::new(),
             release_empty_cleanup: Notify::new(),
@@ -1186,6 +1197,9 @@ impl DrainAfterCreateDatabase {
             trigger_drain_after_create: false,
             legacy_collision_once: AtomicBool::new(false),
             ambiguous_commit_once: AtomicBool::new(true),
+            pause_after_create_once: AtomicBool::new(false),
+            create_committed_reached: Notify::new(),
+            release_committed_create: Notify::new(),
             pause_empty_cleanup_once: AtomicBool::new(false),
             empty_cleanup_reached: Notify::new(),
             release_empty_cleanup: Notify::new(),
@@ -1203,6 +1217,9 @@ impl DrainAfterCreateDatabase {
             trigger_drain_after_create: false,
             legacy_collision_once: AtomicBool::new(false),
             ambiguous_commit_once: AtomicBool::new(false),
+            pause_after_create_once: AtomicBool::new(false),
+            create_committed_reached: Notify::new(),
+            release_committed_create: Notify::new(),
             pause_empty_cleanup_once: AtomicBool::new(true),
             empty_cleanup_reached: Notify::new(),
             release_empty_cleanup: Notify::new(),
@@ -1220,6 +1237,9 @@ impl DrainAfterCreateDatabase {
             trigger_drain_after_create: false,
             legacy_collision_once: AtomicBool::new(false),
             ambiguous_commit_once: AtomicBool::new(false),
+            pause_after_create_once: AtomicBool::new(false),
+            create_committed_reached: Notify::new(),
+            release_committed_create: Notify::new(),
             pause_empty_cleanup_once: AtomicBool::new(false),
             empty_cleanup_reached: Notify::new(),
             release_empty_cleanup: Notify::new(),
@@ -1227,6 +1247,23 @@ impl DrainAfterCreateDatabase {
             expired_cleanup_reached: Notify::new(),
             release_expired_cleanup: Notify::new(),
         }
+    }
+
+    fn with_paused_create(inner: Arc<dyn GameDatabase>) -> Self {
+        let mut database = Self::new(inner);
+        database.trigger_drain_after_create = false;
+        database
+            .pause_after_create_once
+            .store(true, Ordering::Release);
+        database
+    }
+
+    async fn wait_for_committed_create(&self) {
+        self.create_committed_reached.notified().await;
+    }
+
+    fn unblock_create(&self) {
+        self.release_committed_create.notify_one();
     }
 
     async fn wait_for_empty_cleanup(&self) {
@@ -1303,6 +1340,10 @@ impl GameDatabase for DrainAfterCreateDatabase {
                 application_id,
             )
             .await?;
+        if self.pause_after_create_once.swap(false, Ordering::AcqRel) {
+            self.create_committed_reached.notify_one();
+            self.release_committed_create.notified().await;
+        }
         if simulate_competing_winner || simulate_ambiguous_commit {
             return Err(anyhow::anyhow!(
                 "legacy adapter returned an untyped error after the write"
@@ -1344,6 +1385,16 @@ impl GameDatabase for DrainAfterCreateDatabase {
 
     async fn get_room_by_id(&self, room_id: &RoomId) -> anyhow::Result<Option<Room>> {
         self.inner.get_room_by_id(room_id).await
+    }
+
+    async fn set_room_max_spectators(
+        &self,
+        room_id: &RoomId,
+        max_spectators: Option<u8>,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .set_room_max_spectators(room_id, max_spectators)
+            .await
     }
 
     async fn add_player_to_room(
@@ -2031,6 +2082,188 @@ async fn register_client(
         .await
         .expect("client registration succeeds");
     (player_id, receiver)
+}
+
+/// Issue #647: a legacy storage adapter can expose a room row before the
+/// creator applies its configured spectator cap. The room-code lock must keep
+/// a spectator from using the temporary unlimited value.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn spectator_join_waits_for_creation_cap_before_admission() {
+    let database = Arc::new(DrainAfterCreateDatabase::with_paused_create(
+        create_test_database().await,
+    ));
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig {
+            default_max_spectators: Some(1),
+            ..ServerConfig::default()
+        },
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::new(InMemoryDistributedLock::new()),
+        Arc::clone(&database) as Arc<dyn GameDatabase>,
+    )
+    .await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48301".parse().unwrap()).await;
+    let (first, _first_rx) = register_client(&server, "127.0.0.1:48302".parse().unwrap()).await;
+    let (second, _second_rx) = register_client(&server, "127.0.0.1:48303".parse().unwrap()).await;
+
+    let creator_server = Arc::clone(&server);
+    let creator_join = tokio::spawn(async move {
+        creator_server
+            .handle_join_room(
+                &creator,
+                "spectator-birth-cap".to_string(),
+                Some("BIRTH1".to_string()),
+                "creator".to_string(),
+                Some(4),
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await;
+    });
+    database.wait_for_committed_create().await;
+    let room = server
+        .database
+        .get_room("spectator-birth-cap", "BIRTH1")
+        .await
+        .expect("room lookup succeeds")
+        .expect("creation has committed the room row");
+    assert_eq!(
+        room.max_spectators, None,
+        "the adapter exposes an unset cap"
+    );
+
+    let spectator_service = server.spectator_service.clone();
+    let mut first_join = tokio::spawn(async move {
+        spectator_service
+            .join(
+                &first,
+                "spectator-birth-cap".to_string(),
+                "BIRTH1".to_string(),
+                "first".to_string(),
+            )
+            .await
+    });
+    assert!(
+        timeout(Duration::from_millis(100), &mut first_join)
+            .await
+            .is_err(),
+        "spectator admission must wait until creation applies its cap"
+    );
+
+    database.unblock_create();
+    creator_join.await.expect("creator task completes");
+    let response = creator_rx.recv().await.expect("creator gets a response");
+    assert!(matches!(response.as_ref(), ServerMessage::RoomJoined(_)));
+    first_join
+        .await
+        .expect("first spectator task completes")
+        .expect("first spectator takes the only slot");
+    let refusal = server
+        .spectator_service
+        .join(
+            &second,
+            "spectator-birth-cap".to_string(),
+            "BIRTH1".to_string(),
+            "second".to_string(),
+        )
+        .await
+        .expect_err("second spectator must be refused at the cap");
+    assert_eq!(refusal.code, Some(ErrorCode::TooManySpectators));
+    assert_eq!(
+        server
+            .database
+            .get_room_spectators(&room.id)
+            .await
+            .expect("spectator roster is readable")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn spectator_code_lock_failures_refuse_without_membership_or_leaked_lock() {
+    let server = create_test_server().await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48304".parse().unwrap()).await;
+    let (spectator, _spectator_rx) =
+        register_client(&server, "127.0.0.1:48305".parse().unwrap()).await;
+    let game = "spectator-lock";
+    let code = "LOCK01";
+    let lock_key = format!("room_join:{game}:{code}");
+
+    let missing = server
+        .spectator_service
+        .join(
+            &spectator,
+            game.to_string(),
+            code.to_string(),
+            "guest".to_string(),
+        )
+        .await
+        .expect_err("missing room is refused");
+    assert_eq!(missing.code, Some(ErrorCode::RoomNotFound));
+    assert!(
+        !server
+            .distributed_lock
+            .is_locked(&lock_key)
+            .await
+            .expect("lock state is readable"),
+        "a missing-room refusal must release the room-code lock"
+    );
+
+    server
+        .handle_join_room(
+            &creator,
+            game.to_string(),
+            Some(code.to_string()),
+            "creator".to_string(),
+            Some(4),
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(matches!(
+        creator_rx.recv().await.expect("creator response").as_ref(),
+        ServerMessage::RoomJoined(_)
+    ));
+
+    let lock = server
+        .distributed_lock
+        .as_any()
+        .downcast_ref::<InMemoryDistributedLock>()
+        .expect("test server uses the in-memory lock");
+    lock.fail_acquire_for_test(Some(lock_key.clone())).await;
+    let unavailable = server
+        .spectator_service
+        .join(
+            &spectator,
+            game.to_string(),
+            code.to_string(),
+            "guest".to_string(),
+        )
+        .await
+        .expect_err("lock failure must refuse the spectator");
+    assert_eq!(unavailable.code, Some(ErrorCode::StorageError));
+    assert!(!server.spectator_service.is_spectating(&spectator));
+    lock.fail_acquire_for_test(None).await;
+
+    server
+        .spectator_service
+        .join(
+            &spectator,
+            game.to_string(),
+            code.to_string(),
+            "guest".to_string(),
+        )
+        .await
+        .expect("spectator can retry after the lock recovers");
 }
 
 struct JoinedPairFixture {

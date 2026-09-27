@@ -146,6 +146,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Spectator joins wait until room creation sets the configured spectator cap.
+  A spectator can no longer enter a new room while its temporary unlimited
+  value is visible (#647).
+
 - Fortress WASM interop: the negative control's non-vacuity floor now scales
   with the callback budget the run actually drove (>= 90%) instead of an
   absolute 600 that sat exactly at the one-admission-per-callback cap's
