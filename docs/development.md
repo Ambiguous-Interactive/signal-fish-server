@@ -299,6 +299,10 @@ technical term is flagged, add it to the `[default.extend-words]` section.
 
 ## Benchmarks
 
+For the correctness-first ARM campaign, use the
+[audit and experiment ledger](development/arm-capacity-audit.md). It records
+subsystem coverage, measurement controls, and the next runner contract.
+
 ```bash
 
 cargo bench
