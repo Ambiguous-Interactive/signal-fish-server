@@ -121,6 +121,17 @@ No new finding is confirmed by this initial inventory.
 | Confidence and reproduction | `creator_name_failure_refuses_creation_and_allows_retry` failed before the fix with `RoomJoined` and `Creator`; `creator_name_missing_row_refuses_creation_and_allows_retry` covers `Ok(false)`. Both verify room rollback and a successful retry with the requested name. |
 | Disposition | Creator admission now requires a confirmed name write. On storage failure or missing row it rolls back the unpublished room and returns `ROOM_CREATION_FAILED` (#647). |
 
+### ARM-C009 — Failed spectator-cap write can publish an unlimited room
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed, medium |
+| Player impact | A storage failure while setting a new room's spectator cap can leave it unlimited despite a positive deployment cap. Spectators can then exceed the configured limit. |
+| Source and revision | `src/server/room_service.rs` creation-time cap write and `src/database/mod.rs::set_room_max_spectators`, reviewed at `6d2b3eb2`. |
+| Invariant | A creator join cannot publish a room with a cap different from the deployment policy. Explicit `0` is the unlimited opt-out. |
+| Confidence and reproduction | `spectator_cap_write_failure_refuses_creation_and_allows_retry` failed before the fix with `RoomJoined`. The green test checks room/code rollback, retry, and one-spectator enforcement. `explicitly_unlimited_spectators_need_no_cap_write` covers the opt-out. |
+| Disposition | A failed positive cap write now refuses creation and rolls back the unpublished room. If both the write and rollback deletion fail, an orphaned room may remain; track that dual-fault hypothesis in [#658](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/658). |
+
 These findings cover room-code rotation, player names, and spectator,
 reconnect, and room-creation drain seams. The rest of the C1 room and storage
 rows remain unreviewed.

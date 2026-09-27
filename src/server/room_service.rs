@@ -2354,7 +2354,7 @@ impl EnhancedGameServer {
                         // resolves by code) can observe an unlocked row.
                         let creation_password = password.map(RoomPasswordCredential::new);
                         let sealed_creation = creation_password.is_some();
-                        let mut room = match self
+                        let room = match self
                             .database
                             .create_room_classified(
                                 game_name.to_string(),
@@ -2484,44 +2484,6 @@ impl EnhancedGameServer {
                             return Err(JoinRoomError::ServerDraining);
                         }
 
-                        // Creation-time spectator capacity (issue #525):
-                        // apply the deployment default while the room is
-                        // still inside its join critical section. The room
-                        // mutation gate serializes this write with any
-                        // spectator admission resolved onto the same lane,
-                        // but it does not order the two against each other:
-                        // the fresh room row is visible in storage before
-                        // this section, so a spectator that resolves the
-                        // unannounced code in that microsecond window can
-                        // acquire the gate first and be admitted against
-                        // the unlimited default (bounded by the room's
-                        // eventual cap churn, and refused outright for a
-                        // sealed creation by the password perimeter). A
-                        // storage backend that cannot persist the cap logs
-                        // loudly and keeps the room unlimited (the local
-                        // row stays consistent with storage) rather than
-                        // failing an already-committed admission.
-                        let spectator_cap = self.default_max_spectators(max_players);
-                        let cap_event_guard = self
-                            .message_coordinator
-                            .lock_room_event_mutation(&room.id)
-                            .await;
-                        let cap_applied = self
-                            .database
-                            .set_room_max_spectators(&room.id, spectator_cap)
-                            .await;
-                        drop(cap_event_guard);
-                        match cap_applied {
-                            Ok(()) => room.max_spectators = spectator_cap,
-                            Err(error) => {
-                                tracing::error!(
-                                    room_id = %room.id,
-                                    %error,
-                                    "Failed to apply default spectator capacity"
-                                );
-                            }
-                        }
-
                         Ok(room)
                     }
                     .await;
@@ -2547,40 +2509,67 @@ impl EnhancedGameServer {
                                     PendingApplicationClaimRollback { application_id }
                                 }),
                             };
-                            let creator_name_result = self
-                                .database
-                                .update_player_name(&room.id, player_id, player_name)
+                            // A positive deployment cap must be durable before
+                            // this creator can publish a join. The room-code
+                            // lock blocks spectators until this write and the
+                            // room gate protects the ensuing admission.
+                            let spectator_cap = self.default_max_spectators(max_players);
+                            let cap_result =
+                                if spectator_cap.is_some() || room.max_spectators.is_some() {
+                                    self.database
+                                        .set_room_max_spectators(&room.id, spectator_cap)
+                                        .await
+                                } else {
+                                    Ok(())
+                                };
+                            if let Err(error) = cap_result {
+                                tracing::error!(room_id = %room.id, %error, "Failed to apply default spectator capacity");
+                                self.rollback_unpublished_player_admission(
+                                    room.id,
+                                    *player_id,
+                                    admission_kind,
+                                    "spectator_cap_write_failed",
+                                )
                                 .await;
-                            match creator_name_result {
-                                Ok(true) => {
-                                    if let Some(creator_info) = room.players.get_mut(player_id) {
-                                        creator_info.name = player_name.to_string();
+                                Err(JoinRoomError::Internal(error))
+                            } else {
+                                room.max_spectators = spectator_cap;
+                                let creator_name_result = self
+                                    .database
+                                    .update_player_name(&room.id, player_id, player_name)
+                                    .await;
+                                match creator_name_result {
+                                    Ok(true) => {
+                                        if let Some(creator_info) = room.players.get_mut(player_id)
+                                        {
+                                            creator_info.name = player_name.to_string();
+                                        }
+                                        Ok((room, admission_kind))
                                     }
-                                    Ok((room, admission_kind))
-                                }
-                                Ok(false) => {
-                                    tracing::warn!(%player_id, room_id = %room.id, "Creator name update landed on a vanished roster row");
-                                    self.rollback_unpublished_player_admission(
-                                        room.id,
-                                        *player_id,
-                                        admission_kind,
-                                        "creator_name_missing",
-                                    )
-                                    .await;
-                                    Err(JoinRoomError::Internal(anyhow::anyhow!(
-                                        "Creator name update found no roster row"
-                                    )))
-                                }
-                                Err(error) => {
-                                    tracing::warn!(%player_id, %error, "Failed to update creator name");
-                                    self.rollback_unpublished_player_admission(
-                                        room.id,
-                                        *player_id,
-                                        admission_kind,
-                                        "creator_name_write_failed",
-                                    )
-                                    .await;
-                                    Err(JoinRoomError::Internal(error))
+                                    Ok(false) => {
+                                        tracing::warn!(%player_id, room_id = %room.id, "Creator name update landed on a vanished roster row");
+                                        self.rollback_unpublished_player_admission(
+                                            room.id,
+                                            *player_id,
+                                            admission_kind,
+                                            "creator_name_missing",
+                                        )
+                                        .await;
+                                        Err(JoinRoomError::Internal(anyhow::anyhow!(
+                                            "Creator name update found no roster row"
+                                        )))
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(%player_id, %error, "Failed to update creator name");
+                                        self.rollback_unpublished_player_admission(
+                                            room.id,
+                                            *player_id,
+                                            admission_kind,
+                                            "creator_name_write_failed",
+                                        )
+                                        .await;
+                                        Err(JoinRoomError::Internal(error))
+                                    }
                                 }
                             }
                         }
