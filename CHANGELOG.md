@@ -74,11 +74,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Tests: the unit-test modules that waited on the runtime clock now run
   on the paused tokio clock (#512, #642). The remaining real-time
-  negative-wait windows (the 100 ms `assert_silent` family and the
-  drain/GC race sequencing) advance virtual time deterministically
+  negative-wait windows (the 100 ms `assert_silent` family, the
+  drain/GC race sequencing, and the distributed-lock contention
+  windows) advance virtual time deterministically
   instead of sleeping. A silence window now proves no message arrives
   after runtime quiescence — stronger than a jittery 100 ms wall
-  window. The formerly-slowest clock-bound test drops from 0.93 s to
+  window. The two lock-contention tests now assert the lease start on
+  the monotonic `expires_at` domain (the clock the lease decisions
+  use) instead of the informational wall-clock stamp. The
+  formerly-slowest clock-bound test drops from 0.93 s to
   0.02 s; the full `--lib` sweep loses roughly 12 s of pure wait time.
   Pinned properties are unchanged.
 - Relay: mixed-protocol rooms (v2 + v3 recipients) serialize relayed game

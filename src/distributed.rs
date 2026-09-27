@@ -934,7 +934,14 @@ mod tests {
         assert_ne!(first.token, second.token);
     }
 
-    #[tokio::test]
+    /// The contention window runs on the paused clock: `biased` polls the
+    /// blocked acquisition first, so a wrongly-ready future is always caught
+    /// by the panic arm, and `advance` proves no timer can complete the
+    /// acquisition while the internal lock is held. The TTL-start property is
+    /// asserted on the monotonic domain (`expires_at`), the same clock the
+    /// lease decisions use; the wall-clock `acquired_at` stamp is
+    /// informational only.
+    #[tokio::test(start_paused = true)]
     async fn try_acquire_starts_ttl_after_internal_lock_contention() {
         let lock = InMemoryDistributedLock::new();
         let guard = lock.locks.write().await;
@@ -942,26 +949,40 @@ mod tests {
         let mut acquisition = Box::pin(lock.try_acquire("contended-acquire", ttl));
 
         tokio::select! {
+            biased;
             result = &mut acquisition => {
                 panic!("acquisition unexpectedly completed while the internal lock was held: {result:?}");
             }
-            () = tokio::time::sleep(Duration::from_millis(20)) => {}
+            () = tokio::time::advance(Duration::from_millis(20)) => {}
         }
 
-        let lease_must_start_at = chrono::Utc::now();
+        let lease_must_start_at = tokio::time::Instant::now();
         drop(guard);
         let handle = acquisition
             .await
             .expect("contended acquisition should not fail")
             .expect("contended acquisition should obtain the free key");
 
+        let expires_at = lock
+            .locks
+            .read()
+            .await
+            .get(&handle.key)
+            .expect("acquired lease should be stored")
+            .expires_at;
+        let expected_not_before = lease_must_start_at
+            .checked_add(ttl)
+            .expect("test deadline remains representable");
         assert!(
-            handle.acquired_at >= lease_must_start_at,
-            "a successful acquisition must start after internal contention ends"
+            expires_at >= expected_not_before,
+            "a successful acquisition must start its TTL after internal contention ends"
         );
     }
 
-    #[tokio::test]
+    /// Same paused-clock contention window as the acquisition test above: the
+    /// extension must not complete while the internal lock is held, and its
+    /// new expiry must start after the contention ends (monotonic domain).
+    #[tokio::test(start_paused = true)]
     async fn extend_starts_ttl_after_internal_lock_contention() {
         let lock = InMemoryDistributedLock::new();
         let handle = lock
@@ -974,10 +995,11 @@ mod tests {
         let mut extension = Box::pin(lock.extend(&handle, ttl));
 
         tokio::select! {
+            biased;
             result = &mut extension => {
                 panic!("extension unexpectedly completed while the internal lock was held: {result:?}");
             }
-            () = tokio::time::sleep(Duration::from_millis(20)) => {}
+            () = tokio::time::advance(Duration::from_millis(20)) => {}
         }
 
         let extension_must_start_at = tokio::time::Instant::now();
