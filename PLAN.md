@@ -113,6 +113,8 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   cleanup racing join/reconnect; deadlines at before/equal/after boundaries;
   wall-clock changes versus monotonic expiry; drain/shutdown with queued data
   and active reconnect claims; process-loss behavior versus documented limits.
+  In particular, [#658](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/658)
+  tracks unpublished rooms left after a second storage failure blocks rollback.
 - [ ] **Resource and input safety:** queue and replay bounds; inactive records;
   pending detach/claim retention; task ownership; metrics label cardinality;
   parser depth, size, malformed frames, Unicode, and numeric boundaries;

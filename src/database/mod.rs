@@ -303,9 +303,9 @@ pub trait GameDatabase: Send + Sync {
     /// Apply a room's spectator capacity (creation-time default,
     /// issue #525).
     ///
-    /// `None` means unlimited. Callers apply the deployment default while the
-    /// room is still inside its creation critical section, so a missing room
-    /// is an error but cannot otherwise race admission.
+    /// `None` means unlimited. A positive deployment cap must be persisted
+    /// before the creator joins; a write error refuses room creation. The
+    /// caller holds the room-code lock while applying the default.
     async fn set_room_max_spectators(
         &self,
         _room_id: &RoomId,
@@ -697,6 +697,8 @@ pub struct InMemoryDatabase {
     fail_update_player_name: std::sync::atomic::AtomicBool,
     #[cfg(all(test, signal_fish_repository_tests))]
     miss_update_player_name_once: std::sync::atomic::AtomicBool,
+    #[cfg(all(test, signal_fish_repository_tests))]
+    fail_set_room_max_spectators_once: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     fail_remove_spectator_from_room: std::sync::atomic::AtomicBool,
     /// Join-race determinism gate: used only by repository-only test modules
@@ -771,6 +773,8 @@ impl InMemoryDatabase {
             fail_update_player_name: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
             miss_update_player_name_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            fail_set_room_max_spectators_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_remove_spectator_from_room: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
@@ -955,6 +959,12 @@ impl InMemoryDatabase {
     #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) fn miss_next_update_player_name_for_test(&self) {
         self.miss_update_player_name_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn fail_next_set_room_max_spectators_for_test(&self) {
+        self.fail_set_room_max_spectators_once
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -1306,6 +1316,13 @@ impl GameDatabase for InMemoryDatabase {
         room_id: &RoomId,
         max_spectators: Option<u8>,
     ) -> Result<()> {
+        #[cfg(all(test, signal_fish_repository_tests))]
+        if self
+            .fail_set_room_max_spectators_once
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            anyhow::bail!("injected spectator capacity write failure for test");
+        }
         let mut rooms = self.rooms.write().await;
         let room = rooms.get_mut(room_id).ok_or_else(|| {
             anyhow::anyhow!("Room {room_id} not found while setting spectator cap")

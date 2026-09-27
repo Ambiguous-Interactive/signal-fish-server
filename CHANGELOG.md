@@ -146,6 +146,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Room creation now fails if the server cannot store its configured spectator
+  limit. It removes the unpublished room so a retry can use the same code (#647).
+
 - Room creation now fails and rolls back if the creator's requested name
   cannot be stored, instead of joining with the `Creator` placeholder (#647).
 

@@ -9628,6 +9628,141 @@ async fn assert_creator_name_write_failure_allows_retry(missing_row: bool) {
     assert_eq!(stored_name, "Display-Name");
 }
 
+/// A failed default-cap write must not publish a room with unlimited spectators.
+#[tokio::test(start_paused = true)]
+async fn spectator_cap_write_failure_refuses_creation_and_allows_retry() {
+    let database = Arc::new(InMemoryDatabase::new());
+    database.initialize().await.expect("database initializes");
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig {
+            default_max_spectators: Some(1),
+            ..ServerConfig::default()
+        },
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::new(InMemoryDistributedLock::new()),
+        database.clone(),
+    )
+    .await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48312".parse().unwrap()).await;
+
+    database.fail_next_set_room_max_spectators_for_test();
+    server
+        .handle_join_room(
+            &creator,
+            "cap-write".to_string(),
+            Some("CAP001".to_string()),
+            "Creator".to_string(),
+            Some(4),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    let response = timeout(Duration::from_secs(1), creator_rx.recv())
+        .await
+        .expect("failed creation answers")
+        .expect("response present");
+    let ServerMessage::RoomJoinFailed { error_code, .. } = response.as_ref() else {
+        panic!("expected failed creation, got {response:?}");
+    };
+    assert_eq!(*error_code, Some(ErrorCode::RoomCreationFailed));
+    assert!(server.get_client_room(&creator).await.is_none());
+    assert!(
+        database
+            .get_room("cap-write", "CAP001")
+            .await
+            .expect("room lookup succeeds")
+            .is_none(),
+        "failed creation releases the code"
+    );
+
+    server
+        .handle_join_room(
+            &creator,
+            "cap-write".to_string(),
+            Some("CAP001".to_string()),
+            "Creator".to_string(),
+            Some(4),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    let response = timeout(Duration::from_secs(1), creator_rx.recv())
+        .await
+        .expect("retry answers")
+        .expect("response present");
+    assert!(matches!(response.as_ref(), ServerMessage::RoomJoined(_)));
+    let room = database
+        .get_room("cap-write", "CAP001")
+        .await
+        .expect("room lookup succeeds")
+        .expect("retry created the room");
+    assert_eq!(room.max_spectators, Some(1));
+
+    let (first, _first_rx) = register_client(&server, "127.0.0.1:48313".parse().unwrap()).await;
+    let (second, _second_rx) = register_client(&server, "127.0.0.1:48314".parse().unwrap()).await;
+    server
+        .spectator_service
+        .join(&first, "cap-write".into(), "CAP001".into(), "First".into())
+        .await
+        .expect("first spectator fits");
+    let refused = server
+        .spectator_service
+        .join(
+            &second,
+            "cap-write".into(),
+            "CAP001".into(),
+            "Second".into(),
+        )
+        .await
+        .expect_err("second spectator exceeds the configured cap");
+    assert_eq!(refused.code, Some(ErrorCode::TooManySpectators));
+}
+
+#[tokio::test(start_paused = true)]
+async fn explicitly_unlimited_spectators_need_no_cap_write() {
+    let database = Arc::new(InMemoryDatabase::new());
+    database.initialize().await.expect("database initializes");
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig {
+            default_max_spectators: Some(0),
+            ..ServerConfig::default()
+        },
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::new(InMemoryDistributedLock::new()),
+        database.clone(),
+    )
+    .await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48315".parse().unwrap()).await;
+    database.fail_next_set_room_max_spectators_for_test();
+    server
+        .handle_join_room(
+            &creator,
+            "unlimited-cap".to_string(),
+            Some("CAP002".to_string()),
+            "Creator".to_string(),
+            Some(4),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    let response = creator_rx.recv().await.expect("creator gets a response");
+    assert!(matches!(response.as_ref(), ServerMessage::RoomJoined(_)));
+    let room = database
+        .get_room("unlimited-cap", "CAP002")
+        .await
+        .expect("room lookup succeeds")
+        .expect("room exists");
+    assert_eq!(room.max_spectators, None);
+}
+
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn transfer_authority_announcement_cannot_be_overtaken_by_a_departure() {
