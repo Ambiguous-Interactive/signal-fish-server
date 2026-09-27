@@ -347,7 +347,7 @@ async fn setup_finalized_join_publication(
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn finalized_join_uses_delivered_baseline_when_refresh_fails() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -395,7 +395,7 @@ async fn finalized_join_uses_delivered_baseline_when_refresh_fails() {
     assert_silent(&mut fixture.incumbent_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn finalized_join_counts_its_mixed_membership_once_per_publication() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -462,7 +462,7 @@ async fn finalized_join_counts_its_mixed_membership_once_per_publication() {
     assert_silent(&mut fixture.incumbent_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn finalized_join_counts_its_mixed_membership_once_across_routing_retries() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -533,7 +533,7 @@ async fn finalized_join_counts_its_mixed_membership_once_across_routing_retries(
     assert_silent(&mut fixture.incumbent_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn finalized_join_rejects_a_refresh_that_lost_the_joiner() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -586,7 +586,7 @@ async fn finalized_join_rejects_a_refresh_that_lost_the_joiner() {
     assert!(server.connection_manager.has_client(&fixture.joiner));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn finalized_join_uses_a_valid_newer_membership_refresh() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -658,7 +658,7 @@ async fn finalized_join_uses_a_valid_newer_membership_refresh() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn finalized_join_counts_every_committed_turn_plan_once() {
     let turn = TurnConfig {
@@ -724,7 +724,7 @@ async fn finalized_join_counts_every_committed_turn_plan_once() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn finalized_v2_join_refreshes_v3_incumbents_without_counting_actor_plan() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -779,7 +779,7 @@ async fn finalized_v2_join_refreshes_v3_incumbents_without_counting_actor_plan()
 /// capacity from, so it must move for every credential the server actually
 /// hands out. A v2 joiner gets no plan of its own, but each v3 incumbent is
 /// re-issued a fresh credential in its refreshed plan.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn finalized_join_counts_incumbent_credentials_without_an_actor_plan() {
     let turn = TurnConfig {
@@ -847,7 +847,7 @@ async fn finalized_join_counts_incumbent_credentials_without_an_actor_plan() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn finalized_join_transaction_failure_emits_terminal_boundary() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -934,7 +934,7 @@ async fn finalized_join_transaction_failure_emits_terminal_boundary() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn finalized_join_exhausts_a_zero_budget_routing_retry() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -977,7 +977,7 @@ async fn finalized_join_exhausts_a_zero_budget_routing_retry() {
     .expect("the failed actor is terminalized after retry exhaustion");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn missing_join_publication_snapshot_preserves_open_then_terminal_order() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -1058,7 +1058,7 @@ async fn missing_join_publication_snapshot_preserves_open_then_terminal_order() 
     assert!(terminal_channel.is_none());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn coordinator_pruned_join_actor_is_automatically_terminalized() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -1295,7 +1295,7 @@ fn local_initiates_is_antisymmetric_and_irreflexive() {
 // handle_signal happy path + ordering.
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn signal_delivered_to_same_room_peer_preserving_payload() {
     let server = create_test_server().await;
@@ -1351,7 +1351,7 @@ async fn signal_delivered_to_same_room_peer_preserving_payload() {
     assert_silent(&mut bob_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn signal_from_a_replaced_connection_lifecycle_is_discarded() {
     let server = create_test_server().await;
@@ -1406,7 +1406,7 @@ async fn signal_from_a_replaced_connection_lifecycle_is_discarded() {
 // Rejection branches.
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn signal_from_player_not_in_room_is_rejected() {
     let server = create_test_server().await;
@@ -1425,7 +1425,7 @@ async fn signal_from_player_not_in_room_is_rejected() {
     assert_silent(&mut bob_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn signal_to_unknown_target_is_rejected() {
     let server = create_test_server().await;
@@ -1447,7 +1447,7 @@ async fn signal_to_unknown_target_is_rejected() {
     assert_eq!(error_code(&msg), Some(ErrorCode::SignalTargetNotFound));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn signal_across_rooms_is_rejected() {
     let server = create_test_server().await;
@@ -1474,7 +1474,7 @@ async fn signal_across_rooms_is_rejected() {
     assert_silent(&mut bob_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn signal_from_non_webrtc_sender_is_rejected() {
     let server = create_test_server().await;
@@ -1503,7 +1503,7 @@ async fn signal_from_non_webrtc_sender_is_rejected() {
     assert_silent(&mut bob_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn signal_sender_must_be_v3_even_if_webrtc_transport_is_present() {
     let server = create_test_server().await;
@@ -1531,7 +1531,7 @@ async fn signal_sender_must_be_v3_even_if_webrtc_transport_is_present() {
     assert_silent(&mut bob_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn signal_to_v2_peer_reports_target_not_found() {
     // Per-recipient v3 gating: a v3 sender targeting a v2 (relay-only) peer in the
@@ -1561,7 +1561,7 @@ async fn signal_to_v2_peer_reports_target_not_found() {
     assert_silent(&mut legacy_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn signal_to_v3_relay_only_peer_reports_target_not_found() {
     // Negotiated WebRTC capability gating: the target must have negotiated BOTH
@@ -1595,7 +1595,7 @@ async fn signal_to_v3_relay_only_peer_reports_target_not_found() {
     assert_silent(&mut relay_only_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn self_signal_is_rejected() {
     // A peer cannot WebRTC to itself: a self-targeted signal is rejected and the
@@ -1624,7 +1624,7 @@ async fn self_signal_is_rejected() {
     assert_silent(&mut alice_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn signal_rate_limit_trips_after_budget() {
     let server = create_test_server_with_signals(2).await;
@@ -1668,7 +1668,7 @@ async fn signal_rate_limit_trips_after_budget() {
     assert_silent(&mut bob_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn rejected_signal_attempts_are_rate_limited() {
     let server = create_test_server_with_signal_limits(600, 1).await;
@@ -1694,7 +1694,7 @@ async fn rejected_signal_attempts_are_rate_limited() {
     assert_eq!(error_code(&msg), Some(ErrorCode::SignalRateLimited));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn rejected_signals_do_not_consume_valid_signal_budget() {
     let server = create_test_server_with_signal_limits(1, 4).await;
@@ -1771,7 +1771,7 @@ fn payload_len(signal: &serde_json::Value) -> usize {
     serde_json::to_vec(signal).expect("signal serializes").len()
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn signal_exactly_at_size_cap_is_relayed() {
     let payload = json!({ "Offer": "v=0\r\no=- 1 2 IN IP4 0.0.0.0\r\n" });
@@ -1791,7 +1791,7 @@ async fn signal_exactly_at_size_cap_is_relayed() {
     assert_silent(&mut alice_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn signal_one_byte_over_size_cap_is_rejected() {
     let payload = json!({ "Offer": "v=0\r\no=- 1 2 IN IP4 0.0.0.0\r\n" });
@@ -1812,7 +1812,7 @@ async fn signal_one_byte_over_size_cap_is_rejected() {
     assert_silent(&mut bob_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn oversized_signal_is_rejected_before_any_other_check() {
     // The size cap is step 0: even a sender that is not in any room gets the
@@ -1833,7 +1833,7 @@ async fn oversized_signal_is_rejected_before_any_other_check() {
     assert_eq!(error_code(&msg), Some(ErrorCode::SignalTooLarge));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn oversized_signal_rejection_does_not_consume_valid_signal_budget() {
     let small = json!({ "IceCandidate": "ok" });
@@ -1863,7 +1863,7 @@ async fn oversized_signal_rejection_does_not_consume_valid_signal_budget() {
     assert_silent(&mut bob_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn signal_dispatch_waits_for_room_plan_publication_gate() {
     let server = create_test_server().await;
@@ -1903,7 +1903,7 @@ async fn signal_dispatch_waits_for_room_plan_publication_gate() {
     assert_silent(&mut alice_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn signal_waiting_on_plan_gate_cannot_cross_target_incarnations() {
     let server = create_test_server().await;
@@ -1942,7 +1942,7 @@ async fn signal_waiting_on_plan_gate_cannot_cross_target_incarnations() {
     assert_silent(&mut bob_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn signal_target_fallback_requires_the_current_room_assignment() {
     let server = create_test_server().await;
@@ -1991,7 +1991,7 @@ async fn drain_hydration_events(receiver: &mut mpsc::Receiver<Arc<ServerMessage>
 /// between the pre-gate snapshot and the under-gate revalidation) must get a
 /// coded rejection naming the routing change — and the signal must reach
 /// neither the target nor the relayed counter.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn sender_unrouted_in_room_routing_while_gated_is_rejected_not_relayed() {
     let server = create_test_server().await;
@@ -2037,7 +2037,7 @@ async fn sender_unrouted_in_room_routing_while_gated_is_rejected_not_relayed() {
 /// socket carries no room assignment (so they cannot send), and they hold no
 /// coordinator room routing (so they cannot be targeted). Pin both directions
 /// so a future spectator-routing change cannot silently open the signal path.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn spectators_cannot_send_or_receive_webrtc_signals() {
     let server = create_test_server().await;
@@ -2119,7 +2119,7 @@ async fn spectators_cannot_send_or_receive_webrtc_signals() {
     assert_silent(&mut spectator_rx).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_restores_room_membership_plan_and_webrtc_pairing() {
     // Reconnect re-entry consults the sticky session and refreshes every v3
@@ -2261,7 +2261,7 @@ async fn reconnect_restores_room_membership_plan_and_webrtc_pairing() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_authority_restore_is_live_and_replay_visible() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -2382,7 +2382,7 @@ async fn reconnect_authority_restore_is_live_and_replay_visible() {
 /// cleared-authority event, and that member's own reconnect re-grants the role,
 /// so the replay would otherwise assert "authority is vacant" inside the frame
 /// that says "you are the authority".
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_replay_drops_authority_events_the_snapshot_supersedes() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -2499,7 +2499,7 @@ async fn reconnect_replay_drops_authority_events_the_snapshot_supersedes() {
 /// live authority claim: the room's `authority_player` decides who is flagged.
 /// Restoring the snapshot verbatim while a successor holds authority would put
 /// two `is_authority` members in every membership payload.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_does_not_restore_authority_taken_by_a_successor() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -2603,7 +2603,7 @@ async fn reconnect_does_not_restore_authority_taken_by_a_successor() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn aborted_reconnect_publication_finishes_both_ordered_phases() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -2657,7 +2657,7 @@ async fn aborted_reconnect_publication_finishes_both_ordered_phases() {
     assert!(server.connection_manager.has_client(&fixture.reconnecting));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_retries_after_slow_incumbent_with_current_routed_members() {
     let server = create_test_server_with_config(ServerConfig {
@@ -2714,7 +2714,7 @@ async fn reconnect_retries_after_slow_incumbent_with_current_routed_members() {
     assert_eq!(routed, vec![fixture.reconnecting]);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_transaction_failure_emits_terminal_boundary() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -2775,7 +2775,7 @@ async fn reconnect_transaction_failure_emits_terminal_boundary() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn missing_reconnect_publication_snapshot_preserves_open_then_terminal_order() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -2824,7 +2824,7 @@ async fn missing_reconnect_publication_snapshot_preserves_open_then_terminal_ord
     assert!(terminal_channel.is_none());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn closed_actor_before_commit_still_publishes_canonical_lifecycle() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -2933,7 +2933,7 @@ async fn closed_actor_before_commit_still_publishes_canonical_lifecycle() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn actor_close_after_commit_does_not_suppress_incumbent_plan_phase() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -3013,7 +3013,7 @@ async fn actor_close_after_commit_does_not_suppress_incumbent_plan_phase() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn finalized_reconnect_without_sticky_plan_emits_explicit_relay_refresh() {
     let server = create_test_server().await;
@@ -3054,7 +3054,7 @@ async fn finalized_reconnect_without_sticky_plan_emits_explicit_relay_refresh() 
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn waiting_reconnect_publishes_lifecycle_without_session_plan() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -3096,7 +3096,7 @@ async fn waiting_reconnect_publishes_lifecycle_without_session_plan() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_restores_original_connected_at() {
     let server = create_test_server().await;
@@ -3175,7 +3175,7 @@ async fn reconnect_restores_original_connected_at() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_room_full_failure_releases_claim_for_retry() {
     let server = create_test_server().await;
@@ -3279,7 +3279,7 @@ async fn reconnect_room_full_failure_releases_claim_for_retry() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_room_deleted_during_restore_is_classified_room_not_found() {
     // Inactive-room GC deleting the room between the lane-held existence
@@ -3370,7 +3370,7 @@ async fn reconnect_room_deleted_during_restore_is_classified_room_not_found() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_during_shutdown_drain_is_rejected_with_server_draining() {
     let server = create_test_server().await;
@@ -3438,7 +3438,7 @@ async fn reconnect_during_shutdown_drain_is_rejected_with_server_draining() {
         .expect("drain rejection must not consume the one-time token");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_on_a_reaper_pinned_socket_is_refused_and_preserves_the_token() {
     let server = create_test_server().await;
@@ -3536,7 +3536,7 @@ async fn reconnect_on_a_reaper_pinned_socket_is_refused_and_preserves_the_token(
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_during_teardown_preserves_token_for_retry() {
     let server = create_test_server().await;
@@ -3630,7 +3630,7 @@ async fn reconnect_during_teardown_preserves_token_for_retry() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_reassign_failure_rolls_back_membership_and_releases_claim() {
     let server = create_test_server().await;
@@ -3720,7 +3720,7 @@ async fn reconnect_reassign_failure_rolls_back_membership_and_releases_claim() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_baseline_delivery_failure_rolls_back_and_releases_claim_for_retry() {
     let server = create_test_server_with_config(ServerConfig {
@@ -3838,7 +3838,7 @@ async fn reconnect_baseline_delivery_failure_rolls_back_and_releases_claim_for_r
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_from_roomed_temporary_connection_is_rejected_without_ghost_membership() {
     let server = create_test_server().await;
@@ -3927,7 +3927,7 @@ async fn reconnect_from_roomed_temporary_connection_is_rejected_without_ghost_me
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn concurrent_reconnect_attempts_with_same_token_allow_exactly_one_winner() {
     let server = create_test_server().await;
@@ -4032,7 +4032,7 @@ async fn concurrent_reconnect_attempts_with_same_token_allow_exactly_one_winner(
 // signals_relayed metric (P5).
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn handle_signal_increments_signals_relayed_on_accepted_dispatch() {
     let server = create_test_server().await;
@@ -4073,7 +4073,7 @@ async fn handle_signal_increments_signals_relayed_on_accepted_dispatch() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn handle_signal_counts_valid_dispatch_when_receiver_is_closed() {
     let server = create_test_server().await;
@@ -4106,7 +4106,7 @@ async fn handle_signal_counts_valid_dispatch_when_receiver_is_closed() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn handle_signal_does_not_count_rejected_cross_room_signal() {
     let server = create_test_server().await;
@@ -4141,7 +4141,7 @@ async fn handle_signal_does_not_count_rejected_cross_room_signal() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn handle_signal_does_not_count_rate_limited_signal() {
     // A 0-budget signal limiter rejects every relay attempt; none may count.
@@ -4179,7 +4179,7 @@ async fn handle_signal_does_not_count_rate_limited_signal() {
 // TransportStatus handler (P5): per-connection state + p2p/relay metrics, v3 gating.
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn transport_status_webrtc_connected_records_p2p_and_state() {
     let server = create_test_server().await;
@@ -4213,7 +4213,7 @@ async fn transport_status_webrtc_connected_records_p2p_and_state() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn transport_status_direct_connected_records_p2p() {
     let server = create_test_server().await;
@@ -4241,7 +4241,7 @@ async fn transport_status_direct_connected_records_p2p() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn transport_status_disconnected_records_relay_fallback() {
     let server = create_test_server().await;
@@ -4274,7 +4274,7 @@ async fn transport_status_disconnected_records_relay_fallback() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn transport_status_relay_connected_moves_no_counter_but_records_state() {
     // `connected: true` with `transport: relay` means "still on the floor": it is
@@ -4311,7 +4311,7 @@ async fn transport_status_relay_connected_moves_no_counter_but_records_state() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn transport_status_from_non_v3_client_is_ignored() {
     // A v2 client can never legitimately send TransportStatus; the report must be
@@ -4377,7 +4377,7 @@ async fn expect_peer_transport_status(
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn transport_status_change_fans_out_to_v3_room_peers_only() {
     // Alice (v3 + webrtc) reports a state change in a room with Bob (v3
@@ -4534,7 +4534,7 @@ async fn transport_status_slow_peers_share_one_timeout_window() {
     fanout.await.expect("fan-out task must not panic");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn duplicate_transport_status_does_not_refan_out() {
     let server = create_test_server().await;
@@ -4583,7 +4583,7 @@ async fn duplicate_transport_status_does_not_refan_out() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn transport_status_flap_fans_out_each_transition() {
     // true ⇒ false ⇒ true: every report is a real transition, so the peer sees
@@ -4634,7 +4634,7 @@ async fn transport_status_flap_fans_out_each_transition() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn transport_status_fanout_is_bounded_by_signal_budget() {
     // `TransportStatus` is v3 WebRTC control-plane traffic, and an accepted state
@@ -4713,7 +4713,7 @@ async fn transport_status_fanout_is_bounded_by_signal_budget() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn over_budget_transport_status_does_not_load_room_members() {
     // Once the sender is already over the fan-out budget, the handler should
@@ -4792,7 +4792,7 @@ async fn over_budget_transport_status_does_not_load_room_members() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn transport_status_without_room_records_state_but_fans_out_nothing() {
     // A room-less reporter still gets its per-connection state recorded (the
@@ -4849,7 +4849,7 @@ async fn transport_status_without_room_records_state_but_fans_out_nothing() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn transport_status_uses_exact_routing_when_database_lookup_fails() {
     // Production owns an exact coordinator routing snapshot, so informational
@@ -4944,7 +4944,7 @@ async fn transport_status_uses_exact_routing_when_database_lookup_fails() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn transport_status_sender_only_room_does_not_consume_signal_budget() {
     let server = create_test_server().await;
@@ -4983,7 +4983,7 @@ async fn transport_status_sender_only_room_does_not_consume_signal_budget() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn transport_status_room_with_only_v2_peers_does_not_consume_signal_budget() {
     let server = create_test_server().await;
@@ -5035,7 +5035,7 @@ async fn transport_status_room_with_only_v2_peers_does_not_consume_signal_budget
 // Relay floor never closes (P5): GameData still relays after a P2P-failure report.
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn game_data_still_relays_after_transport_status_disconnected() {
     let server = create_test_server().await;
@@ -5084,7 +5084,7 @@ async fn game_data_still_relays_after_transport_status_disconnected() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn refreshed_finalized_plans_carry_no_phantom_authority_after_departure() {
     // Issue #447: when a mid-game authority departs, storage clears the

@@ -77,7 +77,7 @@ async fn drain_until_routed_player_joined(
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn delayed_authenticate_is_rejected_with_warning_only() {
     let server = create_test_server().await;
@@ -122,7 +122,7 @@ async fn delayed_authenticate_is_rejected_with_warning_only() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn client_protocol_round_trips_through_server() {
     let server = create_test_server().await;
@@ -162,7 +162,7 @@ async fn client_protocol_round_trips_through_server() {
     assert_eq!(proto.topologies, vec![Topology::Relay, Topology::Mesh]);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn duplicate_transport_status_reports_do_not_inflate_metrics() {
     let server = create_test_server().await;
@@ -217,7 +217,7 @@ async fn duplicate_transport_status_reports_do_not_inflate_metrics() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn transport_status_for_unnegotiated_transport_is_ignored() {
     let server = create_test_server().await;
@@ -328,7 +328,7 @@ async fn transport_status_for_unnegotiated_transport_is_ignored() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn transport_status_update_results_are_distinct() {
     let server = create_test_server().await;
@@ -398,7 +398,7 @@ async fn transport_status_update_results_are_distinct() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn transport_status_dedup_is_scoped_to_membership_generation() {
     let server = create_test_server().await;
@@ -631,7 +631,7 @@ async fn transport_status_is_ordered_before_concurrent_leave() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn join_room_request_is_forwarded_to_room_service() {
     let server = create_test_server().await;
@@ -678,7 +678,7 @@ async fn join_room_request_is_forwarded_to_room_service() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn correlated_room_operations_echo_ids_and_reject_stale_responses() {
     let server = create_test_server().await;
@@ -851,7 +851,7 @@ async fn correlated_room_operations_echo_ids_and_reject_stale_responses() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn room_operation_requires_explicit_capability_negotiation() {
     let server = create_test_server().await;
@@ -886,7 +886,7 @@ async fn room_operation_requires_explicit_capability_negotiation() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn correlated_spectator_operations_echo_success_and_failure_ids() {
     let server = create_test_server().await;
@@ -1150,7 +1150,7 @@ async fn setup_claimable_reconnect(
 /// must not move any identity — otherwise the routing map would move to the
 /// reconnected identity while this socket keeps stamping frames as the
 /// transient sender (a silent self-zombie).
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn router_refuses_reconnect_frames_even_with_a_claimable_token() {
     let server = create_test_server().await;
@@ -1189,7 +1189,7 @@ async fn router_refuses_reconnect_frames_even_with_a_claimable_token() {
 
 /// Same fail-closed contract for the correlated `RoomOperation` reconnect form:
 /// the refusal must echo the operation id so the client can correlate it.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn router_refuses_correlated_reconnect_operations_with_an_echoed_id() {
     let server = create_test_server().await;

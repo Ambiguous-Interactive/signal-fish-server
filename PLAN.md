@@ -79,7 +79,15 @@ correctness evidence appears.
   serialization (a simd-json-class change is an owner decision: new
   dependency with internal `unsafe` against the no-unsafe crate policy —
   the policy forbids `unsafe` in this crate, not in dependencies, but the
-  review bar is higher). Any change must keep exact wire and delivery
+  review bar is higher). Session 269 re-ranked the frontier: the
+  session-263 "estimate pre-pass caching" candidate is obsolete (the 268
+  splice already bounds the Value walk at one per text relay), and
+  admission shaping is not #207-eligible in-repo — the client names the
+  room, room discovery is the external directory's job (`join_only`,
+  #625), and a reconnect can swap the cohort mid-session
+  (`reassign_connection` takes the new socket's negotiated values), so
+  cohort-count shaping is an owner decision or directory-side work. Any
+  change must keep exact wire and delivery
   semantics (#207 rule) and carry a red-first measurement. The #207
   allocation profile still bounds the relay core.
 - #512 — hosted CI: the session-239 audit found every per-event workflow
@@ -91,7 +99,12 @@ correctness evidence appears.
   session 267 measured the remaining floor dead ends (mold: no gain, link
   is 1.2 s of ~10.5 s; dev-loop resolution: 0.3 s; nightly `-Zthreads`:
   slower than stable) and shrank the last 1 s test classifier window
-  (full `--lib` wall 4.19 s -> 3.44 s). The remaining floor is rustc
+  (full `--lib` wall 4.19 s -> 3.44 s). Session 269 swept the last
+  real-time negative-wait family the floor audit named (#642's "known
+  remainder"): the 100 ms `assert_silent` windows and the drain/GC race
+  sequencing now run on the paused clock (the formerly-slowest
+  clock-bound test 0.93 s -> 0.02 s; the suite's remaining slowest test
+  is pre-existing CPU-bound metrics work, not a clock wait). The remaining floor is rustc
   crate-size work; the structural option (crate split) is parked in #642
   pending an owner decision.
 - #207 — pursue the next optimization only from current allocation and latency

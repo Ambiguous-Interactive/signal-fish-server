@@ -147,7 +147,7 @@ async fn expect_lobby_state_changed(
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn handle_player_ready_without_room_returns_not_in_room_error() {
     let server = create_test_server().await;
@@ -169,7 +169,7 @@ async fn handle_player_ready_without_room_returns_not_in_room_error() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn handle_player_ready_with_missing_room_returns_room_not_found_error() {
     // Regression guard for error-code classification: a player assigned to a
@@ -201,7 +201,7 @@ async fn handle_player_ready_with_missing_room_returns_room_not_found_error() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn prune_ready_players_drops_only_dead_rooms() {
     // The all-paths leak backstop: the maintenance sweep removes coordinator
@@ -275,7 +275,7 @@ async fn prune_ready_players_drops_only_dead_rooms() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn handle_player_ready_after_finalize_returns_invalid_room_state_error() {
     // Finalized is terminal for ready toggles: drive the REAL finalize flow (a
@@ -409,7 +409,7 @@ async fn handle_player_ready_after_finalize_returns_invalid_room_state_error() {
 /// `GAME_START_NOT_READY`, `Forbidden` => `GAME_START_FORBIDDEN`,
 /// `AlreadyStarted` => `INVALID_ROOM_STATE` — each with no state mutation and
 /// no traffic to any other member.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn start_game_rejections_map_to_exact_wire_error_codes() {
     let server = create_test_server().await;
@@ -592,7 +592,7 @@ async fn start_game_rejections_map_to_exact_wire_error_codes() {
 /// cached `all_ready: true` goes stale while the authoritative `StartGame`
 /// gate rejects with `GAME_START_NOT_READY`. The next real toggle restores an
 /// `all_ready: true` that a retrying client can start on.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn join_breaks_cached_all_ready_without_a_corrective_broadcast() {
     let server = create_test_server().await;
@@ -772,7 +772,7 @@ async fn join_breaks_cached_all_ready_without_a_corrective_broadcast() {
 /// (`ready_state.rs`) must return without emitting anything — notably without
 /// the `NotInRoom` error an unfenced handler would send — and without mutating
 /// readiness or the room.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn stale_generation_ready_and_start_game_are_silent_noops_after_reclaim() {
     let server = create_test_server().await;
@@ -903,7 +903,7 @@ async fn stale_generation_ready_and_start_game_are_silent_noops_after_reclaim() 
 /// and joins again is a new, unready member: resurrecting the previous
 /// readiness would both invert their next toggle and let the remaining members
 /// reach `all_ready` (and therefore `StartGame`) without them.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn rejoining_a_room_does_not_restore_stale_readiness() {
     let server = create_test_server().await;
@@ -1033,7 +1033,7 @@ async fn rejoining_a_room_does_not_restore_stale_readiness() {
 /// ready list, so the restored membership carries the only surviving evidence —
 /// and readiness cannot be re-established by hand, because a finalized room
 /// rejects `PlayerReady`.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnecting_into_a_finalized_room_restores_that_members_readiness() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -1155,7 +1155,7 @@ async fn reconnecting_into_a_finalized_room_restores_that_members_readiness() {
 /// final set is written into the room record. A snapshot taken after the game
 /// starts must read the record, or every member of a running game is reported
 /// unready — the state a spectator joining a live game sees.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn snapshots_of_a_finalized_room_report_its_final_readiness() {
     let server = create_test_server_with_session(mesh_session_config()).await;
@@ -1247,7 +1247,7 @@ async fn snapshots_of_a_finalized_room_report_its_final_readiness() {
 /// stored player record during the lobby, so projecting the stored flag shows a
 /// spectator an all-unready lobby no matter what the members did — and the
 /// spectator receives no lobby broadcasts that could correct it.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn spectator_snapshot_reports_live_readiness() {
     let server = create_test_server().await;

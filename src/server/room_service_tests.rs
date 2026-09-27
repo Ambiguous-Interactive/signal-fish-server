@@ -182,7 +182,7 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
     })
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn generated_room_code_collision_retries_instead_of_joining_existing_room() {
     let server = create_test_server().await;
@@ -248,7 +248,7 @@ async fn generated_room_code_collision_retries_instead_of_joining_existing_room(
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn room_join_rejects_unicode_case_fold_equivalent_player_name() {
     let server = create_test_server().await;
@@ -315,7 +315,7 @@ async fn room_join_rejects_unicode_case_fold_equivalent_player_name() {
     assert!(!room.players.contains_key(&joiner));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn legacy_adapter_untyped_atomic_collision_is_confirmed_and_retried() {
     let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
@@ -373,7 +373,7 @@ async fn legacy_adapter_untyped_atomic_collision_is_confirmed_and_retried() {
     assert_eq!(race.room_code_retry_successes, 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn ambiguous_commit_for_a_password_creation_is_refused_not_adopted_unlocked() {
     let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
@@ -436,7 +436,7 @@ async fn ambiguous_commit_for_a_password_creation_is_refused_not_adopted_unlocke
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn legacy_adapter_ambiguous_success_is_adopted_without_duplicate_room() {
     let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
@@ -493,7 +493,7 @@ async fn legacy_adapter_ambiguous_success_is_adopted_without_duplicate_room() {
     assert_eq!(race.room_code_retry_operations, 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn generated_room_code_retry_budget_exhaustion_is_bounded_and_observable() {
     let server = create_test_server().await;
@@ -565,7 +565,7 @@ async fn generated_room_code_retry_budget_exhaustion_is_bounded_and_observable()
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn explicit_room_code_keeps_existing_join_semantics_without_retry() {
     let server = create_test_server().await;
@@ -614,7 +614,7 @@ async fn explicit_room_code_keeps_existing_join_semantics_without_retry() {
     assert_eq!(race.room_code_retry_operations, 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn join_only_admission_never_creates_and_preserves_legacy_create_on_join() {
     // Issue #625: a directory-driven join must not silently create a room
@@ -789,7 +789,7 @@ async fn join_only_admission_never_creates_and_preserves_legacy_create_on_join()
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn join_only_admission_while_draining_is_truthful_and_admits_existing_rooms() {
     // While draining, a join-only miss reports its truthful `ROOM_NOT_FOUND`
@@ -915,7 +915,7 @@ async fn join_only_admission_while_draining_is_truthful_and_admits_existing_room
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn join_only_room_operation_miss_correlates_room_not_found() {
     // The v3 correlated envelope carries the same collision-safe refusal,
@@ -2215,7 +2215,7 @@ fn assert_no_queued_message(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>, c
 /// record — keeping its token, deadline, and epoch/sequence view — and
 /// destroys the token the join just issued, so the client's only live
 /// credential dead-ends with a misleading `TokenMismatch`.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn same_room_rejoin_supersedes_the_pending_reconnection_record() {
     let server = create_test_server_with_config(ServerConfig {
@@ -2331,7 +2331,7 @@ async fn same_room_rejoin_supersedes_the_pending_reconnection_record() {
 /// in the room is spectator, so letting the pre-spectator token stay claimable
 /// would re-seat the player after the spectator session ends — a superseded
 /// membership resurrected through a stale credential.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn spectator_join_supersedes_the_pending_reconnection_record() {
     let server = create_test_server_with_config(ServerConfig {
@@ -2421,7 +2421,7 @@ async fn spectator_join_supersedes_the_pending_reconnection_record() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn seated_room_join_rejects_an_existing_spectator_role() {
     let server = create_test_server().await;
@@ -2501,7 +2501,7 @@ async fn seated_room_join_rejects_an_existing_spectator_role() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn spectator_join_waits_for_one_slot_baseline_capacity() {
     let server = create_test_server().await;
@@ -2593,7 +2593,7 @@ async fn spectator_join_waits_for_one_slot_baseline_capacity() {
     assert!(server.spectator_service.is_spectating(&spectator));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn failed_spectator_publication_retries_rollback_and_restores_transport_generation() {
     let coordinator = Arc::new(DrainTriggerCoordinator::new(
@@ -2703,7 +2703,7 @@ async fn failed_spectator_publication_retries_rollback_and_restores_transport_ge
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn aborting_backpressured_spectator_detach_still_publishes_departure() {
     let server = create_test_server().await;
@@ -2793,7 +2793,7 @@ async fn aborting_backpressured_spectator_detach_still_publishes_departure() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn aborting_join_while_baseline_is_backpressured_still_completes_admission() {
     let server = create_test_server().await;
@@ -2860,7 +2860,7 @@ async fn aborting_join_while_baseline_is_backpressured_still_completes_admission
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn correlated_join_baseline_failure_rolls_back_and_returns_terminal_failure() {
     let database = Arc::new(InMemoryDatabase::new());
@@ -3093,7 +3093,7 @@ async fn correlated_reconnect_panic_fixture() -> CorrelatedReconnectPanicFixture
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn correlated_join_panic_returns_terminal_internal_failure() {
     let server = create_test_server().await;
@@ -3120,7 +3120,7 @@ async fn correlated_join_panic_returns_terminal_internal_failure() {
     expect_correlated_internal_operation_failure(&mut receiver, operation_id, "join panic").await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn correlated_join_panic_after_admission_rolls_back_the_prepared_generation() {
     let server = create_test_server().await;
@@ -3185,7 +3185,7 @@ async fn correlated_join_panic_after_admission_rolls_back_the_prepared_generatio
     assert!(!room.players.contains_key(&player_id));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn correlated_leave_panic_returns_terminal_internal_failure() {
     let server = create_test_server().await;
@@ -3201,7 +3201,7 @@ async fn correlated_leave_panic_returns_terminal_internal_failure() {
     expect_correlated_internal_operation_failure(&mut receiver, operation_id, "leave panic").await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn correlated_leave_event_panic_with_fallback_failure_has_one_terminal_and_lifecycle() {
     let coordinator = Arc::new(DrainTriggerCoordinator::new(
@@ -3309,7 +3309,7 @@ async fn correlated_leave_event_panic_with_fallback_failure_has_one_terminal_and
     assert_no_second_terminal_response(&mut receiver, operation_id, "leave fallback failure").await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn correlated_leave_repairs_an_ordinary_authority_publication_failure_in_lane() {
     let coordinator = Arc::new(DrainTriggerCoordinator::new(
@@ -3417,7 +3417,7 @@ async fn correlated_leave_repairs_an_ordinary_authority_publication_failure_in_l
     assert_no_second_terminal_response(&mut receiver, operation_id, "authority recovery").await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn correlated_reconnect_panic_returns_terminal_internal_failure() {
     let server = create_test_server().await;
@@ -3448,7 +3448,7 @@ async fn correlated_reconnect_panic_returns_terminal_internal_failure() {
         .await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn correlated_reconnect_panic_after_identity_move_uses_the_still_routed_identity() {
     let mut fixture = correlated_reconnect_panic_fixture().await;
@@ -3522,7 +3522,7 @@ async fn correlated_reconnect_panic_after_identity_move_uses_the_still_routed_id
     .await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn correlated_leave_retains_room_gate_across_outer_completion_failure() {
     let coordinator = Arc::new(DrainTriggerCoordinator::new(
@@ -3674,7 +3674,7 @@ async fn correlated_leave_retains_room_gate_across_outer_completion_failure() {
     .expect("peer observes leave recovery before the room gate opens");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn correlated_join_panic_after_terminal_does_not_send_a_second_result() {
     let server = create_test_server().await;
@@ -3773,7 +3773,7 @@ async fn correlated_join_panic_after_terminal_does_not_send_a_second_result() {
         .await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn correlated_leave_panic_after_terminal_does_not_send_a_second_result() {
     let server = create_test_server().await;
@@ -3870,7 +3870,7 @@ async fn correlated_leave_panic_after_terminal_does_not_send_a_second_result() {
         .await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn correlated_reconnect_panic_after_terminal_does_not_send_a_second_result() {
     let mut fixture = correlated_reconnect_panic_fixture().await;
@@ -4425,7 +4425,7 @@ async fn stalled_incumbent_does_not_hide_fresh_join_or_evict_healthy_peers() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn aborting_leave_while_ack_is_backpressured_still_publishes_terminal_event() {
     let server = create_test_server().await;
@@ -4527,7 +4527,7 @@ async fn aborting_leave_while_ack_is_backpressured_still_publishes_terminal_even
     assert_eq!(server.get_client_room(&leaver).await, None);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn aborting_reconnect_while_baseline_is_backpressured_still_restores_identity() {
     let server = create_test_server().await;
@@ -4660,7 +4660,7 @@ async fn aborting_reconnect_while_baseline_is_backpressured_still_restores_ident
         .any(|player| player.id == reconnecting));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn delayed_ready_event_commits_before_a_concurrent_join_mutates_membership() {
     let server = create_test_server().await;
@@ -4774,7 +4774,7 @@ async fn delayed_ready_event_commits_before_a_concurrent_join_mutates_membership
     join.await.expect("join task should not panic");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn two_concurrent_joins_publish_in_database_mutation_order() {
     let server = create_test_server().await;
@@ -4883,7 +4883,7 @@ async fn two_concurrent_joins_publish_in_database_mutation_order() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn delayed_leave_terminal_event_commits_before_a_concurrent_join() {
     let server = create_test_server().await;
@@ -5031,7 +5031,7 @@ async fn delayed_leave_terminal_event_commits_before_a_concurrent_join() {
     join.await.expect("join task should not panic");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn room_join_snapshot_baselines_preexisting_relay_tail_before_player_left() {
     let server = create_test_server().await;
@@ -5126,7 +5126,7 @@ async fn room_join_snapshot_baselines_preexisting_relay_tail_before_player_left(
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn leave_room_sends_confirmation_and_clears_membership() {
     let server = create_test_server().await;
@@ -5191,7 +5191,7 @@ async fn leave_room_sends_confirmation_and_clears_membership() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn leave_storage_error_preserves_membership_routing_and_reconnect_token() {
     let mut fixture = setup_joined_pair_with_reconnection().await;
@@ -5246,7 +5246,7 @@ async fn leave_storage_error_preserves_membership_routing_and_reconnect_token() 
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn disconnect_storage_error_forces_terminal_teardown_and_keeps_claim_reachable() {
     let mut fixture = setup_joined_pair_with_reconnection().await;
@@ -5395,7 +5395,7 @@ async fn disconnect_storage_error_forces_terminal_teardown_and_keeps_claim_reach
         .any(|player| player.id == fixture.leaver));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn failed_reconnect_returns_the_durable_detach_it_took_over() {
     let fixture = setup_joined_pair_with_reconnection().await;
@@ -5466,7 +5466,7 @@ async fn failed_reconnect_returns_the_durable_detach_it_took_over() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn disconnect_storage_error_retries_without_reconnection_support() {
     let server = create_test_server_with_config(ServerConfig {
@@ -5550,7 +5550,7 @@ async fn disconnect_storage_error_retries_without_reconnection_support() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn unpublished_join_rollback_retries_storage_and_conserves_activity() {
     let server = create_test_server_with_config(ServerConfig {
@@ -5650,7 +5650,7 @@ async fn unpublished_join_rollback_retries_storage_and_conserves_activity() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn test_spectator_disconnect_retry_restores_empty_room_gc_issue_241() {
     let database = Arc::new(InMemoryDatabase::new());
@@ -5744,6 +5744,10 @@ async fn test_spectator_disconnect_retry_restores_empty_room_gc_issue_241() {
         .await
         .expect("remove final seated player")
         .expect("creator existed");
+    // Age the room past the zero idle floor on the paused clock: the
+    // cleanup predicate is strictly `idle > timeout`, and a fresh room's
+    // virtual idle is exactly zero.
+    tokio::time::advance(Duration::from_millis(1)).await;
     let deleted = database
         .cleanup_empty_rooms(chrono::Duration::zero(), &HashSet::new())
         .await
@@ -5755,7 +5759,7 @@ async fn test_spectator_disconnect_retry_restores_empty_room_gc_issue_241() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn absent_storage_member_converges_local_role_and_peer_roster() {
     let mut fixture = setup_joined_pair_with_reconnection().await;
@@ -5813,7 +5817,7 @@ async fn absent_storage_member_converges_local_role_and_peer_roster() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn unregister_snapshot_failure_creates_no_broken_reconnect_record() {
     let mut fixture = setup_joined_pair_with_reconnection().await;
@@ -5876,7 +5880,7 @@ async fn unregister_snapshot_failure_creates_no_broken_reconnect_record() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn draining_unregister_removes_membership_without_roomleft_noise() {
     let server = create_test_server().await;
@@ -5960,7 +5964,7 @@ async fn draining_unregister_removes_membership_without_roomleft_noise() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn max_room_cap_denial_releases_join_coordination_locks() {
     let server = create_test_server_with_config(ServerConfig {
@@ -6032,7 +6036,7 @@ async fn max_room_cap_denial_releases_join_coordination_locks() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn server_room_cap_denial_releases_join_coordination_locks() {
     let server = create_test_server_with_config(ServerConfig {
@@ -6112,7 +6116,7 @@ async fn server_room_cap_denial_releases_join_coordination_locks() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn server_room_cap_is_atomic_across_games() {
     let server = create_test_server_with_config(ServerConfig {
@@ -6235,7 +6239,7 @@ async fn server_room_cap_is_atomic_across_games() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn draining_server_rejects_room_creation_without_consuming_join_locks() {
     let server = create_test_server().await;
@@ -6313,7 +6317,7 @@ async fn draining_server_rejects_room_creation_without_consuming_join_locks() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn draining_room_creation_rechecks_after_cap_lock_race() {
     let trigger_lock = Arc::new(DrainOnLockAcquire::new("game_room_cap:test-game"));
@@ -6396,7 +6400,7 @@ async fn draining_room_creation_rechecks_after_cap_lock_race() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn draining_room_creation_rolls_back_after_create_race() {
     let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
@@ -6480,7 +6484,7 @@ async fn draining_room_creation_rolls_back_after_create_race() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn unpublished_created_room_rollback_counts_rooms_deleted() {
     let server = create_test_server().await;
@@ -6517,7 +6521,7 @@ async fn unpublished_created_room_rollback_counts_rooms_deleted() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn empty_room_sweep_counts_rooms_deleted() {
     let server = create_test_server_with_config(ServerConfig {
@@ -6594,7 +6598,7 @@ async fn empty_room_sweep_counts_rooms_deleted() {
         .expect("cleanup task should not panic");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn draining_room_creation_rejection_does_not_wait_on_full_queue() {
     let server = create_test_server().await;
@@ -6661,7 +6665,7 @@ async fn draining_room_creation_rejection_does_not_wait_on_full_queue() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn draining_server_rejects_late_client_registration() {
     let server = create_test_server().await;
@@ -6690,7 +6694,7 @@ async fn draining_server_rejects_late_client_registration() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn draining_unregister_upgrades_activity_timeout_close_to_shutdown() {
     let server = create_test_server().await;
@@ -6722,7 +6726,7 @@ async fn draining_unregister_upgrades_activity_timeout_close_to_shutdown() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn draining_unregister_rechecks_drain_after_mid_unregister_detach() {
     let coordinator = Arc::new(DrainTriggerCoordinator::new(
@@ -6820,7 +6824,7 @@ async fn draining_unregister_rechecks_drain_after_mid_unregister_detach() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn draining_unregister_discards_reconnect_when_drain_starts_during_leave() {
     let coordinator = Arc::new(DrainTriggerCoordinator::new(DrainTrigger::RoomlessRegister));
@@ -6927,7 +6931,7 @@ async fn draining_unregister_discards_reconnect_when_drain_starts_during_leave()
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn draining_unregister_upgrades_close_when_drain_starts_during_coordinator_unregister() {
     let coordinator = Arc::new(DrainTriggerCoordinator::new(DrainTrigger::UnregisterLocal));
@@ -6957,7 +6961,7 @@ async fn draining_unregister_upgrades_close_when_drain_starts_during_coordinator
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn draining_leave_room_skips_roomleft_when_drain_starts_inside_send() {
     let coordinator = Arc::new(DrainTriggerCoordinator::new(DrainTrigger::RoomLeftSend));
@@ -7040,7 +7044,7 @@ async fn draining_leave_room_skips_roomleft_when_drain_starts_inside_send() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn missing_terminal_tail_suppresses_incomplete_player_left() {
     let coordinator = Arc::new(DrainTriggerCoordinator::new(
@@ -7113,7 +7117,7 @@ async fn missing_terminal_tail_suppresses_incomplete_player_left() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn draining_leave_room_cancels_backpressured_roomleft() {
     let server = create_test_server().await;
@@ -7177,7 +7181,7 @@ async fn draining_leave_room_cancels_backpressured_roomleft() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn draining_leave_room_skips_playerleft_when_drain_starts_inside_broadcast() {
     let coordinator = Arc::new(DrainTriggerCoordinator::new(
@@ -7276,7 +7280,7 @@ async fn draining_leave_room_skips_playerleft_when_drain_starts_inside_broadcast
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn draining_leave_room_cancels_backpressured_playerleft_and_replay() {
     let server = create_test_server().await;
@@ -7384,7 +7388,7 @@ async fn draining_leave_room_cancels_backpressured_playerleft_and_replay() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn draining_server_allows_existing_room_join() {
     let server = create_test_server().await;
@@ -7459,7 +7463,7 @@ async fn draining_server_allows_existing_room_join() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn join_into_full_room_classifies_as_room_full_not_creation_failed() {
     // Regression guard for error-code classification (the same class fixed in
@@ -7583,7 +7587,7 @@ async fn maintenance_cleanup_removes_expired_reconnections() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn empty_room_cleanup_preserves_reconnect_registered_during_its_snapshot() {
     let database = Arc::new(DrainAfterCreateDatabase::with_paused_empty_cleanup(
@@ -7733,7 +7737,7 @@ async fn empty_room_cleanup_preserves_reconnect_registered_during_its_snapshot()
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn inactive_cleanup_winner_discards_reconnect_for_deleted_room() {
     let database = Arc::new(DrainAfterCreateDatabase::with_paused_expired_cleanup(
@@ -7796,6 +7800,11 @@ async fn inactive_cleanup_winner_discards_reconnect_for_deleted_room() {
         .expect("joined player should be present in the inactive room");
     let was_authority = room.authority_player == Some(player_id);
 
+    // Age the room past the zero inactive floor on the paused clock: the
+    // cleanup predicate is strictly `idle > timeout`, and a fresh room's
+    // virtual idle is exactly zero.
+    tokio::time::advance(Duration::from_millis(1)).await;
+
     let mut cleanup = Box::pin(server.cleanup_expired_rooms_protecting_reconnections(
         chrono::Duration::hours(1),
         chrono::Duration::zero(),
@@ -7851,7 +7860,7 @@ async fn inactive_cleanup_winner_discards_reconnect_for_deleted_room() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn inactive_room_cleanup_terminally_unroutes_seated_players() {
     let server = create_test_server_with_config(ServerConfig {
@@ -8130,7 +8139,7 @@ async fn inactive_room_cleanup_terminally_unroutes_seated_players() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn zero_ping_timeout_disables_activity_reaper() {
     let server = create_test_server_with_config(ServerConfig {
@@ -8164,7 +8173,7 @@ async fn zero_ping_timeout_disables_activity_reaper() {
         .expect("cleanup task should not panic");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn activity_refresh_after_cleanup_snapshot_prevents_eviction() {
     let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
@@ -8236,7 +8245,7 @@ async fn activity_refresh_after_cleanup_snapshot_prevents_eviction() {
         .expect("cleanup task should not panic");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn activity_reaper_does_not_override_an_existing_close_owner() {
     let server = create_test_server_with_config(ServerConfig {
@@ -8300,7 +8309,7 @@ async fn activity_reaper_does_not_override_an_existing_close_owner() {
         .expect("cleanup task should not panic");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn draining_cleanup_task_exits_without_activity_timeout_eviction() {
     let server = create_test_server_with_config(ServerConfig {
@@ -8332,7 +8341,7 @@ async fn draining_cleanup_task_exits_without_activity_timeout_eviction() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn draining_cleanup_task_stops_when_drain_starts_during_activity_farewell() {
     let coordinator = Arc::new(DrainTriggerCoordinator::new(
@@ -8355,6 +8364,10 @@ async fn draining_cleanup_task_stops_when_drain_starts_during_activity_farewell(
         .register_client_with_close(sender, close, "127.0.0.1:48019".parse().unwrap())
         .await
         .expect("client registration succeeds before drain");
+
+    // Age the connection past the 1 ns expiry on the paused clock so the
+    // first (immediate) cleanup tick deterministically sees it as expired.
+    tokio::time::advance(Duration::from_millis(1)).await;
 
     timeout(
         Duration::from_secs(1),
@@ -8391,7 +8404,7 @@ async fn draining_cleanup_task_stops_when_drain_starts_during_activity_farewell(
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn draining_cleanup_task_skips_activity_farewell_when_drain_starts_during_inmemory_lookup() {
     let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
@@ -8418,6 +8431,10 @@ async fn draining_cleanup_task_skips_activity_farewell_when_drain_starts_during_
         .register_client_with_close(sender, close, "127.0.0.1:48030".parse().unwrap())
         .await
         .expect("client registration succeeds before drain");
+
+    // Age the connection past the 1 ns expiry on the paused clock so the
+    // first (immediate) cleanup tick deterministically sees it as expired.
+    tokio::time::advance(Duration::from_millis(1)).await;
 
     let coordinator_write = coordinator.local_clients.write().await;
     let cleanup_task = tokio::spawn({
@@ -8475,7 +8492,7 @@ async fn draining_cleanup_task_skips_activity_farewell_when_drain_starts_during_
 /// `authority_player`. Without it, clients keep treating the departed member as
 /// host and nobody claims the vacant role, while the server already lets any
 /// member start the game.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn departing_authority_notifies_remaining_members() {
     let mut fixture = setup_joined_pair_with_reconnection().await;
@@ -8537,7 +8554,7 @@ async fn departing_authority_notifies_remaining_members() {
 /// write (inactive-room GC winning the race) must surface as `ROOM_NOT_FOUND`,
 /// not `ROOM_CREATION_FAILED`: the client asked for a room that existed and is
 /// now gone, which is exactly what the not-found code means.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn join_racing_room_deletion_reports_room_not_found() {
     let server = create_test_server().await;
@@ -8656,7 +8673,7 @@ impl DistributedLock for ReleaseErrorLock {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn test_accounted_release_counts_stale_handles_not_successes() {
     let server = create_test_server().await;
@@ -8719,7 +8736,7 @@ async fn test_accounted_release_counts_stale_handles_not_successes() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn test_join_flow_counts_backend_release_errors() {
     let coordinator: Arc<dyn MessageCoordinator> = Arc::new(InMemoryMessageCoordinator::new());
@@ -8776,7 +8793,7 @@ async fn test_join_flow_counts_backend_release_errors() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn test_join_flow_releases_do_not_count_as_release_failures() {
     let server = create_test_server().await;
@@ -8818,7 +8835,7 @@ async fn test_join_flow_releases_do_not_count_as_release_failures() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn test_distributed_lock_cleanup_counters_are_wired() {
     let server = create_test_server_with_config(ServerConfig {
@@ -8882,7 +8899,7 @@ async fn test_distributed_lock_cleanup_counters_are_wired() {
 /// pinned via injected storage errors: the creator's own join snapshot and
 /// any later joiner's snapshot must both show the durable placeholder, and
 /// nothing may republish stale names afterwards.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn creator_name_failure_keeps_published_snapshot_consistent_with_storage() {
     let database = Arc::new(InMemoryDatabase::new());
     database
@@ -9019,7 +9036,7 @@ async fn creator_name_failure_keeps_published_snapshot_consistent_with_storage()
     assert_eq!(stored_after_rename, "Display-Name");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn transfer_authority_announcement_cannot_be_overtaken_by_a_departure() {
     // The transfer's `AuthorityChanged` must be sequenced with the room's
