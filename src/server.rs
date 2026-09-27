@@ -489,6 +489,8 @@ pub struct EnhancedGameServer {
     /// Nonzero once graceful shutdown drain has started; stores the advertised
     /// Unix epoch millisecond close deadline.
     shutdown_drain_deadline_ms: Arc<AtomicU64>,
+    /// Serializes the reconnect baseline enqueue with the drain transition.
+    shutdown_drain_commit_gate: StdMutex<()>,
     /// Wakes drain-sensitive delivery paths so they can cancel backpressured
     /// normal traffic before it is enqueued after drain begins.
     shutdown_drain_tx: watch::Sender<bool>,
@@ -858,6 +860,7 @@ impl EnhancedGameServer {
             transport_security,
             dashboard_metrics_cache: dashboard_metrics_cache.clone(),
             shutdown_drain_deadline_ms,
+            shutdown_drain_commit_gate: StdMutex::new(()),
             shutdown_drain_tx,
             metrics_rejection_log: crate::websocket::RejectionLogThrottle::new(),
             metrics_truncation_log: crate::websocket::RejectionLogThrottle::new(),
@@ -4283,6 +4286,9 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         player_id: PlayerId,
         room_id: RoomId,
         delivery: ClientDeliveryHandle,
+        should_commit: &'a (dyn Fn() -> bool + Send + Sync),
+        commit_gate: Option<&'a StdMutex<()>>,
+        drain: Option<tokio::sync::watch::Receiver<bool>>,
         build_message: Box<
             dyn FnOnce(
                     Vec<PlayerId>,
@@ -4296,7 +4302,19 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 + 'a,
         >,
     ) -> anyhow::Result<DeliveryOutcome> {
-        let permit = match self.reserve_initial_transition(player_id, &delivery).await {
+        let reservation = if let Some(mut drain) = drain {
+            tokio::select! {
+                result = self.reserve_initial_transition(player_id, &delivery) => result,
+                _ = async {
+                    if !*drain.borrow() {
+                        let _ = drain.changed().await;
+                    }
+                } => return Ok(DeliveryOutcome::Canceled),
+            }
+        } else {
+            self.reserve_initial_transition(player_id, &delivery).await
+        };
+        let permit = match reservation {
             Ok(permit) => permit,
             Err(outcome) => return Ok(outcome),
         };
@@ -4324,7 +4342,16 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         }
         routed_players.sort_unstable();
         let message = build_message(routed_players).await?;
-        let outcome = self.commit_initial_transition(player_id, permit, message);
+        let outcome = {
+            // Drain takes the same gate before flipping its atomic state. No
+            // reconnect baseline can pass the check and queue after that flip.
+            let _commit_guard = commit_gate
+                .map(|gate| gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+            if !should_commit() {
+                return Ok(DeliveryOutcome::Canceled);
+            }
+            self.commit_initial_transition(player_id, permit, message)
+        };
         if outcome == DeliveryOutcome::Delivered {
             let mut room_players = self.room_players.write().await;
             let mut clients = self.local_clients.write().await;

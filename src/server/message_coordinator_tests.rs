@@ -1539,6 +1539,9 @@ async fn initial_room_transitions_wait_for_capacity_before_taking_routing_locks(
                             joining_id,
                             room_id,
                             joining_delivery,
+                            &|| true,
+                            None,
+                            None,
                             Box::new(|_| Box::pin(async { Ok(Arc::new(ServerMessage::Pong)) })),
                         )
                         .await
@@ -1643,6 +1646,9 @@ async fn paused_initial_builder_only_blocks_its_room() {
                     joining_a,
                     room_a,
                     ClientDeliveryHandle::new(joining_a_sender, ConnectionCloseSignal::detached()),
+                    &|| true,
+                    None,
+                    None,
                     Box::new(move |routed_players| {
                         Box::pin(async move {
                             assert_eq!(routed_players, vec![stable_a, joining_a]);
@@ -1754,6 +1760,9 @@ async fn canceled_and_failed_initial_builders_release_the_room_gate() {
                     canceled_id,
                     room_id,
                     ClientDeliveryHandle::new(canceled_sender, ConnectionCloseSignal::detached()),
+                    &|| true,
+                    None,
+                    None,
                     Box::new(move |_| {
                         Box::pin(async move {
                             builder_entered.notify_one();
@@ -1778,6 +1787,9 @@ async fn canceled_and_failed_initial_builders_release_the_room_gate() {
             failed_id,
             room_id,
             ClientDeliveryHandle::new(failed_sender, ConnectionCloseSignal::detached()),
+            &|| true,
+            None,
+            None,
             Box::new(|_| Box::pin(async { anyhow::bail!("injected baseline failure") })),
         )
         .await
@@ -2284,6 +2296,9 @@ async fn replay_hook_and_live_broadcast_are_atomic_against_reconnect_registratio
                         reconnecting_sender,
                         ConnectionCloseSignal::detached(),
                     ),
+                    &|| true,
+                    None,
+                    None,
                     Box::new(move |_| {
                         Box::pin(async move {
                             Ok(Arc::new(ServerMessage::Error {

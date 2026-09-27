@@ -93,6 +93,10 @@ impl EnhancedGameServer {
     /// The first caller fixes the deadline. Later callers observe the same
     /// deadline and do not re-announce a second drain window.
     pub fn begin_shutdown_drain(&self) -> ShutdownDrain {
+        let _commit_guard = self
+            .shutdown_drain_commit_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let grace = self.config.drain_grace;
         let deadline_ms = unix_deadline_ms_after(grace);
         match self.shutdown_drain_deadline_ms.compare_exchange(

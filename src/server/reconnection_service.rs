@@ -515,6 +515,8 @@ impl EnhancedGameServer {
         claim_guard: ReconnectionClaimGuard,
         restore: &ReconnectRestoreState,
         rollback_context: &'static str,
+        reason: &'static str,
+        error_code: ErrorCode,
         operation_id: Option<crate::protocol::RoomOperationId>,
     ) -> bool {
         self.discard_pre_issued_reconnection_token(reconnect_player_id)
@@ -539,8 +541,8 @@ impl EnhancedGameServer {
             current_player_id,
             claim_guard,
             restore,
-            "Reconnected baseline could not be delivered",
-            ErrorCode::ReconnectionFailed,
+            reason,
+            error_code,
             operation_id,
         )
         .await
@@ -928,6 +930,19 @@ impl EnhancedGameServer {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .room_event_guard = room_event_guard.clone();
 
+        if self.is_draining() {
+            return self
+                .reject_claimed_reconnect(
+                    current_player_id,
+                    claim_guard,
+                    &restore,
+                    "Server is draining for shutdown",
+                    ErrorCode::ServerDraining,
+                    operation_id,
+                )
+                .await;
+        }
+
         // Get room from database
         let room = match self.database.get_room_by_id(room_id).await {
             Ok(Some(room)) => room,
@@ -1118,6 +1133,21 @@ impl EnhancedGameServer {
                         .await;
                 }
             }
+        }
+
+        // The durable add above can wait while shutdown begins. Reject before
+        // publishing the restored identity, and unwind the new row and claim.
+        if self.is_draining() {
+            return self
+                .reject_claimed_reconnect(
+                    current_player_id,
+                    claim_guard,
+                    &restore,
+                    "Server is draining for shutdown",
+                    ErrorCode::ServerDraining,
+                    operation_id,
+                )
+                .await;
         }
 
         // A prior disconnect may have forced local teardown while durable
@@ -1330,6 +1360,7 @@ impl EnhancedGameServer {
         let baseline_publication = Arc::new(std::sync::Mutex::new(None));
         let baseline_publication_in_builder = Arc::clone(&baseline_publication);
         let server = Arc::clone(&self);
+        let should_commit = || !self.is_draining();
 
         // Queue `Reconnected` before putting the restored connection back into
         // room routing. The coordinator holds the room-routing write lock while
@@ -1347,6 +1378,9 @@ impl EnhancedGameServer {
                 *reconnect_player_id,
                 *room_id,
                 reassigned_delivery,
+                &should_commit,
+                Some(&self.shutdown_drain_commit_gate),
+                Some(self.shutdown_drain_receiver()),
                 Box::new(move |routed_player_ids| {
                     Box::pin(async move {
                         let routed_player_ids: HashSet<PlayerId> =
@@ -1601,6 +1635,7 @@ impl EnhancedGameServer {
                     ?outcome,
                     "Reconnection restored state but could not queue the Reconnected baseline"
                 );
+                let draining = self.is_draining();
                 if let Some(effective_player_id) = &effective_player_id {
                     *effective_player_id.write().await = *current_player_id;
                 }
@@ -1611,6 +1646,16 @@ impl EnhancedGameServer {
                         claim_guard,
                         &restore,
                         "baseline_delivery",
+                        if draining {
+                            "Server is draining for shutdown"
+                        } else {
+                            "Reconnected baseline could not be delivered"
+                        },
+                        if draining {
+                            ErrorCode::ServerDraining
+                        } else {
+                            ErrorCode::ReconnectionFailed
+                        },
                         operation_id,
                     )
                     .await;
@@ -1632,6 +1677,8 @@ impl EnhancedGameServer {
                         claim_guard,
                         &restore,
                         "coordinator_registration",
+                        "Reconnected baseline could not be delivered",
+                        ErrorCode::ReconnectionFailed,
                         operation_id,
                     )
                     .await;

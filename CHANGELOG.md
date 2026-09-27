@@ -146,6 +146,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reconnect now releases its token and rolls back a restored seat if shutdown
+  drain starts before the response is queued (#647).
+
 - Spectator joins now stop if shutdown drain starts while admission waits or
   while the join response is blocked (#647).
 

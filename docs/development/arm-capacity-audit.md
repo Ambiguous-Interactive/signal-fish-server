@@ -77,7 +77,29 @@ No new finding is confirmed by this initial inventory.
 | Confidence and reproduction | The initial `spectator_join_waiting_on_room_code_refuses_shutdown_drain` test failed before the fix: the join returned `SpectatorJoined` after drain. Its deterministic replacement is `scripts/dev-loop.sh spectator_join_rechecks_drain_after_code_lock`; companion tests trigger drain after storage add and during a blocked baseline. |
 | Disposition | The service rechecks drain inside the room lane, rolls back a durable add if drain starts during storage, and cancels a blocked baseline through the drain signal. The focused tests pass in this change (#647). |
 
-These findings cover room-code rotation and spectator drain seams. The rest of the C1 room
+### ARM-C005 — Reconnect admission after shutdown drain
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed, medium |
+| Player impact | A reconnect can restore a seat and spend its one-time token after shutdown drain starts. The forced close then removes that short-lived seat. |
+| Source and revision | `src/server/reconnection_service.rs::handle_reconnect_owned` and `src/server.rs::register_local_client_with_initial_message_async`, reviewed at `07952b86`. |
+| Invariant | Drain refuses reconnects until the `Reconnected` baseline is queued. Rejection rolls back the seat and releases the token. A queued baseline commits the reconnect. |
+| Confidence and reproduction | `reconnect_restoring_membership_refuses_shutdown_drain_and_releases_token` failed before the fix: a paused membership write resumed after drain and returned success. `reconnect_waiting_for_baseline_capacity_refuses_shutdown_drain` covers the blocked response queue. |
+| Disposition | Reconnect rechecks drain after the room gate and durable add, cancels a blocked baseline when drain starts, and serializes baseline enqueue with the drain transition. Both regressions pass (#647). |
+
+### ARM-C006 — Reconnect can restore a duplicate player name
+
+| Field | Record |
+| --- | --- |
+| State, severity | Open, medium |
+| Player impact | Another player can join with a disconnected player's name, then the old player can restore the same name through reconnect. |
+| Source and revision | `src/server/room_service.rs` join name validation, `src/server/reconnection_service.rs` restore, and `src/database/mod.rs::add_player_to_room`, reviewed at `07952b86`. |
+| Invariant | Seated player names must remain unique under the join path's canonical comparison. Reconnect currently inserts its saved name without that check. |
+| Confidence and reproduction | Code-path audit. A focused join, disconnect, replacement join, and reconnect test remains to be written. |
+| Disposition | Carry into the next C1 session under #647. Determine whether disconnected names remain reserved or whether a conflicting reconnect is refused with a retryable token. |
+
+These findings cover room-code rotation and spectator and reconnect drain seams. The rest of the C1 room
 and storage rows remain unreviewed.
 
 ## Coverage ledger
