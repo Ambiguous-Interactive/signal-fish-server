@@ -207,6 +207,7 @@ fn test_ci_dep_detect_internal_paths_match_script() {
         ".llm/*",
         "target/*",
         "progress/*",
+        "docs/development/*",
     ];
 
     for prefix in shared_directory_prefixes {
