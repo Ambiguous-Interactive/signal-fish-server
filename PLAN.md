@@ -65,10 +65,17 @@ correctness evidence appears.
   in general, more hot-loop CPU perf. Session 267 posted the criterion
   runtime baseline (`relay_serialization_runtime`, release profile): the
   hot loop runs 0.7-1.4 us per relay send across all cohorts (1M+ per
-  second per core), the mixed-cohort multiplier shows on CPU too (21.5 ms
-  vs 14.9 ms per 15,360-delivery sample at room 16), and the v3 JSON text
-  cohort pays ~58% serialization premium over MessagePack at room 2.
-  Candidate targets in cost order: cohort-count reduction, JSON text
+  second per core), the mixed-cohort multiplier shows on CPU too, and the
+  v3 JSON text cohort pays ~58% serialization premium over MessagePack at
+  room 2. Landed 2026-09-27 (candidate 1, mixed-room shared-body splice):
+  the sibling protocol cohort copies the first-initialized cohort's exact
+  `head + data` bytes and appends only its stamp suffix, so mixed rooms
+  serialize the `data` tree once per relay instead of once per cohort
+  (ledger 2 -> 1 JSON encodes/relay), mixed-room bench bytes -2.1% with
+  allocation ops unchanged, and all 18 checked-in wire digests are
+  byte-identical; runtime bench room 16 -7.3% (p=0.05, back-to-back),
+  room 8 within codespace noise. Remaining candidates in cost order:
+  cohort-count reduction (admission/room-mix shaping), JSON text
   serialization (a simd-json-class change is an owner decision: new
   dependency with internal `unsafe` against the no-unsafe crate policy —
   the policy forbids `unsafe` in this crate, not in dependencies, but the
