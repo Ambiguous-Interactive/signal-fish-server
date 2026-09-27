@@ -212,6 +212,31 @@ fn test_dev_loop_forwards_options_and_accepts_multiple_patterns() {
     );
 }
 
+/// Patterns that resolve to the same owning target run in ONE scoped
+/// invocation (`-E 'test(a) or test(b)'`): a multi-pattern red-green loop
+/// pays one build, not one per pattern (issue #512, session 266).
+#[test]
+fn test_dev_loop_merges_same_target_patterns_into_one_invocation() {
+    let (code, output) = run_dev_loop(&["--dry-run", "test_alpha_runs", "mid_name_alpha_helper"]);
+    assert_eq!(code, 0, "same-target patterns must resolve: {output}");
+    let nextest_runs = output
+        .lines()
+        .filter(|line| line.contains("cargo nextest run"))
+        .count();
+    assert_eq!(
+        nextest_runs, 1,
+        "patterns sharing one owning target must merge into one invocation: {output}"
+    );
+    assert!(
+        output.contains("\\ or\\"),
+        "the merged filterset must OR the patterns: {output}"
+    );
+    assert!(
+        output.contains("test_alpha_runs") && output.contains("mid_name_alpha_helper"),
+        "both patterns must survive into the merged filterset: {output}"
+    );
+}
+
 #[test]
 fn test_dev_loop_usage_error_without_patterns() {
     let (code, output) = run_dev_loop(&["--dry-run"]);

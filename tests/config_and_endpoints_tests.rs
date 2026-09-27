@@ -11,8 +11,8 @@ mod websocket_test_helpers;
 
 use regex::Regex;
 use signal_fish_server::config::{
-    AppRegistrationEntry, ClientAuthMode, Config, DashboardHistoryField, LogFormat, ProtocolConfig,
-    TokenBindingConfig, TransportSecurityConfig,
+    validate_config_security, AppRegistrationEntry, ClientAuthMode, Config, DashboardHistoryField,
+    LogFormat, ProtocolConfig, TokenBindingConfig, TransportSecurityConfig,
 };
 use signal_fish_server::security::token_binding::TokenBindingScheme;
 use signal_fish_server::websocket::{
@@ -341,6 +341,11 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
         env: "SIGNAL_FISH__SECURITY__MAX_CONNECTION_INFO_BYTES",
         path: "security.max_connection_info_bytes",
         default: Some("8192"),
+    },
+    ConfigReferenceRow {
+        env: "SIGNAL_FISH__SECURITY__MAX_GAME_DATA_BYTES",
+        path: "security.max_game_data_bytes",
+        default: None,
     },
     ConfigReferenceRow {
         env: "SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP",
@@ -1041,6 +1046,12 @@ fn test_config_example_includes_all_rate_limit_fields() {
 
     let config: Config =
         serde_json::from_str(&content).expect("config.example.json must parse as Config");
+    // The example is the copy-paste starting point: it must pass the same
+    // startup security validation the binary runs, including every knob the
+    // example itself documents (a cap above max_message_size here would boot
+    // nowhere).
+    validate_config_security(&config)
+        .expect("config.example.json must pass startup security validation");
     assert_eq!(config.rate_limit.max_signals, 600);
     assert_eq!(config.rate_limit.max_signal_errors, 60);
     assert_eq!(config.rate_limit.max_inbound_error_replies, 3000);
@@ -2427,8 +2438,6 @@ async fn raw_websocket_handlers_without_origin_policy_cannot_upgrade() {
 // ===========================================================================
 // Config validation tests
 // ===========================================================================
-
-use signal_fish_server::config::validate_config_security;
 
 /// A config-validation test scenario: (name, config_modifier, expected_ok).
 type ValidationScenario = (&'static str, Box<dyn Fn(&mut Config)>, bool);

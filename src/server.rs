@@ -605,6 +605,11 @@ pub struct ServerConfig {
     /// `max_message_size` and the roster aggregate for direct library
     /// construction too.
     pub max_connection_info_bytes: usize,
+    /// Optional per-encoding game-data payload ceilings (issue #634).
+    /// Mirrors validated `security.max_game_data_bytes`: every configured cap
+    /// is greater than 0 and does not exceed `max_message_size`. `None` keeps
+    /// the frame cap for every encoding.
+    pub max_game_data_bytes: Option<crate::config::GameDataBytesLimits>,
     pub max_connections_per_ip: usize,
     /// Server-wide concurrent-connection ceiling. Mirrors validated
     /// `security.max_connections` and must be greater than 0 for direct
@@ -648,6 +653,7 @@ impl Default for ServerConfig {
             max_outbound_message_size: 8 * 1024 * 1024, // 8 MiB
             max_signal_bytes: 16384,                    // 16KB
             max_connection_info_bytes: 8192,            // 8KB
+            max_game_data_bytes: None,
             max_connections_per_ip: 24,
             max_connections: crate::config::defaults::default_max_connections(),
             require_metrics_auth: true,

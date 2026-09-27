@@ -1056,4 +1056,157 @@ mod admission_and_budget {
             "open-mode relays are never attributed per app: the label is spoofable"
         );
     }
+
+    /// Per-encoding game-data size ceilings (issue #634): a configured
+    /// `security.max_game_data_bytes.<encoding>` bounds that encoding's raw
+    /// payload bytes at admission — exactly at the cap is relayed, one byte
+    /// over is refused with `MESSAGE_TOO_LARGE` — while encodings without a
+    /// configured cap keep the `max_message_size` frame cap. The rejected
+    /// frame charges no relay budget and relays nothing.
+    #[tokio::test]
+    async fn per_encoding_size_ceilings_bound_the_binary_lane() {
+        // Global frame cap far above the per-encoding caps, so every verdict
+        // below is attributable to the per-encoding knob alone.
+        let server = server_with_config(|config| {
+            config.max_message_size = 4096;
+            config.max_signal_bytes = 4096;
+            config.max_connection_info_bytes = 4096;
+            config.max_game_data_bytes = Some(crate::config::GameDataBytesLimits {
+                rkyv: Some(16),
+                protobuf: Some(16),
+                ..Default::default()
+            });
+        })
+        .await;
+        let (sender, mut sender_rx) = register_client(&server).await;
+        let (peer, mut peer_rx) = register_client(&server).await;
+        join_shared_room(
+            &server,
+            vec![(&sender, &mut sender_rx), (&peer, &mut peer_rx)],
+        )
+        .await;
+
+        struct Case {
+            name: &'static str,
+            encoding: GameDataEncoding,
+            payload_len: usize,
+            expect_relay: bool,
+        }
+
+        let cases = [
+            // Capped encodings: the knob is the authority at the boundary.
+            Case {
+                name: "rkyv exactly at cap",
+                encoding: GameDataEncoding::Rkyv,
+                payload_len: 16,
+                expect_relay: true,
+            },
+            Case {
+                name: "rkyv one byte over cap",
+                encoding: GameDataEncoding::Rkyv,
+                payload_len: 17,
+                expect_relay: false,
+            },
+            Case {
+                name: "protobuf exactly at cap",
+                encoding: GameDataEncoding::Protobuf,
+                payload_len: 16,
+                expect_relay: true,
+            },
+            Case {
+                name: "protobuf one byte over cap",
+                encoding: GameDataEncoding::Protobuf,
+                payload_len: 17,
+                expect_relay: false,
+            },
+            // message_pack has no configured cap: the frame cap (4096) still
+            // admits what the capped encodings reject.
+            Case {
+                name: "uncapped encoding keeps the frame cap",
+                encoding: GameDataEncoding::MessagePack,
+                payload_len: 17,
+                expect_relay: true,
+            },
+        ];
+
+        for case in cases {
+            server
+                .handle_game_data_binary(
+                    &sender,
+                    case.encoding,
+                    Bytes::from(vec![0u8; case.payload_len]),
+                )
+                .await;
+            if case.expect_relay {
+                match recv(&mut peer_rx).await.as_ref() {
+                    ServerMessage::GameDataBinary { payload, .. } => {
+                        assert_eq!(
+                            payload.len(),
+                            case.payload_len,
+                            "{}: the frame must relay intact",
+                            case.name
+                        );
+                    }
+                    other => panic!("{}: expected relayed game data, got {other:?}", case.name),
+                }
+            } else {
+                expect_error(recv(&mut sender_rx).await, ErrorCode::MessageTooLarge);
+                match timeout(Duration::from_millis(100), peer_rx.recv()).await {
+                    Err(_) => {}
+                    Ok(Some(message)) => {
+                        panic!(
+                            "{}: oversized frame must not relay, got {message:?}",
+                            case.name
+                        )
+                    }
+                    Ok(None) => panic!("{}: peer channel closed unexpectedly", case.name),
+                }
+            }
+        }
+    }
+
+    /// The text lane honors a configured `security.max_game_data_bytes.json`
+    /// cap on the canonical-JSON measure (the same bytes the relay budgets
+    /// charge), and JSON without a configured cap keeps the frame cap
+    /// (identity with the pre-#634 behavior).
+    #[tokio::test]
+    async fn per_encoding_size_ceilings_bound_the_text_lane() {
+        let server = server_with_config(|config| {
+            config.max_game_data_bytes = Some(crate::config::GameDataBytesLimits {
+                json: Some(16),
+                ..Default::default()
+            });
+        })
+        .await;
+        let (sender, mut sender_rx) = register_client(&server).await;
+        let (peer, mut peer_rx) = register_client(&server).await;
+        join_shared_room(
+            &server,
+            vec![(&sender, &mut sender_rx), (&peer, &mut peer_rx)],
+        )
+        .await;
+
+        // Canonical JSON of {"k":"v"} is 9 bytes: under the cap, relayed.
+        server
+            .handle_game_data(&sender, serde_json::json!({"k": "v"}), None, None)
+            .await;
+        match recv(&mut peer_rx).await.as_ref() {
+            ServerMessage::GameData { data, .. } => {
+                assert_eq!(*data, serde_json::json!({"k": "v"}));
+            }
+            other => panic!("expected relayed JSON game data, got {other:?}"),
+        }
+
+        // 20 bytes of canonical JSON: over the 16-byte cap, refused.
+        let oversized = serde_json::json!({"key": "value-value"});
+        server
+            .handle_game_data(&sender, oversized.clone(), None, None)
+            .await;
+        expect_error(recv(&mut sender_rx).await, ErrorCode::MessageTooLarge);
+        match timeout(Duration::from_millis(100), peer_rx.recv()).await {
+            Err(_) => {}
+            Ok(Some(message)) => panic!("oversized JSON must not relay, got {message:?}"),
+            Ok(None) => panic!("peer channel closed while checking for silence"),
+        }
+    }
 }

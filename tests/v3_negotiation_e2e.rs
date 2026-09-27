@@ -199,6 +199,118 @@ async fn v3_client_negotiates_v3_and_protocol_info_reports_it() {
     running_server.shutdown().await;
 }
 
+/// Per-encoding game-data size ceilings are disclosed to v3 clients only
+/// (issue #634): present in canonical encoding order when the deployment
+/// configures `security.max_game_data_bytes`, absent on negotiated v2
+/// connections (frozen v2 wire shape), and absent on v3 when every capped
+/// encoding is disabled (an inert cap is not advertised).
+#[tokio::test]
+async fn game_data_size_ceilings_are_disclosed_to_v3_clients_only() {
+    use signal_fish_server::config::GameDataBytesLimits;
+    use signal_fish_server::protocol::{GameDataEncoding, GameDataLimitPayload};
+
+    fn auth(protocol_version: Option<u16>) -> ClientMessage {
+        ClientMessage::Authenticate {
+            app_id: APP_ID.to_string(),
+            connect_token: None,
+            sdk_version: None,
+            platform: None,
+            game_data_format: None,
+            protocol_version,
+            supported_transports: None,
+            supported_topologies: None,
+            requested_capabilities: None,
+        }
+    }
+
+    async fn protocol_info_after_auth(
+        addr: std::net::SocketAddr,
+        path: &str,
+        auth: ClientMessage,
+    ) -> signal_fish_server::protocol::ProtocolInfoPayload {
+        let mut ws = connect(addr, path).await;
+        match authenticate(&mut ws, auth).await {
+            ServerMessage::ProtocolInfo(info) => *info,
+            other => panic!("expected ProtocolInfo, got {other:?}"),
+        }
+    }
+
+    async fn start_server_with(
+        server_config: ServerConfig,
+        protocol_config: signal_fish_server::config::ProtocolConfig,
+    ) -> RunningTestServer {
+        let game_server = EnhancedGameServer::new(
+            server_config,
+            protocol_config,
+            signal_fish_server::config::RelayTypeConfig::default(),
+            signal_fish_server::config::SessionConfig::default(),
+            signal_fish_server::config::TurnConfig::default(),
+            signal_fish_server::database::DatabaseConfig::InMemory,
+            signal_fish_server::config::MetricsConfig::default(),
+            signal_fish_server::config::CoordinationConfig::default(),
+            signal_fish_server::config::TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("server builds");
+        start_server(game_server).await
+    }
+
+    // Server with caps on both opt-in encodings, both knobs enabled.
+    let mut capped_config = test_server_config();
+    capped_config.max_game_data_bytes = Some(GameDataBytesLimits {
+        rkyv: Some(1024),
+        protobuf: Some(2048),
+        ..Default::default()
+    });
+    let mut capped_protocol = test_protocol_config();
+    capped_protocol.enable_rkyv_game_data = true;
+    capped_protocol.enable_protobuf_game_data = true;
+    let capped_server = start_server_with(capped_config, capped_protocol).await;
+    let addr = capped_server.addr();
+
+    // v3 client: caps disclosed in canonical order.
+    let info = protocol_info_after_auth(addr, "/v3/ws", auth(Some(3))).await;
+    assert_eq!(
+        info.game_data_limits,
+        Some(vec![
+            GameDataLimitPayload {
+                encoding: GameDataEncoding::Rkyv,
+                max_bytes: 1024
+            },
+            GameDataLimitPayload {
+                encoding: GameDataEncoding::Protobuf,
+                max_bytes: 2048
+            },
+        ]),
+        "v3 clients learn the deployment's per-encoding ceilings in canonical order"
+    );
+
+    // Same caps, negotiated v2 client: the frozen v2 wire shape carries no
+    // disclosure.
+    let v2_info = protocol_info_after_auth(addr, "/v2/ws", auth(None)).await;
+    assert_eq!(
+        v2_info.game_data_limits, None,
+        "negotiated v2 connections keep the frozen wire shape"
+    );
+    capped_server.shutdown().await;
+
+    // Server with a cap only on a disabled encoding: the inert cap is not
+    // advertised, and the whole field stays absent.
+    let mut inert_config = test_server_config();
+    inert_config.max_game_data_bytes = Some(GameDataBytesLimits {
+        rkyv: Some(1024),
+        ..Default::default()
+    });
+    let inert_server = start_server_with(inert_config, test_protocol_config()).await;
+    let inert_info = protocol_info_after_auth(inert_server.addr(), "/v3/ws", auth(Some(3))).await;
+    inert_server.shutdown().await;
+    assert_eq!(
+        inert_info.game_data_limits, None,
+        "a cap on a disabled encoding must not be advertised"
+    );
+}
+
 #[tokio::test]
 async fn delivery_advisories_wait_for_handshake_complete_protocol_info() {
     for app_id_allowlist_enabled in [true, false] {

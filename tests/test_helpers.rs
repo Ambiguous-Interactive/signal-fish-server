@@ -211,6 +211,7 @@ pub fn test_server_config() -> ServerConfig {
         max_outbound_message_size: 8 * 1024 * 1024,
         max_signal_bytes: 16384,         // 16KB default
         max_connection_info_bytes: 8192, // 8KB default
+        max_game_data_bytes: None,       // Per-encoding caps off by default (#634)
         max_connections_per_ip: 100,     // Generous for tests
         max_connections: 10_000,         // Generous server-wide ceiling for tests
         require_metrics_auth: false,     // No auth for tests

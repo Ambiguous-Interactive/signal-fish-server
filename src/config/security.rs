@@ -6,6 +6,7 @@ use super::defaults::{
     default_max_outbound_message_size, default_max_signal_bytes, default_require_auth,
     default_token_binding_subprotocol,
 };
+use crate::protocol::GameDataEncoding;
 use crate::security::token_binding::TokenBindingScheme;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -101,6 +102,20 @@ pub struct SecurityConfig {
     /// the listener down), and startup validation rejects it.
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
+    /// Optional per-encoding game-data payload ceilings (issue #634).
+    ///
+    /// When absent, every encoding is bounded by `max_message_size` exactly as
+    /// before and the wire shape of `ProtocolInfo` is unchanged. When present,
+    /// each configured encoding's relayed payload (binary raw bytes, or the
+    /// canonical JSON text measure on the text lane) is additionally bounded by
+    /// its own cap at admission; unconfigured encodings keep the
+    /// `max_message_size` cap. This lets a deployment cap compact opaque
+    /// encodings (`rkyv`, `protobuf`) tighter than JSON without touching the
+    /// global frame cap. A cap above `max_message_size` is dead config
+    /// (rejected by the frame cap first) and fails startup; a zero cap rejects
+    /// every frame for that encoding and fails startup.
+    #[serde(default)]
+    pub max_game_data_bytes: Option<GameDataBytesLimits>,
     /// Transport-level security configuration (TLS, mTLS, token binding scaffolding)
     #[serde(default)]
     pub transport: TransportSecurityConfig,
@@ -160,6 +175,16 @@ impl SecurityConfig {
                 .iter()
                 .any(|app| app.require_connect_token == Some(true))
     }
+
+    /// The configured per-encoding game-data payload cap for `encoding`
+    /// (issue #634), or `None` when the knob is absent or the encoding is
+    /// not listed (both keep the `max_message_size` frame cap).
+    #[must_use]
+    pub fn game_data_byte_cap(&self, encoding: GameDataEncoding) -> Option<usize> {
+        self.max_game_data_bytes
+            .as_ref()
+            .and_then(|limits| limits.cap_for(encoding))
+    }
 }
 
 impl Default for SecurityConfig {
@@ -173,6 +198,7 @@ impl Default for SecurityConfig {
             max_outbound_message_size: default_max_outbound_message_size(),
             max_signal_bytes: default_max_signal_bytes(),
             max_connection_info_bytes: default_max_connection_info_bytes(),
+            max_game_data_bytes: None,
             max_connections_per_ip: default_max_connections_per_ip(),
             max_connections: default_max_connections(),
             transport: TransportSecurityConfig::default(),
@@ -180,6 +206,70 @@ impl Default for SecurityConfig {
             app_auth_path: None,
             connect_token: None,
         }
+    }
+}
+
+/// Per-encoding game-data payload ceilings (issue #634).
+///
+/// Every field is optional; an encoding left as `None` (and the whole block
+/// being absent) keeps the `security.max_message_size` frame cap for that
+/// encoding. The block itself is strict-admission, so a typo'd encoding name
+/// fails startup instead of silently capping nothing. A cap on an encoding
+/// whose `protocol.enable_*_game_data` knob is off is inert: negotiation
+/// refuses the encoding regardless, and the disclosure omits it.
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GameDataBytesLimits {
+    /// Text-lane JSON payloads, measured as canonical JSON bytes (the same
+    /// measure the relay byte budgets charge).
+    #[serde(default)]
+    pub json: Option<usize>,
+    /// MessagePack binary payloads, measured as raw bytes.
+    #[serde(default)]
+    pub message_pack: Option<usize>,
+    /// rkyv binary payloads, measured as raw bytes.
+    #[serde(default)]
+    pub rkyv: Option<usize>,
+    /// Protocol Buffers binary payloads, measured as raw bytes.
+    #[serde(default)]
+    pub protobuf: Option<usize>,
+}
+
+impl GameDataBytesLimits {
+    /// The configured cap for `encoding`, in the encoding's own measure
+    /// (canonical JSON bytes on the text lane, raw bytes on the binary lane).
+    #[must_use]
+    pub const fn cap_for(&self, encoding: GameDataEncoding) -> Option<usize> {
+        match encoding {
+            GameDataEncoding::Json => self.json,
+            GameDataEncoding::MessagePack => self.message_pack,
+            GameDataEncoding::Rkyv => self.rkyv,
+            GameDataEncoding::Protobuf => self.protobuf,
+        }
+    }
+
+    /// Iterate the configured caps in the canonical `ProtocolInfo`
+    /// advertisement order (encoding declaration order).
+    pub fn configured_in_canonical_order(
+        &self,
+    ) -> impl Iterator<Item = (GameDataEncoding, usize)> + '_ {
+        [
+            GameDataEncoding::Json,
+            GameDataEncoding::MessagePack,
+            GameDataEncoding::Rkyv,
+            GameDataEncoding::Protobuf,
+        ]
+        .into_iter()
+        .filter_map(|encoding| Some((encoding, self.cap_for(encoding)?)))
+    }
+
+    /// Whether at least one encoding cap is configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.json.is_none()
+            && self.message_pack.is_none()
+            && self.rkyv.is_none()
+            && self.protobuf.is_none()
     }
 }
 

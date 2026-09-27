@@ -22,7 +22,11 @@
 #   -h, --help       Show this help.
 #
 # Patterns are passed through to nextest's `test(...)` filter. A `module::`
-# path or a leading `=` is stripped for ownership resolution only.
+# path or a leading `=` is stripped for ownership resolution only. Patterns
+# that resolve to the same owning target run in ONE scoped invocation
+# (`-E 'test(a) or test(b)'`), so multi-pattern edits cost one build, not one
+# per pattern. Each pattern must be one shell word (nextest test names cannot
+# contain spaces; a space would split the merged filterset).
 #
 # `--changed` maps the working tree's Rust deltas (vs `base-ref`, default
 # HEAD, untracked files included) onto owning targets and runs each owning
@@ -207,6 +211,13 @@ if [ "$CHANGED_MODE" -eq 1 ]; then
     exit "$overall"
 fi
 
+# Resolve every pattern first, grouping patterns by owning target so each
+# target costs ONE cargo invocation — one build, one nextest pass — no matter
+# how many patterns map to it (issue #512, session 266). The groups live in
+# the parallel indexed arrays owner_keys/owner_patterns (Bash 3.2-compatible).
+owner_keys=()
+owner_patterns=()
+
 for pattern in "${PATTERN_ARGS[@]}"; do
     # Resolve ownership from a plain function name: strip an exact-match `=`
     # prefix and any `module::path` the caller included for the filter.
@@ -255,24 +266,69 @@ for pattern in "${PATTERN_ARGS[@]}"; do
     fi
 
     for owner in "${owners[@]}"; do
+        # Key targets by a prefixed form: a tests/lib.rs target would
+        # otherwise collide with the unit-test owner key.
         case "$owner" in
-            lib)
-                echo "dev-loop: '$pattern' -> unit tests (src/, --lib)"
-                run_cargo cargo nextest run ${feature_args[@]+"${feature_args[@]}"} --no-tests warn --lib -E "test($pattern)" || overall=1
-                if [ "$WITH_CLIPPY" -eq 1 ]; then
-                    run_cargo cargo clippy ${feature_args[@]+"${feature_args[@]}"} --lib -- -D warnings || overall=1
-                fi
-                ;;
-            test:*)
-                target="${owner#test:}"
-                echo "dev-loop: '$pattern' -> integration target $target"
-                run_cargo cargo nextest run ${feature_args[@]+"${feature_args[@]}"} --no-tests warn --test "$target" -E "test($pattern)" || overall=1
-                if [ "$WITH_CLIPPY" -eq 1 ]; then
-                    run_cargo cargo clippy ${feature_args[@]+"${feature_args[@]}"} --test "$target" -- -D warnings || overall=1
-                fi
-                ;;
+            lib) key="@lib" ;;
+            test:*) key="t:${owner#test:}" ;;
         esac
+        # Parallel indexed arrays (Bash 3.2-compatible: no associative
+        # arrays — the repo guard forbids them). Linear scan matches the
+        # small owner count per invocation.
+        key_index=""
+        idx=0
+        for existing in ${owner_keys[@]+"${owner_keys[@]}"}; do
+            if [ "$existing" = "$key" ]; then
+                key_index=$idx
+                break
+            fi
+            idx=$((idx + 1))
+        done
+        if [ -z "$key_index" ]; then
+            owner_keys+=("$key")
+            owner_patterns+=("$pattern")
+        else
+            owner_patterns[$key_index]="${owner_patterns[$key_index]} $pattern"
+        fi
     done
+done
+
+# Join space-separated patterns into one nextest filterset:
+# `test(a) or test(b)`.
+join_filter() {
+    local expr=""
+    local pattern
+    for pattern in $1; do
+        if [ -n "$expr" ]; then
+            expr="$expr or "
+        fi
+        expr="${expr}test($pattern)"
+    done
+    printf '%s' "$expr"
+}
+
+idx=0
+while [ "$idx" -lt "${#owner_keys[@]}" ]; do
+    key="${owner_keys[$idx]}"
+    filterset=$(join_filter "${owner_patterns[$idx]}")
+    case "$key" in
+        @lib)
+            echo "dev-loop: patterns [${owner_patterns[$idx]}] -> unit tests (src/, --lib)"
+            run_cargo cargo nextest run ${feature_args[@]+"${feature_args[@]}"} --no-tests warn --lib -E "$filterset" || overall=1
+            if [ "$WITH_CLIPPY" -eq 1 ]; then
+                run_cargo cargo clippy ${feature_args[@]+"${feature_args[@]}"} --lib -- -D warnings || overall=1
+            fi
+            ;;
+        t:*)
+            target="${key#t:}"
+            echo "dev-loop: patterns [${owner_patterns[$idx]}] -> integration target $target"
+            run_cargo cargo nextest run ${feature_args[@]+"${feature_args[@]}"} --no-tests warn --test "$target" -E "$filterset" || overall=1
+            if [ "$WITH_CLIPPY" -eq 1 ]; then
+                run_cargo cargo clippy ${feature_args[@]+"${feature_args[@]}"} --test "$target" -- -D warnings || overall=1
+            fi
+            ;;
+    esac
+    idx=$((idx + 1))
 done
 
 exit "$overall"

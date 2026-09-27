@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Security configuration: optional per-encoding game-data payload ceilings,
+  `security.max_game_data_bytes` (#634). Each encoding (`json`,
+  `message_pack`, `rkyv`, `protobuf`) can carry its own payload cap, checked
+  at admission before any budget charge or fan-out — exactly at the cap is
+  relayed, over it is refused with `MESSAGE_TOO_LARGE`. Encodings without a
+  configured cap keep the `max_message_size` frame cap, and an absent block
+  keeps the default behavior byte-identical. Configured caps that the
+  connection can negotiate are disclosed to v3 clients in
+  `ProtocolInfo.game_data_limits` (canonical encoding order; absent on
+  negotiated v2 connections and when nothing is configured). Validation
+  rejects dead config: a zero cap, a cap above `max_message_size`, or a block
+  with no caps.
+
 - Reference clients: native and browser `--game-data-format
   <json|rkyv|protobuf>` (#627). The flag negotiates the encoding in
   `Authenticate`, validates it against the server's advertised
