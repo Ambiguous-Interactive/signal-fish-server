@@ -104,9 +104,23 @@ correctness evidence appears.
   remainder"): the 100 ms `assert_silent` windows and the drain/GC race
   sequencing now run on the paused clock (the formerly-slowest
   clock-bound test 0.93 s -> 0.02 s; the suite's remaining slowest test
-  is pre-existing CPU-bound metrics work, not a clock wait). The remaining floor is rustc
+  is pre-existing CPU-bound metrics work, not a clock wait). Session 270
+  swept the last real-time negative-wait windows in the suite — the two
+  distributed-lock contention tests now run on the paused clock and
+  assert lease start on the monotonic `expires_at` domain (#642 known
+  remainder; PR #646).
+  The remaining floor is rustc
   crate-size work; the structural option (crate split) is parked in #642
-  pending an owner decision.
+  pending an owner decision. Owner green-lit exploration 2026-09-27
+  ("worth exploring"); session 270's spike falsified the leaf-first
+  split order — extracting protocol/config cannot cut the per-touch
+  floor because every downstream crate rebuilds and re-expands on any
+  upstream edit (data on #642). The win only exists fragmenting the fat
+  server crate itself (downstream-most edits), and any split PR carries
+  owner-tier decisions: crates.io publish order (path deps break
+  `cargo publish`) and workspace-mode mutation inventory. Sequential
+  domain fragmentation or accepting the floor until `-Zthreads` matures
+  on stable are the remaining options.
 - #207 — pursue the next optimization only from current allocation and latency
   profiles, with exact wire and delivery semantics held constant. The
   2026-09-01 profile found the fan-out core at its floor (0–1 allocation ops
