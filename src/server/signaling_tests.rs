@@ -3281,6 +3281,127 @@ async fn reconnect_room_full_failure_releases_claim_for_retry() {
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
+async fn reconnect_name_taken_by_new_member_rejects_without_spending_token() {
+    let server = create_test_server().await;
+    let (anchor, _anchor_rx) = register_client(&server).await;
+    let (reconnecting, _old_rx) = register_client(&server).await;
+    let (replacement, mut replacement_rx) = register_client(&server).await;
+    let (current, mut current_rx) = register_client(&server).await;
+    let room_id = create_db_room_with_max(&server, anchor, 4).await;
+    let room_code = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room read")
+        .expect("room exists")
+        .code;
+    let reconnecting_info = player_info(reconnecting, "Straße");
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(anchor, "Anchor"))
+        .await
+        .expect("seat anchor");
+    server
+        .database
+        .add_player_to_room(&room_id, reconnecting_info.clone())
+        .await
+        .expect("seat original member");
+    for player in [anchor, reconnecting] {
+        server
+            .connection_manager
+            .assign_client_to_room(&player, room_id)
+            .await;
+    }
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info), 0)
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &reconnecting)
+        .await
+        .expect("remove old seat");
+    server.connection_manager.remove_client(&reconnecting);
+    server
+        .message_coordinator
+        .unregister_local_client(&reconnecting)
+        .await
+        .expect("unroute old socket");
+
+    server
+        .handle_join_room(
+            &replacement,
+            "webrtc-game".to_string(),
+            Some(room_code),
+            "STRASSE".to_string(),
+            Some(4),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(
+        matches!(
+            recv(&mut replacement_rx).await.as_ref(),
+            ServerMessage::RoomJoined(_)
+        ),
+        "the replacement may take a name that no seated player uses"
+    );
+
+    assert!(
+        !server
+            .handle_reconnect(&current, &reconnecting, &room_id, &token)
+            .await
+    );
+    match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::ReconnectionFailed { reason, error_code } => {
+            assert_eq!(reason, "Player name already exists in this room");
+            assert_eq!(*error_code, ErrorCode::ReconnectionFailed);
+        }
+        other => panic!("expected name-conflict rejection, got {other:?}"),
+    }
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room read")
+        .expect("room remains");
+    assert_eq!(room.players.len(), 2);
+    assert!(room.players.contains_key(&anchor));
+    assert!(room.players.contains_key(&replacement));
+    assert!(!room.players.contains_key(&reconnecting));
+    assert!(server.connection_manager.has_client(&current));
+    assert!(!server.connection_manager.has_client(&reconnecting));
+    server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .validate_reconnection(&reconnecting, &room_id, &token)
+        .await
+        .expect("name conflict must release the token for retry");
+
+    server.leave_room_locked(&replacement, false).await;
+    assert!(
+        server
+            .handle_reconnect(&current, &reconnecting, &room_id, &token)
+            .await,
+        "the same token can restore the original name after the conflict leaves"
+    );
+    match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::Reconnected(payload) => {
+            assert_eq!(payload.player_id, reconnecting);
+            assert!(payload
+                .current_players
+                .iter()
+                .any(|player| player.id == reconnecting && player.name == "Straße"));
+        }
+        other => panic!("expected Reconnected after retry, got {other:?}"),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
 async fn reconnect_room_deleted_during_restore_is_classified_room_not_found() {
     // Inactive-room GC deleting the room between the lane-held existence
     // recheck and the membership write must be reported truthfully: parity

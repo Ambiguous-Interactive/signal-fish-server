@@ -1,7 +1,7 @@
 # Reconnection
 
-This scenario shows a client recovering from a dropped connection. When a player disconnects, the server holds a
-reconnection slot and issues an authentication token. The client opens a fresh WebSocket and sends `Reconnect`
+This scenario shows a client recovering from a dropped connection. The server issues a token when the player joins
+and arms it when the player disconnects. The client opens a fresh WebSocket and sends `Reconnect`
 with its `player_id`, `room_id`, and `auth_token`; the server replies with `Reconnected`, carrying the current
 room state plus replayable control events the client missed while away. The failure case (an invalid token) is
 shown at the end.
@@ -23,12 +23,12 @@ additionally receives a fresh `SessionPlan` (noted at the end).
 Intent: Bob's socket closes unexpectedly. There is no client message here — the server observes the closed
 connection.
 
-On disconnect, the server keeps Bob's seat for the reconnection window and generates a reconnection token bound to
-his `player_id` and `room_id`. The token is delivered to the client out of band by the SDK's transport layer (it is
-not a JSON protocol message); Bob's client stores it alongside the `player_id` and `room_id` it already saved from
-the original `RoomJoined`.
+Bob's v3 client saved the token from `RoomJoined.reconnection_token` along with his `player_id` and `room_id`.
+On disconnect, the server arms that token for the reconnection window. Room capacity and Bob's name are not
+reserved; a reconnect fails if another player fills the room or takes his name.
 
-Meanwhile, Alice (still connected) sees nothing special yet — Bob is in a reconnecting state, not removed.
+Alice receives `PlayerLeft` when Bob leaves the room. Bob can restore his membership with the token
+if the room still has space and his name is free.
 
 Next: Bob's client opens a brand-new WebSocket to the same endpoint and attempts to reconnect.
 

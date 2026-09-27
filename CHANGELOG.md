@@ -146,6 +146,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reconnect rejects a saved player name already used by a seated player.
+  The token remains valid for a retry while its window is open (#647).
+
 - Reconnect now releases its token and rolls back a restored seat if shutdown
   drain starts before the response is queued (#647).
 

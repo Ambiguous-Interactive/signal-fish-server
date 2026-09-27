@@ -96,8 +96,9 @@ and send a `Reconnect` message with the stored credentials:
 }
 ```
 
-If the token is valid and the reconnection window has not expired, the
-server restores you to the room and sends a `Reconnected` message. This
+If the token is valid, the window is open, and the room has space and no
+seated player with your saved name, the server restores you and sends a
+`Reconnected` message. This
 message contains the current room state **and** the room-uniform
 **control events** that were broadcast while you were away (see
 [Event Buffer](#event-buffer) for exactly which events are replayed and
@@ -221,7 +222,7 @@ Player disconnects
        |
        v
 Server detects disconnect (register_disconnection)
-  - Generates reconnection token (UUID bound to player, room)
+  - Arms the token issued at join (bound to player and room)
   - Records authority status for potential restoration
   - Starts buffering the room's control events for this player
   - Starts expiration timer (default: 300 seconds)
@@ -237,6 +238,7 @@ Server validates token
   - Checks reconnection window has not expired
   - Checks player is not already connected (duplicate guard)
   - Checks room still exists
+  - Checks room capacity and saved player name
        |
        v
 Server restores player
@@ -249,10 +251,10 @@ Server restores player
 
 ## Reconnection Window
 
-The reconnection window is the amount of time the server holds a
-player's spot after a disconnect. The default is **300 seconds
-(5 minutes)**. After this window expires, the reconnection token becomes
-invalid and the player's slot is freed.
+The reconnection window is the time a disconnected player's token can be
+used. The default is **300 seconds (5 minutes)**. The server does not
+reserve room capacity or the player's name during this window. After the
+window expires, the token becomes invalid.
 
 ## Event Buffer
 
@@ -301,6 +303,9 @@ The server responds with a `ReconnectionFailed` message if:
 - **Token expired** -- The reconnection window has passed.
 - **Invalid token** -- The token does not match the player or room.
 - **Room closed** -- The room was cleaned up while the player was away.
+- **Room full** -- New players filled the room while the player was away.
+- **Name taken** -- A seated player joined with the disconnected player's
+  name, using the same Unicode comparison as `JoinRoom`.
 - **Already connected** -- The player is already connected from another
   session.
 - **Kicked** -- The room's authority removed the seat while the player was
@@ -321,8 +326,9 @@ The server responds with a `ReconnectionFailed` message if:
 }
 ```
 
-When reconnection fails, the client should fall back to a fresh
-`JoinRoom` flow.
+For a full room or a taken name, the same token can be retried before the
+window expires if the conflict clears. For an invalid or expired token,
+the client must use a fresh `JoinRoom` flow.
 
 ## Configuration
 
