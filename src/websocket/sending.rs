@@ -155,6 +155,19 @@ impl RelayFrameCohort {
             | Self::BinaryFallbackV3 => RelayFrameKind::Binary,
         }
     }
+
+    /// The opposite protocol cohort of the same relay frame kind, whose frame
+    /// carries the identical `head + data` body. Direct binary frames are
+    /// cohort-unique and have no sibling.
+    const fn sibling_text_cohort(self) -> Option<Self> {
+        match self {
+            Self::TextV2 => Some(Self::TextV3),
+            Self::TextV3 => Some(Self::TextV2),
+            Self::BinaryFallbackV2 => Some(Self::BinaryFallbackV3),
+            Self::BinaryFallbackV3 => Some(Self::BinaryFallbackV2),
+            Self::BinaryDirectV2 | Self::BinaryDirectV3 => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -290,7 +303,9 @@ fn materialize_game_data_frame_limited(
     };
     if let Some(cache) = relay_cache.filter(|cache| cache.supports(cohort)) {
         return cache.materialize(cohort, || {
-            materialize_game_data_frame_uncached(
+            materialize_game_data_frame_shared_body(
+                cache,
+                cohort,
                 message,
                 recipient_supports_v3,
                 recipient_format,
@@ -332,10 +347,7 @@ fn materialize_game_data_frame_uncached(
             // stamp-or-suppress (`next_relay_stamp_in_room`), so reaching this
             // arm means an internal contract breach.
             if recipient_supports_v3 {
-                match (*seq, *epoch) {
-                    (Some(seq), Some(epoch)) if seq != 0 && epoch != 0 => {}
-                    _ => return Err(GameDataMaterializationError::InvalidV3Stamp),
-                }
+                gated_relay_stamps(*seq, *epoch)?;
             }
             let frame = if !recipient_supports_v3
                 && (seq.is_some() || epoch.is_some() || class.is_some() || key.is_some())
@@ -368,10 +380,8 @@ fn materialize_game_data_frame_uncached(
                 // Gate before the carrier split: the text fallback projection
                 // below must never carry the zero stamps the binary encoder
                 // rejects, so both sides of the split share one contract.
-                match (*seq, *epoch) {
-                    (Some(seq), Some(epoch)) if seq != 0 && epoch != 0 => (Some(seq), Some(epoch)),
-                    _ => return Err(GameDataMaterializationError::InvalidV3Stamp),
-                }
+                let (seq, epoch) = gated_relay_stamps(*seq, *epoch)?;
+                (Some(seq), Some(epoch))
             } else {
                 (None, None)
             };
@@ -449,6 +459,260 @@ fn materialize_game_data_frame_uncached(
             "game-data materializer received a non-game-data message".to_string(),
         )),
     }
+}
+
+/// The relay stamp contract shared by every v3 projection (cached and
+/// uncached, text and binary): both stamps must be present and non-zero, or
+/// the projection fails closed.
+fn gated_relay_stamps(
+    seq: Option<u64>,
+    epoch: Option<u32>,
+) -> Result<(u64, u32), GameDataMaterializationError> {
+    match (seq, epoch) {
+        (Some(seq), Some(epoch)) if seq != 0 && epoch != 0 => Ok((seq, epoch)),
+        _ => Err(GameDataMaterializationError::InvalidV3Stamp),
+    }
+}
+
+/// Cached projection of one relay cohort.
+///
+/// Both protocol cohorts of a relay frame kind serialize the identical
+/// `head + data` body, so whichever cohort initializes first performs the one
+/// full struct serialization and the sibling cohort derives its frame by
+/// copying that body — everything before the sibling's cohort suffix — and
+/// appending its own exact suffix. Wire output stays byte-identical to the
+/// direct serialization; mixed v2+v3 rooms pay one `data`-tree encode per
+/// relay instead of one per cohort (#636 candidate 1).
+fn materialize_game_data_frame_shared_body(
+    cache: &RelayFrameCache,
+    cohort: RelayFrameCohort,
+    message: &ServerMessage,
+    recipient_supports_v3: bool,
+    recipient_format: GameDataEncoding,
+    fallback_preflight: BinaryFallbackPreflight,
+    max_outbound_message_size: usize,
+) -> Result<MaterializedFrame, GameDataMaterializationError> {
+    // Cohort-specific contract first: a v3 recipient must never observe a
+    // partially-stamped relay frame, and this gate must hold no matter which
+    // cohort of the relay initialized first (the sibling cohort may be a
+    // stamp-free frozen-v2 frame).
+    if recipient_supports_v3 {
+        match message {
+            ServerMessage::GameData { seq, epoch, .. }
+            | ServerMessage::GameDataBinary { seq, epoch, .. } => {
+                gated_relay_stamps(*seq, *epoch)?;
+            }
+            _ => {
+                return Err(GameDataMaterializationError::Serialization(
+                    "game-data materializer received a non-game-data message".to_string(),
+                ));
+            }
+        }
+    }
+
+    // Derive from the sibling cohort's frame when one exists: its bytes up to
+    // the sibling's suffix are this cohort's exact head plus `data` body.
+    if let Some(sibling_cohort) = cohort.sibling_text_cohort() {
+        if let Some(Ok(sibling)) = cache.slot(sibling_cohort).get() {
+            return derive_relay_frame_from_sibling(
+                &sibling.frame,
+                sibling_cohort,
+                cohort,
+                message,
+                recipient_supports_v3,
+                max_outbound_message_size,
+            );
+        }
+    }
+
+    // First cohort of this relay: the full struct serialization. The sibling
+    // cohort derives its frame from these bytes instead of re-encoding.
+    materialize_game_data_frame_uncached(
+        message,
+        recipient_supports_v3,
+        recipient_format,
+        fallback_preflight,
+        max_outbound_message_size,
+    )
+}
+
+/// Byte length of the frozen-v2 relay suffix: the two closing braces after
+/// the shared `head + data` body.
+const FROZEN_V2_SUFFIX_LEN: usize = 2;
+
+/// Byte length of a cohort's exact suffix after the shared `head + data`
+/// body: the frozen-v2 constant `}}`, or the v3 delivery-stamp suffix
+/// measured on the stack.
+fn relay_frame_suffix_len(
+    cohort: RelayFrameCohort,
+    message: &ServerMessage,
+) -> Result<usize, GameDataMaterializationError> {
+    if matches!(
+        cohort,
+        RelayFrameCohort::TextV3 | RelayFrameCohort::BinaryFallbackV3
+    ) {
+        measure_relay_frame_suffix(message)
+    } else {
+        Ok(FROZEN_V2_SUFFIX_LEN)
+    }
+}
+
+/// Write this cohort's exact suffix (everything after the shared body) into
+/// `writer`: `}}` for the frozen-v2 envelope, or the comma-spliced v3 stamp
+/// fields `,"seq":…,"epoch":…[,"class":…][,"key":…]` plus both closing braces.
+///
+/// The field scaffolding mirrors the envelope structs' declaration order.
+/// serde_json emits plain decimal integers, so `write!` reproduces them
+/// byte-for-byte, and the echoed delivery class is serialized by serde
+/// itself. The wire-identity tests pin the exact bytes against the struct
+/// serialization, and the checked-in bench digests pin the relay payloads.
+fn write_relay_frame_suffix<W: std::io::Write>(
+    writer: &mut W,
+    message: &ServerMessage,
+    recipient_supports_v3: bool,
+) -> std::io::Result<()> {
+    if !recipient_supports_v3 {
+        writer.write_all(b"}}")?;
+        return Ok(());
+    }
+    let (seq, epoch, class, key) = relay_stamp_fields(message);
+    write!(writer, ",\"seq\":{seq},\"epoch\":{epoch}")?;
+    if let Some(class) = class {
+        write!(writer, ",\"class\":")?;
+        serde_json::to_writer(&mut *writer, &class)?;
+    }
+    if let Some(key) = key {
+        write!(writer, ",\"key\":{key}")?;
+    }
+    writer.write_all(b"}}")
+}
+
+/// Measure the v3 stamp suffix without touching the heap. The suffix is
+/// bounded by ~83 bytes (20-digit seq, 10-digit epoch, longest class and key
+/// names), far below the 128-byte scratch buffer; any breach fails closed.
+fn measure_relay_frame_suffix(
+    message: &ServerMessage,
+) -> Result<usize, GameDataMaterializationError> {
+    let mut buffer = [0u8; 128];
+    let mut cursor = &mut buffer[..];
+    write_relay_frame_suffix(&mut cursor, message, true).map_err(|error| {
+        GameDataMaterializationError::Serialization(format!(
+            "v3 relay stamp suffix exceeded its scratch buffer: {error}"
+        ))
+    })?;
+    // The cursor only shrinks, so this cannot underflow; the checked form
+    // keeps the arithmetic panic-policy-clean.
+    128usize.checked_sub(cursor.len()).ok_or_else(|| {
+        GameDataMaterializationError::Serialization(
+            "relay stamp suffix measurement underflowed".to_string(),
+        )
+    })
+}
+
+/// `(seq, epoch, class, key)` for the v3 stamp suffix of one relay message.
+/// Both stamps are gated non-`None` before the suffix is written; binary
+/// carriers never echo `class`/`key`.
+fn relay_stamp_fields(
+    message: &ServerMessage,
+) -> (
+    u64,
+    u32,
+    Option<crate::protocol::DeliveryClass>,
+    Option<u32>,
+) {
+    match message {
+        ServerMessage::GameData {
+            seq,
+            epoch,
+            class,
+            key,
+            ..
+        } => (
+            seq.unwrap_or_default(),
+            epoch.unwrap_or_default(),
+            *class,
+            *key,
+        ),
+        ServerMessage::GameDataBinary { seq, epoch, .. } => (
+            seq.unwrap_or_default(),
+            epoch.unwrap_or_default(),
+            None,
+            None,
+        ),
+        _ => (0, 0, None, None),
+    }
+}
+
+/// Assemble a sibling cohort's frame from the shared relay body plus this
+/// cohort's exact suffix. The body bytes are copied verbatim from the
+/// sibling's already-serialized frame, so the wire output is byte-identical
+/// to a direct serialization without walking the `data` tree again.
+fn derive_relay_frame_from_sibling(
+    sibling_frame: &Message,
+    sibling_cohort: RelayFrameCohort,
+    cohort: RelayFrameCohort,
+    message: &ServerMessage,
+    recipient_supports_v3: bool,
+    max_outbound_message_size: usize,
+) -> Result<MaterializedFrame, GameDataMaterializationError> {
+    let source = match sibling_frame {
+        Message::Text(text) => text.as_bytes(),
+        _ => {
+            return Err(GameDataMaterializationError::Serialization(
+                "relay sibling frame is not text".to_string(),
+            ));
+        }
+    };
+    let body_len = source
+        .len()
+        .checked_sub(relay_frame_suffix_len(sibling_cohort, message)?)
+        .ok_or_else(|| {
+            GameDataMaterializationError::Serialization(
+                "relay sibling frame is shorter than its cohort suffix".to_string(),
+            )
+        })?;
+    let suffix_len = relay_frame_suffix_len(cohort, message)?;
+    let total_len = body_len.checked_add(suffix_len).ok_or_else(|| {
+        GameDataMaterializationError::Serialization("relay frame capacity overflow".to_string())
+    })?;
+    if total_len > max_outbound_message_size {
+        // The full-build path reports the first write chunk that crossed the
+        // limit, so its logged `size` can be smaller than the exact total
+        // reported here; the send/fail decision is identical.
+        return Err(GameDataMaterializationError::MessageTooLarge {
+            size: total_len,
+            max: max_outbound_message_size,
+        });
+    }
+    let mut frame = Vec::new();
+    frame.try_reserve_exact(total_len).map_err(|error| {
+        GameDataMaterializationError::Serialization(format!(
+            "failed to reserve relay frame capacity: {error}"
+        ))
+    })?;
+    let body = source.get(..body_len).ok_or_else(|| {
+        GameDataMaterializationError::Serialization(
+            "relay sibling body length exceeds its frame".to_string(),
+        )
+    })?;
+    frame.extend_from_slice(body);
+    write_relay_frame_suffix(&mut frame, message, recipient_supports_v3)
+        .map_err(|error| GameDataMaterializationError::Serialization(error.to_string()))?;
+    // Fail-closed re-validation, mirroring `serialize_json_text_limited`: the
+    // copied body and the ASCII suffix are UTF-8 by construction, but the
+    // contract is enforced, not assumed.
+    let text = String::from_utf8(frame).map_err(|error| {
+        GameDataMaterializationError::Serialization(format!(
+            "JSON serializer emitted invalid UTF-8: {error}"
+        ))
+    })?;
+    Ok(MaterializedFrame {
+        frame: Message::Text(text.into()),
+        // The shared body was copied, not re-encoded: this cohort performs no
+        // codec work of its own.
+        work: SerializationWork::default(),
+        binary_encode_error: None,
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -3022,7 +3286,7 @@ mod tests {
         assert!(text_cache.supports(RelayFrameCohort::TextV2));
         assert!(text_cache.supports(RelayFrameCohort::TextV3));
         assert!(!text_cache.supports(RelayFrameCohort::BinaryDirectV3));
-        for supports_v3 in [false, true] {
+        for (index, supports_v3) in [false, true].into_iter().enumerate() {
             let first = materialize_game_data_frame(
                 &text,
                 supports_v3,
@@ -3040,7 +3304,10 @@ mod tests {
             )
             .expect("reused text cohort projection");
             assert_eq!(reused.frame, first.frame);
-            assert_eq!(first.work.json_encodes, 1);
+            // The first-initializing cohort performs the relay's one full
+            // `data` serialization; its sibling cohort derives the shared
+            // body instead of re-encoding the tree.
+            assert_eq!(first.work.json_encodes, u64::from(index == 0));
             assert_eq!(reused.work, SerializationWork::default());
         }
 
@@ -3068,7 +3335,10 @@ mod tests {
                 Some(&binary_cache),
             )
             .expect("first fallback cohort projection");
-            assert_eq!(first.work.json_encodes, 1);
+            // Index 0 initializes first: one full serialization plus the
+            // relay's one shared MessagePack decode. Index 1 derives the
+            // shared body and performs no codec work.
+            assert_eq!(first.work.json_encodes, u64::from(index == 0));
             assert_eq!(first.work.message_pack_decodes, u64::from(index == 0));
 
             let preflight =
@@ -3105,6 +3375,333 @@ mod tests {
             assert_eq!(reused.frame, first.frame);
             assert_eq!(first.work.message_pack_encodes, 1);
             assert_eq!(reused.work, SerializationWork::default());
+        }
+    }
+
+    /// The shared-body derive must be byte-identical to the direct struct
+    /// serialization for every cohort, payload shape, stamp, class echo, and
+    /// cohort initialization order: the sibling cohort copies the exact
+    /// `head + data` bytes and appends only its cohort suffix. This pins the
+    /// suffix scaffolding (field names, order, integer formatting, and the
+    /// serde-serialized delivery class) against the envelope structs.
+    #[test]
+    fn shared_body_derivation_is_byte_identical_to_direct_serialization() {
+        let payloads = [
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!(42),
+            serde_json::json!(-1.5),
+            serde_json::json!(2.5e300),
+            serde_json::json!(18446744073709551615u64),
+            serde_json::json!(""),
+            serde_json::json!("quote\" backslash\\ newline\n tab\t fish \u{1f41f}"),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!({
+                "a": [1, {"b": null}, true, -0.5],
+                "c": "x".repeat(96),
+                "d": 18446744073709551615u64,
+            }),
+        ];
+        let class_echoes: [(Option<crate::protocol::DeliveryClass>, Option<u32>); 6] = [
+            (None, None),
+            (Some(crate::protocol::DeliveryClass::Reliable), None),
+            (Some(crate::protocol::DeliveryClass::Latest), Some(7)),
+            (Some(crate::protocol::DeliveryClass::Volatile), None),
+            (Some(crate::protocol::DeliveryClass::Latest), Some(u32::MAX)),
+            // The suffix writer emits fields independently; a key without a
+            // class still lands in the exact declaration position.
+            (None, Some(9)),
+        ];
+
+        for data in payloads {
+            let payload = rmp_serde::to_vec_named(&data).expect("MessagePack fixture");
+            for (seq, epoch) in [(42u64, 3u32), (u64::MAX, u32::MAX)] {
+                for (class, key) in class_echoes {
+                    let legacy = ServerMessage::GameData {
+                        from_player: player_a(),
+                        data: data.clone(),
+                        seq: None,
+                        epoch: None,
+                        class: None,
+                        key: None,
+                    };
+                    let expected_v2_text = serialize_json_frame(&legacy).expect("expected v2 text");
+
+                    let message = ServerMessage::GameData {
+                        from_player: player_a(),
+                        data: data.clone(),
+                        seq: Some(seq),
+                        epoch: Some(epoch),
+                        class,
+                        key,
+                    };
+                    let expected_v3_text =
+                        serialize_json_frame(&message).expect("expected v3 text");
+
+                    for v3_first in [false, true] {
+                        let cache =
+                            RelayFrameCache::for_message(&message).expect("text relay cache");
+                        let order = if v3_first {
+                            [true, false]
+                        } else {
+                            [false, true]
+                        };
+                        for supports_v3 in order {
+                            let projected = materialize_game_data_frame(
+                                &message,
+                                supports_v3,
+                                GameDataEncoding::Json,
+                                BinaryFallbackPreflight::NotNeeded,
+                                Some(&cache),
+                            )
+                            .expect("text cohort projection");
+                            let expected = if supports_v3 {
+                                &expected_v3_text
+                            } else {
+                                &expected_v2_text
+                            };
+                            assert_eq!(
+                                projected.frame, *expected,
+                                "text cohort (v3_first={v3_first}, supports_v3={supports_v3}) \
+                                 wire bytes diverge from the direct serialization"
+                            );
+                        }
+                    }
+
+                    let binary = ServerMessage::GameDataBinary {
+                        from_player: player_a(),
+                        encoding: GameDataEncoding::MessagePack,
+                        payload: payload.clone().into(),
+                        seq: Some(seq),
+                        epoch: Some(epoch),
+                    };
+                    let expected_v3_fallback = serialize_json_frame(&ServerMessage::GameData {
+                        from_player: player_a(),
+                        data: data.clone(),
+                        seq: Some(seq),
+                        epoch: Some(epoch),
+                        class: None,
+                        key: None,
+                    })
+                    .expect("expected v3 fallback");
+
+                    for v3_first in [false, true] {
+                        let cache =
+                            RelayFrameCache::for_message(&binary).expect("binary relay cache");
+                        let order = if v3_first {
+                            [true, false]
+                        } else {
+                            [false, true]
+                        };
+                        for supports_v3 in order {
+                            let preflight = preflight_binary_fallback(
+                                &binary,
+                                GameDataEncoding::Json,
+                                Some(&cache),
+                            );
+                            let projected = materialize_game_data_frame(
+                                &binary,
+                                supports_v3,
+                                GameDataEncoding::Json,
+                                preflight,
+                                Some(&cache),
+                            )
+                            .expect("fallback cohort projection");
+                            let expected = if supports_v3 {
+                                &expected_v3_fallback
+                            } else {
+                                &expected_v2_text
+                            };
+                            assert_eq!(
+                                projected.frame, *expected,
+                                "fallback cohort (v3_first={v3_first}, supports_v3={supports_v3}) \
+                                 wire bytes diverge from the direct serialization"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The v3 stamp gate on the cached projection must hold regardless of
+    /// cohort initialization order: an incomplete or zero stamp fails the v3
+    /// cohort closed even when the stamp-free frozen-v2 sibling already
+    /// initialized, and the v2 recipient is unaffected.
+    #[test]
+    fn cached_projection_gates_v3_stamps_in_both_cohort_orders() {
+        let data = serde_json::json!({"tick": 1});
+        let payload = rmp_serde::to_vec_named(&data).expect("MessagePack fixture");
+        for (seq, epoch) in [
+            (None, Some(1u32)),
+            (Some(1u64), None),
+            (Some(0u64), Some(1u32)),
+            (Some(1u64), Some(0u32)),
+        ] {
+            let text = ServerMessage::GameData {
+                from_player: player_a(),
+                data: data.clone(),
+                seq,
+                epoch,
+                class: None,
+                key: None,
+            };
+            let text_cache = RelayFrameCache::for_message(&text).expect("text relay cache");
+            materialize_game_data_frame(
+                &text,
+                false,
+                GameDataEncoding::Json,
+                BinaryFallbackPreflight::NotNeeded,
+                Some(&text_cache),
+            )
+            .expect("v2 text cohort is stamp-free");
+            assert!(
+                matches!(
+                    materialize_game_data_frame(
+                        &text,
+                        true,
+                        GameDataEncoding::Json,
+                        BinaryFallbackPreflight::NotNeeded,
+                        Some(&text_cache),
+                    ),
+                    Err(GameDataMaterializationError::InvalidV3Stamp)
+                ),
+                "invalid text stamp {seq:?}/{epoch:?} must fail closed on the cached path"
+            );
+
+            let binary = ServerMessage::GameDataBinary {
+                from_player: player_a(),
+                encoding: GameDataEncoding::MessagePack,
+                payload: payload.clone().into(),
+                seq,
+                epoch,
+            };
+            let binary_cache = RelayFrameCache::for_message(&binary).expect("binary relay cache");
+            let preflight =
+                preflight_binary_fallback(&binary, GameDataEncoding::Json, Some(&binary_cache));
+            materialize_game_data_frame(
+                &binary,
+                false,
+                GameDataEncoding::Json,
+                preflight,
+                Some(&binary_cache),
+            )
+            .expect("v2 fallback cohort is stamp-free");
+            let preflight =
+                preflight_binary_fallback(&binary, GameDataEncoding::Json, Some(&binary_cache));
+            assert!(
+                matches!(
+                    materialize_game_data_frame(
+                        &binary,
+                        true,
+                        GameDataEncoding::Json,
+                        preflight,
+                        Some(&binary_cache),
+                    ),
+                    Err(GameDataMaterializationError::InvalidV3Stamp)
+                ),
+                "invalid fallback stamp {seq:?}/{epoch:?} must fail closed on the cached path"
+            );
+        }
+    }
+
+    /// The derive path enforces the same outbound limit as the direct
+    /// serialization: a v3 frame derived from a v2 sibling fails exactly when
+    /// the direct v3 frame would, reports the exact total, and the inclusive
+    /// boundary still delivers.
+    #[test]
+    fn derived_relay_frame_enforces_the_outbound_limit() {
+        let data = serde_json::json!({"tick": 1});
+        let payload = rmp_serde::to_vec_named(&data).expect("MessagePack fixture");
+        let binary = ServerMessage::GameDataBinary {
+            from_player: player_a(),
+            encoding: GameDataEncoding::MessagePack,
+            payload: payload.into(),
+            seq: Some(7),
+            epoch: Some(1),
+        };
+        let cache = RelayFrameCache::for_message(&binary).expect("binary relay cache");
+
+        // Reference lengths from full builds at the default limit.
+        let preflight = preflight_binary_fallback(&binary, GameDataEncoding::Json, Some(&cache));
+        let v2 = materialize_game_data_frame(
+            &binary,
+            false,
+            GameDataEncoding::Json,
+            preflight,
+            Some(&cache),
+        )
+        .expect("v2 fallback projection");
+        let v2_len = match &v2.frame {
+            Message::Text(text) => text.len(),
+            other => panic!("v2 fallback frame must be text: {other:?}"),
+        };
+        let uncached_v3 = materialize_game_data_frame(
+            &binary,
+            true,
+            GameDataEncoding::Json,
+            preflight_binary_fallback(&binary, GameDataEncoding::Json, None),
+            None,
+        )
+        .expect("direct v3 fallback projection");
+        let v3_len = match &uncached_v3.frame {
+            Message::Text(text) => text.len(),
+            other => panic!("v3 fallback frame must be text: {other:?}"),
+        };
+        assert!(v3_len > v2_len, "v3 stamp suffix must extend the frame");
+
+        // At the exact total the derived v3 frame delivers; one byte under it
+        // fails with the exact size.
+        for (max, expect_too_large) in [(v3_len, false), (v3_len - 1, true)] {
+            let cache = RelayFrameCache::for_message(&binary).expect("binary relay cache");
+            let preflight = preflight_binary_fallback_limited(
+                &binary,
+                GameDataEncoding::Json,
+                Some(&cache),
+                max,
+            );
+            materialize_game_data_frame_limited(
+                &binary,
+                false,
+                GameDataEncoding::Json,
+                preflight,
+                Some(&cache),
+                max,
+            )
+            .expect("v2 fallback fits the derived-frame limit");
+            let preflight = preflight_binary_fallback_limited(
+                &binary,
+                GameDataEncoding::Json,
+                Some(&cache),
+                max,
+            );
+            let derived = materialize_game_data_frame_limited(
+                &binary,
+                true,
+                GameDataEncoding::Json,
+                preflight,
+                Some(&cache),
+                max,
+            );
+            if expect_too_large {
+                assert!(
+                    matches!(
+                        derived,
+                        Err(GameDataMaterializationError::MessageTooLarge { size, max: limit })
+                            if size == v3_len && limit == max
+                    ),
+                    "derived v3 frame must fail with its exact total at limit {max}"
+                );
+            } else {
+                let derived = derived.expect("derived v3 frame fits the exact limit");
+                match &derived.frame {
+                    Message::Text(text) => {
+                        assert_eq!(text.len(), v3_len, "derived frame keeps the exact length");
+                    }
+                    other => panic!("derived v3 fallback frame must be text: {other:?}"),
+                }
+            }
         }
     }
 
@@ -3231,8 +3828,9 @@ mod tests {
         );
         assert_eq!(
             winning.work.json_encodes + delayed.work.json_encodes,
-            2,
-            "both exact fallback cohorts must serialize once"
+            1,
+            "exactly one of the two fallback cohorts serializes the shared relay \
+             body; the loser derives it byte-identically instead of re-encoding"
         );
     }
 

@@ -72,6 +72,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Relay: mixed-protocol rooms (v2 + v3 recipients) serialize relayed game
+  data once per message instead of once per cohort (#636). The second
+  cohort's JSON frame reuses the first cohort's exact `head + data` bytes
+  and appends only its stamp suffix. Wire bytes are identical in every
+  cohort; the relay allocation profile is unchanged or smaller, and the
+  serialization hot loop spends one `data`-tree encode per relay instead
+  of two.
 - CI: the `deny` supply-chain job skips dependency-irrelevant pull requests
   (#512). Its verdict is a pure function of dependency-graph inputs, so a
   change touching no Cargo manifest/lockfile, `deny.toml` policy, npm

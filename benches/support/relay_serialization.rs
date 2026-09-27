@@ -436,17 +436,6 @@ impl Fixture {
                 assert_eq!(ledger.binary_frames, relays as u64 * binary_recipients);
                 let profiles =
                     || (0..recipients).map(|index| recipient_profile(self.scenario, index));
-                let json_cohorts = [
-                    profiles().any(|profile| {
-                        !profile.supports_v3() && profile.format == GameDataEncoding::Json
-                    }),
-                    profiles().any(|profile| {
-                        profile.supports_v3() && profile.format == GameDataEncoding::Json
-                    }),
-                ]
-                .into_iter()
-                .filter(|present| *present)
-                .count() as u64;
                 let binary_cohorts = [
                     profiles().any(|profile| {
                         !profile.supports_v3() && profile.format == GameDataEncoding::MessagePack
@@ -458,7 +447,18 @@ impl Fixture {
                 .into_iter()
                 .filter(|present| *present)
                 .count() as u64;
-                assert_eq!(ledger.json_encodes, relays as u64 * json_cohorts);
+                // Both JSON cohorts share one serialized body per relay: the
+                // first-initializing cohort encodes the `data` tree once and
+                // the sibling derives the shared body, appending its exact
+                // stamp suffix (#636 mixed-room splice). Wire digests above
+                // pin the bytes.
+                let json_cohort_present =
+                    profiles().any(|profile| profile.format == GameDataEncoding::Json);
+                assert_eq!(
+                    ledger.json_encodes,
+                    relays as u64 * u64::from(json_cohort_present),
+                    "the mixed room must serialize the shared JSON body once per relay"
+                );
                 assert_eq!(ledger.message_pack_decodes, relays as u64);
                 assert_eq!(ledger.message_pack_encodes, relays as u64 * binary_cohorts);
             }
