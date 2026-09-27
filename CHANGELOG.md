@@ -146,6 +146,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Room creation now stops before `RoomJoined` if shutdown drain starts while
+  the creator response is being built (#647).
+
 - Reconnect rejects a saved player name already used by a seated player.
   The token remains valid for a retry while its window is open (#647).
 

@@ -99,8 +99,20 @@ No new finding is confirmed by this initial inventory.
 | Confidence and reproduction | `reconnect_name_taken_by_new_member_rejects_without_spending_token` failed before the fix: reconnect restored `Straße` beside a seated `STRASSE`. |
 | Disposition | Reconnect now checks the saved name under the room event gate before restoring membership. A conflict returns `ReconnectionFailed` and leaves the token usable until its window expires (#647). Capacity and names are not reserved during disconnect. |
 
-These findings cover room-code rotation and spectator and reconnect drain seams. The rest of the C1 room
-and storage rows remain unreviewed.
+### ARM-C007 — Room creation can publish after shutdown drain
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed, medium |
+| Player impact | A creator can receive `RoomJoined` after shutdown drain starts and enter a room that is about to close. |
+| Source and revision | `src/server/room_service.rs::handle_join_room_owned` and its async baseline commit, reviewed at `fd18c6dc`. |
+| Invariant | A new room must not commit its first join after drain starts. Existing-room joins remain allowed during drain. |
+| Confidence and reproduction | `scripts/dev-loop.sh draining_room_creation_cancels_baseline_before_it_is_queued` failed before the fix: a paused baseline room read resumed after drain and delivered `RoomJoined`. The test covers explicit and generated room codes. |
+| Disposition | Created-room baseline enqueue now shares the shutdown drain commit gate. A canceled baseline rolls back the unpublished room and returns `SERVER_DRAINING` (#647). |
+
+These findings cover room-code rotation, player names, and spectator,
+reconnect, and room-creation drain seams. The rest of the C1 room and storage
+rows remain unreviewed.
 
 ## Coverage ledger
 
