@@ -486,7 +486,7 @@ async fn transport_status_dedup_is_scoped_to_membership_generation() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[cfg_attr(miri, ignore)]
-async fn transport_status_is_ordered_before_concurrent_leave() {
+async fn transport_status_delivery_does_not_block_concurrent_leave() {
     let server = create_test_server().await;
     let protocol = NegotiatedProtocol {
         version: 3,
@@ -577,54 +577,45 @@ async fn transport_status_is_ordered_before_concurrent_leave() {
         ServerMessage::PeerTransportStatus { peer_id, connected: true, .. } if *peer_id == reporter
     ));
 
-    // Poll both production handlers to their lifecycle wait point in a known
-    // order. The lifecycle gate spans only handler processing (transport
-    // status releases it before fan-out dispatch), so this oracle rests on
-    // `join!`'s in-order poll discipline: after the guard drops, the status
-    // future completes its (uncontended, healthy-queue) publication within
-    // its poll, before leave is first polled to clear membership.
-    let lifecycle = server
-        .connection_manager
-        .client_lifecycle(&reporter)
-        .expect("reporter lifecycle");
-    let lifecycle_probe = super::message_router::arm_transport_status_lifecycle_probe(reporter);
-    let lifecycle_guard = lifecycle.lock().await;
-    let status_before_leave = server.handle_client_message(
-        &reporter,
-        ClientMessage::TransportStatus {
-            transport: Transport::WebRtc,
-            connected: false,
-        },
-    );
-    tokio::pin!(status_before_leave);
+    // Status is informational. Its slow delivery must not hold the room gate
+    // or delay a concurrent leave, even if delivery finishes later.
+    let pause = super::message_router::arm_transport_status_delivery_pause(reporter);
+    let status_server = Arc::clone(&server);
+    let status_task = tokio::spawn(async move {
+        status_server
+            .handle_client_message(
+                &reporter,
+                ClientMessage::TransportStatus {
+                    transport: Transport::WebRtc,
+                    connected: false,
+                },
+            )
+            .await;
+    });
+    timeout(Duration::from_secs(1), pause.reached.notified())
+        .await
+        .expect("status reaches the delivery pause");
+    let leave_server = Arc::clone(&server);
+    let mut leave_task = tokio::spawn(async move {
+        leave_server
+            .handle_client_message(&reporter, ClientMessage::LeaveRoom)
+            .await;
+    });
+    timeout(Duration::from_secs(1), &mut leave_task)
+        .await
+        .expect("leave must not wait for status delivery")
+        .expect("leave task completes");
     assert!(matches!(
-        futures_util::poll!(&mut status_before_leave),
-        std::task::Poll::Pending
-    ));
-    assert!(
-        lifecycle_probe.load(Ordering::Acquire),
-        "status handler must reach its lifecycle-lock request before leave is polled"
-    );
-    let leave_after_status = server.handle_client_message(&reporter, ClientMessage::LeaveRoom);
-    tokio::pin!(leave_after_status);
-    assert!(matches!(
-        futures_util::poll!(&mut leave_after_status),
-        std::task::Poll::Pending
-    ));
-    drop(lifecycle_guard);
-    tokio::join!(status_before_leave, leave_after_status);
-    super::message_router::disarm_transport_status_lifecycle_probe(&reporter);
-
-    assert!(matches!(
-        next_routed_test_message(&mut observer_rx, "ordered PeerTransportStatus").await.as_ref(),
-        ServerMessage::PeerTransportStatus { peer_id, connected: false, .. } if *peer_id == reporter
-    ));
-    assert!(matches!(
-        next_routed_test_message(&mut observer_rx, "ordered PlayerLeft").await.as_ref(),
+        next_routed_test_message(&mut observer_rx, "PlayerLeft during paused status")
+            .await
+            .as_ref(),
         ServerMessage::PlayerLeft { player_id, .. } if *player_id == reporter
     ));
+    pause.release.notify_one();
+    status_task.await.expect("status task completes");
+    super::message_router::disarm_transport_status_delivery_pause(&reporter);
     assert!(matches!(
-        next_routed_test_message(&mut reporter_rx, "ordered RoomLeft")
+        next_routed_test_message(&mut reporter_rx, "RoomLeft after paused status")
             .await
             .as_ref(),
         ServerMessage::RoomLeft

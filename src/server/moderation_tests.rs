@@ -940,6 +940,136 @@ async fn rotation_waits_for_an_in_flight_old_code_admission_lock() {
     );
 }
 
+/// A spectator can pass the old-code lock and wait inside the room event lane.
+/// Rotation must wait for that admission before it drops the old code.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn rotation_waits_for_in_flight_old_code_spectator_admission() {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .expect("in-memory test database");
+    let (authority, mut authority_rx) =
+        register_client(&server, "127.0.0.1:48151".parse().unwrap()).await;
+    join_seated_player(&server, &authority, &mut authority_rx, "OLDCOD", "host").await;
+    let (spectator, _spectator_rx) =
+        register_client(&server, "127.0.0.1:48152".parse().unwrap()).await;
+    let spectator_id = spectator;
+    let (late_spectator, _late_rx) =
+        register_client(&server, "127.0.0.1:48153".parse().unwrap()).await;
+    server.script_room_codes_for_test(["NEWCOD"]);
+
+    database.pause_next_get_room_by_id_for_test();
+    let spectator_service = server.spectator_service.clone();
+    let spectator_join = tokio::spawn(async move {
+        spectator_service
+            .join(
+                &spectator,
+                "moderation-game".to_string(),
+                "OLDCOD".to_string(),
+                "watcher".to_string(),
+            )
+            .await
+    });
+    timeout(
+        Duration::from_secs(1),
+        database.wait_for_paused_get_room_by_id_for_test(),
+    )
+    .await
+    .expect("spectator reaches the in-lane room refresh");
+    assert!(
+        !server
+            .distributed_lock_for_test()
+            .is_locked("room_join:moderation-game:OLDCOD")
+            .await
+            .expect("old-code lock state is readable"),
+        "the spectator has released the code lock while holding the room lane"
+    );
+
+    let rotation_server = Arc::clone(&server);
+    let mut rotation = tokio::spawn(async move {
+        rotation_server
+            .handle_regenerate_room_code_operation(&authority, RoomOperationId::new_v4())
+            .await;
+    });
+    assert!(
+        timeout(Duration::from_millis(100), &mut rotation)
+            .await
+            .is_err(),
+        "rotation must wait for the admitted old-code spectator"
+    );
+
+    database.release_paused_get_room_by_id_for_test();
+    spectator_join
+        .await
+        .expect("spectator task completes")
+        .expect("old-code spectator joins before rotation");
+    rotation.await.expect("rotation task completes");
+    let response = recv_until(&mut authority_rx, |message| {
+        matches!(message, ServerMessage::RoomOperationResult { .. })
+    })
+    .await;
+    assert!(matches!(
+        response.as_ref(),
+        ServerMessage::RoomOperationResult { result, .. }
+            if matches!(result.as_ref(), RoomOperationResult::RoomCodeRegenerated { room_code }
+                if room_code == "NEWCOD")
+    ));
+    let refusal = server
+        .spectator_service
+        .join(
+            &late_spectator,
+            "moderation-game".to_string(),
+            "OLDCOD".to_string(),
+            "late".to_string(),
+        )
+        .await
+        .expect_err("old code must stop admitting spectators after rotation");
+    assert_eq!(refusal.code, Some(ErrorCode::RoomNotFound));
+    let room = server
+        .database
+        .get_room("moderation-game", "NEWCOD")
+        .await
+        .expect("room lookup succeeds")
+        .expect("new code resolves the room");
+    let spectators = room.get_spectators();
+    assert_eq!(spectators.len(), 1);
+    assert_eq!(spectators[0].id, spectator_id);
+    server
+        .spectator_service
+        .join(
+            &late_spectator,
+            "moderation-game".to_string(),
+            "NEWCOD".to_string(),
+            "late".to_string(),
+        )
+        .await
+        .expect("new code admits a spectator after rotation");
+    let room = server
+        .database
+        .get_room("moderation-game", "NEWCOD")
+        .await
+        .expect("room lookup succeeds")
+        .expect("new code resolves the room");
+    assert_eq!(
+        room.get_spectators().len(),
+        2,
+        "both spectators remain in the rotated room"
+    );
+    for code in ["OLDCOD", "NEWCOD"] {
+        assert!(
+            !server
+                .distributed_lock_for_test()
+                .is_locked(&format!("room_join:moderation-game:{code}"))
+                .await
+                .expect("code lock state is readable"),
+            "rotation and admission must release the {code} lock"
+        );
+    }
+}
+
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn regenerate_retries_colliding_candidates_within_the_budget() {
@@ -988,6 +1118,56 @@ async fn regenerate_retries_colliding_candidates_within_the_budget() {
         .expect("new-code lookup succeeds")
         .expect("rotated room exists");
     assert!(room.players.contains_key(&authority));
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn regenerate_skips_own_or_busy_code_before_waiting_for_a_second_lock() {
+    for (first_candidate, occupied_by_other) in [("OLDCOD", false), ("BUSY01", true)] {
+        let server = create_test_server_with(ServerConfig::default()).await;
+        let (authority, mut authority_rx) =
+            register_client(&server, "127.0.0.1:48154".parse().unwrap()).await;
+        join_seated_player(&server, &authority, &mut authority_rx, "OLDCOD", "host").await;
+        server.script_room_codes_for_test([first_candidate, "NEWCOD"]);
+
+        let busy_lock = if occupied_by_other {
+            Some(
+                server
+                    .distributed_lock_for_test()
+                    .try_acquire("room_join:moderation-game:BUSY01", Duration::from_secs(10))
+                    .await
+                    .expect("candidate lock probe succeeds")
+                    .expect("candidate lock starts free"),
+            )
+        } else {
+            None
+        };
+
+        timeout(
+            Duration::from_secs(1),
+            server.handle_regenerate_room_code_operation(&authority, RoomOperationId::new_v4()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("rotation must skip {first_candidate} without waiting"));
+        let response = recv_until(&mut authority_rx, |message| {
+            matches!(message, ServerMessage::RoomOperationResult { .. })
+        })
+        .await;
+        assert!(matches!(
+            response.as_ref(),
+            ServerMessage::RoomOperationResult { result, .. }
+                if matches!(result.as_ref(), RoomOperationResult::RoomCodeRegenerated { room_code }
+                    if room_code == "NEWCOD")
+        ));
+
+        if let Some(lock) = busy_lock {
+            server
+                .distributed_lock_for_test()
+                .release(&lock)
+                .await
+                .expect("candidate lock release succeeds");
+        }
+    }
 }
 
 #[tokio::test]

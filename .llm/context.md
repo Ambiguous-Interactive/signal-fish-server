@@ -81,17 +81,17 @@ relevant source, test, documentation, issue, or pull request.
 
 - Time-box each working session to roughly **one hour** of active work
   (earlier sessions ran much longer and churned context).
-- Scope each session to exactly one green PR; carry the remainder forward in
-  `PLAN.md` instead of expanding the session.
-- Budget roughly: 10 min state assessment, 25-35 min implementation with
-  red-green checks, 10 min planning-doc updates, 10 min delivery (commit,
-  push, PR). If the assessment shows the candidate work cannot land green in
-  that budget, pick smaller work.
+- Scope each session to **one milestone and one PR**. Stop new work at about
+  45 minutes and use the last 15 for validation and handoff. At one hour,
+  record pending CI or review in `progress/` and resume that PR next session.
+  Carry other work into `PLAN.md`; do not wait for hours or begin a new milestone.
+- Budget roughly: 10 min assessment, 25-35 min implementation, and 15 min
+  validation and delivery. Pick smaller work if it cannot fit that budget.
 
 ```bash
 # Rust changes: run in order. Full local gate — once before publication;
 # while iterating, use the scoped checks in "Local vs hosted-CI work split".
-cargo fmt && cargo clippy --all-targets --all-features && cargo test --all-features
+cargo fmt && cargo clippy --all-targets --all-features
 ```
 
 **Zero warnings policy** -- all linters enforce strict compliance.

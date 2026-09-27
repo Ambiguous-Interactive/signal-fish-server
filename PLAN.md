@@ -23,7 +23,10 @@ performance experiments within the campaign.
 
 - Keep one session's work in one pull request; do not stack pull requests.
 - Time-box each session to roughly one hour of active work (see GOAL.md).
-  Scope the session to one green PR; carry the remainder forward here.
+  Scope the session to one milestone and one PR. Reserve the last 15 minutes
+  for validation and handoff. If CI or review is pending at the hour mark,
+  record the exact PR state and continue it next session. Carry other work
+  forward here; do not extend the session for a new milestone.
 - Start production fixes with a deterministic failing test and sweep adjacent
   paths for the same failure class.
 - Run the mandatory local Rust sequence and repository gauntlet before

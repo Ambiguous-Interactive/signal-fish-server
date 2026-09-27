@@ -179,48 +179,32 @@ chore: update MSRV from 1.87.0 to 1.88.0
 
 ## Session-End Verification (MANDATORY)
 
-Before ending any work session, **always** run the full validation gauntlet to
-ensure git hooks and CI will pass cleanly:
+Before ending a session, run the focused local checks and the one full local
+lint gate described above. Use hosted CI for the expensive suites. A red
+hosted check needs focused reproduction and a fix; a pending hosted check can
+carry into the next session with its exact PR head and check state recorded in
+`progress/`.
+
+Reserve the last 15 minutes of the roughly one-hour session for validation,
+delivery, and the progress note. Do not start another milestone then. If CI or
+review remains pending at the hour mark, end the session and resume the same
+PR next session; do not spend hours polling.
 
 ```bash
-# 1. Core checks (must all pass)
-cargo fmt --check
+# Local gate for Rust changes
+cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --locked --all-features
-RUSTDOCFLAGS="-D warnings -D rustdoc::broken_intra_doc_links \
-  -D rustdoc::private_intra_doc_links -D rustdoc::invalid_codeblock_attributes" \
-  cargo doc --locked --no-deps --all-features
-
-# 2. Script-level policy checks
-scripts/check-doc-consistency.sh --staged   # or --changed-files <files>
-scripts/check-workflow-hygiene.sh
-scripts/check-llm-file-sizes.sh
-scripts/check-llm-example-files.sh
-pwsh -NoLogo -NoProfile -NonInteractive -File scripts/check-hook-readiness.ps1
-pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
-pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-push.ps1 -Worktree
-
-# 3. Hook/local-policy test suites (run before handoff; hooks stay fast)
-cargo test --locked --test doc_consistency_policy_tests --test doc_consistency_script_tests
-cargo test --locked --test ci_config_tests
+# Plus scoped tests for changed behavior and checks for changed file types.
 ```
 
-If hook files or hook-adjacent policy code changed, rerun pre-commit with profiling enabled and keep it sub-second:
+If hook files or hook-adjacent policy code changed, run their focused policy
+tests and profile pre-commit; keep the hook sub-second:
 
 ```bash
 SIGNAL_FISH_HOOK_PROFILE=1 pwsh -NoLogo -NoProfile -NonInteractive -File scripts/hooks/pre-commit.ps1 -Worktree
 ```
 
-Any run above 1000ms must be investigated and optimized before handoff.
-
-**Why this matters**: The agent workflow runs hook/local-policy test suites
-that validate script output, internal path classifications, and CI config
-consistency. A change that passes broad Rust tests alone may still fail hook or
-policy guards if script output or policy configuration changed. Always verify
-the full chain. Git hooks themselves stay sub-second and inspect the staged Git
-index or pushed commits; the `-Worktree` preflights let agents run the same cheap
-checks on unstaged workflow/hook policy work before handoff. Agents and local CI
-are responsible for catching semantic failures before the hook is ever reached.
+Any run above 1000ms must be investigated before handoff.
 
 ---
 

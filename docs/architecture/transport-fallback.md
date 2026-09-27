@@ -192,7 +192,8 @@ never changes how the server relays `GameData`. The fan-out releases the room
 event mutation gate before delivering, so backpressured (slow-consumer) legs
 never delay other members' room mutations. Delivery is best-effort (like
 `Signal`): a backpressured peer may miss a notice and re-syncs on
-the next state change.
+the next state change. A concurrent leave can finish before a pending status
+delivery; clients should ignore status for a peer no longer in the room.
 
 ## Metrics exposed
 
