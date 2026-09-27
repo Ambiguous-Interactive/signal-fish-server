@@ -600,7 +600,13 @@ fn measure_relay_frame_suffix(
             "v3 relay stamp suffix exceeded its scratch buffer: {error}"
         ))
     })?;
-    Ok(128 - cursor.len())
+    // The cursor only shrinks, so this cannot underflow; the checked form
+    // keeps the arithmetic panic-policy-clean.
+    128usize.checked_sub(cursor.len()).ok_or_else(|| {
+        GameDataMaterializationError::Serialization(
+            "relay stamp suffix measurement underflowed".to_string(),
+        )
+    })
 }
 
 /// `(seq, epoch, class, key)` for the v3 stamp suffix of one relay message.
@@ -684,10 +690,14 @@ fn derive_relay_frame_from_sibling(
             "failed to reserve relay frame capacity: {error}"
         ))
     })?;
-    frame.extend_from_slice(&source[..body_len]);
+    let body = source.get(..body_len).ok_or_else(|| {
+        GameDataMaterializationError::Serialization(
+            "relay sibling body length exceeds its frame".to_string(),
+        )
+    })?;
+    frame.extend_from_slice(body);
     write_relay_frame_suffix(&mut frame, message, recipient_supports_v3)
         .map_err(|error| GameDataMaterializationError::Serialization(error.to_string()))?;
-    debug_assert_eq!(frame.len(), total_len);
     // Fail-closed re-validation, mirroring `serialize_json_text_limited`: the
     // copied body and the ASCII suffix are UTF-8 by construction, but the
     // contract is enforced, not assumed.
