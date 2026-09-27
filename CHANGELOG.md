@@ -81,10 +81,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after runtime quiescence — stronger than a jittery 100 ms wall
   window. The two lock-contention tests now assert the lease start on
   the monotonic `expires_at` domain (the clock the lease decisions
-  use) instead of the informational wall-clock stamp. The
-  formerly-slowest clock-bound test drops from 0.93 s to
-  0.02 s; the full `--lib` sweep loses roughly 12 s of pure wait time.
-  Pinned properties are unchanged.
+  use) instead of the informational wall-clock stamp. No production
+  behavior changed. The formerly-slowest clock-bound test drops from
+  0.93 s to 0.02 s; the full `--lib` sweep loses roughly 12 s of pure
+  wait time.
 - Relay: mixed-protocol rooms (v2 + v3 recipients) serialize relayed game
   data once per message instead of once per cohort (#636). The second
   cohort's JSON frame reuses the first cohort's exact `head + data` bytes

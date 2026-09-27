@@ -110,9 +110,9 @@ correctness evidence appears.
   assert lease start on the monotonic `expires_at` domain (#642 known
   remainder; PR #646).
   The remaining floor is rustc
-  crate-size work; the structural option (crate split) is parked in #642
-  pending an owner decision. Owner green-lit exploration 2026-09-27
-  ("worth exploring"); session 270's spike falsified the leaf-first
+  crate-size work. The owner green-lit split exploration on #642
+  2026-09-27 ("worth exploring"); session 270's spike falsified the
+  leaf-first
   split order — extracting protocol/config cannot cut the per-touch
   floor because every downstream crate rebuilds and re-expands on any
   upstream edit (data on #642). The win only exists fragmenting the fat
