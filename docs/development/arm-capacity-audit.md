@@ -154,7 +154,18 @@ No new finding is confirmed by this initial inventory.
 | Confidence and reproduction | `scripts/dev-loop.sh reconnect_preserves_join_time_but_clears_old_peer_endpoint` failed before the fix: the restored row retained `Direct { host: "old-network.example", port: 7777 }`. The test also checks the saved join time and name. |
 | Disposition | Disconnect registration now clears the old socket's peer metadata while retaining identity and replay state. The reconnect and duplicate-registration regressions pass. Existing Direct host plan tests verify that a host without an endpoint is re-elected or falls back to relay (#647). |
 
-These findings cover room-code rotation, player names, and spectator,
+### ARM-C012 — Old transport status can reach a rejoined seat
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed, medium |
+| Player impact | Peers can receive a stale `PeerTransportStatus` after its sender leaves and rejoins. This can show an old direct or WebRTC path as live. |
+| Source and revision | `src/server/message_router.rs::TransportStatusFanOut::deliver`, reviewed at `55a2b3a2`. |
+| Invariant | A status from one membership generation must not publish in a later generation. The old fan-out rechecked recipients but not the sender. |
+| Confidence and reproduction | `scripts/dev-loop.sh transport_status_delivery_does_not_block_concurrent_leave` failed before the fix with `old status reached the new seat` after a paused delivery resumed following leave and rejoin. |
+| Disposition | Fan-out now checks the sender's room membership generation at recipient queue commit, after any capacity wait. A canceled event does not increment the fan-out counter. The focused regression and transport-status tests pass (#647). |
+
+These findings cover room-code rotation, player names, transport status, and spectator,
 reconnect, and room-creation drain seams. The rest of the C1 room and storage
 rows remain unreviewed.
 

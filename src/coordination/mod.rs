@@ -1933,6 +1933,24 @@ pub trait MessageCoordinator: Send + Sync {
         Ok(true)
     }
 
+    /// Check the sender's current membership at the room-scoped enqueue.
+    /// Implementations that wait for recipient capacity must evaluate
+    /// `should_send` again under their routing gate at queue commit. The
+    /// fallback is for simple coordinators with immediate room sends.
+    async fn send_to_player_in_room_if(
+        &self,
+        player_id: &PlayerId,
+        room_id: &RoomId,
+        message: Arc<ServerMessage>,
+        should_send: &(dyn Fn() -> bool + Send + Sync),
+    ) -> anyhow::Result<bool> {
+        if !should_send() {
+            return Ok(false);
+        }
+        self.send_to_player_in_room(player_id, room_id, message)
+            .await
+    }
+
     /// Snapshot player ids currently published in room routing. `None` means a
     /// lightweight test/distributed implementation does not model local
     /// routing; production returns `Some` under its routing locks.

@@ -47,16 +47,16 @@ pub(super) fn disarm_transport_status_delivery_pause(player_id: &crate::protocol
 /// recipient snapshot and the shared event, ready to dispatch once the caller
 /// has released its serialization gates.
 struct TransportStatusFanOut {
-    #[cfg(all(test, signal_fish_repository_tests))]
     sender: PlayerId,
     room_id: crate::protocol::RoomId,
+    membership_generation: uuid::Uuid,
     recipients: Vec<PlayerId>,
     message: Arc<ServerMessage>,
 }
 
 impl TransportStatusFanOut {
-    /// Deliver outside every serialization gate. Per-recipient membership is
-    /// revalidated by `send_to_player_in_room` at delivery, and each leg
+    /// Deliver outside every serialization gate. Sender and recipient
+    /// membership are revalidated at queue commit, and each leg
     /// re-checks the recipient's negotiated v3 capability, so a membership
     /// change or a reconnect identity swap that lands after the snapshot
     /// cannot direct this v3-only frame at a v2 connection.
@@ -74,20 +74,34 @@ impl TransportStatusFanOut {
         // event one slow-consumer window, never `(N - 1)` windows. Recipient
         // filtering is v3-only but deliberately transport-agnostic: a
         // relay-only client still needs to know that a peer fell back.
-        futures_util::future::join_all(self.recipients.iter().map(|recipient| async move {
-            if !server.client_supports_v3(recipient) {
-                return;
-            }
-            let _ = server
-                .message_coordinator
-                .send_to_player_in_room(recipient, &self.room_id, Arc::clone(&self.message))
-                .await;
-        }))
-        .await;
+        let outcomes =
+            futures_util::future::join_all(self.recipients.iter().map(|recipient| async move {
+                if !server.client_supports_v3(recipient) {
+                    return false;
+                }
+                let sender_is_current = || {
+                    server
+                        .connection_manager
+                        .membership_generation_in_room(&self.sender, &self.room_id)
+                        == Some(self.membership_generation)
+                };
+                server
+                    .message_coordinator
+                    .send_to_player_in_room_if(
+                        recipient,
+                        &self.room_id,
+                        Arc::clone(&self.message),
+                        &sender_is_current,
+                    )
+                    .await
+                    .unwrap_or(false)
+            }))
+            .await;
 
-        // One fan-out EVENT per accepted in-room state change — not per
-        // recipient (see `ServerMetrics::record_transport_status_fanout`).
-        server.metrics.record_transport_status_fanout();
+        // Count one event only when at least one peer received the status.
+        if outcomes.into_iter().any(std::convert::identity) {
+            server.metrics.record_transport_status_fanout();
+        }
     }
 }
 
@@ -614,9 +628,11 @@ impl EnhancedGameServer {
             connected,
         });
         Some(TransportStatusFanOut {
-            #[cfg(all(test, signal_fish_repository_tests))]
             sender: *player_id,
             room_id,
+            membership_generation: self
+                .connection_manager
+                .membership_generation_in_room(player_id, &room_id)?,
             recipients,
             message,
         })

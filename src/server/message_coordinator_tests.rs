@@ -182,7 +182,7 @@ fn start_control_capacity_wait(
             Box::pin(async move {
                 let _drain_tx = drain_tx;
                 match coordinator
-                    .reserve_one_if(player_id, handle, &|| true, drain, None)
+                    .reserve_one_if(player_id, handle, &|| true, drain, None, None)
                     .await
                 {
                     ConditionalDeliveryReservation::SlowConsumer { .. } => {
@@ -207,6 +207,92 @@ async fn wait_for_counter(context: &str, max_yields: usize, mut condition: impl 
         tokio::task::yield_now().await;
     }
     panic!("{context}: counter condition never held");
+}
+
+#[tokio::test(start_paused = true)]
+async fn room_send_cancels_when_sender_changes_during_capacity_wait() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(1),
+        Arc::clone(&metrics),
+    );
+    let room_id = RoomId::new_v4();
+    let recipient = PlayerId::new_v4();
+    let (handle, close_listener, mut receiver) = full_control_queue(ControlQueueKind::Legacy);
+    coordinator
+        .register_local_client(recipient, Some(room_id), handle)
+        .await
+        .expect("route recipient");
+
+    let sender_is_current = AtomicBool::new(true);
+    let predicate = || sender_is_current.load(Ordering::SeqCst);
+    let mut send = Box::pin(coordinator.send_to_player_in_room_if(
+        &recipient,
+        &room_id,
+        Arc::new(ServerMessage::Pong),
+        &predicate,
+    ));
+    assert!(futures_util::poll!(send.as_mut()).is_pending());
+    sender_is_current.store(false, Ordering::SeqCst);
+    assert!(matches!(
+        receiver.pop_message("free recipient capacity").as_ref(),
+        ServerMessage::Pong
+    ));
+    assert!(!send.await.expect("conditional room send"));
+    receiver.assert_empty("stale sender status");
+    assert!(
+        close_listener.requested_reason().is_none(),
+        "recipient stays connected"
+    );
+    assert_eq!(
+        metrics
+            .websocket_slow_consumer_disconnects
+            .load(Ordering::Relaxed),
+        0
+    );
+}
+
+#[cfg(feature = "trace-validation")]
+#[tokio::test]
+async fn conditional_room_send_keeps_successful_trace_correlation() {
+    let coordinator = InMemoryMessageCoordinator::new();
+    let room_id = RoomId::new_v4();
+    let recipient = PlayerId::new_v4();
+    let trace = Arc::new(
+        crate::trace_validation::DeliveryTraceRecorder::new("conditional-room-send", 2)
+            .expect("trace recorder"),
+    );
+    let (close, _listener) = ConnectionCloseSignal::channel_with_trace(Arc::clone(&trace));
+    let trace_close = close.clone();
+    let (sender, mut receiver) = mpsc::channel(2);
+    coordinator
+        .register_local_client(
+            recipient,
+            Some(room_id),
+            ClientDeliveryHandle::new(sender, close),
+        )
+        .await
+        .expect("route recipient");
+    assert!(coordinator
+        .send_to_player_in_room_if(&recipient, &room_id, Arc::new(ServerMessage::Pong), &|| {
+            true
+        })
+        .await
+        .expect("conditional send"));
+    let received = receiver.try_recv().expect("queued control message");
+    let write_id = trace_close
+        .start_trace_write(received.as_ref(), false)
+        .expect("writer retains the send's trace ID");
+    trace_close.finish_trace_write(write_id, false);
+    let mut trace_jsonl = Vec::new();
+    trace
+        .write_jsonl_to(&mut trace_jsonl)
+        .expect("serialize trace");
+    let trace_jsonl = String::from_utf8(trace_jsonl).expect("UTF-8 trace");
+    assert!(trace_jsonl.contains("\"action\":\"SendFast\""));
+    assert!(trace_jsonl.contains("\"action\":\"WriterStart\""));
+    assert!(!trace_jsonl.contains("\"action\":\"Unsupported\""));
+    assert!(matches!(received.as_ref(), ServerMessage::Pong));
 }
 
 #[tokio::test(start_paused = true)]

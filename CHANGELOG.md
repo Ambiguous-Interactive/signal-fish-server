@@ -132,6 +132,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Devcontainer: the pinned GitHub MCP server binary is bumped from 1.11.0 to
   1.12.2, with fresh SHA256 ARGs taken from the release's checksums.txt.
 
+### Fixed
+
+- Peers no longer receive an old transport status after its sender leaves and
+  rejoins a room (#647).
+
 ## [0.9.2] - 2026-09-21
 
 ### Changed
