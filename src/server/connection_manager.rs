@@ -893,6 +893,15 @@ impl ConnectionManager {
         })
     }
 
+    pub(crate) fn membership_generation_in_room(
+        &self,
+        player_id: &PlayerId,
+        expected_room: &RoomId,
+    ) -> Option<Uuid> {
+        let client = self.clients.get(player_id)?;
+        (client.room_id == Some(*expected_room)).then_some(client.membership_generation)
+    }
+
     /// Read a connection's current epoch in unit tests without advancing it.
     /// Production metadata reads must use [`Self::current_relay_stamp_in_room`]
     /// so an epoch cannot be projected across a concurrent room transition.

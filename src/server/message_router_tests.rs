@@ -611,15 +611,42 @@ async fn transport_status_delivery_does_not_block_concurrent_leave() {
             .as_ref(),
         ServerMessage::PlayerLeft { player_id, .. } if *player_id == reporter
     ));
-    pause.release.notify_one();
-    status_task.await.expect("status task completes");
-    super::message_router::disarm_transport_status_delivery_pause(&reporter);
+    server
+        .handle_client_message(&reporter, join_message())
+        .await;
     assert!(matches!(
         next_routed_test_message(&mut reporter_rx, "RoomLeft after paused status")
             .await
             .as_ref(),
         ServerMessage::RoomLeft
     ));
+    assert!(matches!(
+        next_routed_test_message(&mut reporter_rx, "rejoined RoomJoined")
+            .await
+            .as_ref(),
+        ServerMessage::RoomJoined(_)
+    ));
+    drain_until_routed_player_joined(&mut observer_rx, reporter, "rejoined PlayerJoined").await;
+    let fanouts_before_stale_delivery = server
+        .metrics
+        .transport_status_fanout
+        .load(Ordering::Relaxed);
+    pause.release.notify_one();
+    status_task.await.expect("status task completes");
+    super::message_router::disarm_transport_status_delivery_pause(&reporter);
+    let observer_outcome = observer_rx.try_recv();
+    assert!(
+        matches!(observer_outcome, Err(mpsc::error::TryRecvError::Empty)),
+        "old status reached the new seat or observer disconnected"
+    );
+    assert_eq!(
+        server
+            .metrics
+            .transport_status_fanout
+            .load(Ordering::Relaxed),
+        fanouts_before_stale_delivery,
+        "canceled delivery is not a fan-out"
+    );
 }
 
 #[tokio::test(start_paused = true)]

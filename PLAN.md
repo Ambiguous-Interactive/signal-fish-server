@@ -101,7 +101,8 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
 - [ ] **Gameplay transitions:** ready-state invalidation on membership change;
   start/leave races; authority election and loss; host/direct readiness;
   v2/v3 negotiation; transport capability intersections; stale transport
-  reports; reconnect with changed encoding or capabilities; publication order
+  reports (ARM-C012 fixes status delivery after leave/rejoin); reconnect with
+  changed encoding or capabilities; publication order
   of room snapshots, session plans, and gameplay events.
 - [ ] **Delivery:** reliable ordering and duplicate handling; reconnect epoch
   and sequence changes; latest coalescing keys and generations; permitted
