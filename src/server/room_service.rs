@@ -2429,7 +2429,7 @@ impl EnhancedGameServer {
                         let sealed_creation = creation_password.is_some();
                         let room = match self
                             .database
-                            .create_room_classified(
+                            .create_pending_room_classified(
                                 game_name.to_string(),
                                 Some(room_code.to_string()),
                                 max_players,

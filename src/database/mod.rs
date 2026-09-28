@@ -263,6 +263,38 @@ pub trait GameDatabase: Send + Sync {
         }
         Ok(room)
     }
+
+    /// Server admission creates a hidden room and publishes it with
+    /// [`Self::publish_room`] as its first response commits. A backend that
+    /// stores pending rooms must override this to insert the pending marker
+    /// atomically with the room and code. The fallback keeps legacy adapter
+    /// behavior until that backend implements the pending lifecycle (#658).
+    #[allow(clippy::too_many_arguments)]
+    async fn create_pending_room_classified(
+        &self,
+        game_name: String,
+        room_code: Option<String>,
+        max_players: u8,
+        supports_authority: bool,
+        creator_id: PlayerId,
+        relay_type: String,
+        region_id: String,
+        application_id: Option<Uuid>,
+        join_password: Option<RoomPasswordCredential>,
+    ) -> CreateRoomResult {
+        self.create_room_classified(
+            game_name,
+            room_code,
+            max_players,
+            supports_authority,
+            creator_id,
+            relay_type,
+            region_id,
+            application_id,
+            join_password,
+        )
+        .await
+    }
     async fn set_room_application_id(
         &self,
         _room_id: &RoomId,
@@ -1382,6 +1414,33 @@ impl GameDatabase for InMemoryDatabase {
         .map_err(anyhow::Error::new)
     }
     async fn create_room_classified(
+        &self,
+        game_name: String,
+        room_code: Option<String>,
+        max_players: u8,
+        supports_authority: bool,
+        creator_id: PlayerId,
+        relay_type: String,
+        region_id: String,
+        application_id: Option<Uuid>,
+        join_password: Option<RoomPasswordCredential>,
+    ) -> CreateRoomResult {
+        self.create_room_with_state(
+            game_name,
+            room_code,
+            max_players,
+            supports_authority,
+            creator_id,
+            relay_type,
+            region_id,
+            application_id,
+            join_password,
+            false,
+        )
+        .await
+    }
+
+    async fn create_pending_room_classified(
         &self,
         game_name: String,
         room_code: Option<String>,
@@ -2851,6 +2910,33 @@ mod tests {
                 ref room_code,
             } if game_name == "typed_collision" && room_code == "TAKEN1"
         ));
+    }
+
+    #[tokio::test]
+    async fn classified_direct_creation_is_visible_on_return() {
+        let db = InMemoryDatabase::new();
+        let room = db
+            .create_room_classified(
+                "classified_direct".into(),
+                Some("DIRECT".into()),
+                4,
+                true,
+                Uuid::new_v4(),
+                "relay".into(),
+                "us-east-1".into(),
+                None,
+                None,
+            )
+            .await
+            .expect("classified direct creation succeeds");
+        assert_eq!(
+            db.get_room("classified_direct", "DIRECT")
+                .await
+                .expect("room lookup succeeds")
+                .map(|visible| visible.id),
+            Some(room.id)
+        );
+        assert!(db.pending_room_ids().await.unwrap().is_empty());
     }
 
     // --- BUG-1: room lifecycle GC (activity refresh + reconnection-aware GC) ---
