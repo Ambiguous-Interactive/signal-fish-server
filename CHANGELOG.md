@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tests: cover accepted and refused coordination defaults for room sends and
+  reconnect registration (#672).
+
 - Tests: cover an activity-reaper snapshot that becomes stale during reconnect
   and verify that the restored socket stays usable (#647).
 

@@ -3874,6 +3874,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_conditional_room_send_respects_predicate() {
+        let room_id = RoomId::from_u128(0x66666666666666666666666666666671);
+        let player_id = PlayerId::from_u128(0x66666666666666666666666666666672);
+        for (context, allowed) in [("accepted", true), ("refused", false)] {
+            let coordinator = FallbackCoordinator::default();
+            let sent = coordinator
+                .send_to_player_in_room_if(&player_id, &room_id, test_message(), &|| allowed)
+                .await
+                .unwrap_or_else(|error| panic!("{context}: conditional room send failed: {error}"));
+            assert_eq!(sent, allowed, "{context}: wrong send result");
+            let sends = coordinator.sends.lock().await;
+            assert_eq!(
+                sends.len(),
+                usize::from(allowed),
+                "{context}: wrong send count"
+            );
+            if let Some((recipient, message)) = sends.first() {
+                assert_eq!(*recipient, player_id, "{context}: wrong recipient");
+                assert!(
+                    matches!(message, ServerMessage::Pong),
+                    "{context}: wrong message"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn default_exact_membership_send_accepts_only_equal_sets() {
         let room_id = RoomId::from_u128(0x66666666666666666666666666666669);
         let player_id = PlayerId::from_u128(0x6666666666666666666666666666666a);
@@ -4124,6 +4151,71 @@ mod tests {
             "the fallback must request a slow-consumer close for a full initial queue"
         );
         drop(blocked_rx);
+    }
+
+    #[tokio::test]
+    async fn default_async_initial_registration_respects_commit_predicate() {
+        let room_id = RoomId::from_u128(0x33333333333333333333333333333335);
+        let player_id = PlayerId::from_u128(0x44444444444444444444444444444445);
+        for (context, allowed) in [("accepted", true), ("refused", false)] {
+            let coordinator = FallbackCoordinator::default();
+            let (handle, mut receiver, _listener) = delivery_handle(1);
+            let builder_calls = Arc::new(AtomicUsize::new(0));
+            let calls = Arc::clone(&builder_calls);
+            let outcome = coordinator
+                .register_local_client_with_initial_message_async(
+                    player_id,
+                    room_id,
+                    handle,
+                    &|| allowed,
+                    None,
+                    None,
+                    Box::new(move |members| {
+                        calls.fetch_add(1, Ordering::Relaxed);
+                        Box::pin(async move {
+                            assert_eq!(members, vec![player_id]);
+                            Ok(test_message())
+                        })
+                    }),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{context}: async registration failed: {error}"));
+            assert_eq!(
+                outcome,
+                if allowed {
+                    DeliveryOutcome::Delivered
+                } else {
+                    DeliveryOutcome::Canceled
+                },
+                "{context}: wrong registration outcome"
+            );
+            assert_eq!(builder_calls.load(Ordering::Relaxed), 1);
+            let expected_registrations = if allowed {
+                vec![(player_id, Some(room_id))]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(
+                *coordinator.registrations.lock().await,
+                expected_registrations,
+                "{context}: wrong registration state"
+            );
+            let queued_message = receiver.try_recv();
+            if allowed {
+                assert!(
+                    matches!(queued_message, Ok(message) if matches!(message.as_ref(), ServerMessage::Pong)),
+                    "{context}: expected the initial frame"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        queued_message,
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+                    ),
+                    "{context}: canceled delivery closes the unregistered channel"
+                );
+            }
+        }
     }
 
     #[tokio::test]

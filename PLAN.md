@@ -355,9 +355,6 @@ outside this plan's architecture scope.
 These items remain live but are not active phases. Re-rank them whenever new
 correctness evidence appears.
 
-- #672 — the 2026-09-28 scheduled mutation run left four trait-default
-  coordination and registration mutants alive. Check production callers,
-  remove dead defaults or add contract tests, then rerun affected shards.
 - #636 — promoted to the highest-priority correctness-first ARM capacity
   campaign above. Its C0-C5 tasks own the active audit and optimization queue.
 - #512 — hosted CI: the session-239 audit found every per-event workflow
