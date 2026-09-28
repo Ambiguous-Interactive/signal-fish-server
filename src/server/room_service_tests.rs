@@ -414,6 +414,33 @@ async fn default_classified_creation_refuses_password_before_storage_write() {
     );
 }
 
+#[tokio::test]
+async fn legacy_test_adapter_seals_a_successful_protected_creation() {
+    let mut database = DrainAfterCreateDatabase::new(create_test_database().await);
+    database.trigger_drain_after_create = false;
+    let room = database
+        .create_pending_room_classified(
+            "legacy-password".to_string(),
+            Some("SEAL01".to_string()),
+            4,
+            true,
+            PlayerId::new_v4(),
+            "relay".to_string(),
+            "local".to_string(),
+            None,
+            Some(crate::protocol::RoomPasswordCredential::new("secret")),
+        )
+        .await
+        .expect("the explicit legacy adapter accepts a protected creation");
+    let stored = database
+        .get_room_by_id(&room.id)
+        .await
+        .expect("room read succeeds")
+        .expect("created room remains in storage");
+    assert!(stored.admits_join_password(Some("secret")));
+    assert!(!stored.admits_join_password(Some("wrong")));
+}
+
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn ambiguous_commit_for_a_password_creation_is_refused_not_adopted_unlocked() {
@@ -1417,6 +1444,14 @@ impl GameDatabase for DrainAfterCreateDatabase {
 
     async fn is_room_published(&self, room_id: &RoomId) -> anyhow::Result<bool> {
         self.inner.is_room_published(room_id).await
+    }
+
+    async fn set_room_password(
+        &self,
+        room_id: &RoomId,
+        password: Option<crate::protocol::RoomPasswordCredential>,
+    ) -> anyhow::Result<()> {
+        self.inner.set_room_password(room_id, password).await
     }
 
     async fn create_room(
