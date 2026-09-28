@@ -233,8 +233,8 @@ Other stale-socket cleanup paths remain unreviewed.
 
 ### C1 reconnect claim expiry during restore (2026-09-28)
 
-At revision `9ba98f82`, reviewed the claimed reconnect while its membership
-write is paused across the monotonic admission deadline. The unit regression
+Reviewed the claimed reconnect while its membership write is paused across
+the monotonic admission deadline. The unit regression
 `reconnect_claim_survives_expiry_during_membership_restore` runs the server's
 expired-record cleanup after the deadline, then releases the write. Cleanup
 removes an expired unclaimed sibling but retains the claimed record and room
