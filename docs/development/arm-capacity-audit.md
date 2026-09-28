@@ -218,6 +218,19 @@ absent durable row, one peer `PlayerLeft`, one departure count, and the expected
 token outcome for each order. Neither interleaving reproduced a defect. Other
 leave/disconnect races remain unreviewed.
 
+### C1 reconnect and activity-reaper ordering review (2026-09-28)
+
+At `24e1dafb`, checked the case where activity cleanup selects an expired
+transient socket before reconnect moves that socket to the restored player ID.
+`stale_reaper_snapshot_cannot_close_a_restored_reconnect` advances paused time,
+captures the cleanup candidate, reconnects, then applies the stale candidate
+through the farewell and fallback close paths. The test checks the restored
+room seat, route, peer event, consumed token, and usable socket. No violation
+was reproduced. The opposite order, where cleanup pins a close before the
+reconnect claim, is covered by
+`reconnect_on_a_reaper_pinned_socket_is_refused_and_preserves_the_token`.
+Other stale-socket cleanup paths remain unreviewed.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**

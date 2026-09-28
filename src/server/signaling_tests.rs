@@ -3869,6 +3869,109 @@ async fn reconnect_on_a_reaper_pinned_socket_is_refused_and_preserves_the_token(
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
+async fn stale_reaper_snapshot_cannot_close_a_restored_reconnect() {
+    let server = create_test_server().await;
+    let (existing, mut existing_rx) = register_client(&server).await;
+    let (reconnecting, _old_rx) = register_client(&server).await;
+    let (current, mut current_rx) = register_client(&server).await;
+    let room_id = create_db_room(&server, existing).await;
+    let reconnecting_info = player_info(reconnecting, "reconnecting");
+    server
+        .database
+        .add_player_to_room(&room_id, reconnecting_info.clone())
+        .await
+        .expect("add reconnecting player");
+    for player_id in [existing, reconnecting] {
+        server
+            .connection_manager
+            .assign_client_to_room(&player_id, room_id)
+            .await;
+    }
+    let manager = server.reconnection_manager().expect("reconnection enabled");
+    let token = manager
+        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info), 0)
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &reconnecting)
+        .await
+        .expect("remove reconnecting player");
+    server.connection_manager.remove_client(&reconnecting);
+    server
+        .message_coordinator
+        .unregister_local_client(&reconnecting)
+        .await
+        .expect("unroute old socket");
+
+    let ping_timeout = Duration::from_secs(1);
+    tokio::time::advance(ping_timeout + Duration::from_nanos(1)).await;
+    let reaper_snapshot = server
+        .connection_manager
+        .collect_expired_clients(ping_timeout);
+    let candidate = *reaper_snapshot
+        .iter()
+        .find(|player_id| **player_id == current)
+        .expect("the transient socket must be in the reaper snapshot");
+
+    assert!(
+        server
+            .handle_reconnect(&current, &reconnecting, &room_id, &token)
+            .await
+    );
+    assert!(matches!(
+        recv(&mut current_rx).await.as_ref(),
+        ServerMessage::Reconnected { .. }
+    ));
+    assert!(matches!(
+        recv(&mut existing_rx).await.as_ref(),
+        ServerMessage::PlayerReconnected { player_id, .. } if *player_id == reconnecting
+    ));
+
+    // Process the captured candidate through the reaper's farewell and
+    // fallback close paths. Other expired clients are separate loop entries.
+    let should_send = || {
+        server
+            .connection_manager
+            .request_activity_timeout_if_expired(&candidate, ping_timeout)
+    };
+    assert!(
+        !server
+            .send_farewell_to_player_if(
+                &candidate,
+                "Activity timeout".to_string(),
+                Some(ErrorCode::ActivityTimeout),
+                &should_send,
+            )
+            .await
+    );
+    assert!(!server
+        .connection_manager
+        .request_activity_timeout_if_expired(&candidate, ping_timeout));
+    assert!(!server.connection_manager.has_client(&current));
+    assert!(server.connection_manager.has_client(&reconnecting));
+    assert_eq!(server.get_client_room(&reconnecting).await, Some(room_id));
+    assert!(server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room read")
+        .expect("room remains")
+        .players
+        .contains_key(&reconnecting));
+    assert!(!manager.has_pending_reconnection(&reconnecting).await);
+    assert!(server
+        .message_coordinator
+        .try_send_to_player(&reconnecting, Arc::new(ServerMessage::Pong))
+        .await
+        .expect("restored route is available"));
+    assert!(matches!(
+        recv(&mut current_rx).await.as_ref(),
+        ServerMessage::Pong
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
 async fn reconnect_during_teardown_preserves_token_for_retry() {
     let server = create_test_server().await;
     let (existing, _existing_rx) = register_client(&server).await;
