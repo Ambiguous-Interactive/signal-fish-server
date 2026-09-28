@@ -231,6 +231,20 @@ reconnect claim, is covered by
 `reconnect_on_a_reaper_pinned_socket_is_refused_and_preserves_the_token`.
 Other stale-socket cleanup paths remain unreviewed.
 
+### C1 reconnect claim expiry during restore (2026-09-28)
+
+Reviewed the claimed reconnect while its membership write is paused across
+the monotonic admission deadline. The unit regression
+`reconnect_claim_survives_expiry_during_membership_restore` runs the server's
+expired-record cleanup after the deadline, then releases the write. Cleanup
+removes an expired unclaimed sibling but retains the claimed record and room
+protection; the original seat, route, peer
+event, and directed baseline complete, and the one-time token is consumed.
+No violation was reproduced. The manager's existing
+`expired_but_claimed_reconnection_survives_every_expiry_surface` test covers
+claim release after expiry and subsequent cleanup. Other failed restore and
+retry paths remain unreviewed.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**

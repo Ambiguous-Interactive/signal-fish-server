@@ -3658,6 +3658,145 @@ async fn reconnect_restoring_membership_refuses_shutdown_drain_and_releases_toke
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
+async fn reconnect_claim_survives_expiry_during_membership_restore() {
+    let server = create_test_server_with_config(ServerConfig {
+        reconnection_window: Duration::from_secs(1),
+        ..ServerConfig::default()
+    })
+    .await;
+    let (existing, mut existing_rx) = register_client(&server).await;
+    let (reconnecting, _old_rx) = register_client(&server).await;
+    let (expired_sibling, _sibling_rx) = register_client(&server).await;
+    let (current, mut current_rx) = register_client(&server).await;
+    let room_id = create_db_room(&server, existing).await;
+    let reconnecting_info = player_info(reconnecting, "reconnecting");
+    server
+        .database
+        .add_player_to_room(&room_id, reconnecting_info.clone())
+        .await
+        .expect("add player");
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(expired_sibling, "expired sibling"))
+        .await
+        .expect("add sibling");
+    server
+        .connection_manager
+        .assign_client_to_room(&existing, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&reconnecting, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&expired_sibling, room_id)
+        .await;
+    let manager = server.reconnection_manager().expect("reconnection enabled");
+    let token = manager
+        .register_disconnection(reconnecting, room_id, false, Some(reconnecting_info), 0)
+        .await;
+    manager
+        .register_disconnection(expired_sibling, room_id, false, None, 0)
+        .await;
+    server.connection_manager.remove_client(&expired_sibling);
+    server
+        .message_coordinator
+        .unregister_local_client(&expired_sibling)
+        .await
+        .expect("unroute sibling");
+    server
+        .database
+        .remove_player_from_room(&room_id, &reconnecting)
+        .await
+        .expect("remove player");
+    server.connection_manager.remove_client(&reconnecting);
+    server
+        .message_coordinator
+        .unregister_local_client(&reconnecting)
+        .await
+        .expect("unroute player");
+
+    let database = server
+        .database()
+        .as_any()
+        .downcast_ref::<InMemoryDatabase>()
+        .expect("test server uses in-memory database");
+    database.pause_next_add_player_for_test();
+    let reconnect_server = Arc::clone(&server);
+    let reconnect_task = tokio::spawn(async move {
+        reconnect_server
+            .handle_reconnect(&current, &reconnecting, &room_id, &token)
+            .await
+    });
+    timeout(
+        Duration::from_secs(1),
+        database.wait_for_paused_add_player_for_test(),
+    )
+    .await
+    .expect("reconnect reaches membership write after claiming token");
+
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(
+        server.cleanup_expired_reconnections().await,
+        1,
+        "maintenance must remove the expired sibling but retain the claimed seat"
+    );
+    assert!(!manager.has_pending_reconnection(&expired_sibling).await);
+    assert!(!server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room read")
+        .expect("room exists")
+        .players
+        .contains_key(&expired_sibling));
+    assert!(manager.has_pending_reconnection(&reconnecting).await);
+    assert!(manager
+        .rooms_with_active_reconnections()
+        .await
+        .contains(&room_id));
+
+    database.release_paused_add_player_for_test();
+    assert!(timeout(Duration::from_secs(2), reconnect_task)
+        .await
+        .expect("reconnect finishes")
+        .expect("task lives"));
+    match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::Reconnected(payload) => {
+            assert_eq!(payload.player_id, reconnecting);
+            assert_eq!(payload.room_id, room_id);
+        }
+        other => panic!("expected Reconnected, got {other:?}"),
+    }
+    assert!(matches!(
+        recv(&mut existing_rx).await.as_ref(),
+        ServerMessage::PlayerReconnected { player_id, .. } if *player_id == reconnecting
+    ));
+    assert!(server.connection_manager.has_client(&reconnecting));
+    assert!(!server.connection_manager.has_client(&current));
+    assert!(server
+        .message_coordinator
+        .try_send_to_player(&reconnecting, Arc::new(ServerMessage::Pong))
+        .await
+        .expect("restored route send"));
+    assert!(matches!(
+        recv(&mut current_rx).await.as_ref(),
+        ServerMessage::Pong
+    ));
+    assert!(server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room read")
+        .expect("room exists")
+        .players
+        .contains_key(&reconnecting));
+    assert!(!manager.has_pending_reconnection(&reconnecting).await);
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
 async fn reconnect_waiting_for_baseline_capacity_refuses_shutdown_drain() {
     let server = create_test_server().await;
     let (existing, mut existing_rx) = register_client(&server).await;
