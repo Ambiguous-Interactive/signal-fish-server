@@ -432,6 +432,7 @@ async fn legacy_test_adapter_seals_a_successful_protected_creation() {
         )
         .await
         .expect("the explicit legacy adapter accepts a protected creation");
+    assert!(room.admits_join_password(Some("secret")));
     let stored = database
         .get_room_by_id(&room.id)
         .await
@@ -1402,7 +1403,7 @@ impl GameDatabase for DrainAfterCreateDatabase {
         application_id: Option<uuid::Uuid>,
         join_password: Option<crate::protocol::RoomPasswordCredential>,
     ) -> crate::database::CreateRoomResult {
-        let room = self
+        let mut room = self
             .create_room(
                 game_name,
                 room_code,
@@ -1416,12 +1417,16 @@ impl GameDatabase for DrainAfterCreateDatabase {
             .await
             .map_err(crate::database::CreateRoomError::Storage)?;
         if let Some(password) = join_password {
-            if let Err(error) = self.set_room_password(&room.id, Some(password)).await {
+            if let Err(error) = self
+                .set_room_password(&room.id, Some(password.clone()))
+                .await
+            {
                 self.delete_room(&room.id)
                     .await
                     .map_err(crate::database::CreateRoomError::Storage)?;
                 return Err(crate::database::CreateRoomError::Storage(error));
             }
+            room.password = Some(password);
         }
         Ok(room)
     }
