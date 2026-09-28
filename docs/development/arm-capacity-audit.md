@@ -143,6 +143,17 @@ No new finding is confirmed by this initial inventory.
 | Confidence and reproduction | `scripts/dev-loop.sh old_connection_info_cannot_overwrite_rejoined_seat` failed before the fix: the rejoined row contained `Direct { host: "old-endpoint", port: 7777 }`. The deterministic pause is at the storage write. |
 | Disposition | The handler now holds the client lifecycle gate through the metadata write. The regression passes with the new seat's metadata unset (#647). |
 
+### ARM-C011 — Reconnect can restore an old Direct endpoint
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed, medium |
+| Player impact | After a network change, peers can receive the disconnected socket's old Direct host endpoint in a new `SessionPlan`. |
+| Source and revision | `src/reconnection.rs::register_disconnection_with_identity`, `src/server/reconnection_service.rs` restore, and `src/server/session_policy.rs` host selection; reviewed at `e615b0da`. |
+| Invariant | A new socket must advertise its own peer endpoint. The old disconnect snapshot kept `PlayerInfo.connection_info`, and reconnect restored it unchanged. |
+| Confidence and reproduction | `scripts/dev-loop.sh reconnect_preserves_join_time_but_clears_old_peer_endpoint` failed before the fix: the restored row retained `Direct { host: "old-network.example", port: 7777 }`. The test also checks the saved join time and name. |
+| Disposition | Disconnect registration now clears the old socket's peer metadata while retaining identity and replay state. The reconnect and duplicate-registration regressions pass. Existing Direct host plan tests verify that a host without an endpoint is re-elected or falls back to relay (#647). |
+
 These findings cover room-code rotation, player names, and spectator,
 reconnect, and room-creation drain seams. The rest of the C1 room and storage
 rows remain unreviewed.

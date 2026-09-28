@@ -12,8 +12,8 @@ use crate::config::{
 use crate::database::{DatabaseConfig, GameDatabase, InMemoryDatabase};
 use crate::distributed::InMemoryDistributedLock;
 use crate::protocol::{
-    ClientMessage, ErrorCode, IceServer, LobbyState, PlayerId, PlayerInfo, ServerMessage, Topology,
-    Transport,
+    ClientMessage, ConnectionInfo, ErrorCode, IceServer, LobbyState, PlayerId, PlayerInfo,
+    ServerMessage, Topology, Transport,
 };
 use crate::rate_limit::RateLimitConfig;
 use crate::server::{EnhancedGameServer, NegotiatedProtocol, ServerConfig};
@@ -3098,7 +3098,7 @@ async fn waiting_reconnect_publishes_lifecycle_without_session_plan() {
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
-async fn reconnect_restores_original_connected_at() {
+async fn reconnect_preserves_join_time_but_clears_old_peer_endpoint() {
     let server = create_test_server().await;
     let (existing, _existing_rx) = register_client(&server).await;
     let (reconnecting, _old_rx) = register_client(&server).await;
@@ -3113,6 +3113,10 @@ async fn reconnect_restores_original_connected_at() {
             - chrono::Duration::hours(1),
     );
     let original_connected_at = reconnecting_info.connected_at;
+    reconnecting_info.connection_info = Some(ConnectionInfo::Direct {
+        host: "old-network.example".to_string(),
+        port: 7777,
+    });
     server
         .database
         .add_player_to_room(&room_id, reconnecting_info.clone())
@@ -3172,6 +3176,11 @@ async fn reconnect_restores_original_connected_at() {
     assert_eq!(
         restored.connected_at, original_connected_at,
         "reconnect must restore the saved PlayerInfo ordering timestamp"
+    );
+    assert_eq!(restored.name, "reconnecting");
+    assert!(
+        restored.connection_info.is_none(),
+        "the new socket must not inherit the old socket's peer endpoint: {restored:?}"
     );
 }
 

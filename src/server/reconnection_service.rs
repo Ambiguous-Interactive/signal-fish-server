@@ -1149,6 +1149,33 @@ impl EnhancedGameServer {
                         .await;
                 }
             }
+        } else if room
+            .players
+            .get(reconnect_player_id)
+            .is_some_and(|player| player.connection_info.is_some())
+        {
+            // A failed durable detach can leave the old seat in storage.
+            // Reconnect reuses that row, so clear its old socket endpoint
+            // before a baseline or Direct SessionPlan can expose it.
+            match self
+                .database
+                .clear_player_connection_info(room_id, reconnect_player_id)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) | Err(_) => {
+                    return self
+                        .reject_claimed_reconnect(
+                            current_player_id,
+                            claim_guard,
+                            &restore,
+                            "Failed to clear old peer endpoint",
+                            ErrorCode::InternalError,
+                            operation_id,
+                        )
+                        .await;
+                }
+            }
         }
 
         // The durable add above can wait while shutdown begins. Reject before
