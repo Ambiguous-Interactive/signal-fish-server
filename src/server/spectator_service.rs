@@ -523,6 +523,20 @@ impl SpectatorService {
                 ));
             }
         };
+        if !self
+            .database
+            .is_room_published(&room.id)
+            .await
+            .map_err(|err| {
+                warn!(room_id = %room.id, error = %err, "Failed to verify room publication");
+                SpectatorError::new("Storage error", Some(ErrorCode::StorageError))
+            })?
+        {
+            return Err(SpectatorError::new(
+                "Room not found",
+                Some(ErrorCode::RoomNotFound),
+            ));
+        }
 
         // The handler checks drain before it starts the transaction, but the
         // code lock and room lane can keep this join waiting past that check.

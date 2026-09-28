@@ -134,6 +134,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Refused room creations remain closed to players and spectators when setup
+  and rollback storage writes both fail. The server retries deletion and
+  releases the room code after storage recovers (#658).
 - Peers no longer receive an old transport status after its sender leaves and
   rejoins a room (#647).
 
