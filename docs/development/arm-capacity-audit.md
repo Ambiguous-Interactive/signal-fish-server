@@ -176,6 +176,17 @@ No new finding is confirmed by this initial inventory.
 | Confidence and reproduction | `scripts/dev-loop.sh failed_cap_write_and_delete_keep_unpublished_room_closed` failed before the fix: the next join received `RoomJoined` for the unfinished room. The green test checks a second server instance, spectator refusal, repeated repair failure, one deletion count, and code reuse after repair. Name-write and failed-read regressions cover sibling rollback paths. |
 | Disposition | In-memory creation starts pending. The response builder publishes while holding the room code and mutation locks, before the queue commit; cancellation rolls back under both locks. Failed rollbacks are marked abandoned, and maintenance retries deletion by ID after checking that state again. The trait default now refuses server creation without a pending lifecycle and refuses direct protected creation without an atomic seal. Process-loss behavior and other #658 acceptance cases remain open. |
 
+### ARM-C014 — A creator setup panic leaves a pending room outside repair
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed, medium |
+| Player impact | A storage panic after room insertion can reserve its code and room quota until process exit. The room remains invisible, so creators cannot use that code. |
+| Source and revision | `src/server/room_service.rs` creator cap and name setup, reviewed at `49497a44`. |
+| Invariant | A failed creator setup must delete the pending room or mark it abandoned for repair before the creation lock is released. The outer panic supervisor lacks the room ID until setup returns. |
+| Confidence and reproduction | `scripts/dev-loop.sh creator_setup_panic_keeps_pending_room_repairable` failed before the fix: injected cap-write panic left no abandoned room for cleanup. The green test covers cap and name panics followed by a delete failure. |
+| Disposition | Creator setup catches a storage panic while it still owns the room ID, rolls back or marks the room abandoned, and returns a creation failure so the locks release. The focused regression checks the response, metrics, repair, and retry. Raw pending-room recovery after process loss remains in [#658](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/658). |
+
 These findings cover room-code rotation, player names, transport status, and spectator,
 reconnect, and room-creation drain seams. The rest of the C1 room and storage
 rows remain unreviewed.

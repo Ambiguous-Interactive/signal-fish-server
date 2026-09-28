@@ -10172,6 +10172,101 @@ async fn failed_name_write_and_delete_repair_pending_room() {
     assert!(database.pending_room_ids().await.unwrap().is_empty());
 }
 
+/// A storage panic after insertion must not leave a pending room outside the
+/// abandoned-room repair scan.
+#[tokio::test(start_paused = true)]
+async fn creator_setup_panic_keeps_pending_room_repairable() {
+    for (index, panic_at_cap) in [true, false].into_iter().enumerate() {
+        let database = Arc::new(InMemoryDatabase::new());
+        database.initialize().await.expect("database initializes");
+        let server = create_test_server_with_message_coordinator_and_lock(
+            ServerConfig {
+                default_max_spectators: Some(1),
+                ..ServerConfig::default()
+            },
+            Arc::new(InMemoryMessageCoordinator::new()),
+            Arc::new(InMemoryDistributedLock::new()),
+            database.clone(),
+        )
+        .await;
+        let (creator, mut creator_rx) = register_client(
+            &server,
+            format!("127.0.0.1:{}", 48400 + index).parse().unwrap(),
+        )
+        .await;
+        if panic_at_cap {
+            database.panic_next_set_room_max_spectators_for_test();
+        } else {
+            database.panic_next_update_player_name_for_test();
+        }
+        database.fail_next_delete_room_for_test();
+        let operation_id = uuid::Uuid::from_u128(48400 + index as u128);
+        server
+            .handle_join_room_operation(
+                &creator,
+                Some(operation_id),
+                "panic-setup".into(),
+                Some("PAN001".into()),
+                "Creator".into(),
+                Some(4),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        let failure = creator_rx
+            .recv()
+            .await
+            .expect("panic has a terminal response");
+        assert!(
+            matches!(
+                failure.as_ref(),
+                ServerMessage::RoomOperationResult { operation_id: received, result }
+                    if *received == operation_id && matches!(
+                        result.as_ref(),
+                    crate::protocol::RoomOperationResult::RoomJoinFailed {
+                        error_code: Some(ErrorCode::RoomCreationFailed), ..
+                        }
+                    )
+            ),
+            "unexpected failure response: {failure:?}"
+        );
+        assert!(database
+            .get_room("panic-setup", "PAN001")
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(database.pending_room_ids().await.unwrap().len(), 1);
+        assert_eq!(server.metrics.rooms_created.load(Ordering::Relaxed), 1);
+        assert_eq!(server.metrics.players_joined.load(Ordering::Relaxed), 1);
+        assert_eq!(server.metrics.players_left.load(Ordering::Relaxed), 1);
+        assert_eq!(server.cleanup_abandoned_rooms().await, 1);
+        assert!(database.pending_room_ids().await.unwrap().is_empty());
+        assert_eq!(database.get_total_room_count().await.unwrap(), 0);
+        assert_eq!(server.metrics.rooms_deleted.load(Ordering::Relaxed), 1);
+
+        server
+            .handle_join_room(
+                &creator,
+                "panic-setup".into(),
+                Some("PAN001".into()),
+                "Creator".into(),
+                Some(4),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        let retried = creator_rx.recv().await.unwrap();
+        assert!(
+            matches!(retried.as_ref(), ServerMessage::RoomJoined(_)),
+            "unexpected retry response: {retried:?}"
+        );
+    }
+}
+
 /// Issue #658: an unreadable newly created room must still be queued for
 /// deletion when its creator setup fails.
 #[tokio::test(start_paused = true)]
