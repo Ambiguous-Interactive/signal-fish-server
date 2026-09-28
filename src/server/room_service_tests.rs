@@ -380,6 +380,42 @@ async fn legacy_adapter_untyped_atomic_collision_is_confirmed_and_retried() {
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
+async fn default_classified_creation_refuses_password_before_storage_write() {
+    let database =
+        DrainAfterCreateDatabase::with_ambiguous_commit_once(create_test_database().await);
+    let result = database
+        .create_room_classified(
+            "no-unsealed-window".to_string(),
+            Some("SEALED".to_string()),
+            4,
+            true,
+            PlayerId::new_v4(),
+            "relay".to_string(),
+            "local".to_string(),
+            None,
+            Some(crate::protocol::RoomPasswordCredential::new("secret")),
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(crate::database::CreateRoomError::Storage(_))
+    ));
+    assert!(
+        database.ambiguous_commit_once.load(Ordering::Acquire),
+        "a protected creation must not call the legacy storage insert"
+    );
+    assert_eq!(
+        database
+            .get_game_room_count("no-unsealed-window")
+            .await
+            .expect("room count succeeds"),
+        0
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
 async fn ambiguous_commit_for_a_password_creation_is_refused_not_adopted_unlocked() {
     let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
     let message_coordinator: Arc<dyn MessageCoordinator> =
@@ -413,9 +449,8 @@ async fn ambiguous_commit_for_a_password_creation_is_refused_not_adopted_unlocke
         )
         .await;
 
-    // The adapter committed the row, then returned an untyped error before
-    // any seal could land (the classified trait default propagates the
-    // create error before its post-create seal). Adopting that row would
+    // This test fixture explicitly opts into legacy visible creation. It
+    // commits the row, then returns an untyped error before sealing. Adopting it would
     // hand the creator a "protected" room without its password, so the
     // creation must fail honestly instead of reporting success.
     let response = timeout(Duration::from_secs(1), receiver.recv())
@@ -1324,6 +1359,64 @@ impl DrainAfterCreateDatabase {
 impl GameDatabase for DrainAfterCreateDatabase {
     async fn initialize(&self) -> anyhow::Result<()> {
         self.inner.initialize().await
+    }
+
+    // Model an explicitly opted-in legacy adapter. Production backends must
+    // instead insert an invisible pending room and implement repair.
+    async fn create_pending_room_classified(
+        &self,
+        game_name: String,
+        room_code: Option<String>,
+        max_players: u8,
+        supports_authority: bool,
+        creator_id: PlayerId,
+        relay_type: String,
+        region_id: String,
+        application_id: Option<uuid::Uuid>,
+        join_password: Option<crate::protocol::RoomPasswordCredential>,
+    ) -> crate::database::CreateRoomResult {
+        let room = self
+            .create_room(
+                game_name,
+                room_code,
+                max_players,
+                supports_authority,
+                creator_id,
+                relay_type,
+                region_id,
+                application_id,
+            )
+            .await
+            .map_err(crate::database::CreateRoomError::Storage)?;
+        if let Some(password) = join_password {
+            if let Err(error) = self.set_room_password(&room.id, Some(password)).await {
+                self.delete_room(&room.id)
+                    .await
+                    .map_err(crate::database::CreateRoomError::Storage)?;
+                return Err(crate::database::CreateRoomError::Storage(error));
+            }
+        }
+        Ok(room)
+    }
+
+    async fn publish_room(&self, room_id: &RoomId) -> anyhow::Result<()> {
+        self.inner.publish_room(room_id).await
+    }
+
+    async fn abandon_room(&self, room_id: &RoomId, creator_id: &PlayerId) -> anyhow::Result<()> {
+        self.inner.abandon_room(room_id, creator_id).await
+    }
+
+    async fn pending_room_ids(&self) -> anyhow::Result<Vec<RoomId>> {
+        self.inner.pending_room_ids().await
+    }
+
+    async fn delete_room_if_pending(&self, room_id: &RoomId) -> anyhow::Result<bool> {
+        self.inner.delete_room_if_pending(room_id).await
+    }
+
+    async fn is_room_published(&self, room_id: &RoomId) -> anyhow::Result<bool> {
+        self.inner.is_room_published(room_id).await
     }
 
     async fn create_room(

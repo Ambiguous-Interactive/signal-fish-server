@@ -206,18 +206,9 @@ pub trait GameDatabase: Send + Sync {
     /// code retries. Implementations should override this method when they can
     /// classify their storage backend's uniqueness violation.
     ///
-    /// `join_password` (issue #525) seals the room from birth: the row must
-    /// become visible already carrying the credential, so no admission can
-    /// observe an unlocked room. The shipped in-memory implementation creates
-    /// and seals under one guard set. This fallback is NOT atomic — it seals
-    /// after `create_room` returned, leaving a window in which an admission
-    /// that resolves the code (a spectator join resolves without the room-code
-    /// lock) can observe an unlocked row — so implementations that can create
-    /// atomically SHOULD override and do so. If the fallback's seal write
-    /// fails, the fresh room is deleted and the creation surfaces as
-    /// [`CreateRoomError::Storage`] rather than an unlocked `Ok` room: on the
-    /// seal-failure path the server joins nothing into a room whose creation
-    /// reported an error.
+    /// `join_password` must be stored atomically with the room. The default
+    /// refuses protected creation before writing anything. Backends that
+    /// support protected rooms must override this method.
     #[allow(clippy::too_many_arguments)]
     async fn create_room_classified(
         &self,
@@ -231,6 +222,11 @@ pub trait GameDatabase: Send + Sync {
         application_id: Option<Uuid>,
         join_password: Option<RoomPasswordCredential>,
     ) -> CreateRoomResult {
+        if join_password.is_some() {
+            return Err(CreateRoomError::Storage(anyhow::anyhow!(
+                "atomic room password creation is not supported by this database"
+            )));
+        }
         let room = self
             .create_room(
                 game_name,
@@ -244,56 +240,30 @@ pub trait GameDatabase: Send + Sync {
             )
             .await
             .map_err(CreateRoomError::Storage)?;
-        if let Some(credential) = join_password {
-            if let Err(error) = self.set_room_password(&room.id, Some(credential)).await {
-                // Never hand back a room the caller asked to protect: the
-                // failure must not surface as an unlocked `Ok` room. The
-                // caller aborts the join on this error, so the fresh row is
-                // deleted; if even the delete fails, the row leaks unlocked —
-                // log it loudly here, where the operator first learns of it.
-                if let Err(delete_error) = self.delete_room(&room.id).await {
-                    tracing::error!(
-                        room_id = %room.id,
-                        %delete_error,
-                        "Failed to roll back an unsealed room after a failed creation-time password write"
-                    );
-                }
-                return Err(CreateRoomError::Storage(error));
-            }
-        }
         Ok(room)
     }
 
     /// Server admission creates a hidden room and publishes it with
     /// [`Self::publish_room`] as its first response commits. A backend that
-    /// stores pending rooms must override this to insert the pending marker
-    /// atomically with the room and code. The fallback keeps legacy adapter
-    /// behavior until that backend implements the pending lifecycle (#658).
+    /// supports server room creation must override this method and insert the
+    /// pending marker atomically with the room and code. The default refuses
+    /// creation before writing anything (#658).
     #[allow(clippy::too_many_arguments)]
     async fn create_pending_room_classified(
         &self,
-        game_name: String,
-        room_code: Option<String>,
-        max_players: u8,
-        supports_authority: bool,
-        creator_id: PlayerId,
-        relay_type: String,
-        region_id: String,
-        application_id: Option<Uuid>,
-        join_password: Option<RoomPasswordCredential>,
+        _game_name: String,
+        _room_code: Option<String>,
+        _max_players: u8,
+        _supports_authority: bool,
+        _creator_id: PlayerId,
+        _relay_type: String,
+        _region_id: String,
+        _application_id: Option<Uuid>,
+        _join_password: Option<RoomPasswordCredential>,
     ) -> CreateRoomResult {
-        self.create_room_classified(
-            game_name,
-            room_code,
-            max_players,
-            supports_authority,
-            creator_id,
-            relay_type,
-            region_id,
-            application_id,
-            join_password,
-        )
-        .await
+        Err(CreateRoomError::Storage(anyhow::anyhow!(
+            "pending room creation is not supported by this database"
+        )))
     }
     async fn set_room_application_id(
         &self,
@@ -496,28 +466,27 @@ pub trait GameDatabase: Send + Sync {
     /// Make a room visible while the creator holds its code and mutation
     /// locks, immediately before the first response queue commit. A canceled
     /// commit rolls the room back before either lock is released. Backends
-    /// needing pending creation must override this together with atomic
-    /// pending insertion, lookup filtering, and abandoned-room repair.
+    /// supporting room creation must implement the full pending lifecycle.
     async fn publish_room(&self, _room_id: &RoomId) -> Result<()> {
-        Ok(())
+        anyhow::bail!("pending room publication is not supported by this database")
     }
 
     async fn abandon_room(&self, _room_id: &RoomId, _creator_id: &PlayerId) -> Result<()> {
-        Ok(())
+        anyhow::bail!("pending room abandonment is not supported by this database")
     }
 
     /// Retry abandoned rooms. Only a still-abandoned room may be removed.
     async fn pending_room_ids(&self) -> Result<Vec<RoomId>> {
-        Ok(Vec::new())
+        anyhow::bail!("pending room enumeration is not supported by this database")
     }
 
     async fn delete_room_if_pending(&self, _room_id: &RoomId) -> Result<bool> {
-        Ok(false)
+        anyhow::bail!("pending room deletion is not supported by this database")
     }
 
     /// Recheck admission visibility after taking the room mutation lane.
     async fn is_room_published(&self, _room_id: &RoomId) -> Result<bool> {
-        Ok(true)
+        anyhow::bail!("room publication state is not supported by this database")
     }
 
     /// Get room count for a specific game (for rate limiting)
