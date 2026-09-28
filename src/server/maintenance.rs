@@ -8,6 +8,34 @@ use std::sync::Arc;
 use super::{chrono_duration_from_std, EnhancedGameServer};
 
 impl EnhancedGameServer {
+    /// Retry deletion of room creations whose setup failed after insertion.
+    /// Storage checks the publication state again while deleting, so a stale
+    /// sweep cannot remove a room that became live.
+    pub(crate) async fn cleanup_abandoned_rooms(&self) -> usize {
+        let room_ids = match self.database.pending_room_ids().await {
+            Ok(ids) => ids,
+            Err(error) => {
+                tracing::warn!(%error, "Failed to list abandoned rooms for cleanup");
+                return 0;
+            }
+        };
+        let mut deleted = 0_usize;
+        for room_id in room_ids {
+            match self.database.delete_room_if_pending(&room_id).await {
+                Ok(true) => {
+                    self.metrics.add_rooms_deleted(1);
+                    self.room_applications.remove(&room_id);
+                    deleted = deleted.saturating_add(1);
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(%room_id, %error, "Failed to delete abandoned room; retaining it for retry");
+                }
+            }
+        }
+        deleted
+    }
+
     /// Retry player-row removals that failed after a dead connection had to be
     /// unrouted. The room mutation gate orders this check with reconnect/join,
     /// preventing cleanup from deleting a newly restored live membership.
@@ -540,6 +568,7 @@ impl EnhancedGameServer {
                 );
             }
 
+            self.cleanup_abandoned_rooms().await;
             self.cleanup_pending_durable_player_detaches().await;
 
             // Cleanup empty rooms with idempotency

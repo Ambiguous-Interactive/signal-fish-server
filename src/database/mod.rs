@@ -461,6 +461,33 @@ pub trait GameDatabase: Send + Sync {
     #[allow(dead_code)]
     async fn delete_room(&self, room_id: &RoomId) -> Result<bool>;
 
+    /// Make a room visible while the creator holds its code and mutation
+    /// locks, immediately before the first response queue commit. A canceled
+    /// commit rolls the room back before either lock is released. Backends
+    /// needing pending creation must override this together with atomic
+    /// pending insertion, lookup filtering, and abandoned-room repair.
+    async fn publish_room(&self, _room_id: &RoomId) -> Result<()> {
+        Ok(())
+    }
+
+    async fn abandon_room(&self, _room_id: &RoomId, _creator_id: &PlayerId) -> Result<()> {
+        Ok(())
+    }
+
+    /// Retry abandoned rooms. Only a still-abandoned room may be removed.
+    async fn pending_room_ids(&self) -> Result<Vec<RoomId>> {
+        Ok(Vec::new())
+    }
+
+    async fn delete_room_if_pending(&self, _room_id: &RoomId) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Recheck admission visibility after taking the room mutation lane.
+    async fn is_room_published(&self, _room_id: &RoomId) -> Result<bool> {
+        Ok(true)
+    }
+
     /// Get room count for a specific game (for rate limiting)
     async fn get_game_room_count(&self, game_name: &str) -> Result<usize>;
 
@@ -616,6 +643,12 @@ const CLEANUP_RECLAIM_WINDOW: chrono::Duration = chrono::Duration::minutes(5);
 /// forgets it.
 const CLEANUP_EVENT_RETENTION: chrono::Duration = chrono::Duration::hours(1);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PendingRoomState {
+    Creating,
+    Abandoned(PlayerId),
+}
+
 /// Saturating `std::time::Duration` → `chrono::Duration` conversion for
 /// monotonic elapsed values (an `Instant` elapsed cannot be negative, but it
 /// can exceed the chrono range).
@@ -641,6 +674,9 @@ pub struct InMemoryDatabase {
     rooms: std::sync::Arc<tokio::sync::RwLock<HashMap<RoomId, Room>>>,
     /// Maps (game_name, room_code) -> room_id to allow same room codes across different games
     room_codes: std::sync::Arc<tokio::sync::RwLock<HashMap<(String, String), RoomId>>>,
+    /// Missing means published. Lock after rooms, codes, and liveness when
+    /// those guards are also needed, so creation and deletion remain atomic.
+    room_publication: std::sync::Arc<tokio::sync::RwLock<HashMap<RoomId, PendingRoomState>>>,
     /// Monotonic per-room activity used for garbage-collection decisions.
     ///
     /// A wall-clock step (NTP correction, manual clock change, host
@@ -710,6 +746,14 @@ pub struct InMemoryDatabase {
     #[cfg(all(test, signal_fish_repository_tests))]
     fail_set_room_max_spectators_once: std::sync::atomic::AtomicBool,
     #[cfg(all(test, signal_fish_repository_tests))]
+    fail_delete_room_once: std::sync::atomic::AtomicBool,
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pause_publish_room_once: std::sync::atomic::AtomicBool,
+    #[cfg(all(test, signal_fish_repository_tests))]
+    publish_room_reached: tokio::sync::Notify,
+    #[cfg(all(test, signal_fish_repository_tests))]
+    release_publish_room: tokio::sync::Notify,
+    #[cfg(all(test, signal_fish_repository_tests))]
     pause_update_player_connection_info_once: std::sync::atomic::AtomicBool,
     #[cfg(all(test, signal_fish_repository_tests))]
     update_player_connection_info_reached: tokio::sync::Notify,
@@ -741,6 +785,7 @@ impl InMemoryDatabase {
         Self {
             rooms: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             room_codes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            room_publication: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             room_liveness_monotonic: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             cleanup_events: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             #[cfg(test)]
@@ -791,6 +836,14 @@ impl InMemoryDatabase {
             miss_update_player_name_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
             fail_set_room_max_spectators_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            fail_delete_room_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            pause_publish_room_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            publish_room_reached: tokio::sync::Notify::new(),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            release_publish_room: tokio::sync::Notify::new(),
             #[cfg(all(test, signal_fish_repository_tests))]
             pause_update_player_connection_info_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
@@ -991,6 +1044,28 @@ impl InMemoryDatabase {
     }
 
     #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn fail_next_delete_room_for_test(&self) {
+        self.fail_delete_room_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn pause_next_publish_room_for_test(&self) {
+        self.pause_publish_room_once
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) async fn wait_for_paused_publish_room_for_test(&self) {
+        self.publish_room_reached.notified().await;
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn release_paused_publish_room_for_test(&self) {
+        self.release_publish_room.notify_one();
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) fn pause_next_update_player_connection_info_for_test(&self) {
         self.pause_update_player_connection_info_once
             .store(true, std::sync::atomic::Ordering::Release);
@@ -1148,39 +1223,8 @@ fn room_idle_for(
     }
 }
 
-#[async_trait]
-impl GameDatabase for InMemoryDatabase {
-    async fn initialize(&self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn create_room(
-        &self,
-        game_name: String,
-        room_code: Option<String>,
-        max_players: u8,
-        supports_authority: bool,
-        creator_id: PlayerId,
-        relay_type: String,
-        region_id: String,
-        application_id: Option<Uuid>,
-    ) -> Result<Room> {
-        self.create_room_classified(
-            game_name,
-            room_code,
-            max_players,
-            supports_authority,
-            creator_id,
-            relay_type,
-            region_id,
-            application_id,
-            None,
-        )
-        .await
-        .map_err(anyhow::Error::new)
-    }
-
-    async fn create_room_classified(
+impl InMemoryDatabase {
+    async fn create_room_with_state(
         &self,
         game_name: String,
         room_code: Option<String>,
@@ -1191,6 +1235,7 @@ impl GameDatabase for InMemoryDatabase {
         region_id: String,
         application_id: Option<Uuid>,
         join_password: Option<RoomPasswordCredential>,
+        pending: bool,
     ) -> CreateRoomResult {
         let room_code =
             room_code.unwrap_or_else(crate::protocol::room_codes::generate_clean_room_code);
@@ -1233,6 +1278,7 @@ impl GameDatabase for InMemoryDatabase {
         let mut rooms = self.rooms.write().await;
         let mut room_codes = self.room_codes.write().await;
         let mut liveness = self.room_liveness_monotonic.write().await;
+        let mut publication = self.room_publication.write().await;
 
         // Check room code uniqueness under the write lock (no TOCTOU gap)
         let game_room_key = (game_name.clone(), room_code.clone());
@@ -1295,10 +1341,72 @@ impl GameDatabase for InMemoryDatabase {
         rooms.insert(room_id, room.clone());
         room_codes.insert(game_room_key, room_id);
         liveness.insert(room_id, RoomLiveness::Live(tokio::time::Instant::now()));
+        if pending {
+            publication.insert(room_id, PendingRoomState::Creating);
+        }
 
         Ok(room)
     }
+}
 
+#[async_trait]
+impl GameDatabase for InMemoryDatabase {
+    async fn initialize(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn create_room(
+        &self,
+        game_name: String,
+        room_code: Option<String>,
+        max_players: u8,
+        supports_authority: bool,
+        creator_id: PlayerId,
+        relay_type: String,
+        region_id: String,
+        application_id: Option<Uuid>,
+    ) -> Result<Room> {
+        self.create_room_with_state(
+            game_name,
+            room_code,
+            max_players,
+            supports_authority,
+            creator_id,
+            relay_type,
+            region_id,
+            application_id,
+            None,
+            false,
+        )
+        .await
+        .map_err(anyhow::Error::new)
+    }
+    async fn create_room_classified(
+        &self,
+        game_name: String,
+        room_code: Option<String>,
+        max_players: u8,
+        supports_authority: bool,
+        creator_id: PlayerId,
+        relay_type: String,
+        region_id: String,
+        application_id: Option<Uuid>,
+        join_password: Option<RoomPasswordCredential>,
+    ) -> CreateRoomResult {
+        self.create_room_with_state(
+            game_name,
+            room_code,
+            max_players,
+            supports_authority,
+            creator_id,
+            relay_type,
+            region_id,
+            application_id,
+            join_password,
+            true,
+        )
+        .await
+    }
     async fn update_room_code(&self, room_id: &RoomId, new_code: String) -> UpdateRoomCodeResult {
         #[cfg(test)]
         if self
@@ -1404,10 +1512,13 @@ impl GameDatabase for InMemoryDatabase {
         // Lock ordering: rooms first, then room_codes (consistent with write paths)
         let rooms = self.rooms.read().await;
         let room_codes = self.room_codes.read().await;
+        let publication = self.room_publication.read().await;
         let game_room_key = (game_name.to_string(), room_code.to_string());
         if let Some(room_id) = room_codes.get(&game_room_key) {
             if let Some(room) = rooms.get(room_id) {
-                return Ok(Some(room.clone()));
+                if !publication.contains_key(room_id) {
+                    return Ok(Some(room.clone()));
+                }
             }
         }
         Ok(None)
@@ -1759,6 +1870,7 @@ impl GameDatabase for InMemoryDatabase {
             empty_timeout
         };
         let mut liveness = self.room_liveness_monotonic.write().await;
+        let mut publication = self.room_publication.write().await;
 
         let mut to_remove = Vec::new();
         for (room_id, room) in rooms.iter() {
@@ -1776,6 +1888,7 @@ impl GameDatabase for InMemoryDatabase {
             rooms.remove(&room_id);
             room_codes.remove(&(game_name, room_code));
             liveness.remove(&room_id);
+            publication.remove(&room_id);
             deleted_ids.push(room_id);
         }
 
@@ -1791,6 +1904,7 @@ impl GameDatabase for InMemoryDatabase {
         let mut rooms = self.rooms.write().await;
         let mut room_codes = self.room_codes.write().await;
         let mut liveness = self.room_liveness_monotonic.write().await;
+        let mut publication = self.room_publication.write().await;
 
         let mut to_remove = Vec::new();
         for (room_id, room) in rooms.iter() {
@@ -1818,6 +1932,7 @@ impl GameDatabase for InMemoryDatabase {
             rooms.remove(&room_id);
             room_codes.remove(&(game_name, room_code));
             liveness.remove(&room_id);
+            publication.remove(&room_id);
 
             if was_empty {
                 outcome.empty_rooms_cleaned = outcome.empty_rooms_cleaned.saturating_add(1);
@@ -1840,21 +1955,117 @@ impl GameDatabase for InMemoryDatabase {
     }
 
     async fn delete_room(&self, room_id: &RoomId) -> Result<bool> {
+        #[cfg(all(test, signal_fish_repository_tests))]
+        if self
+            .fail_delete_room_once
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            anyhow::bail!("injected room deletion failure for test");
+        }
         // All three guards are acquired before any mutation: a dropped future
         // can only cancel while waiting for a lock, never between the primary
         // commit and the liveness stamp (see the dropped-delete-room test).
         let mut rooms = self.rooms.write().await;
         let mut room_codes = self.room_codes.write().await;
         let mut liveness = self.room_liveness_monotonic.write().await;
+        let mut publication = self.room_publication.write().await;
 
         if let Some(room) = rooms.remove(room_id) {
             let game_room_key = (room.game_name.clone(), room.code);
             room_codes.remove(&game_room_key);
             liveness.remove(room_id);
+            publication.remove(room_id);
             Ok(true)
         } else {
             Ok(false)
         }
+    }
+
+    async fn publish_room(&self, room_id: &RoomId) -> Result<()> {
+        #[cfg(all(test, signal_fish_repository_tests))]
+        if self
+            .pause_publish_room_once
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            self.publish_room_reached.notify_one();
+            self.release_publish_room.notified().await;
+        }
+        let rooms = self.rooms.read().await;
+        if !rooms.contains_key(room_id) {
+            anyhow::bail!("Room {room_id} disappeared before publication");
+        }
+        let mut publication = self.room_publication.write().await;
+        if matches!(
+            publication.get(room_id),
+            Some(PendingRoomState::Abandoned(_))
+        ) {
+            anyhow::bail!("Room {room_id} was abandoned before publication");
+        }
+        publication.remove(room_id);
+        Ok(())
+    }
+
+    async fn abandon_room(&self, room_id: &RoomId, creator_id: &PlayerId) -> Result<()> {
+        let rooms = self.rooms.read().await;
+        let room = rooms
+            .get(room_id)
+            .ok_or_else(|| anyhow::anyhow!("Room {room_id} disappeared before abandonment"))?;
+        if room.players.len() != 1 || !room.players.contains_key(creator_id) {
+            anyhow::bail!("Room {room_id} gained another member before abandonment");
+        }
+        // Publication may have started inside the response builder but its
+        // queue commit can still fail. The caller holds the room lane until
+        // rollback finishes, so revoke lookup visibility before detaching.
+        self.room_publication
+            .write()
+            .await
+            .insert(*room_id, PendingRoomState::Abandoned(*creator_id));
+        Ok(())
+    }
+
+    async fn pending_room_ids(&self) -> Result<Vec<RoomId>> {
+        let publication = self.room_publication.read().await;
+        Ok(publication
+            .iter()
+            .filter_map(|(id, state)| {
+                matches!(state, PendingRoomState::Abandoned(_)).then_some(*id)
+            })
+            .collect())
+    }
+
+    async fn is_room_published(&self, room_id: &RoomId) -> Result<bool> {
+        let rooms = self.rooms.read().await;
+        let publication = self.room_publication.read().await;
+        Ok(rooms.contains_key(room_id) && !publication.contains_key(room_id))
+    }
+
+    async fn delete_room_if_pending(&self, room_id: &RoomId) -> Result<bool> {
+        #[cfg(all(test, signal_fish_repository_tests))]
+        if self
+            .fail_delete_room_once
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            anyhow::bail!("injected room deletion failure for test");
+        }
+        let mut rooms = self.rooms.write().await;
+        let mut room_codes = self.room_codes.write().await;
+        let mut liveness = self.room_liveness_monotonic.write().await;
+        let mut publication = self.room_publication.write().await;
+        let Some(room) = rooms.get(room_id) else {
+            return Ok(false);
+        };
+        let Some(PendingRoomState::Abandoned(creator_id)) = publication.get(room_id) else {
+            return Ok(false);
+        };
+        if room.players.len() > 1 || room.players.keys().any(|player_id| player_id != creator_id) {
+            return Ok(false);
+        }
+        let key = (room.game_name.clone(), room.code.clone());
+        rooms.remove(room_id);
+        room_codes.remove(&key);
+        liveness.remove(room_id);
+        publication.remove(room_id);
+        Ok(true)
     }
 
     async fn get_game_room_count(&self, game_name: &str) -> Result<usize> {

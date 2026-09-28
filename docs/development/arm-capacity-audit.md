@@ -130,7 +130,7 @@ No new finding is confirmed by this initial inventory.
 | Source and revision | `src/server/room_service.rs` creation-time cap write and `src/database/mod.rs::set_room_max_spectators`, reviewed at `6d2b3eb2`. |
 | Invariant | A creator join cannot publish a room with a cap different from the deployment policy. Explicit `0` is the unlimited opt-out. |
 | Confidence and reproduction | `spectator_cap_write_failure_refuses_creation_and_allows_retry` failed before the fix with `RoomJoined`. The green test checks room/code rollback, retry, and one-spectator enforcement. `explicitly_unlimited_spectators_need_no_cap_write` covers the opt-out. |
-| Disposition | A failed positive cap write now refuses creation and rolls back the unpublished room. If both the write and rollback deletion fail, an orphaned room may remain; track that dual-fault hypothesis in [#658](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/658). |
+| Disposition | A failed positive cap write refuses creation. The in-memory backend now hides the pending room and retries deletion if rollback fails (ARM-C013). Other backend and lifecycle cases remain in [#658](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/658). |
 
 ### ARM-C010 — Old peer metadata can overwrite a rejoined seat
 
@@ -164,6 +164,17 @@ No new finding is confirmed by this initial inventory.
 | Invariant | A status from one membership generation must not publish in a later generation. The old fan-out rechecked recipients but not the sender. |
 | Confidence and reproduction | `scripts/dev-loop.sh transport_status_delivery_does_not_block_concurrent_leave` failed before the fix with `old status reached the new seat` after a paused delivery resumed following leave and rejoin. |
 | Disposition | Fan-out now checks the sender's room membership generation at recipient queue commit, after any capacity wait. A canceled event does not increment the fan-out counter. The focused regression and transport-status tests pass (#647). |
+
+### ARM-C013 — A failed room rollback leaves a joinable unfinished room
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed for the in-memory backend, medium; broader #658 remains open |
+| Player impact | If creator setup and deletion both fail, another player can join the unfinished room. A failed spectator-cap write then leaves that room unlimited. |
+| Source and revision | `src/server/room_service.rs` unpublished admission rollback and `src/database/mod.rs` room lookup, reviewed at `c85ee60b`. |
+| Invariant | A newly created room is invisible until its creator response commits. An abandoned room reserves its code until storage confirms deletion. |
+| Confidence and reproduction | `scripts/dev-loop.sh failed_cap_write_and_delete_keep_unpublished_room_closed` failed before the fix: the next join received `RoomJoined` for the unfinished room. The green test checks a second server instance, spectator refusal, repeated repair failure, one deletion count, and code reuse after repair. Name-write and failed-read regressions cover sibling rollback paths. |
+| Disposition | In-memory creation starts pending. The response builder publishes while holding the room code and mutation locks, before the queue commit; cancellation rolls back under both locks. Failed rollbacks are marked abandoned, and maintenance retries deletion by ID after checking that state again. The default trait fallback, password-seal ambiguity, process-loss behavior, and other #658 acceptance cases still need review. |
 
 These findings cover room-code rotation, player names, transport status, and spectator,
 reconnect, and room-creation drain seams. The rest of the C1 room and storage

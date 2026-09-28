@@ -224,16 +224,25 @@ impl EnhancedGameServer {
         admission_kind: RoomAdmissionKind,
         reason: &'static str,
     ) {
-        let created_room_is_still_exclusive =
-            if matches!(admission_kind, RoomAdmissionKind::Created { .. }) {
-                matches!(
-                    self.database.get_room_by_id(&room_id).await,
-                    Ok(Some(room))
-                        if room.players.len() == 1 && room.players.contains_key(&player_id)
-                )
-            } else {
-                false
-            };
+        let created_room_is_still_exclusive = if matches!(
+            admission_kind,
+            RoomAdmissionKind::Created { .. }
+        ) {
+            match self.database.get_room_by_id(&room_id).await {
+                Ok(Some(room)) => room.players.len() == 1 && room.players.contains_key(&player_id),
+                Ok(None) => false,
+                Err(error) => {
+                    tracing::error!(%player_id, %room_id, %error, reason, "Failed to verify unpublished room before rollback; marking it for deletion");
+                    if let Err(mark_error) = self.database.abandon_room(&room_id, &player_id).await
+                    {
+                        tracing::error!(%player_id, %room_id, %mark_error, "Failed to mark unreadable unpublished room for deletion");
+                    }
+                    false
+                }
+            }
+        } else {
+            false
+        };
         if created_room_is_still_exclusive {
             match self.database.delete_room(&room_id).await {
                 Ok(deleted) => {
@@ -247,6 +256,10 @@ impl EnhancedGameServer {
                 }
                 Err(error) => {
                     tracing::error!(%player_id, %room_id, %error, reason, "Failed to roll back unpublished room creation; falling back to durable player detach");
+                    if let Err(mark_error) = self.database.abandon_room(&room_id, &player_id).await
+                    {
+                        tracing::error!(%player_id, %room_id, %mark_error, "Failed to mark unpublished room for deletion");
+                    }
                 }
             }
         }
@@ -731,6 +744,48 @@ impl EnhancedGameServer {
                 let baseline_room = Arc::new(std::sync::Mutex::new(None));
                 let baseline_room_in_builder = Arc::clone(&baseline_room);
                 let created_room = matches!(admission_kind, RoomAdmissionKind::Created { .. });
+                // The first baseline builder makes the room visible before
+                // the queue commit. Keep the code lock through that commit
+                // and any rollback so another instance cannot admit into a
+                // room whose creator response might still be canceled.
+                let mut creation_lock = if created_room {
+                    let key = format!("room_join:{}:{}", room.game_name, room.code);
+                    match self
+                        .distributed_lock
+                        .acquire(&key, self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL))
+                        .await
+                    {
+                        Ok(handle) => Some(self.keep_lock_renewed(
+                            handle,
+                            self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL),
+                        )),
+                        Err(error) => {
+                            self.rollback_unpublished_player_admission(
+                                room.id,
+                                *player_id,
+                                admission_kind,
+                                "creation_publication_lock_failed",
+                            )
+                            .await;
+                            self.connection_manager.rollback_prepared_room_assignment(
+                                player_id,
+                                room.id,
+                                membership_stamp.epoch,
+                            );
+                            let _ = self
+                                .send_join_failure_to_player(
+                                    player_id,
+                                    error.to_string(),
+                                    Some(crate::protocol::ErrorCode::StorageError),
+                                    operation_id,
+                                )
+                                .await;
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
                 let should_commit = || !created_room || !self.is_draining();
                 let initial_delivery = self
                     .message_coordinator
@@ -812,6 +867,10 @@ impl EnhancedGameServer {
                                         Some(current_room.clone());
                                 }
 
+                                if created_room {
+                                    server.database.publish_room(&response_room_id).await?;
+                                }
+
                                 Ok(Arc::new(
                                     (ServerMessage::RoomJoined(Box::new(RoomJoinedPayload {
                                         room_id: current_room.id,
@@ -869,6 +928,7 @@ impl EnhancedGameServer {
                         room.id,
                         membership_stamp.epoch,
                     );
+                    self.release_renewed_cap_lock(&mut creation_lock).await;
                     if drain_canceled_creation {
                         self.reject_join_for_shutdown_drain(player_id, operation_id)
                             .await;
@@ -884,6 +944,7 @@ impl EnhancedGameServer {
                     }
                     return;
                 }
+                self.release_renewed_cap_lock(&mut creation_lock).await;
                 terminal_response_committed.store(true, Ordering::Release);
                 #[cfg(test)]
                 self.trigger_owned_room_operation_panic_for_test(
@@ -2055,6 +2116,18 @@ impl EnhancedGameServer {
                     }
                 };
 
+                match self.database.is_room_published(&room.id).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        self.release_renewed_lock(&mut lock_renewal).await;
+                        return Err(JoinRoomError::RoomNotFound);
+                    }
+                    Err(error) => {
+                        self.release_renewed_lock(&mut lock_renewal).await;
+                        return Err(error.into());
+                    }
+                }
+
                 // App scoping applies in both admission modes (issue #520):
                 // an owned room is invisible to members of other
                 // applications and to context-less connections, with the
@@ -2424,11 +2497,20 @@ impl EnhancedGameServer {
                                                     room_id = %ambiguous_room.id,
                                                     "Unsealed ambiguous room vanished during rollback"
                                                 ),
-                                                Err(delete_error) => tracing::error!(
-                                                    room_id = %ambiguous_room.id,
-                                                    %delete_error,
-                                                    "Failed to roll back the unsealed ambiguous room"
-                                                ),
+                                                Err(delete_error) => {
+                                                    tracing::error!(
+                                                        room_id = %ambiguous_room.id,
+                                                        %delete_error,
+                                                        "Failed to roll back the unsealed ambiguous room"
+                                                    );
+                                                    if let Err(mark_error) = self
+                                                        .database
+                                                        .abandon_room(&ambiguous_room.id, player_id)
+                                                        .await
+                                                    {
+                                                        tracing::error!(room_id = %ambiguous_room.id, %mark_error, "Failed to mark unsealed room for deletion");
+                                                    }
+                                                }
                                             }
                                             return Err(error.into());
                                         }
@@ -2478,6 +2560,11 @@ impl EnhancedGameServer {
                                         %error,
                                         "Failed to roll back room created during shutdown drain"
                                     );
+                                    if let Err(mark_error) =
+                                        self.database.abandon_room(&room.id, player_id).await
+                                    {
+                                        tracing::error!(room_id = %room.id, %mark_error, "Failed to mark drained room for deletion");
+                                    }
                                     return Err(error.into());
                                 }
                             }

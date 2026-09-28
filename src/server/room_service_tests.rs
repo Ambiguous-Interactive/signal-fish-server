@@ -7094,9 +7094,10 @@ async fn draining_room_creation_cancels_baseline_before_it_is_queued() {
                 .get_room("drain-baseline", expected_code)
                 .await
                 .expect("room lookup succeeds")
-                .is_some(),
-            "new room exists before its baseline commits: {case}"
+                .is_none(),
+            "new room stays hidden before its baseline commits: {case}"
         );
+        assert_eq!(database.get_total_room_count().await.unwrap(), 1);
         assert!(server.begin_shutdown_drain().started_by_this_call);
         database.release_paused_get_room_by_id_for_test();
         timeout(Duration::from_secs(1), join_task)
@@ -7134,6 +7135,67 @@ async fn draining_room_creation_cancels_baseline_before_it_is_queued() {
             "{case}"
         );
     }
+}
+
+/// Issue #658: a baseline canceled after provisional publication must hide
+/// the room again when deletion also fails.
+#[tokio::test(start_paused = true)]
+async fn canceled_creator_baseline_with_failed_delete_is_repaired() {
+    let server = create_test_server().await;
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<InMemoryDatabase>()
+        .expect("test server uses in-memory storage");
+    let (creator, mut receiver) =
+        register_client(&server, "127.0.0.1:48323".parse().unwrap()).await;
+    database.pause_next_get_room_by_id_for_test();
+    let task = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move {
+            server
+                .handle_join_room(
+                    &creator,
+                    "canceled-baseline".into(),
+                    Some("CAN001".into()),
+                    "Creator".into(),
+                    Some(4),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+        }
+    });
+    timeout(
+        Duration::from_secs(1),
+        database.wait_for_paused_get_room_by_id_for_test(),
+    )
+    .await
+    .expect("creator reaches baseline read");
+    database.fail_next_delete_room_for_test();
+    assert!(server.begin_shutdown_drain().started_by_this_call);
+    database.release_paused_get_room_by_id_for_test();
+    timeout(Duration::from_secs(1), task)
+        .await
+        .expect("creator finishes")
+        .expect("creator task succeeds");
+    assert!(matches!(
+        receiver.recv().await.unwrap().as_ref(),
+        ServerMessage::RoomJoinFailed {
+            error_code: Some(ErrorCode::ServerDraining),
+            ..
+        }
+    ));
+    assert!(database
+        .get_room("canceled-baseline", "CAN001")
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(database.pending_room_ids().await.unwrap().len(), 1);
+    assert_eq!(server.cleanup_abandoned_rooms().await, 1);
+    assert_eq!(server.metrics.rooms_deleted.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -9746,6 +9808,340 @@ async fn spectator_cap_write_failure_refuses_creation_and_allows_retry() {
         .await
         .expect_err("second spectator exceeds the configured cap");
     assert_eq!(refused.code, Some(ErrorCode::TooManySpectators));
+}
+
+/// Issue #658: a second storage fault must not turn a refused creation into
+/// a joinable room with the wrong spectator policy.
+#[tokio::test(start_paused = true)]
+async fn failed_cap_write_and_delete_keep_unpublished_room_closed() {
+    let database = Arc::new(InMemoryDatabase::new());
+    database.initialize().await.expect("database initializes");
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig {
+            default_max_spectators: Some(1),
+            ..ServerConfig::default()
+        },
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::new(InMemoryDistributedLock::new()),
+        database.clone(),
+    )
+    .await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48316".parse().unwrap()).await;
+    database.fail_next_set_room_max_spectators_for_test();
+    database.fail_next_delete_room_for_test();
+    server
+        .handle_join_room(
+            &creator,
+            "dual-fault".into(),
+            Some("DUAL01".into()),
+            "Creator".into(),
+            Some(4),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    let refused = creator_rx.recv().await.expect("creator receives refusal");
+    assert!(matches!(
+        refused.as_ref(),
+        ServerMessage::RoomJoinFailed { .. }
+    ));
+
+    let pending_ids = database
+        .pending_room_ids()
+        .await
+        .expect("pending scan succeeds");
+    assert_eq!(pending_ids.len(), 1);
+    let pending_id = pending_ids[0];
+    let pending = database
+        .get_room_by_id(&pending_id)
+        .await
+        .expect("pending room read succeeds")
+        .expect("room remains until repair");
+    assert!(!database.is_room_published(&pending.id).await.unwrap());
+    assert!(database
+        .get_room("dual-fault", "DUAL01")
+        .await
+        .expect("code lookup succeeds")
+        .is_none());
+
+    let second_server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig {
+            default_max_spectators: Some(1),
+            ..ServerConfig::default()
+        },
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::new(InMemoryDistributedLock::new()),
+        database.clone(),
+    )
+    .await;
+
+    let (joiner, mut joiner_rx) =
+        register_client(&second_server, "127.0.0.1:48317".parse().unwrap()).await;
+    second_server
+        .handle_join_room(
+            &joiner,
+            "dual-fault".into(),
+            Some("DUAL01".into()),
+            "Joiner".into(),
+            Some(4),
+            None,
+            None,
+            None,
+            Some(true),
+        )
+        .await;
+    let join_result = joiner_rx.recv().await.expect("joiner receives response");
+    assert!(
+        matches!(join_result.as_ref(), ServerMessage::RoomJoinFailed { .. }),
+        "unpublished room must refuse joins, got {join_result:?}"
+    );
+
+    let (spectator, _spectator_rx) =
+        register_client(&second_server, "127.0.0.1:48318".parse().unwrap()).await;
+    assert!(second_server
+        .spectator_service
+        .join(
+            &spectator,
+            "dual-fault".into(),
+            "DUAL01".into(),
+            "Viewer".into()
+        )
+        .await
+        .is_err());
+
+    database.fail_next_delete_room_for_test();
+    assert_eq!(server.cleanup_abandoned_rooms().await, 0);
+    assert_eq!(database.pending_room_ids().await.unwrap(), vec![pending_id]);
+    assert_eq!(server.cleanup_abandoned_rooms().await, 1);
+    assert_eq!(server.cleanup_abandoned_rooms().await, 0);
+    assert!(database
+        .get_room_by_id(&pending_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(server.metrics.rooms_deleted.load(Ordering::Relaxed), 1);
+
+    server
+        .handle_join_room(
+            &creator,
+            "dual-fault".into(),
+            Some("DUAL01".into()),
+            "Creator".into(),
+            Some(4),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    let retried = creator_rx
+        .recv()
+        .await
+        .expect("creator retry receives response");
+    assert!(matches!(retried.as_ref(), ServerMessage::RoomJoined(_)));
+    let new_room = database
+        .get_room("dual-fault", "DUAL01")
+        .await
+        .expect("published room read succeeds")
+        .expect("retry creates a room");
+    assert_ne!(new_room.id, pending_id);
+    assert!(database.is_room_published(&new_room.id).await.unwrap());
+    assert_eq!(new_room.max_spectators, Some(1));
+    assert!(!database.delete_room_if_pending(&new_room.id).await.unwrap());
+    assert!(database
+        .get_room_by_id(&new_room.id)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+/// Issue #658: name setup failure has the same repair path as cap setup.
+#[tokio::test(start_paused = true)]
+async fn failed_name_write_and_delete_repair_pending_room() {
+    let database = Arc::new(InMemoryDatabase::new());
+    database.initialize().await.expect("database initializes");
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::new(InMemoryDistributedLock::new()),
+        database.clone(),
+    )
+    .await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48319".parse().unwrap()).await;
+    database.fail_update_player_name_for_test(true);
+    database.fail_next_delete_room_for_test();
+    server
+        .handle_join_room(
+            &creator,
+            "name-dual-fault".into(),
+            Some("DUAL02".into()),
+            "Creator".into(),
+            Some(4),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(matches!(
+        creator_rx.recv().await.unwrap().as_ref(),
+        ServerMessage::RoomJoinFailed { .. }
+    ));
+    assert!(database
+        .get_room("name-dual-fault", "DUAL02")
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(database.pending_room_ids().await.unwrap().len(), 1);
+    assert_eq!(server.cleanup_abandoned_rooms().await, 1);
+    assert!(database.pending_room_ids().await.unwrap().is_empty());
+}
+
+/// Issue #658: an unreadable newly created room must still be queued for
+/// deletion when its creator setup fails.
+#[tokio::test(start_paused = true)]
+async fn failed_rollback_read_marks_unpublished_room_for_repair() {
+    let database = Arc::new(InMemoryDatabase::new());
+    database.initialize().await.expect("database initializes");
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig {
+            default_max_spectators: Some(1),
+            ..ServerConfig::default()
+        },
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::new(InMemoryDistributedLock::new()),
+        database.clone(),
+    )
+    .await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48320".parse().unwrap()).await;
+    database.fail_next_set_room_max_spectators_for_test();
+    database.fail_get_room_by_id_for_test(true);
+    server
+        .handle_join_room(
+            &creator,
+            "read-dual-fault".into(),
+            Some("DUAL03".into()),
+            "Creator".into(),
+            Some(4),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(matches!(
+        creator_rx.recv().await.unwrap().as_ref(),
+        ServerMessage::RoomJoinFailed { .. }
+    ));
+    assert_eq!(database.pending_room_ids().await.unwrap().len(), 1);
+    database.fail_get_room_by_id_for_test(false);
+    assert_eq!(server.cleanup_abandoned_rooms().await, 1);
+}
+
+/// Issue #658: publication and the first response remain ordered while a
+/// second instance waits on the same room code.
+#[tokio::test(start_paused = true)]
+async fn creator_response_and_cross_instance_join_wait_for_room_publication() {
+    let database = Arc::new(InMemoryDatabase::new());
+    database.initialize().await.expect("database initializes");
+    let lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
+    let creator_server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::clone(&lock),
+        database.clone(),
+    )
+    .await;
+    let joiner_server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        lock,
+        database.clone(),
+    )
+    .await;
+    let (creator, mut creator_rx) =
+        register_client(&creator_server, "127.0.0.1:48321".parse().unwrap()).await;
+    let (joiner, mut joiner_rx) =
+        register_client(&joiner_server, "127.0.0.1:48322".parse().unwrap()).await;
+
+    database.pause_next_publish_room_for_test();
+    let creator_task = tokio::spawn({
+        let server = Arc::clone(&creator_server);
+        async move {
+            server
+                .handle_join_room(
+                    &creator,
+                    "publication-order".into(),
+                    Some("PUB001".into()),
+                    "Creator".into(),
+                    Some(4),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+        }
+    });
+    timeout(
+        Duration::from_secs(1),
+        database.wait_for_paused_publish_room_for_test(),
+    )
+    .await
+    .expect("creator reaches publication");
+    let creator_before_publish = creator_rx.try_recv();
+    assert!(matches!(
+        creator_before_publish,
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+
+    let joiner_task = tokio::spawn({
+        let server = Arc::clone(&joiner_server);
+        async move {
+            server
+                .handle_join_room(
+                    &joiner,
+                    "publication-order".into(),
+                    Some("PUB001".into()),
+                    "Joiner".into(),
+                    Some(4),
+                    None,
+                    None,
+                    None,
+                    Some(true),
+                )
+                .await;
+        }
+    });
+    tokio::task::yield_now().await;
+    let joiner_before_publish = joiner_rx.try_recv();
+    assert!(matches!(
+        joiner_before_publish,
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+
+    database.release_paused_publish_room_for_test();
+    timeout(Duration::from_secs(1), creator_task)
+        .await
+        .expect("creator finishes")
+        .expect("creator task succeeds");
+    timeout(Duration::from_secs(1), joiner_task)
+        .await
+        .expect("joiner finishes")
+        .expect("joiner task succeeds");
+    assert!(matches!(
+        creator_rx.recv().await.unwrap().as_ref(),
+        ServerMessage::RoomJoined(_)
+    ));
+    assert!(matches!(
+        joiner_rx.recv().await.unwrap().as_ref(),
+        ServerMessage::RoomJoined(_)
+    ));
 }
 
 #[tokio::test(start_paused = true)]
