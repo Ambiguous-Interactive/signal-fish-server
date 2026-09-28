@@ -265,6 +265,38 @@ pub trait GameDatabase: Send + Sync {
             "pending room creation is not supported by this database"
         )))
     }
+
+    /// Create a pending room while its creator owns the supplied liveness
+    /// token. Backends with a repairable Creating state should store a weak
+    /// reference atomically with insertion. The default retains compatibility
+    /// with adapters that implement the original pending-room method.
+    #[allow(clippy::too_many_arguments)]
+    async fn create_pending_room_owned_classified(
+        &self,
+        game_name: String,
+        room_code: Option<String>,
+        max_players: u8,
+        supports_authority: bool,
+        creator_id: PlayerId,
+        relay_type: String,
+        region_id: String,
+        application_id: Option<Uuid>,
+        join_password: Option<RoomPasswordCredential>,
+        _creation_owner: std::sync::Arc<()>,
+    ) -> CreateRoomResult {
+        self.create_pending_room_classified(
+            game_name,
+            room_code,
+            max_players,
+            supports_authority,
+            creator_id,
+            relay_type,
+            region_id,
+            application_id,
+            join_password,
+        )
+        .await
+    }
     async fn set_room_application_id(
         &self,
         _room_id: &RoomId,
@@ -475,11 +507,16 @@ pub trait GameDatabase: Send + Sync {
         anyhow::bail!("pending room abandonment is not supported by this database")
     }
 
-    /// Retry abandoned rooms. Only a still-abandoned room may be removed.
+    /// Enumerate unpublished rooms eligible for repair. A creating room may be
+    /// listed after its creator stops; deletion still takes the room-code lock
+    /// and rechecks that state atomically.
     async fn pending_room_ids(&self) -> Result<Vec<RoomId>> {
         anyhow::bail!("pending room enumeration is not supported by this database")
     }
 
+    /// Delete an unpublished room after taking its room-code lock. The state
+    /// must be checked again atomically with deletion because publication may
+    /// finish between enumeration and lock acquisition.
     async fn delete_room_if_pending(&self, _room_id: &RoomId) -> Result<bool> {
         anyhow::bail!("pending room deletion is not supported by this database")
     }
@@ -644,9 +681,13 @@ const CLEANUP_RECLAIM_WINDOW: chrono::Duration = chrono::Duration::minutes(5);
 /// forgets it.
 const CLEANUP_EVENT_RETENTION: chrono::Duration = chrono::Duration::hours(1);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum PendingRoomState {
-    Creating,
+    Creating {
+        creator_id: PlayerId,
+        /// Legacy direct callers have no operation token and are not swept
+        /// automatically; server admission uses an owned token.
+        owner: Option<std::sync::Weak<()>>,
+    },
     Abandoned(PlayerId),
 }
 
@@ -1257,6 +1298,7 @@ impl InMemoryDatabase {
         application_id: Option<Uuid>,
         join_password: Option<RoomPasswordCredential>,
         pending: bool,
+        creation_owner: Option<std::sync::Arc<()>>,
     ) -> CreateRoomResult {
         let room_code =
             room_code.unwrap_or_else(crate::protocol::room_codes::generate_clean_room_code);
@@ -1363,7 +1405,13 @@ impl InMemoryDatabase {
         room_codes.insert(game_room_key, room_id);
         liveness.insert(room_id, RoomLiveness::Live(tokio::time::Instant::now()));
         if pending {
-            publication.insert(room_id, PendingRoomState::Creating);
+            publication.insert(
+                room_id,
+                PendingRoomState::Creating {
+                    creator_id,
+                    owner: creation_owner.as_ref().map(std::sync::Arc::downgrade),
+                },
+            );
         }
 
         Ok(room)
@@ -1398,6 +1446,7 @@ impl GameDatabase for InMemoryDatabase {
             application_id,
             None,
             false,
+            None,
         )
         .await
         .map_err(anyhow::Error::new)
@@ -1425,6 +1474,7 @@ impl GameDatabase for InMemoryDatabase {
             application_id,
             join_password,
             false,
+            None,
         )
         .await
     }
@@ -1452,6 +1502,36 @@ impl GameDatabase for InMemoryDatabase {
             application_id,
             join_password,
             true,
+            None,
+        )
+        .await
+    }
+
+    async fn create_pending_room_owned_classified(
+        &self,
+        game_name: String,
+        room_code: Option<String>,
+        max_players: u8,
+        supports_authority: bool,
+        creator_id: PlayerId,
+        relay_type: String,
+        region_id: String,
+        application_id: Option<Uuid>,
+        join_password: Option<RoomPasswordCredential>,
+        creation_owner: std::sync::Arc<()>,
+    ) -> CreateRoomResult {
+        self.create_room_with_state(
+            game_name,
+            room_code,
+            max_players,
+            supports_authority,
+            creator_id,
+            relay_type,
+            region_id,
+            application_id,
+            join_password,
+            true,
+            Some(creation_owner),
         )
         .await
     }
@@ -1936,7 +2016,8 @@ impl GameDatabase for InMemoryDatabase {
 
         let mut to_remove = Vec::new();
         for (room_id, room) in rooms.iter() {
-            if !room.has_occupants()
+            if !publication.contains_key(room_id)
+                && !room.has_occupants()
                 && !protected.contains(room_id)
                 && room_idle_for(liveness.get(room_id).cloned(), room.last_activity)
                     > effective_timeout
@@ -1970,7 +2051,7 @@ impl GameDatabase for InMemoryDatabase {
 
         let mut to_remove = Vec::new();
         for (room_id, room) in rooms.iter() {
-            if protected.contains(room_id) {
+            if protected.contains(room_id) || publication.contains_key(room_id) {
                 continue;
             }
             let idle_for = room_idle_for(liveness.get(room_id).cloned(), room.last_activity);
@@ -2089,8 +2170,12 @@ impl GameDatabase for InMemoryDatabase {
         let publication = self.room_publication.read().await;
         Ok(publication
             .iter()
-            .filter_map(|(id, state)| {
-                matches!(state, PendingRoomState::Abandoned(_)).then_some(*id)
+            .filter_map(|(id, state)| match state {
+                PendingRoomState::Abandoned(_) => Some(*id),
+                PendingRoomState::Creating {
+                    owner: Some(owner), ..
+                } if owner.upgrade().is_none() => Some(*id),
+                PendingRoomState::Creating { .. } => None,
             })
             .collect())
     }
@@ -2116,8 +2201,17 @@ impl GameDatabase for InMemoryDatabase {
         let Some(room) = rooms.get(room_id) else {
             return Ok(false);
         };
-        let Some(PendingRoomState::Abandoned(creator_id)) = publication.get(room_id) else {
+        let Some(state) = publication.get(room_id) else {
             return Ok(false);
+        };
+        let creator_id = match state {
+            PendingRoomState::Creating { creator_id, owner } => {
+                if owner.as_ref().is_none_or(|owner| owner.upgrade().is_some()) {
+                    return Ok(false);
+                }
+                creator_id
+            }
+            PendingRoomState::Abandoned(creator_id) => creator_id,
         };
         if room.players.len() > 1 || room.players.keys().any(|player_id| player_id != creator_id) {
             return Ok(false);

@@ -47,6 +47,9 @@ enum RoomAdmissionKind {
     },
     Created {
         application_claim_rollback: Option<PendingApplicationClaimRollback>,
+        /// Held through the first response commit. Storage uses a weak copy to
+        /// distinguish an interrupted creator from one still working.
+        _creation_owner: Arc<()>,
     },
 }
 
@@ -67,6 +70,7 @@ impl RoomAdmissionKind {
             }
             | Self::Created {
                 application_claim_rollback,
+                ..
             } => application_claim_rollback.as_ref(),
         }
     }
@@ -2320,6 +2324,7 @@ impl EnhancedGameServer {
                         ));
                     }
 
+                    let creation_owner = Arc::new(());
                     let creation_result = async {
                         if let (Some(app_id), Some(app_limit)) = (
                             client_app_id,
@@ -2404,7 +2409,7 @@ impl EnhancedGameServer {
                         let sealed_creation = creation_password.is_some();
                         let room = match self
                             .database
-                            .create_pending_room_classified(
+                            .create_pending_room_owned_classified(
                                 game_name.to_string(),
                                 Some(room_code.to_string()),
                                 max_players,
@@ -2414,6 +2419,7 @@ impl EnhancedGameServer {
                                 region_id,
                                 client_app_id,
                                 creation_password,
+                                Arc::clone(&creation_owner),
                             )
                             .await
                         {
@@ -2570,6 +2576,7 @@ impl EnhancedGameServer {
                                 application_claim_rollback: client_app_id.map(|application_id| {
                                     PendingApplicationClaimRollback { application_id }
                                 }),
+                                _creation_owner: creation_owner,
                             };
                             // A positive deployment cap must be durable before
                             // this creator can publish a join. The room-code

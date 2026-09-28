@@ -185,7 +185,18 @@ No new finding is confirmed by this initial inventory.
 | Source and revision | `src/server/room_service.rs` creator cap and name setup, reviewed at `49497a44`. |
 | Invariant | A failed creator setup must delete the pending room or mark it abandoned for repair before the creation lock is released. The outer panic supervisor lacks the room ID until setup returns. |
 | Confidence and reproduction | `scripts/dev-loop.sh creator_setup_panic_keeps_pending_room_repairable` failed before the fix: injected cap-write panic left no abandoned room for cleanup. The green test covers cap and name panics followed by a delete failure. |
-| Disposition | Creator setup catches a storage panic while it still owns the room ID, rolls back or marks the room abandoned, and returns a creation failure so the locks release. The focused regression checks the response, metrics, repair, and retry. Raw pending-room recovery after process loss remains in [#658](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/658). |
+| Disposition | Creator setup catches a storage panic while it still owns the room ID, rolls back or marks the room abandoned, and returns a creation failure so the locks release. The focused regression checks the response, metrics, repair, and retry. Interrupted creation after insertion is covered by ARM-C015. |
+
+### ARM-C015 — An interrupted creator reserves a hidden room indefinitely
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed for the in-memory backend, medium |
+| Player impact | If the creator stops after the atomic pending insert and before rollback, its hidden room consumes quota and reserves the requested code until shutdown. |
+| Source and revision | `src/database/mod.rs` pending creation and `src/server/maintenance.rs` repair, reviewed at `630b5d3e`. |
+| Invariant | Repair may delete a Creating room only after its creator operation ends. A lost room-code lease alone does not prove the creator stopped. General room expiry must leave every unpublished room to the dedicated repair path. |
+| Confidence and reproduction | `interrupted_creation_releases_hidden_room_and_reserved_code` failed before the fix because maintenance scanned only Abandoned rooms. The green test drops the creator token, lets its code lock expire, then checks deletion, quota, metrics, and code reuse. `pending_room_repair_preserves_active_creator_after_code_lease_expires` keeps the token alive past lock expiry and confirms publication succeeds. `generic_room_cleanup_keeps_unpublished_rooms_for_repair` covers both general reapers. |
+| Disposition | The in-memory insert stores the original creator ID and a weak operation token under the same commit as the room, code, and pending marker. The response path holds the token through first publication. Repair takes the code lock and atomically rechecks the marker, owner liveness, and creator-only membership before deletion. A process restart drops all in-memory rooms and codes; durable adapters must provide their own process-loss recovery. |
 
 These findings cover room-code rotation, player names, transport status, and spectator,
 reconnect, and room-creation drain seams. The rest of the C1 room and storage

@@ -150,6 +150,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and rollback storage writes both fail. The server retries deletion and
   releases the room code after storage recovers. A storage panic during creator
   setup also returns a failure and keeps the room repairable (#658).
+- Interrupted room creation no longer holds a hidden room and its code until
+  shutdown. Repair reclaims it after the creator stops, while active creators
+  and unpublished rooms remain safe from room-expiry cleanup (#658).
 - Peers no longer receive an old transport status after its sender leaves and
   rejoins a room (#647).
 
