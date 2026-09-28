@@ -132,6 +132,17 @@ No new finding is confirmed by this initial inventory.
 | Confidence and reproduction | `spectator_cap_write_failure_refuses_creation_and_allows_retry` failed before the fix with `RoomJoined`. The green test checks room/code rollback, retry, and one-spectator enforcement. `explicitly_unlimited_spectators_need_no_cap_write` covers the opt-out. |
 | Disposition | A failed positive cap write now refuses creation and rolls back the unpublished room. If both the write and rollback deletion fail, an orphaned room may remain; track that dual-fault hypothesis in [#658](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/658). |
 
+### ARM-C010 — Old peer metadata can overwrite a rejoined seat
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed, medium |
+| Player impact | Peers can receive a former endpoint at game start after a player leaves and rejoins the same room. |
+| Source and revision | `src/server/game_data.rs::handle_provide_connection_info` and `src/database/mod.rs::update_player_connection_info`, reviewed at `5345b9ec`. |
+| Invariant | A metadata write from the old seat must finish before that player can leave and rejoin. The old handler read the room, then awaited storage without the client lifecycle gate. A new seat with the same player ID could receive the old write. |
+| Confidence and reproduction | `scripts/dev-loop.sh old_connection_info_cannot_overwrite_rejoined_seat` failed before the fix: the rejoined row contained `Direct { host: "old-endpoint", port: 7777 }`. The deterministic pause is at the storage write. |
+| Disposition | The handler now holds the client lifecycle gate through the metadata write. The regression passes with the new seat's metadata unset (#647). |
+
 These findings cover room-code rotation, player names, and spectator,
 reconnect, and room-creation drain seams. The rest of the C1 room and storage
 rows remain unreviewed.

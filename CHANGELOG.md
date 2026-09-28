@@ -146,6 +146,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Peer connection metadata from an old room seat can no longer overwrite the
+  same player's new seat after a leave and rejoin (#647).
+
 - Room creation now fails if the server cannot store its configured spectator
   limit. It removes the unpublished room so a retry can use the same code (#647).
 
