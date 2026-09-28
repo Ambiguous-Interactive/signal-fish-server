@@ -1472,6 +1472,16 @@ impl GameDatabase for DrainAfterCreateDatabase {
             .await
     }
 
+    async fn clear_player_connection_info(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .clear_player_connection_info(room_id, player_id)
+            .await
+    }
+
     async fn get_room_players(&self, room_id: &RoomId) -> anyhow::Result<Vec<PlayerInfo>> {
         self.inner.get_room_players(room_id).await
     }
@@ -5574,6 +5584,18 @@ async fn leave_storage_error_preserves_membership_routing_and_reconnect_token() 
 #[cfg_attr(miri, ignore)]
 async fn disconnect_storage_error_forces_terminal_teardown_and_keeps_claim_reachable() {
     let mut fixture = setup_joined_pair_with_reconnection().await;
+    fixture
+        .database
+        .update_player_connection_info(
+            &fixture.room_id,
+            &fixture.leaver,
+            ConnectionInfo::Direct {
+                host: "old-network.example".to_string(),
+                port: 7777,
+            },
+        )
+        .await
+        .expect("store old endpoint");
     fixture.database.fail_remove_player_from_room_for_test(true);
 
     fixture.server.unregister_client(&fixture.leaver).await;
@@ -5672,7 +5694,7 @@ async fn disconnect_storage_error_forces_terminal_teardown_and_keeps_claim_reach
     assert_next_message_matches(
         &mut current_rx,
         "reconnect baseline after storage recovery",
-        |message| matches!(message, ServerMessage::Reconnected(_)),
+        |message| matches!(message, ServerMessage::Reconnected(payload) if payload.current_players.iter().find(|player| player.id == fixture.leaver).is_some_and(|player| player.connection_info.is_none())),
     );
     assert_next_message_matches(
         &mut fixture.survivor_rx,
@@ -5710,13 +5732,16 @@ async fn disconnect_storage_error_forces_terminal_teardown_and_keeps_claim_reach
         0,
         "successful reconnect clears the stale durable-detach candidate"
     );
-    assert!(fixture
+    let players = fixture
         .database
         .get_room_players(&fixture.room_id)
         .await
-        .expect("restored membership remains readable")
+        .expect("restored membership remains readable");
+    let restored = players
         .iter()
-        .any(|player| player.id == fixture.leaver));
+        .find(|player| player.id == fixture.leaver)
+        .expect("player remains seated");
+    assert!(restored.connection_info.is_none());
 }
 
 #[tokio::test(start_paused = true)]

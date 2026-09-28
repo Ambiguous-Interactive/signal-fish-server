@@ -897,10 +897,16 @@ impl ReconnectionManager {
             .as_ref()
             .map(|existing| existing.was_authority)
             .unwrap_or(was_authority);
-        let player_info = match &existing_same_room {
+        let mut player_info = match &existing_same_room {
             Some(existing) if existing.player_info.is_some() => existing.player_info.clone(),
             _ => player_info,
         };
+        // Peer metadata describes the old socket's reachable endpoint. A new
+        // socket may be on another network, so it must advertise fresh info
+        // before peers or a Direct SessionPlan can use it again.
+        if let Some(info) = player_info.as_mut() {
+            info.connection_info = None;
+        }
 
         let record = ReconnectionRecord {
             disconnected: DisconnectedPlayer {
@@ -1503,6 +1509,7 @@ fn reconnection_identity_matches(expected: Option<&str>, provided: Option<&str>)
 mod tests {
     use super::*;
     use crate::metrics::ServerMetrics;
+    use crate::protocol::ConnectionInfo;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use tokio::sync::{Barrier, Notify};
@@ -2788,7 +2795,10 @@ mod tests {
             is_authority: true,
             is_ready: false,
             connected_at: Some(Utc::now()),
-            connection_info: None,
+            connection_info: Some(ConnectionInfo::Direct {
+                host: "old-network.example".to_string(),
+                port: 7777,
+            }),
             epoch: None,
             seq: None,
             region_id: "test".to_string(),
@@ -2808,9 +2818,15 @@ mod tests {
             .claim_reconnection(&Uuid::new_v4(), &player, &room, &token)
             .await
             .expect("claim succeeds with the preserved token");
+        let saved_info = claim
+            .disconnected
+            .player_info
+            .as_ref()
+            .expect("the first disconnect's player_info snapshot survives");
+        assert_eq!(saved_info.name, "Player");
         assert!(
-            claim.disconnected.player_info.is_some(),
-            "the first disconnect's player_info snapshot must survive re-registration"
+            saved_info.connection_info.is_none(),
+            "the old socket's endpoint must not survive either registration"
         );
         assert!(
             claim.disconnected.was_authority,

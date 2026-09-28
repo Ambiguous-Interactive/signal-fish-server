@@ -104,6 +104,11 @@ message contains the current room state **and** the room-uniform
 [Event Buffer](#event-buffer) for exactly which events are replayed and
 the completeness contract):
 
+The new connection does not inherit `ProvideConnectionInfo` from the old
+socket. If this player may host a Direct session, send its current endpoint
+again after reconnect. Until then, the server will not elect it as a Direct
+host.
+
 ```json
 {
   "type": "Reconnected",

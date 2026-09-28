@@ -146,6 +146,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reconnect no longer restores peer metadata from the old socket. A Direct
+  host must send its current endpoint again before peers can use it (#647).
+
 - Peer connection metadata from an old room seat can no longer overwrite the
   same player's new seat after a leave and rejoin (#647).
 

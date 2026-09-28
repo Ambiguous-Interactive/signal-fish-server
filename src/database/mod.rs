@@ -420,6 +420,16 @@ pub trait GameDatabase: Send + Sync {
         connection_info: ConnectionInfo,
     ) -> Result<bool>;
 
+    /// Clear metadata from a disconnected socket before a retained room row
+    /// is published by reconnect. Return false if the row no longer exists.
+    async fn clear_player_connection_info(
+        &self,
+        _room_id: &RoomId,
+        _player_id: &PlayerId,
+    ) -> Result<bool> {
+        anyhow::bail!("clearing player connection info is not supported")
+    }
+
     /// Get all players in a room
     async fn get_room_players(&self, room_id: &RoomId) -> Result<Vec<PlayerInfo>>;
 
@@ -1696,6 +1706,22 @@ impl GameDatabase for InMemoryDatabase {
         } else {
             Ok(false)
         }
+    }
+
+    async fn clear_player_connection_info(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> Result<bool> {
+        let mut rooms = self.rooms.write().await;
+        let Some(player) = rooms
+            .get_mut(room_id)
+            .and_then(|room| room.players.get_mut(player_id))
+        else {
+            return Ok(false);
+        };
+        player.connection_info = None;
+        Ok(true)
     }
 
     async fn get_room_players(&self, room_id: &RoomId) -> Result<Vec<PlayerInfo>> {
