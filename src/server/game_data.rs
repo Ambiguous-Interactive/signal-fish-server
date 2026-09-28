@@ -13,6 +13,18 @@ impl EnhancedGameServer {
         player_id: &PlayerId,
         connection_info: crate::protocol::ConnectionInfo,
     ) {
+        let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
+            return;
+        };
+        let _lifecycle_guard = lifecycle.lock().await;
+        if lifecycle.player_id() != *player_id
+            || !self
+                .connection_manager
+                .lifecycle_matches(player_id, &lifecycle)
+        {
+            return;
+        }
+
         // Per-entry size cap, checked before any storage or fan-out
         // (issue #524). The entry is stored verbatim and broadcast to every
         // room member in `GameStarting.peer_connections` and room snapshots,

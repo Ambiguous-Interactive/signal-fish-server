@@ -699,6 +699,12 @@ pub struct InMemoryDatabase {
     miss_update_player_name_once: std::sync::atomic::AtomicBool,
     #[cfg(all(test, signal_fish_repository_tests))]
     fail_set_room_max_spectators_once: std::sync::atomic::AtomicBool,
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pause_update_player_connection_info_once: std::sync::atomic::AtomicBool,
+    #[cfg(all(test, signal_fish_repository_tests))]
+    update_player_connection_info_reached: tokio::sync::Notify,
+    #[cfg(all(test, signal_fish_repository_tests))]
+    release_update_player_connection_info: tokio::sync::Notify,
     #[cfg(test)]
     fail_remove_spectator_from_room: std::sync::atomic::AtomicBool,
     /// Join-race determinism gate: used only by repository-only test modules
@@ -775,6 +781,12 @@ impl InMemoryDatabase {
             miss_update_player_name_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
             fail_set_room_max_spectators_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            pause_update_player_connection_info_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            update_player_connection_info_reached: tokio::sync::Notify::new(),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            release_update_player_connection_info: tokio::sync::Notify::new(),
             #[cfg(test)]
             fail_remove_spectator_from_room: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
@@ -966,6 +978,22 @@ impl InMemoryDatabase {
     pub(crate) fn fail_next_set_room_max_spectators_for_test(&self) {
         self.fail_set_room_max_spectators_once
             .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn pause_next_update_player_connection_info_for_test(&self) {
+        self.pause_update_player_connection_info_once
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) async fn wait_for_update_player_connection_info_for_test(&self) {
+        self.update_player_connection_info_reached.notified().await;
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn release_update_player_connection_info_for_test(&self) {
+        self.release_update_player_connection_info.notify_one();
     }
 
     #[cfg(test)]
@@ -1649,6 +1677,14 @@ impl GameDatabase for InMemoryDatabase {
         player_id: &PlayerId,
         connection_info: ConnectionInfo,
     ) -> Result<bool> {
+        #[cfg(all(test, signal_fish_repository_tests))]
+        if self
+            .pause_update_player_connection_info_once
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            self.update_player_connection_info_reached.notify_one();
+            self.release_update_player_connection_info.notified().await;
+        }
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             if let Some(player) = room.players.get_mut(player_id) {

@@ -71,10 +71,11 @@ mod handler_honesty {
         TransportSecurityConfig, TurnConfig,
     };
     use crate::coordination::ConnectionCloseSignal;
-    use crate::database::DatabaseConfig;
+    use crate::database::{DatabaseConfig, GameDatabase, InMemoryDatabase};
+    use crate::distributed::InMemoryDistributedLock;
     use crate::protocol::ConnectionInfo;
-    use crate::server::EnhancedGameServer;
     use crate::server::ServerConfig;
+    use crate::server::{EnhancedGameServer, InMemoryMessageCoordinator};
     use std::net::SocketAddr;
 
     static PORT: AtomicU64 = AtomicU64::new(59_400);
@@ -310,6 +311,102 @@ mod handler_honesty {
         assert!(
             matches_direct,
             "healthy write lands and persists: {stored:?}"
+        );
+    }
+
+    /// An old connection's metadata write must finish before that player can
+    /// leave and rejoin with a fresh seat. Otherwise the old endpoint lands in
+    /// the new roster row and can be handed to peers at game start.
+    #[tokio::test(start_paused = true)]
+    async fn old_connection_info_cannot_overwrite_rejoined_seat() {
+        let database = Arc::new(InMemoryDatabase::new());
+        database.initialize().await.expect("database initializes");
+        let server = crate::server::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+            ServerConfig::default(),
+            Arc::new(InMemoryMessageCoordinator::new()),
+            Arc::new(InMemoryDistributedLock::new()),
+            database.clone(),
+        )
+        .await;
+        let (creator, _creator_rx) = register_client(&server).await;
+        let (player, _player_rx) = register_client(&server).await;
+        for (id, name) in [(creator, "creator"), (player, "player")] {
+            server
+                .handle_join_room(
+                    &id,
+                    "stale-endpoint".to_string(),
+                    Some("STALE1".to_string()),
+                    name.to_string(),
+                    Some(3),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+        }
+        let room_id = server
+            .get_client_room(&player)
+            .await
+            .expect("player joined");
+
+        database.pause_next_update_player_connection_info_for_test();
+        let old_server = Arc::clone(&server);
+        let old_write = tokio::spawn(async move {
+            old_server
+                .handle_provide_connection_info(
+                    &player,
+                    ConnectionInfo::Direct {
+                        host: "old-endpoint".to_string(),
+                        port: 7777,
+                    },
+                )
+                .await;
+        });
+        database
+            .wait_for_update_player_connection_info_for_test()
+            .await;
+
+        let transition_server = Arc::clone(&server);
+        let (transition_started, started) = tokio::sync::oneshot::channel();
+        let mut transition = tokio::spawn(async move {
+            transition_started
+                .send(())
+                .expect("transition start observed");
+            transition_server.leave_room(&player).await;
+            transition_server
+                .handle_join_room(
+                    &player,
+                    "stale-endpoint".to_string(),
+                    Some("STALE1".to_string()),
+                    "player".to_string(),
+                    Some(3),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+        });
+        started.await.expect("transition task started");
+        let completed_early = timeout(Duration::from_millis(100), &mut transition).await;
+        database.release_update_player_connection_info_for_test();
+        old_write.await.expect("old metadata task completes");
+        match completed_early {
+            Ok(result) => result.expect("leave and rejoin task completes"),
+            Err(_) => transition.await.expect("leave and rejoin task completes"),
+        }
+        let players = database
+            .get_room_players(&room_id)
+            .await
+            .expect("roster readable");
+        let rejoined = players
+            .iter()
+            .find(|entry| entry.id == player)
+            .expect("player rejoined");
+        assert!(
+            rejoined.connection_info.is_none(),
+            "the new seat must not inherit the old connection's endpoint: {rejoined:?}"
         );
     }
 }
