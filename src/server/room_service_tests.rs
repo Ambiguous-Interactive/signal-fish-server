@@ -5390,6 +5390,108 @@ async fn two_concurrent_joins_publish_in_database_mutation_order() {
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
+async fn concurrent_joins_for_last_seat_admit_one_player() {
+    let database = Arc::new(InMemoryDatabase::new());
+    database.initialize().await.expect("database initializes");
+    let lock = Arc::new(LockAttemptProbe::new("room_join:last-seat:SEAT01"));
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        lock.clone(),
+        database.clone(),
+    )
+    .await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48501".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &creator,
+            "last-seat".into(),
+            Some("SEAT01".into()),
+            "creator".into(),
+            Some(2),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    let joined = creator_rx.recv().await.expect("creator response");
+    assert!(matches!(joined.as_ref(), ServerMessage::RoomJoined(_)));
+    let room = database
+        .get_room("last-seat", "SEAT01")
+        .await
+        .expect("room lookup")
+        .expect("room exists");
+    let (first, mut first_rx) = register_client(&server, "127.0.0.1:48502".parse().unwrap()).await;
+    let (second, mut second_rx) =
+        register_client(&server, "127.0.0.1:48503".parse().unwrap()).await;
+
+    database.pause_next_add_player_for_test();
+    let spawn_join = |player_id, name: &'static str| {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move {
+            server
+                .handle_join_room(
+                    &player_id,
+                    "last-seat".into(),
+                    Some("SEAT01".into()),
+                    name.into(),
+                    Some(2),
+                    None,
+                    None,
+                    None,
+                    Some(true),
+                )
+                .await;
+        })
+    };
+    let first_join = spawn_join(first, "first");
+    timeout(
+        Duration::from_secs(1),
+        database.wait_for_paused_add_player_for_test(),
+    )
+    .await
+    .expect("first join reaches the paused seat write");
+    let second_join = spawn_join(second, "second");
+    lock.wait_for_attempts(3).await;
+    assert!(!second_join.is_finished(), "second join cannot finish yet");
+    database.release_paused_add_player_for_test();
+    timeout(Duration::from_secs(1), first_join)
+        .await
+        .expect("first join finishes")
+        .expect("first join task succeeds");
+    timeout(Duration::from_secs(1), second_join)
+        .await
+        .expect("second join finishes")
+        .expect("second join task succeeds");
+
+    assert!(matches!(
+        first_rx.recv().await.as_deref(),
+        Some(ServerMessage::RoomJoined(_))
+    ));
+    assert!(matches!(
+        second_rx.recv().await.as_deref(),
+        Some(ServerMessage::RoomJoinFailed {
+            error_code: Some(ErrorCode::RoomFull),
+            ..
+        })
+    ));
+    let stored = database
+        .get_room_by_id(&room.id)
+        .await
+        .expect("room lookup")
+        .expect("room remains");
+    assert_eq!(stored.players.len(), 2);
+    assert!(stored.players.contains_key(&creator));
+    assert!(stored.players.contains_key(&first));
+    assert!(!stored.players.contains_key(&second));
+    assert_eq!(server.get_client_room(&first).await, Some(room.id));
+    assert_eq!(server.get_client_room(&second).await, None);
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
 async fn delayed_leave_terminal_event_commits_before_a_concurrent_join() {
     let server = create_test_server().await;
     let (leaver, mut leaver_rx) =
@@ -6636,19 +6738,86 @@ async fn server_room_cap_denial_releases_join_coordination_locks() {
     );
 }
 
+struct LockAttemptProbe {
+    inner: InMemoryDistributedLock,
+    key: &'static str,
+    changed: watch::Sender<usize>,
+}
+
+impl LockAttemptProbe {
+    fn new(key: &'static str) -> Self {
+        Self {
+            inner: InMemoryDistributedLock::new(),
+            key,
+            changed: watch::channel(0).0,
+        }
+    }
+
+    async fn wait_for_attempts(&self, target: usize) {
+        let mut changed = self.changed.subscribe();
+        timeout(Duration::from_secs(1), async {
+            while *changed.borrow_and_update() < target {
+                changed
+                    .changed()
+                    .await
+                    .expect("attempt sender remains open");
+            }
+        })
+        .await
+        .expect("contending operation attempts the lock");
+    }
+}
+
+#[async_trait::async_trait]
+impl DistributedLock for LockAttemptProbe {
+    async fn acquire(&self, key: &str, ttl: Duration) -> anyhow::Result<LockHandle> {
+        if key == self.key {
+            self.changed.send_modify(|attempts| *attempts += 1);
+        }
+        self.inner.acquire(key, ttl).await
+    }
+
+    async fn try_acquire(&self, key: &str, ttl: Duration) -> anyhow::Result<Option<LockHandle>> {
+        self.inner.try_acquire(key, ttl).await
+    }
+
+    async fn extend(&self, handle: &LockHandle, ttl: Duration) -> anyhow::Result<bool> {
+        self.inner.extend(handle, ttl).await
+    }
+
+    async fn release(&self, handle: &LockHandle) -> anyhow::Result<bool> {
+        self.inner.release(handle).await
+    }
+
+    async fn is_locked(&self, key: &str) -> anyhow::Result<bool> {
+        self.inner.is_locked(key).await
+    }
+
+    async fn cleanup_expired_locks(&self) -> anyhow::Result<usize> {
+        self.inner.cleanup_expired_locks().await
+    }
+
+    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self
+    }
+}
+
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn server_room_cap_is_atomic_across_games() {
-    let server = create_test_server_with_config(ServerConfig {
-        max_rooms: 2,
-        ..ServerConfig::default()
-    })
+    let database = Arc::new(InMemoryDatabase::new());
+    database.initialize().await.expect("database initializes");
+    let lock = Arc::new(LockAttemptProbe::new("server_room_cap"));
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig {
+            max_rooms: 1,
+            ..ServerConfig::default()
+        },
+        Arc::new(InMemoryMessageCoordinator::new()),
+        lock.clone(),
+        database.clone(),
+    )
     .await;
-    let database = server
-        .database
-        .as_any()
-        .downcast_ref::<crate::database::InMemoryDatabase>()
-        .expect("in-memory test database");
     let (first_player, mut first_rx) =
         register_client(&server, "127.0.0.1:48012".parse().unwrap()).await;
     let (second_player, mut second_rx) =
@@ -6698,9 +6867,7 @@ async fn server_room_cap_is_atomic_across_games() {
             )
             .await;
     });
-    for _ in 0..10 {
-        tokio::task::yield_now().await;
-    }
+    lock.wait_for_attempts(2).await;
     assert!(
         !waiting_task.is_finished(),
         "second create in another game must wait on the server-wide cap lock"
@@ -6723,11 +6890,13 @@ async fn server_room_cap_is_atomic_across_games() {
         .expect("second channel open");
     assert!(matches!(
         second_response.as_ref(),
-        ServerMessage::RoomJoined(_)
+        ServerMessage::RoomJoinFailed {
+            error_code: Some(ErrorCode::MaxRoomsPerGameExceeded),
+            ..
+        }
     ));
 
-    // The cap is now saturated: a third game's creation must be denied even
-    // though each individual game stays far below its per-game cap.
+    // A later creation must still be denied after the raced refusal.
     server
         .handle_join_room(
             &third_player,
@@ -6754,7 +6923,7 @@ async fn server_room_cap_is_atomic_across_games() {
 
     assert_eq!(
         server.database.get_total_room_count().await.expect("count"),
-        2,
+        1,
         "server-wide ceiling bounds total rooms across games"
     );
 }
@@ -9439,9 +9608,7 @@ async fn departing_authority_notifies_remaining_members() {
 /// write (inactive-room GC winning the race) must surface as `ROOM_NOT_FOUND`,
 /// not `ROOM_CREATION_FAILED`: the client asked for a room that existed and is
 /// now gone, which is exactly what the not-found code means.
-#[tokio::test(start_paused = true)]
-#[cfg_attr(miri, ignore)]
-async fn join_racing_room_deletion_reports_room_not_found() {
+async fn assert_join_racing_room_deletion_reports_room_not_found(join_only: Option<bool>) {
     let server = create_test_server().await;
     let creator = PlayerId::new_v4();
     let room = server
@@ -9479,7 +9646,7 @@ async fn join_racing_room_deletion_reports_room_not_found() {
                 Some(true),
                 None,
                 None,
-                None,
+                join_only,
             )
             .await;
     });
@@ -9513,6 +9680,14 @@ async fn join_racing_room_deletion_reports_room_not_found() {
         "a join racing deletion must classify as ROOM_NOT_FOUND"
     );
     assert_eq!(reason, "Room not found");
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn join_racing_room_deletion_reports_room_not_found() {
+    for join_only in [None, Some(true)] {
+        assert_join_racing_room_deletion_reports_room_not_found(join_only).await;
+    }
 }
 
 struct ReleaseErrorLock {

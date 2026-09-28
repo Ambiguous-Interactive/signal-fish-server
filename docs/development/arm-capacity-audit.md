@@ -191,6 +191,22 @@ These findings cover room-code rotation, player names, transport status, and spe
 reconnect, and room-creation drain seams. The rest of the C1 room and storage
 rows remain unreviewed.
 
+### C1 admission-limit review (2026-09-28)
+
+At `46f840ab`, reviewed the in-memory room seat check and the server and
+application room-count gates. `concurrent_joins_for_last_seat_admit_one_player`
+parks the first seat write while a second player joins the same full-boundary
+room. It checks one admission, one `ROOM_FULL` refusal, the stored roster, and
+both routes. Existing barrier checks
+`server_room_cap_is_atomic_across_games` and
+`application_room_cap_is_atomic_across_games_and_independent_between_apps`
+cover concurrent creation in different games at the server and application
+limits. `join_racing_room_deletion_reports_room_not_found` now checks both
+ordinary and `join_only` admission when a room vanishes before the membership
+write. Both receive `ROOM_NOT_FOUND`. No violation was reproduced in these
+paths. Other storage adapters, leave/disconnect races, and the remaining C1
+cases are unreviewed.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -225,8 +241,8 @@ neither is a deployed capacity preset.
 | Authentication: `src/auth/**`, `src/rate_limit.rs` | Unauthorized traffic cannot enter a room; limits count refusals | `tests/auth_integration_tests.rs`, `formal/tla/RateLimitWindow.tla` | Concurrent admission and auth timeout boundary | Unreviewed |
 | Security: `src/security/**`, `src/websocket/token_binding.rs` | Token, origin, TLS, and TURN credential checks fail closed | `tests/mtls_token_binding_e2e.rs`, `fuzz/fuzz_targets/fuzz_reconnect_tokens.rs` | Token rotation/expiry during claim; TLS variants | Unreviewed |
 | Protocol: `src/protocol/**`, `src/trace_validation.rs` | V2/V3 decoding, wire bytes, and delivery class match contract | `tests/v2_wire_golden.rs`, `tests/v3_wire_properties.rs`, `fuzz/fuzz_targets/decode_protocol.rs` | Malformed/deep frames, mixed format boundaries | Unreviewed |
-| Room and player storage: `src/database/**` | Membership and room limits stay atomic and app isolated | `tests/integration_tests.rs`, `tests/model_based_state_machines.rs` | Concurrent joins at both limits; rollback | Unreviewed |
-| Room lifecycle and moderation: `src/server/room_service.rs`, `moderation.rs`, `spectator_service.rs`, `spectator_handlers.rs` | Join, leave, kick, ban, spectator state and ownership agree | `tests/lobby_integration_tests.rs`, `src/server/room_service_tests.rs` | ARM-C001–C004 fixed in spectator and room-code seams; join-only, leave/disconnect, kick/ban, and authority races remain | Unreviewed |
+| Room and player storage: `src/database/**` | Membership and room limits stay atomic and app isolated | `tests/integration_tests.rs`, `tests/model_based_state_machines.rs`; C1 admission-limit review above | Other adapters, rollback, and leave/disconnect races remain | Unreviewed |
+| Room lifecycle and moderation: `src/server/room_service.rs`, `moderation.rs`, `spectator_service.rs`, `spectator_handlers.rs` | Join, leave, kick, ban, spectator state and ownership agree | `tests/lobby_integration_tests.rs`, `src/server/room_service_tests.rs`; C1 admission-limit review above | ARM-C001–C004 fixed in spectator and room-code seams; other join-only paths, leave/disconnect, kick/ban, and authority races remain | Unreviewed |
 | Readiness and gameplay: `src/server/ready_state.rs`, `authority.rs`, `session_policy.rs`, `signaling.rs` | Membership and transport changes invalidate stale plans/readiness | `tests/v3_session_plan_e2e.rs`, `formal/tla/SignalFishSession.tla` | Start/leave, authority loss, reconnect publication order | Unreviewed |
 | Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs` | Mixed conversion refusal; stalled room fairness | Unreviewed |
 | Coordination and queues: `src/coordination/**`, `src/distributed.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla` | Cancellation/panic at reservation and commit | Unreviewed |
