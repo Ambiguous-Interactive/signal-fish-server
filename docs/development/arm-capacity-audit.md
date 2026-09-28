@@ -207,6 +207,17 @@ write. Both receive `ROOM_NOT_FOUND`. No violation was reproduced in these
 paths. Other storage adapters, leave/disconnect races, and the remaining C1
 cases are unreviewed.
 
+### C1 leave/disconnect ordering review (2026-09-28)
+
+At `56803cf0`, checked the socket lifecycle gate where an explicit leave
+waits behind disconnect after the reconnect claim is armed, and where
+disconnect waits behind a leave stalled on peer delivery. The regressions
+`leave_queued_during_disconnect_cannot_consume_reconnect_or_repeat_departure`
+and `disconnect_queued_during_leave_does_not_arm_a_reconnect` confirm one
+absent durable row, one peer `PlayerLeft`, one departure count, and the expected
+token outcome for each order. Neither interleaving reproduced a defect. Other
+leave/disconnect races remain unreviewed.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -242,7 +253,7 @@ neither is a deployed capacity preset.
 | Security: `src/security/**`, `src/websocket/token_binding.rs` | Token, origin, TLS, and TURN credential checks fail closed | `tests/mtls_token_binding_e2e.rs`, `fuzz/fuzz_targets/fuzz_reconnect_tokens.rs` | Token rotation/expiry during claim; TLS variants | Unreviewed |
 | Protocol: `src/protocol/**`, `src/trace_validation.rs` | V2/V3 decoding, wire bytes, and delivery class match contract | `tests/v2_wire_golden.rs`, `tests/v3_wire_properties.rs`, `fuzz/fuzz_targets/decode_protocol.rs` | Malformed/deep frames, mixed format boundaries | Unreviewed |
 | Room and player storage: `src/database/**` | Membership and room limits stay atomic and app isolated | `tests/integration_tests.rs`, `tests/model_based_state_machines.rs`; C1 admission-limit review above | Other adapters, rollback, and leave/disconnect races remain | Unreviewed |
-| Room lifecycle and moderation: `src/server/room_service.rs`, `moderation.rs`, `spectator_service.rs`, `spectator_handlers.rs` | Join, leave, kick, ban, spectator state and ownership agree | `tests/lobby_integration_tests.rs`, `src/server/room_service_tests.rs`; C1 admission-limit review above | ARM-C001–C004 fixed in spectator and room-code seams; other join-only paths, leave/disconnect, kick/ban, and authority races remain | Unreviewed |
+| Room lifecycle and moderation: `src/server/room_service.rs`, `moderation.rs`, `spectator_service.rs`, `spectator_handlers.rs` | Join, leave, kick, ban, spectator state and ownership agree | `tests/lobby_integration_tests.rs`, `src/server/room_service_tests.rs`; C1 admission-limit and leave/disconnect ordering reviews above | ARM-C001–C004 fixed in spectator and room-code seams; other join-only paths, leave/disconnect interleavings, kick/ban, and authority races remain | Unreviewed |
 | Readiness and gameplay: `src/server/ready_state.rs`, `authority.rs`, `session_policy.rs`, `signaling.rs` | Membership and transport changes invalidate stale plans/readiness | `tests/v3_session_plan_e2e.rs`, `formal/tla/SignalFishSession.tla` | Start/leave, authority loss, reconnect publication order | Unreviewed |
 | Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs` | Mixed conversion refusal; stalled room fairness | Unreviewed |
 | Coordination and queues: `src/coordination/**`, `src/distributed.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla` | Cancellation/panic at reservation and commit | Unreviewed |

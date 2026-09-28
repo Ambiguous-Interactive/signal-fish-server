@@ -154,6 +154,10 @@ pub(crate) struct ClientConnection {
 pub(crate) struct ClientLifecycle {
     gate: Arc<tokio::sync::Mutex<()>>,
     player_id: std::sync::Mutex<PlayerId>,
+    #[cfg(test)]
+    lock_attempts: AtomicUsize,
+    #[cfg(test)]
+    lock_attempt_notify: tokio::sync::Notify,
 }
 
 impl ClientLifecycle {
@@ -161,6 +165,10 @@ impl ClientLifecycle {
         Self {
             gate: Arc::new(tokio::sync::Mutex::new(())),
             player_id: std::sync::Mutex::new(player_id),
+            #[cfg(test)]
+            lock_attempts: AtomicUsize::new(0),
+            #[cfg(test)]
+            lock_attempt_notify: tokio::sync::Notify::new(),
         }
     }
 
@@ -169,7 +177,24 @@ impl ClientLifecycle {
     }
 
     pub(crate) async fn lock_owned(self: Arc<Self>) -> tokio::sync::OwnedMutexGuard<()> {
+        #[cfg(test)]
+        {
+            self.lock_attempts.fetch_add(1, Ordering::Release);
+            self.lock_attempt_notify.notify_one();
+        }
         Arc::clone(&self.gate).lock_owned().await
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn lock_attempt_count_for_test(&self) -> usize {
+        self.lock_attempts.load(Ordering::Acquire)
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) async fn wait_for_lock_attempt_after_for_test(&self, previous: usize) {
+        while self.lock_attempt_count_for_test() <= previous {
+            self.lock_attempt_notify.notified().await;
+        }
     }
 
     pub(crate) fn player_id(&self) -> PlayerId {
