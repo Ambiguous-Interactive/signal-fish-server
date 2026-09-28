@@ -634,9 +634,10 @@ async fn transport_status_delivery_does_not_block_concurrent_leave() {
     pause.release.notify_one();
     status_task.await.expect("status task completes");
     super::message_router::disarm_transport_status_delivery_pause(&reporter);
+    let observer_outcome = observer_rx.try_recv();
     assert!(
-        observer_rx.try_recv().is_err(),
-        "old status reached the new seat"
+        matches!(observer_outcome, Err(mpsc::error::TryRecvError::Empty)),
+        "old status reached the new seat or observer disconnected"
     );
     assert_eq!(
         server
