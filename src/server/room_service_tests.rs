@@ -10397,6 +10397,241 @@ async fn spectator_cap_write_failure_refuses_creation_and_allows_retry() {
     assert_eq!(refused.code, Some(ErrorCode::TooManySpectators));
 }
 
+/// Issue #658: an interrupted creator leaves a hidden room that repair must reclaim.
+#[tokio::test(start_paused = true)]
+async fn interrupted_creation_releases_hidden_room_and_reserved_code() {
+    let database = Arc::new(InMemoryDatabase::new());
+    database.initialize().await.expect("database initializes");
+    let lock = Arc::new(InMemoryDistributedLock::new());
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        lock.clone(),
+        database.clone(),
+    )
+    .await;
+    let creator_id = PlayerId::new_v4();
+    let creator_lock = lock
+        .acquire("room_join:interrupted:RETRY1", Duration::from_secs(10))
+        .await
+        .expect("creator owns code lock");
+    let creation_owner = Arc::new(());
+    let pending = database
+        .create_pending_room_owned_classified(
+            "interrupted".into(),
+            Some("RETRY1".into()),
+            4,
+            true,
+            creator_id,
+            "relay".into(),
+            "local".into(),
+            None,
+            None,
+            Arc::clone(&creation_owner),
+        )
+        .await
+        .expect("pending room inserts atomically");
+    drop(creation_owner);
+
+    assert!(database
+        .get_room("interrupted", "RETRY1")
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(server.cleanup_abandoned_rooms().await, 0);
+    tokio::time::advance(Duration::from_secs(11)).await;
+    assert_eq!(server.cleanup_abandoned_rooms().await, 1);
+    assert!(!lock
+        .release(&creator_lock)
+        .await
+        .expect("expired lock release succeeds"));
+    assert!(database
+        .get_room_by_id(&pending.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(database.get_total_room_count().await.unwrap(), 0);
+    assert_eq!(server.metrics.rooms_deleted.load(Ordering::Relaxed), 1);
+    assert!(database
+        .create_pending_room_owned_classified(
+            "interrupted".into(),
+            Some("RETRY1".into()),
+            4,
+            true,
+            creator_id,
+            "relay".into(),
+            "local".into(),
+            None,
+            None,
+            Arc::new(()),
+        )
+        .await
+        .is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn pending_room_repair_preserves_active_creator_after_code_lease_expires() {
+    let database = Arc::new(InMemoryDatabase::new());
+    database.initialize().await.expect("database initializes");
+    let lock = Arc::new(InMemoryDistributedLock::new());
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        lock.clone(),
+        database.clone(),
+    )
+    .await;
+    let creator_lock = lock
+        .acquire("room_join:active-creation:ACTIVE1", Duration::from_secs(10))
+        .await
+        .expect("creator owns code lock");
+    let creation_owner = Arc::new(());
+    let pending = database
+        .create_pending_room_owned_classified(
+            "active-creation".into(),
+            Some("ACTIVE1".into()),
+            4,
+            true,
+            PlayerId::new_v4(),
+            "relay".into(),
+            "local".into(),
+            None,
+            None,
+            Arc::clone(&creation_owner),
+        )
+        .await
+        .expect("creator inserts pending room");
+
+    assert_eq!(server.cleanup_abandoned_rooms().await, 0);
+    assert!(database
+        .get_room_by_id(&pending.id)
+        .await
+        .unwrap()
+        .is_some());
+    tokio::time::advance(Duration::from_secs(11)).await;
+    assert_eq!(server.cleanup_abandoned_rooms().await, 0);
+    assert!(database.pending_room_ids().await.unwrap().is_empty());
+    assert!(!database.delete_room_if_pending(&pending.id).await.unwrap());
+    assert!(database
+        .get_room_by_id(&pending.id)
+        .await
+        .unwrap()
+        .is_some());
+    database
+        .publish_room(&pending.id)
+        .await
+        .expect("creator publishes");
+    assert!(!lock
+        .release(&creator_lock)
+        .await
+        .expect("expired lock release succeeds"));
+    assert_eq!(server.cleanup_abandoned_rooms().await, 0);
+    assert!(database.is_room_published(&pending.id).await.unwrap());
+    assert_eq!(server.metrics.rooms_deleted.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn legacy_pending_creation_is_not_reclaimed_without_owner_token() {
+    let database = Arc::new(InMemoryDatabase::new());
+    database.initialize().await.expect("database initializes");
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::new(InMemoryDistributedLock::new()),
+        database.clone(),
+    )
+    .await;
+    let pending = database
+        .create_pending_room_classified(
+            "legacy-pending".into(),
+            Some("LEGACY".into()),
+            4,
+            true,
+            PlayerId::new_v4(),
+            "relay".into(),
+            "local".into(),
+            None,
+            None,
+        )
+        .await
+        .expect("legacy caller inserts pending room");
+
+    assert_eq!(server.cleanup_abandoned_rooms().await, 0);
+    database
+        .publish_room(&pending.id)
+        .await
+        .expect("legacy caller publishes");
+    assert_eq!(server.cleanup_abandoned_rooms().await, 0);
+    assert!(database.is_room_published(&pending.id).await.unwrap());
+}
+
+#[tokio::test(start_paused = true)]
+async fn generic_room_cleanup_keeps_unpublished_rooms_for_repair() {
+    let database = Arc::new(InMemoryDatabase::new());
+    database.initialize().await.expect("database initializes");
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::new(InMemoryDistributedLock::new()),
+        database.clone(),
+    )
+    .await;
+    let creator_id = PlayerId::new_v4();
+    let creation_owner = Arc::new(());
+    let pending = database
+        .create_pending_room_owned_classified(
+            "pending-expiry".into(),
+            Some("EXPIRY".into()),
+            4,
+            true,
+            creator_id,
+            "relay".into(),
+            "local".into(),
+            None,
+            None,
+            Arc::clone(&creation_owner),
+        )
+        .await
+        .expect("pending room inserts");
+    tokio::time::advance(Duration::from_secs(11)).await;
+
+    let protected = HashSet::new();
+    let expired = database
+        .cleanup_expired_rooms(
+            chrono::Duration::zero(),
+            chrono::Duration::zero(),
+            &protected,
+        )
+        .await
+        .expect("expiry cleanup succeeds");
+    assert_eq!(expired.empty_rooms_cleaned, 0);
+    assert_eq!(expired.inactive_rooms_cleaned, 0);
+    assert_eq!(server.cleanup_abandoned_rooms().await, 0);
+
+    database
+        .remove_player_from_room(&pending.id, &creator_id)
+        .await
+        .expect("remove creator from pending room");
+    assert!(database
+        .cleanup_empty_rooms(chrono::Duration::zero(), &protected)
+        .await
+        .expect("empty-room cleanup succeeds")
+        .is_empty());
+    assert!(database
+        .get_room_by_id(&pending.id)
+        .await
+        .unwrap()
+        .is_some());
+
+    drop(creation_owner);
+    assert_eq!(server.cleanup_abandoned_rooms().await, 1);
+    assert!(database
+        .get_room_by_id(&pending.id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
 /// Issue #658: a second storage fault must not turn a refused creation into
 /// a joinable room with the wrong spectator policy.
 #[tokio::test(start_paused = true)]

@@ -5,12 +5,13 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use super::room_service::ROOM_JOIN_LOCK_TTL;
 use super::{chrono_duration_from_std, EnhancedGameServer};
 
 impl EnhancedGameServer {
-    /// Retry deletion of room creations whose setup failed after insertion.
-    /// Storage checks the publication state again while deleting, so a stale
-    /// sweep cannot remove a room that became live.
+    /// Reclaim unpublished rooms after a failed or interrupted creation.
+    /// The code lock excludes a creator still preparing its first response;
+    /// storage rechecks publication before deleting a stale scan result.
     pub(crate) async fn cleanup_abandoned_rooms(&self) -> usize {
         let room_ids = match self.database.pending_room_ids().await {
             Ok(ids) => ids,
@@ -21,7 +22,27 @@ impl EnhancedGameServer {
         };
         let mut deleted = 0_usize;
         for room_id in room_ids {
-            match self.database.delete_room_if_pending(&room_id).await {
+            let room = match self.database.get_room_by_id(&room_id).await {
+                Ok(Some(room)) => room,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(%room_id, %error, "Failed to read unpublished room for cleanup");
+                    continue;
+                }
+            };
+            let lock_key = format!("room_join:{}:{}", room.game_name, room.code);
+            let ttl = self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL);
+            let lock_handle = match self.distributed_lock.try_acquire(&lock_key, ttl).await {
+                Ok(Some(handle)) => handle,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(%room_id, %error, "Failed to lock unpublished room for cleanup");
+                    continue;
+                }
+            };
+            let mut lock_renewal = self.keep_lock_renewed(lock_handle, ttl);
+            let result = self.database.delete_room_if_pending(&room_id).await;
+            match result {
                 Ok(true) => {
                     self.metrics.add_rooms_deleted(1);
                     self.room_applications.remove(&room_id);
@@ -32,6 +53,7 @@ impl EnhancedGameServer {
                     tracing::warn!(%room_id, %error, "Failed to delete abandoned room; retaining it for retry");
                 }
             }
+            self.release_renewed_lock(&mut lock_renewal).await;
         }
         deleted
     }
