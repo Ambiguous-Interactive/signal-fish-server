@@ -747,6 +747,10 @@ pub struct InMemoryDatabase {
     #[cfg(all(test, signal_fish_repository_tests))]
     fail_set_room_max_spectators_once: std::sync::atomic::AtomicBool,
     #[cfg(all(test, signal_fish_repository_tests))]
+    panic_set_room_max_spectators_once: std::sync::atomic::AtomicBool,
+    #[cfg(all(test, signal_fish_repository_tests))]
+    panic_update_player_name_once: std::sync::atomic::AtomicBool,
+    #[cfg(all(test, signal_fish_repository_tests))]
     fail_delete_room_once: std::sync::atomic::AtomicBool,
     #[cfg(all(test, signal_fish_repository_tests))]
     pause_publish_room_once: std::sync::atomic::AtomicBool,
@@ -837,6 +841,10 @@ impl InMemoryDatabase {
             miss_update_player_name_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
             fail_set_room_max_spectators_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            panic_set_room_max_spectators_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            panic_update_player_name_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
             fail_delete_room_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
@@ -1041,6 +1049,18 @@ impl InMemoryDatabase {
     #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) fn fail_next_set_room_max_spectators_for_test(&self) {
         self.fail_set_room_max_spectators_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn panic_next_set_room_max_spectators_for_test(&self) {
+        self.panic_set_room_max_spectators_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn panic_next_update_player_name_for_test(&self) {
+        self.panic_update_player_name_once
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -1492,6 +1512,13 @@ impl GameDatabase for InMemoryDatabase {
     ) -> Result<()> {
         #[cfg(all(test, signal_fish_repository_tests))]
         if self
+            .panic_set_room_max_spectators_once
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            panic!("injected spectator capacity write panic for test");
+        }
+        #[cfg(all(test, signal_fish_repository_tests))]
+        if self
             .fail_set_room_max_spectators_once
             .swap(false, std::sync::atomic::Ordering::Relaxed)
         {
@@ -1793,6 +1820,13 @@ impl GameDatabase for InMemoryDatabase {
         player_id: &PlayerId,
         name: &str,
     ) -> Result<bool> {
+        #[cfg(all(test, signal_fish_repository_tests))]
+        if self
+            .panic_update_player_name_once
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            panic!("injected player name write panic for test");
+        }
         #[cfg(all(test, signal_fish_repository_tests))]
         if self
             .miss_update_player_name_once

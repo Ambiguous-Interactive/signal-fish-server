@@ -139,7 +139,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   room lifecycle, so unfinished rooms cannot become visible by default (#658).
 - Refused room creations remain closed to players and spectators when setup
   and rollback storage writes both fail. The server retries deletion and
-  releases the room code after storage recovers (#658).
+  releases the room code after storage recovers. A storage panic during creator
+  setup also returns a failure and keeps the room repairable (#658).
 - Peers no longer receive an old transport status after its sender leaves and
   rejoins a room (#647).
 
