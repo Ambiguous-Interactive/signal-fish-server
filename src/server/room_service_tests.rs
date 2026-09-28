@@ -2624,6 +2624,247 @@ async fn setup_joined_pair_with_reconnection() -> JoinedPairFixture {
     }
 }
 
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn leave_queued_during_disconnect_cannot_consume_reconnect_or_repeat_departure() {
+    let mut fixture = setup_joined_pair_with_reconnection().await;
+    let gate = fixture.server.install_reconnect_teardown_test_gate();
+    let disconnect = {
+        let server = Arc::clone(&fixture.server);
+        let leaver = fixture.leaver;
+        tokio::spawn(async move { server.unregister_client(&leaver).await })
+    };
+    timeout(Duration::from_secs(1), gate.wait_until_armed())
+        .await
+        .expect("disconnect reaches the armed reconnect boundary");
+    let lifecycle = fixture
+        .server
+        .client_lifecycle(&fixture.leaver)
+        .expect("disconnect still owns the physical socket");
+    let previous_attempts = lifecycle.lock_attempt_count_for_test();
+
+    let leave = {
+        let server = Arc::clone(&fixture.server);
+        let leaver = fixture.leaver;
+        tokio::spawn(async move { server.leave_room(&leaver).await })
+    };
+    timeout(
+        Duration::from_secs(1),
+        lifecycle.wait_for_lock_attempt_after_for_test(previous_attempts),
+    )
+    .await
+    .expect("leave attempts the held lifecycle lock");
+    assert!(
+        !leave.is_finished(),
+        "leave must wait for disconnect's socket lifecycle gate"
+    );
+    assert!(
+        drain_queued_messages(&mut fixture.leaver_rx).is_empty(),
+        "a queued leave cannot acknowledge before disconnect finishes"
+    );
+
+    gate.release();
+    timeout(Duration::from_secs(1), disconnect)
+        .await
+        .expect("disconnect finishes")
+        .expect("disconnect task succeeds");
+    timeout(Duration::from_secs(1), leave)
+        .await
+        .expect("queued leave finishes")
+        .expect("leave task succeeds");
+
+    assert!(!fixture
+        .server
+        .connection_manager
+        .has_client(&fixture.leaver));
+    assert_eq!(fixture.server.get_client_room(&fixture.leaver).await, None);
+    assert!(!fixture
+        .database
+        .get_room_players(&fixture.room_id)
+        .await
+        .expect("room membership is readable")
+        .iter()
+        .any(|player| player.id == fixture.leaver));
+    let survivor_messages = drain_queued_messages(&mut fixture.survivor_rx);
+    assert_eq!(
+        survivor_messages
+            .iter()
+            .filter(|message| matches!(message.as_ref(), ServerMessage::PlayerLeft { player_id, .. } if *player_id == fixture.leaver))
+            .count(),
+        1,
+        "one physical departure produces one terminal event"
+    );
+    assert!(
+        drain_queued_messages(&mut fixture.leaver_rx).is_empty(),
+        "the dead socket cannot receive a late RoomLeft"
+    );
+    assert_eq!(
+        fixture.server.metrics.players_left.load(Ordering::Relaxed),
+        1,
+        "the duplicate leave must not count a second departure"
+    );
+    let manager = fixture
+        .server
+        .reconnection_manager()
+        .expect("reconnection is enabled");
+    manager
+        .validate_reconnection(&fixture.leaver, &fixture.room_id, &fixture.reconnect_token)
+        .await
+        .expect("the queued leave must not consume disconnect's reconnect token");
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn disconnect_queued_during_leave_does_not_arm_a_reconnect() {
+    let server = create_test_server().await;
+    let (leaver, mut leaver_rx) =
+        register_client(&server, "127.0.0.1:48150".parse().unwrap()).await;
+    let (survivor_sender, mut survivor_rx) = mpsc::channel(1);
+    let fill_sender = survivor_sender.clone();
+    let survivor = server
+        .connection_manager
+        .register_client(
+            survivor_sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            "127.0.0.1:48151".parse().unwrap(),
+            server.instance_id,
+        )
+        .await
+        .expect("survivor registration succeeds");
+    let room = server
+        .database
+        .create_room(
+            "leave-disconnect-order".to_string(),
+            Some("LDC001".to_string()),
+            4,
+            true,
+            leaver,
+            "udp".to_string(),
+            "region-a".to_string(),
+            None,
+        )
+        .await
+        .expect("room creation succeeds");
+    server
+        .connection_manager
+        .assign_client_to_room(&leaver, room.id)
+        .await;
+    server
+        .database
+        .add_player_to_room(
+            &room.id,
+            PlayerInfo {
+                id: survivor,
+                name: "survivor".to_string(),
+                is_authority: false,
+                is_ready: false,
+                connected_at: Some(chrono::Utc::now()),
+                connection_info: None,
+                epoch: None,
+                seq: None,
+                region_id: "region-a".to_string(),
+            },
+        )
+        .await
+        .expect("survivor joins room");
+    server
+        .connection_manager
+        .assign_client_to_room(&survivor, room.id)
+        .await;
+    server
+        .reconnection_manager()
+        .expect("reconnection is enabled")
+        .pre_issue_token(leaver, room.id)
+        .await;
+    fill_sender
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("fill survivor delivery queue");
+    let leave = {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move { server.leave_room(&leaver).await })
+    };
+    wait_for_backpressure_event(&server).await;
+    assert_next_message_matches(&mut leaver_rx, "leave acknowledgement", |message| {
+        matches!(message, ServerMessage::RoomLeft)
+    });
+    let lifecycle = server
+        .client_lifecycle(&leaver)
+        .expect("leave still owns the physical socket");
+    let previous_attempts = lifecycle.lock_attempt_count_for_test();
+
+    let disconnect = {
+        let server = Arc::clone(&server);
+        tokio::spawn(async move { server.unregister_client(&leaver).await })
+    };
+    timeout(
+        Duration::from_secs(1),
+        lifecycle.wait_for_lock_attempt_after_for_test(previous_attempts),
+    )
+    .await
+    .expect("disconnect attempts the held lifecycle lock");
+    assert!(
+        !disconnect.is_finished(),
+        "disconnect must wait while the explicit leave publishes its terminal event"
+    );
+    assert_next_message_matches(&mut survivor_rx, "queued filler", |message| {
+        matches!(message, ServerMessage::Pong)
+    });
+    let terminal = timeout(Duration::from_secs(1), survivor_rx.recv())
+        .await
+        .expect("terminal leave arrives")
+        .expect("survivor remains connected");
+    assert!(
+        matches!(terminal.as_ref(), ServerMessage::PlayerLeft { player_id, .. } if *player_id == leaver)
+    );
+    let authority = timeout(Duration::from_secs(1), survivor_rx.recv())
+        .await
+        .expect("authority update arrives")
+        .expect("survivor remains connected");
+    assert!(matches!(
+        authority.as_ref(),
+        ServerMessage::AuthorityChanged {
+            authority_player: None,
+            ..
+        }
+    ));
+    timeout(Duration::from_secs(1), leave)
+        .await
+        .expect("leave finishes")
+        .expect("leave task succeeds");
+    timeout(Duration::from_secs(1), disconnect)
+        .await
+        .expect("disconnect finishes")
+        .expect("disconnect task succeeds");
+
+    assert!(!server.connection_manager.has_client(&leaver));
+    assert_eq!(server.get_client_room(&leaver).await, None);
+    assert!(!server
+        .database
+        .get_room_players(&room.id)
+        .await
+        .expect("room membership is readable")
+        .iter()
+        .any(|player| player.id == leaver));
+    assert_eq!(
+        server.metrics.players_left.load(Ordering::Relaxed),
+        1,
+        "disconnect after leave must not count another departure"
+    );
+    assert!(
+        !server
+            .reconnection_manager()
+            .expect("reconnection is enabled")
+            .has_pending_reconnection(&leaver)
+            .await,
+        "a departed player cannot receive a reconnect claim"
+    );
+    assert!(
+        drain_queued_messages(&mut leaver_rx).is_empty()
+            && drain_queued_messages(&mut survivor_rx).is_empty(),
+        "the race cannot duplicate lifecycle messages"
+    );
+}
+
 async fn wait_for_backpressure_event(server: &EnhancedGameServer) {
     timeout(Duration::from_secs(1), async {
         while server
