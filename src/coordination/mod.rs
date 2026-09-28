@@ -4200,16 +4200,20 @@ mod tests {
                 expected_registrations,
                 "{context}: wrong registration state"
             );
+            let queued_message = receiver.try_recv();
             if allowed {
                 assert!(
-                    matches!(receiver.try_recv(), Ok(message) if matches!(message.as_ref(), ServerMessage::Pong))
+                    matches!(queued_message, Ok(message) if matches!(message.as_ref(), ServerMessage::Pong)),
+                    "{context}: expected the initial frame"
                 );
             } else {
-                assert!(matches!(
-                    receiver.try_recv(),
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty
-                        | tokio::sync::mpsc::error::TryRecvError::Disconnected)
-                ));
+                assert!(
+                    matches!(
+                        queued_message,
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+                    ),
+                    "{context}: canceled delivery closes the unregistered channel"
+                );
             }
         }
     }
