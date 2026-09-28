@@ -134,6 +134,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Database adapters now refuse protected room creation unless they can seal
+  the room atomically. Server creation also refuses adapters without a pending
+  room lifecycle, so unfinished rooms cannot become visible by default (#658).
 - Refused room creations remain closed to players and spectators when setup
   and rollback storage writes both fail. The server retries deletion and
   releases the room code after storage recovers (#658).
@@ -375,9 +378,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `create_room_classified` must accept the new trailing
   `join_password: Option<RoomPasswordCredential>` parameter; the trait
   contract is that the room becomes visible already sealed (the shipped
-  in-memory implementation creates and seals under one guard set, and the
-  trait default seals after creation, deleting the fresh room if the seal
-  write fails). `BanPlayer` evicts a seated member
+  in-memory implementation creates and seals under one guard set; the trait
+  default now refuses protected creation). `BanPlayer` evicts a seated member
   exactly like a kick and additionally records the id on the room's
   in-memory ban list: while the room lives, the banned id cannot rejoin as a
   player or spectator (`BANNED`); `UnbanPlayer` lifts a ban idempotently.
