@@ -56,6 +56,7 @@ struct JoinPanicRecovery {
     epoch: Option<u32>,
     admission_kind: Option<RoomAdmissionKind>,
     room_event_guard: Option<RoomEventMutationGuard>,
+    creation_lock: Option<Arc<std::sync::Mutex<Option<LeaseRenewalGuard>>>>,
 }
 
 impl RoomAdmissionKind {
@@ -465,6 +466,14 @@ impl EnhancedGameServer {
                         )
                         .await;
                 }
+                let creation_lock = panic_recovery
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .creation_lock
+                    .clone();
+                if let Some(creation_lock) = creation_lock {
+                    server.release_join_creation_lock(&creation_lock).await;
+                }
             }
         });
         if let Err(error) = task.await {
@@ -708,7 +717,8 @@ impl EnhancedGameServer {
         };
 
         match room_join_result {
-            Ok((room, room_event_guard, admission_kind, mut creation_lock)) => {
+            Ok((room, room_event_guard, admission_kind, creation_lock)) => {
+                let creation_lock = Arc::new(std::sync::Mutex::new(creation_lock));
                 room_join_span.record("room_code", tracing::field::display(&room.code));
                 room_join_span.record("room_id", tracing::field::display(room.id));
                 let Some((delivery, membership_stamp)) = self
@@ -722,7 +732,7 @@ impl EnhancedGameServer {
                         "missing_prepared_connection",
                     )
                     .await;
-                    self.release_renewed_cap_lock(&mut creation_lock).await;
+                    self.release_join_creation_lock(&creation_lock).await;
                     return;
                 };
                 *panic_recovery
@@ -732,6 +742,7 @@ impl EnhancedGameServer {
                     epoch: Some(membership_stamp.epoch),
                     admission_kind: Some(admission_kind.clone()),
                     room_event_guard: Some(room_event_guard.clone()),
+                    creation_lock: Some(Arc::clone(&creation_lock)),
                 };
                 #[cfg(test)]
                 self.trigger_owned_room_operation_panic_for_test(
@@ -890,7 +901,7 @@ impl EnhancedGameServer {
                         room.id,
                         membership_stamp.epoch,
                     );
-                    self.release_renewed_cap_lock(&mut creation_lock).await;
+                    self.release_join_creation_lock(&creation_lock).await;
                     if drain_canceled_creation {
                         self.reject_join_for_shutdown_drain(player_id, operation_id)
                             .await;
@@ -906,7 +917,7 @@ impl EnhancedGameServer {
                     }
                     return;
                 }
-                self.release_renewed_cap_lock(&mut creation_lock).await;
+                self.release_join_creation_lock(&creation_lock).await;
                 terminal_response_committed.store(true, Ordering::Release);
                 #[cfg(test)]
                 self.trigger_owned_room_operation_panic_for_test(
@@ -2725,6 +2736,17 @@ impl EnhancedGameServer {
             self.release_renewed_lock(renewal).await;
         }
         *cap_lock = None;
+    }
+
+    async fn release_join_creation_lock(
+        &self,
+        shared: &Arc<std::sync::Mutex<Option<LeaseRenewalGuard>>>,
+    ) {
+        let mut lock = shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        self.release_renewed_cap_lock(&mut lock).await;
     }
 
     async fn acquire_application_room_cap_lock(

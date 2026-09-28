@@ -3521,6 +3521,44 @@ async fn correlated_join_panic_after_admission_rolls_back_the_prepared_generatio
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
+async fn created_room_panic_releases_code_lock_after_rollback() {
+    let server = create_test_server().await;
+    server.script_room_codes_for_test(["PNC001"]);
+    let (creator, mut receiver) =
+        register_client(&server, "127.0.0.1:48324".parse().unwrap()).await;
+    let operation_id = uuid::Uuid::from_u128(0x48324);
+    server.panic_owned_room_operation_for_test(OwnedRoomOperationPanicPoint::JoinAfterAdmission);
+    server
+        .handle_join_room_operation(
+            &creator,
+            Some(operation_id),
+            "panic-new".into(),
+            None,
+            "Creator".into(),
+            Some(4),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    expect_correlated_internal_operation_failure(&mut receiver, operation_id, "creator panic")
+        .await;
+    assert!(server
+        .database
+        .get_room("panic-new", "PNC001")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(!server
+        .distributed_lock
+        .is_locked("room_join:panic-new:PNC001")
+        .await
+        .unwrap());
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
 async fn correlated_leave_panic_returns_terminal_internal_failure() {
     let server = create_test_server().await;
     let (player_id, mut receiver) =
