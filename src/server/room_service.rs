@@ -708,7 +708,7 @@ impl EnhancedGameServer {
         };
 
         match room_join_result {
-            Ok((room, room_event_guard, admission_kind)) => {
+            Ok((room, room_event_guard, admission_kind, mut creation_lock)) => {
                 room_join_span.record("room_code", tracing::field::display(&room.code));
                 room_join_span.record("room_id", tracing::field::display(room.id));
                 let Some((delivery, membership_stamp)) = self
@@ -722,6 +722,7 @@ impl EnhancedGameServer {
                         "missing_prepared_connection",
                     )
                     .await;
+                    self.release_renewed_cap_lock(&mut creation_lock).await;
                     return;
                 };
                 *panic_recovery
@@ -744,48 +745,9 @@ impl EnhancedGameServer {
                 let baseline_room = Arc::new(std::sync::Mutex::new(None));
                 let baseline_room_in_builder = Arc::clone(&baseline_room);
                 let created_room = matches!(admission_kind, RoomAdmissionKind::Created { .. });
-                // The first baseline builder makes the room visible before
-                // the queue commit. Keep the code lock through that commit
-                // and any rollback so another instance cannot admit into a
-                // room whose creator response might still be canceled.
-                let mut creation_lock = if created_room {
-                    let key = format!("room_join:{}:{}", room.game_name, room.code);
-                    match self
-                        .distributed_lock
-                        .acquire(&key, self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL))
-                        .await
-                    {
-                        Ok(handle) => Some(self.keep_lock_renewed(
-                            handle,
-                            self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL),
-                        )),
-                        Err(error) => {
-                            self.rollback_unpublished_player_admission(
-                                room.id,
-                                *player_id,
-                                admission_kind,
-                                "creation_publication_lock_failed",
-                            )
-                            .await;
-                            self.connection_manager.rollback_prepared_room_assignment(
-                                player_id,
-                                room.id,
-                                membership_stamp.epoch,
-                            );
-                            let _ = self
-                                .send_join_failure_to_player(
-                                    player_id,
-                                    error.to_string(),
-                                    Some(crate::protocol::ErrorCode::StorageError),
-                                    operation_id,
-                                )
-                                .await;
-                            return;
-                        }
-                    }
-                } else {
-                    None
-                };
+                // Creation retains its code lock through the response commit
+                // and any rollback, so another instance cannot admit while
+                // that response may still be canceled.
                 let should_commit = || !created_room || !self.is_draining();
                 let initial_delivery = self
                     .message_coordinator
@@ -1200,6 +1162,7 @@ impl EnhancedGameServer {
             Room,
             crate::coordination::RoomEventMutationGuard,
             RoomAdmissionKind,
+            Option<LeaseRenewalGuard>,
         ),
         JoinRoomError,
     > {
@@ -2039,6 +2002,7 @@ impl EnhancedGameServer {
             Room,
             crate::coordination::RoomEventMutationGuard,
             RoomAdmissionKind,
+            Option<LeaseRenewalGuard>,
         ),
         JoinRoomError,
     > {
@@ -2671,12 +2635,23 @@ impl EnhancedGameServer {
         self.release_renewed_cap_lock(&mut game_cap_lock).await;
         self.release_renewed_cap_lock(&mut application_cap_lock)
             .await;
-        self.release_renewed_lock(&mut lock_renewal).await;
-        let (room, admission_kind) = result?;
+        let (room, admission_kind) = match result {
+            Ok(value) => value,
+            Err(error) => {
+                self.release_renewed_lock(&mut lock_renewal).await;
+                return Err(error);
+            }
+        };
+        let creation_lock = if matches!(admission_kind, RoomAdmissionKind::Created { .. }) {
+            Some(lock_renewal)
+        } else {
+            self.release_renewed_lock(&mut lock_renewal).await;
+            None
+        };
         let guard = room_event_guard.ok_or_else(|| {
             anyhow::anyhow!("successful room admission lost its room publication guard")
         })?;
-        Ok((room, guard, admission_kind))
+        Ok((room, guard, admission_kind, creation_lock))
     }
 
     /// Release a distributed lock and account every non-success outcome.
