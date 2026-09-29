@@ -8,7 +8,7 @@ use crate::protocol::{
 };
 
 use super::room_service::ROOM_JOIN_LOCK_TTL;
-use super::EnhancedGameServer;
+use super::{ClientLifecycle, EnhancedGameServer};
 
 /// Maximum fresh-code candidates tried per `RegenerateRoomCode` request.
 /// Matches the generated-room-code creation retry budget
@@ -52,15 +52,27 @@ impl EnhancedGameServer {
     /// `Error` frame; a target whose live route is in another room — a
     /// seated route or a spectator session — loses only the residue row or
     /// the tombstoned record, and its live connection stays open.
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(super) async fn handle_kick_player_operation(
         self: &Arc<Self>,
         authority_id: &PlayerId,
         operation_id: RoomOperationId,
         target_id: PlayerId,
     ) {
+        self.handle_kick_player_from_lifecycle(authority_id, operation_id, target_id, None)
+            .await;
+    }
+
+    pub(super) async fn handle_kick_player_from_lifecycle(
+        self: &Arc<Self>,
+        authority_id: &PlayerId,
+        operation_id: RoomOperationId,
+        target_id: PlayerId,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) {
         let moderation_lifecycle_guard = self.moderation_lifecycle_gate.lock().await;
         let resolved = self
-            .resolve_kick_style_target(authority_id, &target_id)
+            .resolve_kick_style_target(authority_id, &target_id, source_lifecycle)
             .await;
         let Some(ModerationTarget {
             room_id,
@@ -117,15 +129,27 @@ impl EnhancedGameServer {
     /// room's remaining lifetime. The ban write is serialized behind the
     /// room mutation gate ahead of the removal, so a concurrent admission
     /// cannot slip in between the ban decision and the eviction.
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(super) async fn handle_ban_player_operation(
         self: &Arc<Self>,
         authority_id: &PlayerId,
         operation_id: RoomOperationId,
         target_id: PlayerId,
     ) {
+        self.handle_ban_player_from_lifecycle(authority_id, operation_id, target_id, None)
+            .await;
+    }
+
+    pub(super) async fn handle_ban_player_from_lifecycle(
+        self: &Arc<Self>,
+        authority_id: &PlayerId,
+        operation_id: RoomOperationId,
+        target_id: PlayerId,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) {
         let moderation_lifecycle_guard = self.moderation_lifecycle_gate.lock().await;
         let resolved = self
-            .resolve_kick_style_target(authority_id, &target_id)
+            .resolve_kick_style_target(authority_id, &target_id, source_lifecycle)
             .await;
         let Some(ModerationTarget {
             room_id,
@@ -897,13 +921,16 @@ impl EnhancedGameServer {
         self: &Arc<Self>,
         authority_id: &PlayerId,
         target_id: &PlayerId,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
     ) -> ModerationResolution {
         // Fix the authority's connection identity and membership with its
         // lifecycle gate (same prologue as every room operation handler).
         // The guard is carried out through [`ModerationTarget`] so the
         // eviction it authorizes cannot interleave with the authority's own
         // disconnect/leave processing.
-        let Some(lifecycle) = self.connection_manager.client_lifecycle(authority_id) else {
+        let Some(lifecycle) =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(authority_id))
+        else {
             return Ok(None);
         };
         let authority_lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;

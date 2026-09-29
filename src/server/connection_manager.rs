@@ -877,13 +877,25 @@ impl ConnectionManager {
     /// under one entry lock, so concurrent leave/unregister cannot reset `seq`
     /// and then leak a duplicate stamp into the old room. `None` cancels that
     /// stale relay without consuming a sequence number.
+    #[cfg(test)]
     pub fn next_relay_stamp_in_room(
         &self,
         player_id: &PlayerId,
         expected_room: &RoomId,
     ) -> Option<RelayStamp> {
+        self.next_relay_stamp_in_room_from_lifecycle(player_id, expected_room, None)
+    }
+
+    pub(crate) fn next_relay_stamp_in_room_from_lifecycle(
+        &self,
+        player_id: &PlayerId,
+        expected_room: &RoomId,
+        source_lifecycle: Option<&Arc<ClientLifecycle>>,
+    ) -> Option<RelayStamp> {
         let mut client = self.clients.get_mut(player_id)?;
-        if client.room_id != Some(*expected_room) {
+        if client.room_id != Some(*expected_room)
+            || source_lifecycle.is_some_and(|source| !Arc::ptr_eq(source, &client.lifecycle))
+        {
             return None;
         }
         let Some(next_seq) = client.game_data_seq.checked_add(1) else {

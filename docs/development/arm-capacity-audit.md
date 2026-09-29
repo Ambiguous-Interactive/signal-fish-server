@@ -264,6 +264,28 @@ No new finding is confirmed by this initial inventory.
 | Confidence and reproduction | `cargo nextest run --lib -E 'test(leave_from_removed_socket_cannot_depart_reconnected_lifecycle)'` failed before the fix: the old leave paused after observing no lifecycle, reconnect restored the seat, and the leave removed it (`left: None`, `right: Some(room_id)`). `leave_from_old_socket_cannot_use_replacement_lifecycle` checks the stale physical socket Arc through the owned transaction and both router leave forms. These are server tests; the WebSocket ordering follows from its independent send and receive tasks and the router's await before dispatch. |
 | Disposition | The missing-lifecycle branch returns. WebSocket dispatch now carries its socket lifecycle to the router and the owned leave, which locks that exact Arc and verifies it still owns the player ID. The green tests check assignment, durable membership, routing, departure count, peer and player messages, and a valid leave from the new socket. [#685](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/685) still tracks the room-A to room-B order from ARM-C020. [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686) tracks other old-socket operations. |
 
+### ARM-C022 — Old socket moderates after authority reconnect
+
+| Field | Finding |
+| --- | --- |
+| State, severity | Fixed for kick and ban, high |
+| Player impact | A kick or ban from a removed socket can evict a peer after its authority reconnects on a new socket. |
+| Source and revision | `src/server/message_router.rs` and `src/server/moderation.rs::resolve_kick_style_target`, reviewed at `330e25f7`. |
+| Invariant | A moderation request must use the physical socket lifecycle that sent it. The old kick and ban handlers awaited the moderation gate, then looked up a lifecycle by player ID; reconnect could replace that lifecycle during the wait. |
+| Confidence and reproduction | `cargo nextest run --lib -E 'test(old_socket_moderation_cannot_target_peers_after_authority_reconnect)'` failed before the fix: a paused old request resumed after authority reconnect and removed the target. The test covers both kick and ban, then verifies that moderation from the restored socket still works. |
+| Disposition | The router passes the source lifecycle through both handlers. The resolver locks that Arc and rejects it if it no longer owns the player ID. [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686) remains open for other socket-bound operations. |
+
+### ARM-C023 — Old socket relays as a restored sender
+
+| Field | Finding |
+| --- | --- |
+| State, severity | Fixed for text and binary relay, high |
+| Player impact | Peers can receive game data from a removed socket stamped as a player's restored connection. |
+| Source and revision | `src/server/game_data.rs`, `src/server/connection_manager.rs::next_relay_stamp_in_room`, and `src/websocket/connection.rs`, reviewed at `330e25f7`. |
+| Invariant | A relay frame may receive a sequence stamp only while its physical socket lifecycle owns the sender ID and room. The old text handler could resume after the router check, and the binary path bypassed that check. Both stamped the replacement lifecycle by player ID. |
+| Confidence and reproduction | `cargo nextest run --lib -E 'test(old_socket_game_data_cannot_relay_after_reconnect)'` failed before the fix: peers received both old text and binary frames with the restored sender's epoch. The green test also verifies that the restored socket's own frames receive sequence 1 and 2. |
+| Disposition | Both paths carry the source lifecycle and check it at entry and under the connection entry lock when assigning a relay stamp. The WebSocket receive task also stops frames from an already replaced socket before parsing. A frame that was in progress during replacement can still charge a byte budget before the final stamp rejects it; [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686) tracks remaining accounting and response effects. |
+
 These findings cover room-code rotation, player names, transport status, and spectator,
 reconnect, room-creation drain, and terminal routing seams. The rest of the C1 room and storage
 rows remain unreviewed.

@@ -2,11 +2,21 @@ use crate::protocol::{
     DeliveryClass, ErrorCode, GameDataEncoding, PlayerId, RoomId, ServerMessage,
 };
 use bytes::Bytes;
+use std::sync::Arc;
 
 use super::signaling::canonical_json_len;
-use super::EnhancedGameServer;
+use super::{ClientLifecycle, EnhancedGameServer};
 
 impl EnhancedGameServer {
+    fn relay_source_is_current(
+        &self,
+        player_id: &PlayerId,
+        source_lifecycle: Option<&Arc<ClientLifecycle>>,
+    ) -> bool {
+        source_lifecycle
+            .is_none_or(|source| self.connection_manager.lifecycle_matches(player_id, source))
+    }
+
     /// Store legacy, self-declared peer metadata for the `GameStarting` handoff.
     pub async fn handle_provide_connection_info(
         &self,
@@ -154,6 +164,21 @@ impl EnhancedGameServer {
         class: Option<DeliveryClass>,
         key: Option<u32>,
     ) {
+        self.handle_game_data_from_lifecycle(player_id, data, class, key, None)
+            .await;
+    }
+
+    pub(crate) async fn handle_game_data_from_lifecycle(
+        &self,
+        player_id: &PlayerId,
+        data: serde_json::Value,
+        class: Option<DeliveryClass>,
+        key: Option<u32>,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) {
+        if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
+            return;
+        }
         let valid = if self.client_supports_v3(player_id) {
             matches!(
                 (class, key),
@@ -214,6 +239,9 @@ impl EnhancedGameServer {
         }
 
         if let Some(room_id) = self.get_client_room(player_id).await {
+            if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
+                return;
+            }
             // The sender-controlled JSON payload is the budget measure
             // (memoized above, shared with the per-encoding cap).
             if self
@@ -226,8 +254,11 @@ impl EnhancedGameServer {
             let connection_manager = &self.connection_manager;
             let expected_room = room_id;
             self.broadcast_game_data_with(player_id, &room_id, move || {
-                let stamp =
-                    connection_manager.next_relay_stamp_in_room(player_id, &expected_room)?;
+                let stamp = connection_manager.next_relay_stamp_in_room_from_lifecycle(
+                    player_id,
+                    &expected_room,
+                    source_lifecycle.as_ref(),
+                )?;
                 Some(ServerMessage::GameData {
                     from_player: *player_id,
                     data,
@@ -261,6 +292,36 @@ impl EnhancedGameServer {
         encoding: GameDataEncoding,
         payload: Bytes,
     ) {
+        self.handle_game_data_binary_with_lifecycle(player_id, encoding, payload, None)
+            .await;
+    }
+
+    pub(crate) async fn handle_game_data_binary_from_lifecycle(
+        &self,
+        player_id: &PlayerId,
+        encoding: GameDataEncoding,
+        payload: Bytes,
+        source_lifecycle: Arc<ClientLifecycle>,
+    ) {
+        self.handle_game_data_binary_with_lifecycle(
+            player_id,
+            encoding,
+            payload,
+            Some(source_lifecycle),
+        )
+        .await;
+    }
+
+    async fn handle_game_data_binary_with_lifecycle(
+        &self,
+        player_id: &PlayerId,
+        encoding: GameDataEncoding,
+        payload: Bytes,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) {
+        if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
+            return;
+        }
         // Per-encoding ceiling (issue #634): a configured
         // `security.max_game_data_bytes.<encoding>` replaces the global frame
         // cap for that encoding's raw payload bytes; absent knobs keep the
@@ -311,6 +372,9 @@ impl EnhancedGameServer {
         // liveness: a stream of rejected frames must not keep an otherwise
         // idle client or room alive indefinitely.
         if let Some(room_id) = self.get_client_room(player_id).await {
+            if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
+                return;
+            }
             // Sender-side relay byte budget (issue #519) plus the room's
             // aggregate ceiling (issue #530): charge the binary payload
             // before the fan-out, mirroring the text lane.
@@ -326,8 +390,11 @@ impl EnhancedGameServer {
             let connection_manager = &self.connection_manager;
             let expected_room = room_id;
             self.broadcast_game_data_with(player_id, &room_id, move || {
-                let stamp =
-                    connection_manager.next_relay_stamp_in_room(player_id, &expected_room)?;
+                let stamp = connection_manager.next_relay_stamp_in_room_from_lifecycle(
+                    player_id,
+                    &expected_room,
+                    source_lifecycle.as_ref(),
+                )?;
                 Some(ServerMessage::GameDataBinary {
                     from_player: *player_id,
                     encoding,
