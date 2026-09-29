@@ -147,6 +147,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Moderation: an old socket cannot unban a player, transfer authority, change
+  room access, or rotate the room code after the authority reconnects (#686).
+
 - Moderation: an old socket's kick or ban cannot target peers after the
   authority reconnects on a new socket (#647).
 

@@ -287,6 +287,17 @@ No new finding is confirmed by this initial inventory.
 | Confidence and reproduction | `cargo nextest run --lib -E 'test(old_socket_game_data_cannot_relay_after_reconnect)'` failed before the fix: peers received both old text and binary frames with the restored sender's epoch. The green test also verifies that the restored socket's own frames receive sequence 1 and 2. |
 | Disposition | Both paths carry the source lifecycle and check it at entry and under the connection entry lock when assigning a relay stamp. The WebSocket receive task also stops frames from an already replaced socket before parsing. A frame that was in progress during replacement can still charge a byte budget before the final stamp rejects it; [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686) tracks remaining accounting and response effects. |
 
+### ARM-C024 — Old socket changes restored authority's room policy
+
+| Field | Finding |
+| --- | --- |
+| State, severity | Fixed for unban, authority transfer, room access, and code rotation; high |
+| Player impact | A removed authority socket can lift a ban, transfer authority, seal a room, or rotate its join code after that authority reconnects on another socket. |
+| Source and revision | `src/server/message_router.rs` and `src/server/moderation.rs`, reviewed at `2d104af8`. |
+| Invariant | Every authority operation must hold the lifecycle of the physical socket that sent it through its room mutation, rather than look up the current socket by player ID after router dispatch. |
+| Confidence and reproduction | `cargo nextest run --lib -E 'test(old_socket_cannot_change_room_authority_or_access_after_reconnect)'` failed before the fix: an old `UnbanPlayer` frame crossed the router check, the authority reconnected, and the old frame removed a seeded ban (`left: false, right: true`). The green test covers all four operations, unchanged storage and recipient queues for old frames, and successful operations from the restored socket. |
+| Disposition | The router passes its source lifecycle into each operation. Each handler locks that exact lifecycle and rejects it if the player ID now maps to another socket. [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686) remains open for other dispatch paths and relay accounting. |
+
 These findings cover room-code rotation, player names, transport status, and spectator,
 reconnect, room-creation drain, and terminal routing seams. The rest of the C1 room and storage
 rows remain unreviewed.

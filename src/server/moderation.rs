@@ -241,13 +241,27 @@ impl EnhancedGameServer {
     ///
     /// Lifts a room ban so the named player id may join again. Idempotent:
     /// lifting a ban that is not set succeeds.
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(super) async fn handle_unban_player_operation(
         self: &Arc<Self>,
         authority_id: &PlayerId,
         operation_id: RoomOperationId,
         target_id: PlayerId,
     ) {
-        let Some(lifecycle) = self.connection_manager.client_lifecycle(authority_id) else {
+        self.handle_unban_player_from_lifecycle(authority_id, operation_id, target_id, None)
+            .await;
+    }
+
+    pub(super) async fn handle_unban_player_from_lifecycle(
+        self: &Arc<Self>,
+        authority_id: &PlayerId,
+        operation_id: RoomOperationId,
+        target_id: PlayerId,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) {
+        let Some(lifecycle) =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(authority_id))
+        else {
             return;
         };
         let _authority_lifecycle_guard = lifecycle.lock().await;
@@ -337,13 +351,27 @@ impl EnhancedGameServer {
     /// admission, so the password perimeter does not apply to it (a ban is
     /// the tool that refuses restores). The plaintext password is hashed
     /// once here and never logged, echoed, or persisted.
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(super) async fn handle_set_room_access_operation(
         self: &Arc<Self>,
         authority_id: &PlayerId,
         operation_id: RoomOperationId,
         password: Option<String>,
     ) {
-        let Some(lifecycle) = self.connection_manager.client_lifecycle(authority_id) else {
+        self.handle_set_room_access_from_lifecycle(authority_id, operation_id, password, None)
+            .await;
+    }
+
+    pub(super) async fn handle_set_room_access_from_lifecycle(
+        self: &Arc<Self>,
+        authority_id: &PlayerId,
+        operation_id: RoomOperationId,
+        password: Option<String>,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) {
+        let Some(lifecycle) =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(authority_id))
+        else {
             return;
         };
         let _authority_lifecycle_guard = lifecycle.lock().await;
@@ -443,13 +471,27 @@ impl EnhancedGameServer {
     /// (personalized `you_are_authority` per recipient); the sender receives
     /// `AuthorityTransferred` and loses every authority capability —
     /// `StartGame`, kick, ban, access, rotation, and further transfers.
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(super) async fn handle_transfer_authority_operation(
         self: &Arc<Self>,
         authority_id: &PlayerId,
         operation_id: RoomOperationId,
         target_id: PlayerId,
     ) {
-        let Some(lifecycle) = self.connection_manager.client_lifecycle(authority_id) else {
+        self.handle_transfer_authority_from_lifecycle(authority_id, operation_id, target_id, None)
+            .await;
+    }
+
+    pub(super) async fn handle_transfer_authority_from_lifecycle(
+        self: &Arc<Self>,
+        authority_id: &PlayerId,
+        operation_id: RoomOperationId,
+        target_id: PlayerId,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) {
+        let Some(lifecycle) =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(authority_id))
+        else {
             return;
         };
         let _authority_lifecycle_guard = lifecycle.lock().await;
@@ -705,12 +747,25 @@ impl EnhancedGameServer {
     /// duplicate. The old code's lock is held across the loop for the same
     /// reason on the outgoing side: a joiner already admitted on the old code
     /// resolves this room, and only post-swap joiners observe the drop.
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(super) async fn handle_regenerate_room_code_operation(
         self: &Arc<Self>,
         authority_id: &PlayerId,
         operation_id: RoomOperationId,
     ) {
-        let Some(lifecycle) = self.connection_manager.client_lifecycle(authority_id) else {
+        self.handle_regenerate_room_code_from_lifecycle(authority_id, operation_id, None)
+            .await;
+    }
+
+    pub(super) async fn handle_regenerate_room_code_from_lifecycle(
+        self: &Arc<Self>,
+        authority_id: &PlayerId,
+        operation_id: RoomOperationId,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) {
+        let Some(lifecycle) =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(authority_id))
+        else {
             return;
         };
         let _authority_lifecycle_guard = lifecycle.lock().await;

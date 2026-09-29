@@ -402,12 +402,21 @@ impl EnhancedGameServer {
                         .await;
                     }
                     RoomOperationRequest::RegenerateRoomCode => {
-                        self.handle_regenerate_room_code_operation(player_id, operation_id)
-                            .await;
+                        self.handle_regenerate_room_code_from_lifecycle(
+                            player_id,
+                            operation_id,
+                            source_lifecycle,
+                        )
+                        .await;
                     }
                     RoomOperationRequest::SetRoomAccess { password } => {
-                        self.handle_set_room_access_operation(player_id, operation_id, password)
-                            .await;
+                        self.handle_set_room_access_from_lifecycle(
+                            player_id,
+                            operation_id,
+                            password,
+                            source_lifecycle,
+                        )
+                        .await;
                     }
                     RoomOperationRequest::BanPlayer { player_id: target } => {
                         self.handle_ban_player_from_lifecycle(
@@ -419,12 +428,22 @@ impl EnhancedGameServer {
                         .await;
                     }
                     RoomOperationRequest::UnbanPlayer { player_id: target } => {
-                        self.handle_unban_player_operation(player_id, operation_id, target)
-                            .await;
+                        self.handle_unban_player_from_lifecycle(
+                            player_id,
+                            operation_id,
+                            target,
+                            source_lifecycle,
+                        )
+                        .await;
                     }
                     RoomOperationRequest::TransferAuthority { player_id: target } => {
-                        self.handle_transfer_authority_operation(player_id, operation_id, target)
-                            .await;
+                        self.handle_transfer_authority_from_lifecycle(
+                            player_id,
+                            operation_id,
+                            target,
+                            source_lifecycle,
+                        )
+                        .await;
                     }
                 }
             }
