@@ -2235,6 +2235,8 @@ pub trait MessageCoordinator: Send + Sync {
     /// as one operation relative to room-recipient snapshots and relay-stamp
     /// allocation. `clear_assignment` must synchronously clear the matching
     /// connection-manager membership and return `(delivery, epoch, seq)`.
+    /// If it returns `None`, only the named room route may be removed: the
+    /// player may already have a live route in another room or the lobby.
     async fn unroute_local_client_with_tail<'a>(
         &'a self,
         player_id: PlayerId,

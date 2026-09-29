@@ -242,8 +242,19 @@ No new finding is confirmed by this initial inventory.
 | Confidence and reproduction | `cargo nextest run --lib -E 'test(failed_reconnect_rollback_does_not_leave_an_unrouted_authority)'` failed before the fix: the room retained `authority_player: Some(reconnecting)` after baseline delivery and rollback removal failed. |
 | Disposition | Rollback now clears authority when membership removal fails and keeps the failed detach queued. The regression checks that a live member can claim authority before repair, repair removes the row, and the original token can retry (#647). |
 
+### ARM-C020 — Stale terminal unroute deletes a newer route
+
+| Field | Finding |
+| --- | --- |
+| State, severity | Fixed at the coordinator seam, medium |
+| Potential player impact | If a stale room-A terminal unroute follows a move to room B, room B can stop receiving broadcasts. A move to the roomless lobby can lose directed responses. Top-level race reachability is not yet established. |
+| Source and revision | `src/server.rs::unroute_local_client_with_tail` and `src/server/connection_manager.rs::clear_room_assignment_with_tail`, reviewed at `b7e11dea`. |
+| Invariant | Refusal to clear a foreign room assignment must preserve the current room route or roomless delivery handle. The old coordinator swept every room route and removed the handle even when the assignment callback returned no terminal tail. |
+| Confidence and reproduction | `cargo nextest run --lib -E 'test(stale_terminal_unroute_preserves_new_room_route)'` failed before the fix with `left: Some([]), right: Some([player_id])` after room A to B. The same test covers A to roomless after the fix. |
+| Disposition | A terminal unroute with no tail now removes only the named room route and leaves the direct delivery handle until explicit unregister. The focused routing tests pass (#647). [#685](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/685) tracks proof or exclusion of the top-level race. |
+
 These findings cover room-code rotation, player names, transport status, and spectator,
-reconnect, and room-creation drain seams. The rest of the C1 room and storage
+reconnect, room-creation drain, and terminal routing seams. The rest of the C1 room and storage
 rows remain unreviewed.
 
 ### C1 admission-limit review (2026-09-28)

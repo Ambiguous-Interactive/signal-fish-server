@@ -1410,6 +1410,110 @@ async fn registration_replaces_the_players_room_routing_scope() {
 }
 
 #[tokio::test]
+async fn stale_terminal_unroute_preserves_new_room_route() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(1),
+        Arc::clone(&metrics),
+    ));
+    let connections = ConnectionManager::new(
+        usize::MAX,
+        8,
+        metrics,
+        coordinator.clone(),
+        false,
+        (u32::MAX, Duration::from_secs(60)),
+    );
+    let player_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0023);
+    let room_a = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0024);
+    let room_b = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0025);
+    let addr = "127.0.0.1:41000".parse().expect("test address");
+    let (sender, mut receiver) = mpsc::channel(4);
+    let delivery = ClientDeliveryHandle::new(sender.clone(), ConnectionCloseSignal::detached());
+    connections
+        .connect_test_client(player_id, sender, addr)
+        .await;
+    connections.assign_client_to_room(&player_id, room_a).await;
+    coordinator
+        .register_local_client(player_id, Some(room_a), delivery.clone())
+        .await
+        .expect("register first room route");
+    connections.assign_client_to_room(&player_id, room_b).await;
+    coordinator
+        .register_local_client(player_id, Some(room_b), delivery)
+        .await
+        .expect("register new room route");
+
+    let tail = coordinator
+        .unroute_local_client_with_tail(
+            player_id,
+            room_a,
+            Box::new(|| {
+                connections
+                    .clear_room_assignment_with_tail(&player_id, &room_a)
+                    .map(|(delivery, stamp)| (delivery, stamp.epoch, stamp.seq))
+            }),
+        )
+        .await
+        .expect("stale terminal unroute");
+    assert_eq!(tail, None, "a foreign room has no terminal watermark");
+    assert_eq!(connections.get_client_room(&player_id), Some(room_b));
+    assert_eq!(
+        coordinator
+            .routed_player_ids(&room_b)
+            .await
+            .expect("new room routes"),
+        Some(vec![player_id]),
+        "stale unroute must preserve the live room route"
+    );
+    coordinator
+        .broadcast_to_room(&room_b, Arc::new(ServerMessage::Pong))
+        .await
+        .expect("send to new room");
+    let room_delivery = receiver.try_recv();
+    assert!(matches!(room_delivery.as_deref(), Ok(ServerMessage::Pong)));
+
+    let lobby_delivery = connections
+        .clear_room_assignment(&player_id)
+        .expect("live player remains connected");
+    coordinator
+        .register_local_client(player_id, None, lobby_delivery)
+        .await
+        .expect("route live player to lobby");
+    let lobby_tail = coordinator
+        .unroute_local_client_with_tail(
+            player_id,
+            room_a,
+            Box::new(|| {
+                connections
+                    .clear_room_assignment_with_tail(&player_id, &room_a)
+                    .map(|(delivery, stamp)| (delivery, stamp.epoch, stamp.seq))
+            }),
+        )
+        .await
+        .expect("stale terminal unroute after lobby move");
+    assert_eq!(lobby_tail, None);
+    assert_eq!(connections.get_client_room(&player_id), None);
+    coordinator
+        .send_to_player(&player_id, Arc::new(ServerMessage::Pong))
+        .await
+        .expect("live lobby delivery");
+    let lobby_response = receiver.try_recv();
+    assert!(matches!(lobby_response.as_deref(), Ok(ServerMessage::Pong)));
+    coordinator
+        .unregister_local_client(&player_id)
+        .await
+        .expect("unregister lobby client");
+    assert!(
+        !coordinator
+            .try_send_to_player(&player_id, Arc::new(ServerMessage::Pong))
+            .await
+            .expect("closed client cannot receive"),
+        "explicit unregister removes the retained direct route"
+    );
+}
+
+#[tokio::test]
 async fn opposite_room_reroutes_use_canonical_lock_order_and_unique_routes() {
     let coordinator = Arc::new(InMemoryMessageCoordinator::new());
     let room_a = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0025);
