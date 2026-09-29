@@ -253,6 +253,17 @@ No new finding is confirmed by this initial inventory.
 | Confidence and reproduction | `cargo nextest run --lib -E 'test(stale_terminal_unroute_preserves_new_room_route)'` failed before the fix with `left: Some([]), right: Some([player_id])` after room A to B. The same test covers A to roomless after the fix. |
 | Disposition | A terminal unroute with no tail now removes only the named room route and leaves the direct delivery handle until explicit unregister. The focused routing tests pass (#647). [#685](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/685) tracks proof or exclusion of the top-level race. |
 
+### ARM-C021 — Removed socket leave departs a restored player
+
+| Field | Finding |
+| --- | --- |
+| State, severity | Fixed at the server operation seam, high |
+| Player impact | An old leave can remove a player's restored room seat and send a second departure event after reconnect. |
+| Source and revision | `src/server/room_service.rs::leave_room_owned`, `src/server/message_router.rs`, and `src/websocket/connection.rs`, reviewed at `5b79ac98`. |
+| Invariant | An old socket's leave must not act on a lifecycle later installed under the same player ID. The old missing-lifecycle fallback could reach the restored seat. A frame already in the receive task can also resume after its send task unregisters and capture the new lifecycle by ID. |
+| Confidence and reproduction | `cargo nextest run --lib -E 'test(leave_from_removed_socket_cannot_depart_reconnected_lifecycle)'` failed before the fix: the old leave paused after observing no lifecycle, reconnect restored the seat, and the leave removed it (`left: None`, `right: Some(room_id)`). `leave_from_old_socket_cannot_use_replacement_lifecycle` checks the stale physical socket Arc through the owned transaction and both router leave forms. These are server tests; the WebSocket ordering follows from its independent send and receive tasks and the router's await before dispatch. |
+| Disposition | The missing-lifecycle branch returns. WebSocket dispatch now carries its socket lifecycle to the router and the owned leave, which locks that exact Arc and verifies it still owns the player ID. The green tests check assignment, durable membership, routing, departure count, peer and player messages, and a valid leave from the new socket. [#685](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/685) still tracks the room-A to room-B order from ARM-C020. [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686) tracks other old-socket operations. |
+
 These findings cover room-code rotation, player names, transport status, and spectator,
 reconnect, room-creation drain, and terminal routing seams. The rest of the C1 room and storage
 rows remain unreviewed.

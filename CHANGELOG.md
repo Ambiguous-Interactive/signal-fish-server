@@ -147,6 +147,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reconnect: a leave request from a removed socket no longer removes the
+  restored player's room seat (#647).
+
 - Routing: a rejected stale terminal unroute preserves the player's newer
   room route or roomless response path (#647).
 

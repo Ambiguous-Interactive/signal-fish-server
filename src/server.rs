@@ -474,6 +474,8 @@ pub struct EnhancedGameServer {
     #[cfg(test)]
     reconnect_teardown_test_gate: StdMutex<Option<Arc<ReconnectTeardownTestGate>>>,
     #[cfg(test)]
+    missing_lifecycle_leave_test_gate: StdMutex<Option<Arc<MissingLifecycleLeaveTestGate>>>,
+    #[cfg(test)]
     moderation_eviction_test_gate: StdMutex<Option<Arc<ModerationEvictionTestGate>>>,
     #[cfg(test)]
     moderation_lifecycle_test_gate: StdMutex<Option<Arc<ModerationLifecycleTestGate>>>,
@@ -534,6 +536,13 @@ struct PendingApplicationClaimRollback {
 #[derive(Default)]
 pub(crate) struct ReconnectTeardownTestGate {
     armed: Notify,
+    release: Notify,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct MissingLifecycleLeaveTestGate {
+    checked: Notify,
     release: Notify,
 }
 
@@ -610,6 +619,17 @@ impl ModerationEvictionTestGate {
 impl ReconnectTeardownTestGate {
     pub(crate) async fn wait_until_armed(&self) {
         self.armed.notified().await;
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
+#[cfg(all(test, signal_fish_repository_tests))]
+impl MissingLifecycleLeaveTestGate {
+    pub(crate) async fn wait_until_checked(&self) {
+        self.checked.notified().await;
     }
 
     pub(crate) fn release(&self) {
@@ -928,6 +948,8 @@ impl EnhancedGameServer {
             fail_retain_room_publication_snapshot: AtomicBool::new(false),
             #[cfg(test)]
             reconnect_teardown_test_gate: StdMutex::new(None),
+            #[cfg(test)]
+            missing_lifecycle_leave_test_gate: StdMutex::new(None),
             #[cfg(test)]
             moderation_eviction_test_gate: StdMutex::new(None),
             #[cfg(test)]
@@ -1729,6 +1751,18 @@ impl EnhancedGameServer {
         gate
     }
 
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn install_missing_lifecycle_leave_test_gate(
+        &self,
+    ) -> Arc<MissingLifecycleLeaveTestGate> {
+        let gate = Arc::new(MissingLifecycleLeaveTestGate::default());
+        *self
+            .missing_lifecycle_leave_test_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
+        gate
+    }
+
     #[cfg(test)]
     #[cfg(signal_fish_repository_tests)]
     pub(crate) fn install_moderation_eviction_test_gate(&self) -> Arc<ModerationEvictionTestGate> {
@@ -1806,6 +1840,19 @@ impl EnhancedGameServer {
             .take();
         if let Some(gate) = gate {
             gate.armed.notify_one();
+            gate.release.notified().await;
+        }
+    }
+
+    #[cfg(test)]
+    async fn pause_after_missing_lifecycle_leave_for_test(&self) {
+        let gate = self
+            .missing_lifecycle_leave_test_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(gate) = gate {
+            gate.checked.notify_one();
             gate.release.notified().await;
         }
     }
