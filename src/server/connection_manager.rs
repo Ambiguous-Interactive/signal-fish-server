@@ -794,10 +794,8 @@ impl ConnectionManager {
     /// `expected_room`. On any other room (a stale leave racing a room switch)
     /// this returns `None` untouched instead of publishing that room's live
     /// stamp as a foreign room's phantom terminal watermark. Note the refusal
-    /// is only `ConnectionManager`-level: the coordinator's
-    /// `unroute_local_client_with_tail` treats a `None` closure result as
-    /// "unroute without tail" and sweeps stale coordinator entries, so a
-    /// mismatch still tears down routing (minus the watermark publication).
+    /// is only `ConnectionManager`-level: the coordinator still clears the
+    /// stale route for `expected_room`, while preserving any newer room route.
     /// The coordinator calls this while holding its room-routing write lock,
     /// making stamp allocation and terminal unroute mutually exclusive.
     pub fn clear_room_assignment_with_tail(

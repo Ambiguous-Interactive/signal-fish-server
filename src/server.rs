@@ -4523,15 +4523,26 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         let was_routed = room_players
             .get(&room_id)
             .is_some_and(|players| players.contains(&player_id));
-        room_players.retain(|_, players| {
-            players.remove(&player_id);
-            !players.is_empty()
-        });
         let terminal_tail = if let Some((delivery, epoch, final_seq)) = cleared {
+            room_players.retain(|_, players| {
+                players.remove(&player_id);
+                !players.is_empty()
+            });
             clients.insert(player_id, delivery);
             Some((epoch, final_seq))
         } else {
-            clients.remove(&player_id);
+            // A stale terminal event may target an old room after this player
+            // has joined another. The assignment check leaves that live room
+            // untouched, so preserve its route and delivery handle too.
+            if let Some(players) = room_players.get_mut(&room_id) {
+                players.remove(&player_id);
+                if players.is_empty() {
+                    room_players.remove(&room_id);
+                }
+            }
+            // No terminal tail also covers a live connection that has
+            // returned to the roomless lobby. Its direct response route stays
+            // valid until explicit client unregister.
             None
         };
         self.sync_active_room_gates(&room_players, &routing);

@@ -147,6 +147,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Routing: a rejected stale terminal unroute preserves the player's newer
+  room route or roomless response path (#647).
+
 - Reconnect: a failed restore no longer leaves an unrouted player as room
   authority when membership cleanup also fails (#647).
 
