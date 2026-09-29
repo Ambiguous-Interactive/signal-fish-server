@@ -147,6 +147,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Spectator leave: an old socket cannot send a leave failure to a restored
+  player or detach a spectator role owned by another socket (#686).
+
 - WebSocket dispatch: an old socket cannot release restored authority, change
   lobby readiness, start a game, store peer metadata, relay a WebRTC signal,
   publish transport status, or charge the restored socket's Ping reply budget

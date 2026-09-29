@@ -1,5 +1,8 @@
 use super::EnhancedGameServer;
 use crate::protocol::PlayerId;
+use std::sync::Arc;
+
+use super::connection_manager::ClientLifecycle;
 
 impl EnhancedGameServer {
     /// Handle joining a room as spectator, surfacing validation errors back to the client.
@@ -86,13 +89,53 @@ impl EnhancedGameServer {
         player_id: &PlayerId,
         operation_id: Option<crate::protocol::RoomOperationId>,
     ) {
+        self.handle_leave_spectator_operation_from_lifecycle(player_id, operation_id, None)
+            .await;
+    }
+
+    pub(super) async fn handle_leave_spectator_operation_from_lifecycle(
+        &self,
+        player_id: &PlayerId,
+        operation_id: Option<crate::protocol::RoomOperationId>,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) {
+        let lifecycle =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id));
+        if let Some(lifecycle) = &lifecycle {
+            let guard = lifecycle.lock().await;
+            if lifecycle.player_id() != *player_id
+                || !self
+                    .connection_manager
+                    .lifecycle_matches(player_id, lifecycle)
+            {
+                return;
+            }
+            drop(guard);
+        }
         let outcome = match operation_id {
             Some(operation_id) => {
                 self.spectator_service
-                    .leave_operation(player_id, operation_id)
+                    .leave_operation_from_lifecycle(player_id, operation_id, lifecycle.clone())
                     .await
             }
-            None => self.spectator_service.leave(player_id).await,
+            None => {
+                self.spectator_service
+                    .leave_from_lifecycle(player_id, lifecycle.clone())
+                    .await
+            }
+        };
+        let _guard = if let Some(lifecycle) = &lifecycle {
+            let guard = lifecycle.lock().await;
+            if lifecycle.player_id() != *player_id
+                || !self
+                    .connection_manager
+                    .lifecycle_matches(player_id, lifecycle)
+            {
+                return;
+            }
+            Some(guard)
+        } else {
+            None
         };
         match outcome {
             Ok(()) => tracing::info!(%player_id, "Spectator left room"),

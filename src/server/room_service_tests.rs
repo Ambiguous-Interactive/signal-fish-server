@@ -2726,6 +2726,67 @@ async fn old_socket_authority_request_cannot_release_restored_authority() {
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
+async fn old_socket_spectator_leave_cannot_reply_to_restored_player() {
+    use crate::protocol::{ClientMessage, RoomOperationRequest};
+
+    for (message, enable_replacement_operations) in [
+        (ClientMessage::LeaveSpectator, false),
+        (
+            ClientMessage::RoomOperation {
+                operation_id: uuid::Uuid::from_u128(0x303),
+                operation: Box::new(RoomOperationRequest::LeaveSpectator),
+            },
+            false,
+        ),
+        (
+            ClientMessage::RoomOperation {
+                operation_id: uuid::Uuid::from_u128(0x304),
+                operation: Box::new(RoomOperationRequest::LeaveSpectator),
+            },
+            true,
+        ),
+    ] {
+        let mut fixture = setup_joined_pair_with_reconnection().await;
+        fixture
+            .server
+            .set_client_room_operation_ids(&fixture.leaver, true);
+        let old_lifecycle = fixture.server.client_lifecycle(&fixture.leaver).unwrap();
+        let pause = super::message_router::arm_socket_dispatch_pause(fixture.leaver);
+        let old_request = {
+            let server = Arc::clone(&fixture.server);
+            let player_id = fixture.leaver;
+            tokio::spawn(async move {
+                server
+                    .handle_client_message_from_lifecycle(&player_id, message, old_lifecycle)
+                    .await;
+            })
+        };
+        timeout(Duration::from_secs(1), pause.reached.notified())
+            .await
+            .expect("old leave reaches dispatch");
+
+        let mut replacement_rx = restore_joined_pair_authority(&mut fixture).await;
+        if enable_replacement_operations {
+            fixture
+                .server
+                .set_client_room_operation_ids(&fixture.leaver, true);
+        }
+        pause.release.notify_one();
+        timeout(Duration::from_secs(1), old_request)
+            .await
+            .expect("old leave finishes")
+            .expect("old leave task lives");
+        let received = drain_queued_messages(&mut replacement_rx);
+        assert!(
+            received.is_empty(),
+            "old leave must not send its failure to the restored socket: {received:?}"
+        );
+        assert!(drain_queued_messages(&mut fixture.survivor_rx).is_empty());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
 async fn old_socket_frames_cannot_change_restored_metadata_or_send_pong() {
     use crate::protocol::{ClientMessage, ConnectionInfo};
 

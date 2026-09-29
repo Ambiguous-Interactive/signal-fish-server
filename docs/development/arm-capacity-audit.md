@@ -307,7 +307,18 @@ No new finding is confirmed by this initial inventory.
 | Source and revision | `src/server/message_router.rs`, `src/server/authority.rs`, `src/server/ready_state.rs`, `src/server/game_data.rs`, `src/server/signaling.rs`, and `src/server/heartbeat.rs`, reviewed at `da3b10f8`. |
 | Invariant | Every socket-originated direct handler must lock the lifecycle of the physical socket that sent the frame and confirm it still owns the player ID before acting. |
 | Confidence and reproduction | `old_socket_authority_request_cannot_release_restored_authority` failed before the fix: the old authority frame released the restored player's authority (`left: None, right: Some(...)`). Green paused-dispatch regressions cover authority, readiness, game start, metadata, Signal, TransportStatus, and Ping, plus valid frames from each replacement socket. |
-| Disposition | The router carries its source lifecycle to all seven direct handlers. Each locks that exact lifecycle and checks the current mapping before mutation, fan-out, or budget charge. [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686) remains open for spectator/admission/reconnect dispatch, transport control frames, and pre-stamp relay accounting. |
+| Disposition | The router carries its source lifecycle to all seven direct handlers. Each locks that exact lifecycle and checks the current mapping before mutation, fan-out, or budget charge. [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686) remains open for spectator join/admission/reconnect dispatch, transport control frames, and pre-stamp relay accounting. |
+
+### ARM-C026 — Old spectator leave replies to a restored socket
+
+| Field | Finding |
+| --- | --- |
+| State, severity | Fixed for plain and correlated spectator leave, medium |
+| Player impact | An old `LeaveSpectator` request can send `NotASpectator` to the restored player's socket. Its room-operation form can also charge the restored socket's error budget during capability refusal. |
+| Source and revision | `src/server/message_router.rs`, `src/server/spectator_handlers.rs`, and `src/server/spectator_service.rs`, reviewed at `38e5ccb5`. |
+| Invariant | A spectator leave and its reply belong to the physical source socket. A stale request cannot use a replacement socket's lifecycle or reply budget. |
+| Confidence and reproduction | `scripts/dev-loop.sh old_socket_spectator_leave_cannot_reply_to_restored_player` failed before the fix: an old leave sent a failure to the restored socket. The test covers plain and correlated forms after a paused dispatch. |
+| Disposition | The handler and detach service carry the source lifecycle and check ownership before detach and reply. The router checks ownership while it reads room-operation capability and sends a capability failure. The correlated spectator test covers valid leave and rejects a mismatched source lifecycle. [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686) remains open for join/admission/reconnect dispatch, transport control, and relay accounting. |
 
 These findings cover room-code rotation, player names, transport status, and spectator,
 reconnect, room-creation drain, and terminal routing seams. The rest of the C1 room and storage

@@ -311,12 +311,30 @@ impl EnhancedGameServer {
                 .await;
             }
             ClientMessage::LeaveSpectator => {
-                self.handle_leave_spectator(player_id).await;
+                self.handle_leave_spectator_operation_from_lifecycle(
+                    player_id,
+                    None,
+                    source_lifecycle,
+                )
+                .await;
             }
             ClientMessage::RoomOperation {
                 operation_id,
                 operation,
             } => {
+                let _guard = if let Some(lifecycle) = &source_lifecycle {
+                    let guard = lifecycle.lock().await;
+                    if lifecycle.player_id() != *player_id
+                        || !self
+                            .connection_manager
+                            .lifecycle_matches(player_id, lifecycle)
+                    {
+                        return;
+                    }
+                    Some(guard)
+                } else {
+                    None
+                };
                 if !self.client_supports_room_operation_ids(player_id) {
                     // A pre-v3 session has no RoomOperation surface at all, so
                     // the version code is truthful there. A negotiated-v3
@@ -338,6 +356,7 @@ impl EnhancedGameServer {
                         .await;
                     return;
                 }
+                drop(_guard);
                 match *operation {
                     RoomOperationRequest::JoinRoom {
                         game_name,
@@ -406,8 +425,12 @@ impl EnhancedGameServer {
                         .await;
                     }
                     RoomOperationRequest::LeaveSpectator => {
-                        self.handle_leave_spectator_operation(player_id, Some(operation_id))
-                            .await;
+                        self.handle_leave_spectator_operation_from_lifecycle(
+                            player_id,
+                            Some(operation_id),
+                            source_lifecycle,
+                        )
+                        .await;
                     }
                     RoomOperationRequest::KickPlayer { player_id: target } => {
                         self.handle_kick_player_from_lifecycle(
