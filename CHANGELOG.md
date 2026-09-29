@@ -81,6 +81,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Observability: pending room creation now counts the room and creator at the
+  atomic insert. Rollback, direct deletion, and abandoned-room repair count
+  the creator leaving once, even when setup panics after insertion (#658).
+
 - Tests: the unit-test modules that waited on the runtime clock now run
   on the paused tokio clock (#512, #642). The remaining real-time
   negative-wait windows (the 100 ms `assert_silent` family, the

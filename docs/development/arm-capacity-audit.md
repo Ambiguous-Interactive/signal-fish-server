@@ -198,6 +198,17 @@ No new finding is confirmed by this initial inventory.
 | Confidence and reproduction | `interrupted_creation_releases_hidden_room_and_reserved_code` failed before the fix because maintenance scanned only Abandoned rooms. The green test drops the creator token, lets its code lock expire, then checks deletion, quota, metrics, and code reuse. `pending_room_repair_preserves_active_creator_after_code_lease_expires` keeps the token alive past lock expiry and confirms publication succeeds. `generic_room_cleanup_keeps_unpublished_rooms_for_repair` covers both general reapers. |
 | Disposition | The in-memory insert stores the original creator ID and a weak operation token under the same commit as the room, code, and pending marker. The response path holds the token through first publication. Repair takes the code lock and atomically rechecks the marker, owner liveness, and creator-only membership before deletion. A process restart drops all in-memory rooms and codes; durable adapters must provide their own process-loss recovery. |
 
+### ARM-C016 — A creator insert panic leaves lifecycle counters unbalanced
+
+| Field | Finding |
+| --- | --- |
+| State, severity | Fixed for the in-memory backend, low; broader #658 remains open |
+| Player impact | Dashboards undercount rooms and joined players when storage inserts a pending room and panics before the server resumes. Later repair can count deletion without a matching creation or departure. |
+| Source and revision | `src/database/mod.rs` pending insertion and deletion; `src/server/room_service.rs` admission rollback, reviewed on this branch. |
+| Invariant | A committed pending insert counts one room and creator before another suspension point. Removing that room counts the creator leaving exactly once, including direct deletion and repeated repair. |
+| Confidence and reproduction | `panic_after_pending_insert_balances_creation_metrics_once` failed before the fix with `rooms_created=0` after storage committed the pending room. It now covers failed then successful repair and all four counters. `direct_pending_room_delete_balances_creator_metrics_once` checks direct deletion and repeated leave accounting. |
+| Disposition | The in-memory insert records creation and join while holding its commit guards. Rollback and deletion share one atomic accounting token for the departure. The trait compatibility default cannot provide the same guarantee for other backends; durable process-loss recovery remains in #658. |
+
 These findings cover room-code rotation, player names, transport status, and spectator,
 reconnect, and room-creation drain seams. The rest of the C1 room and storage
 rows remain unreviewed.
