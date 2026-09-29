@@ -1,7 +1,8 @@
 use crate::coordination::{PlayerReadyError, RoomOperationCoordinatorTrait, StartGameOutcome};
 use crate::protocol::{ErrorCode, LobbyState, PlayerId, Room};
+use std::sync::Arc;
 
-use super::EnhancedGameServer;
+use super::{ClientLifecycle, EnhancedGameServer};
 
 /// The readiness a room snapshot (`RoomJoined`, `Reconnected`, `SpectatorJoined`)
 /// must report for `room`.
@@ -29,7 +30,18 @@ impl EnhancedGameServer {
     /// `all_ready`); finalization is driven by an explicit `StartGame`
     /// ([`Self::handle_start_game`]).
     pub async fn handle_player_ready(&self, player_id: &PlayerId) {
-        let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
+        self.handle_player_ready_from_lifecycle(player_id, None)
+            .await;
+    }
+
+    pub(super) async fn handle_player_ready_from_lifecycle(
+        &self,
+        player_id: &PlayerId,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) {
+        let Some(lifecycle) =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id))
+        else {
             return;
         };
         let _lifecycle_guard = lifecycle.lock().await;
@@ -92,7 +104,17 @@ impl EnhancedGameServer {
     /// sticky v3 session decision, and all tailored `SessionPlan`s as one
     /// cancellation-independent exact-membership transaction.
     pub async fn handle_start_game(&self, player_id: &PlayerId) {
-        let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
+        self.handle_start_game_from_lifecycle(player_id, None).await;
+    }
+
+    pub(super) async fn handle_start_game_from_lifecycle(
+        &self,
+        player_id: &PlayerId,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) {
+        let Some(lifecycle) =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id))
+        else {
             return;
         };
         let _lifecycle_guard = lifecycle.lock().await;

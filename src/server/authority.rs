@@ -1,12 +1,24 @@
 use crate::protocol::{ErrorCode, PlayerId, ServerMessage};
 use std::sync::Arc;
 
-use super::EnhancedGameServer;
+use super::{ClientLifecycle, EnhancedGameServer};
 
 impl EnhancedGameServer {
     /// Handle an authority request under process-local room coordination.
     pub async fn handle_authority_request(&self, player_id: &PlayerId, become_authority: bool) {
-        let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
+        self.handle_authority_request_from_lifecycle(player_id, become_authority, None)
+            .await;
+    }
+
+    pub(super) async fn handle_authority_request_from_lifecycle(
+        &self,
+        player_id: &PlayerId,
+        become_authority: bool,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) {
+        let Some(lifecycle) =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id))
+        else {
             return;
         };
         let _lifecycle_guard = lifecycle.lock().await;

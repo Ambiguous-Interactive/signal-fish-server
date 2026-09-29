@@ -2628,6 +2628,381 @@ async fn setup_joined_pair_with_reconnection() -> JoinedPairFixture {
     }
 }
 
+async fn restore_joined_pair_authority(
+    fixture: &mut JoinedPairFixture,
+) -> mpsc::Receiver<Arc<ServerMessage>> {
+    fixture.server.unregister_client(&fixture.leaver).await;
+    let (replacement, mut replacement_rx) =
+        register_client(&fixture.server, "127.0.0.1:48108".parse().unwrap()).await;
+    fixture.server.set_client_protocol(
+        &replacement,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![crate::protocol::Transport::Relay],
+            topologies: vec![crate::protocol::Topology::Relay],
+        },
+    );
+    assert!(
+        fixture
+            .server
+            .handle_reconnect(
+                &replacement,
+                &fixture.leaver,
+                &fixture.room_id,
+                &fixture.reconnect_token,
+            )
+            .await
+    );
+    assert_next_message_matches(&mut replacement_rx, "reconnect baseline", |message| {
+        matches!(message, ServerMessage::Reconnected(_))
+    });
+    drain_queued_messages(&mut replacement_rx);
+    drain_queued_messages(&mut fixture.survivor_rx);
+    replacement_rx
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn old_socket_authority_request_cannot_release_restored_authority() {
+    use crate::protocol::ClientMessage;
+
+    let mut fixture = setup_joined_pair_with_reconnection().await;
+    let old_lifecycle = fixture.server.client_lifecycle(&fixture.leaver).unwrap();
+    let pause = super::message_router::arm_socket_dispatch_pause(fixture.leaver);
+    let old_request = {
+        let server = Arc::clone(&fixture.server);
+        let player_id = fixture.leaver;
+        tokio::spawn(async move {
+            server
+                .handle_client_message_from_lifecycle(
+                    &player_id,
+                    ClientMessage::AuthorityRequest {
+                        become_authority: false,
+                    },
+                    old_lifecycle,
+                )
+                .await;
+        })
+    };
+    timeout(Duration::from_secs(1), pause.reached.notified())
+        .await
+        .expect("old request reaches dispatch");
+
+    let mut replacement_rx = restore_joined_pair_authority(&mut fixture).await;
+
+    pause.release.notify_one();
+    timeout(Duration::from_secs(1), old_request)
+        .await
+        .expect("old request finishes")
+        .expect("old request task lives");
+    let room = fixture
+        .database
+        .get_room_by_id(&fixture.room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(room.authority_player, Some(fixture.leaver));
+    assert!(drain_queued_messages(&mut replacement_rx).is_empty());
+    assert!(drain_queued_messages(&mut fixture.survivor_rx).is_empty());
+
+    fixture
+        .server
+        .handle_client_message_from_lifecycle(
+            &fixture.leaver,
+            ClientMessage::AuthorityRequest {
+                become_authority: false,
+            },
+            fixture.server.client_lifecycle(&fixture.leaver).unwrap(),
+        )
+        .await;
+    let room = fixture
+        .database
+        .get_room_by_id(&fixture.room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(room.authority_player, None);
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn old_socket_frames_cannot_change_restored_metadata_or_send_pong() {
+    use crate::protocol::{ClientMessage, ConnectionInfo};
+
+    for frame in [
+        ClientMessage::ProvideConnectionInfo {
+            connection_info: ConnectionInfo::Direct {
+                host: "127.0.0.1".to_string(),
+                port: 7777,
+            },
+        },
+        ClientMessage::Ping,
+    ] {
+        let mut fixture = setup_joined_pair_with_reconnection().await;
+        let old_lifecycle = fixture.server.client_lifecycle(&fixture.leaver).unwrap();
+        let pause = super::message_router::arm_socket_dispatch_pause(fixture.leaver);
+        let old_frame = {
+            let server = Arc::clone(&fixture.server);
+            let player_id = fixture.leaver;
+            let frame = frame.clone();
+            tokio::spawn(async move {
+                server
+                    .handle_client_message_from_lifecycle(&player_id, frame, old_lifecycle)
+                    .await;
+            })
+        };
+        timeout(Duration::from_secs(1), pause.reached.notified())
+            .await
+            .expect("old frame reaches dispatch");
+        let mut replacement_rx = restore_joined_pair_authority(&mut fixture).await;
+
+        pause.release.notify_one();
+        timeout(Duration::from_secs(1), old_frame)
+            .await
+            .expect("old frame finishes")
+            .expect("old frame task lives");
+        let room = fixture
+            .database
+            .get_room_by_id(&fixture.room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(room.players[&fixture.leaver].connection_info.is_none());
+        assert!(drain_queued_messages(&mut replacement_rx).is_empty());
+        assert!(drain_queued_messages(&mut fixture.survivor_rx).is_empty());
+
+        fixture
+            .server
+            .handle_client_message_from_lifecycle(
+                &fixture.leaver,
+                frame.clone(),
+                fixture.server.client_lifecycle(&fixture.leaver).unwrap(),
+            )
+            .await;
+        match frame {
+            ClientMessage::ProvideConnectionInfo { .. } => {
+                let room = fixture
+                    .database
+                    .get_room_by_id(&fixture.room_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(room.players[&fixture.leaver].connection_info.is_some());
+            }
+            ClientMessage::Ping => {
+                assert_next_message_matches(&mut replacement_rx, "current pong", |message| {
+                    matches!(message, ServerMessage::Pong)
+                });
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn old_socket_lobby_frames_cannot_toggle_ready_or_start_game() {
+    use crate::protocol::{ClientMessage, LobbyState};
+
+    for frame in [ClientMessage::PlayerReady, ClientMessage::StartGame] {
+        let mut fixture = setup_joined_pair_with_reconnection().await;
+        let old_lifecycle = fixture.server.client_lifecycle(&fixture.leaver).unwrap();
+        let pause = super::message_router::arm_socket_dispatch_pause(fixture.leaver);
+        let old_frame = {
+            let server = Arc::clone(&fixture.server);
+            let player_id = fixture.leaver;
+            let frame = frame.clone();
+            tokio::spawn(async move {
+                server
+                    .handle_client_message_from_lifecycle(&player_id, frame, old_lifecycle)
+                    .await;
+            })
+        };
+        timeout(Duration::from_secs(1), pause.reached.notified())
+            .await
+            .expect("old lobby frame reaches dispatch");
+        let mut replacement_rx = restore_joined_pair_authority(&mut fixture).await;
+        if matches!(frame, ClientMessage::StartGame) {
+            fixture.server.handle_player_ready(&fixture.leaver).await;
+            fixture.server.handle_player_ready(&fixture.survivor).await;
+            drain_queued_messages(&mut replacement_rx);
+            drain_queued_messages(&mut fixture.survivor_rx);
+        }
+
+        pause.release.notify_one();
+        timeout(Duration::from_secs(1), old_frame)
+            .await
+            .expect("old lobby frame finishes")
+            .expect("old lobby frame task lives");
+        let room = fixture
+            .database
+            .get_room_by_id(&fixture.room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(room.lobby_state, LobbyState::Lobby);
+        let ready = fixture
+            .server
+            .room_coordinator
+            .current_ready_players(&fixture.room_id)
+            .await;
+        match frame {
+            ClientMessage::PlayerReady => assert!(ready.is_empty()),
+            ClientMessage::StartGame => assert_eq!(ready.len(), 2),
+            _ => unreachable!(),
+        }
+        assert!(drain_queued_messages(&mut replacement_rx).is_empty());
+        assert!(drain_queued_messages(&mut fixture.survivor_rx).is_empty());
+
+        fixture
+            .server
+            .handle_client_message_from_lifecycle(
+                &fixture.leaver,
+                frame.clone(),
+                fixture.server.client_lifecycle(&fixture.leaver).unwrap(),
+            )
+            .await;
+        match frame {
+            ClientMessage::PlayerReady => {
+                let ready = fixture
+                    .server
+                    .room_coordinator
+                    .current_ready_players(&fixture.room_id)
+                    .await;
+                assert_eq!(ready, vec![fixture.leaver]);
+            }
+            ClientMessage::StartGame => {
+                let room = fixture
+                    .database
+                    .get_room_by_id(&fixture.room_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(room.lobby_state, LobbyState::Finalized);
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn old_socket_transport_status_cannot_publish_as_restored_player() {
+    use crate::protocol::{ClientMessage, Transport};
+
+    let mut fixture = setup_joined_pair_with_reconnection().await;
+    fixture.server.set_client_protocol(
+        &fixture.survivor,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![Transport::Relay],
+            topologies: vec![crate::protocol::Topology::Relay],
+        },
+    );
+    let old_lifecycle = fixture.server.client_lifecycle(&fixture.leaver).unwrap();
+    let pause = super::message_router::arm_socket_dispatch_pause(fixture.leaver);
+    let frame = ClientMessage::TransportStatus {
+        transport: Transport::Relay,
+        connected: true,
+    };
+    let old_frame = {
+        let server = Arc::clone(&fixture.server);
+        let player_id = fixture.leaver;
+        let frame = frame.clone();
+        tokio::spawn(async move {
+            server
+                .handle_client_message_from_lifecycle(&player_id, frame, old_lifecycle)
+                .await;
+        })
+    };
+    timeout(Duration::from_secs(1), pause.reached.notified())
+        .await
+        .expect("old transport report reaches dispatch");
+    let mut replacement_rx = restore_joined_pair_authority(&mut fixture).await;
+    pause.release.notify_one();
+    timeout(Duration::from_secs(1), old_frame)
+        .await
+        .expect("old transport report finishes")
+        .expect("old transport report task lives");
+    assert!(drain_queued_messages(&mut replacement_rx).is_empty());
+    assert!(drain_queued_messages(&mut fixture.survivor_rx).is_empty());
+
+    fixture
+        .server
+        .handle_client_message_from_lifecycle(
+            &fixture.leaver,
+            frame,
+            fixture.server.client_lifecycle(&fixture.leaver).unwrap(),
+        )
+        .await;
+    assert_next_message_matches(
+        &mut fixture.survivor_rx,
+        "current transport report",
+        |message| matches!(message, ServerMessage::PeerTransportStatus { peer_id, connected: true, .. } if *peer_id == fixture.leaver),
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn old_socket_signal_cannot_relay_as_restored_player() {
+    use crate::protocol::{ClientMessage, SessionGeneration, Transport};
+
+    let mut fixture = setup_joined_pair_with_reconnection().await;
+    let webrtc_protocol = NegotiatedProtocol {
+        version: 3,
+        transports: vec![Transport::Relay, Transport::WebRtc],
+        topologies: vec![crate::protocol::Topology::Relay],
+    };
+    fixture
+        .server
+        .set_client_protocol(&fixture.survivor, webrtc_protocol.clone());
+    let old_lifecycle = fixture.server.client_lifecycle(&fixture.leaver).unwrap();
+    let pause = super::message_router::arm_socket_dispatch_pause(fixture.leaver);
+    let frame = ClientMessage::Signal {
+        to: fixture.survivor,
+        generation: SessionGeneration::nil(),
+        signal: serde_json::json!({"sdp": "old"}),
+    };
+    let old_frame = {
+        let server = Arc::clone(&fixture.server);
+        let player_id = fixture.leaver;
+        let frame = frame.clone();
+        tokio::spawn(async move {
+            server
+                .handle_client_message_from_lifecycle(&player_id, frame, old_lifecycle)
+                .await;
+        })
+    };
+    timeout(Duration::from_secs(1), pause.reached.notified())
+        .await
+        .expect("old signal reaches dispatch");
+    let mut replacement_rx = restore_joined_pair_authority(&mut fixture).await;
+    fixture
+        .server
+        .set_client_protocol(&fixture.leaver, webrtc_protocol);
+    pause.release.notify_one();
+    timeout(Duration::from_secs(1), old_frame)
+        .await
+        .expect("old signal finishes")
+        .expect("old signal task lives");
+    assert!(drain_queued_messages(&mut replacement_rx).is_empty());
+    assert!(drain_queued_messages(&mut fixture.survivor_rx).is_empty());
+
+    fixture
+        .server
+        .handle_client_message_from_lifecycle(
+            &fixture.leaver,
+            frame,
+            fixture.server.client_lifecycle(&fixture.leaver).unwrap(),
+        )
+        .await;
+    assert_next_message_matches(
+        &mut fixture.survivor_rx,
+        "current signal",
+        |message| matches!(message, ServerMessage::Signal { from, .. } if *from == fixture.leaver),
+    );
+}
+
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn leave_queued_during_disconnect_cannot_consume_reconnect_or_repeat_departure() {

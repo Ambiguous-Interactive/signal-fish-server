@@ -147,6 +147,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- WebSocket dispatch: an old socket cannot release restored authority, change
+  lobby readiness, start a game, store peer metadata, relay a WebRTC signal,
+  publish transport status, or charge the restored socket's Ping reply budget
+  after reconnect (#686).
+
 - Moderation: an old socket cannot unban a player, transfer authority, change
   room access, or rotate the room code after the authority reconnects (#686).
 
