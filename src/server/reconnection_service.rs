@@ -602,7 +602,7 @@ impl EnhancedGameServer {
         .await
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) async fn handle_reconnect_with_identity_operation(
         self: &Arc<Self>,
         current_player_id: &PlayerId,
