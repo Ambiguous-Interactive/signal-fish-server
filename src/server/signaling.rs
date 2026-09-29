@@ -29,7 +29,7 @@ use crate::protocol::{
 };
 
 use super::session_policy::membership_session_decision;
-use super::EnhancedGameServer;
+use super::{ClientLifecycle, EnhancedGameServer};
 
 /// Glare-avoidance offerer designation (the deterministic mesh rule).
 ///
@@ -91,7 +91,21 @@ impl EnhancedGameServer {
         generation: SessionGeneration,
         signal: serde_json::Value,
     ) {
-        let Some(lifecycle) = self.connection_manager.client_lifecycle(from) else {
+        self.handle_signal_in_generation_from_lifecycle(from, to, generation, signal, None)
+            .await;
+    }
+
+    pub(super) async fn handle_signal_in_generation_from_lifecycle(
+        &self,
+        from: &PlayerId,
+        to: PlayerId,
+        generation: SessionGeneration,
+        signal: serde_json::Value,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) {
+        let Some(lifecycle) =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(from))
+        else {
             return;
         };
         let _lifecycle_guard = lifecycle.lock().await;

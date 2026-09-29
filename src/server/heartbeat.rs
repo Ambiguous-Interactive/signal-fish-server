@@ -1,7 +1,7 @@
 use crate::protocol::{PlayerId, ServerMessage};
 use std::sync::Arc;
 
-use super::EnhancedGameServer;
+use super::{ClientLifecycle, EnhancedGameServer};
 
 impl EnhancedGameServer {
     /// Refresh liveness from transport-level WebSocket traffic (a client
@@ -26,6 +26,28 @@ impl EnhancedGameServer {
     /// answering again; liveness is still recorded for the frame that trips
     /// it, and the close itself follows.
     pub async fn handle_ping(&self, player_id: &PlayerId) {
+        self.handle_ping_from_lifecycle(player_id, None).await;
+    }
+
+    pub(super) async fn handle_ping_from_lifecycle(
+        &self,
+        player_id: &PlayerId,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) {
+        let Some(lifecycle) =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id))
+        else {
+            return;
+        };
+        let _lifecycle_guard = lifecycle.lock().await;
+        if lifecycle.player_id() != *player_id
+            || !self
+                .connection_manager
+                .lifecycle_matches(player_id, &lifecycle)
+        {
+            return;
+        }
+
         // Always record the ping in memory for disconnect detection
         self.connection_manager.record_ping(player_id);
 

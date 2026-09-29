@@ -23,7 +23,19 @@ impl EnhancedGameServer {
         player_id: &PlayerId,
         connection_info: crate::protocol::ConnectionInfo,
     ) {
-        let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
+        self.handle_provide_connection_info_from_lifecycle(player_id, connection_info, None)
+            .await;
+    }
+
+    pub(super) async fn handle_provide_connection_info_from_lifecycle(
+        &self,
+        player_id: &PlayerId,
+        connection_info: crate::protocol::ConnectionInfo,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) {
+        let Some(lifecycle) =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id))
+        else {
             return;
         };
         let _lifecycle_guard = lifecycle.lock().await;

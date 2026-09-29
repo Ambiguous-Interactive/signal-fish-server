@@ -235,25 +235,42 @@ impl EnhancedGameServer {
                 generation,
                 signal,
             } => {
-                self.handle_signal_in_generation(player_id, to, generation, signal)
-                    .await;
+                self.handle_signal_in_generation_from_lifecycle(
+                    player_id,
+                    to,
+                    generation,
+                    signal,
+                    source_lifecycle,
+                )
+                .await;
             }
             ClientMessage::AuthorityRequest { become_authority } => {
-                self.handle_authority_request(player_id, become_authority)
-                    .await;
+                self.handle_authority_request_from_lifecycle(
+                    player_id,
+                    become_authority,
+                    source_lifecycle,
+                )
+                .await;
             }
             ClientMessage::PlayerReady => {
-                self.handle_player_ready(player_id).await;
-            }
-            ClientMessage::StartGame => {
-                self.handle_start_game(player_id).await;
-            }
-            ClientMessage::ProvideConnectionInfo { connection_info } => {
-                self.handle_provide_connection_info(player_id, connection_info)
+                self.handle_player_ready_from_lifecycle(player_id, source_lifecycle)
                     .await;
             }
+            ClientMessage::StartGame => {
+                self.handle_start_game_from_lifecycle(player_id, source_lifecycle)
+                    .await;
+            }
+            ClientMessage::ProvideConnectionInfo { connection_info } => {
+                self.handle_provide_connection_info_from_lifecycle(
+                    player_id,
+                    connection_info,
+                    source_lifecycle,
+                )
+                .await;
+            }
             ClientMessage::Ping => {
-                self.handle_ping(player_id).await;
+                self.handle_ping_from_lifecycle(player_id, source_lifecycle)
+                    .await;
             }
             ClientMessage::Reconnect { .. } => {
                 // Reconnection swaps the socket's routing identity and is
@@ -451,7 +468,7 @@ impl EnhancedGameServer {
                 transport,
                 connected,
             } => {
-                self.handle_transport_status(player_id, transport, connected)
+                self.handle_transport_status(player_id, transport, connected, source_lifecycle)
                     .await;
             }
         }
@@ -486,8 +503,11 @@ impl EnhancedGameServer {
         player_id: &PlayerId,
         transport: crate::protocol::Transport,
         connected: bool,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
     ) {
-        let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
+        let Some(lifecycle) =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id))
+        else {
             return;
         };
         let lifecycle_guard = lifecycle.lock().await;
