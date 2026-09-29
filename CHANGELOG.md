@@ -147,6 +147,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Moderation: a kick now follows a disconnected seat through a racing
+  reconnect, so a second disconnect cannot leave a fresh token that restores
+  the kicked player (#647).
+
 - Database adapters now refuse protected room creation unless they can seal
   the room atomically. Server creation also refuses adapters without a pending
   room lifecycle, so unfinished rooms cannot become visible by default (#658).

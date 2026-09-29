@@ -469,6 +469,8 @@ pub struct EnhancedGameServer {
     #[cfg(test)]
     reconnect_teardown_test_gate: StdMutex<Option<Arc<ReconnectTeardownTestGate>>>,
     #[cfg(test)]
+    moderation_eviction_test_gate: StdMutex<Option<Arc<ModerationEvictionTestGate>>>,
+    #[cfg(test)]
     scripted_room_codes: StdMutex<VecDeque<String>>,
     #[cfg(test)]
     owned_room_operation_panic: Arc<AtomicU8>,
@@ -526,6 +528,35 @@ struct PendingApplicationClaimRollback {
 pub(crate) struct ReconnectTeardownTestGate {
     armed: Notify,
     release: Notify,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct ModerationEvictionTestGate {
+    resolved: Notify,
+    release_resolved: Notify,
+    routed: Notify,
+    release_routed: Notify,
+}
+
+#[cfg(test)]
+#[cfg(signal_fish_repository_tests)]
+impl ModerationEvictionTestGate {
+    pub(crate) async fn wait_until_resolved(&self) {
+        self.resolved.notified().await;
+    }
+
+    pub(crate) fn release_resolved(&self) {
+        self.release_resolved.notify_one();
+    }
+
+    pub(crate) async fn wait_until_routed(&self) {
+        self.routed.notified().await;
+    }
+
+    pub(crate) fn release_routed(&self) {
+        self.release_routed.notify_one();
+    }
 }
 
 #[cfg(test)]
@@ -850,6 +881,8 @@ impl EnhancedGameServer {
             fail_retain_room_publication_snapshot: AtomicBool::new(false),
             #[cfg(test)]
             reconnect_teardown_test_gate: StdMutex::new(None),
+            #[cfg(test)]
+            moderation_eviction_test_gate: StdMutex::new(None),
             #[cfg(test)]
             scripted_room_codes: StdMutex::new(VecDeque::new()),
             #[cfg(test)]
@@ -1645,6 +1678,43 @@ impl EnhancedGameServer {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
         gate
+    }
+
+    #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
+    pub(crate) fn install_moderation_eviction_test_gate(&self) -> Arc<ModerationEvictionTestGate> {
+        let gate = Arc::new(ModerationEvictionTestGate::default());
+        *self
+            .moderation_eviction_test_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
+        gate
+    }
+
+    #[cfg(test)]
+    async fn pause_after_moderation_resolve_for_test(&self) {
+        let gate = self
+            .moderation_eviction_test_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(gate) = gate {
+            gate.resolved.notify_one();
+            gate.release_resolved.notified().await;
+        }
+    }
+
+    #[cfg(test)]
+    async fn pause_after_moderation_route_for_test(&self) {
+        let gate = self
+            .moderation_eviction_test_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(gate) = gate {
+            gate.routed.notify_one();
+            gate.release_routed.notified().await;
+        }
     }
 
     #[cfg(test)]

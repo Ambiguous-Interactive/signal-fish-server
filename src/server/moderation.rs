@@ -945,23 +945,22 @@ impl EnhancedGameServer {
         // departing connection's lifecycle gate, and holding it here
         // serializes against a concurrent disconnect (which snapshots
         // membership and arms reconnection under the same gate) so neither
-        // path can act on a stale seat. A player-id mismatch means a
-        // reconnect identity swap is mid-flight; the durable removal is still
-        // the convergent outcome (the swapped-in incarnation fails its
-        // reconnect against the removed seat), so proceed rather than strand
-        // the authority without a terminal result.
+        // path can act on a stale seat. Revalidate after waiting: an old
+        // socket can finish unregistering while this kick waits, and its
+        // guard cannot protect a new socket that reconnects as this player.
         let target_lifecycle = self.connection_manager.client_lifecycle(target_id);
         let target_lifecycle_guard = match target_lifecycle {
             Some(target) => {
                 let guard = Arc::clone(&target).lock_owned().await;
-                if target.player_id() != *target_id {
-                    tracing::debug!(
-                        %target_id,
-                        %room_id,
-                        "Moderation raced a target identity swap; proceeding with removal"
-                    );
+                if target.player_id() == *target_id
+                    && self
+                        .connection_manager
+                        .lifecycle_matches(target_id, &target)
+                {
+                    Some(guard)
+                } else {
+                    None
                 }
-                Some(guard)
             }
             None => None,
         };
@@ -1052,9 +1051,11 @@ impl EnhancedGameServer {
         room_id: RoomId,
         target_seated_in_row: bool,
         pending_record_room: Option<RoomId>,
-        _target_lifecycle_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+        target_lifecycle_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
         _authority_lifecycle_guard: tokio::sync::OwnedMutexGuard<()>,
     ) {
+        #[cfg(test)]
+        self.pause_after_moderation_resolve_for_test().await;
         // The target's live route decides what this eviction removes: a
         // route in THIS room is the seat being evicted, while a route in any
         // other room means this room's row is stale residue (a
@@ -1081,10 +1082,58 @@ impl EnhancedGameServer {
                 .lock_room_event_mutation(&room_id)
                 .await;
             if let Some(manager) = &self.reconnection_manager {
-                manager.mark_reconnection_kicked(target_id).await;
+                if manager.pending_reconnection_room(target_id).await == Some(room_id) {
+                    manager.mark_reconnection_kicked(target_id).await;
+                }
             }
             drop(tombstone_event_guard);
         }
+
+        // Validation may have found no live target while a reconnect was
+        // restoring its pending seat. The first tombstone can then miss the
+        // consumed record, and the restored socket can disconnect before the
+        // route-based removal below. Reacquire that socket's lifecycle gate
+        // outside the room gate. If there is still no socket, take the room
+        // gate and recheck both identity and the pending record together: a
+        // reconnect either completed before this gate (and has a lifecycle)
+        // or must observe the tombstone before it can restore.
+        let target_lifecycle_guard = if let Some(guard) = target_lifecycle_guard {
+            Some(guard)
+        } else {
+            loop {
+                if let Some(lifecycle) = self.connection_manager.client_lifecycle(target_id) {
+                    let guard = Arc::clone(&lifecycle).lock_owned().await;
+                    if lifecycle.player_id() == *target_id
+                        && self
+                            .connection_manager
+                            .lifecycle_matches(target_id, &lifecycle)
+                    {
+                        break Some(guard);
+                    }
+                    continue;
+                }
+
+                let room_gate = self
+                    .message_coordinator
+                    .lock_room_event_mutation(&room_id)
+                    .await;
+                if self
+                    .connection_manager
+                    .client_lifecycle(target_id)
+                    .is_some()
+                {
+                    drop(room_gate);
+                    continue;
+                }
+                if let Some(manager) = &self.reconnection_manager {
+                    if manager.pending_reconnection_room(target_id).await == Some(room_id) {
+                        manager.mark_reconnection_kicked(target_id).await;
+                    }
+                }
+                drop(room_gate);
+                break None;
+            }
+        };
 
         // Fresh route read after the tombstone's gate section: a reconnection
         // claim that completed against the tombstone re-keyed its live
@@ -1101,6 +1150,8 @@ impl EnhancedGameServer {
         // so it is queried separately.
         let routed_room = self.get_client_room(target_id).await;
         let spectator_room = self.spectator_service.spectator_room(target_id);
+        #[cfg(test)]
+        self.pause_after_moderation_route_for_test().await;
         let evicts_live_membership_elsewhere = matches!(routed_room, Some(routed) if routed != room_id)
             || matches!(spectator_room, Some(live) if live != room_id);
 
@@ -1193,7 +1244,7 @@ impl EnhancedGameServer {
             self.handle_session_member_departure(&room_id, target_id)
                 .await;
         }
-        drop(_target_lifecycle_guard);
+        drop(target_lifecycle_guard);
         drop(_authority_lifecycle_guard);
 
         if !evicts_live_membership_elsewhere {

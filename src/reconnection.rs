@@ -927,11 +927,12 @@ impl ReconnectionManager {
                 || monotonic_deadline(monotonic_now, self.reconnection_window),
                 |existing| existing.deadline,
             ),
-            // A re-registration can only observe a seated snapshot, and it
-            // runs under the disconnect path's connection lifecycle gate —
-            // the same gate a concurrent kick holds across seat removal — so
-            // a fresh record can never overwrite a tombstone. The preserved
-            // flag below only covers the defensive merge path.
+            // A re-registration observes a seated snapshot under the
+            // disconnect path's connection lifecycle gate. A concurrent kick
+            // must revalidate and hold that current gate through removal;
+            // the kick's room-gated pending-record check covers a target that
+            // has no live socket. The preserved flag handles re-registration
+            // of a record that is already tombstoned.
             kicked: existing_same_room
                 .as_ref()
                 .is_some_and(|existing| existing.kicked),
