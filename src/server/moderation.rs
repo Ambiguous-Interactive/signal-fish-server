@@ -33,6 +33,9 @@ struct ModerationTarget {
     _authority_lifecycle_guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
+type ModerationResolution =
+    std::result::Result<Option<ModerationTarget>, (&'static str, ErrorCode)>;
+
 impl EnhancedGameServer {
     /// Handle an authority-initiated `KickPlayer` room operation (v3 only,
     /// issue #525).
@@ -55,15 +58,25 @@ impl EnhancedGameServer {
         operation_id: RoomOperationId,
         target_id: PlayerId,
     ) {
+        let moderation_lifecycle_guard = self.moderation_lifecycle_gate.lock().await;
+        let resolved = self
+            .resolve_kick_style_target(authority_id, &target_id)
+            .await;
         let Some(ModerationTarget {
             room_id,
             target_seated_in_row,
             pending_record_room,
             target_lifecycle_guard,
             _authority_lifecycle_guard,
-        }) = self
-            .resolve_kick_style_target(authority_id, operation_id, &target_id)
-            .await
+        }) = (match resolved {
+            Ok(target) => target,
+            Err((message, code)) => {
+                drop(moderation_lifecycle_guard);
+                self.fail_operation(authority_id, operation_id, message, code)
+                    .await;
+                return;
+            }
+        })
         else {
             return;
         };
@@ -78,6 +91,7 @@ impl EnhancedGameServer {
             _authority_lifecycle_guard,
         )
         .await;
+        drop(moderation_lifecycle_guard);
 
         self.metrics.increment_room_kicks();
         let _ = self
@@ -109,15 +123,25 @@ impl EnhancedGameServer {
         operation_id: RoomOperationId,
         target_id: PlayerId,
     ) {
+        let moderation_lifecycle_guard = self.moderation_lifecycle_gate.lock().await;
+        let resolved = self
+            .resolve_kick_style_target(authority_id, &target_id)
+            .await;
         let Some(ModerationTarget {
             room_id,
             target_seated_in_row,
             pending_record_room,
             target_lifecycle_guard,
             _authority_lifecycle_guard,
-        }) = self
-            .resolve_kick_style_target(authority_id, operation_id, &target_id)
-            .await
+        }) = (match resolved {
+            Ok(target) => target,
+            Err((message, code)) => {
+                drop(moderation_lifecycle_guard);
+                self.fail_operation(authority_id, operation_id, message, code)
+                    .await;
+                return;
+            }
+        })
         else {
             return;
         };
@@ -141,6 +165,9 @@ impl EnhancedGameServer {
                 %error,
                 "Ban failed to persist; refusing the eviction"
             );
+            drop(moderation_lifecycle_guard);
+            drop(target_lifecycle_guard);
+            drop(_authority_lifecycle_guard);
             self.fail_operation(
                 authority_id,
                 operation_id,
@@ -168,6 +195,7 @@ impl EnhancedGameServer {
             _authority_lifecycle_guard,
         )
         .await;
+        drop(moderation_lifecycle_guard);
 
         self.metrics.increment_room_bans();
         let _ = self
@@ -862,82 +890,57 @@ impl EnhancedGameServer {
     /// operations (`KickPlayer`, `BanPlayer`): fixes the authority's
     /// identity under its lifecycle gate, resolves the room, re-checks
     /// authority on fresh storage state, and validates the target under the
-    /// target's lifecycle gate. Every refusal is already emitted; `None`
-    /// means the caller is done.
+    /// target's lifecycle gate. Refusals return to the caller so it can
+    /// release the moderation gate before sending the terminal response.
+    /// `Ok(None)` means the connection identity became stale.
     async fn resolve_kick_style_target(
         self: &Arc<Self>,
         authority_id: &PlayerId,
-        operation_id: RoomOperationId,
         target_id: &PlayerId,
-    ) -> Option<ModerationTarget> {
+    ) -> ModerationResolution {
         // Fix the authority's connection identity and membership with its
         // lifecycle gate (same prologue as every room operation handler).
         // The guard is carried out through [`ModerationTarget`] so the
         // eviction it authorizes cannot interleave with the authority's own
         // disconnect/leave processing.
-        let lifecycle = self.connection_manager.client_lifecycle(authority_id)?;
+        let Some(lifecycle) = self.connection_manager.client_lifecycle(authority_id) else {
+            return Ok(None);
+        };
         let authority_lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+        #[cfg(test)]
+        self.pause_after_moderation_authority_lock_for_test().await;
         if lifecycle.player_id() != *authority_id
             || !self
                 .connection_manager
                 .lifecycle_matches(authority_id, &lifecycle)
         {
-            return None;
+            return Ok(None);
         }
 
         let Some(room_id) = self.get_client_room(authority_id).await else {
-            self.fail_operation(
-                authority_id,
-                operation_id,
-                "Not currently in a room",
-                ErrorCode::NotInRoom,
-            )
-            .await;
-            return None;
+            return Err(("Not currently in a room", ErrorCode::NotInRoom));
         };
         let room = match self.database.get_room_by_id(&room_id).await {
             Ok(Some(room)) => room,
             Ok(None) => {
-                self.fail_operation(
-                    authority_id,
-                    operation_id,
-                    "Room no longer exists",
-                    ErrorCode::RoomNotFound,
-                )
-                .await;
-                return None;
+                return Err(("Room no longer exists", ErrorCode::RoomNotFound));
             }
             Err(error) => {
                 tracing::error!(%authority_id, %room_id, %error, "Moderation failed to load room");
-                self.fail_operation(
-                    authority_id,
-                    operation_id,
-                    "Failed to load room",
-                    ErrorCode::StorageError,
-                )
-                .await;
-                return None;
+                return Err(("Failed to load room", ErrorCode::StorageError));
             }
         };
         if room.authority_player != Some(*authority_id) {
-            self.fail_operation(
-                authority_id,
-                operation_id,
+            return Err((
                 "Only the room's authority player may moderate this room",
                 ErrorCode::NotRoomAuthority,
-            )
-            .await;
-            return None;
+            ));
         }
         if target_id == authority_id {
-            self.fail_operation(
-                authority_id,
-                operation_id,
+            return Err((
                 "The authority cannot target itself; use LeaveRoom instead",
                 ErrorCode::InvalidInput,
-            )
-            .await;
-            return None;
+            ));
         }
 
         // Hold the target's lifecycle gate across validation and removal:
@@ -972,36 +975,18 @@ impl EnhancedGameServer {
         let room = match self.database.get_room_by_id(&room_id).await {
             Ok(Some(room)) => room,
             Ok(None) => {
-                self.fail_operation(
-                    authority_id,
-                    operation_id,
-                    "Room no longer exists",
-                    ErrorCode::RoomNotFound,
-                )
-                .await;
-                return None;
+                return Err(("Room no longer exists", ErrorCode::RoomNotFound));
             }
             Err(error) => {
                 tracing::error!(%authority_id, %room_id, %error, "Moderation failed to re-load room");
-                self.fail_operation(
-                    authority_id,
-                    operation_id,
-                    "Failed to load room",
-                    ErrorCode::StorageError,
-                )
-                .await;
-                return None;
+                return Err(("Failed to load room", ErrorCode::StorageError));
             }
         };
         if room.authority_player != Some(*authority_id) {
-            self.fail_operation(
-                authority_id,
-                operation_id,
+            return Err((
                 "Only the room's authority player may moderate this room",
                 ErrorCode::NotRoomAuthority,
-            )
-            .await;
-            return None;
+            ));
         }
         // A disconnect with reconnection enabled removes the durable member
         // and arms a pending record; from the room's perspective that seat is
@@ -1013,23 +998,19 @@ impl EnhancedGameServer {
         };
         let target_seated_in_row = room.players.contains_key(target_id);
         if !target_seated_in_row && pending_record_room != Some(room_id) {
-            self.fail_operation(
-                authority_id,
-                operation_id,
+            return Err((
                 "Moderation target is not a member of this room",
                 ErrorCode::KickTargetNotFound,
-            )
-            .await;
-            return None;
+            ));
         }
 
-        Some(ModerationTarget {
+        Ok(Some(ModerationTarget {
             room_id,
             target_seated_in_row,
             pending_record_room,
             target_lifecycle_guard,
             _authority_lifecycle_guard: authority_lifecycle_guard,
-        })
+        }))
     }
 
     /// Shared eviction core for `KickPlayer` and `BanPlayer` (issue #525).

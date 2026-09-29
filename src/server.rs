@@ -27,7 +27,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use thiserror::Error;
-use tokio::sync::{mpsc, watch, Notify, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
+use tokio::sync::{
+    mpsc, watch, Mutex, Notify, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock,
+};
 use tokio::time::Duration;
 use uuid::Uuid;
 
@@ -464,12 +466,17 @@ pub struct EnhancedGameServer {
     /// reconnect support is enabled.
     pending_durable_player_detaches:
         Arc<DashMap<(RoomId, PlayerId), Option<PendingApplicationClaimRollback>>>,
+    /// Kick and ban can wait for a target lifecycle while holding the acting
+    /// authority lifecycle. Serialize them to prevent cycles across rooms.
+    moderation_lifecycle_gate: Mutex<()>,
     #[cfg(test)]
     fail_retain_room_publication_snapshot: AtomicBool,
     #[cfg(test)]
     reconnect_teardown_test_gate: StdMutex<Option<Arc<ReconnectTeardownTestGate>>>,
     #[cfg(test)]
     moderation_eviction_test_gate: StdMutex<Option<Arc<ModerationEvictionTestGate>>>,
+    #[cfg(test)]
+    moderation_lifecycle_test_gate: StdMutex<Option<Arc<ModerationLifecycleTestGate>>>,
     #[cfg(test)]
     scripted_room_codes: StdMutex<VecDeque<String>>,
     #[cfg(test)]
@@ -537,6 +544,45 @@ pub(crate) struct ModerationEvictionTestGate {
     release_resolved: Notify,
     routed: Notify,
     release_routed: Notify,
+}
+
+#[cfg(test)]
+pub(crate) struct ModerationLifecycleTestGate {
+    acquired: Notify,
+    acquired_count: AtomicUsize,
+    release: tokio::sync::Semaphore,
+}
+
+#[cfg(test)]
+impl Default for ModerationLifecycleTestGate {
+    fn default() -> Self {
+        Self {
+            acquired: Notify::new(),
+            acquired_count: AtomicUsize::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        }
+    }
+}
+
+#[cfg(all(test, signal_fish_repository_tests))]
+impl ModerationLifecycleTestGate {
+    pub(crate) async fn wait_until_acquired(&self, expected: usize) {
+        loop {
+            let notified = self.acquired.notified();
+            if self
+                .acquired_count
+                .load(std::sync::atomic::Ordering::SeqCst)
+                >= expected
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    pub(crate) fn release_one(&self) {
+        self.release.add_permits(1);
+    }
 }
 
 #[cfg(test)]
@@ -877,12 +923,15 @@ impl EnhancedGameServer {
             room_applications,
             active_session_plans: Arc::new(DashMap::new()),
             pending_durable_player_detaches: Arc::new(DashMap::new()),
+            moderation_lifecycle_gate: Mutex::new(()),
             #[cfg(test)]
             fail_retain_room_publication_snapshot: AtomicBool::new(false),
             #[cfg(test)]
             reconnect_teardown_test_gate: StdMutex::new(None),
             #[cfg(test)]
             moderation_eviction_test_gate: StdMutex::new(None),
+            #[cfg(test)]
+            moderation_lifecycle_test_gate: StdMutex::new(None),
             #[cfg(test)]
             scripted_room_codes: StdMutex::new(VecDeque::new()),
             #[cfg(test)]
@@ -1689,6 +1738,37 @@ impl EnhancedGameServer {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
         gate
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn install_moderation_lifecycle_test_gate(
+        &self,
+    ) -> Arc<ModerationLifecycleTestGate> {
+        let gate = Arc::new(ModerationLifecycleTestGate::default());
+        *self
+            .moderation_lifecycle_test_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
+        gate
+    }
+
+    #[cfg(test)]
+    async fn pause_after_moderation_authority_lock_for_test(&self) {
+        let gate = self
+            .moderation_lifecycle_test_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(gate) = gate {
+            gate.acquired_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            gate.acquired.notify_one();
+            gate.release
+                .acquire()
+                .await
+                .expect("test gate remains open")
+                .forget();
+        }
     }
 
     #[cfg(test)]

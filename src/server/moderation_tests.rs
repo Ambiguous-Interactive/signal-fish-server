@@ -77,6 +77,42 @@ async fn register_client(
     (player_id, receiver)
 }
 
+/// Copy a live player's durable row into another room to model crosswise
+/// stale storage state. Returns the destination room id for assertions.
+async fn copy_stale_row(
+    server: &EnhancedGameServer,
+    source_code: &str,
+    destination_code: &str,
+    player_id: PlayerId,
+) -> RoomId {
+    let source = server
+        .database
+        .get_room("moderation-game", source_code)
+        .await
+        .unwrap()
+        .unwrap();
+    let destination = server
+        .database
+        .get_room("moderation-game", destination_code)
+        .await
+        .unwrap()
+        .unwrap();
+    let row = server
+        .database
+        .get_room_players(&source.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|player| player.id == player_id)
+        .unwrap();
+    server
+        .database
+        .add_player_to_room(&destination.id, row)
+        .await
+        .unwrap();
+    destination.id
+}
+
 async fn join_seated_player(
     server: &Arc<EnhancedGameServer>,
     player_id: &PlayerId,
@@ -330,6 +366,183 @@ async fn kick_evicts_only_the_authoritys_room_not_a_rerouted_target() {
         unexpected_farewell.is_none(),
         "a kick of stale residue must not send the kicked farewell: got {unexpected_farewell:?}"
     );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn crossed_stale_seat_moderation_completes_without_lifecycle_deadlock() {
+    for ban_second in [false, true] {
+        let server = create_test_server_with(ServerConfig::default()).await;
+        let (a, mut a_rx, a_close) =
+            register_client_with_close_listener(&server, "127.0.0.1:48580".parse().unwrap()).await;
+        let (b, mut b_rx, b_close) =
+            register_client_with_close_listener(&server, "127.0.0.1:48581".parse().unwrap()).await;
+        join_seated_player(&server, &a, &mut a_rx, "CROSSA", "a").await;
+        join_seated_player(&server, &b, &mut b_rx, "CROSSB", "b").await;
+
+        // Synthetic crosswise stale rows make the two target lookups cross
+        // lifecycle gates while both clients remain live authorities.
+        let room_a = copy_stale_row(&server, "CROSSB", "CROSSA", b).await;
+        let room_b = copy_stale_row(&server, "CROSSA", "CROSSB", a).await;
+
+        let gate = server.install_moderation_lifecycle_test_gate();
+        let start = Arc::new(tokio::sync::Barrier::new(3));
+        let first_server = Arc::clone(&server);
+        let first_start = Arc::clone(&start);
+        let first = tokio::spawn(async move {
+            first_start.wait().await;
+            first_server
+                .handle_kick_player_operation(&a, RoomOperationId::new_v4(), b)
+                .await;
+        });
+        let second_server = Arc::clone(&server);
+        let second_start = Arc::clone(&start);
+        let second = tokio::spawn(async move {
+            second_start.wait().await;
+            if ban_second {
+                second_server
+                    .handle_ban_player_operation(&b, RoomOperationId::new_v4(), a)
+                    .await;
+            } else {
+                second_server
+                    .handle_kick_player_operation(&b, RoomOperationId::new_v4(), a)
+                    .await;
+            }
+        });
+
+        start.wait().await;
+
+        timeout(Duration::from_secs(1), gate.wait_until_acquired(1))
+            .await
+            .unwrap();
+        if timeout(Duration::from_secs(1), gate.wait_until_acquired(2))
+            .await
+            .is_ok()
+        {
+            gate.release_one();
+            gate.release_one();
+        } else {
+            gate.release_one();
+            timeout(Duration::from_secs(1), gate.wait_until_acquired(2))
+                .await
+                .unwrap();
+            gate.release_one();
+        }
+        timeout(Duration::from_secs(1), first)
+            .await
+            .expect("first moderation must finish")
+            .unwrap();
+        timeout(Duration::from_secs(1), second)
+            .await
+            .expect("second moderation must finish")
+            .unwrap();
+        assert!(matches!(room_access_result(&mut a_rx).await,
+            RoomOperationResult::PlayerKicked { player_id } if player_id == b));
+        let second_result = room_access_result(&mut b_rx).await;
+        if ban_second {
+            assert!(matches!(second_result,
+                RoomOperationResult::PlayerBanned { player_id } if player_id == a));
+        } else {
+            assert!(matches!(second_result,
+                RoomOperationResult::PlayerKicked { player_id } if player_id == a));
+        }
+
+        let room_a_after = server
+            .database
+            .get_room_by_id(&room_a)
+            .await
+            .unwrap()
+            .unwrap();
+        let room_b_after = server
+            .database
+            .get_room_by_id(&room_b)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(room_a_after.players.contains_key(&a));
+        assert!(room_b_after.players.contains_key(&b));
+        assert!(!room_a_after.players.contains_key(&b));
+        assert!(!room_b_after.players.contains_key(&a));
+        assert_eq!(server.get_client_room(&a).await, Some(room_a));
+        assert_eq!(server.get_client_room(&b).await, Some(room_b));
+        assert_eq!(a_close.requested_reason(), None);
+        assert_eq!(b_close.requested_reason(), None);
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn three_way_stale_seat_moderation_completes_without_lifecycle_deadlock() {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (a, mut a_rx) = register_client(&server, "127.0.0.1:48582".parse().unwrap()).await;
+    let (b, mut b_rx) = register_client(&server, "127.0.0.1:48583".parse().unwrap()).await;
+    let (c, mut c_rx) = register_client(&server, "127.0.0.1:48584".parse().unwrap()).await;
+    join_seated_player(&server, &a, &mut a_rx, "CYCLEA", "a").await;
+    join_seated_player(&server, &b, &mut b_rx, "CYCLEB", "b").await;
+    join_seated_player(&server, &c, &mut c_rx, "CYCLEC", "c").await;
+    let room_a = copy_stale_row(&server, "CYCLEB", "CYCLEA", b).await;
+    let room_b = copy_stale_row(&server, "CYCLEC", "CYCLEB", c).await;
+    let room_c = copy_stale_row(&server, "CYCLEA", "CYCLEC", a).await;
+
+    let gate = server.install_moderation_lifecycle_test_gate();
+    let start = Arc::new(tokio::sync::Barrier::new(4));
+    let mut tasks = Vec::new();
+    for (authority, target) in [(a, b), (b, c), (c, a)] {
+        let server = Arc::clone(&server);
+        let start = Arc::clone(&start);
+        tasks.push(tokio::spawn(async move {
+            start.wait().await;
+            server
+                .handle_kick_player_operation(&authority, RoomOperationId::new_v4(), target)
+                .await;
+        }));
+    }
+    start.wait().await;
+    timeout(Duration::from_secs(1), gate.wait_until_acquired(1))
+        .await
+        .unwrap();
+    if timeout(Duration::from_secs(1), gate.wait_until_acquired(3))
+        .await
+        .is_ok()
+    {
+        for _ in 0..3 {
+            gate.release_one();
+        }
+    } else {
+        for reached in 2..=3 {
+            gate.release_one();
+            timeout(Duration::from_secs(1), gate.wait_until_acquired(reached))
+                .await
+                .unwrap();
+        }
+        gate.release_one();
+    }
+    for task in tasks {
+        timeout(Duration::from_secs(1), task)
+            .await
+            .expect("moderation cycle must finish")
+            .unwrap();
+    }
+    assert!(
+        matches!(room_access_result(&mut a_rx).await, RoomOperationResult::PlayerKicked { player_id } if player_id == b)
+    );
+    assert!(
+        matches!(room_access_result(&mut b_rx).await, RoomOperationResult::PlayerKicked { player_id } if player_id == c)
+    );
+    assert!(
+        matches!(room_access_result(&mut c_rx).await, RoomOperationResult::PlayerKicked { player_id } if player_id == a)
+    );
+    for (room, authority, stale) in [(room_a, a, b), (room_b, b, c), (room_c, c, a)] {
+        let stored = server
+            .database
+            .get_room_by_id(&room)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.players.contains_key(&authority));
+        assert!(!stored.players.contains_key(&stale));
+        assert_eq!(server.get_client_room(&authority).await, Some(room));
+    }
 }
 
 #[tokio::test]
