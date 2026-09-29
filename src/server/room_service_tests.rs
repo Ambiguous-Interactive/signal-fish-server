@@ -3042,6 +3042,189 @@ async fn old_socket_moderation_cannot_target_peers_after_authority_reconnect() {
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
+async fn old_socket_cannot_change_room_authority_or_access_after_reconnect() {
+    use crate::protocol::{ClientMessage, RoomOperationRequest};
+
+    #[derive(Clone, Copy, Debug)]
+    enum Change {
+        Unban,
+        Transfer,
+        Access,
+        Code,
+    }
+
+    for change in [
+        Change::Unban,
+        Change::Transfer,
+        Change::Access,
+        Change::Code,
+    ] {
+        let mut fixture = setup_joined_pair_with_reconnection().await;
+        fixture
+            .server
+            .set_client_room_operation_ids(&fixture.leaver, true);
+        let banned_target = PlayerId::new_v4();
+        fixture
+            .database
+            .set_room_ban(&fixture.room_id, &banned_target, true)
+            .await
+            .expect("seed room ban");
+        let old_lifecycle = fixture
+            .server
+            .client_lifecycle(&fixture.leaver)
+            .expect("old authority socket exists");
+        let pause = super::message_router::arm_socket_dispatch_pause(fixture.leaver);
+        let operation = match change {
+            Change::Unban => RoomOperationRequest::UnbanPlayer {
+                player_id: banned_target,
+            },
+            Change::Transfer => RoomOperationRequest::TransferAuthority {
+                player_id: fixture.survivor,
+            },
+            Change::Access => RoomOperationRequest::SetRoomAccess {
+                password: Some("secret".to_string()),
+            },
+            Change::Code => RoomOperationRequest::RegenerateRoomCode,
+        };
+        let old_request = {
+            let server = Arc::clone(&fixture.server);
+            let authority = fixture.leaver;
+            tokio::spawn(async move {
+                server
+                    .handle_client_message_from_lifecycle(
+                        &authority,
+                        ClientMessage::RoomOperation {
+                            operation_id: uuid::Uuid::new_v4(),
+                            operation: Box::new(operation),
+                        },
+                        old_lifecycle,
+                    )
+                    .await;
+            })
+        };
+        timeout(Duration::from_secs(1), pause.reached.notified())
+            .await
+            .expect("old request passed its socket identity check");
+
+        fixture.server.unregister_client(&fixture.leaver).await;
+        let (replacement, mut replacement_rx) =
+            register_client(&fixture.server, "127.0.0.1:48105".parse().unwrap()).await;
+        fixture.server.set_client_protocol(
+            &replacement,
+            NegotiatedProtocol {
+                version: 3,
+                transports: vec![crate::protocol::Transport::Relay],
+                topologies: vec![crate::protocol::Topology::Relay],
+            },
+        );
+        fixture
+            .server
+            .set_client_room_operation_ids(&replacement, true);
+        assert!(
+            fixture
+                .server
+                .handle_reconnect(
+                    &replacement,
+                    &fixture.leaver,
+                    &fixture.room_id,
+                    &fixture.reconnect_token,
+                )
+                .await
+        );
+        assert_next_message_matches(&mut replacement_rx, "reconnect baseline", |message| {
+            matches!(message, ServerMessage::Reconnected(_))
+        });
+        let before = fixture
+            .database
+            .get_room_by_id(&fixture.room_id)
+            .await
+            .expect("room lookup succeeds")
+            .expect("room survives reconnect");
+        assert_eq!(before.authority_player, Some(fixture.leaver));
+        assert!(before.is_banned(&banned_target));
+        drain_queued_messages(&mut replacement_rx);
+        drain_queued_messages(&mut fixture.survivor_rx);
+
+        pause.release.notify_one();
+        timeout(Duration::from_secs(1), old_request)
+            .await
+            .expect("old operation finishes")
+            .expect("old operation task lives");
+
+        let after = fixture
+            .database
+            .get_room_by_id(&fixture.room_id)
+            .await
+            .expect("room lookup succeeds")
+            .expect("room remains");
+        assert_eq!(
+            after.authority_player, before.authority_player,
+            "{change:?}"
+        );
+        assert_eq!(after.code, before.code, "{change:?}");
+        assert_eq!(
+            after.password.is_some(),
+            before.password.is_some(),
+            "{change:?}"
+        );
+        assert_eq!(
+            after.is_banned(&banned_target),
+            before.is_banned(&banned_target),
+            "{change:?}"
+        );
+        assert!(
+            drain_queued_messages(&mut fixture.survivor_rx).is_empty(),
+            "{change:?}"
+        );
+        assert!(
+            drain_queued_messages(&mut replacement_rx).is_empty(),
+            "{change:?}"
+        );
+
+        let current_lifecycle = fixture
+            .server
+            .client_lifecycle(&fixture.leaver)
+            .expect("restored authority socket exists");
+        let valid_operation = match change {
+            Change::Unban => RoomOperationRequest::UnbanPlayer {
+                player_id: banned_target,
+            },
+            Change::Transfer => RoomOperationRequest::TransferAuthority {
+                player_id: fixture.survivor,
+            },
+            Change::Access => RoomOperationRequest::SetRoomAccess {
+                password: Some("secret".to_string()),
+            },
+            Change::Code => RoomOperationRequest::RegenerateRoomCode,
+        };
+        fixture
+            .server
+            .handle_client_message_from_lifecycle(
+                &fixture.leaver,
+                ClientMessage::RoomOperation {
+                    operation_id: uuid::Uuid::new_v4(),
+                    operation: Box::new(valid_operation),
+                },
+                current_lifecycle,
+            )
+            .await;
+        let changed = fixture
+            .database
+            .get_room_by_id(&fixture.room_id)
+            .await
+            .expect("room lookup succeeds")
+            .expect("room remains after valid operation");
+        match change {
+            Change::Unban => assert!(!changed.is_banned(&banned_target)),
+            Change::Transfer => assert_eq!(changed.authority_player, Some(fixture.survivor)),
+            Change::Access => assert!(changed.password.is_some()),
+            Change::Code => assert_ne!(changed.code, before.code),
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
 async fn old_socket_game_data_cannot_relay_after_reconnect() {
     use crate::protocol::{ClientMessage, GameDataEncoding};
 
