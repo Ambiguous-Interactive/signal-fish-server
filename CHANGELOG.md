@@ -147,6 +147,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Moderation: an old socket's kick or ban cannot target peers after the
+  authority reconnects on a new socket (#647).
+
+- Relay: an old socket cannot send text or binary game data under a restored
+  socket's player ID (#647).
+
 - Reconnect: a leave request from a removed socket no longer removes the
   restored player's room seat (#647).
 

@@ -2904,6 +2904,255 @@ async fn leave_from_old_socket_cannot_use_replacement_lifecycle() {
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
+async fn old_socket_moderation_cannot_target_peers_after_authority_reconnect() {
+    use crate::protocol::{ClientMessage, RoomOperationRequest};
+
+    for ban in [false, true] {
+        let mut fixture = setup_joined_pair_with_reconnection().await;
+        fixture
+            .server
+            .set_client_room_operation_ids(&fixture.leaver, true);
+        let old_lifecycle = fixture
+            .server
+            .client_lifecycle(&fixture.leaver)
+            .expect("old authority socket exists");
+        let pause = super::message_router::arm_socket_dispatch_pause(fixture.leaver);
+        let operation = if ban {
+            RoomOperationRequest::BanPlayer {
+                player_id: fixture.survivor,
+            }
+        } else {
+            RoomOperationRequest::KickPlayer {
+                player_id: fixture.survivor,
+            }
+        };
+        let old_request = {
+            let server = Arc::clone(&fixture.server);
+            let authority = fixture.leaver;
+            tokio::spawn(async move {
+                server
+                    .handle_client_message_from_lifecycle(
+                        &authority,
+                        ClientMessage::RoomOperation {
+                            operation_id: uuid::Uuid::new_v4(),
+                            operation: Box::new(operation),
+                        },
+                        old_lifecycle,
+                    )
+                    .await;
+            })
+        };
+        timeout(Duration::from_secs(1), pause.reached.notified())
+            .await
+            .expect("old request passed its socket identity check");
+
+        fixture.server.unregister_client(&fixture.leaver).await;
+        let (replacement, mut replacement_rx) =
+            register_client(&fixture.server, "127.0.0.1:48104".parse().unwrap()).await;
+        fixture.server.set_client_protocol(
+            &replacement,
+            NegotiatedProtocol {
+                version: 3,
+                transports: vec![crate::protocol::Transport::Relay],
+                topologies: vec![crate::protocol::Topology::Relay],
+            },
+        );
+        fixture
+            .server
+            .set_client_room_operation_ids(&replacement, true);
+        assert!(
+            fixture
+                .server
+                .handle_reconnect(
+                    &replacement,
+                    &fixture.leaver,
+                    &fixture.room_id,
+                    &fixture.reconnect_token,
+                )
+                .await
+        );
+        assert_next_message_matches(&mut replacement_rx, "reconnect baseline", |message| {
+            matches!(message, ServerMessage::Reconnected(_))
+        });
+        let room = fixture
+            .database
+            .get_room_by_id(&fixture.room_id)
+            .await
+            .expect("room lookup succeeds")
+            .expect("room survives reconnect");
+        assert_eq!(room.authority_player, Some(fixture.leaver));
+        drain_queued_messages(&mut replacement_rx);
+        drain_queued_messages(&mut fixture.survivor_rx);
+        pause.release.notify_one();
+        timeout(Duration::from_secs(1), old_request)
+            .await
+            .expect("old moderation finishes")
+            .expect("old moderation task lives");
+
+        let room = fixture
+            .database
+            .get_room_by_id(&fixture.room_id)
+            .await
+            .expect("room lookup succeeds")
+            .expect("room remains");
+        assert!(room.players.contains_key(&fixture.survivor));
+        assert!(!room.is_banned(&fixture.survivor));
+        assert_eq!(
+            fixture.server.get_client_room(&fixture.survivor).await,
+            Some(fixture.room_id)
+        );
+        assert!(drain_queued_messages(&mut fixture.survivor_rx).is_empty());
+        let replacement_messages = drain_queued_messages(&mut replacement_rx);
+        assert!(replacement_messages.is_empty(), "{replacement_messages:?}");
+
+        let current_lifecycle = fixture
+            .server
+            .client_lifecycle(&fixture.leaver)
+            .expect("restored authority socket exists");
+        let valid_operation = if ban {
+            RoomOperationRequest::BanPlayer {
+                player_id: fixture.survivor,
+            }
+        } else {
+            RoomOperationRequest::KickPlayer {
+                player_id: fixture.survivor,
+            }
+        };
+        fixture
+            .server
+            .handle_client_message_from_lifecycle(
+                &fixture.leaver,
+                ClientMessage::RoomOperation {
+                    operation_id: uuid::Uuid::new_v4(),
+                    operation: Box::new(valid_operation),
+                },
+                current_lifecycle,
+            )
+            .await;
+        let room = fixture
+            .database
+            .get_room_by_id(&fixture.room_id)
+            .await
+            .expect("room lookup succeeds")
+            .expect("room remains");
+        assert!(!room.players.contains_key(&fixture.survivor));
+        assert_eq!(room.is_banned(&fixture.survivor), ban);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn old_socket_game_data_cannot_relay_after_reconnect() {
+    use crate::protocol::{ClientMessage, GameDataEncoding};
+
+    let mut fixture = setup_joined_pair_with_reconnection().await;
+    let old_lifecycle = fixture
+        .server
+        .client_lifecycle(&fixture.leaver)
+        .expect("old sender socket exists");
+    let pause = super::message_router::arm_socket_dispatch_pause(fixture.leaver);
+    let old_text = {
+        let server = Arc::clone(&fixture.server);
+        let sender = fixture.leaver;
+        let lifecycle = Arc::clone(&old_lifecycle);
+        tokio::spawn(async move {
+            server
+                .handle_client_message_from_lifecycle(
+                    &sender,
+                    ClientMessage::GameData {
+                        data: serde_json::json!({"old": true}),
+                        class: None,
+                        key: None,
+                    },
+                    lifecycle,
+                )
+                .await;
+        })
+    };
+    timeout(Duration::from_secs(1), pause.reached.notified())
+        .await
+        .expect("old text frame passed its socket identity check");
+
+    fixture.server.unregister_client(&fixture.leaver).await;
+    let (replacement, mut replacement_rx) =
+        register_client(&fixture.server, "127.0.0.1:48105".parse().unwrap()).await;
+    assert!(
+        fixture
+            .server
+            .handle_reconnect(
+                &replacement,
+                &fixture.leaver,
+                &fixture.room_id,
+                &fixture.reconnect_token,
+            )
+            .await
+    );
+    assert_next_message_matches(&mut replacement_rx, "reconnect baseline", |message| {
+        matches!(message, ServerMessage::Reconnected(_))
+    });
+    drain_queued_messages(&mut replacement_rx);
+    drain_queued_messages(&mut fixture.survivor_rx);
+    pause.release.notify_one();
+    timeout(Duration::from_secs(1), old_text)
+        .await
+        .expect("old text frame finishes")
+        .expect("old text task lives");
+    fixture
+        .server
+        .handle_game_data_binary_from_lifecycle(
+            &fixture.leaver,
+            GameDataEncoding::MessagePack,
+            bytes::Bytes::from_static(b"old socket"),
+            old_lifecycle,
+        )
+        .await;
+    let peer_messages = drain_queued_messages(&mut fixture.survivor_rx);
+    assert!(
+        !peer_messages.iter().any(|message| matches!(
+            message.as_ref(),
+            ServerMessage::GameData { .. } | ServerMessage::GameDataBinary { .. }
+        )),
+        "old socket data reached the restored sender's peer: {peer_messages:?}"
+    );
+
+    let current_lifecycle = fixture
+        .server
+        .client_lifecycle(&fixture.leaver)
+        .expect("restored sender socket exists");
+    fixture
+        .server
+        .handle_client_message_from_lifecycle(
+            &fixture.leaver,
+            ClientMessage::GameData {
+                data: serde_json::json!({"current": true}),
+                class: None,
+                key: None,
+            },
+            Arc::clone(&current_lifecycle),
+        )
+        .await;
+    fixture
+        .server
+        .handle_game_data_binary_from_lifecycle(
+            &fixture.leaver,
+            GameDataEncoding::MessagePack,
+            bytes::Bytes::from_static(b"current socket"),
+            current_lifecycle,
+        )
+        .await;
+    let peer_messages = drain_queued_messages(&mut fixture.survivor_rx);
+    assert!(peer_messages.iter().any(|message| matches!(
+        message.as_ref(),
+        ServerMessage::GameData { seq: Some(1), .. }
+    )));
+    assert!(peer_messages.iter().any(|message| matches!(
+        message.as_ref(),
+        ServerMessage::GameDataBinary { seq: Some(2), .. }
+    )));
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
 async fn disconnect_queued_during_leave_does_not_arm_a_reconnect() {
     let server = create_test_server().await;
     let (leaver, mut leaver_rx) =

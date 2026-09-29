@@ -2060,6 +2060,16 @@ pub(super) async fn handle_socket(
                     break;
                 }
             };
+            // The other socket half can finish unregistering while this
+            // receive task holds an already-read frame. A replacement may
+            // then reconnect under the same player ID. Stop the old task
+            // before it reads policy or sends a response for that ID.
+            if !server_clone
+                .client_lifecycle(&active_player_id)
+                .is_some_and(|current| Arc::ptr_eq(&current, &lifecycle_for_receive))
+            {
+                break;
+            }
             let received_at = Instant::now();
             let _inbound_activity_guard = if !matches!(&msg, Message::Pong(_)) {
                 // Publish transport liveness before parsing or any awaited
@@ -2794,7 +2804,12 @@ pub(super) async fn handle_socket(
 
                     // Payload from axum WebSocket is already Bytes - pass directly for zero-copy
                     server_clone
-                        .handle_game_data_binary(&active_player_id, encoding, payload)
+                        .handle_game_data_binary_from_lifecycle(
+                            &active_player_id,
+                            encoding,
+                            payload,
+                            Arc::clone(&lifecycle_for_receive),
+                        )
                         .await;
                     if !server_clone.config().app_id_allowlist_enabled && !authenticate_processed {
                         protocol_handshake_complete.store(true, Ordering::Release);

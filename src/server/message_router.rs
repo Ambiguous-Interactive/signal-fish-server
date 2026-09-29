@@ -17,6 +17,27 @@ static TRANSPORT_STATUS_DELIVERY_PAUSES: LazyLock<
     dashmap::DashMap<crate::protocol::PlayerId, Arc<TransportStatusDeliveryPause>>,
 > = LazyLock::new(dashmap::DashMap::new);
 
+#[cfg(all(test, signal_fish_repository_tests))]
+static SOCKET_DISPATCH_PAUSES: LazyLock<
+    dashmap::DashMap<crate::protocol::PlayerId, Arc<SocketDispatchPause>>,
+> = LazyLock::new(dashmap::DashMap::new);
+
+#[cfg(all(test, signal_fish_repository_tests))]
+pub(super) struct SocketDispatchPause {
+    pub(super) reached: Notify,
+    pub(super) release: Notify,
+}
+
+#[cfg(all(test, signal_fish_repository_tests))]
+pub(super) fn arm_socket_dispatch_pause(player_id: PlayerId) -> Arc<SocketDispatchPause> {
+    let pause = Arc::new(SocketDispatchPause {
+        reached: Notify::new(),
+        release: Notify::new(),
+    });
+    SOCKET_DISPATCH_PAUSES.insert(player_id, Arc::clone(&pause));
+    pause
+}
+
 #[cfg(test)]
 #[cfg(signal_fish_repository_tests)]
 pub(super) struct TransportStatusDeliveryPause {
@@ -160,6 +181,11 @@ impl EnhancedGameServer {
         }) {
             return;
         }
+        #[cfg(all(test, signal_fish_repository_tests))]
+        if let Some((_, pause)) = SOCKET_DISPATCH_PAUSES.remove(player_id) {
+            pause.reached.notify_one();
+            pause.release.notified().await;
+        }
         match message {
             ClientMessage::Authenticate { app_id, .. } => {
                 tracing::warn!(
@@ -201,7 +227,8 @@ impl EnhancedGameServer {
                     .await;
             }
             ClientMessage::GameData { data, class, key } => {
-                self.handle_game_data(player_id, data, class, key).await;
+                self.handle_game_data_from_lifecycle(player_id, data, class, key, source_lifecycle)
+                    .await;
             }
             ClientMessage::Signal {
                 to,
@@ -366,8 +393,13 @@ impl EnhancedGameServer {
                             .await;
                     }
                     RoomOperationRequest::KickPlayer { player_id: target } => {
-                        self.handle_kick_player_operation(player_id, operation_id, target)
-                            .await;
+                        self.handle_kick_player_from_lifecycle(
+                            player_id,
+                            operation_id,
+                            target,
+                            source_lifecycle,
+                        )
+                        .await;
                     }
                     RoomOperationRequest::RegenerateRoomCode => {
                         self.handle_regenerate_room_code_operation(player_id, operation_id)
@@ -378,8 +410,13 @@ impl EnhancedGameServer {
                             .await;
                     }
                     RoomOperationRequest::BanPlayer { player_id: target } => {
-                        self.handle_ban_player_operation(player_id, operation_id, target)
-                            .await;
+                        self.handle_ban_player_from_lifecycle(
+                            player_id,
+                            operation_id,
+                            target,
+                            source_lifecycle,
+                        )
+                        .await;
                     }
                     RoomOperationRequest::UnbanPlayer { player_id: target } => {
                         self.handle_unban_player_operation(player_id, operation_id, target)
