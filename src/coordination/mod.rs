@@ -57,6 +57,25 @@ pub type RoomEventJob = Box<
 /// Completion of one FIFO room event.
 pub type RoomEventCompletion = Pin<Box<dyn Future<Output = anyhow::Result<bool>> + Send + 'static>>;
 
+/// Result of starting the contention-fallback relay enqueue without awaiting
+/// its backpressured completion.
+///
+/// The caller owns per-sender serialization gates (the source lifecycle gate,
+/// issue #686) across the enqueue call and releases them before awaiting an
+/// [`RelayEnqueueOutcome::AwaitFinish`] completion, so every implementation
+/// must finish its stamp-and-enqueue waits inside the enqueue call itself.
+#[doc(hidden)]
+#[must_use = "await the AwaitFinish completion after releasing caller-held gates"]
+pub enum RelayEnqueueOutcome<'a> {
+    /// The enqueue and its backpressured completion already finished inside
+    /// the call (compatibility implementations), or nothing needed to start.
+    Finished(anyhow::Result<()>),
+    /// Deliveries started; the completion finishes backpressured queue drains
+    /// and slow-consumer cleanup. Await it only after releasing caller-held
+    /// serialization gates.
+    AwaitFinish(Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>),
+}
+
 /// Result of attempting the allocation-free game-data broadcast handoff.
 ///
 /// The process-local coordinator can acquire its routing snapshot without
@@ -2222,6 +2241,39 @@ pub trait MessageCoordinator: Send + Sync {
         _build_message: &mut (dyn FnMut() -> Option<ServerMessage> + Send),
     ) -> ImmediateGameDataBroadcast<'a> {
         ImmediateGameDataBroadcast::Unavailable
+    }
+
+    /// Start the game-data contention-fallback enqueue and return its
+    /// backpressured completion without awaiting it.
+    ///
+    /// Production callers hold the sender's source lifecycle gate across this
+    /// call and release it before awaiting an
+    /// [`RelayEnqueueOutcome::AwaitFinish`] completion (issue #686), so the
+    /// stamp allocation and enqueue must complete inside this call — the
+    /// stamp must not be allocated after the sender's identity may have
+    /// changed. The default runs the whole compatibility
+    /// enqueue-plus-finish path and reports it as already finished. The
+    /// in-memory production coordinator splits its contention fallback so
+    /// only the backpressured drain remains for the caller to await.
+    #[doc(hidden)]
+    fn enqueue_relay_broadcast_after_contention<'a>(
+        &'a self,
+        room_id: &RoomId,
+        except_player: &PlayerId,
+        build_message: &'a mut (dyn FnMut() -> Option<ServerMessage> + Send),
+    ) -> Pin<Box<dyn Future<Output = RelayEnqueueOutcome<'a>> + Send + 'a>> {
+        // Copy the small route keys so the compatibility future never
+        // borrows the caller's frame beyond the builder it owns.
+        let room_id = *room_id;
+        let except_player = *except_player;
+        Box::pin(async move {
+            let result = self.broadcast_to_room_except_with_borrowed_owned_message(
+                &room_id,
+                &except_player,
+                build_message,
+            );
+            RelayEnqueueOutcome::Finished(result.await)
+        })
     }
 
     async fn register_local_client(

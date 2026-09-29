@@ -3,9 +3,54 @@ use crate::protocol::{
 };
 use bytes::Bytes;
 use std::sync::Arc;
+#[cfg(all(test, signal_fish_repository_tests))]
+use std::sync::LazyLock;
 
 use super::signaling::canonical_json_len;
 use super::{ClientLifecycle, EnhancedGameServer};
+
+/// Where a relay admission pauses for reconnect-race regressions (issue
+/// #686): the sender-budget wait and the room-budget wait are the two
+/// suspension points between the source check and the lifecycle-guarded
+/// stamp.
+#[cfg(all(test, signal_fish_repository_tests))]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(super) enum RelayAdmissionStage {
+    BeforeSenderBudget,
+    BeforeRoomBudget,
+}
+
+#[cfg(all(test, signal_fish_repository_tests))]
+pub(super) struct RelayAdmissionPause {
+    pub(super) reached: tokio::sync::Notify,
+    pub(super) release: tokio::sync::Notify,
+}
+
+#[cfg(all(test, signal_fish_repository_tests))]
+pub(super) fn arm_relay_admission_pause(
+    player_id: PlayerId,
+    stage: RelayAdmissionStage,
+) -> Arc<RelayAdmissionPause> {
+    let pause = Arc::new(RelayAdmissionPause {
+        reached: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    RELAY_ADMISSION_PAUSES.insert((player_id, stage), Arc::clone(&pause));
+    pause
+}
+
+#[cfg(all(test, signal_fish_repository_tests))]
+async fn pause_relay_admission(player_id: &PlayerId, stage: RelayAdmissionStage) {
+    if let Some((_, pause)) = RELAY_ADMISSION_PAUSES.remove(&(*player_id, stage)) {
+        pause.reached.notify_one();
+        pause.release.notified().await;
+    }
+}
+
+#[cfg(all(test, signal_fish_repository_tests))]
+static RELAY_ADMISSION_PAUSES: LazyLock<
+    dashmap::DashMap<(PlayerId, RelayAdmissionStage), Arc<RelayAdmissionPause>>,
+> = LazyLock::new(dashmap::DashMap::new);
 
 impl EnhancedGameServer {
     fn relay_source_is_current(
@@ -132,46 +177,46 @@ impl EnhancedGameServer {
     /// charge is recorded for egress accounting — server-wide and, for
     /// allowlisted applications, per-app — only after both budgets admitted
     /// the frame.
+    /// Charge one game-data frame's sender-controlled payload size against
+    /// the sender's per-window byte budget (`rate_limit.max_relay_bytes`,
+    /// issue #519, or the sender's per-app override, issue #530) and the
+    /// relaying room's aggregate per-window ceiling
+    /// (`rate_limit.max_room_relay_bytes`, issue #530).
+    ///
+    /// Called only for a sender that is routed in a room (a roomless frame is
+    /// never relayed and must keep its pinned `NOT_IN_ROOM` reply), before
+    /// the fan-out is built. The sender budget is charged first so a frame
+    /// its own sender cannot afford never drains its room's ceiling; a room
+    /// rejection leaves the frame unrelayed with a wire error. The accepted
+    /// charge is recorded for egress accounting — server-wide and, for
+    /// allowlisted applications, per-app — only after both budgets admitted
+    /// the frame.
+    ///
+    /// The caller holds the source lifecycle gate across this call (issue
+    /// #686), so a rejection is returned instead of replied to: the refusal
+    /// reply locks the same gate and must be sent after the caller releases
+    /// it.
     async fn check_and_charge_relay_bytes(
         &self,
         player_id: &PlayerId,
         room_id: &crate::protocol::RoomId,
         bytes: u64,
-        source_lifecycle: Option<&Arc<ClientLifecycle>>,
-    ) -> Result<(), ()> {
+    ) -> Result<(), crate::rate_limit::RateLimitError> {
         // Resolved once per frame; reads are lock-guarded and project only
         // Copy fields, so the relay hot path stays allocation-free.
         let app_policy = self.client_app_relay_policy(player_id);
-        if let Err(e) = self
-            .rate_limiter
+        // Both budget waits suspend the admission; regressions pin the
+        // source gate across each one (issue #686).
+        #[cfg(all(test, signal_fish_repository_tests))]
+        pause_relay_admission(player_id, RelayAdmissionStage::BeforeSenderBudget).await;
+        self.rate_limiter
             .check_relay_bytes(player_id, bytes, app_policy)
-            .await
-        {
-            let _ = self
-                .send_error_to_player_for_source(
-                    player_id,
-                    e.to_string(),
-                    Some(ErrorCode::RateLimitExceeded),
-                    source_lifecycle,
-                )
-                .await;
-            return Err(());
-        }
-        if let Err(e) = self
-            .rate_limiter
+            .await?;
+        #[cfg(all(test, signal_fish_repository_tests))]
+        pause_relay_admission(player_id, RelayAdmissionStage::BeforeRoomBudget).await;
+        self.rate_limiter
             .check_room_relay_bytes(room_id, bytes)
-            .await
-        {
-            let _ = self
-                .send_error_to_player_for_source(
-                    player_id,
-                    e.to_string(),
-                    Some(ErrorCode::RateLimitExceeded),
-                    source_lifecycle,
-                )
-                .await;
-            return Err(());
-        }
+            .await?;
         self.metrics.record_relay_bytes(bytes);
         if let Some(policy) = app_policy {
             self.metrics.record_app_relay_bytes(&policy.app_id, bytes);
@@ -267,27 +312,46 @@ impl EnhancedGameServer {
             if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
                 return;
             }
+            // Hold the source gate across admission and stamp/enqueue (issue
+            // #686): the reconnect rekey waits for this gate, so the budget
+            // charge and the stamp land while the source is provably the
+            // incumbent — or the re-check dismisses the stale frame with no
+            // charge at all. The gate is released before the backpressured
+            // fan-out completion so a reconnect never waits on queue drains.
+            let source_gate = match source_lifecycle.as_ref() {
+                Some(lifecycle) => Some(lifecycle.lock().await),
+                None => None,
+            };
+            if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
+                return;
+            }
             // The sender-controlled JSON payload is the budget measure
             // (memoized above, shared with the per-encoding cap).
-            if self
-                .check_and_charge_relay_bytes(
-                    player_id,
-                    &room_id,
-                    payload_bytes() as u64,
-                    source_lifecycle.as_ref(),
-                )
+            if let Err(e) = self
+                .check_and_charge_relay_bytes(player_id, &room_id, payload_bytes() as u64)
                 .await
-                .is_err()
             {
+                // The refusal reply locks the source gate itself; it is sent
+                // only after this frame's admission released it.
+                drop(source_gate);
+                let _ = self
+                    .send_error_to_player_for_source(
+                        player_id,
+                        e.to_string(),
+                        Some(ErrorCode::RateLimitExceeded),
+                        source_lifecycle.as_ref(),
+                    )
+                    .await;
                 return;
             }
             let connection_manager = &self.connection_manager;
             let expected_room = room_id;
-            self.broadcast_game_data_with(player_id, &room_id, move || {
+            let source_ref = &source_lifecycle;
+            let mut build_message = one_shot_message_builder(move || {
                 let stamp = connection_manager.next_relay_stamp_in_room_from_lifecycle(
                     player_id,
                     &expected_room,
-                    source_lifecycle.as_ref(),
+                    source_ref.as_ref(),
                 )?;
                 Some(ServerMessage::GameData {
                     from_player: *player_id,
@@ -297,8 +361,9 @@ impl EnhancedGameServer {
                     class,
                     key,
                 })
-            })
-            .await;
+            });
+            self.broadcast_game_data_with(player_id, &room_id, source_gate, &mut build_message)
+                .await;
         } else {
             // Every sibling surface (ProvideConnectionInfo, Signal,
             // Authority) rejects unseated senders with NOT_IN_ROOM; leaving
@@ -411,30 +476,45 @@ impl EnhancedGameServer {
             if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
                 return;
             }
+            // Source gate across admission and stamp/enqueue; see the text
+            // lane for the issue #686 rationale.
+            let source_gate = match source_lifecycle.as_ref() {
+                Some(lifecycle) => Some(lifecycle.lock().await),
+                None => None,
+            };
+            if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
+                return;
+            }
             // Sender-side relay byte budget (issue #519) plus the room's
             // aggregate ceiling (issue #530): charge the binary payload
             // before the fan-out, mirroring the text lane.
-            if self
-                .check_and_charge_relay_bytes(
-                    player_id,
-                    &room_id,
-                    payload.len() as u64,
-                    source_lifecycle.as_ref(),
-                )
+            if let Err(e) = self
+                .check_and_charge_relay_bytes(player_id, &room_id, payload.len() as u64)
                 .await
-                .is_err()
             {
+                // The refusal reply locks the source gate itself; it is sent
+                // only after this frame's admission released it.
+                drop(source_gate);
+                let _ = self
+                    .send_error_to_player_for_source(
+                        player_id,
+                        e.to_string(),
+                        Some(ErrorCode::RateLimitExceeded),
+                        source_lifecycle.as_ref(),
+                    )
+                    .await;
                 return;
             }
             self.record_client_activity(player_id);
             self.maybe_update_last_seen(player_id).await;
             let connection_manager = &self.connection_manager;
             let expected_room = room_id;
-            self.broadcast_game_data_with(player_id, &room_id, move || {
+            let source_ref = &source_lifecycle;
+            let mut build_message = one_shot_message_builder(move || {
                 let stamp = connection_manager.next_relay_stamp_in_room_from_lifecycle(
                     player_id,
                     &expected_room,
-                    source_lifecycle.as_ref(),
+                    source_ref.as_ref(),
                 )?;
                 Some(ServerMessage::GameDataBinary {
                     from_player: *player_id,
@@ -443,8 +523,9 @@ impl EnhancedGameServer {
                     seq: Some(stamp.seq),
                     epoch: Some(stamp.epoch),
                 })
-            })
-            .await;
+            });
+            self.broadcast_game_data_with(player_id, &room_id, source_gate, &mut build_message)
+                .await;
         } else {
             // Roomless frames keep their pre-existing liveness contract: the
             // frame was validly sized and is answered with NOT_IN_ROOM.
@@ -477,22 +558,21 @@ impl EnhancedGameServer {
     /// cross-instance bus (`distributed::SequencedMessage` serializes the
     /// whole message); the in-memory single-instance coordinator is the only
     /// production backend today, so no remote instance can re-stamp or lose it.
-    async fn broadcast_game_data_with<'a, F>(
-        &'a self,
-        player_id: &'a PlayerId,
+    ///
+    /// `source_gate` is the sender's held source lifecycle gate: it stays
+    /// held across admission and stamp/enqueue and is released before any
+    /// backpressured completion is awaited (issue #686). `None` keeps the
+    /// legacy ungated shape for the no-lifecycle test entries.
+    async fn broadcast_game_data_with(
+        &self,
+        player_id: &PlayerId,
         room_id: &RoomId,
-        build_message: F,
-    ) where
-        F: FnOnce() -> Option<ServerMessage> + Send + 'a,
-    {
-        if let Err(e) = broadcast_game_data_with(
-            self.message_coordinator.as_ref(),
-            self.metrics.as_ref(),
-            player_id,
-            room_id,
-            build_message,
-        )
-        .await
+        source_gate: Option<tokio::sync::MutexGuard<'_, ()>>,
+        build_message: &mut (dyn FnMut() -> Option<ServerMessage> + Send),
+    ) {
+        if let Err(e) = self
+            .start_game_data_broadcast(player_id, room_id, build_message, source_gate)
+            .await
         {
             tracing::error!(
                 %player_id,
@@ -502,28 +582,78 @@ impl EnhancedGameServer {
             );
         }
     }
+
+    /// Drive the production metric and the gated coordinator handoff. The
+    /// caller holds the source lifecycle gate across admission and
+    /// stamp/enqueue; the gate is released before any backpressured
+    /// completion is awaited (issue #686).
+    async fn start_game_data_broadcast(
+        &self,
+        player_id: &PlayerId,
+        room_id: &RoomId,
+        build_message: &mut (dyn FnMut() -> Option<ServerMessage> + Send),
+        source_gate: Option<tokio::sync::MutexGuard<'_, ()>>,
+    ) -> anyhow::Result<()> {
+        // Acceptance-time semantics, deliberately counted BEFORE the
+        // builder runs: the increment doubles as the synchronization marker
+        // that a broadcast was accepted (contention tests observe
+        // `game_data_messages` moving while the builder has not been consumed
+        // yet), so it also covers accepted-but-cancelled builds (unseated
+        // sender / stamp exhaustion). Delivery attempts are counted separately
+        // by the coordinator metrics. This differs from `signals_relayed`,
+        // which is counted at dispatch after every gate (signaling.rs) — the
+        // two families are intentionally not interchangeable.
+        self.metrics.increment_game_data_messages();
+        let coordinator = self.message_coordinator.as_ref();
+        // Fast path: the synchronous admission never awaits, so the stamp and
+        // enqueue cannot race the gate.
+        match coordinator.try_broadcast_to_room_except_with_borrowed_owned_message(
+            room_id,
+            player_id,
+            build_message,
+        ) {
+            crate::coordination::ImmediateGameDataBroadcast::Complete => return Ok(()),
+            crate::coordination::ImmediateGameDataBroadcast::Pending(completion) => {
+                // The rekey may proceed while backpressured fan-out drains;
+                // every stamp and enqueue already completed under the gate.
+                drop(source_gate);
+                completion.await;
+                return Ok(());
+            }
+            crate::coordination::ImmediateGameDataBroadcast::Unavailable => {}
+        }
+        // Contended: run the fallback enqueue under the caller's gate, then
+        // release the gate before the backpressured completion.
+        match coordinator
+            .enqueue_relay_broadcast_after_contention(room_id, player_id, build_message)
+            .await
+        {
+            crate::coordination::RelayEnqueueOutcome::Finished(result) => {
+                drop(source_gate);
+                result
+            }
+            crate::coordination::RelayEnqueueOutcome::AwaitFinish(completion) => {
+                drop(source_gate);
+                completion.await
+            }
+        }
+    }
 }
 
-/// Drive the production metric, one-shot adapter, and coordinator handoff.
-pub async fn broadcast_game_data_with<'a, F>(
-    message_coordinator: &'a dyn crate::coordination::MessageCoordinator,
+/// Drive the production metric, one-shot adapter, and the ungated
+/// coordinator handoff. Compatibility entry for direct-coordinator tests;
+/// the production lanes use the gated
+/// [`EnhancedGameServer::broadcast_game_data_with`] above.
+pub async fn broadcast_game_data_with<F>(
+    message_coordinator: &dyn crate::coordination::MessageCoordinator,
     metrics: &crate::metrics::ServerMetrics,
-    player_id: &'a PlayerId,
+    player_id: &PlayerId,
     room_id: &RoomId,
     build_message: F,
 ) -> anyhow::Result<()>
 where
-    F: FnOnce() -> Option<ServerMessage> + Send + 'a,
+    F: FnOnce() -> Option<ServerMessage> + Send,
 {
-    // Acceptance-time semantics, deliberately counted BEFORE the one-shot
-    // builder runs: the increment doubles as the synchronization marker that a
-    // broadcast was accepted (contention tests observe `game_data_messages`
-    // moving while the builder has not been consumed yet), so it also covers
-    // accepted-but-cancelled builds (unseated sender / stamp exhaustion).
-    // Delivery attempts are counted separately by the coordinator metrics.
-    // This differs from `signals_relayed`, which is counted at dispatch after
-    // every gate (signaling.rs) — the two families are intentionally not
-    // interchangeable.
     metrics.increment_game_data_messages();
     let mut build_message = one_shot_message_builder(build_message);
     match message_coordinator.try_broadcast_to_room_except_with_borrowed_owned_message(
@@ -537,13 +667,15 @@ where
             Ok(())
         }
         crate::coordination::ImmediateGameDataBroadcast::Unavailable => {
-            message_coordinator
-                .broadcast_to_room_except_with_borrowed_owned_message(
-                    room_id,
-                    player_id,
-                    &mut build_message,
-                )
+            match message_coordinator
+                .enqueue_relay_broadcast_after_contention(room_id, player_id, &mut build_message)
                 .await
+            {
+                crate::coordination::RelayEnqueueOutcome::Finished(result) => result,
+                crate::coordination::RelayEnqueueOutcome::AwaitFinish(completion) => {
+                    completion.await
+                }
+            }
         }
     }
 }

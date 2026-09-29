@@ -147,6 +147,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Relay: an old socket's in-flight game-data frame can no longer charge a
+  restored player's relay byte budgets before its stamp rejects delivery.
+  Relay admission now holds the sender's source lifecycle gate through both
+  budget waits and stamp/enqueue, and releases it before backpressured
+  fan-out (#686).
+
 - Prevent stale WebSocket Ping/Pong frames from keeping a restored player
   alive, and keep old error replies off the restored socket (#686).
 
