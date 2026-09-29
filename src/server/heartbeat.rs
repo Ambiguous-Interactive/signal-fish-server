@@ -4,6 +4,24 @@ use std::sync::Arc;
 use super::{ClientLifecycle, EnhancedGameServer};
 
 impl EnhancedGameServer {
+    /// A transport control frame may resume after its socket loses this ID.
+    /// Keep its liveness writes on the source connection's lifecycle gate.
+    pub(crate) async fn record_transport_activity_from_lifecycle(
+        &self,
+        player_id: &PlayerId,
+        source_lifecycle: Arc<ClientLifecycle>,
+    ) {
+        let _guard = source_lifecycle.lock().await;
+        if source_lifecycle.player_id() != *player_id
+            || !self
+                .connection_manager
+                .lifecycle_matches(player_id, &source_lifecycle)
+        {
+            return;
+        }
+        self.record_transport_activity(player_id).await;
+    }
+
     /// Refresh liveness from transport-level WebSocket traffic (a client
     /// Ping, or a Pong answering our probe) without generating an
     /// application-level `ServerMessage::Pong` response.

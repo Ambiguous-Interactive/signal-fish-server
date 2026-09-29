@@ -33,6 +33,39 @@ use super::{
 
 const SERVER_PING_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
+#[cfg(all(test, signal_fish_repository_tests))]
+static RECEIVE_OWNERSHIP_PAUSES: std::sync::LazyLock<
+    dashmap::DashMap<PlayerId, Arc<ReceiveOwnershipPause>>,
+> = std::sync::LazyLock::new(dashmap::DashMap::new);
+
+#[cfg(all(test, signal_fish_repository_tests))]
+struct ReceiveOwnershipPause {
+    reached: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    finished: tokio::sync::Notify,
+}
+
+#[cfg(all(test, signal_fish_repository_tests))]
+struct ReceiveFrameCompletion(Arc<ReceiveOwnershipPause>);
+
+#[cfg(all(test, signal_fish_repository_tests))]
+impl Drop for ReceiveFrameCompletion {
+    fn drop(&mut self) {
+        self.0.finished.notify_one();
+    }
+}
+
+#[cfg(all(test, signal_fish_repository_tests))]
+fn arm_receive_ownership_pause(player_id: PlayerId) -> Arc<ReceiveOwnershipPause> {
+    let pause = Arc::new(ReceiveOwnershipPause {
+        reached: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        finished: tokio::sync::Notify::new(),
+    });
+    RECEIVE_OWNERSHIP_PAUSES.insert(player_id, Arc::clone(&pause));
+    pause
+}
+
 async fn send_outbound_too_large_close(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
 ) {
@@ -2070,6 +2103,15 @@ pub(super) async fn handle_socket(
             {
                 break;
             }
+            #[cfg(all(test, signal_fish_repository_tests))]
+            let _receive_frame_completion =
+                if let Some((_, pause)) = RECEIVE_OWNERSHIP_PAUSES.remove(&active_player_id) {
+                    pause.reached.notify_one();
+                    pause.release.notified().await;
+                    Some(ReceiveFrameCompletion(pause))
+                } else {
+                    None
+                };
             let received_at = Instant::now();
             let _inbound_activity_guard = if !matches!(&msg, Message::Pong(_)) {
                 // Publish transport liveness before parsing or any awaited
@@ -2095,7 +2137,7 @@ pub(super) async fn handle_socket(
                             "Message exceeds size limit"
                         );
                         let _ = server_clone
-                            .send_error_to_player(
+                            .send_error_to_player_from_lifecycle(
                                 &active_player_id,
                                 format!(
                                     "Message too large ({} bytes, max {} bytes)",
@@ -2103,6 +2145,7 @@ pub(super) async fn handle_socket(
                                     max_size
                                 ),
                                 Some(ErrorCode::MessageTooLarge),
+                                Arc::clone(&lifecycle_for_receive),
                             )
                             .await;
                         continue;
@@ -2134,10 +2177,11 @@ pub(super) async fn handle_socket(
                             // Connection stays alive: the rejection notice
                             // rides the reliable delivery path.
                             let _ = server_clone
-                                .send_error_to_player(
+                                .send_error_to_player_from_lifecycle(
                                     &active_player_id,
                                     err.user_message().to_string(),
                                     Some(err.error_code()),
+                                    Arc::clone(&lifecycle_for_receive),
                                 )
                                 .await;
                             continue;
@@ -2156,6 +2200,16 @@ pub(super) async fn handle_socket(
                             supported_topologies,
                             requested_capabilities,
                         } => {
+                            let _source_guard = lifecycle_for_receive.lock().await;
+                            if lifecycle_for_receive.player_id() != active_player_id
+                                || !server_clone
+                                    .client_lifecycle(&active_player_id)
+                                    .is_some_and(|current| {
+                                        Arc::ptr_eq(&current, &lifecycle_for_receive)
+                                    })
+                            {
+                                break;
+                            }
                             if server_clone.config().app_id_allowlist_enabled
                                 && app_handshake_complete
                             {
@@ -2791,10 +2845,11 @@ pub(super) async fn handle_socket(
                             "Client negotiated JSON game data but sent binary payload; dropping"
                         );
                         let _ = server_clone
-                            .send_error_to_player(
+                            .send_error_to_player_from_lifecycle(
                                 &active_player_id,
                                 "Binary payloads are disabled for this connection".to_string(),
                                 Some(ErrorCode::InvalidInput),
+                                Arc::clone(&lifecycle_for_receive),
                             )
                             .await;
                         if !server_clone.config().app_id_allowlist_enabled
@@ -2832,7 +2887,10 @@ pub(super) async fn handle_socket(
                     // Publish the probe observation before a potentially slow
                     // activity refresh so deadline evaluation stays independent.
                     server_clone
-                        .record_transport_activity(&active_player_id)
+                        .record_transport_activity_from_lifecycle(
+                            &active_player_id,
+                            Arc::clone(&lifecycle_for_receive),
+                        )
                         .await;
                 }
                 Message::Ping(_) => {
@@ -2843,7 +2901,10 @@ pub(super) async fn handle_socket(
                     // starves the activity reaper and is deterministically
                     // evicted while fully healthy.
                     server_clone
-                        .record_transport_activity(&active_player_id)
+                        .record_transport_activity_from_lifecycle(
+                            &active_player_id,
+                            Arc::clone(&lifecycle_for_receive),
+                        )
                         .await;
                 }
             }
@@ -2932,6 +2993,195 @@ mod tests {
         )
         .await
         .expect("construct connection test server")
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[cfg(signal_fish_repository_tests)]
+    #[cfg_attr(miri, ignore)]
+    async fn old_socket_receive_frame_cannot_affect_restored_player() {
+        use crate::protocol::ServerMessage;
+
+        let repeated_auth = ClientMessage::Authenticate {
+            app_id: "public".to_string(),
+            connect_token: None,
+            sdk_version: None,
+            platform: None,
+            game_data_format: None,
+            protocol_version: None,
+            supported_transports: None,
+            supported_topologies: None,
+            requested_capabilities: None,
+        };
+        for stale_frame in [
+            TungsteniteMessage::Text("{".into()),
+            TungsteniteMessage::Ping(Vec::new().into()),
+            TungsteniteMessage::Pong(Vec::new().into()),
+            TungsteniteMessage::Binary(vec![1, 2, 3].into()),
+            TungsteniteMessage::Text(serde_json::to_string(&repeated_auth).unwrap().into()),
+        ] {
+            let server = test_server_with_config(ServerConfig {
+                heartbeat_throttle: Duration::ZERO,
+                rate_limit_config: crate::rate_limit::RateLimitConfig {
+                    max_inbound_error_replies: 1,
+                    ..crate::rate_limit::RateLimitConfig::default()
+                },
+                ..ServerConfig::default()
+            })
+            .await;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind socket test listener");
+            let addr = listener.local_addr().expect("read socket test address");
+            let app = super::super::routes::create_standalone_router("http://localhost:3000")
+                .with_state(Arc::clone(&server));
+            let serve_task = tokio::spawn(async move {
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await
+                .expect("serve socket test");
+            });
+            let (mut old_socket, _) = tokio::time::timeout(
+                Duration::from_secs(10),
+                connect_async(format!("ws://{addr}/v3/ws")),
+            )
+            .await
+            .expect("old socket connect timeout")
+            .expect("connect old socket");
+            let join = ClientMessage::JoinRoom {
+                game_name: "stale-receive".to_string(),
+                room_code: None,
+                player_name: "old".to_string(),
+                max_players: Some(2),
+                supports_authority: Some(true),
+                relay_transport: None,
+                password: None,
+                join_only: None,
+            };
+            old_socket
+                .send(TungsteniteMessage::Text(
+                    serde_json::to_string(&join).unwrap().into(),
+                ))
+                .await
+                .expect("join from old socket");
+            let join_deadline = Instant::now() + Duration::from_secs(10);
+            let (old_id, room_id, token) = loop {
+                let frame = tokio::time::timeout_at(join_deadline, old_socket.next())
+                    .await
+                    .expect("join response timeout")
+                    .expect("join response frame")
+                    .expect("read join response");
+                if let TungsteniteMessage::Text(text) = frame {
+                    if let ServerMessage::RoomJoined(payload) =
+                        serde_json::from_str::<ServerMessage>(&text).expect("decode join response")
+                    {
+                        break (
+                            payload.player_id,
+                            payload.room_id,
+                            payload.reconnection_token.expect("v3 reconnect token"),
+                        );
+                    }
+                }
+            };
+
+            let pause = arm_receive_ownership_pause(old_id);
+            old_socket
+                .send(stale_frame.clone())
+                .await
+                .expect("send stale frame");
+            tokio::time::timeout(Duration::from_secs(10), pause.reached.notified())
+                .await
+                .expect("old frame did not reach receive pause");
+            server.unregister_client(&old_id).await;
+
+            let (replacement_tx, mut replacement_rx) = mpsc::channel(16);
+            let transient_id = server
+                .register_client(replacement_tx, "127.0.0.1:48180".parse().unwrap())
+                .await
+                .expect("register replacement");
+            server.set_client_protocol(
+                &transient_id,
+                NegotiatedProtocol {
+                    version: 3,
+                    transports: vec![Transport::Relay],
+                    topologies: vec![Topology::Relay],
+                },
+            );
+            assert!(
+                server
+                    .handle_reconnect(&transient_id, &old_id, &room_id, &token)
+                    .await
+            );
+            let baseline = tokio::time::timeout(Duration::from_secs(10), replacement_rx.recv())
+                .await
+                .expect("reconnect baseline timeout")
+                .expect("replacement channel stays open");
+            assert!(matches!(baseline.as_ref(), ServerMessage::Reconnected(_)));
+            let authority = replacement_rx.try_recv().expect("restored authority event");
+            assert!(matches!(
+                authority.as_ref(),
+                ServerMessage::AuthorityChanged {
+                    authority_player: Some(player_id),
+                    you_are_authority: true,
+                } if *player_id == old_id
+            ));
+            match replacement_rx.try_recv() {
+                Err(mpsc::error::TryRecvError::Empty) => {}
+                other => panic!("unexpected message after reconnect baseline: {other:?}"),
+            }
+
+            let heartbeat_updates_before =
+                server.metrics().heartbeat_updates.load(Ordering::Relaxed);
+            pause.release.notify_one();
+            tokio::time::timeout(Duration::from_secs(10), pause.finished.notified())
+                .await
+                .expect("old frame did not finish");
+            match replacement_rx.try_recv() {
+                Err(mpsc::error::TryRecvError::Empty) => {}
+                other => panic!("old frame affected replacement: {stale_frame:?}, {other:?}"),
+            }
+            assert_eq!(
+                server.metrics().heartbeat_updates.load(Ordering::Relaxed),
+                heartbeat_updates_before,
+                "old control frame refreshed replacement activity: {stale_frame:?}"
+            );
+
+            server
+                .send_error_to_player_from_lifecycle(
+                    &old_id,
+                    "current refusal".to_string(),
+                    Some(ErrorCode::InvalidInput),
+                    server
+                        .client_lifecycle(&old_id)
+                        .expect("replacement lifecycle"),
+                )
+                .await
+                .expect("current socket refusal");
+            let current_reply =
+                tokio::time::timeout(Duration::from_secs(10), replacement_rx.recv())
+                    .await
+                    .expect("current refusal timeout")
+                    .expect("replacement channel stays open");
+            assert!(
+                matches!(current_reply.as_ref(), ServerMessage::Error { message, error_code: Some(ErrorCode::InvalidInput) } if message == "current refusal"),
+                "old frame charged the replacement's only reply: {stale_frame:?}, {current_reply:?}"
+            );
+
+            drop(old_socket);
+            server.unregister_client(&old_id).await;
+            assert_eq!(
+                server
+                    .wait_for_shutdown_connections(
+                        crate::websocket::registered_connection_shutdown_settle_timeout(),
+                    )
+                    .await,
+                0,
+                "old socket handler must finish before releasing the server"
+            );
+            serve_task.abort();
+            let _ = serve_task.await;
+        }
     }
 
     async fn closed_with_timeout(

@@ -137,6 +137,7 @@ impl EnhancedGameServer {
         player_id: &PlayerId,
         room_id: &crate::protocol::RoomId,
         bytes: u64,
+        source_lifecycle: Option<&Arc<ClientLifecycle>>,
     ) -> Result<(), ()> {
         // Resolved once per frame; reads are lock-guarded and project only
         // Copy fields, so the relay hot path stays allocation-free.
@@ -147,7 +148,12 @@ impl EnhancedGameServer {
             .await
         {
             let _ = self
-                .send_error_to_player(player_id, e.to_string(), Some(ErrorCode::RateLimitExceeded))
+                .send_error_to_player_for_source(
+                    player_id,
+                    e.to_string(),
+                    Some(ErrorCode::RateLimitExceeded),
+                    source_lifecycle,
+                )
                 .await;
             return Err(());
         }
@@ -157,7 +163,12 @@ impl EnhancedGameServer {
             .await
         {
             let _ = self
-                .send_error_to_player(player_id, e.to_string(), Some(ErrorCode::RateLimitExceeded))
+                .send_error_to_player_for_source(
+                    player_id,
+                    e.to_string(),
+                    Some(ErrorCode::RateLimitExceeded),
+                    source_lifecycle,
+                )
                 .await;
             return Err(());
         }
@@ -204,11 +215,12 @@ impl EnhancedGameServer {
         };
         if !valid {
             let _ = self
-                .send_error_to_player(
+                .send_error_to_player_for_source(
                     player_id,
                     "Invalid delivery class: latest requires a key; reliable and volatile forbid one"
                         .to_string(),
                     Some(ErrorCode::InvalidDeliveryClass),
+                    source_lifecycle.as_ref(),
                 )
                 .await;
             return;
@@ -236,7 +248,7 @@ impl EnhancedGameServer {
         {
             if payload_bytes() > cap {
                 let _ = self
-                    .send_error_to_player(
+                    .send_error_to_player_for_source(
                         player_id,
                         format!(
                             "JSON game data is {} bytes; the maximum allowed for \
@@ -244,6 +256,7 @@ impl EnhancedGameServer {
                             payload_bytes()
                         ),
                         Some(ErrorCode::MessageTooLarge),
+                        source_lifecycle.as_ref(),
                     )
                     .await;
                 return;
@@ -257,7 +270,12 @@ impl EnhancedGameServer {
             // The sender-controlled JSON payload is the budget measure
             // (memoized above, shared with the per-encoding cap).
             if self
-                .check_and_charge_relay_bytes(player_id, &room_id, payload_bytes() as u64)
+                .check_and_charge_relay_bytes(
+                    player_id,
+                    &room_id,
+                    payload_bytes() as u64,
+                    source_lifecycle.as_ref(),
+                )
                 .await
                 .is_err()
             {
@@ -287,10 +305,11 @@ impl EnhancedGameServer {
             // these lanes silent made "relayed" indistinguishable from
             // "dropped" during teardown races (#396 sweep).
             let _ = self
-                .send_error_to_player(
+                .send_error_to_player_for_source(
                     player_id,
                     "Not in a room".to_string(),
                     Some(ErrorCode::NotInRoom),
+                    source_lifecycle.as_ref(),
                 )
                 .await;
         }
@@ -373,7 +392,12 @@ impl EnhancedGameServer {
                 log_message
             );
             let _ = self
-                .send_error_to_player(player_id, client_message, Some(ErrorCode::MessageTooLarge))
+                .send_error_to_player_for_source(
+                    player_id,
+                    client_message,
+                    Some(ErrorCode::MessageTooLarge),
+                    source_lifecycle.as_ref(),
+                )
                 .await;
             return;
         }
@@ -391,7 +415,12 @@ impl EnhancedGameServer {
             // aggregate ceiling (issue #530): charge the binary payload
             // before the fan-out, mirroring the text lane.
             if self
-                .check_and_charge_relay_bytes(player_id, &room_id, payload.len() as u64)
+                .check_and_charge_relay_bytes(
+                    player_id,
+                    &room_id,
+                    payload.len() as u64,
+                    source_lifecycle.as_ref(),
+                )
                 .await
                 .is_err()
             {
@@ -424,10 +453,11 @@ impl EnhancedGameServer {
             // See the text-lane rationale above: an unseated sender must be
             // able to observe the rejection, not infer it from silence.
             let _ = self
-                .send_error_to_player(
+                .send_error_to_player_for_source(
                     player_id,
                     "Not in a room".to_string(),
                     Some(ErrorCode::NotInRoom),
+                    source_lifecycle.as_ref(),
                 )
                 .await;
         }
