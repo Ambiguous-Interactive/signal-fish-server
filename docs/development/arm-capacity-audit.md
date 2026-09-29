@@ -231,6 +231,17 @@ No new finding is confirmed by this initial inventory.
 | Confidence and reproduction | A synthetic cross-room stale-row test, `crossed_stale_seat_moderation_completes_without_lifecycle_deadlock`, failed before the fix: both authority locks were held and the first kick timed out after one second. It covers kick/kick and kick/ban pairs; a three-way test covers longer cycles. The shipped in-memory failure path does not establish this exact crosswise state: `leave_storage_error_preserves_membership_routing_and_reconnect_token` keeps the route, `disconnect_storage_error_forces_terminal_teardown_and_keeps_claim_reachable` leaves a room-bound reconnect record, and `disconnect_storage_error_retries_without_reconnection_support` checks repair. No observed player incident is claimed. |
 | Disposition | One moderation lifecycle gate serializes kick and ban while they may hold two lifecycle locks, including the late target reacquisition. It releases before the terminal result send. The synthetic regression and existing moderation cases check completion and preservation of unrelated live memberships. Other client-lifecycle users take one lifecycle lock per operation. |
 
+### ARM-C019 — Failed reconnect keeps an unrouted authority
+
+| Field | Finding |
+| --- | --- |
+| State, severity | Fixed, high |
+| Player impact | A failed reconnect can leave its unrouted player as room authority while storage removal is unavailable. Live members cannot take authority until detach repair succeeds. |
+| Source and revision | `src/server/reconnection_service.rs::rollback_claimed_reconnect`, reviewed at `1be93b32`. |
+| Invariant | A reconnect that cannot deliver its baseline must release any authority it gained, even if its restored membership row cannot yet be removed. |
+| Confidence and reproduction | `cargo nextest run --lib -E 'test(failed_reconnect_rollback_does_not_leave_an_unrouted_authority)'` failed before the fix: the room retained `authority_player: Some(reconnecting)` after baseline delivery and rollback removal failed. |
+| Disposition | Rollback now clears authority when membership removal fails and keeps the failed detach queued. The regression checks that a live member can claim authority before repair, repair removes the row, and the original token can retry (#647). |
+
 These findings cover room-code rotation, player names, transport status, and spectator,
 reconnect, and room-creation drain seams. The rest of the C1 room and storage
 rows remain unreviewed.

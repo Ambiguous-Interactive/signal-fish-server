@@ -4413,6 +4413,136 @@ async fn reconnect_baseline_delivery_failure_rolls_back_and_releases_claim_for_r
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
+async fn failed_reconnect_rollback_does_not_leave_an_unrouted_authority() {
+    let server = create_test_server_with_config(ServerConfig {
+        websocket_config: WebSocketConfig {
+            slow_consumer_timeout_ms: 1,
+            ..WebSocketConfig::default()
+        },
+        ..ServerConfig::default()
+    })
+    .await;
+    let (survivor, _survivor_rx) = register_client(&server).await;
+    let (reconnecting, _old_rx) = register_client(&server).await;
+    let (current, _current_rx) = register_client_with_queue_capacity(&server, 1).await;
+    let room_id = create_db_room(&server, survivor).await;
+    let reconnecting_info = player_info(reconnecting, "reconnecting");
+    server
+        .database
+        .add_player_to_room(&room_id, reconnecting_info.clone())
+        .await
+        .expect("seat former authority");
+    server
+        .database
+        .update_room_authority(&room_id, Some(reconnecting))
+        .await
+        .expect("grant former authority");
+    assert_eq!(
+        server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .expect("room read")
+            .expect("room exists")
+            .authority_player,
+        Some(reconnecting)
+    );
+    for player in [survivor, reconnecting] {
+        server
+            .connection_manager
+            .assign_client_to_room(&player, room_id)
+            .await;
+    }
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(reconnecting, room_id, true, Some(reconnecting_info), 1)
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &reconnecting)
+        .await
+        .expect("remove former authority");
+    server.connection_manager.remove_client(&reconnecting);
+    server
+        .message_coordinator
+        .unregister_local_client(&reconnecting)
+        .await
+        .expect("unroute former authority");
+    assert!(server
+        .message_coordinator
+        .try_send_to_player(&current, Arc::new(ServerMessage::Pong))
+        .await
+        .expect("fill response queue"));
+    let db = server
+        .database()
+        .as_any()
+        .downcast_ref::<InMemoryDatabase>()
+        .expect("in-memory database");
+    db.fail_remove_player_from_room_for_test(true);
+
+    assert!(
+        !server
+            .handle_reconnect(&current, &reconnecting, &room_id, &token)
+            .await
+    );
+    let room = db
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room read")
+        .expect("room retained");
+    assert!(
+        room.players.contains_key(&reconnecting),
+        "failed detach leaves row"
+    );
+    assert_eq!(
+        room.authority_player, None,
+        "an unrouted failed reconnector cannot hold authority"
+    );
+    server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .validate_reconnection(&reconnecting, &room_id, &token)
+        .await
+        .expect("failed restore releases claim");
+    assert!(server
+        .database
+        .request_room_authority(&room_id, &survivor, true)
+        .await
+        .expect("survivor can request authority")
+        .granted());
+    db.fail_remove_player_from_room_for_test(false);
+    assert_eq!(server.cleanup_pending_durable_player_detaches().await, 1);
+    assert!(!db
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room read")
+        .expect("room retained")
+        .players
+        .contains_key(&reconnecting));
+    let (replacement, mut replacement_rx) = register_client(&server).await;
+    assert!(
+        server
+            .handle_reconnect(&replacement, &reconnecting, &room_id, &token)
+            .await
+    );
+    assert!(matches!(
+        recv(&mut replacement_rx).await.as_ref(),
+        ServerMessage::Reconnected(_)
+    ));
+    assert_eq!(
+        db.get_room_by_id(&room_id)
+            .await
+            .expect("room read")
+            .expect("room retained")
+            .authority_player,
+        Some(survivor),
+        "repair and retry cannot revoke the live successor"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
 async fn reconnect_from_roomed_temporary_connection_is_rejected_without_ghost_membership() {
     let server = create_test_server().await;
     let (existing, _existing_rx) = register_client(&server).await;
