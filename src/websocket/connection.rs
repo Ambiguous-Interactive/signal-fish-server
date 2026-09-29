@@ -3113,14 +3113,23 @@ mod tests {
                     .handle_reconnect(&transient_id, &old_id, &room_id, &token)
                     .await
             );
+            let baseline = tokio::time::timeout(Duration::from_secs(10), replacement_rx.recv())
+                .await
+                .expect("reconnect baseline timeout")
+                .expect("replacement channel stays open");
+            assert!(matches!(baseline.as_ref(), ServerMessage::Reconnected(_)));
+            let authority = replacement_rx.try_recv().expect("restored authority event");
             assert!(matches!(
-                tokio::time::timeout(Duration::from_secs(10), replacement_rx.recv())
-                    .await
-                    .expect("reconnect baseline timeout")
-                    .as_deref(),
-                Some(ServerMessage::Reconnected(_))
+                authority.as_ref(),
+                ServerMessage::AuthorityChanged {
+                    authority_player: Some(player_id),
+                    you_are_authority: true,
+                } if *player_id == old_id
             ));
-            while replacement_rx.try_recv().is_ok() {}
+            match replacement_rx.try_recv() {
+                Err(mpsc::error::TryRecvError::Empty) => {}
+                other => panic!("unexpected message after reconnect baseline: {other:?}"),
+            }
 
             let heartbeat_updates_before =
                 server.metrics().heartbeat_updates.load(Ordering::Relaxed);
@@ -3128,10 +3137,10 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(10), pause.finished.notified())
                 .await
                 .expect("old frame did not finish");
-            assert!(
-                replacement_rx.try_recv().is_err(),
-                "old frame reached replacement: {stale_frame:?}"
-            );
+            match replacement_rx.try_recv() {
+                Err(mpsc::error::TryRecvError::Empty) => {}
+                other => panic!("old frame affected replacement: {stale_frame:?}, {other:?}"),
+            }
             assert_eq!(
                 server.metrics().heartbeat_updates.load(Ordering::Relaxed),
                 heartbeat_updates_before,
