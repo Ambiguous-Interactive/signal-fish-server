@@ -220,6 +220,17 @@ No new finding is confirmed by this initial inventory.
 | Confidence and reproduction | `kick_cannot_leave_a_fresh_reconnect_record_after_target_disconnect` failed before the fix with an untombstoned pending record. It pauses after kick validation, reconnects the target, then pauses after kick reads the restored route while the target disconnects. The green test verifies that disconnect cannot arm another record before removal and that no claimable record remains. `kick_does_not_tombstone_a_new_pending_record_in_another_room` checks a newer room B record against kick's stale room A validation. Existing active-kick and pending-seat tests remain green. |
 | Disposition | Eviction rejects a stale target lifecycle guard after waiting, then rechecks the current lifecycle after its first tombstone. It holds a restored socket's lifecycle gate through removal, or rechecks and tombstones a pending record under the room gate if no socket exists. Both tombstone writes require a fresh same-room record check. |
 
+### ARM-C018 — Cyclic moderation waits on lifecycle locks
+
+| Field | Finding |
+| --- | --- |
+| State, severity | Fixed defensive lock-order gap; reachable player impact unconfirmed |
+| Potential impact | If live authorities have cyclic stale storage rows, simultaneous kick or ban requests can wait forever on each other's lifecycle locks. |
+| Source and revision | `src/server/moderation.rs::resolve_kick_style_target` and `evict_member_by_authority`, reviewed at `e4ae5526`. |
+| Invariant | Moderation operations must not hold lifecycle locks in a wait cycle. A late reconnect can create the target lifecycle after initial validation, so both acquisition sites need the same coordination. |
+| Confidence and reproduction | A synthetic cross-room stale-row test, `crossed_stale_seat_moderation_completes_without_lifecycle_deadlock`, failed before the fix: both authority locks were held and the first kick timed out after one second. It covers kick/kick and kick/ban pairs; a three-way test covers longer cycles. The shipped in-memory failure path does not establish this exact crosswise state: `leave_storage_error_preserves_membership_routing_and_reconnect_token` keeps the route, `disconnect_storage_error_forces_terminal_teardown_and_keeps_claim_reachable` leaves a room-bound reconnect record, and `disconnect_storage_error_retries_without_reconnection_support` checks repair. No observed player incident is claimed. |
+| Disposition | One moderation lifecycle gate serializes kick and ban while they may hold two lifecycle locks, including the late target reacquisition. It releases before the terminal result send. The synthetic regression and existing moderation cases check completion and preservation of unrelated live memberships. Other client-lifecycle users take one lifecycle lock per operation. |
+
 These findings cover room-code rotation, player names, transport status, and spectator,
 reconnect, and room-creation drain seams. The rest of the C1 room and storage
 rows remain unreviewed.

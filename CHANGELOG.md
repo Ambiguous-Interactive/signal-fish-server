@@ -147,6 +147,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Moderation: concurrent kick and ban requests no longer deadlock when
+  storage contains cross-room stale rows (#680).
+
 - Moderation: a kick now follows a disconnected seat through a racing
   reconnect, so a second disconnect cannot leave a fresh token that restores
   the kicked player (#647).
