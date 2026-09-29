@@ -99,7 +99,10 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   restore and retry; token rotation; spectator transitions; kick/ban races;
   application isolation; authentication and allowlist/key reload boundaries.
   [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686)
-  tracks remaining in-flight old-socket operations and accounting after reconnect.
+  tracks remaining old-socket relay budget admission, pre-handler activity
+  writes, and lifecycle capture points after reconnect. Relay admission must
+  retain the source lifecycle through budget checks and stamp allocation, then
+  release it before backpressured fan-out completion.
 - [ ] **Gameplay transitions:** ready-state invalidation on membership change;
   start/leave races; authority election and loss; host/direct readiness;
   v2/v3 negotiation; transport capability intersections; stale transport

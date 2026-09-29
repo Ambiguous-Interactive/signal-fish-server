@@ -147,6 +147,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Prevent stale WebSocket Ping/Pong frames from keeping a restored player
+  alive, and keep old error replies off the restored socket (#686).
+
 - Admission: an old socket cannot join a room, join as a spectator, or retry
   reconnect under a restored player's identity (#686).
 

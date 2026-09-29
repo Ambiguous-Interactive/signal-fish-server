@@ -2995,6 +2995,69 @@ async fn old_socket_reconnect_cannot_reply_to_restored_player() {
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
+async fn old_socket_transport_activity_and_refusal_cannot_touch_restored_player() {
+    let mut fixture = setup_joined_pair_with_reconnection().await;
+    let old_lifecycle = fixture.server.client_lifecycle(&fixture.leaver).unwrap();
+    let mut replacement_rx = restore_joined_pair_authority(&mut fixture).await;
+
+    tokio::time::advance(Duration::from_millis(25)).await;
+    assert!(fixture
+        .server
+        .connection_manager
+        .collect_expired_clients(Duration::from_millis(5))
+        .contains(&fixture.leaver));
+
+    fixture
+        .server
+        .record_transport_activity_from_lifecycle(&fixture.leaver, Arc::clone(&old_lifecycle))
+        .await;
+    fixture
+        .server
+        .send_error_to_player_from_lifecycle(
+            &fixture.leaver,
+            "old socket refusal".to_string(),
+            Some(crate::protocol::ErrorCode::InvalidInput),
+            old_lifecycle,
+        )
+        .await
+        .unwrap();
+
+    assert!(fixture
+        .server
+        .connection_manager
+        .collect_expired_clients(Duration::from_millis(5))
+        .contains(&fixture.leaver));
+    assert!(drain_queued_messages(&mut replacement_rx).is_empty());
+
+    let current_lifecycle = fixture.server.client_lifecycle(&fixture.leaver).unwrap();
+    fixture
+        .server
+        .record_transport_activity_from_lifecycle(&fixture.leaver, Arc::clone(&current_lifecycle))
+        .await;
+    fixture
+        .server
+        .send_error_to_player_from_lifecycle(
+            &fixture.leaver,
+            "current socket refusal".to_string(),
+            Some(crate::protocol::ErrorCode::InvalidInput),
+            current_lifecycle,
+        )
+        .await
+        .unwrap();
+    assert!(!fixture
+        .server
+        .connection_manager
+        .collect_expired_clients(Duration::from_millis(5))
+        .contains(&fixture.leaver));
+    assert_next_message_matches(
+        &mut replacement_rx,
+        "current refusal",
+        |message| matches!(message, ServerMessage::Error { message, .. } if message == "current socket refusal"),
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
 async fn old_socket_frames_cannot_change_restored_metadata_or_send_pong() {
     use crate::protocol::{ClientMessage, ConnectionInfo};
 

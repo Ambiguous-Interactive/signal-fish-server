@@ -331,6 +331,17 @@ No new finding is confirmed by this initial inventory.
 | Confidence and reproduction | `old_socket_join_cannot_reply_to_restored_player`, `old_socket_spectator_join_cannot_reply_to_restored_player`, and `old_socket_reconnect_cannot_reply_to_restored_player` each failed before the fix with an old failure delivered to the replacement. The tests cover plain and correlated forms. |
 | Disposition | The router and WebSocket receive task pass the source lifecycle into owned join and reconnect transactions. Spectator join checks it before drain refusal and after a failed transaction. Positive room and spectator joins and correlated reconnect remain covered. [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686) remains open for transport control, relay accounting, and other lifecycle capture points. |
 
+### ARM-C028 — Old control and invalid frames affect a restored socket
+
+| Field | Finding |
+| --- | --- |
+| State, severity | Fixed for WebSocket receive control and refusal paths, medium |
+| Player impact | An old socket can refresh a restored player's idle clock or send it an error and charge its reply budget after reconnect. |
+| Source and revision | `src/websocket/connection.rs` receive loop, `src/server/heartbeat.rs`, `src/server/game_data.rs`, and `src/server/messaging.rs`, reviewed at `c0b3c8b0`. |
+| Invariant | A socket-originated control frame or refusal can affect only the physical socket that sent it. The receive loop's first ownership check alone does not protect later awaited work. |
+| Confidence and reproduction | `scripts/dev-loop.sh old_socket_receive_frame_cannot_affect_restored_player` failed with the old receive calls: malformed text reached the replacement, and Ping changed its heartbeat counter from 1 to 2. The green socket test covers malformed text, Ping, Pong, binary format refusal, and repeated Authenticate. A one-reply budget proves stale frames consume no replacement reply; a current refusal still succeeds. The helper regression also checks the idle clock and current activity. |
+| Disposition | Ping/Pong liveness, receive-loop parse/size/encoding refusals, and game-data refusals now lock and verify the source lifecycle through their effects. Authenticate processing holds the source gate while it reads and changes connection policy. [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686) remains open for relay accounting before stamping and other lifecycle capture points. |
+
 These findings cover room-code rotation, player names, transport status, and spectator,
 reconnect, room-creation drain, and terminal routing seams. The rest of the C1 room and storage
 rows remain unreviewed.

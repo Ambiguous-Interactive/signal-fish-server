@@ -1,8 +1,53 @@
-use super::EnhancedGameServer;
+use super::{ClientLifecycle, EnhancedGameServer};
 use crate::protocol::{ErrorCode, PlayerId, ServerMessage};
 use std::sync::Arc;
 
 impl EnhancedGameServer {
+    pub(super) async fn send_error_to_player_for_source(
+        &self,
+        player_id: &PlayerId,
+        message: String,
+        error_code: Option<ErrorCode>,
+        source_lifecycle: Option<&Arc<ClientLifecycle>>,
+    ) -> anyhow::Result<()> {
+        match source_lifecycle {
+            Some(lifecycle) => {
+                self.send_error_to_player_from_lifecycle(
+                    player_id,
+                    message,
+                    error_code,
+                    Arc::clone(lifecycle),
+                )
+                .await
+            }
+            None => {
+                self.send_error_to_player(player_id, message, error_code)
+                    .await
+            }
+        }
+    }
+
+    /// Send a socket-originated refusal only while that socket owns the ID.
+    /// The guard covers the budget charge and the queued reply.
+    pub(crate) async fn send_error_to_player_from_lifecycle(
+        &self,
+        player_id: &PlayerId,
+        message: String,
+        error_code: Option<ErrorCode>,
+        source_lifecycle: Arc<ClientLifecycle>,
+    ) -> anyhow::Result<()> {
+        let _guard = source_lifecycle.lock().await;
+        if source_lifecycle.player_id() != *player_id
+            || !self
+                .connection_manager
+                .lifecycle_matches(player_id, &source_lifecycle)
+        {
+            return Ok(());
+        }
+        self.send_error_to_player(player_id, message, error_code)
+            .await
+    }
+
     /// Charge one polite per-frame reply against the player's per-connection
     /// error-reply budget (issue #518). Returns `false` when the budget is
     /// exhausted: the caller must NOT send the reply — the budget's own
