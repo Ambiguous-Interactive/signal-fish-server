@@ -177,20 +177,6 @@ impl EnhancedGameServer {
     /// charge is recorded for egress accounting — server-wide and, for
     /// allowlisted applications, per-app — only after both budgets admitted
     /// the frame.
-    /// Charge one game-data frame's sender-controlled payload size against
-    /// the sender's per-window byte budget (`rate_limit.max_relay_bytes`,
-    /// issue #519, or the sender's per-app override, issue #530) and the
-    /// relaying room's aggregate per-window ceiling
-    /// (`rate_limit.max_room_relay_bytes`, issue #530).
-    ///
-    /// Called only for a sender that is routed in a room (a roomless frame is
-    /// never relayed and must keep its pinned `NOT_IN_ROOM` reply), before
-    /// the fan-out is built. The sender budget is charged first so a frame
-    /// its own sender cannot afford never drains its room's ceiling; a room
-    /// rejection leaves the frame unrelayed with a wire error. The accepted
-    /// charge is recorded for egress accounting — server-wide and, for
-    /// allowlisted applications, per-app — only after both budgets admitted
-    /// the frame.
     ///
     /// The caller holds the source lifecycle gate across this call (issue
     /// #686), so a rejection is returned instead of replied to: the refusal
@@ -505,6 +491,11 @@ impl EnhancedGameServer {
                     .await;
                 return;
             }
+            // Charged frames record liveness (rejected frames never do), and
+            // under the gate the refresh can only land on the incumbent. The
+            // throttled database write holds the gate; the in-memory database
+            // makes that bounded today, and a real backend must stay bounded
+            // too or this call moves behind the gate release (#686 audit).
             self.record_client_activity(player_id);
             self.maybe_update_last_seen(player_id).await;
             let connection_manager = &self.connection_manager;

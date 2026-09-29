@@ -2673,8 +2673,9 @@ async fn restore_joined_pair_authority(
 /// waits suspend a relay between its source check and its lifecycle-guarded
 /// stamp. The source gate must hold across both waits — the reconnect rekey
 /// waits for the gate, so the in-flight frame either relays wholly as the
-/// incumbent or never charges — and the replacement's byte budget must stay
-/// untouched by the old frame.
+/// incumbent or never charges — and the old frame is charged exactly once,
+/// so the replacement's follow-up relay within the same window is never
+/// refused.
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn old_relay_budget_admission_serializes_restored_player_reconnect() {
