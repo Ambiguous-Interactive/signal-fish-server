@@ -209,6 +209,17 @@ No new finding is confirmed by this initial inventory.
 | Confidence and reproduction | `panic_after_pending_insert_balances_creation_metrics_once` failed before the fix with `rooms_created=0` after storage committed the pending room. It now covers failed then successful repair and all four counters. `direct_pending_room_delete_balances_creator_metrics_once` checks direct deletion and repeated leave accounting. |
 | Disposition | The in-memory insert records creation and join while holding its commit guards. Rollback and deletion share one atomic accounting token for the departure. The trait compatibility default cannot provide the same guarantee for other backends; durable process-loss recovery remains in #658. |
 
+### ARM-C017 — Kick loses a reconnected seat during a second disconnect
+
+| Field | Finding |
+| --- | --- |
+| State, severity | Fixed, high |
+| Player impact | A kicked player can retain a fresh reconnection record and restore the seat after the authority receives `PlayerKicked`. |
+| Source and revision | `src/server/moderation.rs` disconnected-target eviction, reviewed at `3ed1c337`. |
+| Invariant | A kick either removes the restored live seat while holding its current lifecycle gate or tombstones that room's pending record under the room event gate. A second disconnect cannot re-arm a restorable seat before removal, and the kick cannot revoke a newer credential for another room. |
+| Confidence and reproduction | `kick_cannot_leave_a_fresh_reconnect_record_after_target_disconnect` failed before the fix with an untombstoned pending record. It pauses after kick validation, reconnects the target, then pauses after kick reads the restored route while the target disconnects. The green test verifies that disconnect cannot arm another record before removal and that no claimable record remains. `kick_does_not_tombstone_a_new_pending_record_in_another_room` checks a newer room B record against kick's stale room A validation. Existing active-kick and pending-seat tests remain green. |
+| Disposition | Eviction rejects a stale target lifecycle guard after waiting, then rechecks the current lifecycle after its first tombstone. It holds a restored socket's lifecycle gate through removal, or rechecks and tombstones a pending record under the room gate if no socket exists. Both tombstone writes require a fresh same-room record check. |
+
 These findings cover room-code rotation, player names, transport status, and spectator,
 reconnect, and room-creation drain seams. The rest of the C1 room and storage
 rows remain unreviewed.

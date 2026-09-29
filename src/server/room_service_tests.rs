@@ -170,6 +170,7 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
         pending_durable_player_detaches: Arc::new(DashMap::new()),
         fail_retain_room_publication_snapshot: AtomicBool::new(false),
         reconnect_teardown_test_gate: StdMutex::new(None),
+        moderation_eviction_test_gate: StdMutex::new(None),
         scripted_room_codes: StdMutex::new(std::collections::VecDeque::new()),
         owned_room_operation_panic: Arc::new(std::sync::atomic::AtomicU8::new(0)),
         coordination_lock_ttl_override_ms: std::sync::atomic::AtomicU64::new(0),

@@ -1326,6 +1326,219 @@ async fn kicked_disconnected_seat_is_removed_and_never_reconnectable() {
     );
 }
 
+/// A target that reconnects after kick validation can disconnect again before
+/// the kick removes its newly routed seat. The second record must not survive.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn kick_cannot_leave_a_fresh_reconnect_record_after_target_disconnect() {
+    use crate::coordination::ClientDeliveryHandle;
+
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (authority, mut authority_rx) =
+        register_client(&server, "127.0.0.1:48170".parse().unwrap()).await;
+    let (target, mut target_rx) =
+        register_client(&server, "127.0.0.1:48171".parse().unwrap()).await;
+    join_seated_player(&server, &authority, &mut authority_rx, "KICK11", "host").await;
+    join_seated_player(&server, &target, &mut target_rx, "KICK11", "guest").await;
+    let room_id = server
+        .get_client_room(&target)
+        .await
+        .expect("target seated");
+    let seat = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .players
+        .get(&target)
+        .cloned()
+        .expect("seat exists");
+    let manager = server.reconnection_manager().expect("reconnection enabled");
+    let token = manager
+        .register_disconnection(target, room_id, false, Some(seat), 0)
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &target)
+        .await
+        .unwrap();
+    server.connection_manager.remove_client(&target);
+    server
+        .message_coordinator
+        .unregister_local_client(&target)
+        .await
+        .unwrap();
+
+    let gate = server.install_moderation_eviction_test_gate();
+    let kick_server = Arc::clone(&server);
+    let kick = tokio::spawn(async move {
+        kick_server
+            .handle_kick_player_operation(&authority, RoomOperationId::new_v4(), target)
+            .await;
+    });
+    timeout(Duration::from_secs(1), gate.wait_until_resolved())
+        .await
+        .expect("kick reached post-validation pause");
+
+    let (sender, _receiver) = mpsc::channel(8);
+    let socket = server
+        .connection_manager
+        .register_client(
+            sender.clone(),
+            ConnectionCloseSignal::detached(),
+            "127.0.0.1:48172".parse().unwrap(),
+            server.instance_id,
+        )
+        .await
+        .unwrap();
+    server
+        .message_coordinator
+        .register_local_client(
+            socket,
+            None,
+            ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached()),
+        )
+        .await
+        .unwrap();
+    let effective_id = Arc::new(tokio::sync::RwLock::new(socket));
+    assert!(
+        server
+            .handle_reconnect_with_identity_operation(
+                &socket,
+                &target,
+                &room_id,
+                &token,
+                effective_id,
+                Some(RoomOperationId::new_v4()),
+            )
+            .await
+    );
+    assert_eq!(server.get_client_room(&target).await, Some(room_id));
+
+    gate.release_resolved();
+    timeout(Duration::from_secs(1), gate.wait_until_routed())
+        .await
+        .expect("kick read the restored route");
+    let disconnect_gate = server.install_reconnect_teardown_test_gate();
+    let disconnect_server = Arc::clone(&server);
+    let disconnect = tokio::spawn(async move {
+        disconnect_server.unregister_client(&target).await;
+    });
+    assert!(
+        timeout(Duration::from_secs(1), disconnect_gate.wait_until_armed())
+            .await
+            .is_err(),
+        "target disconnect armed a new record before the kick removed its seat"
+    );
+    gate.release_routed();
+    timeout(Duration::from_secs(1), kick)
+        .await
+        .expect("kick must finish")
+        .expect("kick task must not panic");
+    timeout(Duration::from_secs(1), disconnect)
+        .await
+        .expect("disconnect must finish")
+        .expect("disconnect task must not panic");
+
+    let pending = manager.pending_reconnection_room(&target).await;
+    assert!(
+        pending.is_none() || manager.is_reconnection_kicked(&target).await,
+        "kick reported success but left a claimable new reconnect record"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn kick_does_not_tombstone_a_new_pending_record_in_another_room() {
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (authority, mut authority_rx) =
+        register_client(&server, "127.0.0.1:48173".parse().unwrap()).await;
+    let (target, mut target_rx) =
+        register_client(&server, "127.0.0.1:48174".parse().unwrap()).await;
+    join_seated_player(&server, &authority, &mut authority_rx, "KICK12", "host").await;
+    join_seated_player(&server, &target, &mut target_rx, "KICK12", "guest").await;
+    let room_a = server.get_client_room(&target).await.unwrap();
+    let seat = server
+        .database
+        .get_room_by_id(&room_a)
+        .await
+        .unwrap()
+        .unwrap()
+        .players
+        .get(&target)
+        .cloned()
+        .unwrap();
+    let manager = server.reconnection_manager().unwrap();
+    manager
+        .register_disconnection(target, room_a, false, Some(seat), 0)
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_a, &target)
+        .await
+        .unwrap();
+    server.connection_manager.remove_client(&target);
+    server
+        .message_coordinator
+        .unregister_local_client(&target)
+        .await
+        .unwrap();
+
+    let gate = server.install_moderation_eviction_test_gate();
+    let kick_server = Arc::clone(&server);
+    let kick = tokio::spawn(async move {
+        kick_server
+            .handle_kick_player_operation(&authority, RoomOperationId::new_v4(), target)
+            .await;
+    });
+    timeout(Duration::from_secs(1), gate.wait_until_resolved())
+        .await
+        .expect("kick validated room A's pending seat");
+
+    // Model the completed A-to-B role transition while the kick is paused:
+    // the same player now holds only a pending seat in B. The kick may evict
+    // A's old seat, but it must leave B's new credential alone.
+    let room_b = server
+        .database
+        .create_room(
+            "moderation-game".into(),
+            Some("OTHER12".into()),
+            4,
+            true,
+            target,
+            "relay".into(),
+            "local".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    let seat_b = room_b.players.get(&target).cloned().unwrap();
+    manager
+        .register_disconnection(target, room_b.id, false, Some(seat_b), 0)
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_b.id, &target)
+        .await
+        .unwrap();
+    gate.release_resolved();
+    timeout(Duration::from_secs(1), gate.wait_until_routed())
+        .await
+        .expect("kick checked current route");
+    gate.release_routed();
+    timeout(Duration::from_secs(1), kick)
+        .await
+        .expect("kick finishes")
+        .expect("kick task does not panic");
+
+    assert_eq!(
+        manager.pending_reconnection_room(&target).await,
+        Some(room_b.id)
+    );
+    assert!(!manager.is_reconnection_kicked(&target).await);
+}
+
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn banned_players_pending_record_cannot_restore_the_seat() {
