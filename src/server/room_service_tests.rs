@@ -171,6 +171,7 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
         moderation_lifecycle_gate: tokio::sync::Mutex::new(()),
         fail_retain_room_publication_snapshot: AtomicBool::new(false),
         reconnect_teardown_test_gate: StdMutex::new(None),
+        missing_lifecycle_leave_test_gate: StdMutex::new(None),
         moderation_eviction_test_gate: StdMutex::new(None),
         moderation_lifecycle_test_gate: StdMutex::new(None),
         scripted_room_codes: StdMutex::new(std::collections::VecDeque::new()),
@@ -2714,6 +2715,191 @@ async fn leave_queued_during_disconnect_cannot_consume_reconnect_or_repeat_depar
         .validate_reconnection(&fixture.leaver, &fixture.room_id, &fixture.reconnect_token)
         .await
         .expect("the queued leave must not consume disconnect's reconnect token");
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn leave_from_removed_socket_cannot_depart_reconnected_lifecycle() {
+    let mut fixture = setup_joined_pair_with_reconnection().await;
+    fixture.server.unregister_client(&fixture.leaver).await;
+    assert!(!fixture
+        .server
+        .connection_manager
+        .has_client(&fixture.leaver));
+    assert_eq!(fixture.server.get_client_room(&fixture.leaver).await, None);
+    let departure_count = fixture.server.metrics.players_left.load(Ordering::Relaxed);
+    drain_queued_messages(&mut fixture.survivor_rx);
+
+    let gate = fixture.server.install_missing_lifecycle_leave_test_gate();
+    let operation_id = uuid::Uuid::from_u128(0x48102);
+    let stale_leave = {
+        let server = Arc::clone(&fixture.server);
+        let old_player_id = fixture.leaver;
+        tokio::spawn(async move {
+            server
+                .leave_room_operation(&old_player_id, Some(operation_id))
+                .await
+        })
+    };
+    timeout(Duration::from_secs(1), gate.wait_until_checked())
+        .await
+        .expect("old leave observes the removed lifecycle");
+
+    let (replacement, mut replacement_rx) =
+        register_client(&fixture.server, "127.0.0.1:48102".parse().unwrap()).await;
+    assert!(
+        fixture
+            .server
+            .handle_reconnect(
+                &replacement,
+                &fixture.leaver,
+                &fixture.room_id,
+                &fixture.reconnect_token,
+            )
+            .await
+    );
+    assert_next_message_matches(&mut replacement_rx, "reconnect baseline", |message| {
+        matches!(message, ServerMessage::Reconnected(_))
+    });
+    drain_queued_messages(&mut replacement_rx);
+    drain_queued_messages(&mut fixture.survivor_rx);
+    gate.release();
+    timeout(Duration::from_secs(1), stale_leave)
+        .await
+        .expect("old leave finishes")
+        .expect("old leave task lives");
+
+    assert!(fixture
+        .server
+        .connection_manager
+        .has_client(&fixture.leaver));
+    assert_eq!(
+        fixture.server.get_client_room(&fixture.leaver).await,
+        Some(fixture.room_id),
+        "old socket's leave must not remove the restored socket's room"
+    );
+    assert!(fixture
+        .database
+        .get_room_players(&fixture.room_id)
+        .await
+        .expect("room players")
+        .iter()
+        .any(|player| player.id == fixture.leaver));
+    assert!(fixture
+        .server
+        .message_coordinator
+        .routed_player_ids(&fixture.room_id)
+        .await
+        .expect("routing lookup succeeds")
+        .expect("room has routed members")
+        .contains(&fixture.leaver));
+    assert_eq!(
+        fixture.server.metrics.players_left.load(Ordering::Relaxed),
+        departure_count,
+        "stale leave cannot count a second departure"
+    );
+    assert!(
+        drain_queued_messages(&mut fixture.survivor_rx).is_empty(),
+        "stale leave cannot send a second PlayerLeft"
+    );
+    assert!(
+        drain_queued_messages(&mut replacement_rx).is_empty(),
+        "old socket's operation cannot answer on the restored socket"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn leave_from_old_socket_cannot_use_replacement_lifecycle() {
+    let mut fixture = setup_joined_pair_with_reconnection().await;
+    let old_lifecycle = fixture
+        .server
+        .client_lifecycle(&fixture.leaver)
+        .expect("old socket lifecycle exists");
+    fixture.server.unregister_client(&fixture.leaver).await;
+    let (replacement, mut replacement_rx) =
+        register_client(&fixture.server, "127.0.0.1:48103".parse().unwrap()).await;
+    assert!(
+        fixture
+            .server
+            .handle_reconnect(
+                &replacement,
+                &fixture.leaver,
+                &fixture.room_id,
+                &fixture.reconnect_token,
+            )
+            .await
+    );
+    assert_next_message_matches(&mut replacement_rx, "reconnect baseline", |message| {
+        matches!(message, ServerMessage::Reconnected(_))
+    });
+    drain_queued_messages(&mut replacement_rx);
+    drain_queued_messages(&mut fixture.survivor_rx);
+    let departure_count = fixture.server.metrics.players_left.load(Ordering::Relaxed);
+
+    fixture
+        .server
+        .leave_room_operation_from_lifecycle(
+            &fixture.leaver,
+            None,
+            Some(Arc::clone(&old_lifecycle)),
+        )
+        .await;
+    fixture
+        .server
+        .handle_client_message_from_lifecycle(
+            &fixture.leaver,
+            crate::protocol::ClientMessage::LeaveRoom,
+            Arc::clone(&old_lifecycle),
+        )
+        .await;
+    fixture
+        .server
+        .handle_client_message_from_lifecycle(
+            &fixture.leaver,
+            crate::protocol::ClientMessage::RoomOperation {
+                operation_id: uuid::Uuid::from_u128(0x48103),
+                operation: Box::new(crate::protocol::RoomOperationRequest::LeaveRoom),
+            },
+            old_lifecycle,
+        )
+        .await;
+
+    assert_eq!(
+        fixture.server.get_client_room(&fixture.leaver).await,
+        Some(fixture.room_id)
+    );
+    assert!(fixture
+        .database
+        .get_room_players(&fixture.room_id)
+        .await
+        .expect("room players")
+        .iter()
+        .any(|player| player.id == fixture.leaver));
+    assert_eq!(
+        fixture.server.metrics.players_left.load(Ordering::Relaxed),
+        departure_count
+    );
+    assert!(drain_queued_messages(&mut fixture.survivor_rx).is_empty());
+    assert!(drain_queued_messages(&mut replacement_rx).is_empty());
+
+    let restored_lifecycle = fixture
+        .server
+        .client_lifecycle(&fixture.leaver)
+        .expect("replacement lifecycle exists");
+    fixture
+        .server
+        .handle_client_message_from_lifecycle(
+            &fixture.leaver,
+            crate::protocol::ClientMessage::LeaveRoom,
+            restored_lifecycle,
+        )
+        .await;
+    assert_eq!(fixture.server.get_client_room(&fixture.leaver).await, None);
+    assert_eq!(
+        fixture.server.metrics.players_left.load(Ordering::Relaxed),
+        departure_count + 1
+    );
 }
 
 #[tokio::test(start_paused = true)]

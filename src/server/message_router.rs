@@ -9,7 +9,7 @@ use tokio::sync::Notify;
 
 use crate::protocol::{ClientMessage, PlayerId, RoomOperationRequest, ServerMessage};
 
-use super::{EnhancedGameServer, TransportStatusUpdate};
+use super::{ClientLifecycle, EnhancedGameServer, TransportStatusUpdate};
 
 #[cfg(test)]
 #[cfg(signal_fish_repository_tests)]
@@ -112,6 +112,33 @@ impl EnhancedGameServer {
         player_id: &PlayerId,
         message: ClientMessage,
     ) {
+        self.handle_client_message_with_lifecycle(player_id, message, None)
+            .await;
+    }
+
+    pub(crate) async fn handle_client_message_from_lifecycle(
+        self: &Arc<Self>,
+        player_id: &PlayerId,
+        message: ClientMessage,
+        lifecycle: Arc<ClientLifecycle>,
+    ) {
+        self.handle_client_message_with_lifecycle(player_id, message, Some(lifecycle))
+            .await;
+    }
+
+    async fn handle_client_message_with_lifecycle(
+        self: &Arc<Self>,
+        player_id: &PlayerId,
+        message: ClientMessage,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) {
+        if source_lifecycle.as_ref().is_some_and(|lifecycle| {
+            !self
+                .connection_manager
+                .lifecycle_matches(player_id, lifecycle)
+        }) {
+            return;
+        }
         // EVERY inbound message is liveness, not just `Ping`: the activity
         // reaper (`server.ping_timeout`) must never disconnect a client that
         // is actively streaming GameData/Signal traffic but not heartbeating.
@@ -126,6 +153,13 @@ impl EnhancedGameServer {
         // it subsumes the former per-handler calls in `handle_ping` /
         // `broadcast_game_data`. No-ops for a roomless sender (pre-join).
         self.maybe_update_last_seen(player_id).await;
+        if source_lifecycle.as_ref().is_some_and(|lifecycle| {
+            !self
+                .connection_manager
+                .lifecycle_matches(player_id, lifecycle)
+        }) {
+            return;
+        }
         match message {
             ClientMessage::Authenticate { app_id, .. } => {
                 tracing::warn!(
@@ -163,7 +197,8 @@ impl EnhancedGameServer {
                 .await;
             }
             ClientMessage::LeaveRoom => {
-                self.leave_room(player_id).await;
+                self.leave_room_operation_from_lifecycle(player_id, None, source_lifecycle)
+                    .await;
             }
             ClientMessage::GameData { data, class, key } => {
                 self.handle_game_data(player_id, data, class, key).await;
@@ -285,8 +320,12 @@ impl EnhancedGameServer {
                         .await;
                     }
                     RoomOperationRequest::LeaveRoom => {
-                        self.leave_room_operation(player_id, Some(operation_id))
-                            .await;
+                        self.leave_room_operation_from_lifecycle(
+                            player_id,
+                            Some(operation_id),
+                            source_lifecycle,
+                        )
+                        .await;
                     }
                     RoomOperationRequest::Reconnect { .. } => {
                         // Same fail-closed contract as the plain

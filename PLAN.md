@@ -98,6 +98,8 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   reconnect; simultaneous claims of one token; expiry during a claim; failed
   restore and retry; token rotation; spectator transitions; kick/ban races;
   application isolation; authentication and allowlist/key reload boundaries.
+  [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686)
+  tracks other in-flight old-socket operations after reconnect.
 - [ ] **Gameplay transitions:** ready-state invalidation on membership change;
   start/leave races; authority election and loss; host/direct readiness;
   v2/v3 negotiation; transport capability intersections; stale transport

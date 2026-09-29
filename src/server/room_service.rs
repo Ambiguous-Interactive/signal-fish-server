@@ -1310,6 +1310,16 @@ impl EnhancedGameServer {
         player_id: &PlayerId,
         operation_id: Option<crate::protocol::RoomOperationId>,
     ) {
+        self.leave_room_operation_from_lifecycle(player_id, operation_id, None)
+            .await;
+    }
+
+    pub(super) async fn leave_room_operation_from_lifecycle(
+        self: &Arc<Self>,
+        player_id: &PlayerId,
+        operation_id: Option<crate::protocol::RoomOperationId>,
+        source_lifecycle: Option<Arc<super::ClientLifecycle>>,
+    ) {
         let server = Arc::clone(self);
         let player_id = *player_id;
         let terminal_response_committed = Arc::new(AtomicBool::new(false));
@@ -1320,6 +1330,7 @@ impl EnhancedGameServer {
                 true,
                 operation_id,
                 terminal_response_committed_in_task,
+                source_lifecycle,
             ))
             .catch_unwind()
             .await;
@@ -1347,20 +1358,21 @@ impl EnhancedGameServer {
         notify_player: bool,
         operation_id: Option<crate::protocol::RoomOperationId>,
         terminal_response_committed: Arc<AtomicBool>,
+        source_lifecycle: Option<Arc<super::ClientLifecycle>>,
     ) {
         #[cfg(test)]
         self.trigger_owned_room_operation_panic_for_test(
             super::OwnedRoomOperationPanicPoint::LeaveBeforeTerminal,
         );
         let player_id = &player_id;
-        let Some(lifecycle) = self.connection_manager.client_lifecycle(player_id) else {
-            self.leave_room_locked_operation(
-                player_id,
-                notify_player,
-                operation_id,
-                terminal_response_committed,
-            )
-            .await;
+        let Some(lifecycle) =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id))
+        else {
+            #[cfg(test)]
+            self.pause_after_missing_lifecycle_leave_for_test().await;
+            // A leave from a removed socket has no assignment to clear. A
+            // reconnect can install a new lifecycle under this player ID
+            // before the old request resumes; it must not leave that seat.
             return;
         };
         let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;

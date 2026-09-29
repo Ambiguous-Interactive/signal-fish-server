@@ -2697,19 +2697,24 @@ pub(super) async fn handle_socket(
                                     }
                                     operation => {
                                         server_clone
-                                            .handle_client_message(
+                                            .handle_client_message_from_lifecycle(
                                                 &active_player_id,
                                                 ClientMessage::RoomOperation {
                                                     operation_id,
                                                     operation: Box::new(operation),
                                                 },
+                                                Arc::clone(&lifecycle_for_receive),
                                             )
                                             .await;
                                     }
                                 },
                                 other => {
                                     server_clone
-                                        .handle_client_message(&active_player_id, other)
+                                        .handle_client_message_from_lifecycle(
+                                            &active_player_id,
+                                            other,
+                                            Arc::clone(&lifecycle_for_receive),
+                                        )
                                         .await;
                                 }
                             }
