@@ -2668,12 +2668,14 @@ pub(super) async fn handle_socket(
                                     auth_token,
                                 } => {
                                     if server_clone
-                                        .handle_reconnect_with_identity(
+                                        .handle_reconnect_with_identity_operation_from_lifecycle(
                                             &active_player_id,
                                             &reconnect_player_id,
                                             &room_id,
                                             &auth_token,
                                             Arc::clone(&effective_player_id_for_receive),
+                                            None,
+                                            Arc::clone(&lifecycle_for_receive),
                                         )
                                         .await
                                     {
@@ -2692,13 +2694,14 @@ pub(super) async fn handle_socket(
                                         .client_supports_room_operation_ids(&active_player_id) =>
                                     {
                                         if server_clone
-                                            .handle_reconnect_with_identity_operation(
+                                            .handle_reconnect_with_identity_operation_from_lifecycle(
                                                 &active_player_id,
                                                 &reconnect_player_id,
                                                 &room_id,
                                                 &auth_token,
                                                 Arc::clone(&effective_player_id_for_receive),
                                                 Some(operation_id),
+                                                Arc::clone(&lifecycle_for_receive),
                                             )
                                             .await
                                         {

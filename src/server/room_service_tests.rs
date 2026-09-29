@@ -2787,6 +2787,214 @@ async fn old_socket_spectator_leave_cannot_reply_to_restored_player() {
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
+async fn old_socket_join_cannot_reply_to_restored_player() {
+    use crate::protocol::{ClientMessage, RoomOperationRequest};
+
+    for (correlated, replacement_leaves) in [(false, false), (true, false), (false, true)] {
+        let mut fixture = setup_joined_pair_with_reconnection().await;
+        fixture
+            .server
+            .set_client_room_operation_ids(&fixture.leaver, true);
+        let old_lifecycle = fixture.server.client_lifecycle(&fixture.leaver).unwrap();
+        let pause = super::message_router::arm_socket_dispatch_pause(fixture.leaver);
+        let join = RoomOperationRequest::JoinRoom {
+            game_name: "stale-join".to_string(),
+            room_code: None,
+            player_name: "Old socket".to_string(),
+            max_players: None,
+            supports_authority: None,
+            relay_transport: None,
+            password: None,
+            join_only: None,
+        };
+        let message = if correlated {
+            ClientMessage::RoomOperation {
+                operation_id: uuid::Uuid::from_u128(0x305),
+                operation: Box::new(join),
+            }
+        } else if let RoomOperationRequest::JoinRoom {
+            game_name,
+            room_code,
+            player_name,
+            max_players,
+            supports_authority,
+            relay_transport,
+            password,
+            join_only,
+        } = join
+        {
+            ClientMessage::JoinRoom {
+                game_name,
+                room_code,
+                player_name,
+                max_players,
+                supports_authority,
+                relay_transport,
+                password,
+                join_only,
+            }
+        } else {
+            unreachable!()
+        };
+        let old_request = {
+            let server = Arc::clone(&fixture.server);
+            let player_id = fixture.leaver;
+            tokio::spawn(async move {
+                server
+                    .handle_client_message_from_lifecycle(&player_id, message, old_lifecycle)
+                    .await;
+            })
+        };
+        timeout(Duration::from_secs(1), pause.reached.notified())
+            .await
+            .expect("old join reaches dispatch");
+
+        let mut replacement_rx = restore_joined_pair_authority(&mut fixture).await;
+        fixture
+            .server
+            .set_client_room_operation_ids(&fixture.leaver, true);
+        if replacement_leaves {
+            fixture
+                .server
+                .leave_room_operation_from_lifecycle(
+                    &fixture.leaver,
+                    None,
+                    fixture.server.client_lifecycle(&fixture.leaver),
+                )
+                .await;
+            assert_eq!(fixture.server.get_client_room(&fixture.leaver).await, None);
+            drain_queued_messages(&mut replacement_rx);
+            drain_queued_messages(&mut fixture.survivor_rx);
+        }
+        pause.release.notify_one();
+        timeout(Duration::from_secs(1), old_request)
+            .await
+            .expect("old join finishes")
+            .expect("old join task lives");
+        assert!(
+            drain_queued_messages(&mut replacement_rx).is_empty(),
+            "old join must not answer on the restored socket"
+        );
+        assert!(drain_queued_messages(&mut fixture.survivor_rx).is_empty());
+        if replacement_leaves {
+            assert_eq!(fixture.server.get_client_room(&fixture.leaver).await, None);
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn old_socket_spectator_join_cannot_reply_to_restored_player() {
+    use crate::protocol::{ClientMessage, RoomOperationRequest};
+
+    for (correlated, replacement_leaves) in [(false, false), (true, false), (false, true)] {
+        let mut fixture = setup_joined_pair_with_reconnection().await;
+        fixture
+            .server
+            .set_client_room_operation_ids(&fixture.leaver, true);
+        let old_lifecycle = fixture.server.client_lifecycle(&fixture.leaver).unwrap();
+        let pause = super::message_router::arm_socket_dispatch_pause(fixture.leaver);
+        let message = if correlated {
+            ClientMessage::RoomOperation {
+                operation_id: uuid::Uuid::from_u128(0x306),
+                operation: Box::new(RoomOperationRequest::JoinAsSpectator {
+                    game_name: "leave-convergence".to_string(),
+                    room_code: "LVC001".to_string(),
+                    spectator_name: "Old socket".to_string(),
+                    password: None,
+                }),
+            }
+        } else {
+            ClientMessage::JoinAsSpectator {
+                game_name: "leave-convergence".to_string(),
+                room_code: "LVC001".to_string(),
+                spectator_name: "Old socket".to_string(),
+                password: None,
+            }
+        };
+        let old_request = {
+            let server = Arc::clone(&fixture.server);
+            let player_id = fixture.leaver;
+            tokio::spawn(async move {
+                server
+                    .handle_client_message_from_lifecycle(&player_id, message, old_lifecycle)
+                    .await;
+            })
+        };
+        timeout(Duration::from_secs(1), pause.reached.notified())
+            .await
+            .expect("old spectator join reaches dispatch");
+
+        let mut replacement_rx = restore_joined_pair_authority(&mut fixture).await;
+        fixture
+            .server
+            .set_client_room_operation_ids(&fixture.leaver, true);
+        if replacement_leaves {
+            fixture
+                .server
+                .leave_room_operation_from_lifecycle(
+                    &fixture.leaver,
+                    None,
+                    fixture.server.client_lifecycle(&fixture.leaver),
+                )
+                .await;
+            assert_eq!(fixture.server.get_client_room(&fixture.leaver).await, None);
+            drain_queued_messages(&mut replacement_rx);
+            drain_queued_messages(&mut fixture.survivor_rx);
+        }
+        pause.release.notify_one();
+        timeout(Duration::from_secs(1), old_request)
+            .await
+            .expect("old spectator join finishes")
+            .expect("old spectator join task lives");
+        assert!(
+            drain_queued_messages(&mut replacement_rx).is_empty(),
+            "old spectator join must not answer on the restored socket"
+        );
+        assert!(drain_queued_messages(&mut fixture.survivor_rx).is_empty());
+        if replacement_leaves {
+            assert!(!fixture
+                .server
+                .spectator_service
+                .is_spectating(&fixture.leaver));
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn old_socket_reconnect_cannot_reply_to_restored_player() {
+    for operation_id in [None, Some(uuid::Uuid::from_u128(0x307))] {
+        let mut fixture = setup_joined_pair_with_reconnection().await;
+        let old_lifecycle = fixture.server.client_lifecycle(&fixture.leaver).unwrap();
+        let mut replacement_rx = restore_joined_pair_authority(&mut fixture).await;
+        let effective_player_id = Arc::new(tokio::sync::RwLock::new(fixture.leaver));
+
+        assert!(
+            !fixture
+                .server
+                .handle_reconnect_with_identity_operation_from_lifecycle(
+                    &fixture.leaver,
+                    &fixture.leaver,
+                    &fixture.room_id,
+                    "old-socket-token",
+                    Arc::clone(&effective_player_id),
+                    operation_id,
+                    old_lifecycle,
+                )
+                .await
+        );
+        assert_eq!(*effective_player_id.read().await, fixture.leaver);
+        assert!(
+            drain_queued_messages(&mut replacement_rx).is_empty(),
+            "old reconnect must not answer on the restored socket"
+        );
+        assert!(drain_queued_messages(&mut fixture.survivor_rx).is_empty());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
 async fn old_socket_frames_cannot_change_restored_metadata_or_send_pong() {
     use crate::protocol::{ClientMessage, ConnectionInfo};
 

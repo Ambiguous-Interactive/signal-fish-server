@@ -667,7 +667,7 @@ async fn join_room_request_is_forwarded_to_room_service() {
         .expect("client registration succeeds");
 
     server
-        .handle_client_message(
+        .handle_client_message_from_lifecycle(
             &player_id,
             ClientMessage::JoinRoom {
                 game_name: "game".to_string(),
@@ -680,6 +680,10 @@ async fn join_room_request_is_forwarded_to_room_service() {
                 password: None,
                 join_only: None,
             },
+            server
+                .connection_manager
+                .client_lifecycle(&player_id)
+                .expect("join source lifecycle"),
         )
         .await;
 
@@ -981,7 +985,7 @@ async fn correlated_spectator_operations_echo_success_and_failure_ids() {
 
     let join_id = uuid::Uuid::from_u128(11);
     server
-        .handle_client_message(
+        .handle_client_message_from_lifecycle(
             &spectator,
             ClientMessage::RoomOperation {
                 operation_id: join_id,
@@ -993,6 +997,10 @@ async fn correlated_spectator_operations_echo_success_and_failure_ids() {
                     password: None,
                 }),
             },
+            server
+                .connection_manager
+                .client_lifecycle(&spectator)
+                .expect("spectator join source lifecycle"),
         )
         .await;
     assert!(matches!(

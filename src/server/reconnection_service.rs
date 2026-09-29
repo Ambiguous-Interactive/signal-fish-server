@@ -13,7 +13,7 @@ use crate::coordination::{
 };
 
 use super::session_policy::{membership_session_decision, ActiveSessionPlan};
-use super::{EnhancedGameServer, PendingApplicationClaimRollback};
+use super::{ClientLifecycle, EnhancedGameServer, PendingApplicationClaimRollback};
 
 struct ReconnectionClaimGuard {
     manager: Arc<ReconnectionManager>,
@@ -560,7 +560,7 @@ impl EnhancedGameServer {
     /// without touching any socket-side identity (no
     /// `effective_player_id` handle is supplied). It must only be driven by a
     /// caller that owns the reconnecting socket's identity — the connection
-    /// task uses `handle_reconnect_with_identity`. The message router
+    /// task uses `handle_reconnect_with_identity_operation_from_lifecycle`. The message router
     /// refuses `Reconnect` frames with a coded error for exactly this reason;
     /// see the `ClientMessage::Reconnect` arm in `message_router.rs`.
     pub async fn handle_reconnect(
@@ -597,29 +597,12 @@ impl EnhancedGameServer {
             auth_token.to_string(),
             None,
             operation_id,
-        )
-        .await
-    }
-
-    pub(crate) async fn handle_reconnect_with_identity(
-        self: &Arc<Self>,
-        current_player_id: &PlayerId,
-        reconnect_player_id: &PlayerId,
-        room_id: &RoomId,
-        auth_token: &str,
-        effective_player_id: Arc<tokio::sync::RwLock<PlayerId>>,
-    ) -> bool {
-        self.handle_reconnect_with_identity_operation(
-            current_player_id,
-            reconnect_player_id,
-            room_id,
-            auth_token,
-            effective_player_id,
             None,
         )
         .await
     }
 
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) async fn handle_reconnect_with_identity_operation(
         self: &Arc<Self>,
         current_player_id: &PlayerId,
@@ -636,6 +619,30 @@ impl EnhancedGameServer {
             auth_token.to_string(),
             Some(effective_player_id),
             operation_id,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn handle_reconnect_with_identity_operation_from_lifecycle(
+        self: &Arc<Self>,
+        current_player_id: &PlayerId,
+        reconnect_player_id: &PlayerId,
+        room_id: &RoomId,
+        auth_token: &str,
+        effective_player_id: Arc<tokio::sync::RwLock<PlayerId>>,
+        operation_id: Option<crate::protocol::RoomOperationId>,
+        source_lifecycle: Arc<ClientLifecycle>,
+    ) -> bool {
+        self.spawn_reconnect_transaction(
+            *current_player_id,
+            *reconnect_player_id,
+            *room_id,
+            auth_token.to_string(),
+            Some(effective_player_id),
+            operation_id,
+            Some(source_lifecycle),
         )
         .await
     }
@@ -648,6 +655,7 @@ impl EnhancedGameServer {
         auth_token: String,
         effective_player_id: Option<Arc<tokio::sync::RwLock<PlayerId>>>,
         operation_id: Option<crate::protocol::RoomOperationId>,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
     ) -> bool {
         let server = Arc::clone(self);
         let effective_player_id_for_recovery = effective_player_id.clone();
@@ -660,10 +668,11 @@ impl EnhancedGameServer {
         let panic_recovery = Arc::new(std::sync::Mutex::new(ReconnectPanicRecovery::default()));
         let panic_recovery_in_task = Arc::clone(&panic_recovery);
         let task = tokio::spawn(async move {
-            let Some(lifecycle) = server
-                .connection_manager
-                .client_lifecycle(&current_player_id)
-            else {
+            let Some(lifecycle) = source_lifecycle.or_else(|| {
+                server
+                    .connection_manager
+                    .client_lifecycle(&current_player_id)
+            }) else {
                 return false;
             };
             let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;

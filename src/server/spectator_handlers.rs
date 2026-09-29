@@ -34,6 +34,43 @@ impl EnhancedGameServer {
         spectator_name: String,
         password: Option<String>,
     ) {
+        self.handle_join_as_spectator_operation_from_lifecycle(
+            player_id,
+            operation_id,
+            game_name,
+            room_code,
+            spectator_name,
+            password,
+            None,
+        )
+        .await;
+    }
+
+    pub(super) async fn handle_join_as_spectator_operation_from_lifecycle(
+        &self,
+        player_id: &PlayerId,
+        operation_id: Option<crate::protocol::RoomOperationId>,
+        game_name: String,
+        room_code: String,
+        spectator_name: String,
+        password: Option<String>,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) {
+        let lifecycle =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id));
+        let initial_guard = if let Some(lifecycle) = &lifecycle {
+            let guard = lifecycle.lock().await;
+            if lifecycle.player_id() != *player_id
+                || !self
+                    .connection_manager
+                    .lifecycle_matches(player_id, lifecycle)
+            {
+                return;
+            }
+            Some(guard)
+        } else {
+            None
+        };
         // Shutdown-drain parity with the join path: only a socket upgraded
         // before the drain flipped can still deliver `JoinAsSpectator` inside
         // the grace window. Admitting it would publish a role the drain
@@ -50,18 +87,33 @@ impl EnhancedGameServer {
                 .await;
             return;
         }
+        drop(initial_guard);
         if let Err(err) = self
             .spectator_service
-            .join_operation(
+            .join_operation_from_lifecycle(
                 player_id,
                 operation_id,
                 game_name,
                 room_code,
                 spectator_name,
                 password,
+                lifecycle.clone(),
             )
             .await
         {
+            let _reply_guard = if let Some(lifecycle) = &lifecycle {
+                let guard = lifecycle.lock().await;
+                if lifecycle.player_id() != *player_id
+                    || !self
+                        .connection_manager
+                        .lifecycle_matches(player_id, lifecycle)
+                {
+                    return;
+                }
+                Some(guard)
+            } else {
+                None
+            };
             // The terminal response to a `JoinAsSpectator`, mirroring
             // `RoomJoinFailed` for `JoinRoom`: a client that awaits
             // `SpectatorJoined | SpectatorJoinFailed` — the pair `docs/protocol.md`

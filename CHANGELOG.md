@@ -147,6 +147,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Admission: an old socket cannot join a room, join as a spectator, or retry
+  reconnect under a restored player's identity (#686).
+
 - Spectator leave: an old socket cannot send a leave failure to a restored
   player or detach a spectator role owned by another socket (#686).
 

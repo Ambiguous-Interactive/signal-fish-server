@@ -1,5 +1,5 @@
 use super::{
-    session_policy::joiner_supports_sticky_plan, EnhancedGameServer,
+    session_policy::joiner_supports_sticky_plan, ClientLifecycle, EnhancedGameServer,
     MaxPlayersPerApplicationExceededError, MaxRoomsExceededError,
     MaxRoomsPerApplicationExceededError, MaxRoomsPerGameExceededError,
     PendingApplicationClaimRollback,
@@ -382,6 +382,37 @@ impl EnhancedGameServer {
         password: Option<String>,
         join_only: Option<bool>,
     ) {
+        self.handle_join_room_operation_from_lifecycle(
+            player_id,
+            operation_id,
+            game_name,
+            room_code,
+            player_name,
+            max_players,
+            supports_authority,
+            relay_transport,
+            password,
+            join_only,
+            None,
+        )
+        .await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn handle_join_room_operation_from_lifecycle(
+        self: &Arc<Self>,
+        player_id: &PlayerId,
+        operation_id: Option<crate::protocol::RoomOperationId>,
+        game_name: String,
+        room_code: Option<String>,
+        player_name: String,
+        max_players: Option<u8>,
+        supports_authority: Option<bool>,
+        relay_transport: Option<RelayTransport>,
+        password: Option<String>,
+        join_only: Option<bool>,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) {
         let server = Arc::clone(self);
         let player_id = *player_id;
         let terminal_response_committed = Arc::new(AtomicBool::new(false));
@@ -391,7 +422,9 @@ impl EnhancedGameServer {
         let panic_recovery = Arc::new(std::sync::Mutex::new(JoinPanicRecovery::default()));
         let panic_recovery_in_task = Arc::clone(&panic_recovery);
         let task = tokio::spawn(async move {
-            let Some(lifecycle) = server.connection_manager.client_lifecycle(&player_id) else {
+            let Some(lifecycle) =
+                source_lifecycle.or_else(|| server.connection_manager.client_lifecycle(&player_id))
+            else {
                 return;
             };
             let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
