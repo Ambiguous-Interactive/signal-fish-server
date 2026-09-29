@@ -269,7 +269,9 @@ pub trait GameDatabase: Send + Sync {
     /// Create a pending room while its creator owns the supplied liveness
     /// token. Backends with a repairable Creating state should store a weak
     /// reference atomically with insertion. The default retains compatibility
-    /// with adapters that implement the original pending-room method.
+    /// with adapters that implement the original pending-room method. Those
+    /// adapters must override this method to make insertion accounting and
+    /// abandoned-room repair atomic; the default cannot guarantee either.
     #[allow(clippy::too_many_arguments)]
     async fn create_pending_room_owned_classified(
         &self,
@@ -282,7 +284,7 @@ pub trait GameDatabase: Send + Sync {
         region_id: String,
         application_id: Option<Uuid>,
         join_password: Option<RoomPasswordCredential>,
-        _creation_owner: std::sync::Arc<()>,
+        _creation_owner: PendingRoomCreation,
     ) -> CreateRoomResult {
         self.create_pending_room_classified(
             game_name,
@@ -681,14 +683,78 @@ const CLEANUP_RECLAIM_WINDOW: chrono::Duration = chrono::Duration::minutes(5);
 /// forgets it.
 const CLEANUP_EVENT_RETENTION: chrono::Duration = chrono::Duration::hours(1);
 
+/// Tracks one server-owned pending room through cancellation and repair.
+/// The database holds only a weak owner reference, so dropping the creator
+/// makes its unfinished room eligible for cleanup.
+#[derive(Clone)]
+pub struct PendingRoomCreation {
+    owner: std::sync::Arc<()>,
+    accounting: std::sync::Arc<PendingRoomAccounting>,
+}
+
+struct PendingRoomAccounting {
+    metrics: std::sync::Arc<crate::metrics::ServerMetrics>,
+    inserted: std::sync::atomic::AtomicBool,
+    creator_left: std::sync::atomic::AtomicBool,
+}
+
+impl PendingRoomCreation {
+    pub fn new(metrics: std::sync::Arc<crate::metrics::ServerMetrics>) -> Self {
+        Self {
+            owner: std::sync::Arc::new(()),
+            accounting: std::sync::Arc::new(PendingRoomAccounting {
+                metrics,
+                inserted: std::sync::atomic::AtomicBool::new(false),
+                creator_left: std::sync::atomic::AtomicBool::new(false),
+            }),
+        }
+    }
+
+    /// Count the inserted room and its initial member once, before any later
+    /// suspension can lose the creator operation.
+    pub(crate) fn record_inserted(&self) {
+        self.accounting.record_inserted();
+    }
+
+    pub(crate) fn record_creator_left(&self) {
+        self.accounting.record_creator_left();
+    }
+}
+
+impl PendingRoomAccounting {
+    fn record_inserted(&self) {
+        if !self
+            .inserted
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            self.metrics.increment_rooms_created();
+            self.metrics.increment_players_joined();
+        }
+    }
+
+    fn record_creator_left(&self) {
+        self.record_inserted();
+        if !self
+            .creator_left
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            self.metrics.increment_players_left();
+        }
+    }
+}
+
 enum PendingRoomState {
     Creating {
         creator_id: PlayerId,
         /// Legacy direct callers have no operation token and are not swept
         /// automatically; server admission uses an owned token.
         owner: Option<std::sync::Weak<()>>,
+        accounting: Option<std::sync::Arc<PendingRoomAccounting>>,
     },
-    Abandoned(PlayerId),
+    Abandoned {
+        creator_id: PlayerId,
+        accounting: Option<std::sync::Arc<PendingRoomAccounting>>,
+    },
 }
 
 /// Saturating `std::time::Duration` → `chrono::Duration` conversion for
@@ -792,6 +858,8 @@ pub struct InMemoryDatabase {
     #[cfg(all(test, signal_fish_repository_tests))]
     panic_update_player_name_once: std::sync::atomic::AtomicBool,
     #[cfg(all(test, signal_fish_repository_tests))]
+    panic_after_pending_insert_once: std::sync::atomic::AtomicBool,
+    #[cfg(all(test, signal_fish_repository_tests))]
     fail_delete_room_once: std::sync::atomic::AtomicBool,
     #[cfg(all(test, signal_fish_repository_tests))]
     pause_publish_room_once: std::sync::atomic::AtomicBool,
@@ -886,6 +954,8 @@ impl InMemoryDatabase {
             panic_set_room_max_spectators_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
             panic_update_player_name_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            panic_after_pending_insert_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
             fail_delete_room_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
@@ -1106,6 +1176,12 @@ impl InMemoryDatabase {
     }
 
     #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn panic_after_next_pending_insert_for_test(&self) {
+        self.panic_after_pending_insert_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) fn fail_next_delete_room_for_test(&self) {
         self.fail_delete_room_once
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1298,7 +1374,7 @@ impl InMemoryDatabase {
         application_id: Option<Uuid>,
         join_password: Option<RoomPasswordCredential>,
         pending: bool,
-        creation_owner: Option<std::sync::Arc<()>>,
+        creation_owner: Option<PendingRoomCreation>,
     ) -> CreateRoomResult {
         let room_code =
             room_code.unwrap_or_else(crate::protocol::room_codes::generate_clean_room_code);
@@ -1409,9 +1485,24 @@ impl InMemoryDatabase {
                 room_id,
                 PendingRoomState::Creating {
                     creator_id,
-                    owner: creation_owner.as_ref().map(std::sync::Arc::downgrade),
+                    owner: creation_owner
+                        .as_ref()
+                        .map(|creation| std::sync::Arc::downgrade(&creation.owner)),
+                    accounting: creation_owner
+                        .as_ref()
+                        .map(|creation| std::sync::Arc::clone(&creation.accounting)),
                 },
             );
+            if let Some(creation) = creation_owner.as_ref() {
+                creation.record_inserted();
+            }
+            #[cfg(all(test, signal_fish_repository_tests))]
+            if self
+                .panic_after_pending_insert_once
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
+                panic!("injected panic after pending room insertion");
+            }
         }
 
         Ok(room)
@@ -1518,7 +1609,7 @@ impl GameDatabase for InMemoryDatabase {
         region_id: String,
         application_id: Option<Uuid>,
         join_password: Option<RoomPasswordCredential>,
-        creation_owner: std::sync::Arc<()>,
+        creation_owner: PendingRoomCreation,
     ) -> CreateRoomResult {
         self.create_room_with_state(
             game_name,
@@ -2114,10 +2205,17 @@ impl GameDatabase for InMemoryDatabase {
         let mut publication = self.room_publication.write().await;
 
         if let Some(room) = rooms.remove(room_id) {
+            let accounting = publication.get(room_id).and_then(|state| match state {
+                PendingRoomState::Creating { accounting, .. }
+                | PendingRoomState::Abandoned { accounting, .. } => accounting.clone(),
+            });
             let game_room_key = (room.game_name.clone(), room.code);
             room_codes.remove(&game_room_key);
             liveness.remove(room_id);
             publication.remove(room_id);
+            if let Some(accounting) = accounting {
+                accounting.record_creator_left();
+            }
             Ok(true)
         } else {
             Ok(false)
@@ -2140,7 +2238,7 @@ impl GameDatabase for InMemoryDatabase {
         let mut publication = self.room_publication.write().await;
         if matches!(
             publication.get(room_id),
-            Some(PendingRoomState::Abandoned(_))
+            Some(PendingRoomState::Abandoned { .. })
         ) {
             anyhow::bail!("Room {room_id} was abandoned before publication");
         }
@@ -2159,10 +2257,18 @@ impl GameDatabase for InMemoryDatabase {
         // Publication may have started inside the response builder but its
         // queue commit can still fail. The caller holds the room lane until
         // rollback finishes, so revoke lookup visibility before detaching.
-        self.room_publication
-            .write()
-            .await
-            .insert(*room_id, PendingRoomState::Abandoned(*creator_id));
+        let mut publication = self.room_publication.write().await;
+        let accounting = publication.get(room_id).and_then(|state| match state {
+            PendingRoomState::Creating { accounting, .. }
+            | PendingRoomState::Abandoned { accounting, .. } => accounting.clone(),
+        });
+        publication.insert(
+            *room_id,
+            PendingRoomState::Abandoned {
+                creator_id: *creator_id,
+                accounting,
+            },
+        );
         Ok(())
     }
 
@@ -2171,7 +2277,7 @@ impl GameDatabase for InMemoryDatabase {
         Ok(publication
             .iter()
             .filter_map(|(id, state)| match state {
-                PendingRoomState::Abandoned(_) => Some(*id),
+                PendingRoomState::Abandoned { .. } => Some(*id),
                 PendingRoomState::Creating {
                     owner: Some(owner), ..
                 } if owner.upgrade().is_none() => Some(*id),
@@ -2204,14 +2310,21 @@ impl GameDatabase for InMemoryDatabase {
         let Some(state) = publication.get(room_id) else {
             return Ok(false);
         };
-        let creator_id = match state {
-            PendingRoomState::Creating { creator_id, owner } => {
+        let (creator_id, accounting) = match state {
+            PendingRoomState::Creating {
+                creator_id,
+                owner,
+                accounting,
+            } => {
                 if owner.as_ref().is_none_or(|owner| owner.upgrade().is_some()) {
                     return Ok(false);
                 }
-                creator_id
+                (creator_id, accounting.clone())
             }
-            PendingRoomState::Abandoned(creator_id) => creator_id,
+            PendingRoomState::Abandoned {
+                creator_id,
+                accounting,
+            } => (creator_id, accounting.clone()),
         };
         if room.players.len() > 1 || room.players.keys().any(|player_id| player_id != creator_id) {
             return Ok(false);
@@ -2221,6 +2334,9 @@ impl GameDatabase for InMemoryDatabase {
         room_codes.remove(&key);
         liveness.remove(room_id);
         publication.remove(room_id);
+        if let Some(accounting) = accounting {
+            accounting.record_creator_left();
+        }
         Ok(true)
     }
 

@@ -7777,6 +7777,9 @@ async fn canceled_creator_baseline_with_failed_delete_is_repaired() {
     assert_eq!(database.pending_room_ids().await.unwrap().len(), 1);
     assert_eq!(server.cleanup_abandoned_rooms().await, 1);
     assert_eq!(server.metrics.rooms_deleted.load(Ordering::Relaxed), 1);
+    assert_eq!(server.metrics.rooms_created.load(Ordering::Relaxed), 1);
+    assert_eq!(server.metrics.players_joined.load(Ordering::Relaxed), 1);
+    assert_eq!(server.metrics.players_left.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -10398,6 +10401,37 @@ async fn spectator_cap_write_failure_refuses_creation_and_allows_retry() {
 }
 
 /// Issue #658: an interrupted creator leaves a hidden room that repair must reclaim.
+#[tokio::test]
+async fn direct_pending_room_delete_balances_creator_metrics_once() {
+    let database = InMemoryDatabase::new();
+    database.initialize().await.expect("database initializes");
+    let metrics = Arc::new(crate::metrics::ServerMetrics::default());
+    let creation = crate::database::PendingRoomCreation::new(Arc::clone(&metrics));
+    let room = database
+        .create_pending_room_owned_classified(
+            "direct-delete".into(),
+            Some("DIRECT1".into()),
+            4,
+            true,
+            PlayerId::new_v4(),
+            "relay".into(),
+            "local".into(),
+            None,
+            None,
+            creation.clone(),
+        )
+        .await
+        .expect("pending room inserts");
+    assert!(database.delete_room(&room.id).await.unwrap());
+    assert_eq!(metrics.players_left.load(Ordering::Relaxed), 1);
+    creation.record_creator_left();
+    assert!(!database.delete_room(&room.id).await.unwrap());
+    assert_eq!(metrics.rooms_created.load(Ordering::Relaxed), 1);
+    assert_eq!(metrics.players_joined.load(Ordering::Relaxed), 1);
+    assert_eq!(metrics.players_left.load(Ordering::Relaxed), 1);
+}
+
+/// Issue #658: an interrupted creator leaves a hidden room that repair must reclaim.
 #[tokio::test(start_paused = true)]
 async fn interrupted_creation_releases_hidden_room_and_reserved_code() {
     let database = Arc::new(InMemoryDatabase::new());
@@ -10415,7 +10449,7 @@ async fn interrupted_creation_releases_hidden_room_and_reserved_code() {
         .acquire("room_join:interrupted:RETRY1", Duration::from_secs(10))
         .await
         .expect("creator owns code lock");
-    let creation_owner = Arc::new(());
+    let creation_owner = crate::database::PendingRoomCreation::new(Arc::clone(&server.metrics));
     let pending = database
         .create_pending_room_owned_classified(
             "interrupted".into(),
@@ -10427,7 +10461,7 @@ async fn interrupted_creation_releases_hidden_room_and_reserved_code() {
             "local".into(),
             None,
             None,
-            Arc::clone(&creation_owner),
+            creation_owner.clone(),
         )
         .await
         .expect("pending room inserts atomically");
@@ -10463,7 +10497,7 @@ async fn interrupted_creation_releases_hidden_room_and_reserved_code() {
             "local".into(),
             None,
             None,
-            Arc::new(()),
+            crate::database::PendingRoomCreation::new(Arc::clone(&server.metrics)),
         )
         .await
         .is_ok());
@@ -10485,7 +10519,7 @@ async fn pending_room_repair_preserves_active_creator_after_code_lease_expires()
         .acquire("room_join:active-creation:ACTIVE1", Duration::from_secs(10))
         .await
         .expect("creator owns code lock");
-    let creation_owner = Arc::new(());
+    let creation_owner = crate::database::PendingRoomCreation::new(Arc::clone(&server.metrics));
     let pending = database
         .create_pending_room_owned_classified(
             "active-creation".into(),
@@ -10497,7 +10531,7 @@ async fn pending_room_repair_preserves_active_creator_after_code_lease_expires()
             "local".into(),
             None,
             None,
-            Arc::clone(&creation_owner),
+            creation_owner.clone(),
         )
         .await
         .expect("creator inserts pending room");
@@ -10577,7 +10611,7 @@ async fn generic_room_cleanup_keeps_unpublished_rooms_for_repair() {
     )
     .await;
     let creator_id = PlayerId::new_v4();
-    let creation_owner = Arc::new(());
+    let creation_owner = crate::database::PendingRoomCreation::new(Arc::clone(&server.metrics));
     let pending = database
         .create_pending_room_owned_classified(
             "pending-expiry".into(),
@@ -10589,7 +10623,7 @@ async fn generic_room_cleanup_keeps_unpublished_rooms_for_repair() {
             "local".into(),
             None,
             None,
-            Arc::clone(&creation_owner),
+            creation_owner.clone(),
         )
         .await
         .expect("pending room inserts");
@@ -10826,6 +10860,64 @@ async fn failed_name_write_and_delete_repair_pending_room() {
 /// A storage panic after insertion must not leave a pending room outside the
 /// abandoned-room repair scan.
 #[tokio::test(start_paused = true)]
+async fn panic_after_pending_insert_balances_creation_metrics_once() {
+    let database = Arc::new(InMemoryDatabase::new());
+    database.initialize().await.expect("database initializes");
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        Arc::new(InMemoryDistributedLock::new()),
+        database.clone(),
+    )
+    .await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48420".parse().unwrap()).await;
+    database.panic_after_next_pending_insert_for_test();
+    let operation_id = uuid::Uuid::from_u128(48420);
+    server
+        .handle_join_room_operation(
+            &creator,
+            Some(operation_id),
+            "insert-panic".into(),
+            Some("PANINS".into()),
+            "Creator".into(),
+            Some(4),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(matches!(
+        creator_rx.recv().await.unwrap().as_ref(),
+        ServerMessage::RoomOperationResult { operation_id: received, .. }
+            if *received == operation_id
+    ));
+    assert_eq!(database.pending_room_ids().await.unwrap().len(), 1);
+    assert!(database
+        .get_room("insert-panic", "PANINS")
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(server.metrics.rooms_created.load(Ordering::Relaxed), 1);
+    assert_eq!(server.metrics.players_joined.load(Ordering::Relaxed), 1);
+    assert_eq!(server.metrics.players_left.load(Ordering::Relaxed), 0);
+
+    database.fail_next_delete_room_for_test();
+    tokio::time::advance(Duration::from_secs(11)).await;
+    assert_eq!(server.cleanup_abandoned_rooms().await, 0);
+    assert_eq!(server.metrics.players_left.load(Ordering::Relaxed), 0);
+    assert_eq!(server.cleanup_abandoned_rooms().await, 1);
+    assert_eq!(server.cleanup_abandoned_rooms().await, 0);
+    assert_eq!(database.get_total_room_count().await.unwrap(), 0);
+    assert_eq!(server.metrics.rooms_created.load(Ordering::Relaxed), 1);
+    assert_eq!(server.metrics.players_joined.load(Ordering::Relaxed), 1);
+    assert_eq!(server.metrics.players_left.load(Ordering::Relaxed), 1);
+    assert_eq!(server.metrics.rooms_deleted.load(Ordering::Relaxed), 1);
+}
+
+/// A storage panic during creator setup must leave the room repairable.
+#[tokio::test(start_paused = true)]
 async fn creator_setup_panic_keeps_pending_room_repairable() {
     for (index, panic_at_cap) in [true, false].into_iter().enumerate() {
         let database = Arc::new(InMemoryDatabase::new());
@@ -10896,6 +10988,7 @@ async fn creator_setup_panic_keeps_pending_room_repairable() {
         assert!(database.pending_room_ids().await.unwrap().is_empty());
         assert_eq!(database.get_total_room_count().await.unwrap(), 0);
         assert_eq!(server.metrics.rooms_deleted.load(Ordering::Relaxed), 1);
+        assert_eq!(server.metrics.players_left.load(Ordering::Relaxed), 1);
 
         server
             .handle_join_room(

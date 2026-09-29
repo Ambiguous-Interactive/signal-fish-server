@@ -5,7 +5,7 @@ use super::{
     PendingApplicationClaimRollback,
 };
 use crate::coordination::RoomEventMutationGuard;
-use crate::database::CreateRoomError;
+use crate::database::{CreateRoomError, PendingRoomCreation};
 use crate::distributed::{LeaseRenewalGuard, LockHandle};
 use crate::protocol::validation;
 use crate::protocol::{
@@ -49,7 +49,7 @@ enum RoomAdmissionKind {
         application_claim_rollback: Option<PendingApplicationClaimRollback>,
         /// Held through the first response commit. Storage uses a weak copy to
         /// distinguish an interrupted creator from one still working.
-        _creation_owner: Arc<()>,
+        creation_owner: PendingRoomCreation,
     },
 }
 
@@ -229,6 +229,9 @@ impl EnhancedGameServer {
         admission_kind: RoomAdmissionKind,
         reason: &'static str,
     ) {
+        if let RoomAdmissionKind::Created { creation_owner, .. } = &admission_kind {
+            creation_owner.record_creator_left();
+        }
         let created_room_is_still_exclusive = if matches!(
             admission_kind,
             RoomAdmissionKind::Created { .. }
@@ -256,7 +259,6 @@ impl EnhancedGameServer {
                     }
                     self.room_applications.remove(&room_id);
                     let _ = self.room_coordinator.clear_ready_players(&room_id).await;
-                    self.metrics.increment_players_left();
                     return;
                 }
                 Err(error) => {
@@ -302,7 +304,9 @@ impl EnhancedGameServer {
         // Admission already moved `players_joined`, but no RoomJoined reached
         // the client. Balance that logical membership immediately; eventual
         // storage repair must not move activity metrics a second time.
-        self.metrics.increment_players_left();
+        if matches!(admission_kind, RoomAdmissionKind::Existing { .. }) {
+            self.metrics.increment_players_left();
+        }
     }
 
     /// Roll back a pre-terminal join while the actor lifecycle guard remains
@@ -2324,7 +2328,7 @@ impl EnhancedGameServer {
                         ));
                     }
 
-                    let creation_owner = Arc::new(());
+                    let creation_owner = PendingRoomCreation::new(Arc::clone(&self.metrics));
                     let creation_result = async {
                         if let (Some(app_id), Some(app_limit)) = (
                             client_app_id,
@@ -2419,7 +2423,7 @@ impl EnhancedGameServer {
                                 region_id,
                                 client_app_id,
                                 creation_password,
-                                Arc::clone(&creation_owner),
+                                creation_owner.clone(),
                             )
                             .await
                         {
@@ -2525,6 +2529,7 @@ impl EnhancedGameServer {
                         };
 
                         if self.is_draining() {
+                            creation_owner.record_creator_left();
                             match self.database.delete_room(&room.id).await {
                                 Ok(true) => {
                                     self.metrics.add_rooms_deleted(1);
@@ -2567,8 +2572,7 @@ impl EnhancedGameServer {
                                     .lock_room_event_mutation(&room.id)
                                     .await,
                             );
-                            self.metrics.increment_rooms_created();
-                            self.metrics.increment_players_joined();
+                            creation_owner.record_inserted();
                             if let Some(app_id) = client_app_id {
                                 self.cache_room_application(&room.id, app_id);
                             }
@@ -2576,7 +2580,7 @@ impl EnhancedGameServer {
                                 application_claim_rollback: client_app_id.map(|application_id| {
                                     PendingApplicationClaimRollback { application_id }
                                 }),
-                                _creation_owner: creation_owner,
+                                creation_owner,
                             };
                             // A positive deployment cap must be durable before
                             // this creator can publish a join. The room-code
