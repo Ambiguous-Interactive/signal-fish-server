@@ -272,6 +272,7 @@ impl SpectatorService {
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn join_operation(
         &self,
         player_id: &PlayerId,
@@ -280,6 +281,28 @@ impl SpectatorService {
         room_code: String,
         spectator_name: String,
         password: Option<String>,
+    ) -> Result<(), SpectatorError> {
+        self.join_operation_from_lifecycle(
+            player_id,
+            operation_id,
+            game_name,
+            room_code,
+            spectator_name,
+            password,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn join_operation_from_lifecycle(
+        &self,
+        player_id: &PlayerId,
+        operation_id: Option<crate::protocol::RoomOperationId>,
+        game_name: String,
+        room_code: String,
+        spectator_name: String,
+        password: Option<String>,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
     ) -> Result<(), SpectatorError> {
         let service = self.clone();
         let player_id = *player_id;
@@ -302,7 +325,9 @@ impl SpectatorService {
             // the lifecycle lock could race a concurrent admission for the
             // same connection (deleting a newer row or rewinding a newer
             // advance). Same discipline as the player join's panic repair.
-            let Some(lifecycle) = service.connection_manager.client_lifecycle(&player_id) else {
+            let Some(lifecycle) = source_lifecycle
+                .or_else(|| service.connection_manager.client_lifecycle(&player_id))
+            else {
                 return Err(SpectatorError::new(
                     "Connection is no longer active",
                     Some(ErrorCode::SpectatorJoinFailed),

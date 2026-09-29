@@ -209,8 +209,9 @@ impl EnhancedGameServer {
                 password,
                 join_only,
             } => {
-                self.handle_join_room(
+                self.handle_join_room_operation_from_lifecycle(
                     player_id,
+                    None,
                     game_name,
                     room_code,
                     player_name,
@@ -219,6 +220,7 @@ impl EnhancedGameServer {
                     relay_transport,
                     password,
                     join_only,
+                    source_lifecycle,
                 )
                 .await;
             }
@@ -301,12 +303,14 @@ impl EnhancedGameServer {
                 spectator_name,
                 password,
             } => {
-                self.handle_join_as_spectator(
+                self.handle_join_as_spectator_operation_from_lifecycle(
                     player_id,
+                    None,
                     game_name,
                     room_code,
                     spectator_name,
                     password,
+                    source_lifecycle,
                 )
                 .await;
             }
@@ -368,7 +372,7 @@ impl EnhancedGameServer {
                         password,
                         join_only,
                     } => {
-                        self.handle_join_room_operation(
+                        self.handle_join_room_operation_from_lifecycle(
                             player_id,
                             Some(operation_id),
                             game_name,
@@ -379,6 +383,7 @@ impl EnhancedGameServer {
                             relay_transport,
                             password,
                             join_only,
+                            source_lifecycle,
                         )
                         .await;
                     }
@@ -414,13 +419,14 @@ impl EnhancedGameServer {
                         spectator_name,
                         password,
                     } => {
-                        self.handle_join_as_spectator_operation(
+                        self.handle_join_as_spectator_operation_from_lifecycle(
                             player_id,
                             Some(operation_id),
                             game_name,
                             room_code,
                             spectator_name,
                             password,
+                            source_lifecycle,
                         )
                         .await;
                     }
