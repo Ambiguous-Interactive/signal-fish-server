@@ -23,6 +23,7 @@ use crate::rate_limit::RoomRateLimiter;
 use crate::reconnection::ReconnectionManager;
 use tokio::sync::watch;
 
+use super::connection_manager::ClientLifecycle;
 use super::room_service::ROOM_JOIN_LOCK_TTL;
 use super::ConnectionManager;
 
@@ -863,7 +864,16 @@ impl SpectatorService {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn leave(&self, player_id: &PlayerId) -> Result<(), SpectatorError> {
+        self.leave_from_lifecycle(player_id, None).await
+    }
+
+    pub(crate) async fn leave_from_lifecycle(
+        &self,
+        player_id: &PlayerId,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) -> Result<(), SpectatorError> {
         if !self.is_spectating(player_id) {
             return Err(SpectatorError::new(
                 "You are not currently spectating a room",
@@ -871,7 +881,11 @@ impl SpectatorService {
             ));
         }
         if self
-            .detach(player_id, SpectatorStateChangeReason::VoluntaryLeave)
+            .detach_from_lifecycle(
+                player_id,
+                SpectatorStateChangeReason::VoluntaryLeave,
+                source_lifecycle,
+            )
             .await
         {
             Ok(())
@@ -883,10 +897,11 @@ impl SpectatorService {
         }
     }
 
-    pub(crate) async fn leave_operation(
+    pub(crate) async fn leave_operation_from_lifecycle(
         &self,
         player_id: &PlayerId,
         operation_id: crate::protocol::RoomOperationId,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
     ) -> Result<(), SpectatorError> {
         if !self.is_spectating(player_id) {
             return Err(SpectatorError::new(
@@ -895,10 +910,11 @@ impl SpectatorService {
             ));
         }
         if self
-            .detach_operation(
+            .detach_operation_from_lifecycle(
                 player_id,
                 SpectatorStateChangeReason::VoluntaryLeave,
                 operation_id,
+                source_lifecycle,
             )
             .await
         {
@@ -954,6 +970,7 @@ impl SpectatorService {
                     SpectatorStateChangeReason::RoomClosed,
                     Some(room_id),
                     drain,
+                    None,
                     None,
                     None,
                 )
@@ -1128,16 +1145,34 @@ impl SpectatorService {
         player_id: &PlayerId,
         reason: SpectatorStateChangeReason,
     ) -> bool {
-        let (drain_tx, drain_rx) = watch::channel(false);
-        self.detach_expected(player_id, reason, None, drain_rx, Some(drain_tx), None)
-            .await
+        self.detach_from_lifecycle(player_id, reason, None).await
     }
 
-    pub(crate) async fn detach_operation(
+    async fn detach_from_lifecycle(
+        &self,
+        player_id: &PlayerId,
+        reason: SpectatorStateChangeReason,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) -> bool {
+        let (drain_tx, drain_rx) = watch::channel(false);
+        self.detach_expected(
+            player_id,
+            reason,
+            None,
+            drain_rx,
+            Some(drain_tx),
+            None,
+            source_lifecycle,
+        )
+        .await
+    }
+
+    async fn detach_operation_from_lifecycle(
         &self,
         player_id: &PlayerId,
         reason: SpectatorStateChangeReason,
         operation_id: crate::protocol::RoomOperationId,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
     ) -> bool {
         let (drain_tx, drain_rx) = watch::channel(false);
         self.detach_expected(
@@ -1147,6 +1182,7 @@ impl SpectatorService {
             drain_rx,
             Some(drain_tx),
             Some(operation_id),
+            source_lifecycle,
         )
         .await
     }
@@ -1159,8 +1195,10 @@ impl SpectatorService {
         drain: watch::Receiver<bool>,
         drain_owner: Option<watch::Sender<bool>>,
         operation_id: Option<crate::protocol::RoomOperationId>,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
     ) -> bool {
-        let lifecycle = self.connection_manager.client_lifecycle(player_id);
+        let lifecycle =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id));
         let lifecycle_guard = match lifecycle.as_ref() {
             Some(lifecycle) => Some(Arc::clone(lifecycle).lock_owned().await),
             None => None,

@@ -1002,14 +1002,30 @@ async fn correlated_spectator_operations_echo_success_and_failure_ids() {
                 && matches!(result.as_ref(), RoomOperationResult::SpectatorJoined(_))
     ));
 
+    let (other, _other_rx) = register_router_test_client(&server).await;
+    let wrong_lifecycle = server
+        .connection_manager
+        .client_lifecycle(&other)
+        .expect("other socket lifecycle");
+    assert!(server
+        .spectator_service
+        .leave_from_lifecycle(&spectator, Some(wrong_lifecycle))
+        .await
+        .is_err());
+    assert!(server.spectator_service.is_spectating(&spectator));
+
     let leave_id = uuid::Uuid::from_u128(12);
     server
-        .handle_client_message(
+        .handle_client_message_from_lifecycle(
             &spectator,
             ClientMessage::RoomOperation {
                 operation_id: leave_id,
                 operation: Box::new(RoomOperationRequest::LeaveSpectator),
             },
+            server
+                .connection_manager
+                .client_lifecycle(&spectator)
+                .expect("spectator socket lifecycle"),
         )
         .await;
     assert!(matches!(
