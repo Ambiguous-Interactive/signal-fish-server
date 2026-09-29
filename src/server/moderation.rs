@@ -52,7 +52,7 @@ impl EnhancedGameServer {
     /// `Error` frame; a target whose live route is in another room — a
     /// seated route or a spectator session — loses only the residue row or
     /// the tombstoned record, and its live connection stays open.
-    #[cfg(test)]
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(super) async fn handle_kick_player_operation(
         self: &Arc<Self>,
         authority_id: &PlayerId,
@@ -129,7 +129,7 @@ impl EnhancedGameServer {
     /// room's remaining lifetime. The ban write is serialized behind the
     /// room mutation gate ahead of the removal, so a concurrent admission
     /// cannot slip in between the ban decision and the eviction.
-    #[cfg(test)]
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(super) async fn handle_ban_player_operation(
         self: &Arc<Self>,
         authority_id: &PlayerId,
