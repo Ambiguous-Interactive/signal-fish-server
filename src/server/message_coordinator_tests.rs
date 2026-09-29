@@ -1470,10 +1470,8 @@ async fn stale_terminal_unroute_preserves_new_room_route() {
         .broadcast_to_room(&room_b, Arc::new(ServerMessage::Pong))
         .await
         .expect("send to new room");
-    assert!(matches!(
-        receiver.try_recv().as_deref(),
-        Ok(ServerMessage::Pong)
-    ));
+    let room_delivery = receiver.try_recv();
+    assert!(matches!(room_delivery.as_deref(), Ok(ServerMessage::Pong)));
 
     let lobby_delivery = connections
         .clear_room_assignment(&player_id)
@@ -1500,10 +1498,8 @@ async fn stale_terminal_unroute_preserves_new_room_route() {
         .send_to_player(&player_id, Arc::new(ServerMessage::Pong))
         .await
         .expect("live lobby delivery");
-    assert!(matches!(
-        receiver.try_recv().as_deref(),
-        Ok(ServerMessage::Pong)
-    ));
+    let lobby_response = receiver.try_recv();
+    assert!(matches!(lobby_response.as_deref(), Ok(ServerMessage::Pong)));
     coordinator
         .unregister_local_client(&player_id)
         .await
