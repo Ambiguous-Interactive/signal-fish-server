@@ -147,6 +147,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reconnect: a failed restore no longer leaves an unrouted player as room
+  authority when membership cleanup also fails (#647).
+
 - Moderation: concurrent kick and ban requests no longer deadlock when
   storage contains cross-room stale rows (#680).
 

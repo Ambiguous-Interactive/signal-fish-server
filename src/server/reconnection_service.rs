@@ -459,6 +459,7 @@ impl EnhancedGameServer {
         // "nothing left to repair"; `Some(rollback)` re-queues the retry with
         // the provenance it started with.
         let mut requeue_detach = restore.cleared_pending_detach.clone();
+        let mut authority_needs_rollback = !restore.restored_membership;
         if restore.restored_membership {
             if let Err(err) = self
                 .database
@@ -468,6 +469,7 @@ impl EnhancedGameServer {
                 // The row survives, so a detach retry is owed whether or not
                 // this attempt inherited one.
                 requeue_detach = Some(requeue_detach.flatten());
+                authority_needs_rollback = true;
                 tracing::warn!(
                     player_id = %disconnected.player_id,
                     room_id = %disconnected.room_id,
@@ -479,7 +481,11 @@ impl EnhancedGameServer {
                 // application-claim rollback still needs a retry.
                 requeue_detach = requeue_detach.filter(Option::is_some);
             }
-        } else if restore.restored_authority {
+        }
+        // Successful removal clears this member's authority in storage. A
+        // failed removal leaves its row behind, so release the granted role
+        // while detach repair waits for storage to recover.
+        if restore.restored_authority && authority_needs_rollback {
             if let Err(err) = self
                 .database
                 .update_room_authority(&disconnected.room_id, None)
