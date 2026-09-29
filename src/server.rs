@@ -564,7 +564,7 @@ impl Default for ModerationLifecycleTestGate {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, signal_fish_repository_tests))]
 impl ModerationLifecycleTestGate {
     pub(crate) async fn wait_until_acquired(&self, expected: usize) {
         loop {
@@ -1740,7 +1740,7 @@ impl EnhancedGameServer {
         gate
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) fn install_moderation_lifecycle_test_gate(
         &self,
     ) -> Arc<ModerationLifecycleTestGate> {
