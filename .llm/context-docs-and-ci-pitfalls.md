@@ -123,6 +123,26 @@ Config and binary wire-format drift rules:
   devcontainer / mutation job): cross-link correctness across three arches beats the marginal
   link-time win. (5) `armv7-unknown-linux-gnueabihf` links fine once (2) is satisfied — armv7-A has
   64-bit atomics (LDREXD), so there is no `__atomic_*`/`-latomic` problem despite it being 32-bit.
+- **Rustdoc lane denies private intra-doc links from public docs** -- the
+  doc-validation job sets `-D rustdoc::private_intra_doc_links`, so a `pub`
+  item's doc comment may not link `[`PrivateType::method`]` even when the link
+  resolves locally. Point at private items with plain backticks (no brackets);
+  link only `pub` targets. When RCA-ing a doc-lint failure, `cargo clean -p
+  signal-fish-server` first: `cargo doc` can pass from stale doc artifacts or
+  from a worktree that was reset to another branch -- always confirm `git
+  branch` shows the PR branch before trusting a local green run.
+- **Mutation inventory drift fails the per-PR nextest lane** -- adding or
+  changing mutation-scoped production code changes `cargo mutants --list`'s
+  count, and `test_mutation_total_mutants_constant_matches_list` (ubuntu
+  nextest lane, cargo-mutants preinstalled) fails the PR that caused the
+  drift. Before pushing a production-code change: run `cargo mutants --list |
+  grep -c .`, update `MUTATION_TOTAL_MUTANTS` (+ its changelog comment) in
+  `tests/ci_config_tests.rs`, and re-run
+  `test_mutation_shard_budget_is_feasible_vs_timeout` -- bumping the shard
+  count N in `mutation.yml` means every pinned site at once (matrix list, job
+  name, run step, and the policy test's pinned run-line literal). The
+  feasibility contract lives in
+  [Mutation Testing Performance](skills/mutation-testing-performance/SKILL.md).
 - **`rustls-pemfile` (RUSTSEC-2025-0134) is banned proactively, not because it is present** --
   `deny.toml` carries a `[[bans.deny]]` for the unmaintained `rustls-pemfile`, but the crate is
   NOT in the dependency tree (`cargo tree -i rustls-pemfile` matches nothing) on the default build

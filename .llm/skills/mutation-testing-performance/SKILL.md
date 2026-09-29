@@ -17,6 +17,9 @@ description: >-
 - Changing the mutation build profile, linker, oracle scope, or feature set
 - Reviewing a change to `scripts/run-mutants.sh`, `.cargo/mutants.toml`, or
   `.github/workflows/mutation.yml`
+- **A PR adds or changes mutation-scoped production code** — the mutant count
+  drifts and `test_mutation_total_mutants_constant_matches_list` fails the
+  ubuntu nextest lane (see [Count Drift on a PR](#6-count-drift-on-a-pr))
 
 ---
 
@@ -145,10 +148,11 @@ re-checking the others can silently reintroduce the cancellation:
 
 Measured in CI: shard 22, the worst 12-mutant shard, took 310.12s, or
 25.843s/mutant. Adding ~10% headroom and rounding up gives a conservative
-29s/mutant budget. Using 41 shards caps the modeled largest shard at
-`ceil(408/41) × 29s = 10 × 29s = 290s`, below the 5-minute target. The
-10-minute `timeout-minutes` retains headroom for runner variance or an
-occasional cache miss.
+29s/mutant budget. The current interlocked values live in
+`tests/ci_config_tests.rs` (`MUTATION_TOTAL_MUTANTS` + its changelog comment,
+`MUTATION_PER_MUTANT_BUDGET_SECS`) and in `mutation.yml` (matrix list N,
+`timeout-minutes`) — read them together; this skill's prose numbers are
+examples, not the source of truth.
 
 ---
 
@@ -186,6 +190,36 @@ Two pre-existing **free guards** also cover this workflow without new code:
 
 Do not duplicate flags into the workflow YAML or a developer's shell history;
 change them once in the script (or the toml) so every runner stays in lockstep.
+
+---
+
+## 6. Count Drift on a PR
+
+The measured inventory is enforced on every ubuntu PR nextest lane (CI
+preinstalls `cargo-mutants` there), so a production-code change that adds,
+removes, or reshapes scoped function bodies fails fast — in the PR that caused
+it, not in the scheduled mutation run.
+
+When `test_mutation_total_mutants_constant_matches_list` fails with
+`cargo mutants --list reports N mutants but MUTATION_TOTAL_MUTANTS = M`:
+
+1. **Re-measure on the PR branch**: `cargo mutants --list | grep -c .`
+   (fast — source parsing only, no builds). Compare against the base branch
+   when the delta is surprising.
+2. **Update `MUTATION_TOTAL_MUTANTS`** in `tests/ci_config_tests.rs` and add
+   one changelog line to its comment block (what added the sites, which issue).
+3. **Re-run `test_mutation_shard_budget_is_feasible_vs_timeout`.** If
+   `ceil(N_count / shards) × 29s` now exceeds the 300s soft target, bump the
+   shard count in `mutation.yml` at EVERY pinned site in one commit: the
+   matrix list, the job `name:` denominator, the `Run mutation testing`
+   step's name and `--shard` argument, and the policy test's pinned run-line
+   literal (`test_mutation_workflow_uses_fast_linker_and_in_place`).
+4. **Full local check**: `cargo nextest run --test ci_config_tests -E
+   'test(mutation)' --all-features` covers all nine guards.
+
+Do not chase the count by excluding code from the mutation scope — exclusions
+are for genuinely untestable generated code, decided deliberately in
+`.cargo/mutants.toml`.
 
 ---
 
