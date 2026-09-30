@@ -98,12 +98,10 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   reconnect; simultaneous claims of one token; expiry during a claim; failed
   restore and retry; token rotation; spectator transitions; kick/ban races;
   application isolation; authentication and allowlist/key reload boundaries.
-  [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686)
-  tracks the remaining lifecycle-capture-point sweep: every check that
-  captures the current lifecycle before awaiting a gate needs a deterministic
-  regression or a documented exclusion. Relay admission now holds the source
-  gate through both budget waits and stamp/enqueue and releases it before
-  backpressured fan-out completion (ARM-C029).
+  The #686 lifecycle-capture-point sweep is complete (ARM-C030, issue
+  closed): every capture-check-await site is fenced or has a documented
+  exclusion. One defense-in-depth residual is tracked in
+  [#697](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/697).
 - [ ] **Gameplay transitions:** ready-state invalidation on membership change;
   start/leave races; authority election and loss; host/direct readiness;
   v2/v3 negotiation; transport capability intersections; stale transport
