@@ -1144,6 +1144,10 @@ impl InMemoryDatabase {
 
     #[cfg(test)]
     pub(crate) fn pause_next_get_room_players_for_test(&self) {
+        // The arming is process-global: the next `get_room_players` call
+        // from ANY task consumes it. Deterministic use requires a test with
+        // no concurrent `get_room_players` callers (joins, ready toggles,
+        // and finalize paths read membership through the room coordinator).
         self.pause_get_room_players
             .store(true, std::sync::atomic::Ordering::Release);
     }
@@ -2154,6 +2158,9 @@ impl GameDatabase for InMemoryDatabase {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         #[cfg(test)]
+        // The one-shot pause precedes the failure injection: an armed pause
+        // is an observation point, so the caller resumes before a co-armed
+        // `fail_get_room_players` fails the same call.
         if self
             .pause_get_room_players
             .swap(false, std::sync::atomic::Ordering::AcqRel)

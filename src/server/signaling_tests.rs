@@ -4788,8 +4788,9 @@ async fn reconnect_drain_flip_after_baseline_rotation_discards_the_fresh_token()
         .as_any()
         .downcast_ref::<InMemoryDatabase>()
         .expect("test server uses in-memory database");
-    // Park the transaction inside the baseline builder, at its first storage
-    // read (`get_room_players`), before the builder's final rotation step.
+    // Park the transaction inside the baseline builder, at its first
+    // `get_room_players` read (the builder's membership read), before the
+    // builder's final rotation step.
     // The admission drain pre-checks have already passed by this point, so
     // the drain flip below can only be observed at the post-builder commit
     // gate — after the token has been minted.
