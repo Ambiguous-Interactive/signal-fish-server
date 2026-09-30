@@ -100,7 +100,11 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   application isolation; authentication and allowlist/key reload boundaries.
   The #686 lifecycle-capture-point sweep is complete (ARM-C030, issue
   closed): every capture-check-await site is fenced or has a documented
-  exclusion, and the #697 close-pin residual is fixed.
+  exclusion, and the #697 close-pin residual is fixed. The failed-restore
+  and retry review is complete (audit ledger, 2026-09-30): every
+  post-claim reconnect rejection is pinned or excluded, with degraded
+  authority restoration recorded as intentional with a client-driven
+  recovery path.
 - [ ] **Gameplay transitions:** ready-state invalidation on membership change;
   start/leave races; authority election and loss; host/direct readiness;
   v2/v3 negotiation; transport capability intersections; stale transport
@@ -117,8 +121,6 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   cleanup racing join/reconnect; deadlines at before/equal/after boundaries;
   wall-clock changes versus monotonic expiry; drain/shutdown with queued data
   and active reconnect claims; process-loss behavior versus documented limits.
-  In particular, [#658](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/658)
-  tracks unpublished rooms left after a second storage failure blocks rollback.
 - [ ] **Resource and input safety:** queue and replay bounds; inactive records;
   pending detach/claim retention; task ownership; metrics label cardinality;
   parser depth, size, malformed frames, Unicode, and numeric boundaries;
