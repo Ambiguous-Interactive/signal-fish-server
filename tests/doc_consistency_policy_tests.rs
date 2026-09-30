@@ -349,7 +349,7 @@ fn extract_hook_changelog_internal_path_globs(hook: &str) -> Vec<String> {
         .collect()
 }
 
-fn extract_checker_internal_path_patterns(checker: &str) -> Vec<String> {
+fn extract_checker_internal_path_patterns(checker: &str) -> (Vec<String>, usize, usize) {
     const FUNCTION: &str = "is_internal_path() {";
     let start = checker
         .find(FUNCTION)
@@ -362,27 +362,35 @@ fn extract_checker_internal_path_patterns(checker: &str) -> Vec<String> {
     // of the alternatives, so strip it before the character check. All other
     // lines in the function (local, case, return, ;;, esac) fail this shape.
     // The '*' catch-all (match-everything default) ends the internal list.
-    body[..end]
+    let mut patterns = Vec::new();
+    let mut consumed_groups = 0;
+    for line in body[..end].lines() {
+        let Some(alternatives) = line.trim().strip_suffix(')') else {
+            continue;
+        };
+        let is_pattern_line = !alternatives.is_empty()
+            && alternatives.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '*' | '.' | '/' | '|' | '-' | '_')
+            });
+        if !is_pattern_line {
+            continue;
+        }
+        if alternatives == "*" {
+            break;
+        }
+        consumed_groups += 1;
+        patterns.extend(alternatives.split('|').map(str::to_string));
+    }
+
+    // Every pattern arm pairs with exactly one `return 0`. If the checker
+    // gains a shape this parser cannot read (for example a trailing comment
+    // after the ')'), the counts diverge and the parity test fails loudly
+    // instead of comparing a silently shrunken pattern set.
+    let return_zero_arms = body[..end]
         .lines()
-        .filter_map(|line| {
-            let alternatives = line.trim().strip_suffix(')')?;
-            let is_pattern_line = !alternatives.is_empty()
-                && alternatives.chars().all(|c| {
-                    c.is_ascii_alphanumeric() || matches!(c, '*' | '.' | '/' | '|' | '-' | '_')
-                });
-            if !is_pattern_line {
-                return None;
-            }
-            Some(alternatives.to_string())
-        })
-        .take_while(|alternatives| alternatives != "*")
-        .flat_map(|alternatives| {
-            alternatives
-                .split('|')
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .collect()
+        .filter(|line| line.trim() == "return 0")
+        .count();
+    (patterns, consumed_groups, return_zero_arms)
 }
 
 #[test]
@@ -392,8 +400,16 @@ fn test_pre_commit_changelog_gate_internal_paths_match_checker() {
     let checker = read_live_file(&root.join("scripts/check-doc-consistency.sh"));
 
     let mut hook_globs = extract_hook_changelog_internal_path_globs(&hook);
-    let mut checker_patterns = extract_checker_internal_path_patterns(&checker);
+    let (raw_checker_patterns, consumed_groups, return_zero_arms) =
+        extract_checker_internal_path_patterns(&checker);
+    let mut checker_patterns = raw_checker_patterns;
 
+    assert_eq!(
+        consumed_groups, return_zero_arms,
+        "every parsed is_internal_path() pattern arm must pair with its 'return 0'; \
+         a mismatch means the checker has a pattern shape this parser cannot read \
+         and the parity comparison below would silently shrink."
+    );
     assert!(
         !checker_patterns.is_empty(),
         "is_internal_path() in scripts/check-doc-consistency.sh must list internal path patterns."
@@ -442,9 +458,20 @@ fn test_pre_commit_runs_changelog_gate_on_every_commit_shape() {
 
     assert!(
         hook.contains(
-            "Invoke-Check \"Changelog gate\" { Test-ChangelogGate -ChangedFiles $allChangedFiles }"
+            "Invoke-Check \"Changelog gate\" { Test-ChangelogGate -ChangedFiles (Get-ChangelogGateChangedFiles) }"
         ),
-        "pre-commit.ps1 must run the changelog gate on the full changed-file set."
+        "pre-commit.ps1 must run the changelog gate on the gate-scoped changed-file set."
+    );
+
+    // The staged gate must classify the same diff-filter set as the checker's
+    // collect_changed_files(): deletions are excluded, so a staged
+    // `git rm CHANGELOG.md` cannot pose as changelog accompaniment and a
+    // staged deletion of a non-internal path cannot trip the gate.
+    assert!(
+        hook.contains(
+            "\"diff\", \"--cached\", \"--name-only\", \"-z\", \"--diff-filter=ACMRTUXB\""
+        ),
+        "Get-ChangelogGateChangedFiles must mirror the checker's --diff-filter=ACMRTUXB set."
     );
 
     // The gate must run before the metadata-policy early exit so a src-only

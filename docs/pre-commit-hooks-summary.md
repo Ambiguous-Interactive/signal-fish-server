@@ -30,6 +30,13 @@ agent workflows, `scripts/run-local-ci.sh`, and CI.
 
 ## Pre-Commit Checks
 
+Every commit path:
+
+- doc version sync with auto-repair (`Cargo.toml` version quoted in docs)
+- changelog gate: a non-internal change requires a `CHANGELOG.md` update in
+  the same change, so a missing entry fails at commit time instead of in the
+  hosted `Doc Consistency` job
+
 Production Rust commit path:
 
 - explicit `panic!`/`todo!`/`unimplemented!`/`unreachable!` macro additions in

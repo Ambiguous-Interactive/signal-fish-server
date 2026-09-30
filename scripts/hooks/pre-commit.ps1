@@ -891,6 +891,12 @@ function Test-WorktreeIndexPolicyConsistency {
 
     $conflicts = [System.Collections.Generic.List[string]]::new()
     foreach ($path in $script:StagedChangedFileSet) {
+        # The changelog gate consumes CHANGELOG.md as a changed-path presence
+        # signal, never as content, so index/worktree disagreement on it
+        # cannot invalidate a -Worktree verdict.
+        if ($path -ceq "CHANGELOG.md") {
+            continue
+        }
         if ($script:WorktreeChangedFileSet.Contains($path)) {
             [void]$conflicts.Add($path)
         }
@@ -1608,9 +1614,31 @@ function Repair-DocVersionsIfNeeded {
 # scripts/check-doc-consistency.sh and is enforced by the hosted Doc
 # Consistency job after push. This check mirrors it so a missing entry fails
 # at commit time instead of one CI round-trip later (issue #700: PR #699 paid
-# exactly that round-trip). Pure path classification plus one changed-file-set
-# lookup; no process spawns, so it stays inside the hook budget.
+# exactly that round-trip).
+#
+# In staged mode the changed set comes from the same --diff-filter as the
+# checker's collect_changed_files(), so a staged `git rm CHANGELOG.md` cannot
+# pose as changelog accompaniment and a staged deletion of a non-internal
+# path cannot trip the gate. In -Worktree mode the set is the policy-tree
+# state: the preflight predicts the gate outcome for a tree committed as-is,
+# and the staged hook stays the authoritative last-resort guard at commit
+# time.
 # ---------------------------------------------------------------------------
+function Get-ChangelogGateChangedFiles {
+    if ($script:InspectWorktree) {
+        return $script:StagedFiles
+    }
+
+    $result = Invoke-Git -Arguments @(
+        "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRTUXB"
+    )
+    if ([string]::IsNullOrEmpty($result.Stdout)) {
+        return @()
+    }
+
+    $result.Stdout.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries)
+}
+
 function Test-ChangelogGateInternalPath {
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Path)
 
@@ -1628,8 +1656,10 @@ function Test-ChangelogGateInternalPath {
 function Test-ChangelogGate {
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ChangedFiles)
 
+    # -cne and -ccontains keep the CHANGELOG.md comparisons case-sensitive
+    # like the checker's [ "$path" = "CHANGELOG.md" ] tests.
     $nonInternal = @($ChangedFiles | Where-Object {
-            $_ -ne "CHANGELOG.md" -and -not (Test-ChangelogGateInternalPath -Path $_)
+            $_ -cne "CHANGELOG.md" -and -not (Test-ChangelogGateInternalPath -Path $_)
         })
 
     if ($nonInternal.Count -eq 0) {
@@ -1637,7 +1667,7 @@ function Test-ChangelogGate {
         return
     }
 
-    if ($ChangedFiles -contains "CHANGELOG.md") {
+    if ($ChangedFiles -ccontains "CHANGELOG.md") {
         Pass "Changelog gate"
         return
     }
@@ -1646,7 +1676,8 @@ function Test-ChangelogGate {
     Fail "Changelog gate" (@(
             "Non-internal changed files without a CHANGELOG.md update:",
             $offenders,
-            "Add a Keep a Changelog entry under '## [Unreleased]' for user-facing impact, or add the path to the internal-path lists in scripts/check-doc-consistency.sh and this hook if truly internal."
+            "Add a Keep a Changelog entry under '## [Unreleased]' for user-facing impact.",
+            "If a path is truly internal, add it to the internal-path lists in scripts/check-doc-consistency.sh and this hook."
         ) -join "`n")
 }
 
@@ -1844,7 +1875,7 @@ if (-not (Invoke-Check "Doc version sync" { Repair-DocVersionsIfNeeded -ChangedF
 
 # Mirror the hosted changelog gate at commit time (issue #700): a non-internal
 # change without a CHANGELOG.md update must fail here, not in hosted CI.
-if (-not (Invoke-Check "Changelog gate" { Test-ChangelogGate -ChangedFiles $allChangedFiles })) { Complete-PreCommit }
+if (-not (Invoke-Check "Changelog gate" { Test-ChangelogGate -ChangedFiles (Get-ChangelogGateChangedFiles) })) { Complete-PreCommit }
 
 if (-not (Invoke-Check "Hook speed policy" { Test-FastHookSource })) { Complete-PreCommit }
 $changedProductionRustFiles = [string[]]@($allChangedFiles | Where-Object { Test-ProductionRustSourcePath -Path $_ })

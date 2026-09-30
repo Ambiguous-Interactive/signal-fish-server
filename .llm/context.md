@@ -97,11 +97,11 @@ cargo fmt && cargo clippy --all-targets --all-features
 
 **Changelog gate (publication blocker)** -- production `src/` changes need a
 `CHANGELOG.md` entry under `## [Unreleased]`. The hosted `Doc Consistency`
-job enforces this; the local fmt/clippy gate and the pre-commit hook do
-not. Classify and add the entry before pushing. Gate rules, internal-path
-scope, and the scoped ~3 s pre-push check
-(`bash scripts/check-doc-consistency.sh --changed-files <files...>`) live in
-[version-sync-and-changelog-gates](skills/version-sync-and-changelog-gates/SKILL.md)
+job enforces this, and the pre-commit hook's `Changelog gate` check mirrors
+it at commit time; the local fmt/clippy gate does not. Add the entry before
+committing. Gate rules, internal-path scope, and the scoped ~3 s pre-push
+check (`bash scripts/check-doc-consistency.sh --changed-files <files...>`)
+live in [version-sync-and-changelog-gates](skills/version-sync-and-changelog-gates/SKILL.md)
 and the [changelog flow](skills/classify-user-visible-changes/SKILL.md).
 
 ### Local vs hosted-CI work split (Required)

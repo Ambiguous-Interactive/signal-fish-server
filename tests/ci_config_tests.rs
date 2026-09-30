@@ -24164,7 +24164,13 @@ fn test_pre_commit_changelog_gate_classification_and_verdicts_when_pwsh_availabl
                 Test-ChangelogGate -ChangedFiles @("CHANGELOG.md")
                 Assert ($script:Skipped -eq 1 -and $script:Failed -eq 0) "CHANGELOG.md alone must skip the gate"
 
-                # 5) Case-sensitive like the bash `case` statement it mirrors.
+                # 5) CHANGELOG.md accompaniment is case-sensitive like the
+                #    checker's [ "$path" = "CHANGELOG.md" ] tests.
+                Reset-Counters
+                Test-ChangelogGate -ChangedFiles @("src/main.rs", "changelog.md")
+                Assert ($script:Failed -eq 1 -and $script:Passed -eq 0) "a wrong-case changelog.md must not count as changelog accompaniment"
+
+                # 6) Case-sensitive classification like the bash `case` statement.
                 Assert (-not (Test-ChangelogGateInternalPath -Path "SRC/server_tests.rs")) "classification must stay case-sensitive"
                 Assert (-not (Test-ChangelogGateInternalPath -Path "src/SERVER_TESTS.RS")) "classification must stay case-sensitive"
             "##,
@@ -24278,6 +24284,32 @@ fn test_pre_commit_changelog_gate_blocks_src_changes_without_changelog_when_pwsh
     assert!(
         stdout.contains("PASS: Changelog gate"),
         "the pass verdict must be reported.\nstdout: {stdout}"
+    );
+
+    // TRAP: a staged `git rm CHANGELOG.md` is not changelog accompaniment.
+    // The checker's collect_changed_files() excludes deletions
+    // (--diff-filter=ACMRTUXB), so the hook must fail here instead of waving
+    // the commit through into a hosted-CI failure.
+    assert!(git(&["commit", "-q", "-m", "land", "--no-verify"])
+        .unwrap()
+        .status
+        .success());
+    assert!(git(&["rm", "-q", "CHANGELOG.md"]).unwrap().status.success());
+    write_file(
+        &src.join("server.rs"),
+        "pub fn ready() -> bool {\n    true\n}\n\npub fn second() {}\n",
+    );
+    assert!(git(&["add", "src/server.rs"]).unwrap().status.success());
+
+    let output = run_hook().expect("pwsh run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !output.status.success(),
+        "the hook must fail when the changelog accompaniment is a staged deletion.\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("FAIL: Changelog gate"),
+        "the deletion trap must fail the changelog gate.\nstdout: {stdout}"
     );
 }
 
