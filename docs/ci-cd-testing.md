@@ -245,7 +245,10 @@ cohorts (issues #513 and #512):
   `macos-latest` legs. Windows bills at 2x and macOS at 10x Linux per minute
   while the server deploys on Linux containers, so cross-OS lint/nextest
   signal runs daily against `main` instead of on every event — a Windows or
-  macOS regression surfaces next-day instead of pre-merge.
+  macOS regression surfaces next-day instead of pre-merge. A tick whose head
+  the same workflow already verified successfully skips the duplicate lanes
+  (the fail-open verified-head guard, issue #702); a moved head or an expired
+  freshness window always re-runs.
 
 The cohort is a dynamic matrix: the cheap `ci-matrix` job (runs on every
 event, seconds of Linux time) emits `["ubuntu-latest"]` per push/PR and
