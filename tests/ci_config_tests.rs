@@ -22145,6 +22145,17 @@ fn test_ci_safety_workflow_is_periodic_not_per_event() {
         "the guard must keep the 168-hour freshness window so drifted external \
          state (runner images, advisory data) re-verifies even on an unchanged tree"
     );
+    assert_eq!(
+        guard_step
+            .as_mapping_get("with")
+            .and_then(|with| with.as_mapping_get("anchor_step"))
+            .and_then(Yaml::as_str),
+        Some("Run Miri on library tests"),
+        "the guard must anchor on an executed-work step: a run that itself \
+         skipped via this guard still concludes success at the run level, so \
+         without an anchor one skip would sustain itself forever and the \
+         freshness window would never re-arm (PR #703 round 2)"
+    );
 
     for job_key in ["miri", "asan"] {
         let job = jobs
@@ -22785,6 +22796,28 @@ fn test_unused_deps_workflow_uses_one_shared_analyzer_job() {
         head_guard.as_mapping_get("uses").and_then(Yaml::as_str),
         Some("./.github/actions/skip-if-verified"),
         "the guard must call the shared fail-open skip-if-verified action"
+    );
+    assert_eq!(
+        head_guard
+            .as_mapping_get("with")
+            .and_then(|with| with.as_mapping_get("anchor_step"))
+            .and_then(Yaml::as_str),
+        Some("Check for unused dependencies"),
+        "the guard must anchor on the gating machete step (the udeps step is \
+         continue-on-error, so its conclusion cannot be relied on); without an \
+         executed-work anchor one skipped tick would sustain itself forever"
+    );
+    let job_permissions = analyzer
+        .as_mapping_get("permissions")
+        .expect("the analyzer job must declare job-level permissions");
+    assert_eq!(
+        job_permissions
+            .as_mapping_get("actions")
+            .and_then(Yaml::as_str),
+        Some("read"),
+        "the analyzer job needs actions: read for the guard's run lookups; \
+         under the workflow default (contents: read) every lookup 403s and the \
+         guard silently fails open on every tick"
     );
 
     for (needle, expected) in [
@@ -33526,6 +33559,67 @@ fn test_mutation_workflow_is_periodic_not_per_pr() {
              restoring this trigger spends roughly 193 modeled runner-minutes per eligible change"
         );
     }
+
+    // Issue #702: the verified-head-guard is the only permitted skip path for
+    // the weekly evidence lane. Pin its exact wiring so a weaker guard (or one
+    // whose own skipped runs count as verification) fails here. See the
+    // ci-safety counterpart test for the full rationale.
+    let jobs = document
+        .as_mapping_get("jobs")
+        .expect("mutation workflow must define jobs");
+    let guard = jobs
+        .as_mapping_get("verified-head-guard")
+        .unwrap_or_else(|| {
+            panic!(
+                "mutation.yml must keep the verified-head-guard job: it is the \
+                 only permitted skip path for the weekly evidence lane (issue #702)"
+            )
+        });
+    assert_eq!(
+        guard.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("github.event_name == 'schedule'"),
+        "the verified-head-guard must decide on schedule ticks only; manual \
+         dispatch must always run mutation testing"
+    );
+    let guard_steps = guard
+        .as_mapping_get("steps")
+        .and_then(Yaml::as_sequence)
+        .expect("verified-head-guard must define steps");
+    let guard_step = guard_steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("uses").and_then(Yaml::as_str)
+                == Some("./.github/actions/skip-if-verified")
+        })
+        .expect("verified-head-guard must call ./.github/actions/skip-if-verified");
+    let guard_with = guard_step
+        .as_mapping_get("with")
+        .expect("verified-head-guard must pass guard inputs");
+    assert_eq!(
+        guard_with
+            .as_mapping_get("max_success_age_hours")
+            .and_then(Yaml::as_str),
+        Some("336"),
+        "the weekly cadence needs a two-week staleness bound; 168h would be \
+         indistinguishable from the tick interval and never skip"
+    );
+    assert_eq!(
+        guard_with
+            .as_mapping_get("anchor_step")
+            .and_then(Yaml::as_str),
+        Some("Warm build + green-gate (exact unmutated nextest oracle)"),
+        "the guard must anchor on the baseline's executed-work step so a run \
+         skipped by this very guard can never count as verification"
+    );
+    let baseline = jobs
+        .as_mapping_get("baseline")
+        .expect("mutation workflow must define the baseline job");
+    assert_eq!(
+        baseline.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("${{ !cancelled() && needs.verified-head-guard.outputs.duplicate != 'true' }}"),
+        "the baseline job must skip only through the verified-head guard outcome \
+         (`!cancelled()` keeps the guard failure fail-open)"
+    );
 }
 
 /// Count the mutants `cargo mutants --list` generates for the current config, or

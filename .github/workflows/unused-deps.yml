@@ -91,6 +91,14 @@ jobs:
   unused-deps:
     name: Check Unused Dependencies
     runs-on: ubuntu-latest
+    # Job-level grant (replaces the workflow default, so contents: read is
+    # restated): the skip-if-verified guard step lists workflow runs through
+    # the Actions API, which needs actions: read. Without it the API returns
+    # 403 and the guard fails open on every tick, silently disabling the skip
+    # (Bugbot finding, PR #703 round 2).
+    permissions:
+      contents: read
+      actions: read
     # Two analyzers share setup but run sequentially. Keep cold-cache install
     # headroom until hosted warm/cold measurements establish a tighter bound.
     timeout-minutes: 30
@@ -108,6 +116,10 @@ jobs:
         if: github.event_name == 'schedule'
         uses: ./.github/actions/skip-if-verified
         with:
+          # The gating machete step is the anchor: it only concludes success
+          # when the analyzers really ran. (The udeps step is
+          # continue-on-error, so its own conclusion cannot be relied on.)
+          anchor_step: "Check for unused dependencies"
           max_success_age_hours: "168"
       - name: Install Rust nightly toolchain
         if: steps.verified-head-guard.outputs.duplicate != 'true'

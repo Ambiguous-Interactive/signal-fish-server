@@ -69,7 +69,10 @@ jobs:
       - id: guard
         uses: ./.github/actions/skip-if-verified
         with:
-          max_success_age_hours: "168"
+          anchor_step: "Warm build + green-gate (exact unmutated nextest oracle)"
+          # Weekly cadence: a 168-hour window would be indistinguishable from
+          # the tick interval, so allow a two-week staleness bound instead.
+          max_success_age_hours: "336"
 
   # Warm a SHARED rust-cache once and prove the exact unmutated nextest oracle is
   # green, so every sharded mutants job can (a) use --baseline=skip (this job is
