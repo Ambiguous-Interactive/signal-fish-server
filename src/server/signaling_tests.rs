@@ -2603,6 +2603,166 @@ async fn reconnect_does_not_restore_authority_taken_by_a_successor() {
     );
 }
 
+/// A storage failure on the reconnect authority grant must not fail the
+/// attempt or strand the membership: the reconnect completes degraded (live
+/// member, vacant role) and the member's NEXT reconnect re-runs the grant.
+/// Authority restoration is best-effort because the membership row — the part
+/// a rejection would have to roll back — is already durable when the grant
+/// runs; failing after it would owe a removal to storage that just failed.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn reconnect_authority_grant_storage_failure_completes_degraded_and_recovers() {
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let (authority, _old_authority_rx) = register_client(&server).await;
+    let (existing, _existing_rx) = register_client(&server).await;
+    let (current, mut current_rx) = register_client(&server).await;
+    for player in [authority, existing, current] {
+        server.set_client_protocol(&player, v3_webrtc());
+    }
+    let room_id = create_db_room_with_max(&server, authority, 2).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(existing, "existing"))
+        .await
+        .expect("add incumbent");
+    for player in [authority, existing] {
+        server
+            .connection_manager
+            .assign_client_to_room(&player, room_id)
+            .await;
+    }
+    let authority_info = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("read authority room")
+        .expect("room exists")
+        .players
+        .get(&authority)
+        .cloned()
+        .expect("authority member exists");
+    assert!(
+        authority_info.is_authority,
+        "fixture precondition: the disconnecting member is the stored authority"
+    );
+    let manager = server.reconnection_manager().expect("reconnection enabled");
+    let token = manager
+        .register_disconnection(
+            authority,
+            room_id,
+            true,
+            Some(authority_info.clone()),
+            server
+                .connection_manager
+                .game_data_epoch(&authority)
+                .unwrap_or(0),
+        )
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &authority)
+        .await
+        .expect("remove disconnected authority")
+        .expect("authority was present");
+    server.connection_manager.remove_client(&authority);
+    server
+        .message_coordinator
+        .unregister_local_client(&authority)
+        .await
+        .expect("unroute disconnected authority");
+
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<InMemoryDatabase>()
+        .expect("in-memory test database");
+    database.fail_next_request_room_authority_for_test();
+
+    assert!(
+        server
+            .handle_reconnect(&current, &authority, &room_id, &token)
+            .await,
+        "an authority-grant storage failure must not fail the reconnect"
+    );
+    assert!(
+        !matches!(
+            recv(&mut current_rx).await.as_ref(),
+            ServerMessage::Reconnected(payload) if payload.is_authority
+        ),
+        "the degraded reconnect must not present the vacant authority as held"
+    );
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("read restored room")
+        .expect("room remains");
+    assert_eq!(
+        room.authority_player, None,
+        "the failed grant must leave the role vacant, not silently held"
+    );
+    assert!(
+        room.players.contains_key(&authority),
+        "the degraded reconnect still restores the membership"
+    );
+
+    // The recovery path: the member disconnects again and the next reconnect
+    // re-runs the grant against the still-vacant role.
+    let authority_info = room
+        .players
+        .get(&authority)
+        .cloned()
+        .expect("restored member row");
+    let token = manager
+        .register_disconnection(
+            authority,
+            room_id,
+            true,
+            Some(authority_info),
+            server
+                .connection_manager
+                .game_data_epoch(&authority)
+                .unwrap_or(0),
+        )
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &authority)
+        .await
+        .expect("remove authority for the recovery cycle")
+        .expect("member was present");
+    server.connection_manager.remove_client(&authority);
+    server
+        .message_coordinator
+        .unregister_local_client(&authority)
+        .await
+        .expect("unroute for the recovery cycle");
+    let (retry, mut retry_rx) = register_client(&server).await;
+    server.set_client_protocol(&retry, v3_webrtc());
+
+    assert!(
+        server
+            .handle_reconnect(&retry, &authority, &room_id, &token)
+            .await,
+        "the recovery reconnect succeeds"
+    );
+    assert!(matches!(
+        recv(&mut retry_rx).await.as_ref(),
+        ServerMessage::Reconnected(payload) if payload.is_authority
+    ));
+    assert_eq!(
+        server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .expect("read recovered room")
+            .expect("room remains")
+            .authority_player,
+        Some(authority),
+        "the next reconnect re-runs the grant and restores the authority"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn aborted_reconnect_publication_finishes_both_ordered_phases() {
@@ -3498,6 +3658,128 @@ async fn reconnect_room_deleted_during_restore_is_classified_room_not_found() {
             .is_ok(),
         "the failed attempt must release the claim for retry"
     );
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn reconnect_membership_restore_storage_error_releases_claim_for_retry() {
+    // A transient storage fault on the membership-restore write (the room
+    // demonstrably still exists) must be refused as a retryable storage
+    // error: the claim is released unspent, the roster is untouched, and the
+    // same token reconnects once storage recovers. The room-deleted sibling
+    // above covers the `ROOM_NOT_FOUND` reclassification of the same match
+    // arm; this pins its plain storage-fault branch end to end.
+    let database = Arc::new(InMemoryDatabase::new());
+    let coordinator: Arc<dyn MessageCoordinator> = Arc::new(InMemoryMessageCoordinator::new());
+    let server = super::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+        ServerConfig {
+            enable_reconnection: true,
+            ..ServerConfig::default()
+        },
+        coordinator,
+        Arc::new(InMemoryDistributedLock::new()),
+        database.clone(),
+    )
+    .await;
+    let (existing, _existing_rx) = register_client(&server).await;
+    let (reconnecting, _old_rx) = register_client(&server).await;
+    let (current, mut current_rx) = register_client(&server).await;
+    server.set_client_protocol(&existing, v3_webrtc());
+    server.set_client_protocol(&current, v3_webrtc());
+
+    let room_id = create_db_room_with_max(&server, existing, 2).await;
+    let reconnecting_info = player_info(reconnecting, "reconnecting");
+    server
+        .database
+        .add_player_to_room(&room_id, reconnecting_info.clone())
+        .await
+        .expect("add reconnecting player");
+    server
+        .connection_manager
+        .assign_client_to_room(&existing, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&reconnecting, room_id)
+        .await;
+
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(
+            reconnecting,
+            room_id,
+            false,
+            Some(reconnecting_info),
+            server
+                .connection_manager
+                .game_data_epoch(&reconnecting)
+                .unwrap_or(0),
+        )
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &reconnecting)
+        .await
+        .expect("remove reconnecting player");
+    server.connection_manager.remove_client(&reconnecting);
+    let _ = server
+        .message_coordinator
+        .unregister_local_client(&reconnecting)
+        .await;
+
+    database.fail_next_add_player_to_room_for_test();
+
+    assert!(
+        !server
+            .handle_reconnect(&current, &reconnecting, &room_id, &token)
+            .await,
+        "a storage fault on the restore write must fail the attempt"
+    );
+    match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::ReconnectionFailed { error_code, .. } => {
+            assert_eq!(*error_code, ErrorCode::InternalError);
+        }
+        other => panic!("expected ReconnectionFailed(InternalError), got {other:?}"),
+    }
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room readable")
+        .expect("room present");
+    assert!(
+        !room.players.contains_key(&reconnecting),
+        "the failed restore must not leave a restored roster row"
+    );
+    assert_eq!(
+        room.players.len(),
+        1,
+        "only the incumbent member remains after the failed restore"
+    );
+    server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .validate_reconnection(&reconnecting, &room_id, &token)
+        .await
+        .expect("the failed attempt must release the claim for retry");
+
+    assert!(
+        server
+            .handle_reconnect(&current, &reconnecting, &room_id, &token)
+            .await,
+        "the same token reconnects once storage recovers"
+    );
+    match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::Reconnected(payload) => {
+            assert_eq!(payload.player_id, reconnecting);
+            assert!(payload
+                .current_players
+                .iter()
+                .any(|player| player.id == reconnecting));
+        }
+        other => panic!("expected Reconnected on retry, got {other:?}"),
+    }
 }
 
 #[tokio::test(start_paused = true)]

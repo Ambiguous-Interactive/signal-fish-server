@@ -861,6 +861,18 @@ pub struct InMemoryDatabase {
     panic_after_pending_insert_once: std::sync::atomic::AtomicBool,
     #[cfg(all(test, signal_fish_repository_tests))]
     fail_delete_room_once: std::sync::atomic::AtomicBool,
+    /// One-shot storage failure for the next `add_player_to_room`: the
+    /// reconnect membership-restore write fails while the room demonstrably
+    /// still exists, so the attempt must be refused as a retryable storage
+    /// fault (not reclassified `ROOM_NOT_FOUND`) and leave no restored state.
+    #[cfg(all(test, signal_fish_repository_tests))]
+    fail_add_player_to_room_once: std::sync::atomic::AtomicBool,
+    /// One-shot storage failure for the next `request_room_authority`: the
+    /// reconnect authority grant fails after membership restored, so the
+    /// attempt must complete degraded (live member, vacant role) with the
+    /// next reconnect re-running the grant.
+    #[cfg(all(test, signal_fish_repository_tests))]
+    fail_request_room_authority_once: std::sync::atomic::AtomicBool,
     #[cfg(all(test, signal_fish_repository_tests))]
     pause_publish_room_once: std::sync::atomic::AtomicBool,
     #[cfg(all(test, signal_fish_repository_tests))]
@@ -958,6 +970,10 @@ impl InMemoryDatabase {
             panic_after_pending_insert_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
             fail_delete_room_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            fail_add_player_to_room_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            fail_request_room_authority_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
             pause_publish_room_once: std::sync::atomic::AtomicBool::new(false),
             #[cfg(all(test, signal_fish_repository_tests))]
@@ -1184,6 +1200,24 @@ impl InMemoryDatabase {
     #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) fn fail_next_delete_room_for_test(&self) {
         self.fail_delete_room_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Arms the one-shot storage-failure injection for the next
+    /// `add_player_to_room` call (see the `fail_add_player_to_room_once`
+    /// field doc).
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn fail_next_add_player_to_room_for_test(&self) {
+        self.fail_add_player_to_room_once
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Arms the one-shot storage-failure injection for the next
+    /// `request_room_authority` call (see the `fail_request_room_authority_once`
+    /// field doc).
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn fail_next_request_room_authority_for_test(&self) {
+        self.fail_request_room_authority_once
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -1777,6 +1811,13 @@ impl GameDatabase for InMemoryDatabase {
     async fn add_player_to_room(&self, room_id: &RoomId, mut player: PlayerInfo) -> Result<bool> {
         #[cfg(all(test, signal_fish_repository_tests))]
         if self
+            .fail_add_player_to_room_once
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            anyhow::bail!("injected add_player_to_room failure for test");
+        }
+        #[cfg(all(test, signal_fish_repository_tests))]
+        if self
             .delete_room_during_add_once
             .swap(false, std::sync::atomic::Ordering::AcqRel)
         {
@@ -1931,6 +1972,13 @@ impl GameDatabase for InMemoryDatabase {
         player_id: &PlayerId,
         become_authority: bool,
     ) -> Result<AuthorityOutcome> {
+        #[cfg(all(test, signal_fish_repository_tests))]
+        if self
+            .fail_request_room_authority_once
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            anyhow::bail!("injected request_room_authority failure for test");
+        }
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             // Check if room supports authority

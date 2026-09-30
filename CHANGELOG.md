@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tests: cover reconnect failed-restore and retry — a storage fault on the
+  membership restore is refused as `InternalError` with the claim released
+  for retry and the roster untouched, and a storage fault on the authority
+  grant completes the reconnect degraded with the member's next reconnect
+  re-running the grant (#647).
+
 - Tests: cover accepted and refused coordination defaults for room sends and
   reconnect registration (#672).
 

@@ -471,6 +471,56 @@ With this sweep, [#686](https://github.com/Ambiguous-Interactive/signal-fish-ser
 is closed: each path has a deterministic regression from PRs #687-#696 or a
 documented exclusion here.
 
+### C1 reconnect failed-restore and retry review (2026-09-30)
+
+At `bdf8bddb`, reviewed every post-claim rejection in `handle_reconnect_owned`
+(`src/server/reconnection_service.rs`): the pre-restore refusals (room full,
+missing seat record, name conflict), the membership-write storage fault and
+its room-missing reclassification, the stale-endpoint clear failure, the
+drain refusal, the post-restore authority grant, the room-readback faults,
+and the reassignment and baseline-publication failures. The rejection
+contract holds on every reviewed path: `reject_claimed_reconnect` rolls back
+exactly the state the attempt made durable (restored membership row, granted
+authority, taken-over detach retry with its application-claim provenance),
+releases the claim unspent, and replies with the classified code. The
+`Option<Option<_>>` detach-requeue arithmetic preserves bare (`None`) and
+ownership-carrying (`Some`) provenance in both the removal-failed and
+removal-succeeded branches.
+
+Evidence added:
+
+- `reconnect_membership_restore_storage_error_releases_claim_for_retry` — a
+  transient fault on the membership-restore write (new one-shot
+  `fail_next_add_player_to_room_for_test` injection) replies
+  `InternalError`, leaves the roster untouched, releases the claim, and the
+  same token reconnects once storage recovers. Red-proofed by disabling the
+  storage-error rollback.
+- `reconnect_authority_grant_storage_failure_completes_degraded_and_recovers`
+  — an authority-grant fault (new one-shot
+  `fail_next_request_room_authority_for_test` injection) after membership
+  restored completes the reconnect degraded: live member, vacant role, no
+  presented authority, and the member's next reconnect re-runs the grant.
+  Red-proofed by making the grant failure reject the attempt. Disposition:
+  best-effort continuation is correct — the membership row is already
+  durable when the grant runs, so rejecting would owe a removal to the
+  storage that just failed; recovery is the client-driven reconnect any
+  live was-authority member can perform.
+- The room-deleted reclassification, room-full, name-conflict, drain,
+  reassignment-failure, and baseline-failure rejections were already pinned
+  by `reconnect_room_deleted_during_restore_is_classified_room_not_found`,
+  `reconnect_room_full_failure_releases_claim_for_retry`,
+  `reconnect_name_taken_by_new_member_rejects_without_spending_token`,
+  `reconnect_during_shutdown_drain_is_rejected_with_server_draining`,
+  `reconnect_reassign_failure_rolls_back_membership_and_releases_claim`, and
+  `reconnect_baseline_delivery_failure_rolls_back_and_releases_claim_for_retry`.
+- The bare-detach (`None` provenance) requeue branch is covered by
+  derivation plus the ownership-provenance sibling
+  `rejected_reconnect_requeues_the_ownership_rollback_it_inherited`; no
+  dedicated `None`-provenance pin was added.
+
+No violation was reproduced. Every post-claim rejection of the reconnect
+restore has a recorded disposition and reproducible evidence.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -511,7 +561,7 @@ neither is a deployed capacity preset.
 | Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs` | Mixed conversion refusal; stalled room fairness | Unreviewed |
 | Coordination and queues: `src/coordination/**`, `src/distributed.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla` | Cancellation/panic at reservation and commit | Unreviewed |
 | WebSocket ingress and egress: `src/websocket/**` | Bounded frames, priority control, close and drain semantics hold | `tests/transport_frame_limits_e2e.rs`, `tests/slow_consumer_no_cascade_e2e.rs` | Slow reader, batching age, TLS close paths | Unreviewed |
-| Reconnect and retry: `src/reconnection.rs`, `src/retry.rs`, `src/server/reconnection_service.rs` | Claims have one owner; replay and stale routes cannot leak or misroute | `tests/reconnect_window_races_e2e.rs`, `formal/tla/ReconnectionClaimLifecycle.tla` | Simultaneous claim, expiry, failed restore/retry | Unreviewed |
+| Reconnect and retry: `src/reconnection.rs`, `src/retry.rs`, `src/server/reconnection_service.rs` | Claims have one owner; replay and stale routes cannot leak or misroute | `tests/reconnect_window_races_e2e.rs`, `formal/tla/ReconnectionClaimLifecycle.tla`; C1 reaper-ordering, claim-expiry, and failed-restore reviews above | Simultaneous claim, expiry during claim, and failed restore/retry are reviewed and pinned; `src/retry.rs` backoff seams and multi-failure detach accounting on failing backends remain | Partially reviewed |
 | Maintenance and deadlines: `src/server/maintenance.rs`, `heartbeat.rs`, `dashboard_cache.rs`, `src/deadline.rs` | Expiry and cleanup are bounded; live state survives sweeps | `formal/tla/RoomLifecycleGC.tla`, `tests/clock_source_scan.rs` | Exact expiry boundary; churn growth; dashboard cost | Unreviewed |
 | Metrics and logging: `src/metrics.rs`, `src/logging.rs`, `src/websocket/metrics.rs`, `prometheus.rs` | Counters report outcomes; labels and logs stay bounded and safe | `tests/config_and_endpoints_tests.rs`, `tests/websocket_test_helpers/prometheus_scrape.rs` | Cardinality and logging pressure under floods | Unreviewed |
 | Admin and shutdown: `src/server/admin.rs`, `shutdown.rs`, `connection_manager.rs` | Drain closes all owned tasks and reports queued work accurately | `tests/close_code_semantics_e2e.rs`, `formal/tla/ConnectionTeardown.tla` | Drain racing claims, queued reliable data, panic | Unreviewed |
