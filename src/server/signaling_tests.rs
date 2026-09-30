@@ -4673,17 +4673,19 @@ async fn reconnect_baseline_delivery_failure_rolls_back_and_releases_claim_for_r
         !members.iter().any(|player| player.id == reconnecting),
         "failed baseline delivery must roll back restored room membership"
     );
-    // The baseline builder runs before the queue refusal, so the rotation
-    // already minted a fresh pre-issued token for the restored identity. The
-    // rejection must discard it: the player was never restored, so the
-    // credential must not survive for a later disconnect to arm.
+    // The queue refusal fires at initial-slot reservation, before the
+    // baseline builder runs, so rotation has not happened in this window.
+    // This pins the end state only: no credential may survive for an
+    // identity the transaction did not restore. (The reject-path discard is
+    // a no-op here; the post-rotation windows are recorded in the C1
+    // token rotation boundary review.)
     assert!(
         !server
             .reconnection_manager()
             .expect("reconnection enabled")
             .has_pre_issued_token(&reconnecting)
             .await,
-        "failed baseline delivery must discard the rotated pre-issued token"
+        "failed baseline delivery must leave no pre-issued credential for the unrestored identity"
     );
     match recv(&mut current_rx).await.as_ref() {
         ServerMessage::Pong => {}

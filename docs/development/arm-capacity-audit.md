@@ -557,8 +557,10 @@ fresh token as the last step of the `Reconnected` baseline builder, inside the
 coordinator's registration critical section; completion removes the claimed
 record only after that baseline is queued, so the token is never consumed
 without a delivered baseline. The new token is unclaimable until the next
-genuine disconnect arms it, and a retry presenting the consumed token after a
-completed reconnect is refused by the token comparison.
+genuine disconnect arms it, and a retry presenting the consumed token after
+a completed reconnect is refused — `NoRecord` while the consumed record
+stays removed, and by token comparison once the next disconnect has armed
+the fresh token.
 
 Failure unwinding after rotation: a rejection once reassignment has occurred
 runs `reject_after_reassigned_reconnect_failure`, which discards the freshly
@@ -583,15 +585,17 @@ Evidence added (extends
 - Boundary record: in that test's queue-full scenario the coordinator refuses
   at initial-slot reservation, before the baseline builder runs, so the
   rotation has not happened yet and the reject-path discard is a no-op there.
-  The reachable post-rotation failure window is the drain flip between builder
-  and commit (`DeliveryOutcome::Canceled`); it shares the same discard line and
-  the same unwinding as the pinned reassigned-failure path. A dedicated
-  red-first pin for that window needs a new mid-transaction drain-flip seam and
-  is tracked as follow-up work.
+  The post-rotation failure windows (builder fault, commit channel-close,
+  drain flip between builder and commit) share this discard line and the
+  same unwinding as the pinned reassigned-failure path; none has an
+  injection seam today (the existing storage-fault flags are sticky and trip
+  the pre-rotation restore lookup first). A dedicated red-first pin needs a
+  new mid-transaction seam and is tracked as follow-up work. Until then the
+  reject-path discard has no directly pinned evidence on any path.
 
 No violation was reproduced. The rotation ordering, concurrent-claim refusals,
-and both unwinding phases carry pinned evidence; the only derivation-only
-residual is the drain-flip discard window above.
+and both unwinding phases carry pinned evidence; the derivation-only residual
+is the reject-path discard above, including its drain-flip window.
 
 ## Coverage ledger
 
