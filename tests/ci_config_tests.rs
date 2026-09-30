@@ -24298,10 +24298,13 @@ fn test_pre_commit_changelog_gate_blocks_src_changes_without_changelog_when_pwsh
         stdout.contains("## [Unreleased]"),
         "the failure must name the fix.\nstdout: {stdout}"
     );
-    assert!(
-        !stdout.contains("exceeded"),
-        "the changelog gate must stay inside the hook budget.\nstdout: {stdout}"
-    );
+    // Deliberately no wall-clock budget assertion here: the baselines
+    // workflow owns hook-runtime evidence because wall-clock totals must not
+    // gate correctness, and a cold hosted runner can exceed the 1 s budget
+    // before the first check runs. The gate's own cost is bounded by design:
+    // path classification plus the same git query class the hook already
+    // issues during discovery, visible as "PROFILE: Changelog gate" when
+    // SIGNAL_FISH_HOOK_PROFILE=1.
 
     // GREEN: staging the changelog entry alongside the src change passes.
     write_file(
