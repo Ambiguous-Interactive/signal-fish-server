@@ -91,10 +91,18 @@ relevant source, test, documentation, issue, or pull request.
 ```bash
 # Rust changes: run in order. Full local gate — once before publication;
 # while iterating, use the scoped checks in "Local vs hosted-CI work split".
+# Zero warnings policy: all linters enforce strict compliance.
 cargo fmt && cargo clippy --all-targets --all-features
 ```
 
-**Zero warnings policy** -- all linters enforce strict compliance.
+**Changelog gate (publication blocker)** -- production `src/` changes need a
+`CHANGELOG.md` entry under `## [Unreleased]`. The hosted `Doc Consistency`
+job enforces this; the local fmt/clippy gate and the pre-commit hook do
+not. Classify and add the entry before pushing. Gate rules, internal-path
+scope, and the scoped ~3 s pre-push check
+(`bash scripts/check-doc-consistency.sh --changed-files <files...>`) live in
+[version-sync-and-changelog-gates](skills/version-sync-and-changelog-gates/SKILL.md)
+and the [changelog flow](skills/classify-user-visible-changes/SKILL.md).
 
 ### Local vs hosted-CI work split (Required)
 
@@ -143,24 +151,17 @@ cargo fmt && cargo clippy --all-targets --all-features
 Write every user-facing text in Simplified Technical English (STE): short,
 simple, direct, and extremely brief. This applies to PR titles and
 descriptions, issue text and comments, commit messages, code review comments,
-documentation, CHANGELOG entries, and operator-facing log messages.
+documentation, CHANGELOG entries, and operator-facing log messages. Write
+active voice; name the actor ("The server closes the connection"). One idea
+per sentence. Use common words; no idioms, jokes, marketing language, or
+hype.
 
 PR descriptions follow `.github/pull_request_template.md` (short Why/What
-shape, adopted from `ambiguous-interactive/unity-helpers`): 1-2 "why"
-sentences, 2-5 one-line "what" bullets; detail belongs in the linked issue.
-
-- Keep it extremely short. A few sentences is the maximum, not the target.
-  No fluff, no verbosity, no filler.
-- Answer "how": what changed and what to do next. Plain steps.
-- For PR descriptions, also answer "why" and "what": the reason and the
-  visible effect. A few sentences each, at most.
-- Write short sentences. One idea per sentence.
-- Use active voice. Name the actor ("The server closes the connection").
-- Use common words. No idioms, jokes, marketing language, or hype.
-
+shape): 1-2 "why" sentences, 2-5 one-line "what" bullets; detail belongs in
+the linked issue. Answer "why", "what", and "how": the reason, the visible
+effect, and what to do next. A few sentences is the maximum, not the target.
 The audience includes non-native English readers, operators under pressure,
-and automated tools. Short, simple text is faster to read and harder to
-misread.
+and automated tools.
 
 ### Hook Reliability Rules (Required)
 

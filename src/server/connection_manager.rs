@@ -1208,10 +1208,15 @@ impl ConnectionManager {
     /// farewell, and the semantic `4006 inbound_rate_limited` close request,
     /// in that order — while the close lands.
     ///
+    /// The close pins the per-socket close signal captured under the charge
+    /// guard, not the map key: a reconnect identity swap landing inside the
+    /// farewell await moves the entry to the restored identity's key, and the
+    /// one-shot exhaustion report never retries a skipped pin (issue #697).
+    ///
     /// An unknown player id is admitted (`true`): there is no budget to
     /// charge, and the caller's send fails downstream anyway.
     pub async fn charge_error_reply(&self, player_id: &PlayerId) -> bool {
-        let (allowed, first_exhaustion) = {
+        let (first_exhaustion, close) = {
             let Some(entry) = self.clients.get_mut(player_id) else {
                 return true;
             };
@@ -1219,12 +1224,17 @@ impl ConnectionManager {
                 .error_reply_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let allowed = gate.charge(Instant::now());
-            (allowed, !allowed && gate.report_exhaustion())
+            if gate.charge(Instant::now()) {
+                return true;
+            }
+            // Exhausted: capture the per-socket close signal under the charge
+            // guard, before any await. A reconnect identity swap landing
+            // inside the farewell await moves the entry to the restored
+            // identity's key, and the one-shot `report_exhaustion` below never
+            // retries a skipped pin (issue #697). The signal belongs to the
+            // physical socket, so the pin follows the swap.
+            (gate.report_exhaustion(), entry.close.clone())
         };
-        if allowed {
-            return true;
-        }
         if !first_exhaustion {
             return false;
         }
@@ -1247,7 +1257,9 @@ impl ConnectionManager {
                 }),
             )
             .await;
-        self.request_close_for(player_id, CloseReason::InboundRateLimited);
+        // Pin through the captured signal: it belongs to the physical socket,
+        // so the close follows a concurrent identity swap (issue #697).
+        close.request_close(CloseReason::InboundRateLimited);
         false
     }
 
@@ -1266,6 +1278,17 @@ impl ConnectionManager {
         self.clients
             .get(player_id)
             .is_some_and(|connection| connection.close.request_close(reason))
+    }
+
+    /// Snapshot the per-socket close signal for `player_id`.
+    ///
+    /// Callers that hold a fence excluding identity swaps (the connection's
+    /// own lifecycle gate) capture here and pin through the captured signal
+    /// after the fence drops: the pin then follows the physical socket even
+    /// when a swap rekeys the entry in between, and a one-shot reason never
+    /// loses its close frame to a map miss (issue #697 class).
+    pub(crate) fn close_signal_for(&self, player_id: &PlayerId) -> Option<ConnectionCloseSignal> {
+        self.clients.get(player_id).map(|entry| entry.close.clone())
     }
 
     #[cfg(test)]
@@ -1495,6 +1518,49 @@ mod tests {
         room_events: Arc<RoomEventSequencer>,
         registrations: Mutex<Vec<(PlayerId, Option<RoomId>)>>,
         unregisters: Mutex<Vec<PlayerId>>,
+        /// When armed, `try_send_to_player` parks until released
+        /// ([`FarewellGate::park`]), so a test can land a concurrent map
+        /// mutation inside a farewell await.
+        farewell_gate: Option<Arc<FarewellGate>>,
+    }
+
+    /// Parks [`TestCoordinator::try_send_to_player`] until released. The
+    /// `entered` channel fires once the park is reached; the one-shot release
+    /// completes the parked send.
+    struct FarewellGate {
+        entered_tx: mpsc::UnboundedSender<()>,
+        release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    impl FarewellGate {
+        fn channel() -> (
+            Self,
+            mpsc::UnboundedReceiver<()>,
+            tokio::sync::oneshot::Sender<()>,
+        ) {
+            let (entered_tx, entered_rx) = mpsc::unbounded_channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            (
+                Self {
+                    entered_tx,
+                    release: std::sync::Mutex::new(Some(release_rx)),
+                },
+                entered_rx,
+                release_tx,
+            )
+        }
+
+        async fn park(&self) {
+            let _ = self.entered_tx.send(());
+            let release = self
+                .release
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take();
+            if let Some(release) = release {
+                let _ = release.await;
+            }
+        }
     }
 
     #[async_trait]
@@ -1527,6 +1593,9 @@ mod tests {
             // Test double: send_to_player is non-blocking here, so delegating
             // honors the non-waiting farewell contract while preserving
             // whatever recording/blocking behavior the double implements.
+            if let Some(gate) = &self.farewell_gate {
+                gate.park().await;
+            }
             self.send_to_player(player_id, message).await.map(|()| true)
         }
 
@@ -2192,6 +2261,88 @@ mod tests {
                 "the exhaustion metric fires exactly once per window in both orders"
             );
         }
+    }
+
+    /// A reconnect identity swap landing inside `charge_error_reply`'s
+    /// farewell await must not skip the `4006` close (#697): the close request
+    /// pins the captured per-socket signal, not a fresh map lookup under the
+    /// transient key. The one-shot `report_exhaustion` never retries a skipped
+    /// pin, so a key-lookup pin would leave the exhausted socket open until
+    /// the window rolls over and exhausts again.
+    #[tokio::test]
+    async fn error_reply_exhaustion_pins_the_close_through_a_rekey_inside_the_farewell_await() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let (gate, mut farewell_entered, farewell_release) = FarewellGate::channel();
+        let coordinator: Arc<dyn MessageCoordinator> = Arc::new(TestCoordinator {
+            farewell_gate: Some(Arc::new(gate)),
+            ..TestCoordinator::default()
+        });
+        let manager = Arc::new(ConnectionManager::new(
+            usize::MAX,
+            4,
+            metrics.clone(),
+            coordinator,
+            false,
+            (1, tokio::time::Duration::from_secs(60)),
+        ));
+        let addr: SocketAddr = "127.0.0.1:5048".parse().unwrap();
+        let (tx, _rx) = channel();
+        let (close_signal, close_listener) = ConnectionCloseSignal::channel();
+        let transient_id = manager
+            .register_client(tx, close_signal, addr, Uuid::new_v4())
+            .await
+            .expect("registration succeeds");
+
+        // Spend the window's single reply so the next charge is the
+        // exhaustion whose side effects include the farewell await.
+        assert!(manager.charge_error_reply(&transient_id).await);
+
+        // Exhaust inside a spawned task so the test can interleave the rekey
+        // while the farewell await is parked.
+        let exhaustion = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            async move { manager.charge_error_reply(&transient_id).await }
+        });
+        farewell_entered.recv().await.expect("farewell is reached");
+
+        // Land the swap inside that await: the entry moves from the transient
+        // key to the restored key, carrying the same physical-socket signal.
+        let restored_id = PlayerId::new_v4();
+        let room_id = RoomId::new_v4();
+        assert!(matches!(
+            manager.reassign_connection(&transient_id, &restored_id, room_id, 1),
+            ReassignmentOutcome::Reassigned(_)
+        ));
+
+        let _ = farewell_release.send(());
+        assert!(
+            !exhaustion.await.expect("exhaustion task completes"),
+            "the exhausting charge must still refuse the reply"
+        );
+        assert_eq!(
+            close_listener.requested_reason(),
+            Some(crate::coordination::CloseReason::InboundRateLimited),
+            "the 4006 close must pin the restored connection through the swap"
+        );
+
+        // One-shot accounting is unchanged: a later exhausted charge under the
+        // restored identity neither re-fires the metric nor flips the pin.
+        assert!(
+            !manager.charge_error_reply(&restored_id).await,
+            "the restored identity resumes the exhausted budget"
+        );
+        assert_eq!(
+            close_listener.requested_reason(),
+            Some(crate::coordination::CloseReason::InboundRateLimited),
+            "repeat exhaustions must not overwrite the pinned close"
+        );
+        assert_eq!(
+            metrics
+                .rate_limit_inbound_error_reply_rejections
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the exhaustion metric fires exactly once"
+        );
     }
 
     /// A stale terminal unroute for a room the player no longer (or never did)

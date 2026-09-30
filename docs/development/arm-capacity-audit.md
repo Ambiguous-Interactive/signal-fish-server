@@ -451,16 +451,23 @@ Documented exclusions, each verified against the code:
 - Test-only entries: `handle_reconnect` with no lifecycle is unreachable from
   production dispatch; the socket path always forwards the source lifecycle.
 
-No violation was reproduced. One defense-in-depth residual is documented, not
-fixed: `charge_error_reply` pins the `4006` close by map key after the farewell
-await (`connection_manager.rs:1250`). A rekey landing inside that await would
-skip the pin, and the one-shot `report_exhaustion` means later exhausted
-charges never retry it until the window rolls over. The window is unreachable
-today — every charge site holds the charging player's own lifecycle gate, and
-the rekey needs that same gate — but a future ungated charge site would
-reintroduce it. [#697](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/697)
-tracks pinning the close on the carried per-socket close signal. With this
-sweep, [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686)
+No violation was reproduced. One defense-in-depth residual was found and
+fixed: `charge_error_reply` pinned the `4006` close by map key after the
+farewell await, so a rekey landing inside that await skipped the pin, and the
+one-shot `report_exhaustion` never retried it until the window rolled over.
+The window was unreachable (every charge site holds the charging player's own
+lifecycle gate, which the rekey needs), but a future ungated charge site would
+have reintroduced it. The close now pins the per-socket close signal captured
+under the charge guard, so it follows a concurrent identity swap
+([#697](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/697),
+fixed by PR
+[#699](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/699),
+regression
+`error_reply_exhaustion_pins_the_close_through_a_rekey_inside_the_farewell_await`).
+The same capture-under-fence pin hardened the authority kick's one-shot
+`4007` close (`evict_member_by_authority`), the last same-class residual
+found by the fix review.
+With this sweep, [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686)
 is closed: each path has a deterministic regression from PRs #687-#696 or a
 documented exclusion here.
 

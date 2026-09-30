@@ -147,6 +147,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Rate limits: a socket whose error-reply budget is exhausted now always
+  receives its semantic `4006 inbound_rate_limited` close, even when a
+  reconnect identity swap rekeys the connection during the exhaustion
+  farewell (#697). The close pins the per-socket close signal instead of the
+  map key. The authority kick's `4007 kicked` close follows the socket the
+  same way, so a reconnect claim racing the eviction cannot lose the kicked
+  close frame.
+
 - Relay: an old socket's in-flight game-data frame can no longer charge a
   restored player's relay byte budgets before its stamp rejects delivery.
   Relay admission now holds the sender's source lifecycle gate through both

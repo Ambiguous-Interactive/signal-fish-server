@@ -100,8 +100,7 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   application isolation; authentication and allowlist/key reload boundaries.
   The #686 lifecycle-capture-point sweep is complete (ARM-C030, issue
   closed): every capture-check-await site is fenced or has a documented
-  exclusion. One defense-in-depth residual is tracked in
-  [#697](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/697).
+  exclusion, and the #697 close-pin residual is fixed.
 - [ ] **Gameplay transitions:** ready-state invalidation on membership change;
   start/leave races; authority election and loss; host/direct readiness;
   v2/v3 negotiation; transport capability intersections; stale transport
