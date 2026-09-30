@@ -4971,7 +4971,9 @@ fn test_check_markdown_script_md013_diagnostics_are_data_driven() {
 fn test_pre_commit_hook_does_not_bootstrap_markdownlint() {
     let root = repo_root();
     let hook_path = root.join("scripts/hooks/pre-commit.ps1");
-    let content = read_file(&hook_path);
+    // Positive presence checks must run on the live (comment-stripped) view
+    // so a commented-out invocation cannot satisfy them (drift-guard policy).
+    let content = read_live_file(&hook_path);
 
     // The hook may NAME markdownlint: the changelog gate's internal-path
     // globs list `.markdownlint*` files. It must never run or bootstrap it,
