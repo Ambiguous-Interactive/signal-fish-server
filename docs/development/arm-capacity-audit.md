@@ -475,17 +475,21 @@ documented exclusion here.
 
 At `bdf8bddb`, reviewed every post-claim rejection in `handle_reconnect_owned`
 (`src/server/reconnection_service.rs`): the pre-restore refusals (room full,
-missing seat record, name conflict), the membership-write storage fault and
-its room-missing reclassification, the stale-endpoint clear failure, the
-drain refusal, the post-restore authority grant, the room-readback faults,
-and the reassignment and baseline-publication failures. The rejection
+missing seat record, name conflict), the kicked, already-connected, banned,
+and wrong-application-id rechecks inside the claimed window, the
+membership-write storage fault and its room-missing reclassification, the
+stale-endpoint clear failure, the drain refusal, the post-restore authority
+grant, the room-readback faults, and the reassignment and
+baseline-publication failures. The rejection
 contract holds on every reviewed path: `reject_claimed_reconnect` rolls back
 exactly the state the attempt made durable (restored membership row, granted
 authority, taken-over detach retry with its application-claim provenance),
 releases the claim unspent, and replies with the classified code. The
-`Option<Option<_>>` detach-requeue arithmetic preserves bare (`None`) and
-ownership-carrying (`Some`) provenance in both the removal-failed and
-removal-succeeded branches.
+`Option<Option<_>>` detach-requeue arithmetic re-queues inherited provenance
+unchanged when the rollback removal fails (promoting a bare inheritance to
+an owed bare retry), and when removal succeeds retains only
+ownership-carrying provenance — a bare inheritance then means nothing is
+left to repair.
 
 Evidence added:
 
@@ -517,9 +521,26 @@ Evidence added:
   derivation plus the ownership-provenance sibling
   `rejected_reconnect_requeues_the_ownership_rollback_it_inherited`; no
   dedicated `None`-provenance pin was added.
+- The remaining gates carry recorded evidence or an explicit exclusion: the
+  banned refusal is pinned end to end through `handle_reconnect`
+  (`ErrorCode::Banned`, `moderation_tests.rs` ban-reconnect regression), the
+  wrong-application-id refusal by
+  `app_bound_room_owner_gates_seated_spectator_and_reconnect_admission`
+  (wrong app → `RoomNotFound`), the claim-level kicked refusal by the
+  moderation unit pin (`claim_reconnection` → `Err(Kicked)`), and the
+  pre-claim already-connected refusal at the dispatch boundary
+  (`reconnect_during_teardown_preserves_token_for_retry` and the H6
+  duplicate-claim suite). The stale-endpoint clear failure, the pre- and
+  post-restore room-readback faults, and the kicked/already-connected
+  rechecks inside the claimed window are covered by derivation only: each
+  exits through the same `reject_claimed_reconnect` seam whose storage-fault
+  and rollback branches are red-proofed here, injects no state a later
+  check trusts, and releases the claim through the same guard. No dedicated
+  pins were added for them.
 
 No violation was reproduced. Every post-claim rejection of the reconnect
-restore has a recorded disposition and reproducible evidence.
+restore has a recorded disposition: each gate is pinned end to end or
+carries an explicit derivation exclusion in this section.
 
 ## Coverage ledger
 

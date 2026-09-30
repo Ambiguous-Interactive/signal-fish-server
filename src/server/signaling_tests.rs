@@ -2684,13 +2684,15 @@ async fn reconnect_authority_grant_storage_failure_completes_degraded_and_recove
             .await,
         "an authority-grant storage failure must not fail the reconnect"
     );
-    assert!(
-        !matches!(
-            recv(&mut current_rx).await.as_ref(),
-            ServerMessage::Reconnected(payload) if payload.is_authority
-        ),
-        "the degraded reconnect must not present the vacant authority as held"
-    );
+    match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::Reconnected(payload) => {
+            assert!(
+                !payload.is_authority,
+                "the degraded reconnect must not present the vacant authority as held"
+            );
+        }
+        other => panic!("expected degraded Reconnected frame, got {other:?}"),
+    }
     let room = server
         .database
         .get_room_by_id(&room_id)
