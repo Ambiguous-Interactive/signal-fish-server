@@ -40,6 +40,15 @@ fn action_run_block() -> String {
         block.contains("duplicate="),
         "extracted run block must be the guard script (got: {block:?})"
     );
+    // The guard runs on every runner family its callers use, and the
+    // harness runs on the macOS cron lane: GNU-only constructs (`date -d`)
+    // break under BSD date. The window must stay portable arithmetic over
+    // `date +%s` (Bugbot finding, PR #704 round 2).
+    assert!(
+        !block.contains("date -d") && !block.contains("date -j"),
+        "the guard script must not use GNU-only `date -d`/`date -j` parsing; \
+         compute the cutoff from `date +%s` with shell arithmetic instead"
+    );
     block
 }
 
@@ -56,15 +65,17 @@ fn make_executable(path: &std::path::Path) {
 #[cfg(unix)]
 /// Canned `gh` shim. `gh api` passes the endpoint as `$2` (`api` is `$1`).
 /// Modes and payloads come from the environment so the script stays a plain
-/// raw string (no format! brace-escaping against shell syntax).
+/// raw string (no format! brace-escaping against shell syntax). Timestamps
+/// come from `jq` (a dependency of the guard itself), not GNU `date -d`, so
+/// the harness behaves identically on Linux and the BSD-date macOS cron lane.
 const GH_SHIM: &str = r#"#!/usr/bin/env bash
 set -u
 url="${2:-}"
 case "$url" in
   *"actions/runs?"*)
     if [ "${MOCK_RUNS_FAIL:-0}" = "1" ]; then echo "simulated runs API failure" >&2; exit 70; fi
-    recent="$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)"
-    old="$(date -u -d '200 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+    recent="$(jq -rn 'now - 3600 | todateiso8601')"
+    old="$(jq -rn 'now - 720000 | todateiso8601')"
     case "${MOCK_RUNS_MODE:-}" in
       recent|old)
         stamp="$recent"; [ "${MOCK_RUNS_MODE}" = "old" ] && stamp="$old"

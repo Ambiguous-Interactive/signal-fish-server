@@ -249,10 +249,15 @@ scheduled tick can only reproduce the prior verdict. The shared guard is
   sentinel-derived values before they reach `jq --argjson`.
 - **Sentinel fallbacks must point in the fail-open direction.** A
   window-computation failure falling back to epoch `0` counts every prior
-  success — a skip-biased guard. The correct fallback is "now" (nothing
-  matches → run). And a documented `0 disables the window` needs its own
-  branch: `date -d "-0 hours"` succeeds with cutoff "now", so `0` would
-  otherwise never match anything.
+  success — a skip-biased guard. The correct fallback is to skip the lookup
+  and run. And a documented `0 disables the window` needs its own branch:
+  `date -d "-0 hours"` succeeds with cutoff "now", so `0` would otherwise
+  never match anything.
+- **Guard scripts must stay runner-portable.** GNU `date -d` fails under the
+  BSD date of macOS runners, and the nextest cron lane executes test
+  harnesses there. Compute cutoffs from `date +%s` with shell arithmetic and
+  derive fixture timestamps from `jq` (a guard dependency anyway), never
+  from GNU-only flags; the harness pins this with a portability assert.
 - **Commit the behavioral harness; wiring pins cannot see runtime.**
   Session-310's ad-hoc run-block harness died with the session, and both
   PR-#704 Bugbot findings were runtime-only (unguarded abort, zero-window).

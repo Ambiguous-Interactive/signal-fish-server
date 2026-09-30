@@ -22,9 +22,9 @@
 #   `max_success_age_hours` so drifted external state (runner images, advisory
 #   databases) re-verifies after the window even on an unchanged tree. The
 #   value 0 disables the window (any prior anchored success counts). An
-#   unreadable value fails open (runs) — its fallback cutoff is "now", never
-#   epoch, which would count every prior success and bias the guard toward
-#   skipping.
+#   unreadable value or an unreadable clock fails open (runs): the lookup is
+#   skipped — never decided from a fallback that could count prior successes
+#   (epoch would count all of them and bias the guard toward skipping).
 # - NEVER decides on its own event other than schedule: the caller gates this
 #   action behind `if: github.event_name == 'schedule'`.
 # - Fails open. Any lookup error, missing token/permission, malformed payload,
@@ -91,22 +91,30 @@ runs:
             # directory on so both spellings normalize to the API form.
             workflow_path="${GITHUB_WORKFLOW_REF%%@*}"
             workflow_path=".github/workflows/${workflow_path##*.github/workflows/}"
-            # Freshness window: 0 disables it (any prior anchored success
-            # counts, per the documented input contract). An unreadable value
-            # must fail OPEN — its fallback cutoff is "now" so nothing older
-            # can match. Falling back to 0 (epoch) would count every prior
-            # success and bias the guard toward skipping (Bugbot finding,
-            # PR #704 round 1).
-            if [ "${MAX_SUCCESS_AGE_HOURS}" = "0" ]; then
-                cutoff=0
-            elif ! cutoff="$(date -d "-${MAX_SUCCESS_AGE_HOURS} hours" +%s 2>/dev/null)"; then
-                echo "::warning::skip-if-verified: unreadable max_success_age_hours '${MAX_SUCCESS_AGE_HOURS}'; ignoring the freshness window and failing open (running)."
-                cutoff="$(date +%s 2>/dev/null)" || cutoff=""
-            fi
-            case "${cutoff:-}" in
+            # Freshness window, computed with portable arithmetic (`date +%s`
+            # plus shell math — no GNU `date -d`, which fails on the BSD date
+            # of macOS runners; Bugbot finding, PR #704 round 2).
+            # - 0 disables the window: any prior anchored success counts, per
+            #   the documented input contract.
+            # - An unreadable value or an unreadable clock must fail OPEN:
+            #   leave the cutoff empty and skip the lookup — never fall back
+            #   to a cutoff that counts prior successes (epoch would count
+            #   all of them and bias the guard toward skipping; PR #704
+            #   round 1).
+            cutoff=""
+            case "${MAX_SUCCESS_AGE_HOURS}" in
+                0)
+                    cutoff=0
+                    ;;
                 ''|*[!0-9]*)
-                    echo "::warning::skip-if-verified: could not compute the freshness cutoff; failing open (running)."
-                    cutoff=""
+                    echo "::warning::skip-if-verified: unreadable max_success_age_hours '${MAX_SUCCESS_AGE_HOURS}'; failing open (running)."
+                    ;;
+                *)
+                    if now="$(date +%s 2>/dev/null)"; then
+                        cutoff=$((now - MAX_SUCCESS_AGE_HOURS * 3600))
+                    else
+                        echo "::warning::skip-if-verified: could not read the clock; failing open (running)."
+                    fi
                     ;;
             esac
         fi
