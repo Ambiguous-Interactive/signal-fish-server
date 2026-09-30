@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tests: pin the post-rotation reconnect token discard. A one-shot
+  `get_room_players` pause seam parks a reconnect inside the `Reconnected`
+  baseline builder; a shutdown-drain flip then refuses the commit after the
+  fresh token is minted, and the rejection must discard it, restore the
+  transient identity, release the claim for retry, and roll back membership
+  (#707).
+
 - Security configuration: optional per-encoding game-data payload ceilings,
   `security.max_game_data_bytes` (#634). Each encoding (`json`,
   `message_pack`, `rkyv`, `protobuf`) can carry its own payload cap, checked

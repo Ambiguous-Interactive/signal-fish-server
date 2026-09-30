@@ -4727,6 +4727,152 @@ async fn reconnect_baseline_delivery_failure_rolls_back_and_releases_claim_for_r
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
+async fn reconnect_drain_flip_after_baseline_rotation_discards_the_fresh_token() {
+    // Issue #707: the drain-flip window between the `Reconnected` baseline
+    // builder and the commit is the one reachable post-rotation failure
+    // window. The builder mints the rotated token as its last step, then the
+    // commit gate re-checks the drain and refuses with `Canceled`, so the
+    // reject path must discard exactly the freshly minted pre-issued token.
+    // Red-proofed: removing the discard line leaves the fresh token armed
+    // and fails this test on the pre-issued-token assertion.
+    let server = create_test_server().await;
+    let (existing, _existing_rx) = register_client(&server).await;
+    let (reconnecting, _old_rx) = register_client(&server).await;
+    let (current, mut current_rx) = register_client(&server).await;
+    server.set_client_protocol(&existing, v3_webrtc());
+    server.set_client_protocol(&current, v3_webrtc());
+
+    let room_id = create_db_room(&server, existing).await;
+    let reconnecting_info = player_info(reconnecting, "reconnecting");
+    server
+        .database
+        .add_player_to_room(&room_id, reconnecting_info.clone())
+        .await
+        .expect("add reconnecting player");
+    server
+        .connection_manager
+        .assign_client_to_room(&existing, room_id)
+        .await;
+    server
+        .connection_manager
+        .assign_client_to_room(&reconnecting, room_id)
+        .await;
+
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .register_disconnection(
+            reconnecting,
+            room_id,
+            false,
+            Some(reconnecting_info),
+            server
+                .connection_manager
+                .game_data_epoch(&reconnecting)
+                .unwrap_or(0),
+        )
+        .await;
+    server
+        .database
+        .remove_player_from_room(&room_id, &reconnecting)
+        .await
+        .expect("remove reconnecting player");
+    server.connection_manager.remove_client(&reconnecting);
+    let _ = server
+        .message_coordinator
+        .unregister_local_client(&reconnecting)
+        .await;
+
+    let database = server
+        .database()
+        .as_any()
+        .downcast_ref::<InMemoryDatabase>()
+        .expect("test server uses in-memory database");
+    // Park the transaction inside the baseline builder, at its first storage
+    // read (`get_room_players`), before the builder's final rotation step.
+    // The admission drain pre-checks have already passed by this point, so
+    // the drain flip below can only be observed at the post-builder commit
+    // gate — after the token has been minted.
+    database.pause_next_get_room_players_for_test();
+    let reconnect_server = Arc::clone(&server);
+    let retry_token = token.clone();
+    let reconnect_task = tokio::spawn(async move {
+        reconnect_server
+            .handle_reconnect(&current, &reconnecting, &room_id, &retry_token)
+            .await
+    });
+    timeout(
+        Duration::from_secs(1),
+        database.wait_for_paused_get_room_players_for_test(),
+    )
+    .await
+    .expect("reconnect reaches the baseline builder");
+    assert!(
+        !server
+            .reconnection_manager()
+            .expect("reconnection enabled")
+            .has_pre_issued_token(&reconnecting)
+            .await,
+        "the rotated token must not exist before the builder's final step"
+    );
+
+    assert!(
+        server.begin_shutdown_drain().started_by_this_call,
+        "test owns the drain window"
+    );
+    database.release_paused_get_room_players_for_test();
+    assert!(
+        !timeout(Duration::from_secs(2), reconnect_task)
+            .await
+            .expect("reconnect finishes")
+            .expect("task lives"),
+        "a post-rotation drain flip must reject the reconnect"
+    );
+    match recv(&mut current_rx).await.as_ref() {
+        ServerMessage::ReconnectionFailed { error_code, .. } => {
+            assert_eq!(*error_code, ErrorCode::ServerDraining);
+        }
+        other => panic!("expected ReconnectionFailed(ServerDraining), got {other:?}"),
+    }
+
+    // The pin under test: the builder minted a fresh pre-issued token, and
+    // the post-reassignment rejection must discard it — a player who was
+    // never restored never holds an armed credential.
+    assert!(
+        !server
+            .reconnection_manager()
+            .expect("reconnection enabled")
+            .has_pre_issued_token(&reconnecting)
+            .await,
+        "the post-rotation drain refusal must discard the freshly minted pre-issued token"
+    );
+    assert!(
+        server.connection_manager.has_client(&current),
+        "the drain refusal must restore the temporary connection id"
+    );
+    assert!(
+        !server.connection_manager.has_client(&reconnecting),
+        "the drain refusal must not leave the restored id registered"
+    );
+    server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .validate_reconnection(&reconnecting, &room_id, &token)
+        .await
+        .expect("the drain refusal must release the claim for retry");
+    let members = server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .expect("room players");
+    assert!(
+        !members.iter().any(|player| player.id == reconnecting),
+        "the drain refusal must roll back the restored room membership"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
 async fn failed_reconnect_rollback_does_not_leave_an_unrouted_authority() {
     let server = create_test_server_with_config(ServerConfig {
         websocket_config: WebSocketConfig {

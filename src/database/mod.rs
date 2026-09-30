@@ -904,6 +904,16 @@ pub struct InMemoryDatabase {
     release_authority_request_commit: tokio::sync::Notify,
     #[cfg(test)]
     get_room_players_calls: std::sync::atomic::AtomicU32,
+    /// One-shot test pause inside `get_room_players`: parks the caller at the
+    /// read so a test can interleave (for example flip the shutdown drain)
+    /// while a reconnect transaction is inside its baseline builder, before
+    /// the builder's final rotation step.
+    #[cfg(test)]
+    pause_get_room_players: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    get_room_players_reached: tokio::sync::Notify,
+    #[cfg(test)]
+    release_get_room_players: tokio::sync::Notify,
 }
 
 impl InMemoryDatabase {
@@ -1002,6 +1012,12 @@ impl InMemoryDatabase {
             release_authority_request_commit: tokio::sync::Notify::new(),
             #[cfg(test)]
             get_room_players_calls: std::sync::atomic::AtomicU32::new(0),
+            #[cfg(test)]
+            pause_get_room_players: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            get_room_players_reached: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            release_get_room_players: tokio::sync::Notify::new(),
         }
     }
 
@@ -1124,6 +1140,22 @@ impl InMemoryDatabase {
     pub(crate) fn pause_next_add_player_for_test(&self) {
         self.pause_add_player_to_room
             .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_next_get_room_players_for_test(&self) {
+        self.pause_get_room_players
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_paused_get_room_players_for_test(&self) {
+        self.get_room_players_reached.notified().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_paused_get_room_players_for_test(&self) {
+        self.release_get_room_players.notify_one();
     }
 
     #[cfg(all(test, signal_fish_repository_tests))]
@@ -2120,6 +2152,15 @@ impl GameDatabase for InMemoryDatabase {
         #[cfg(test)]
         self.get_room_players_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        #[cfg(test)]
+        if self
+            .pause_get_room_players
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            self.get_room_players_reached.notify_one();
+            self.release_get_room_players.notified().await;
+        }
 
         #[cfg(test)]
         if self
