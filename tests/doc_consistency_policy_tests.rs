@@ -328,6 +328,156 @@ fn test_pre_commit_doc_version_sync_sites_match_checker() {
     );
 }
 
+fn extract_hook_changelog_internal_path_globs(hook: &str) -> Vec<String> {
+    const DECLARATION: &str = "$script:ChangelogInternalPathGlobs = [string[]]@(";
+    let start = hook
+        .find(DECLARATION)
+        .expect("scripts/hooks/pre-commit.ps1 must declare $script:ChangelogInternalPathGlobs");
+    let body = &hook[start + DECLARATION.len()..];
+    let end = body
+        .find("\n)")
+        .expect("$script:ChangelogInternalPathGlobs array must be closed by a ')' on its own line");
+
+    // The array body alternates between quoted glob strings and comments or
+    // whitespace, so the odd segments of a double-quote split are exactly the
+    // declared globs.
+    body[..end]
+        .split('"')
+        .enumerate()
+        .filter(|(index, _)| index % 2 == 1)
+        .map(|(_, glob)| glob.to_string())
+        .collect()
+}
+
+fn extract_checker_internal_path_patterns(checker: &str) -> Vec<String> {
+    const FUNCTION: &str = "is_internal_path() {";
+    let start = checker
+        .find(FUNCTION)
+        .expect("scripts/check-doc-consistency.sh must define is_internal_path()");
+    let body = &checker[start..];
+    let end = body.find("\n}").expect("is_internal_path() must be closed");
+
+    // A bash case-pattern line is one or more glob alternatives separated by
+    // '|' and terminated by ')'. The ')' terminates the line and is not part
+    // of the alternatives, so strip it before the character check. All other
+    // lines in the function (local, case, return, ;;, esac) fail this shape.
+    // The '*' catch-all (match-everything default) ends the internal list.
+    body[..end]
+        .lines()
+        .filter_map(|line| {
+            let alternatives = line.trim().strip_suffix(')')?;
+            let is_pattern_line = !alternatives.is_empty()
+                && alternatives.chars().all(|c| {
+                    c.is_ascii_alphanumeric() || matches!(c, '*' | '.' | '/' | '|' | '-' | '_')
+                });
+            if !is_pattern_line {
+                return None;
+            }
+            Some(alternatives.to_string())
+        })
+        .take_while(|alternatives| alternatives != "*")
+        .flat_map(|alternatives| {
+            alternatives
+                .split('|')
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+#[test]
+fn test_pre_commit_changelog_gate_internal_paths_match_checker() {
+    let root = repo_root();
+    let hook = read_live_file(&root.join("scripts/hooks/pre-commit.ps1"));
+    let checker = read_live_file(&root.join("scripts/check-doc-consistency.sh"));
+
+    let mut hook_globs = extract_hook_changelog_internal_path_globs(&hook);
+    let mut checker_patterns = extract_checker_internal_path_patterns(&checker);
+
+    assert!(
+        !checker_patterns.is_empty(),
+        "is_internal_path() in scripts/check-doc-consistency.sh must list internal path patterns."
+    );
+    assert!(
+        !hook_globs.is_empty(),
+        "$script:ChangelogInternalPathGlobs in scripts/hooks/pre-commit.ps1 must list internal path globs."
+    );
+
+    hook_globs.sort();
+    hook_globs.dedup();
+    checker_patterns.sort();
+    checker_patterns.dedup();
+
+    let missing_from_hook: Vec<&String> = checker_patterns
+        .iter()
+        .filter(|pattern| !hook_globs.contains(pattern))
+        .collect();
+    let extra_in_hook: Vec<&String> = hook_globs
+        .iter()
+        .filter(|glob| !checker_patterns.contains(glob))
+        .collect();
+
+    assert!(
+        missing_from_hook.is_empty() && extra_in_hook.is_empty(),
+        "The pre-commit changelog gate and the checker's is_internal_path() must classify internal paths identically.\n\
+         Missing from scripts/hooks/pre-commit.ps1 $script:ChangelogInternalPathGlobs:\n{}\n\
+         Not present in is_internal_path() in scripts/check-doc-consistency.sh:\n{}",
+        missing_from_hook
+            .iter()
+            .map(|pattern| format!("  - {pattern}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        extra_in_hook
+            .iter()
+            .map(|glob| format!("  - {glob}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+}
+
+#[test]
+fn test_pre_commit_runs_changelog_gate_on_every_commit_shape() {
+    let root = repo_root();
+    let hook = read_live_file(&root.join("scripts/hooks/pre-commit.ps1"));
+
+    assert!(
+        hook.contains(
+            "Invoke-Check \"Changelog gate\" { Test-ChangelogGate -ChangedFiles $allChangedFiles }"
+        ),
+        "pre-commit.ps1 must run the changelog gate on the full changed-file set."
+    );
+
+    // The gate must run before the metadata-policy early exit so a src-only
+    // commit (no .llm/README files staged) is still gated.
+    let doc_sync = hook
+        .find("Invoke-Check \"Doc version sync\"")
+        .expect("pre-commit.ps1 must run the doc version sync check");
+    let changelog_gate = hook
+        .find("Invoke-Check \"Changelog gate\"")
+        .expect("pre-commit.ps1 must run the changelog gate check");
+    let metadata_early_exit = hook
+        .find("if (-not $metadataPolicyTriggered)")
+        .expect("pre-commit.ps1 must have a metadata-policy early exit");
+    assert!(
+        doc_sync < changelog_gate && changelog_gate < metadata_early_exit,
+        "the changelog gate must run after doc version sync and before the metadata-policy early exit."
+    );
+
+    // -Worktree discovery must see CHANGELOG.md so the worktree preflight can
+    // verify that non-internal changes carry a changelog entry.
+    let pathspecs_start = hook
+        .find("$script:WorktreePolicyPathspecs = @(")
+        .expect("pre-commit.ps1 must declare $script:WorktreePolicyPathspecs");
+    let pathspecs_block = &hook[pathspecs_start..];
+    let pathspecs_end = pathspecs_block
+        .find(") + $script:DocVersionSyncFiles")
+        .expect("$script:WorktreePolicyPathspecs must append the policy file lists");
+    assert!(
+        pathspecs_block[..pathspecs_end].contains("\"CHANGELOG.md\""),
+        "$script:WorktreePolicyPathspecs must include CHANGELOG.md so -Worktree mode can see changelog accompaniment."
+    );
+}
+
 #[test]
 fn test_local_ci_includes_doc_consistency_gate_and_tests() {
     let root = repo_root();

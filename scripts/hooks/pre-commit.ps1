@@ -42,12 +42,39 @@ $script:SkillsIndexToolingFiles = @(
 )
 $script:HookPolicyChangedFiles = @()
 $script:DocVersionSyncFiles = @("docs/library-usage.md", ".llm/context.md")
+# Internal path classification for the changelog gate. Mirrors is_internal_path()
+# in scripts/check-doc-consistency.sh EXACTLY (same patterns, same order); the
+# lockstep is locked by tests/doc_consistency_policy_tests.rs. Update both lists
+# together, then the fixture corpus at
+# .github/test-fixtures/test-doc-consistency.sh.
+$script:ChangelogInternalPathGlobs = [string[]]@(
+    # Dot-directories
+    ".github/*", ".githooks/*", ".devcontainer/*", ".config/*", ".vscode/*", ".claude/*",
+    # Dev/build/agent directories
+    "scripts/*", "tests/*", "test-fixtures/*", "formal/*", ".llm/*", "target/*", "progress/*",
+    # Test-only Rust sources
+    "src/*_tests.rs", "src/*_test.rs", "src/*/tests.rs",
+    # CI/infrastructure docs
+    "docs/ci-cd-*", "docs/test-*", "docs/git-hooks-*", "docs/hooks-*", "docs/pre-commit-*",
+    "docs/development.md", "docs/development/*",
+    # Standalone internal files
+    "Cargo.lock", "PLAN.md", "AGENTS.md", "CLAUDE.md", "pre-push.txt", "pre-commit.txt", "logs_*.zip",
+    # Linter and tool config
+    ".markdownlint*", ".lychee.toml", ".lycheecache", ".typos.toml", ".yamllint.yml",
+    # VCS and Docker ignore files
+    ".gitignore", ".dockerignore",
+    # Build tool configs
+    "clippy.toml", "deny.toml", "tarpaulin.toml", "rust-toolchain.toml", "mkdocs.yml", "requirements-docs.txt"
+)
 $script:WorktreePolicyPathspecs = @(
     "src",
     ".llm",
     "README.md",
     "scripts/generate-skills-index.sh",
-    "Cargo.toml"
+    "Cargo.toml",
+    # The changelog gate must see CHANGELOG.md changes so the -Worktree
+    # preflight can verify that non-internal changes carry a changelog entry.
+    "CHANGELOG.md"
 ) + $script:DocVersionSyncFiles + $script:HookPolicyFiles
 $script:PendingWorktreeStatus = $null
 $script:PendingWorktreeUntracked = $null
@@ -1573,6 +1600,56 @@ function Repair-DocVersionsIfNeeded {
     }
 }
 
+# ---------------------------------------------------------------------------
+# Changelog gate (fail-closed mirror)
+#
+# Non-internal changes require a CHANGELOG.md entry under '## [Unreleased]'.
+# The gate lives in is_internal_path() plus section 4 of
+# scripts/check-doc-consistency.sh and is enforced by the hosted Doc
+# Consistency job after push. This check mirrors it so a missing entry fails
+# at commit time instead of one CI round-trip later (issue #700: PR #699 paid
+# exactly that round-trip). Pure path classification plus one changed-file-set
+# lookup; no process spawns, so it stays inside the hook budget.
+# ---------------------------------------------------------------------------
+function Test-ChangelogGateInternalPath {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Path)
+
+    foreach ($glob in $script:ChangelogInternalPathGlobs) {
+        # -clike keeps the classification case-sensitive like the bash
+        # `case` statement it mirrors.
+        if ($Path -clike $glob) {
+            return $true
+        }
+    }
+
+    $false
+}
+
+function Test-ChangelogGate {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ChangedFiles)
+
+    $nonInternal = @($ChangedFiles | Where-Object {
+            $_ -ne "CHANGELOG.md" -and -not (Test-ChangelogGateInternalPath -Path $_)
+        })
+
+    if ($nonInternal.Count -eq 0) {
+        Skip "Changelog gate" "no non-internal changed files"
+        return
+    }
+
+    if ($ChangedFiles -contains "CHANGELOG.md") {
+        Pass "Changelog gate"
+        return
+    }
+
+    $offenders = ($nonInternal | ForEach-Object { "  - $_" }) -join "`n"
+    Fail "Changelog gate" (@(
+            "Non-internal changed files without a CHANGELOG.md update:",
+            $offenders,
+            "Add a Keep a Changelog entry under '## [Unreleased]' for user-facing impact, or add the path to the internal-path lists in scripts/check-doc-consistency.sh and this hook if truly internal."
+        ) -join "`n")
+}
+
 function Test-LlmFileSizes {
     if ($null -ne $script:PreloadError) {
         Skip "LLM file sizes" "staged content preload failed"
@@ -1764,6 +1841,10 @@ if ($script:InspectWorktree) {
 # commit shape (runs before the Rust early-exit below so a Cargo.toml bump that
 # also touches Rust still auto-syncs).
 if (-not (Invoke-Check "Doc version sync" { Repair-DocVersionsIfNeeded -ChangedFiles $allChangedFiles })) { Complete-PreCommit }
+
+# Mirror the hosted changelog gate at commit time (issue #700): a non-internal
+# change without a CHANGELOG.md update must fail here, not in hosted CI.
+if (-not (Invoke-Check "Changelog gate" { Test-ChangelogGate -ChangedFiles $allChangedFiles })) { Complete-PreCommit }
 
 if (-not (Invoke-Check "Hook speed policy" { Test-FastHookSource })) { Complete-PreCommit }
 $changedProductionRustFiles = [string[]]@($allChangedFiles | Where-Object { Test-ProductionRustSourcePath -Path $_ })
