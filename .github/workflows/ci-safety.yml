@@ -96,9 +96,38 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Duplicate-scheduled-verification guard (issue #702). A daily tick against
+  # a head this workflow already verified successfully re-runs Miri and ASan
+  # (10-50x-interpreter / instrumented lanes) as a pure function of the same
+  # pinned toolchain and tree, so the tick can only repeat the prior verdict.
+  # Fails open; only schedule ticks consult it — manual dispatch always runs.
+  # The deterministic schedule-only lanes in ci.yml are deferred to a focused
+  # follow-up: that workflow's matrix cohort and pinned per-job invariants
+  # deserve their own reviewed change.
+  verified-head-guard:
+    name: Skip if HEAD already verified
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      duplicate: ${{ steps.guard.outputs.duplicate }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+      - id: guard
+        uses: ./.github/actions/skip-if-verified
+        with:
+          anchor_step: "Run Miri on library tests"
+          max_success_age_hours: "168"
+
   miri:
     name: Miri (${{ matrix.lane.name }})
     runs-on: ubuntu-latest
+    needs: [verified-head-guard]
+    if: ${{ !cancelled() && needs.verified-head-guard.outputs.duplicate != 'true' }}
     # Miri interprets code rather than compiling it natively, which is
     # significantly slower — 10-50x depending on the test suite size. Two
     # parallel lanes keep the per-lane step wall near the compile floor
@@ -219,6 +248,8 @@ jobs:
   asan:
     name: AddressSanitizer
     runs-on: ubuntu-latest
+    needs: [verified-head-guard]
+    if: ${{ !cancelled() && needs.verified-head-guard.outputs.duplicate != 'true' }}
     timeout-minutes: 30
     # Gating: sanitizer/test failures must fail this job and workflow.
     env:

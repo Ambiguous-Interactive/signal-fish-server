@@ -47,6 +47,33 @@ permissions:
   contents: read
 
 jobs:
+  # Duplicate-scheduled-verification guard (issue #702). The mutation run is a
+  # pure function of the pinned toolchain, pinned cargo-mutants, and the tree,
+  # so a Monday tick against a head this workflow already verified
+  # successfully can only reproduce the prior survivor list. Fails open; only
+  # schedule ticks consult it — manual dispatch always runs. Skipping
+  # `baseline` skips the `mutants` shards through their existing `needs` edge.
+  verified-head-guard:
+    name: Skip if HEAD already verified
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      duplicate: ${{ steps.guard.outputs.duplicate }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+      - id: guard
+        uses: ./.github/actions/skip-if-verified
+        with:
+          anchor_step: "Warm build + green-gate (exact unmutated nextest oracle)"
+          # Weekly cadence: a 168-hour window would be indistinguishable from
+          # the tick interval, so allow a two-week staleness bound instead.
+          max_success_age_hours: "336"
+
   # Warm a SHARED rust-cache once and prove the exact unmutated nextest oracle is
   # green, so every sharded mutants job can (a) use --baseline=skip (this job is
   # the green-gate) and (b) reuse the warm target/ via --in-place instead of
@@ -55,6 +82,8 @@ jobs:
   baseline:
     name: baseline (warm shared cache + green-gate)
     runs-on: ubuntu-latest
+    needs: [verified-head-guard]
+    if: ${{ !cancelled() && needs.verified-head-guard.outputs.duplicate != 'true' }}
     timeout-minutes: 15
     steps:
       - name: Checkout repository

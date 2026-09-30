@@ -248,6 +248,33 @@ This ensures:
 
 ---
 
+## 8. Skipping Ticks That Re-Verify an Unchanged Head (issue #702)
+
+When the head has not moved since the same workflow last verified it, a
+scheduled tick can only reproduce the prior verdict. The shared guard is
+[`.github/actions/skip-if-verified`](../../../.github/actions/skip-if-verified)
+(reuse it; do not fork it). Three review findings define its contract:
+
+- **Runner env formats: verify against the docs, never the assumption.**
+  `GITHUB_WORKFLOW_REF` is owner-qualified
+  (`owner/repo/.github/workflows/f.yml@ref`) while the Actions API `path` is
+  repository-relative. Parsing without normalizing made the guard never
+  match, and the harness masked it because its fixtures seeded the
+  implementation's assumed format. Normalize both spellings; seed harness
+  fixtures from the documented reality.
+- **Listing workflow runs needs job-level `actions: read`.** A workflow
+  default of `contents: read` makes every lookup 403, and a fail-open guard
+  then silently disables itself. Declare `permissions:` on the guard's job
+  and make the warning name the permission.
+- **A guard's own output must not satisfy its predicate.** A skipped tick
+  still concludes `success` at run level, so "a recent success exists" lets
+  one skip sustain itself forever. Count a run as verification only when its
+  jobs show a successful executed-work step (`anchor_step`: gating, must-pass,
+  never the guard, never checkout). Generalizes to every cache/dedupe guard:
+  anchor on evidence the real work ran.
+
+---
+
 ## Best Practices Checklist
 
 - [ ] `schedule:` trigger added to security audit workflow
@@ -259,6 +286,9 @@ This ensures:
 - [ ] Failure notifications configured for scheduled-run failures
 - [ ] Concurrency control prevents overlapping scheduled runs
 - [ ] `test_ci_schedule_only_runs_audit` test validates guard coverage
+- [ ] Skip guards (issue #702): the guard's job declares `permissions:` with
+      `actions: read`; anchor step is an executed-work step; harness fixtures
+      use documented env formats; skipped runs never count as verification
 
 ---
 

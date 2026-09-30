@@ -91,42 +91,71 @@ jobs:
   unused-deps:
     name: Check Unused Dependencies
     runs-on: ubuntu-latest
+    # Job-level grant (replaces the workflow default, so contents: read is
+    # restated): the skip-if-verified guard step lists workflow runs through
+    # the Actions API, which needs actions: read. Without it the API returns
+    # 403 and the guard fails open on every tick, silently disabling the skip
+    # (Bugbot finding, PR #703 round 2).
+    permissions:
+      contents: read
+      actions: read
     # Two analyzers share setup but run sequentially. Keep cold-cache install
     # headroom until hosted warm/cold measurements establish a tighter bound.
     timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
+      - name: Skip duplicate scheduled verification (issue 702)
+        # A scheduled tick against a head this workflow already verified
+        # successfully re-runs a pure function of the same pinned inputs and
+        # can only repeat the prior verdict. The guard fails open and only
+        # decides on schedule ticks; manual dispatch and pull requests always
+        # run. Kept inside the single analyzer job on purpose: a separate
+        # guard job would add a runner allocation to skip a runner allocation.
+        id: verified-head-guard
+        if: github.event_name == 'schedule'
+        uses: ./.github/actions/skip-if-verified
+        with:
+          # The gating machete step is the anchor: it only concludes success
+          # when the analyzers really ran. (The udeps step is
+          # continue-on-error, so its own conclusion cannot be relied on.)
+          anchor_step: "Check for unused dependencies"
+          max_success_age_hours: "168"
       - name: Install Rust nightly toolchain
+        if: steps.verified-head-guard.outputs.duplicate != 'true'
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: nightly-2026-08-01
           components: rustc
 
       - name: Cache Rust dependencies
+        if: steps.verified-head-guard.outputs.duplicate != 'true'
         uses: Swatinem/rust-cache@v2.9.2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install unused-dependency analyzers
+        if: steps.verified-head-guard.outputs.duplicate != 'true'
         uses: taiki-e/install-action@v2.87.20
         with:
           tool: cargo-machete@0.7.0,cargo-udeps@0.1.61
           fallback: none
 
       - name: Verify analyzer versions
+        if: steps.verified-head-guard.outputs.duplicate != 'true'
         run: |
           set -euo pipefail
           cargo machete --version | grep -Fxq '0.7.0'
           cargo +nightly-2026-08-01 udeps --version | grep -Fxq 'cargo-udeps 0.1.61'
 
       - name: Check for unused dependencies
+        if: steps.verified-head-guard.outputs.duplicate != 'true'
         run: cargo machete
 
       - name: Check for unused dependencies (udeps)
         # The nightly compile is the job's heavy leg and the result is
         # informational (see the continue-on-error note below), so it runs on
         # the daily cohort and manual dispatch only (issue #512).
-        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        if: ${{ !cancelled() && steps.verified-head-guard.outputs.duplicate != 'true' && github.event_name != 'pull_request' }}
         # Note: continue-on-error is enabled because cargo-udeps may report
         # false positives for:
         #   - Proc-macro dependencies (used at compile-time)
