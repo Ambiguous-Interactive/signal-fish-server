@@ -3,8 +3,8 @@ use crate::config::AppRegistrationEntry;
 use crate::coordination::{
     ClientDeliveryHandle, CloseReason, ConnectionCloseSignal, DeliveryOutcome, DeliveryPermit,
     DeliveryReserveError, DeliverySender, DeliveryTrySendError, ImmediateGameDataBroadcast,
-    InMemoryRoomOperationCoordinator, MessageCoordinator, RoomEventCompletion, RoomEventJob,
-    RoomEventMutationGuard, RoomEventSequencer, RoomMessageTransactionOutcome,
+    InMemoryRoomOperationCoordinator, MessageCoordinator, RelayEnqueueOutcome, RoomEventCompletion,
+    RoomEventJob, RoomEventMutationGuard, RoomEventSequencer, RoomMessageTransactionOutcome,
     RoomOperationCoordinatorTrait, RoomRecipientMessages,
 };
 use crate::database::{create_database, DatabaseConfig, GameDatabase};
@@ -20,7 +20,9 @@ use dashmap::DashMap;
 #[cfg(test)]
 use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8};
 use std::sync::atomic::{AtomicU64, AtomicUsize};
@@ -2246,6 +2248,31 @@ fn relay_projection_work_repeats(cohorts: impl IntoIterator<Item = RelayProjecti
 }
 
 impl InMemoryMessageCoordinator {
+    /// Enqueue portion of [`Self::broadcast_to_room_except_with_borrowed_owned_message`]:
+    /// await the routing snapshot, build the message (allocating the relay
+    /// stamp), and start deliveries. The backpressured finish is returned
+    /// separately so a caller holding per-sender serialization gates can
+    /// release them before awaiting it (issue #686).
+    async fn enqueue_borrowed_owned_broadcast_after_contention(
+        &self,
+        room_id: &RoomId,
+        except_player: &PlayerId,
+        build_message: &mut (dyn FnMut() -> Option<ServerMessage> + Send),
+    ) -> Option<StartedDeliveries> {
+        let _routing = self.room_routing_gates.read(*room_id).await;
+        let room_players = self.room_players.read().await;
+        let clients = self.local_clients.read().await;
+        build_message().map(|message| {
+            self.start_routed_owned_deliveries(
+                &room_players,
+                &clients,
+                room_id,
+                Some(except_player),
+                message,
+            )
+        })
+    }
+
     /// Create a coordinator with default delivery policy and private metrics.
     ///
     /// Production wiring uses [`Self::with_delivery_policy`] so backpressure
@@ -4466,25 +4493,48 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         except_player: &PlayerId,
         build_message: &'a mut (dyn FnMut() -> Option<ServerMessage> + Send),
     ) -> anyhow::Result<()> {
-        let _routing = self.room_routing_gates.read(*room_id).await;
-        let room_players = self.room_players.read().await;
-        let clients = self.local_clients.read().await;
-        let started = build_message().map(|message| {
-            self.start_routed_owned_deliveries(
-                &room_players,
-                &clients,
+        if let Some(started) = self
+            .enqueue_borrowed_owned_broadcast_after_contention(
                 room_id,
-                Some(except_player),
-                message,
+                except_player,
+                build_message,
             )
-        });
-        drop(clients);
-        drop(room_players);
-        drop(_routing);
-        if let Some(started) = started {
+            .await
+        {
             self.finish_deliveries(started).await;
         }
         Ok(())
+    }
+
+    /// Gated relay contention fallback
+    /// ([`MessageCoordinator::enqueue_relay_broadcast_after_contention`]):
+    /// the fallback enqueue (with its routing waits) runs inside the call, so
+    /// the caller's lifecycle gate covers the stamp allocation, and only the
+    /// backpressured drain is left for the caller to await.
+    fn enqueue_relay_broadcast_after_contention<'a>(
+        &'a self,
+        room_id: &RoomId,
+        except_player: &PlayerId,
+        build_message: &'a mut (dyn FnMut() -> Option<ServerMessage> + Send),
+    ) -> Pin<Box<dyn Future<Output = RelayEnqueueOutcome<'a>> + Send + 'a>> {
+        let room_id = *room_id;
+        let except_player = *except_player;
+        Box::pin(async move {
+            match self
+                .enqueue_borrowed_owned_broadcast_after_contention(
+                    &room_id,
+                    &except_player,
+                    build_message,
+                )
+                .await
+            {
+                Some(started) => RelayEnqueueOutcome::AwaitFinish(Box::pin(async move {
+                    self.finish_deliveries(started).await;
+                    Ok(())
+                })),
+                None => RelayEnqueueOutcome::Finished(Ok(())),
+            }
+        })
     }
 
     fn try_broadcast_to_room_except_with_borrowed_owned_message<'a>(

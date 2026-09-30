@@ -2530,6 +2530,12 @@ fn drain_queued_messages(
 }
 
 async fn setup_joined_pair_with_reconnection() -> JoinedPairFixture {
+    setup_joined_pair_with_reconnection_and_config(|_| {}).await
+}
+
+async fn setup_joined_pair_with_reconnection_and_config(
+    mutate_config: impl FnOnce(&mut ServerConfig),
+) -> JoinedPairFixture {
     let database = Arc::new(InMemoryDatabase::new());
     database
         .initialize()
@@ -2538,11 +2544,13 @@ async fn setup_joined_pair_with_reconnection() -> JoinedPairFixture {
     let coordinator: Arc<dyn MessageCoordinator> = Arc::new(InMemoryMessageCoordinator::new());
     let distributed_lock: Arc<dyn DistributedLock> = Arc::new(InMemoryDistributedLock::new());
     let server_database: Arc<dyn GameDatabase> = database.clone();
+    let mut server_config = ServerConfig {
+        enable_reconnection: true,
+        ..ServerConfig::default()
+    };
+    mutate_config(&mut server_config);
     let server = create_test_server_with_message_coordinator_and_lock(
-        ServerConfig {
-            enable_reconnection: true,
-            ..ServerConfig::default()
-        },
+        server_config,
         coordinator,
         distributed_lock,
         server_database,
@@ -2659,6 +2667,209 @@ async fn restore_joined_pair_authority(
     drain_queued_messages(&mut replacement_rx);
     drain_queued_messages(&mut fixture.survivor_rx);
     replacement_rx
+}
+
+/// Old-relay admission (issue #686): the sender-budget and room-budget
+/// waits suspend a relay between its source check and its lifecycle-guarded
+/// stamp. The source gate must hold across both waits — the reconnect rekey
+/// waits for the gate, so the in-flight frame either relays wholly as the
+/// incumbent or never charges — and the old frame is charged exactly once,
+/// so the replacement's follow-up relay within the same window is never
+/// refused.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn old_relay_budget_admission_serializes_restored_player_reconnect() {
+    use super::game_data::{arm_relay_admission_pause, RelayAdmissionStage};
+    use crate::protocol::ClientMessage;
+
+    for lane in ["text", "binary"] {
+        for stage in [
+            RelayAdmissionStage::BeforeSenderBudget,
+            RelayAdmissionStage::BeforeRoomBudget,
+        ] {
+            let mut fixture = setup_joined_pair_with_reconnection_and_config(|config| {
+                config.rate_limit_config.max_relay_bytes = 1000;
+            })
+            .await;
+            let old_lifecycle = fixture.server.client_lifecycle(&fixture.leaver).unwrap();
+            let pause = arm_relay_admission_pause(fixture.leaver, stage);
+            let old_frame = {
+                let server = Arc::clone(&fixture.server);
+                let player_id = fixture.leaver;
+                let lifecycle = Arc::clone(&old_lifecycle);
+                tokio::spawn(async move {
+                    if lane == "text" {
+                        server
+                            .handle_client_message_from_lifecycle(
+                                &player_id,
+                                ClientMessage::GameData {
+                                    data: serde_json::Value::String("x".repeat(900)),
+                                    class: None,
+                                    key: None,
+                                },
+                                lifecycle,
+                            )
+                            .await;
+                    } else {
+                        server
+                            .handle_game_data_binary_from_lifecycle(
+                                &player_id,
+                                GameDataEncoding::MessagePack,
+                                bytes::Bytes::from(vec![0u8; 900]),
+                                lifecycle,
+                            )
+                            .await;
+                    }
+                })
+            };
+            timeout(Duration::from_secs(1), pause.reached.notified())
+                .await
+                .expect("old relay reaches the budget wait");
+
+            // The reconnect must not rekey while the old relay is paused
+            // mid-admission: the source gate holds it back.
+            let mut restore = {
+                let server = Arc::clone(&fixture.server);
+                let room_id = fixture.room_id;
+                let token = fixture.reconnect_token.clone();
+                let leaver = fixture.leaver;
+                tokio::spawn(async move {
+                    // Teardown first, mirroring the fixture restore: the
+                    // unregister serializes behind the relay's gate too.
+                    server.unregister_client(&leaver).await;
+                    let (replacement, mut replacement_rx) =
+                        register_client(&server, "127.0.0.1:48108".parse().unwrap()).await;
+                    server.set_client_protocol(
+                        &replacement,
+                        NegotiatedProtocol {
+                            version: 3,
+                            transports: vec![crate::protocol::Transport::Relay],
+                            topologies: vec![crate::protocol::Topology::Relay],
+                        },
+                    );
+                    assert!(
+                        server
+                            .handle_reconnect(&replacement, &leaver, &room_id, &token)
+                            .await,
+                        "replacement reconnects"
+                    );
+                    assert_next_message_matches(&mut replacement_rx, "reconnect baseline", |m| {
+                        matches!(m, ServerMessage::Reconnected(_))
+                    });
+                    drain_queued_messages(&mut replacement_rx);
+                    replacement_rx
+                })
+            };
+            tokio::time::advance(Duration::from_millis(1)).await;
+            assert!(
+                timeout(Duration::from_millis(1), &mut restore)
+                    .await
+                    .is_err(),
+                "reconnect must wait for the paused old relay admission ({lane}, {stage:?})"
+            );
+
+            pause.release.notify_one();
+            timeout(Duration::from_secs(1), old_frame)
+                .await
+                .expect("old relay finishes")
+                .expect("old relay task lives");
+            let mut replacement_rx = timeout(Duration::from_secs(1), restore)
+                .await
+                .expect("reconnect completes after the gate releases")
+                .expect("restore task lives");
+            assert!(
+                drain_queued_messages(&mut replacement_rx).is_empty(),
+                "the replacement receives no refusal for the old frame ({lane}, {stage:?})"
+            );
+
+            // The in-flight frame relayed as the incumbent, exactly once:
+            // charged bytes and room delivery agree.
+            let delivered = drain_queued_messages(&mut fixture.survivor_rx);
+            assert!(
+                delivered.iter().any(|message| if lane == "text" {
+                    matches!(
+                        message.as_ref(),
+                        ServerMessage::GameData { data, .. }
+                            if data == &serde_json::Value::String("x".repeat(900))
+                    )
+                } else {
+                    matches!(
+                        message.as_ref(),
+                        ServerMessage::GameDataBinary { payload, .. }
+                            if payload.as_ref() == &[0u8; 900][..]
+                    )
+                }),
+                "the old frame must relay while its bytes are charged ({lane}, {stage:?}); got {delivered:?}"
+            );
+            let expected_bytes = if lane == "text" { 902 } else { 900 };
+            let snapshot = fixture.server.metrics().snapshot().await;
+            assert_eq!(
+                snapshot.players.relay_bytes_total, expected_bytes,
+                "exactly the incumbent frame is charged ({lane}, {stage:?})"
+            );
+
+            // The replacement keeps an intact budget: a follow-up frame fits
+            // the window's remainder and must reach the survivor.
+            if lane == "text" {
+                fixture
+                    .server
+                    .handle_client_message(
+                        &fixture.leaver,
+                        ClientMessage::GameData {
+                            data: serde_json::Value::String("y".repeat(50)),
+                            class: None,
+                            key: None,
+                        },
+                    )
+                    .await;
+            } else {
+                fixture
+                    .server
+                    .handle_game_data_binary(
+                        &fixture.leaver,
+                        GameDataEncoding::MessagePack,
+                        bytes::Bytes::from(vec![1u8; 50]),
+                    )
+                    .await;
+            }
+            let follow_up = timeout(Duration::from_secs(1), async {
+                loop {
+                    let message = timeout(Duration::from_millis(5), fixture.survivor_rx.recv())
+                        .await
+                        .expect("survivor receives the follow-up relay")
+                        .expect("survivor channel open");
+                    if matches!(
+                        message.as_ref(),
+                        ServerMessage::GameData { .. } | ServerMessage::GameDataBinary { .. }
+                    ) {
+                        break message;
+                    }
+                }
+            })
+            .await
+            .expect("replacement follow-up relay is admitted");
+            assert!(
+                drain_queued_messages(&mut replacement_rx).is_empty(),
+                "the replacement's follow-up relay must not be refused ({lane}, {stage:?})"
+            );
+            assert!(
+                if lane == "text" {
+                    matches!(
+                        follow_up.as_ref(),
+                        ServerMessage::GameData { data, .. }
+                            if data == &serde_json::Value::String("y".repeat(50))
+                    )
+                } else {
+                    matches!(
+                        follow_up.as_ref(),
+                        ServerMessage::GameDataBinary { payload, .. }
+                            if payload.as_ref() == &[1u8; 50][..]
+                    )
+                },
+                "the replacement's own frame must not be throttled by the old frame ({lane}, {stage:?})"
+            );
+        }
+    }
 }
 
 #[tokio::test(start_paused = true)]

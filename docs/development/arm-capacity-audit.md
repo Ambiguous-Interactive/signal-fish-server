@@ -342,6 +342,17 @@ No new finding is confirmed by this initial inventory.
 | Confidence and reproduction | `scripts/dev-loop.sh old_socket_receive_frame_cannot_affect_restored_player` failed with the old receive calls: malformed text reached the replacement, and Ping changed its heartbeat counter from 1 to 2. The green socket test covers malformed text, Ping, Pong, binary format refusal, and repeated Authenticate. A one-reply budget proves stale frames consume no replacement reply; a current refusal still succeeds. The helper regression also checks the idle clock and current activity. |
 | Disposition | Ping/Pong liveness, receive-loop parse/size/encoding refusals, and game-data refusals now lock and verify the source lifecycle through their effects. Authenticate processing holds the source gate while it reads and changes connection policy. [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686) remains open for relay accounting before stamping and other lifecycle capture points. |
 
+### ARM-C029 — Old relay charges a restored player's byte budget
+
+| Field | Finding |
+| --- | --- |
+| State, severity | Fixed for relay budget admission, medium |
+| Player impact | An old socket relay suspended at a budget wait could charge the restored player's sender and room byte windows for a frame the lifecycle-guarded stamp then rejected — a phantom charge that throttles the replacement's own game data. |
+| Source and revision | `src/server/game_data.rs`, `src/coordination/mod.rs`, and `src/server.rs`, reviewed at `409482e5`. |
+| Invariant | Relay budget admission, stamp allocation, and enqueue complete under the sender's source lifecycle gate; the gate releases before any backpressured fan-out completion, so a reconnect never waits on queue drains. Charged bytes and room delivery agree for every admitted frame. |
+| Confidence and reproduction | `old_relay_budget_admission_serializes_restored_player_reconnect` failed with the gate disabled: the reconnect rekeyed while the old relay sat paused at each budget wait. The green table covers text and binary lanes at both budget waits, proves the rekey waits for admission, and checks the charged-byte count against the delivered frame plus the replacement's unthrottled follow-up relay. |
+| Disposition | Both relay lanes hold the source gate across the budget waits and the coordinator start. A new `enqueue_relay_broadcast_after_contention` seam splits the coordinator contention fallback so its routing waits stay under the gate and only the drain awaits outside it. Budget rejections reply after the gate releases. [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686) remains open for the lifecycle-capture-point sweep. |
+
 These findings cover room-code rotation, player names, transport status, and spectator,
 reconnect, room-creation drain, and terminal routing seams. The rest of the C1 room and storage
 rows remain unreviewed.
