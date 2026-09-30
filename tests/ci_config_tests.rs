@@ -4971,14 +4971,41 @@ fn test_check_markdown_script_md013_diagnostics_are_data_driven() {
 fn test_pre_commit_hook_does_not_bootstrap_markdownlint() {
     let root = repo_root();
     let hook_path = root.join("scripts/hooks/pre-commit.ps1");
+    // Absence checks scan the raw comment-bearing view on purpose: a
+    // commented-out invocation is still bootstrap intent, and the drift-guard
+    // live-view rule binds only positive presence checks, so every `contains`
+    // below stays negated.
     let content = read_file(&hook_path);
 
+    // The hook may NAME markdownlint: the changelog gate's internal-path
+    // globs list `.markdownlint*` files. It must never run or bootstrap it,
+    // so assert on execution-shaped occurrences instead of the bare word.
+    let execution_patterns = [
+        "npx markdownlint",
+        "npm install markdownlint",
+        "markdownlint-cli",
+        "Invoke-Markdownlint",
+        "& markdownlint",
+        "markdownlint.ps1",
+        "markdownlint.cmd",
+        "markdownlint.exe",
+    ];
+    let clean = execution_patterns
+        .iter()
+        .all(|pattern| !content.contains(pattern));
+
     assert!(
-        !content.contains("markdownlint") && !content.contains("npm install"),
+        clean,
         ".githooks/pre-commit must not run or bootstrap markdownlint.\n\
          Markdownlint remains fail-closed in run-local-ci.sh and CI, while git hooks \
          stay dependency-light and sub-second.\n\
-         Unexpected markdownlint dependency in {}",
+         Execution patterns must all be absent from {}",
+        hook_path.display()
+    );
+    assert!(
+        !content.contains("npm install"),
+        ".githooks/pre-commit must not bootstrap tooling with npm install.\n\
+         File: {}",
         hook_path.display()
     );
 }
@@ -24037,19 +24064,31 @@ fn test_pre_commit_doc_version_sync_restages_corrected_docs_end_to_end_when_pwsh
         "signal-fish-server = \"0.2.0\"\nsignal-fish-server = { version = \"0.2.0\", features = [\"tls\"] }\n",
     );
     write_file(&dir.join(".llm/context.md"), "- **Version:** 0.2.0\n");
+    write_file(
+        &dir.join("CHANGELOG.md"),
+        "## [Unreleased]\n\n### Added\n\n- Seed release 0.2.0.\n",
+    );
     assert!(git(&["add", "-A"]).unwrap().status.success());
     assert!(git(&["commit", "-q", "-m", "init", "--no-verify"])
         .unwrap()
         .status
         .success());
 
-    // Bump ONLY the manifest and stage it, exactly like a real version bump
-    // that forgets the docs — the scenario that broke CI.
+    // Bump the manifest and stage it with its changelog entry, exactly like a
+    // real version bump (Cargo.toml is non-internal, so the changelog gate
+    // requires the accompaniment the hosted checker also requires).
     write_file(
         &dir.join("Cargo.toml"),
         "[package]\nname = \"x\"\nversion = \"0.9.9\"\n",
     );
-    assert!(git(&["add", "Cargo.toml"]).unwrap().status.success());
+    write_file(
+        &dir.join("CHANGELOG.md"),
+        "## [Unreleased]\n\n### Changed\n\n- Bump crate version to 0.9.9.\n",
+    );
+    assert!(git(&["add", "Cargo.toml", "CHANGELOG.md"])
+        .unwrap()
+        .status
+        .success());
 
     let output = Command::new("pwsh")
         .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
@@ -24090,6 +24129,229 @@ fn test_pre_commit_doc_version_sync_restages_corrected_docs_end_to_end_when_pwsh
     assert!(
         ctx.contains("- **Version:** 0.9.9"),
         "context.md version line must be re-staged at 0.9.9, got:\n{ctx}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn test_pre_commit_changelog_gate_classification_and_verdicts_when_pwsh_available() {
+    let root = repo_root();
+    let output = Command::new("pwsh")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            r##"
+                . ./scripts/hooks/pre-commit.ps1 -SourceOnly
+                function Assert($condition, $message) {
+                    if (-not $condition) { throw $message }
+                }
+                function Reset-Counters {
+                    $script:Passed = 0
+                    $script:Failed = 0
+                    $script:Skipped = 0
+                }
+
+                # 1) Internal classification: the fixture corpus that
+                #    test-doc-consistency.sh validates against the checker.
+                $internal = @(
+                    ".github/workflows/ci.yml", ".githooks/pre-commit", ".devcontainer/Dockerfile",
+                    ".config/cargo-deny.toml", ".vscode/settings.json", ".claude/settings.json",
+                    "scripts/check-foo.sh", "tests/unit_test.rs", "test-fixtures/data.json",
+                    "formal/model.tla", ".llm/skills/foo.md", "target/debug/binary", "progress/notes.md",
+                    "src/server_tests.rs", "src/main_test.rs", "src/server/tests.rs",
+                    "docs/ci-cd-testing.md", "docs/test-analysis.md", "docs/git-hooks-guide.md",
+                    "docs/hooks-quick-reference.md", "docs/pre-commit-hooks-summary.md",
+                    "docs/development.md", "docs/development/arm-capacity-audit.md",
+                    "Cargo.lock", "PLAN.md", "AGENTS.md", "CLAUDE.md",
+                    "pre-push.txt", "pre-commit.txt", "logs_2025.zip",
+                    ".markdownlint.yaml", ".lychee.toml", ".lycheecache", ".typos.toml", ".yamllint.yml",
+                    ".gitignore", ".dockerignore",
+                    "clippy.toml", "deny.toml", "tarpaulin.toml", "rust-toolchain.toml",
+                    "mkdocs.yml", "requirements-docs.txt"
+                )
+                foreach ($path in $internal) {
+                    Assert (Test-ChangelogGateInternalPath -Path $path) "$path must classify as internal"
+                }
+
+                # 2) Non-internal classification.
+                $nonInternal = @(
+                    "src/main.rs", "src/server.rs", "build.rs", "benches/benchmark.rs",
+                    "Cargo.toml", "README.md", "docs/guide.md", "docs/library-usage.md",
+                    "Dockerfile", "docker-compose.yml", "config.example.json", "LICENSE"
+                )
+                foreach ($path in $nonInternal) {
+                    Assert (-not (Test-ChangelogGateInternalPath -Path $path)) "$path must classify as non-internal"
+                }
+
+                # 3) Verdicts on the three gate outcomes.
+                Reset-Counters
+                Test-ChangelogGate -ChangedFiles @("scripts/check-foo.sh", ".github/workflows/ci.yml")
+                Assert ($script:Skipped -eq 1 -and $script:Failed -eq 0 -and $script:Passed -eq 0) "internal-only changes must skip the changelog gate"
+
+                Reset-Counters
+                Test-ChangelogGate -ChangedFiles @("src/main.rs", "CHANGELOG.md", "scripts/check-foo.sh")
+                Assert ($script:Passed -eq 1 -and $script:Failed -eq 0 -and $script:Skipped -eq 0) "non-internal changes with a CHANGELOG.md update must pass"
+
+                Reset-Counters
+                Test-ChangelogGate -ChangedFiles @("scripts/check-foo.sh", "src/main.rs", ".github/workflows/ci.yml")
+                Assert ($script:Failed -eq 1 -and $script:Passed -eq 0 -and $script:Skipped -eq 0) "non-internal changes without CHANGELOG.md must fail"
+
+                # 4) CHANGELOG.md never requires itself.
+                Reset-Counters
+                Test-ChangelogGate -ChangedFiles @("CHANGELOG.md")
+                Assert ($script:Skipped -eq 1 -and $script:Failed -eq 0) "CHANGELOG.md alone must skip the gate"
+
+                # 5) CHANGELOG.md accompaniment is case-sensitive like the
+                #    checker's [ "$path" = "CHANGELOG.md" ] tests.
+                Reset-Counters
+                Test-ChangelogGate -ChangedFiles @("src/main.rs", "changelog.md")
+                Assert ($script:Failed -eq 1 -and $script:Passed -eq 0) "a wrong-case changelog.md must not count as changelog accompaniment"
+
+                # 6) Case-sensitive classification like the bash `case` statement.
+                Assert (-not (Test-ChangelogGateInternalPath -Path "SRC/server_tests.rs")) "classification must stay case-sensitive"
+                Assert (-not (Test-ChangelogGateInternalPath -Path "src/SERVER_TESTS.RS")) "classification must stay case-sensitive"
+            "##,
+        ])
+        .current_dir(&root)
+        .output();
+
+    let Ok(output) = output else {
+        eprintln!("Skipping changelog gate logic test because pwsh is unavailable.");
+        return;
+    };
+
+    assert!(
+        output.status.success(),
+        "pre-commit.ps1 changelog gate must classify paths and set verdicts exactly like the checker.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn test_pre_commit_changelog_gate_blocks_src_changes_without_changelog_when_pwsh_available() {
+    let root = repo_root();
+    let hook = root.join("scripts/hooks/pre-commit.ps1");
+
+    // Throwaway repo so we exercise the REAL staged-commit path without
+    // mutating this repository.
+    let temp = unique_temp_dir("changelog-gate-e2e");
+    let dir = temp.path();
+
+    let git = |args: &[&str]| -> std::io::Result<std::process::Output> {
+        Command::new("git").args(args).current_dir(dir).output()
+    };
+
+    let Ok(init) = git(&["init", "-q"]) else {
+        eprintln!("Skipping changelog gate e2e test because git is unavailable.");
+        return;
+    };
+    if !init.status.success() {
+        eprintln!("Skipping changelog gate e2e test because git init failed.");
+        return;
+    }
+    let _ = git(&["config", "user.email", "test@example.com"]);
+    let _ = git(&["config", "user.name", "Test"]);
+    let _ = git(&["config", "commit.gpgsign", "false"]);
+
+    write_file(&dir.join("README.md"), "seed\n");
+    assert!(git(&["add", "-A"]).unwrap().status.success());
+    assert!(git(&["commit", "-q", "-m", "init", "--no-verify"])
+        .unwrap()
+        .status
+        .success());
+
+    let run_hook = || -> std::io::Result<std::process::Output> {
+        Command::new("pwsh")
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
+            .arg(&hook)
+            .current_dir(dir)
+            .output()
+    };
+
+    // RED: a staged src/ change without a staged CHANGELOG.md change must fail
+    // the hook, name the gate and the fix, and stay inside the hook budget.
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    write_file(
+        &src.join("server.rs"),
+        "pub fn ready() -> bool {\n    true\n}\n",
+    );
+    assert!(git(&["add", "src/server.rs"]).unwrap().status.success());
+
+    let output = run_hook().expect("pwsh run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !output.status.success(),
+        "the hook must fail for a staged src/ change without a changelog entry.\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("FAIL: Changelog gate"),
+        "the failure must name the changelog gate.\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("src/server.rs"),
+        "the failure must list the offending file.\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("## [Unreleased]"),
+        "the failure must name the fix.\nstdout: {stdout}"
+    );
+    // Deliberately no wall-clock budget assertion here: the baselines
+    // workflow owns hook-runtime evidence because wall-clock totals must not
+    // gate correctness, and a cold hosted runner can exceed the 1 s budget
+    // before the first check runs. The gate's own cost is bounded by design:
+    // path classification plus the same git query class the hook already
+    // issues during discovery, visible as "PROFILE: Changelog gate" when
+    // SIGNAL_FISH_HOOK_PROFILE=1.
+
+    // GREEN: staging the changelog entry alongside the src change passes.
+    write_file(
+        &dir.join("CHANGELOG.md"),
+        "## [Unreleased]\n\n### Fixed\n\n- Tests: pin the exhaustion close (#697).\n",
+    );
+    assert!(git(&["add", "CHANGELOG.md"]).unwrap().status.success());
+
+    let output = run_hook().expect("pwsh run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "the hook must pass once CHANGELOG.md is staged alongside the src change.\n\
+         stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("PASS: Changelog gate"),
+        "the pass verdict must be reported.\nstdout: {stdout}"
+    );
+
+    // TRAP: a staged `git rm CHANGELOG.md` is not changelog accompaniment.
+    // The checker's collect_changed_files() excludes deletions
+    // (--diff-filter=ACMRTUXB), so the hook must fail here instead of waving
+    // the commit through into a hosted-CI failure.
+    assert!(git(&["commit", "-q", "-m", "land", "--no-verify"])
+        .unwrap()
+        .status
+        .success());
+    assert!(git(&["rm", "-q", "CHANGELOG.md"]).unwrap().status.success());
+    write_file(
+        &src.join("server.rs"),
+        "pub fn ready() -> bool {\n    true\n}\n\npub fn second() {}\n",
+    );
+    assert!(git(&["add", "src/server.rs"]).unwrap().status.success());
+
+    let output = run_hook().expect("pwsh run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !output.status.success(),
+        "the hook must fail when the changelog accompaniment is a staged deletion.\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("FAIL: Changelog gate"),
+        "the deletion trap must fail the changelog gate.\nstdout: {stdout}"
     );
 }
 
@@ -24189,8 +24451,14 @@ fn test_pre_commit_profile_diagnostics_contract_when_pwsh_available() {
     assert_profile_timing_coverage(&stdout, "clean worktree preflight", &[], &[]);
 
     // 3) A metadata commit exercises the PASS path and the staged-content
-    //    preload emitter, which runs outside Invoke-Check.
+    //    preload emitter, which runs outside Invoke-Check. README.md is
+    //    non-internal, so the worktree state must carry a CHANGELOG.md
+    //    update for the changelog gate.
     write_file(&dir.join("README.md"), "# probe v2\n");
+    write_file(
+        &dir.join("CHANGELOG.md"),
+        "## [Unreleased]\n\n### Changed\n\n- Probe content refresh.\n",
+    );
     assert!(git(&["add", "README.md"]).unwrap().status.success());
     let metadata = match run_hook(true) {
         Ok(output) => output,

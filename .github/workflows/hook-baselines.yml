@@ -102,7 +102,11 @@ jobs:
         run: |
           $env:SIGNAL_FISH_HOOK_PROFILE = "1"
           Add-Content -Path src/lib.rs -Value "// hook-baseline measurement marker (reverted below, never pushed)"
-          git add src/lib.rs
+          # The pre-commit changelog gate requires a CHANGELOG.md update for a
+          # non-internal staged change; stage the accompaniment the marker
+          # simulates so the hook under measurement passes.
+          Add-Content -Path CHANGELOG.md -Value "- Hooks: hook-baseline measurement marker (reverted below, never pushed)."
+          git add src/lib.rs CHANGELOG.md
           $totals = [System.Collections.Generic.List[long]]::new()
           for ($i = 1; $i -le $Env:REPETITIONS; $i++) {
             $label = if ($i -eq 1) { "cold (index refresh)" } else { "warm" }
@@ -111,18 +115,18 @@ jobs:
             $output | ForEach-Object { Write-Host "$_" }
             if ($LASTEXITCODE -ne 0) {
               Write-Host "::error::pre-commit staged run $i failed (exit $LASTEXITCODE)"
-              git checkout HEAD -- src/lib.rs
+              git checkout HEAD -- src/lib.rs CHANGELOG.md
               exit $LASTEXITCODE
             }
             $completed = $output | Select-String 'Completed in (\d+)ms'
             if (-not $completed) {
               Write-Host "::error::run $i produced no 'Completed in Nms' line"
-              git checkout HEAD -- src/lib.rs
+              git checkout HEAD -- src/lib.rs CHANGELOG.md
               exit 1
             }
             $totals.Add([long]$completed.Matches[0].Groups[1].Value)
           }
-          git checkout HEAD -- src/lib.rs
+          git checkout HEAD -- src/lib.rs CHANGELOG.md
           $warm = @($totals | Select-Object -Skip 1)
           $sorted = $warm | Sort-Object
           $idx = [int][math]::Floor(($warm.Count - 1) / 2)

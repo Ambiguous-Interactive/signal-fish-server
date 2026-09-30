@@ -230,6 +230,9 @@ params = "params"
 stderr = "stderr"
 stdin = "stdin"
 stdout = "stdout"
+# PowerShell case-sensitive comparison operator (-ccontains); the c-prefix
+# is language syntax, not a typo of "contains".
+ccontains = "ccontains"
 
 # Proper nouns and company names with mixed case
 HashiCorp = "HashiCorp"

@@ -129,12 +129,19 @@ INTERNAL_PATHS=(
     ".llm/skills/foo.md"
     "target/debug/binary"
     "progress/notes.md"
+    # Test-only production-tree Rust sources
+    "src/server_tests.rs"
+    "src/main_test.rs"
+    "src/server/tests.rs"
+    # Formal verification tree
+    "formal/model.tla"
     # Standalone internal files
     "Cargo.lock"
     "PLAN.md"
     "AGENTS.md"
     "CLAUDE.md"
     "pre-push.txt"
+    "pre-commit.txt"
     "logs_2025.zip"
     # Linter/tool config (glob patterns)
     ".markdownlint.yaml"
@@ -156,6 +163,7 @@ INTERNAL_PATHS=(
     "docs/hooks-quick-reference.md"
     "docs/pre-commit-hooks-summary.md"
     "docs/development.md"
+    "docs/development/arm-capacity-audit.md"
     # Tool configuration files
     "clippy.toml"
     "deny.toml"

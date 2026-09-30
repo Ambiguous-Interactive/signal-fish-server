@@ -78,9 +78,19 @@ The following paths are classified as internal (no CHANGELOG entry required):
 
 Any changed file outside internal-only scope requires a `CHANGELOG.md` update.
 
-When adding a new internal path category, update both `is_internal_path()` in
-`scripts/check-doc-consistency.sh` and the test fixture at
-`.github/test-fixtures/test-doc-consistency.sh`.
+The pre-commit hook mirrors this gate: `Test-ChangelogGate` in
+`scripts/hooks/pre-commit.ps1` fails a commit whose non-internal staged files
+lack a staged `CHANGELOG.md` change, so the failure surfaces at commit time
+instead of one hosted-CI round-trip later.
+
+When adding a new internal path category, update all of:
+
+- `is_internal_path()` in `scripts/check-doc-consistency.sh`
+- `$script:ChangelogInternalPathGlobs` in `scripts/hooks/pre-commit.ps1`
+- The test fixture at `.github/test-fixtures/test-doc-consistency.sh`
+
+`tests/doc_consistency_policy_tests.rs` locks the hook/checker lists in
+lockstep.
 
 ---
 
