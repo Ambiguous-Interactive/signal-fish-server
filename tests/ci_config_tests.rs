@@ -22094,23 +22094,79 @@ fn test_ci_safety_workflow_is_periodic_not_per_event() {
         );
     }
 
-    // The jobs themselves must stay unconditional: with per-event triggers
-    // gone, the scheduled events are the ONLY automated evidence lane, so a
-    // job-level `if:` (for example `github.event_name == 'workflow_dispatch'`)
-    // would silently kill the scheduled Miri/ASan runs while every other pin
-    // in this file still passes.
+    // The jobs themselves must stay schedule-lane evidence: with per-event
+    // triggers gone, the scheduled events are the ONLY automated evidence
+    // lane. Issue #702 added the single permitted exception — the jobs skip
+    // only when this exact workflow already completed successfully on the
+    // exact same head SHA inside the freshness window (the skip-if-verified
+    // guard, which fails open and never decides off-schedule). Pin the exact
+    // guard wiring so no other conditionality can silently retire evidence:
+    // any other `if:` (for example `github.event_name == 'workflow_dispatch'`)
+    // or a weakened/removed guard fails here.
     let jobs = document
         .as_mapping_get("jobs")
         .expect("ci-safety.yml must define a jobs mapping");
+
+    let guard = jobs
+        .as_mapping_get("verified-head-guard")
+        .unwrap_or_else(|| {
+            panic!(
+                "ci-safety.yml must keep the verified-head-guard job: it is the \
+                 only permitted skip path for the scheduled evidence lanes \
+                 (issue #702)"
+            )
+        });
+    assert_eq!(
+        guard.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("github.event_name == 'schedule'"),
+        "the verified-head-guard must decide on schedule ticks only; manual \
+         dispatch must always run the analyzers"
+    );
+    let guard_steps = guard
+        .as_mapping_get("steps")
+        .and_then(Yaml::as_sequence)
+        .expect("verified-head-guard must define steps");
+    let guard_step = guard_steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("uses").and_then(Yaml::as_str)
+                == Some("./.github/actions/skip-if-verified")
+        })
+        .expect(
+            "verified-head-guard must call ./.github/actions/skip-if-verified \
+             (the shared, fail-open guard)",
+        );
+    assert_eq!(
+        guard_step
+            .as_mapping_get("with")
+            .and_then(|with| with.as_mapping_get("max_success_age_hours"))
+            .and_then(Yaml::as_str),
+        Some("168"),
+        "the guard must keep the 168-hour freshness window so drifted external \
+         state (runner images, advisory data) re-verifies even on an unchanged tree"
+    );
+
     for job_key in ["miri", "asan"] {
         let job = jobs
             .as_mapping_get(job_key)
             .unwrap_or_else(|| panic!("ci-safety.yml must define the {job_key} job"));
-        assert!(
-            job.as_mapping_get("if").is_none(),
-            "the ci-safety {job_key} job must not be conditional: the daily \
-             schedule is the only automated lane left (issue #512), and a job \
-             guard can silently retire its evidence"
+        let needs = job
+            .as_mapping_get("needs")
+            .and_then(Yaml::as_sequence)
+            .unwrap_or_else(|| {
+                panic!("the ci-safety {job_key} job must depend on the verified-head-guard")
+            });
+        assert_eq!(
+            needs.iter().map(Yaml::as_str).collect::<Vec<_>>(),
+            vec![Some("verified-head-guard")],
+            "the ci-safety {job_key} job must depend only on the verified-head-guard"
+        );
+        assert_eq!(
+            job.as_mapping_get("if").and_then(Yaml::as_str),
+            Some("${{ !cancelled() && needs.verified-head-guard.outputs.duplicate != 'true' }}"),
+            "the ci-safety {job_key} job must skip ONLY through the verified-head \
+             guard outcome (`!cancelled()` keeps the guard failure fail-open): any \
+             other condition could silently retire the scheduled evidence lane"
         );
     }
 }
@@ -22708,6 +22764,29 @@ fn test_unused_deps_workflow_uses_one_shared_analyzer_job() {
         .and_then(Yaml::as_sequence)
         .expect("consolidated analyzer steps");
 
+    // Issue #702: the in-job skip guard. It must stay INSIDE the single job
+    // (a separate guard job would spend a runner allocation to skip a runner
+    // allocation), decide on schedule ticks only, and call the shared
+    // fail-open action so a lookup error can never silently retire the
+    // analyzer cohort.
+    let head_guard = analyzer_steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("id").and_then(Yaml::as_str) == Some("verified-head-guard")
+        })
+        .expect("the analyzer job must keep the verified-head-guard step (issue #702)");
+    assert_eq!(
+        head_guard.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("github.event_name == 'schedule'"),
+        "the verified-head-guard must decide on schedule ticks only; manual \
+         dispatch and pull requests always run the analyzers"
+    );
+    assert_eq!(
+        head_guard.as_mapping_get("uses").and_then(Yaml::as_str),
+        Some("./.github/actions/skip-if-verified"),
+        "the guard must call the shared fail-open skip-if-verified action"
+    );
+
     for (needle, expected) in [
         ("uses: actions/checkout@", 1),
         ("uses: dtolnay/rust-toolchain@", 1),
@@ -22769,10 +22848,12 @@ fn test_unused_deps_workflow_uses_one_shared_analyzer_job() {
     );
     assert_eq!(
         udeps.as_mapping_get("if").and_then(Yaml::as_str),
-        Some("${{ !cancelled() && github.event_name != 'pull_request' }}"),
+        Some("${{ !cancelled() && steps.verified-head-guard.outputs.duplicate != 'true' && github.event_name != 'pull_request' }}"),
         "cargo-udeps must still run after a cargo-machete failure while respecting \
          cancellation, but only on the schedule/dispatch cohort (issue #512: the nightly \
-         compile is informational and moved off the per-PR lane)"
+         compile is informational and moved off the per-PR lane). Issue #702 narrows \
+         the schedule cohort further: a tick against an already-verified head skips \
+         through the fail-open skip-if-verified guard step"
     );
     assert_eq!(
         step_named("Check for unused dependencies (udeps)")

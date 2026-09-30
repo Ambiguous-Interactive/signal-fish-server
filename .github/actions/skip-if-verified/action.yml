@@ -1,0 +1,108 @@
+# Skip-if-verified guard (issue #702).
+#
+# A scheduled tick re-runs a workflow against the current default-branch head.
+# When the head has not moved since an earlier successful run of the SAME
+# workflow, the tick would re-verify identical code with identical pinned
+# tooling and can only reproduce the previous verdict. This guard detects that
+# case so the caller can skip its remaining jobs.
+#
+# Contract:
+# - Matches only the exact same workflow (by its path, so renames never
+#   cross-match) and the exact same head SHA. A moved head always runs.
+# - Only counts completed, successful runs, and only within
+#   `max_success_age_hours` so drifted external state (runner images, advisory
+#   databases) re-verifies after the window even on an unchanged tree.
+# - NEVER decides on its own event other than schedule: the caller gates this
+#   action behind `if: github.event_name == 'schedule'`.
+# - Fails open. Any lookup error, missing token, or unexpected shape reports
+#   `duplicate=false` and exits 0, so the workflow runs exactly as before.
+#   A silent skip must never be able to mask a real verification gap.
+#
+# The run lookup excludes the current run by ID, so re-running a failed run
+# (same run ID) still executes instead of matching its own earlier failure.
+
+name: "Skip if HEAD already verified"
+description: >
+  Reports duplicate=true when this workflow already completed successfully on
+  the exact current head SHA within the freshness window. Fails open.
+inputs:
+  max_success_age_hours:
+    description: >-
+      Only prior successes newer than this many hours count as verification
+      of the current head. 0 disables the window (any age counts).
+    required: false
+    default: "168"
+outputs:
+  duplicate:
+    description: "true when an equivalent verified run already exists"
+    value: ${{ steps.guard.outputs.duplicate }}
+runs:
+  using: composite
+  steps:
+    - id: guard
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        MAX_SUCCESS_AGE_HOURS: ${{ inputs.max_success_age_hours }}
+      run: |
+        set -euo pipefail
+        duplicate=false
+        matched_url=""
+        if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::skip-if-verified: no GH_TOKEN; failing open (running)"
+        else
+            workflow_path="${GITHUB_WORKFLOW_REF%%@*}"
+            MAX_SUCCESS_AGE_HOURS="${MAX_SUCCESS_AGE_HOURS:-168}"
+            cutoff=$(date -d "-${MAX_SUCCESS_AGE_HOURS} hours" +%s 2>/dev/null || echo 0)
+            page=1
+            while [ "$page" -le 3 ]; do
+                runs_json="$(gh api \
+                    "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${GITHUB_SHA}&per_page=100&page=${page}" \
+                    2>/dev/null)" || {
+                    echo "::warning::skip-if-verified: run lookup failed; failing open (running)"
+                    break
+                }
+                match="$(printf '%s' "$runs_json" | jq -r \
+                    --arg workflow_path "$workflow_path" \
+                    --argjson self_run_id "$GITHUB_RUN_ID" \
+                    --argjson cutoff_epoch "$cutoff" \
+                    '[.workflow_runs[]
+                      | select(.path == $workflow_path)
+                      | select(.id != $self_run_id)
+                      | select(.status == "completed")
+                      | select(.conclusion == "success")
+                      | select((.created_at | fromdateiso8601) >= $cutoff_epoch)]
+                     | (first | .html_url // empty)')"
+
+                if [ -n "$match" ]; then
+                    duplicate=true
+                    matched_url="$match"
+                    break
+                fi
+                total="$(printf '%s' "$runs_json" | jq -r '.total_count // 0')"
+                if [ "$total" -le $((page * 100)) ]; then
+                    break
+                fi
+                page=$((page + 1))
+            done
+        fi
+        {
+            echo "duplicate=$duplicate"
+            echo "matched_url=$matched_url"
+        } >> "$GITHUB_OUTPUT"
+        if [ "$duplicate" = "true" ]; then
+            echo "::notice::skip-if-verified: ${GITHUB_WORKFLOW:-} already verified ${GITHUB_SHA:-}"
+            echo "::notice::prior verified run: ${matched_url}; skipping duplicate work"
+            {
+                echo "### Duplicate scheduled verification skipped"
+                echo ""
+                echo "This tick would have re-verified head \`${GITHUB_SHA:-}\`, which the same"
+                echo "workflow already verified successfully:"
+                echo ""
+                echo "- Prior run: ${matched_url}"
+                echo "- Freshness window: ${MAX_SUCCESS_AGE_HOURS} hours (a moved head or an expired"
+                echo "  window always re-runs; this guard fails open on lookup errors)."
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+        else
+            echo "skip-if-verified: no equivalent verified run found; running normally"
+        fi
