@@ -4973,12 +4973,37 @@ fn test_pre_commit_hook_does_not_bootstrap_markdownlint() {
     let hook_path = root.join("scripts/hooks/pre-commit.ps1");
     let content = read_file(&hook_path);
 
+    // The hook may NAME markdownlint: the changelog gate's internal-path
+    // globs list `.markdownlint*` files. It must never run or bootstrap it,
+    // so assert on execution-shaped occurrences instead of the bare word.
+    let execution_patterns = [
+        "npx markdownlint",
+        "npm install markdownlint",
+        "markdownlint-cli",
+        "Invoke-Markdownlint",
+        "& markdownlint",
+        "markdownlint.ps1",
+        "markdownlint.cmd",
+        "markdownlint.exe",
+    ];
+    let found: Vec<&str> = execution_patterns
+        .iter()
+        .copied()
+        .filter(|pattern| content.contains(pattern))
+        .collect();
+
     assert!(
-        !content.contains("markdownlint") && !content.contains("npm install"),
+        found.is_empty(),
         ".githooks/pre-commit must not run or bootstrap markdownlint.\n\
          Markdownlint remains fail-closed in run-local-ci.sh and CI, while git hooks \
          stay dependency-light and sub-second.\n\
-         Unexpected markdownlint dependency in {}",
+         Execution patterns found in {}: {found:?}",
+        hook_path.display()
+    );
+    assert!(
+        !content.contains("npm install"),
+        ".githooks/pre-commit must not bootstrap tooling with npm install.\n\
+         File: {}",
         hook_path.display()
     );
 }
@@ -24037,19 +24062,31 @@ fn test_pre_commit_doc_version_sync_restages_corrected_docs_end_to_end_when_pwsh
         "signal-fish-server = \"0.2.0\"\nsignal-fish-server = { version = \"0.2.0\", features = [\"tls\"] }\n",
     );
     write_file(&dir.join(".llm/context.md"), "- **Version:** 0.2.0\n");
+    write_file(
+        &dir.join("CHANGELOG.md"),
+        "## [Unreleased]\n\n### Added\n\n- Seed release 0.2.0.\n",
+    );
     assert!(git(&["add", "-A"]).unwrap().status.success());
     assert!(git(&["commit", "-q", "-m", "init", "--no-verify"])
         .unwrap()
         .status
         .success());
 
-    // Bump ONLY the manifest and stage it, exactly like a real version bump
-    // that forgets the docs — the scenario that broke CI.
+    // Bump the manifest and stage it with its changelog entry, exactly like a
+    // real version bump (Cargo.toml is non-internal, so the changelog gate
+    // requires the accompaniment the hosted checker also requires).
     write_file(
         &dir.join("Cargo.toml"),
         "[package]\nname = \"x\"\nversion = \"0.9.9\"\n",
     );
-    assert!(git(&["add", "Cargo.toml"]).unwrap().status.success());
+    write_file(
+        &dir.join("CHANGELOG.md"),
+        "## [Unreleased]\n\n### Changed\n\n- Bump crate version to 0.9.9.\n",
+    );
+    assert!(git(&["add", "Cargo.toml", "CHANGELOG.md"])
+        .unwrap()
+        .status
+        .success());
 
     let output = Command::new("pwsh")
         .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
@@ -24409,8 +24446,14 @@ fn test_pre_commit_profile_diagnostics_contract_when_pwsh_available() {
     assert_profile_timing_coverage(&stdout, "clean worktree preflight", &[], &[]);
 
     // 3) A metadata commit exercises the PASS path and the staged-content
-    //    preload emitter, which runs outside Invoke-Check.
+    //    preload emitter, which runs outside Invoke-Check. README.md is
+    //    non-internal, so the worktree state must carry a CHANGELOG.md
+    //    update for the changelog gate.
     write_file(&dir.join("README.md"), "# probe v2\n");
+    write_file(
+        &dir.join("CHANGELOG.md"),
+        "## [Unreleased]\n\n### Changed\n\n- Probe content refresh.\n",
+    );
     assert!(git(&["add", "README.md"]).unwrap().status.success());
     let metadata = match run_hook(true) {
         Ok(output) => output,

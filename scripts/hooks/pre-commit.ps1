@@ -1625,18 +1625,21 @@ function Repair-DocVersionsIfNeeded {
 # time.
 # ---------------------------------------------------------------------------
 function Get-ChangelogGateChangedFiles {
+    # The unary comma keeps an empty changed set a collection across the
+    # function boundary: a bare `return @()` unrolls to $null at the call
+    # site and fails Test-ChangelogGate's parameter binding on a clean tree.
     if ($script:InspectWorktree) {
-        return $script:StagedFiles
+        return ,([string[]]@($script:StagedFiles))
     }
 
     $result = Invoke-Git -Arguments @(
         "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRTUXB"
     )
     if ([string]::IsNullOrEmpty($result.Stdout)) {
-        return @()
+        return ,([string[]]@())
     }
 
-    $result.Stdout.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries)
+    return ,($result.Stdout.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries))
 }
 
 function Test-ChangelogGateInternalPath {
