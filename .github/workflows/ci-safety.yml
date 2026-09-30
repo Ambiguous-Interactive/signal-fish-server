@@ -101,9 +101,8 @@ jobs:
   # (10-50x-interpreter / instrumented lanes) as a pure function of the same
   # pinned toolchain and tree, so the tick can only repeat the prior verdict.
   # Fails open; only schedule ticks consult it — manual dispatch always runs.
-  # The deterministic schedule-only lanes in ci.yml are deferred to a focused
-  # follow-up: that workflow's matrix cohort and pinned per-job invariants
-  # deserve their own reviewed change.
+  # The deterministic cron lanes in ci.yml are guarded the same way (its own
+  # verified-head-guard job, issue #702).
   verified-head-guard:
     name: Skip if HEAD already verified
     if: github.event_name == 'schedule'

@@ -1293,9 +1293,24 @@ const CI_MATRIX_OUTPUT_OS: &str = "${{ fromJSON(needs.ci-matrix.outputs.os) }}";
 /// The exact job-level `if` the gated jobs must use: a failed cohort job
 /// must not skip them silently red-less (`!cancelled()` keeps the run's
 /// failure visible) and a successful one must admit exactly the cohort's
-/// legs. (`matrix` is not an available context in a job-level `if`, which
-/// is why the cohort is a dynamic matrix rather than a per-leg guard.)
-const CI_MATRIX_GUARD: &str = "${{ !cancelled() && needs.ci-matrix.result == 'success' }}";
+/// legs. The verified-head guard clause (issue #702) is the one permitted
+/// scheduled skip path: a duplicate scheduled tick skips, any guard lookup
+/// problem fails open (`!cancelled()` keeps the guard failure running), and
+/// on pull requests the guard job is skipped so `duplicate` is empty and the
+/// clause is vacuously true. (`matrix` is not an available context in a
+/// job-level `if`, which is why the cohort is a dynamic matrix rather than a
+/// per-leg guard.)
+const CI_MATRIX_GUARD: &str = "${{ !cancelled() && needs.ci-matrix.result == 'success' && needs.verified-head-guard.outputs.duplicate != 'true' }}";
+
+/// The exact job-level `if` clause the schedule-only full-suite lanes (msrv
+/// full suite, coverage) must append: skip only through the verified-head
+/// guard, fail open otherwise (issue #702).
+const VERIFIED_HEAD_GUARD_CLAUSE: &str = "needs.verified-head-guard.outputs.duplicate != 'true'";
+
+/// The anchor step the ci.yml verified-head guard pins (issue #702).
+/// Schedule-only and inside a gated job, so a tick skipped by the guard never
+/// executes it and cannot sustain its own skip.
+const CI_VERIFIED_HEAD_ANCHOR_STEP: &str = "Generate coverage report";
 
 /// The cohort script lines pinning which OS legs exist per event.
 const CI_MATRIX_SCHEDULE_OS: &str = "os=[\"macos-latest\",\"windows-latest\"]";
@@ -1928,17 +1943,24 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
     // every event and runs its full test suite on the cron only. The
     // panic-policy and relay-allocation checks are steps of the lint and
     // nextest jobs (#558), so the jobs pinned here cover them transitively.
+    // The cron-only lanes (lint/nextest cron legs, msrv, coverage) also wait
+    // on the verified-head guard (issue #702): it is their one permitted
+    // scheduled skip path. `docker` never runs on schedule, so it needs no
+    // guard edge.
     for (job, cohort_guard) in [
         ("lint", CI_MATRIX_GUARD),
         ("nextest", CI_MATRIX_GUARD),
-        ("msrv", "${{ !cancelled() }}"),
+        (
+            "msrv",
+            "${{ !cancelled() && needs.verified-head-guard.outputs.duplicate != 'true' }}",
+        ),
         (
             "docker",
             "${{ !cancelled() && github.event_name != 'schedule' }}",
         ),
         (
             "coverage",
-            "${{ !cancelled() && github.event_name == 'schedule' }}",
+            "${{ !cancelled() && github.event_name == 'schedule' && needs.verified-head-guard.outputs.duplicate != 'true' }}",
         ),
     ] {
         let header = format!("\n  {job}:");
@@ -1946,10 +1968,13 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
             .find(&header)
             .unwrap_or_else(|| panic!("ci.yml must define the `{job}` job"));
         let block_end = (start + 300).min(workflow.len());
-        // lint/nextest also wait on the cohort job (issue #513); the other
-        // gated jobs need only the fail-fast gate.
+        // lint/nextest also wait on the cohort job (issue #513); the cron-only
+        // lanes need the fail-fast gate plus the verified-head guard (issue
+        // #702); docker needs only the fail-fast gate.
         let expected_needs = if matches!(job, "lint" | "nextest") {
-            "needs: [quick-check, ci-matrix]"
+            "needs: [verified-head-guard, quick-check, ci-matrix]"
+        } else if matches!(job, "msrv" | "coverage") {
+            "needs: [verified-head-guard, quick-check]"
         } else {
             "needs: quick-check"
         };
@@ -27939,9 +27964,10 @@ fn test_ci_windows_and_macos_lanes_run_only_on_the_daily_cron() {
         let needs: Vec<&str> = needs.iter().filter_map(Yaml::as_str).collect();
         assert_eq!(
             needs,
-            vec!["quick-check", CI_MATRIX_JOB],
-            "`{job}` must gate on both the fail-closed quick-check gate and the \
-             cohort job"
+            vec!["verified-head-guard", "quick-check", CI_MATRIX_JOB],
+            "`{job}` must gate on the verified-head guard (the one permitted \
+             scheduled skip path, issue #702), the fail-closed quick-check \
+             gate, and the cohort job"
         );
 
         let block = extract_workflow_job_block(&workflow, job)
@@ -28012,26 +28038,30 @@ fn test_ci_msrv_and_coverage_suite_lanes_run_on_the_daily_cron() {
         .and_then(|document| document.as_mapping_get("jobs"))
         .expect("ci.yml jobs");
 
-    // Coverage is cron-only.
+    // Coverage is cron-only, and skips a duplicate scheduled tick only
+    // through the verified-head guard (issue #702).
     let coverage = jobs
         .as_mapping_get("coverage")
         .unwrap_or_else(|| panic!("parsed ci.yml must define `coverage`"));
     assert_eq!(
         coverage.as_mapping_get("if").and_then(Yaml::as_str),
-        Some("${{ !cancelled() && github.event_name == 'schedule' }}"),
-        "coverage must run on the daily cron only: its instrumented suite \
-         duplicates the per-event nextest run (issue #512)"
+        Some("${{ !cancelled() && github.event_name == 'schedule' && needs.verified-head-guard.outputs.duplicate != 'true' }}"),
+        "coverage must run on the daily cron only — skipping a duplicate tick \
+         only through the verified-head guard (issues #512 and #702)"
     );
 
-    // MSRV runs on every event but runs its test suite on the cron only.
+    // MSRV runs on every event but runs its test suite on the cron only,
+    // and skips a duplicate scheduled tick only through the verified-head
+    // guard (issue #702).
     let msrv = jobs
         .as_mapping_get("msrv")
         .unwrap_or_else(|| panic!("parsed ci.yml must define `msrv`"));
     assert_eq!(
         msrv.as_mapping_get("if").and_then(Yaml::as_str),
-        Some("${{ !cancelled() }}"),
-        "msrv must run on every event: per-event MSRV compilation is the \
-         actual MSRV-breakage guard"
+        Some("${{ !cancelled() && needs.verified-head-guard.outputs.duplicate != 'true' }}"),
+        "msrv must run on every event — per-event MSRV compilation is the \
+         actual MSRV-breakage guard, and the only scheduled skip is the \
+         verified-head guard (issue #702)"
     );
     let msrv_block = extract_workflow_job_block(&workflow, "msrv")
         .unwrap_or_else(|| panic!("ci.yml must define the `msrv` job"));
@@ -28055,6 +28085,178 @@ fn test_ci_msrv_and_coverage_suite_lanes_run_on_the_daily_cron() {
     assert!(
         suite_step.contains("SIGNAL_FISH_TEST_TIMEOUT_MULTIPLIER: \"3\""),
         "the MSRV full-suite step must keep the idle-timeout headroom multiplier"
+    );
+}
+
+#[test]
+fn test_ci_schedule_lanes_skip_only_through_verified_head_guard() {
+    // Issue #702 follow-up: ci.yml's deterministic cron lanes (the macOS +
+    // Windows lint/nextest legs, the MSRV full suite, and the instrumented
+    // coverage gate) skip a tick whose head the same workflow already
+    // verified successfully inside the freshness window. Measured
+    // redundancy: 5 of the last 26 scheduled ci.yml ticks ran on an
+    // already-verified head. Pin the exact guard wiring so no other skip
+    // path can silently retire the scheduled evidence:
+    //   1. The guard decides on schedule ticks only and fails open
+    //      (`pull_request` runs always execute every lane).
+    //   2. The guard needs `actions: read` or its run lookups 403 and it
+    //      fails open forever (PR #703 round 2 finding).
+    //   3. The anchor step is executed work from the gated cohort, so a
+    //      tick skipped by this very guard can never count as verification
+    //      and the freshness window always re-arms (PR #703 round 2).
+    //   4. `deny` stays UNGATED: its analyzers reprove live advisory data
+    //      (external input), not just the tree — a skip would let advisory
+    //      coverage go stale even though the tree did not move.
+    let root = repo_root();
+    let workflow = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let documents = Yaml::load_from_str(&workflow).expect("ci.yml must parse");
+    let jobs = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .expect("ci.yml jobs");
+
+    let guard = jobs
+        .as_mapping_get("verified-head-guard")
+        .unwrap_or_else(|| {
+            panic!(
+                "ci.yml must keep the verified-head-guard job: it is the only \
+                 permitted skip path for the deterministic cron lanes \
+                 (issue #702)"
+            )
+        });
+    assert_eq!(
+        guard.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("github.event_name == 'schedule'"),
+        "the verified-head-guard must decide on schedule ticks only; pull \
+         requests must always run every lane"
+    );
+    let permissions = guard
+        .as_mapping_get("permissions")
+        .expect("verified-head-guard must declare scoped permissions");
+    assert_eq!(
+        permissions.as_mapping_get("actions").and_then(Yaml::as_str),
+        Some("read"),
+        "the verified-head-guard needs actions: read for the guard's run and \
+         jobs lookups; without it every lookup 403s and the guard fails open \
+         forever (PR #703 round 2)"
+    );
+    let guard_steps = guard
+        .as_mapping_get("steps")
+        .and_then(Yaml::as_sequence)
+        .expect("verified-head-guard must define steps");
+    let guard_step = guard_steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("uses").and_then(Yaml::as_str)
+                == Some("./.github/actions/skip-if-verified")
+        })
+        .expect("verified-head-guard must call ./.github/actions/skip-if-verified");
+    assert_eq!(
+        guard_step.as_mapping_get("id").and_then(Yaml::as_str),
+        Some("guard"),
+        "the guard step must keep id `guard`: the job output and every gated \
+         lane's `if` read steps.guard.outputs.duplicate, so a rename would \
+         silently neutralize the guard (every clause reads empty)"
+    );
+    assert_eq!(
+        guard
+            .as_mapping_get("outputs")
+            .and_then(|o| o.as_mapping_get("duplicate"))
+            .and_then(Yaml::as_str),
+        Some("${{ steps.guard.outputs.duplicate }}"),
+        "the guard job must forward the guard step's `duplicate` output; the \
+         gated lanes decide on needs.verified-head-guard.outputs.duplicate"
+    );
+    let guard_with = guard_step
+        .as_mapping_get("with")
+        .expect("verified-head-guard must pass guard inputs");
+    assert_eq!(
+        guard_with
+            .as_mapping_get("max_success_age_hours")
+            .and_then(Yaml::as_str),
+        Some("168"),
+        "the guard must keep the 168-hour freshness window so drifted \
+         external state (runner images) re-verifies even on an unchanged tree"
+    );
+    assert_eq!(
+        guard_with
+            .as_mapping_get("anchor_step")
+            .and_then(Yaml::as_str),
+        Some(CI_VERIFIED_HEAD_ANCHOR_STEP),
+        "the guard must anchor on `{CI_VERIFIED_HEAD_ANCHOR_STEP}` — \
+         schedule-only executed work inside a gated job, so a run skipped by \
+         this very guard never shows an executed anchor and cannot sustain \
+         its own skip (PR #703 round 2)"
+    );
+
+    // The anchor must stay bound to a real step of a GATED job, and stay
+    // unique. A rename of coverage's step would make the guard a silent
+    // no-op; the same name on a step in an ungated job that executes on
+    // skipped ticks (quick-check, deny) would re-create the
+    // self-sustaining-skip cycle the anchor exists to break (PR #703 round
+    // 2).
+    let anchor_step_line = format!("- name: {CI_VERIFIED_HEAD_ANCHOR_STEP}");
+    let coverage_block = extract_workflow_job_block(&workflow, "coverage")
+        .unwrap_or_else(|| panic!("ci.yml must define the `coverage` job"));
+    assert!(
+        coverage_block.contains(&anchor_step_line),
+        "the anchor `{CI_VERIFIED_HEAD_ANCHOR_STEP}` must name a real step of \
+         the gated coverage job; renaming it silently kills the guard"
+    );
+    assert_eq!(
+        workflow.matches(&anchor_step_line).count(),
+        1,
+        "`{CI_VERIFIED_HEAD_ANCHOR_STEP}` must name exactly one step in all \
+         of ci.yml — the gated coverage job's report step. The same name on \
+         any step that also executes when the guard skips a tick (for \
+         example in quick-check or deny) would let a skipped tick's own run \
+         count as verification and sustain the skip forever"
+    );
+
+    // Every gated lane must skip ONLY through the guard outcome, and only
+    // on the cron legs: `!cancelled()` keeps a guard failure fail-open.
+    for job_key in ["lint", "nextest", "msrv", "coverage"] {
+        let job = jobs
+            .as_mapping_get(job_key)
+            .unwrap_or_else(|| panic!("parsed ci.yml must define `{job_key}`"));
+        let job_if = job
+            .as_mapping_get("if")
+            .and_then(Yaml::as_str)
+            .unwrap_or_else(|| panic!("the ci.yml {job_key} job must define an `if`"));
+        assert!(
+            job_if.contains(VERIFIED_HEAD_GUARD_CLAUSE),
+            "the ci.yml {job_key} job must skip only through the verified-head \
+             guard outcome: any other condition could silently retire the \
+             scheduled evidence lane"
+        );
+    }
+
+    // The deny job must stay ungated at BOTH levels: the daily cron's
+    // advisory reproof is external signal (live advisory databases), not a
+    // pure function of the tree. A job-level guard is visible above; this
+    // also rejects the step-level shape (an in-job skip-if-verified step
+    // gating the analyzers, as unused-deps.yml uses).
+    let deny = jobs
+        .as_mapping_get("deny")
+        .expect("parsed ci.yml must define `deny`");
+    let deny_gated = deny
+        .as_mapping_get("if")
+        .and_then(Yaml::as_str)
+        .is_some_and(|cond| cond.contains(VERIFIED_HEAD_GUARD_CLAUSE))
+        || deny
+            .as_mapping_get("steps")
+            .and_then(Yaml::as_sequence)
+            .is_some_and(|steps| {
+                steps.iter().any(|step| {
+                    step.as_mapping_get("uses").and_then(Yaml::as_str)
+                        == Some("./.github/actions/skip-if-verified")
+                })
+            });
+    assert!(
+        !deny_gated,
+        "the deny job must NOT skip through the verified-head guard at any \
+         level: its analyzers reprove live advisory data, so a skipped tick \
+         would let advisory coverage go stale on an unchanged tree"
     );
 }
 

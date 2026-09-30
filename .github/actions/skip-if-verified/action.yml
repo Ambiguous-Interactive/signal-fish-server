@@ -20,14 +20,22 @@
 #   that cycle (Bugbot finding, PR #703 round 2).
 # - Only counts completed, successful runs, and only within
 #   `max_success_age_hours` so drifted external state (runner images, advisory
-#   databases) re-verifies after the window even on an unchanged tree.
+#   databases) re-verifies after the window even on an unchanged tree. The
+#   value 0 disables the window (any prior anchored success counts). An
+#   unreadable value or an unreadable clock fails open (runs): the lookup is
+#   skipped — never decided from a fallback that could count prior successes
+#   (epoch would count all of them and bias the guard toward skipping).
 # - NEVER decides on its own event other than schedule: the caller gates this
 #   action behind `if: github.event_name == 'schedule'`.
-# - Fails open. Any lookup error, missing token/permission, or unexpected
-#   shape reports `duplicate=false` and exits 0, so the workflow runs exactly
-#   as before. A silent skip must never be able to mask a real verification
-#   gap. The caller's token therefore needs `actions: read`, or the guard
-#   always fails open (Bugbot finding, PR #703 round 2).
+# - Fails open. Any lookup error, missing token/permission, malformed payload,
+#   or unexpected shape reports `duplicate=false` and exits 0, so the workflow
+#   runs exactly as before. A silent skip must never be able to mask a real
+#   verification gap. The script therefore guards EVERY fallible command —
+#   under `set -euo pipefail` a single unguarded `jq` would abort the step,
+#   and an in-job caller (unused-deps.yml) would then fail the job and skip
+#   the analyzers the guard protects. The caller's token still needs
+#   `actions: read`, or the guard always fails open (Bugbot finding, PR #703
+#   round 2; payload/abort hardening, PR #704 round 1).
 #
 # The run lookup excludes the current run by ID, so re-running a failed run
 # (same run ID) still executes instead of matching its own earlier failure.
@@ -50,7 +58,7 @@ inputs:
     description: >-
       Only prior anchored successes newer than this many hours count as
       verification of the current head. 0 disables the window (any age
-      counts).
+      counts). An unreadable value fails open (runs).
     required: false
     default: "168"
 outputs:
@@ -83,7 +91,36 @@ runs:
             # directory on so both spellings normalize to the API form.
             workflow_path="${GITHUB_WORKFLOW_REF%%@*}"
             workflow_path=".github/workflows/${workflow_path##*.github/workflows/}"
-            cutoff=$(date -d "-${MAX_SUCCESS_AGE_HOURS} hours" +%s 2>/dev/null || echo 0)
+            # Freshness window, computed with portable arithmetic (`date +%s`
+            # plus shell math; GNU-only date parsing fails on the BSD date of
+            # macOS runners; Bugbot finding, PR #704 round 2).
+            # - 0 disables the window: any prior anchored success counts, per
+            #   the documented input contract.
+            # - An unreadable value or an unreadable clock must fail OPEN:
+            #   leave the cutoff empty and skip the lookup — never fall back
+            #   to a cutoff that counts prior successes (epoch would count
+            #   all of them and bias the guard toward skipping; PR #704
+            #   round 1).
+            cutoff=""
+            case "${MAX_SUCCESS_AGE_HOURS}" in
+                0)
+                    cutoff=0
+                    ;;
+                ''|*[!0-9]*)
+                    echo "::warning::skip-if-verified: unreadable max_success_age_hours '${MAX_SUCCESS_AGE_HOURS}'; failing open (running)."
+                    ;;
+                *)
+                    if now="$(date +%s 2>/dev/null)"; then
+                        cutoff=$((now - MAX_SUCCESS_AGE_HOURS * 3600))
+                    else
+                        echo "::warning::skip-if-verified: could not read the clock; failing open (running)."
+                    fi
+                    ;;
+            esac
+        fi
+        if [ -z "${cutoff:-}" ]; then
+            : # fail-open: skip the lookup, report duplicate=false below
+        else
             jobs_lookup_broken=false
             page=1
             while [ "$page" -le 3 ] && [ "$duplicate" = "false" ] && [ "$jobs_lookup_broken" = "false" ]; do
@@ -93,7 +130,9 @@ runs:
                     echo "::warning::skip-if-verified: run lookup failed; failing open (running). If this is a 403, the caller needs actions: read."
                     break
                 }
-                # Candidates, newest first, one "id<TAB>url" per line.
+                # Candidates, newest first, one "id<TAB>url" per line. A
+                # malformed payload must fail open, not abort the step under
+                # set -e (Bugbot finding, PR #704 round 1).
                 candidates="$(printf '%s' "$runs_json" | jq -r \
                     --arg workflow_path "$workflow_path" \
                     --argjson self_run_id "$GITHUB_RUN_ID" \
@@ -105,7 +144,10 @@ runs:
                       | select(.conclusion == "success")
                       | select((.created_at | fromdateiso8601) >= $cutoff_epoch)
                       | [(.id | tostring), .html_url]]
-                     | .[] | @tsv')"
+                     | .[] | @tsv' 2>/dev/null)" || {
+                    echo "::warning::skip-if-verified: unexpected runs payload; failing open (running)."
+                    break
+                }
                 while IFS=$'\t' read -r run_id run_url; do
                     [ -n "$run_id" ] || continue
                     jobs_json="$(gh api \
@@ -119,14 +161,21 @@ runs:
                         --arg anchor_step "$ANCHOR_STEP" \
                         '[.jobs[]?.steps[]?
                           | select(.name == $anchor_step and .conclusion == "success")]
-                         | length > 0')"
+                         | length > 0' 2>/dev/null)" || {
+                        echo "::warning::skip-if-verified: unexpected jobs payload for run ${run_id}; failing open (running)."
+                        jobs_lookup_broken=true
+                        break
+                    }
                     if [ "$anchored" = "true" ]; then
                         duplicate=true
                         matched_url="$run_url"
                         break
                     fi
                 done <<< "$candidates"
-                total="$(printf '%s' "$runs_json" | jq -r '.total_count // 0')"
+                total="$(printf '%s' "$runs_json" | jq -r '.total_count // 0' 2>/dev/null)" || total=""
+                case "$total" in
+                    ''|*[!0-9]*) total=0 ;;
+                esac
                 if [ "$total" -le $((page * 100)) ]; then
                     break
                 fi

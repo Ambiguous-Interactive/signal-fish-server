@@ -8,7 +8,10 @@
 #     cron in issue #557: squash content is identical to the PR run)
 #   - Daily schedule (the `deny` supply-chain job, the macOS and Windows
 #     lint/nextest lanes, the instrumented coverage gate, and the MSRV
-#     full-suite test run — issues #513 and #512)
+#     full-suite test run — issues #513 and #512). The scheduled cron lanes
+#     skip a tick whose head the same workflow already verified successfully
+#     within the freshness window (the fail-open verified-head guard, issue
+#     #702); `deny` always audits so live advisory data keeps being reproved.
 #
 # Jobs:
 #   - lint: Cross-OS linting (clippy) matrix (ubuntu per pull request;
@@ -48,6 +51,9 @@
 #   - msrv: MSRV verification (compilation per push/PR; the full test suite
 #     runs on the daily schedule — the suite itself is already covered
 #     per-event by ubuntu nextest)
+#   - verified-head-guard: schedule-only fail-open guard (issue #702); on a
+#     duplicate tick it reports `duplicate=true` and the lint, nextest, msrv,
+#     and coverage jobs skip
 #
 # Features:
 #   - Rust toolchain caching for faster builds
@@ -169,10 +175,42 @@ jobs:
             echo 'os=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
           fi
 
+  # Duplicate-scheduled-verification guard (issue #702). A daily tick against
+  # a head this workflow already verified successfully re-runs the cron lanes
+  # (macOS bills at 10x and Windows at 2x Linux per minute; the instrumented
+  # coverage run and the MSRV full suite re-execute the per-event nextest
+  # suite) as a pure function of the same pinned toolchain and tree, so the
+  # tick can only repeat the prior verdict. Measured redundancy on this
+  # workflow: 5 of the last 26 scheduled ticks ran on an already-verified
+  # head. Fails open; only schedule ticks consult it — pull requests always
+  # run every lane. The `deny` job below is deliberately NOT gated: its
+  # analyzers reprove live advisory data (external input), not just the tree.
+  # The anchor step is coverage's report generation: it is schedule-only and
+  # lives in a gated job, so a tick skipped by this guard never shows an
+  # executed anchor and cannot sustain its own skip (PR #703 round 2).
+  verified-head-guard:
+    name: Skip if HEAD already verified
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      duplicate: ${{ steps.guard.outputs.duplicate }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+      - id: guard
+        uses: ./.github/actions/skip-if-verified
+        with:
+          anchor_step: "Generate coverage report"
+          max_success_age_hours: "168"
+
   lint:
     name: Lint (${{ matrix.os }})
-    needs: [quick-check, ci-matrix]
-    if: ${{ !cancelled() && needs.ci-matrix.result == 'success' }}
+    needs: [verified-head-guard, quick-check, ci-matrix]
+    if: ${{ !cancelled() && needs.ci-matrix.result == 'success' && needs.verified-head-guard.outputs.duplicate != 'true' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -267,8 +305,8 @@ jobs:
 
   nextest:
     name: Nextest (${{ matrix.os }})
-    needs: [quick-check, ci-matrix]
-    if: ${{ !cancelled() && needs.ci-matrix.result == 'success' }}
+    needs: [verified-head-guard, quick-check, ci-matrix]
+    if: ${{ !cancelled() && needs.ci-matrix.result == 'success' && needs.verified-head-guard.outputs.duplicate != 'true' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -745,8 +783,8 @@ jobs:
 
   msrv:
     name: MSRV Verification
-    needs: quick-check
-    if: ${{ !cancelled() }}
+    needs: [verified-head-guard, quick-check]
+    if: ${{ !cancelled() && needs.verified-head-guard.outputs.duplicate != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Verify Minimum Supported Rust Version (MSRV) compliance
@@ -971,14 +1009,16 @@ jobs:
 
   coverage:
     name: Coverage (llvm-cov)
-    needs: quick-check
+    needs: [verified-head-guard, quick-check]
     # Daily-schedule lane (issue #512): the instrumented run executes the
     # same suite nextest already runs on every push/PR, at 2-4x slower
     # execution (see the timeout multiplier below). Keeping it per-event
     # tripled every full-suite execution for a threshold signal that
     # tolerates next-day detection — the same trade-off the macOS/Windows
-    # lanes accepted (#513).
-    if: ${{ !cancelled() && github.event_name == 'schedule' }}
+    # lanes accepted (#513). The verified-head guard (issue #702) skips
+    # duplicate scheduled ticks; `!cancelled()` keeps a guard failure
+    # fail-open.
+    if: ${{ !cancelled() && github.event_name == 'schedule' && needs.verified-head-guard.outputs.duplicate != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
