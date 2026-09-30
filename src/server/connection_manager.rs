@@ -1216,7 +1216,7 @@ impl ConnectionManager {
     /// An unknown player id is admitted (`true`): there is no budget to
     /// charge, and the caller's send fails downstream anyway.
     pub async fn charge_error_reply(&self, player_id: &PlayerId) -> bool {
-        let (allowed, first_exhaustion, close) = {
+        let (first_exhaustion, close) = {
             let Some(entry) = self.clients.get_mut(player_id) else {
                 return true;
             };
@@ -1224,16 +1224,17 @@ impl ConnectionManager {
                 .error_reply_gate
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let allowed = gate.charge(Instant::now());
-            (
-                allowed,
-                !allowed && gate.report_exhaustion(),
-                entry.close.clone(),
-            )
+            if gate.charge(Instant::now()) {
+                return true;
+            }
+            // Exhausted: capture the per-socket close signal under the charge
+            // guard, before any await. A reconnect identity swap landing
+            // inside the farewell await moves the entry to the restored
+            // identity's key, and the one-shot `report_exhaustion` below never
+            // retries a skipped pin (issue #697). The signal belongs to the
+            // physical socket, so the pin follows the swap.
+            (gate.report_exhaustion(), entry.close.clone())
         };
-        if allowed {
-            return true;
-        }
         if !first_exhaustion {
             return false;
         }
@@ -1277,6 +1278,17 @@ impl ConnectionManager {
         self.clients
             .get(player_id)
             .is_some_and(|connection| connection.close.request_close(reason))
+    }
+
+    /// Snapshot the per-socket close signal for `player_id`.
+    ///
+    /// Callers that hold a fence excluding identity swaps (the connection's
+    /// own lifecycle gate) capture here and pin through the captured signal
+    /// after the fence drops: the pin then follows the physical socket even
+    /// when a swap rekeys the entry in between, and a one-shot reason never
+    /// loses its close frame to a map miss (issue #697 class).
+    pub(crate) fn close_signal_for(&self, player_id: &PlayerId) -> Option<ConnectionCloseSignal> {
+        self.clients.get(player_id).map(|entry| entry.close.clone())
     }
 
     #[cfg(test)]

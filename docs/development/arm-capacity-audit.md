@@ -464,6 +464,9 @@ fixed by PR
 [#699](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/699),
 regression
 `error_reply_exhaustion_pins_the_close_through_a_rekey_inside_the_farewell_await`).
+The same capture-under-fence pin hardened the authority kick's one-shot
+`4007` close (`evict_member_by_authority`), the last same-class residual
+found by the fix review.
 With this sweep, [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686)
 is closed: each path has a deterministic regression from PRs #687-#696 or a
 documented exclusion here.
