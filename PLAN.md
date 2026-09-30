@@ -104,7 +104,10 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   and retry review is complete (audit ledger, 2026-09-30): every
   post-claim reconnect rejection is pinned or excluded, with degraded
   authority restoration recorded as intentional with a client-driven
-  recovery path.
+  recovery path. The token rotation boundary review is complete (audit
+  ledger, 2026-09-30): rotation ordering, concurrent-claim refusals, and
+  both post-rotation unwinding phases are pinned; the drain-flip discard
+  pin is tracked as follow-up.
 - [ ] **Gameplay transitions:** ready-state invalidation on membership change;
   start/leave races; authority election and loss; host/direct readiness;
   v2/v3 negotiation; transport capability intersections; stale transport

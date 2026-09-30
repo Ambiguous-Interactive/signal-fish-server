@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tests: cover reconnect token rotation boundaries — a delivered retry must
+  surface a rotated token on the wire and re-arm the pre-issued credential,
+  and a failed baseline delivery must leave no pre-issued token for the
+  unrestored identity (#647).
+
 - Tests: cover reconnect failed-restore and retry — a storage fault on the
   membership restore is refused as `InternalError` with the claim released
   for retry and the roster untouched, and a storage fault on the authority
