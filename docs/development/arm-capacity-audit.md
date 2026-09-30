@@ -411,6 +411,59 @@ No violation was reproduced. The manager's existing
 claim release after expiry and subsequent cleanup. Other failed restore and
 retry paths remain unreviewed.
 
+### C1 lifecycle-capture-point sweep (2026-09-30)
+
+Closes the last open row of
+[#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686)
+at `8191ed60`. The sweep reviewed every site that captures or validates a
+`ClientLifecycle` before one or more await points and then acts, across all 17
+files that mention the type: `server.rs`, `server/{authority,connection_manager,
+game_data,heartbeat,maintenance,message_router,messaging,moderation,ready_state,
+reconnection_service,room_service,signaling,spectator_handlers,
+spectator_service}.rs`, and `websocket/{connection,handler}.rs`. The rekey
+mutates the shared lifecycle only from the gate-holding reconnect transaction
+(`reconnection_service.rs:678` guards `reassign_connection` at `:1313`;
+`set_player_id` has no other caller), so a held gate pins the identity. A site
+is safe when it re-validates `player_id()` plus `lifecycle_matches` under the
+gate after its last pre-act await, or when its act is keyed to state a rekey
+removes.
+
+Every lifecycle-resolving handler follows the fenced shape: authority, ready
+state, start game, transport ping, signal dispatch, transport status, join,
+leave, spectator join/detach, moderation (kick/ban/unban/access/transfer/
+rotation, with guards carried through `ModerationTarget`), relay text/binary
+admission (the stamp adds a second `ptr_eq` fence at the final touchpoint),
+authenticate and receive-loop refusals, `assign_client_to_room`,
+`cleanup_client_in_missing_room`, and the reconnect transaction itself.
+Documented exclusions, each verified against the code:
+
+- Ungated keyed-liveness lanes (`maybe_update_last_seen`, the router's
+  pre-dispatch activity writes, the roomless binary branch): the stale id's map
+  entry is gone after a rekey and unknown ids never take a throttle stamp, so
+  the write lands nowhere or only on the retired identity; the router re-checks
+  the source after the await before dispatching.
+- Socket-keyed acts (probe state, farewell enqueues, close pins from the
+  socket's own I/O tasks): the signal belongs to the physical socket and a
+  rekey cannot redirect it.
+- Post-release replies (moderation terminal results, relay budget refusals,
+  spectator failure replies): keyed to an id whose route the rekey removes, or
+  re-locked and re-validated before sending.
+- Test-only entries: `handle_reconnect` with no lifecycle is unreachable from
+  production dispatch; the socket path always forwards the source lifecycle.
+
+No violation was reproduced. One defense-in-depth residual is documented, not
+fixed: `charge_error_reply` pins the `4006` close by map key after the farewell
+await (`connection_manager.rs:1250`). A rekey landing inside that await would
+skip the pin, and the one-shot `report_exhaustion` means later exhausted
+charges never retry it until the window rolls over. The window is unreachable
+today — every charge site holds the charging player's own lifecycle gate, and
+the rekey needs that same gate — but a future ungated charge site would
+reintroduce it. [#697](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/697)
+tracks pinning the close on the carried per-socket close signal. With this
+sweep, [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686)
+is closed: each path has a deterministic regression from PRs #687-#696 or a
+documented exclusion here.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
