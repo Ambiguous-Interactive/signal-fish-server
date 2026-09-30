@@ -65,6 +65,9 @@ Before reviewing logic, verify the basics:
 - [ ] Tests pass: `cargo test --all-features`
 - [ ] Lints clean: `cargo clippy --all-targets --all-features -- -D warnings`
 - [ ] Formatted: `cargo fmt --check`
+- [ ] PR diff is scoped to the change: the branch sits on the default-branch
+      tip (rebuild it after a predecessor PR squash-merges), so reviewers and
+      review bots do not re-review already-merged work
 
 If any fail, report them as CRITICAL before reviewing other issues.
 

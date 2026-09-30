@@ -34,41 +34,17 @@ description: >-
 
 ## 1. The Problem: Reactive vs Proactive Security
 
-Running security audits only on code changes is reactive:
-
-```yaml
-# ❌ REACTIVE: Only runs when code changes
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-```
-
-**Issues:**
-
-- New CVEs published overnight won't trigger the workflow
-- Advisory databases update independently of code
-- Stale dependencies accumulate between changes
-- Nightly toolchains become outdated
+Running security audits only on code changes is reactive (`on: push` +
+`pull_request` only). New CVEs published overnight won't trigger the
+workflow, advisory databases update independently of code, stale
+dependencies accumulate, and nightly toolchains age out unseen.
 
 ---
 
 ## 2. The Solution: Scheduled Workflows
 
-```yaml
-# ✅ PROACTIVE: Runs on code changes AND on schedule
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-  schedule:
-    # Daily security audit at noon UTC to catch new CVEs
-    - cron: '0 12 * * *'
-```
-
-### When to Use Scheduled Workflows
+Add a `schedule:` trigger alongside the per-event ones (daily noon-UTC
+audit in `.github/workflows/ci.yml`). Schedule guidance:
 
 | Workflow Type                | Recommended Schedule | Rationale                              |
 |------------------------------|----------------------|----------------------------------------|
@@ -78,15 +54,8 @@ on:
 | Workflow hygiene             | Weekly               | Detect stale toolchains                |
 | Unused dependencies          | Changes/manual       | Pinned inputs change in Git            |
 
-### Common Cron Schedules
-
-```yaml
-- cron: '0 12 * * *'   # Every day at noon UTC
-- cron: '0 0 * * 1'    # Every Monday at midnight UTC
-- cron: '0 6 * * 1'    # Every Monday at 6 AM UTC
-- cron: '0 0 1 * *'    # First day of every month
-- cron: '0 */6 * * *'  # Every 6 hours
-```
+Stagger crons (daily noon, nightly 02:00/03:00/04:00); never run
+everything at midnight UTC.
 
 ---
 
@@ -253,7 +222,7 @@ This ensures:
 When the head has not moved since the same workflow last verified it, a
 scheduled tick can only reproduce the prior verdict. The shared guard is
 [`.github/actions/skip-if-verified`](../../../.github/actions/skip-if-verified)
-(reuse it; do not fork it). Three review findings define its contract:
+(reuse it; do not fork it). Review findings that define its contract:
 
 - **Runner env formats: verify against the docs, never the assumption.**
   `GITHUB_WORKFLOW_REF` is owner-qualified
@@ -272,23 +241,40 @@ scheduled tick can only reproduce the prior verdict. The shared guard is
   jobs show a successful executed-work step (`anchor_step`: gating, must-pass,
   never the guard, never checkout). Generalizes to every cache/dedupe guard:
   anchor on evidence the real work ran.
+- **Fail-open is a property of every command, not a wrapper.** Under
+  `set -euo pipefail`, one unguarded `jq` aborts the step; a job-level caller
+  survives via `!cancelled()`, but an in-job caller (unused-deps.yml) fails
+  the job and skips the analyzers the guard protects. Guard each fallible
+  command with a `|| { warn; stay fail-open; }` handler and validate
+  sentinel-derived values before they reach `jq --argjson`.
+- **Sentinel fallbacks must point in the fail-open direction.** A
+  window-computation failure falling back to epoch `0` counts every prior
+  success — a skip-biased guard. The correct fallback is "now" (nothing
+  matches → run). And a documented `0 disables the window` needs its own
+  branch: `date -d "-0 hours"` succeeds with cutoff "now", so `0` would
+  otherwise never match anything.
+- **Commit the behavioral harness; wiring pins cannot see runtime.**
+  Session-310's ad-hoc run-block harness died with the session, and both
+  PR-#704 Bugbot findings were runtime-only (unguarded abort, zero-window).
+  `tests/skip_if_verified_action_tests.rs` executes the extracted `run:`
+  block with a canned `gh` shim; extend it for any contract change.
 
 ---
 
 ## Best Practices Checklist
 
-- [ ] `schedule:` trigger added to security audit workflow
-- [ ] Schedule frequency documented with comments explaining the choice
-- [ ] Every non-audit job has `if: github.event_name != 'schedule'`
-- [ ] The audit job (`deny`) omits the schedule guard
+- [ ] `schedule:` trigger added to the audit workflow; frequency documented
+- [ ] Every non-audit job has `if: github.event_name != 'schedule'`; the audit job omits it
 - [ ] Different schedules used for different priorities (no everything-at-midnight)
 - [ ] Deterministic source-only analyzers use path triggers plus manual dispatch, not cron
-- [ ] Failure notifications configured for scheduled-run failures
-- [ ] Concurrency control prevents overlapping scheduled runs
-- [ ] `test_ci_schedule_only_runs_audit` test validates guard coverage
+- [ ] Failure notifications configured; concurrency control prevents overlapping runs
+- [ ] A config test validates the schedule cohort (e.g. `test_ci_schedule_only_runs_security_jobs`)
 - [ ] Skip guards (issue #702): the guard's job declares `permissions:` with
       `actions: read`; anchor step is an executed-work step; harness fixtures
-      use documented env formats; skipped runs never count as verification
+      use documented env formats; skipped runs never count as verification;
+      every guard-script command is fail-open-guarded (payload parse failures
+      exit 0); `max_success_age_hours=0` disables the window; the behavioral
+      harness (`tests/skip_if_verified_action_tests.rs`) stays green
 
 ---
 
