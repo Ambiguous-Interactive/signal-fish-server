@@ -262,7 +262,11 @@ scheduled tick can only reproduce the prior verdict. The shared guard is
   Session-310's ad-hoc run-block harness died with the session, and both
   PR-#704 Bugbot findings were runtime-only (unguarded abort, zero-window).
   `tests/skip_if_verified_action_tests.rs` executes the extracted `run:`
-  block with a canned `gh` shim; extend it for any contract change.
+  block with a canned `gh` shim; extend it for any contract change. Extract
+  the block from RAW text (`read_file`, not `read_live_file`): the stripped
+  view hides full-line comments from ABSENCE pins (documented caveat in
+  `tests/common/mod.rs`) and makes the harness execute bytes that differ
+  from production.
 
 ---
 

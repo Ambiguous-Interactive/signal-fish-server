@@ -13,12 +13,20 @@
 mod common;
 
 #[cfg(unix)]
-use common::{bash_command, read_live_file, repo_root, unique_temp_dir, write_file};
+use common::{bash_command, read_file, repo_root, unique_temp_dir, write_file};
 
 #[cfg(unix)]
 /// Extract the action's single composite step's `run: |` block, dedented.
+///
+/// Deliberately reads RAW text (`read_file`, not `read_live_file`): the block
+/// is both executed as the production script and scanned by an ABSENCE
+/// assertion (the portability pin). `read_live_file` strips full-line
+/// comments, which would (a) make the harness run a script that is not
+/// byte-identical to production and (b) hide a commented-out GNU-only line
+/// from the pin — exactly the presence-vs-absence caveat documented in
+/// `tests/common/mod.rs`.
 fn action_run_block() -> String {
-    let action = read_live_file(&repo_root().join(".github/actions/skip-if-verified/action.yml"));
+    let action = read_file(&repo_root().join(".github/actions/skip-if-verified/action.yml"));
     let marker = "      run: |";
     let start = action
         .find(marker)

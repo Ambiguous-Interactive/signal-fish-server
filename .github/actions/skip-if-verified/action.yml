@@ -92,8 +92,8 @@ runs:
             workflow_path="${GITHUB_WORKFLOW_REF%%@*}"
             workflow_path=".github/workflows/${workflow_path##*.github/workflows/}"
             # Freshness window, computed with portable arithmetic (`date +%s`
-            # plus shell math — no GNU `date -d`, which fails on the BSD date
-            # of macOS runners; Bugbot finding, PR #704 round 2).
+            # plus shell math; GNU-only date parsing fails on the BSD date of
+            # macOS runners; Bugbot finding, PR #704 round 2).
             # - 0 disables the window: any prior anchored success counts, per
             #   the documented input contract.
             # - An unreadable value or an unreadable clock must fail OPEN:
