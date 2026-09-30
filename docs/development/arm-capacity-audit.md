@@ -460,6 +460,8 @@ lifecycle gate, which the rekey needs), but a future ungated charge site would
 have reintroduced it. The close now pins the per-socket close signal captured
 under the charge guard, so it follows a concurrent identity swap
 ([#697](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/697),
+fixed by PR
+[#699](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/699),
 regression
 `error_reply_exhaustion_pins_the_close_through_a_rekey_inside_the_farewell_await`).
 With this sweep, [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686)
