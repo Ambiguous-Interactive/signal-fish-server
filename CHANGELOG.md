@@ -9,21 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Tests: cover reconnect failed-restore and retry — a storage fault on the
-  membership restore is refused as `InternalError` with the claim released
-  for retry and the roster untouched, and a storage fault on the authority
-  grant completes the reconnect degraded with the member's next reconnect
-  re-running the grant (#647).
-
-- Tests: cover accepted and refused coordination defaults for room sends and
-  reconnect registration (#672).
-
-- Tests: cover an activity-reaper snapshot that becomes stale during reconnect
-  and verify that the restored socket stays usable (#647).
-
-- Tests: add deterministic coverage for concurrent room leave and disconnect,
-  including peer events and reconnect token outcomes (#647).
-
 - Security configuration: optional per-encoding game-data payload ceilings,
   `security.max_game_data_bytes` (#634). Each encoding (`json`,
   `message_pack`, `rkyv`, `protobuf`) can carry its own payload cap, checked
@@ -50,12 +35,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `protobuf` token in its binary-envelope validator and emits opaque
   receipts (encoding token + base64 payload) with native parity.
 
-- Benchmarks: the relay serialization benches gained a `mixed_rkyv_source`
-  scenario — an rkyv sender in a room spanning v3-rkyv, v3-protobuf,
-  v3-json, and v2-json cohorts — pinning exact wire digests, per-cohort
-  frame/encode expectations (opaque passthrough; fail-closed
-  `unsupported_format` accounting for cross-format recipients), and
-  per-relay allocation ceilings (issue #636).
 - Protocol: opaque game-data encodings `rkyv` and `protobuf` are negotiable on
   v2 and v3 behind the new opt-in knobs `protocol.enable_rkyv_game_data` and
   `protocol.enable_protobuf_game_data` (#627). Default off: the default
@@ -91,19 +70,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   atomic insert. Rollback, direct deletion, and abandoned-room repair count
   the creator leaving once, even when setup panics after insertion (#658).
 
-- Tests: the unit-test modules that waited on the runtime clock now run
-  on the paused tokio clock (#512, #642). The remaining real-time
-  negative-wait windows (the 100 ms `assert_silent` family, the
-  drain/GC race sequencing, and the distributed-lock contention
-  windows) advance virtual time deterministically
-  instead of sleeping. A silence window now proves no message arrives
-  after runtime quiescence — stronger than a jittery 100 ms wall
-  window. The two lock-contention tests now assert the lease start on
-  the monotonic `expires_at` domain (the clock the lease decisions
-  use) instead of the informational wall-clock stamp. No production
-  behavior changed. The formerly-slowest clock-bound test drops from
-  0.93 s to 0.02 s; the full `--lib` sweep loses roughly 12 s of pure
-  wait time.
 - Relay: mixed-protocol rooms (v2 + v3 recipients) serialize relayed game
   data once per message instead of once per cohort (#636). The second
   cohort's JSON frame reuses the first cohort's exact `head + data` bytes
@@ -111,12 +77,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cohort; the relay allocation profile is unchanged or smaller, and the
   serialization hot loop spends one `data`-tree encode per relay instead
   of two.
-- CI: the `deny` supply-chain job skips dependency-irrelevant pull requests
-  (#512). Its verdict is a pure function of dependency-graph inputs, so a
-  change touching no Cargo manifest/lockfile, `deny.toml` policy, npm
-  package file, or `.cargo/**` config skips the analyzers; the daily noon
-  cron always audits. Pinned in lockstep by
-  `test_ci_deny_job_skips_dependency_irrelevant_pull_requests`.
 - Reference clients: `--join-code` now sends `JoinRoom.join_only` on both the
   native and browser clients. A code that does not resolve is refused
   `ROOM_NOT_FOUND` as a visible protocol error instead of silently creating
@@ -125,31 +85,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Native reference client: webrtc-rs/rtc bumped to 0.21. The engine migrates
   to the `SettingEngineBuilder` API, and unknown future data-channel events
   log at debug instead of failing the build (#621).
-
-- Devcontainer: `opencode.json` now uses the native OpenCode V2 config shape.
-  Servers live under `mcp.servers` and the V1-only `enabled` key is gone.
-  All servers keep the default classic MCP handshake: the Z.AI relay's
-  bundled MCP SDK predates the 2026-07-28 revision, so `protocol: "auto"`
-  probes cannot succeed there. `github-mcp-server` keeps its `#496` token
-  pass-through. Enforced by `tests/agent_tooling_guards.rs` and
-  `scripts/check-tooling-parity.sh`.
-
-- Devcontainer: OpenCode now installs from the V2 npm package
-  `@opencode/cli@latest`. The legacy `opencode-ai` package still serves V1
-  from npm's `latest` tag, so a one-time idempotent migration
-  (`migrate_opencode_to_v2` in `.devcontainer/lib-agent-tools.sh`) uninstalls
-  it before V2 installs — both own the `opencode` bin symlink, so order
-  matters. Offline launches keep V1; a pinned `OPENCODE_NPM_SPEC` skips the
-  migration.
-
-- Devcontainer: npm global agent installs no longer pass `--allow-scripts`.
-  npm runs lifecycle scripts by default; the flag is an unknown config there
-  and deprecation-warned on every install. `--include=optional` still ships
-  the per-platform binary packages (verified on npm 11: identical install
-  results with and without the flag).
-
-- Devcontainer: the pinned GitHub MCP server binary is bumped from 1.11.0 to
-  1.12.2, with fresh SHA256 ARGs taken from the release's checksums.txt.
 
 ### Fixed
 

@@ -542,6 +542,61 @@ No violation was reproduced. Every post-claim rejection of the reconnect
 restore has a recorded disposition: each gate is pinned end to end or
 carries an explicit derivation exclusion in this section.
 
+### C1 token rotation boundary review (2026-09-30)
+
+At `562a63fb`, reviewed the rotation boundaries of the reconnect transaction
+(`src/server/reconnection_service.rs`) against the concurrent-claim guards
+(`src/reconnection.rs`). The invariant chain: `claim_reconnection` checks and
+sets the claim under one write-lock hold with no awaits, so a second claimant
+during the transaction gets `AlreadyInProgress` (pinned by
+`test_reconnection_claim_is_single_use_under_concurrency`, the H6
+duplicate-claim e2e, and the fuzz model's no-double-claim invariant). The
+disconnect registration consumes the pre-issued join token, so no credential
+exists for the identity between disconnect and rotation. Rotation mints the
+fresh token as the last step of the `Reconnected` baseline builder, inside the
+coordinator's registration critical section; completion removes the claimed
+record only after that baseline is queued, so the token is never consumed
+without a delivered baseline. The new token is unclaimable until the next
+genuine disconnect arms it, and a retry presenting the consumed token after
+a completed reconnect is refused — `NoRecord` while the consumed record
+stays removed, and by token comparison once the next disconnect has armed
+the fresh token.
+
+Failure unwinding after rotation: a rejection once reassignment has occurred
+runs `reject_after_reassigned_reconnect_failure`, which discards the freshly
+rotated pre-issued token before restoring the transient identity and rolling
+back, so a player who was never restored never holds an armed credential. The
+panic supervisor repeats the same unwinding for the reassigned-but-not-committed
+phase (`ReconnectAfterReassignment` regression) and, post-commit, completes the
+claim and keeps the rotated token (`ReconnectAfterTerminal` regression pins the
+consumed old token). `ReconnectionClaimGuard::drop` deliberately releases
+nothing; only the supervisor's phase-aware completion or rollback may mutate
+the claim.
+
+Evidence added (extends
+`reconnect_baseline_delivery_failure_rolls_back_and_releases_claim_for_retry`):
+
+- A delivered retry must surface a rotated token on the wire (`Reconnected`
+  payload token differs from the consumed one) and re-arm the pre-issued map
+  for the next disconnect. Previously only the consumed old token was pinned;
+  the fresh-credential side of the rotation was not.
+- A failed baseline delivery leaves no pre-issued token for the unrestored
+  identity.
+- Boundary record: in that test's queue-full scenario the coordinator refuses
+  at initial-slot reservation, before the baseline builder runs, so the
+  rotation has not happened yet and the reject-path discard is a no-op there.
+  The post-rotation failure windows (builder fault, commit channel-close,
+  drain flip between builder and commit) share this discard line and the
+  same unwinding as the pinned reassigned-failure path; none has an
+  injection seam today (the existing storage-fault flags are sticky and trip
+  the pre-rotation restore lookup first). A dedicated red-first pin needs a
+  new mid-transaction seam and is tracked as follow-up work. Until then the
+  reject-path discard has no directly pinned evidence on any path.
+
+No violation was reproduced. The rotation ordering, concurrent-claim refusals,
+and both unwinding phases carry pinned evidence; the derivation-only residual
+is the reject-path discard above, including its drain-flip window.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -574,7 +629,7 @@ neither is a deployed capacity preset.
 | Startup and CLI: `src/main.rs`, `src/lib.rs` | Startup rejects bad config; startup failure leaves no listener | `tests/config_and_endpoints_tests.rs` | Failure after partial startup; feature matrix | Unreviewed |
 | Config and reload: `src/config/**` | Defaults, validation, and reload preserve one coherent policy | `tests/config_and_endpoints_tests.rs`, `tests/config_validation_coverage_scan.rs` | Key/allowlist swap order and invalid reload | Unreviewed |
 | Authentication: `src/auth/**`, `src/rate_limit.rs` | Unauthorized traffic cannot enter a room; limits count refusals | `tests/auth_integration_tests.rs`, `formal/tla/RateLimitWindow.tla` | Concurrent admission and auth timeout boundary | Unreviewed |
-| Security: `src/security/**`, `src/websocket/token_binding.rs` | Token, origin, TLS, and TURN credential checks fail closed | `tests/mtls_token_binding_e2e.rs`, `fuzz/fuzz_targets/fuzz_reconnect_tokens.rs` | Token rotation/expiry during claim; TLS variants | Unreviewed |
+| Security: `src/security/**`, `src/websocket/token_binding.rs` | Token, origin, TLS, and TURN credential checks fail closed | `tests/mtls_token_binding_e2e.rs`, `fuzz/fuzz_targets/fuzz_reconnect_tokens.rs`; C1 token rotation boundary review above | Rotation ordering and concurrent-claim refusals are reviewed and pinned; TLS variants and connect-token claim boundaries remain | Unreviewed |
 | Protocol: `src/protocol/**`, `src/trace_validation.rs` | V2/V3 decoding, wire bytes, and delivery class match contract | `tests/v2_wire_golden.rs`, `tests/v3_wire_properties.rs`, `fuzz/fuzz_targets/decode_protocol.rs` | Malformed/deep frames, mixed format boundaries | Unreviewed |
 | Room and player storage: `src/database/**` | Membership and room limits stay atomic and app isolated | `tests/integration_tests.rs`, `tests/model_based_state_machines.rs`; C1 admission-limit review above | Other adapters, rollback, and leave/disconnect races remain | Unreviewed |
 | Room lifecycle and moderation: `src/server/room_service.rs`, `moderation.rs`, `spectator_service.rs`, `spectator_handlers.rs` | Join, leave, kick, ban, spectator state and ownership agree | `tests/lobby_integration_tests.rs`, `src/server/room_service_tests.rs`; C1 admission-limit and leave/disconnect ordering reviews above | ARM-C001–C004 fixed in spectator and room-code seams; other join-only paths, leave/disconnect interleavings, kick/ban, and authority races remain | Unreviewed |
@@ -582,7 +637,7 @@ neither is a deployed capacity preset.
 | Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs` | Mixed conversion refusal; stalled room fairness | Unreviewed |
 | Coordination and queues: `src/coordination/**`, `src/distributed.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla` | Cancellation/panic at reservation and commit | Unreviewed |
 | WebSocket ingress and egress: `src/websocket/**` | Bounded frames, priority control, close and drain semantics hold | `tests/transport_frame_limits_e2e.rs`, `tests/slow_consumer_no_cascade_e2e.rs` | Slow reader, batching age, TLS close paths | Unreviewed |
-| Reconnect and retry: `src/reconnection.rs`, `src/retry.rs`, `src/server/reconnection_service.rs` | Claims have one owner; replay and stale routes cannot leak or misroute | `tests/reconnect_window_races_e2e.rs`, `formal/tla/ReconnectionClaimLifecycle.tla`; C1 reaper-ordering, claim-expiry, and failed-restore reviews above | Simultaneous claim, expiry during claim, and failed restore/retry are reviewed and pinned; `src/retry.rs` backoff seams and multi-failure detach accounting on failing backends remain | Partially reviewed |
+| Reconnect and retry: `src/reconnection.rs`, `src/retry.rs`, `src/server/reconnection_service.rs` | Claims have one owner; replay and stale routes cannot leak or misroute | `tests/reconnect_window_races_e2e.rs`, `formal/tla/ReconnectionClaimLifecycle.tla`; C1 reaper-ordering, claim-expiry, failed-restore, and token-rotation reviews above | Simultaneous claim, expiry during claim, failed restore/retry, and rotation boundaries are reviewed and pinned; `src/retry.rs` backoff seams, multi-failure detach accounting on failing backends, and the drain-flip discard pin remain | Partially reviewed |
 | Maintenance and deadlines: `src/server/maintenance.rs`, `heartbeat.rs`, `dashboard_cache.rs`, `src/deadline.rs` | Expiry and cleanup are bounded; live state survives sweeps | `formal/tla/RoomLifecycleGC.tla`, `tests/clock_source_scan.rs` | Exact expiry boundary; churn growth; dashboard cost | Unreviewed |
 | Metrics and logging: `src/metrics.rs`, `src/logging.rs`, `src/websocket/metrics.rs`, `prometheus.rs` | Counters report outcomes; labels and logs stay bounded and safe | `tests/config_and_endpoints_tests.rs`, `tests/websocket_test_helpers/prometheus_scrape.rs` | Cardinality and logging pressure under floods | Unreviewed |
 | Admin and shutdown: `src/server/admin.rs`, `shutdown.rs`, `connection_manager.rs` | Drain closes all owned tasks and reports queued work accurately | `tests/close_code_semantics_e2e.rs`, `formal/tla/ConnectionTeardown.tla` | Drain racing claims, queued reliable data, panic | Unreviewed |
