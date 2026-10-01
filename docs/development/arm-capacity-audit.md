@@ -659,6 +659,67 @@ a set reports an empty diff exactly when it is the running set):
 No violation was reproduced. The reload boundary — key/allowlist swap order
 and invalid reload — carries pinned evidence through the SIGHUP glue.
 
+### C1 identity-slice completion review (2026-10-01)
+
+At `81cc153a`, closed the three remaining identity and membership case
+families of [#647](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/647):
+spectator transitions, kick/ban races, and application isolation.
+
+**Spectator transitions.** Every role-mutating path serializes on the
+player's `ClientLifecycle` gate: a voluntary leave locks it through
+`detach_expected` and validates ownership after the wait; the disconnect
+teardown holds it across `unregister_client_locked`, whose spectator
+`detach_if` runs inside that hold; join, moderation, and reconnect admission
+carry their source lifecycle (ARM-C021/C026/C027). The owned detach
+re-validates the player→room mapping under the room mutation gate (the
+issue-241 TOCTOU fence), is idempotent on an absent entry, and the prune
+path refuses a moved or gone session through `expected_room`. Kick and ban
+refuse spectator targets by contract (`KickTargetNotFound` — the authority
+documentation scopes both operations to seated players; no `Kicked`
+spectator reason exists). The one unpinned interleaving — voluntary leave
+racing the disconnect teardown — is now pinned in both orders
+(`spectator_leave_wins_disconnect_race_with_exactly_one_voluntary_detach`,
+`spectator_disconnect_wins_race_and_the_late_leave_detaches_nothing`):
+exactly one detach wins, room events carry the winner's reason, the loser
+is inert (no second event, `StorageError` without state change), and the
+roster, local role, and retry backlog end clean. Red-proofed by disabling
+both serialization fences (the `detach_expected` lifecycle fence and the
+`detach_owned` room-gate re-validation): the leave-wins order publishes a
+phantom second spectator event, and the disconnect-wins order lets the
+losing leave report success; the tests fail on those assertions. A losing
+leave whose pre-gate `is_spectating` probe predates a completed detach
+replies `StorageError` to a socket the disconnect already removed — the
+reply has no route and no state changes, so it is inert by derivation.
+
+**Kick/ban races.** The ban write serializes on the room mutation gate
+ahead of the eviction, and the reconnect claim re-reads the room
+gate-fresh and refuses a recorded ban (issue #525 pins both orders). A kick
+of a disconnected target tombstones under the room gate and fences the
+second-disconnect re-arm (ARM-C017); moderation serializes through one
+lifecycle gate against lock cycles (ARM-C018); old-socket kick, ban,
+unban, transfer, access, and rotation are fenced at the source lifecycle
+(ARM-C022/C024). A kick that races a voluntary leave waits on the target's
+lifecycle gate, then re-reads storage truth under it
+(`resolve_kick_style_target` revalidation): the seat is either still held
+and evicted, or already gone and refused `KickTargetNotFound` — no
+intermediate state is observable. Covered by derivation from the fenced
+validation ordering.
+
+**Application isolation.** The app-owner gate covers every admission
+perimeter in both allowlist and open modes: fresh `JoinRoom`
+(non-enumerating `RoomNotFound`), `JoinAsSpectator`, and reconnect
+(`app_bound_room_owner_gates_seated_spectator_and_reconnect_admission`,
+including persistence-based authorization after a cache loss and
+token-preserving wrong-app refusals), plus open-policy scoping
+(`open_policy_rooms_are_scoped_to_their_application`), atomic application
+room-cap claims, and per-app player caps. Moderation is room-scoped by
+resolution (the target must be a member of the authority's own room), so
+no cross-app moderation path exists. No violation was reproduced.
+
+With this review, every case family in the identity and membership slice
+has a recorded disposition: pinned end to end, or derived from a fenced
+ordering with named evidence. The slice is complete.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -694,7 +755,7 @@ neither is a deployed capacity preset.
 | Security: `src/security/**`, `src/websocket/token_binding.rs` | Token, origin, TLS, and TURN credential checks fail closed | `tests/mtls_token_binding_e2e.rs`, `fuzz/fuzz_targets/fuzz_reconnect_tokens.rs`; C1 token rotation boundary review above | Rotation ordering and concurrent-claim refusals are reviewed and pinned; TLS variants and connect-token claim boundaries remain | Unreviewed |
 | Protocol: `src/protocol/**`, `src/trace_validation.rs` | V2/V3 decoding, wire bytes, and delivery class match contract | `tests/v2_wire_golden.rs`, `tests/v3_wire_properties.rs`, `fuzz/fuzz_targets/decode_protocol.rs` | Malformed/deep frames, mixed format boundaries | Unreviewed |
 | Room and player storage: `src/database/**` | Membership and room limits stay atomic and app isolated | `tests/integration_tests.rs`, `tests/model_based_state_machines.rs`; C1 admission-limit review above | Other adapters, rollback, and leave/disconnect races remain | Unreviewed |
-| Room lifecycle and moderation: `src/server/room_service.rs`, `moderation.rs`, `spectator_service.rs`, `spectator_handlers.rs` | Join, leave, kick, ban, spectator state and ownership agree | `tests/lobby_integration_tests.rs`, `src/server/room_service_tests.rs`; C1 admission-limit and leave/disconnect ordering reviews above | ARM-C001–C004 fixed in spectator and room-code seams; other join-only paths, leave/disconnect interleavings, kick/ban, and authority races remain | Unreviewed |
+| Room lifecycle and moderation: `src/server/room_service.rs`, `moderation.rs`, `spectator_service.rs`, `spectator_handlers.rs` | Join, leave, kick, ban, spectator state and ownership agree | `tests/lobby_integration_tests.rs`, `src/server/room_service_tests.rs`; C1 admission-limit, leave/disconnect ordering, and identity-slice completion reviews above | ARM-C001–C004 fixed in spectator and room-code seams; identity cases (concurrent limits, join-only, leave/disconnect, spectator transitions, kick/ban races, application isolation) reviewed and pinned or derived; storage-fault interleavings on other adapters remain | Partially reviewed |
 | Readiness and gameplay: `src/server/ready_state.rs`, `authority.rs`, `session_policy.rs`, `signaling.rs` | Membership and transport changes invalidate stale plans/readiness | `tests/v3_session_plan_e2e.rs`, `formal/tla/SignalFishSession.tla` | Start/leave, authority loss, reconnect publication order | Unreviewed |
 | Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs` | Mixed conversion refusal; stalled room fairness | Unreviewed |
 | Coordination and queues: `src/coordination/**`, `src/distributed.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla` | Cancellation/panic at reservation and commit | Unreviewed |

@@ -8919,6 +8919,270 @@ async fn spectator_join_cancels_backpressured_baseline_on_drain() {
     );
 }
 
+/// Issue #647 identity slice: a voluntary `LeaveSpectator` races the physical
+/// disconnect teardown for the same spectator session. The lifecycle gate
+/// must serialize the two detaches so exactly one wins, the events carry the
+/// winner's reason, the losing operation is inert, and the roster and local
+/// role end clean. This order parks the leave's owned detach on the room
+/// event gate while it holds the lifecycle gate; the disconnect must wait
+/// behind it and detach nothing.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn spectator_leave_wins_disconnect_race_with_exactly_one_voluntary_detach() {
+    let server = create_test_server().await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48401".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &creator,
+            "spectator-detach-race".to_string(),
+            Some("SDRACE".to_string()),
+            "creator".to_string(),
+            Some(4),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await;
+    let room = server
+        .database
+        .get_room("spectator-detach-race", "SDRACE")
+        .await
+        .expect("room lookup succeeds")
+        .expect("creator joins the room");
+    drain_queued_messages(&mut creator_rx);
+    let (spectator, mut spectator_rx) =
+        register_client(&server, "127.0.0.1:48402".parse().unwrap()).await;
+    server
+        .handle_join_as_spectator(
+            &spectator,
+            "spectator-detach-race".to_string(),
+            "SDRACE".to_string(),
+            "watcher".to_string(),
+            None,
+        )
+        .await;
+    assert!(matches!(
+        spectator_rx.recv().await.as_deref(),
+        Some(ServerMessage::SpectatorJoined(_))
+    ));
+    drain_queued_messages(&mut creator_rx);
+
+    let room_gate = server
+        .message_coordinator
+        .lock_room_event_mutation(&room.id)
+        .await;
+    let leave_server = Arc::clone(&server);
+    let leave_spectator = spectator;
+    let mut leave =
+        tokio::spawn(async move { leave_server.spectator_service.leave(&leave_spectator).await });
+    for _ in 0..64 {
+        if leave.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !leave.is_finished(),
+        "leave must park on the held room event gate before detaching"
+    );
+
+    let disconnect_server = Arc::clone(&server);
+    let disconnect_spectator = spectator;
+    let mut disconnect = tokio::spawn(async move {
+        disconnect_server
+            .unregister_client(&disconnect_spectator)
+            .await;
+    });
+    for _ in 0..64 {
+        if disconnect.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !disconnect.is_finished(),
+        "disconnect must wait on the lifecycle gate the leave's detach holds"
+    );
+
+    drop(room_gate);
+    let leave_outcome = timeout(Duration::from_secs(1), &mut leave)
+        .await
+        .expect("leave completes after the room gate drops")
+        .expect("leave task joins");
+    let Ok(()) = leave_outcome else {
+        panic!("the winning leave reports success: {leave_outcome:?}");
+    };
+    timeout(Duration::from_secs(1), &mut disconnect)
+        .await
+        .expect("disconnect completes after the leave releases the lifecycle gate")
+        .expect("disconnect task joins");
+
+    assert!(matches!(
+        spectator_rx.recv().await.as_deref(),
+        Some(ServerMessage::SpectatorLeft {
+            reason: Some(crate::protocol::SpectatorStateChangeReason::VoluntaryLeave),
+            ..
+        })
+    ));
+    assert!(matches!(
+        creator_rx.recv().await.as_deref(),
+        Some(ServerMessage::SpectatorDisconnected {
+            spectator_id,
+            reason: Some(crate::protocol::SpectatorStateChangeReason::VoluntaryLeave),
+            ..
+        }) if *spectator_id == spectator
+    ));
+    assert!(
+        matches!(creator_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        "the losing disconnect must not publish a second spectator event"
+    );
+    assert!(!server.spectator_service.is_spectating(&spectator));
+    assert!(server
+        .database
+        .get_room_spectators(&room.id)
+        .await
+        .expect("spectator roster is readable")
+        .is_empty());
+    assert_eq!(
+        server.spectator_service.retry_disconnected_detaches().await,
+        0,
+        "no ghost detach work may remain after the race"
+    );
+}
+
+/// Issue #647 identity slice: the disconnect-first order of the same race.
+/// The disconnect's detach parks on the room event gate while holding the
+/// lifecycle gate; a concurrent voluntary leave must wait behind it and end
+/// inert (no second detach, no extra event, no resurrected role).
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn spectator_disconnect_wins_race_and_the_late_leave_detaches_nothing() {
+    let server = create_test_server().await;
+    let (creator, mut creator_rx) =
+        register_client(&server, "127.0.0.1:48403".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &creator,
+            "spectator-detach-race-b".to_string(),
+            Some("SDRACB".to_string()),
+            "creator".to_string(),
+            Some(4),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await;
+    let room = server
+        .database
+        .get_room("spectator-detach-race-b", "SDRACB")
+        .await
+        .expect("room lookup succeeds")
+        .expect("creator joins the room");
+    drain_queued_messages(&mut creator_rx);
+    let (spectator, _spectator_rx) =
+        register_client(&server, "127.0.0.1:48404".parse().unwrap()).await;
+    server
+        .handle_join_as_spectator(
+            &spectator,
+            "spectator-detach-race-b".to_string(),
+            "SDRACB".to_string(),
+            "watcher".to_string(),
+            None,
+        )
+        .await;
+    drain_queued_messages(&mut creator_rx);
+
+    let room_gate = server
+        .message_coordinator
+        .lock_room_event_mutation(&room.id)
+        .await;
+    let disconnect_server = Arc::clone(&server);
+    let disconnect_spectator = spectator;
+    let mut disconnect = tokio::spawn(async move {
+        disconnect_server
+            .unregister_client(&disconnect_spectator)
+            .await;
+    });
+    for _ in 0..64 {
+        if disconnect.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !disconnect.is_finished(),
+        "disconnect must park on the held room event gate before detaching"
+    );
+
+    let leave_server = Arc::clone(&server);
+    let leave_spectator = spectator;
+    let mut leave =
+        tokio::spawn(async move { leave_server.spectator_service.leave(&leave_spectator).await });
+    for _ in 0..64 {
+        if leave.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !leave.is_finished(),
+        "the late leave must wait on the lifecycle gate the disconnect holds"
+    );
+
+    drop(room_gate);
+    timeout(Duration::from_secs(1), &mut disconnect)
+        .await
+        .expect("disconnect completes after the room gate drops")
+        .expect("disconnect task joins");
+    let leave_outcome = timeout(Duration::from_secs(1), &mut leave)
+        .await
+        .expect("leave completes after the disconnect releases the lifecycle gate")
+        .expect("leave task joins");
+    let Err(leave_error) = leave_outcome else {
+        panic!("the losing leave must not report success: {leave_outcome:?}");
+    };
+    assert_eq!(
+        leave_error.code,
+        Some(ErrorCode::StorageError),
+        "the losing leave fails closed without touching state: {leave_error:?}"
+    );
+
+    assert!(matches!(
+        creator_rx.recv().await.as_deref(),
+        Some(ServerMessage::SpectatorDisconnected {
+            spectator_id,
+            reason: Some(crate::protocol::SpectatorStateChangeReason::Disconnected),
+            ..
+        }) if *spectator_id == spectator
+    ));
+    assert!(
+        matches!(creator_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        "the losing leave must not publish a second spectator event"
+    );
+    assert!(!server.spectator_service.is_spectating(&spectator));
+    assert!(
+        server
+            .connection_manager
+            .client_lifecycle(&spectator)
+            .is_none(),
+        "the disconnect removed the connection before the leave resumed"
+    );
+    assert!(server
+        .database
+        .get_room_spectators(&room.id)
+        .await
+        .expect("spectator roster is readable")
+        .is_empty());
+    assert_eq!(
+        server.spectator_service.retry_disconnected_detaches().await,
+        0,
+        "no ghost detach work may remain after the race"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn draining_server_rejects_room_creation_without_consuming_join_locks() {
