@@ -878,6 +878,76 @@ any arrangement; no defect is confirmed.**
   expecting can hide such setup refusals; expect the first frame of a phase
   when its arrival is the phase's evidence.
 
+## C1 cross-room stall fairness review (2026-10-01)
+
+At `72d9188f` (main after #715), reviewed the delivery slice's
+"slow-recipient isolation; healthy-room progress during another room's
+stall" case families. The within-room half was already pinned
+(`slow_consumer_no_cascade_e2e.rs`, `relay_backpressure_e2e.rs`: one stalled
+recipient is evicted loudly while its own room keeps flowing); the cross-room
+half — one room's stall must not strand an unrelated room — had no
+executable pin. The coupling audit found no shared state a stalled recipient
+can hold across its delivery wait, and the invariant is now pinned.
+
+**Coupling audit** (each shared seam a stall could hold, with dispositions):
+
+- **Room event lanes.** `RoomEventLane::drain` runs one job at a time per
+  room; a lane job parked on a slow recipient delays only that room's later
+  mutations. Other rooms get their own lanes; the sequencer registry stores
+  weak handles only.
+- **Backpressured data deliveries.** `BackpressuredDelivery` owns
+  per-recipient state only. The routed fan-out paths
+  (`start_routed_deliveries`, `start_routed_deliveries_with_shared`) are
+  synchronous under the routing snapshot and drop the shared `room_players`
+  and `local_clients` read guards before any capacity wait is awaited; the
+  parked wait holds no shared lock across its slow-consumer deadline.
+- **Concurrent waits and eviction.** `finish_deliveries` awaits all
+  backpressured recipients concurrently (`join_all`), bounding one
+  broadcast's latency to its slowest single recipient; the subsequent
+  slow-consumer removal takes the evicted player's routing write gate and
+  their rooms' gates briefly, with no await inside the critical section
+  beyond lock acquisition.
+- **Control-plane conditional deliveries.** `reserve_one_if`'s capacity wait
+  likewise owns only per-recipient state; the caller drops the shared guards
+  before awaiting the reservation.
+- **No shared egress budget.** The delivery path contains no semaphore or
+  per-app budget a stalled recipient could exhaust: the only semaphores are
+  the distributed room-cap lock (room creation) and test scaffolding.
+- **Sender tasks.** A sender's connection task awaits its own room's fan-out
+  (within-room ordering by design, bounded by the slow-consumer deadline);
+  other rooms' connection tasks are independent tokio tasks.
+
+**Pinned invariant.**
+`stalled_room_does_not_strand_a_healthy_room`
+(`tests/cross_room_stall_fairness_e2e.rs`) runs two independent rooms on one
+server: room A holds a flooding sender and a never-reading recipient, so its
+fan-out parks in backpressure until the slow-consumer deadline evicts exactly
+that recipient; room B runs a continuous relay flood, a member that joins
+while the stall is live, and two draining recipients. When room A's sender
+observes the stalled peer's `PlayerLeft`, room B must already have relayed
+frames through the whole grace window, the mid-stall join must have completed
+with its `PlayerJoined` broadcast, and no fair-room member may ever observe a
+`PlayerLeft`, an `Error`, or a socket close; the fair-room relay's longest
+inter-frame gap must stay under half the stall window (a bare frame count is
+not enough — early frames before the wedge would satisfy it); and exactly one
+slow-consumer eviction with abandoned-frame drops must be counted. Red-proofed
+by holding a shared gate across the game-data dispatch in a probe: room B's
+relay went silent for the full stall window and the pin failed on the gap
+oracle; the probe was reverted byte-identically.
+
+**Pin-authoring notes.** Wedging a recipient deterministically requires (a)
+frames under the 64 KiB inbound `max_message_size` — larger frames are
+refused before fan-out and wedge nothing; (b) the heartbeat Pong deadline
+above the delivery deadline — otherwise the heartbeat reaper evicts the
+stalled peer first and `websocket_slow_consumer_disconnects` stays zero; and
+(c) offered flood volume in the tens of MiB — loopback kernel buffering
+absorbs far more than the queue capacity, while the wedge self-limits the
+actual transfer at the queue-full point.
+
+With this review, the delivery slice's cross-room fairness family has a
+recorded disposition. The coverage row for relay routing moves to partially
+reviewed: mixed conversion refusal remains.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -915,7 +985,7 @@ neither is a deployed capacity preset.
 | Room and player storage: `src/database/**` | Membership and room limits stay atomic and app isolated | `tests/integration_tests.rs`, `tests/model_based_state_machines.rs`; C1 admission-limit review above | Other adapters, rollback, and leave/disconnect races remain | Unreviewed |
 | Room lifecycle and moderation: `src/server/room_service.rs`, `moderation.rs`, `spectator_service.rs`, `spectator_handlers.rs` | Join, leave, kick, ban, spectator state and ownership agree | `tests/lobby_integration_tests.rs`, `src/server/room_service_tests.rs`; C1 admission-limit, leave/disconnect ordering, and identity-slice completion reviews above | ARM-C001–C004 fixed in spectator and room-code seams; identity cases (concurrent limits, join-only, leave/disconnect, spectator transitions, kick/ban races, application isolation) reviewed and pinned or derived; storage-fault interleavings on other adapters remain | Partially reviewed |
 | Readiness and gameplay: `src/server/ready_state.rs`, `authority.rs`, `session_policy.rs`, `signaling.rs` | Membership and transport changes invalidate stale plans/readiness | `tests/v3_session_plan_e2e.rs`, `formal/tla/SignalFishSession.tla`; C1 gameplay-transitions review above | Start/leave, authority loss, v2/v3 negotiation, capability intersections, stale reports, downgrade reconnects, and publication order are reviewed and pinned (including the spectator start-authorization coupling); shared `src/server.rs` state seams remain | Partially reviewed |
-| Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs` | Mixed conversion refusal; stalled room fairness | Unreviewed |
+| Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs`; C1 cross-room stall fairness review above | Slow-recipient isolation and cross-room stall fairness are reviewed and pinned (`stalled_room_does_not_strand_a_healthy_room`); mixed conversion refusal remains | Partially reviewed |
 | Coordination and queues: `src/coordination/**`, `src/distributed.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla`; C1 room-event duplicate-delivery disposition above | Lane job exactly-once and no lease re-run are dispositioned and pinned (`interleaved_awaits_deliver_each_lobby_broadcast_exactly_once`); cancellation/panic at reservation and commit remain | Unreviewed |
 | WebSocket ingress and egress: `src/websocket/**` | Bounded frames, priority control, close and drain semantics hold | `tests/transport_frame_limits_e2e.rs`, `tests/slow_consumer_no_cascade_e2e.rs` | Slow reader, batching age, TLS close paths | Unreviewed |
 | Reconnect and retry: `src/reconnection.rs`, `src/retry.rs`, `src/server/reconnection_service.rs` | Claims have one owner; replay and stale routes cannot leak or misroute | `tests/reconnect_window_races_e2e.rs`, `formal/tla/ReconnectionClaimLifecycle.tla`; C1 reaper-ordering, claim-expiry, failed-restore, and token-rotation reviews above | Simultaneous claim, expiry during claim, failed restore/retry, and rotation boundaries are reviewed and pinned (including the post-rotation discard via the drain-flip pin); `src/retry.rs` backoff seams and multi-failure detach accounting on failing backends remain | Partially reviewed |
