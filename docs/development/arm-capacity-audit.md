@@ -827,6 +827,57 @@ With this review, the gameplay-transitions case families have recorded
 dispositions. The coverage row moves to partially reviewed: the shared
 `src/server.rs` state seams remain for later slices.
 
+### C1 room-event duplicate-delivery disposition, #713 (2026-10-01)
+
+[Issue #713](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/713)
+reported that, while iterating on the spectator-start pin, two awaited
+`handle_player_ready` toggles delivered each `LobbyStateChanged` twice per
+member when per-frame `recv` awaits were interleaved between the operations,
+and asked whether the room-event lane's lease/stall recovery re-runs a
+completed publication when tokio's auto-advanced paused time trips a lease
+deadline. Investigated at `97506b11` (main after #714). Disposition: **the
+suspected mechanism does not exist and the doubling was not reproducible in
+any arrangement; no defect is confirmed.**
+
+- **The lane has no lease deadline and no re-run path.** The room-event
+  mutation lease is a plain `tokio::sync::Mutex` guard
+  (`RoomEventMutationLease`, `src/coordination/mod.rs`) with no TTL and no
+  recovery; the ready-toggle publication takes no distributed lock. The
+  slow-consumer delivery deadline arms only under per-recipient backpressure
+  and, on expiry, disconnects that recipient — it never re-runs the
+  publication (`reserve_one_if`, `src/server.rs`). `RoomEventLane::drain`
+  executes each enqueued job exactly once: the queue pop removes the job, the
+  mutex-guarded `running` flag keeps at most one live drain per lane, and the
+  completion resolves only after the job's sends finish. A completed
+  publication cannot re-run.
+- **The reported arrangement cannot advance the paused clock.** After an
+  awaited toggle, every broadcast frame is already queued, so interleaved
+  `recv` expects never park and tokio's auto-advance never fires. No
+  timer-driven mechanism can intervene between the operations at all.
+- **Non-reproducibility sweep.** Five mechanically distinct arrangements
+  delivered exactly one `LobbyStateChanged` per toggle per member: awaited
+  toggles with interleaved expects (paused), the same with a spectator join
+  and a router-dispatched `StartGame` refusal interleaved (paused), spawned
+  non-awaited toggles with interleaved expects (paused), a fully idle 30 s
+  auto-advance window between awaited toggles (paused), and real time without
+  `start_paused`. All clean. The original scratch test was not retained, and
+  a single-run observation remains unexplained; if the pattern reappears,
+  capture the exact test.
+- **Pinned invariant.**
+  `interleaved_awaits_deliver_each_lobby_broadcast_exactly_once`
+  (`src/server/ready_state_tests.rs`) encodes the report's detection recipe:
+  interleaved expects consume one copy per toggle, a fully idle window lets
+  the paused clock auto-advance past any suspected deadline, and a final
+  drain must find no second copy. Red-proofed by enqueueing the toggle
+  publication twice in a probe: the pin fails on the duplicated frame. The
+  probe was reverted byte-identically.
+- **Test-authoring hazard recorded.** During the sweep, a parked idle window
+  after a silently failed setup (a 5-character room code refused by the
+  fixed `room_code_length` validation) surfaces a confusing
+  `Error(NOT_IN_ROOM)` at the next expect. Tests that drain instead of
+  expecting can hide such setup refusals; expect the first frame of a phase
+  when its arrival is the phase's evidence.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -865,7 +916,7 @@ neither is a deployed capacity preset.
 | Room lifecycle and moderation: `src/server/room_service.rs`, `moderation.rs`, `spectator_service.rs`, `spectator_handlers.rs` | Join, leave, kick, ban, spectator state and ownership agree | `tests/lobby_integration_tests.rs`, `src/server/room_service_tests.rs`; C1 admission-limit, leave/disconnect ordering, and identity-slice completion reviews above | ARM-C001–C004 fixed in spectator and room-code seams; identity cases (concurrent limits, join-only, leave/disconnect, spectator transitions, kick/ban races, application isolation) reviewed and pinned or derived; storage-fault interleavings on other adapters remain | Partially reviewed |
 | Readiness and gameplay: `src/server/ready_state.rs`, `authority.rs`, `session_policy.rs`, `signaling.rs` | Membership and transport changes invalidate stale plans/readiness | `tests/v3_session_plan_e2e.rs`, `formal/tla/SignalFishSession.tla`; C1 gameplay-transitions review above | Start/leave, authority loss, v2/v3 negotiation, capability intersections, stale reports, downgrade reconnects, and publication order are reviewed and pinned (including the spectator start-authorization coupling); shared `src/server.rs` state seams remain | Partially reviewed |
 | Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs` | Mixed conversion refusal; stalled room fairness | Unreviewed |
-| Coordination and queues: `src/coordination/**`, `src/distributed.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla` | Cancellation/panic at reservation and commit | Unreviewed |
+| Coordination and queues: `src/coordination/**`, `src/distributed.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla`; C1 room-event duplicate-delivery disposition above | Lane job exactly-once and no lease re-run are dispositioned and pinned (`interleaved_awaits_deliver_each_lobby_broadcast_exactly_once`); cancellation/panic at reservation and commit remain | Unreviewed |
 | WebSocket ingress and egress: `src/websocket/**` | Bounded frames, priority control, close and drain semantics hold | `tests/transport_frame_limits_e2e.rs`, `tests/slow_consumer_no_cascade_e2e.rs` | Slow reader, batching age, TLS close paths | Unreviewed |
 | Reconnect and retry: `src/reconnection.rs`, `src/retry.rs`, `src/server/reconnection_service.rs` | Claims have one owner; replay and stale routes cannot leak or misroute | `tests/reconnect_window_races_e2e.rs`, `formal/tla/ReconnectionClaimLifecycle.tla`; C1 reaper-ordering, claim-expiry, failed-restore, and token-rotation reviews above | Simultaneous claim, expiry during claim, failed restore/retry, and rotation boundaries are reviewed and pinned (including the post-rotation discard via the drain-flip pin); `src/retry.rs` backoff seams and multi-failure detach accounting on failing backends remain | Partially reviewed |
 | Maintenance and deadlines: `src/server/maintenance.rs`, `heartbeat.rs`, `dashboard_cache.rs`, `src/deadline.rs` | Expiry and cleanup are bounded; live state survives sweeps | `formal/tla/RoomLifecycleGC.tla`, `tests/clock_source_scan.rs` | Exact expiry boundary; churn growth; dashboard cost | Unreviewed |

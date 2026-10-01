@@ -136,6 +136,12 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   volatile loss; exact gap/report accounting; mixed encodings and unsupported
   conversions; serialization size limits; priority-control saturation;
   slow-recipient isolation; healthy-room progress during another room's stall.
+  The #713 duplicate-delivery report is dispositioned (audit ledger,
+  2026-10-01): the suspected lane lease re-run does not exist, the doubling
+  was not reproducible in any arrangement, and room-uniform lobby
+  exactly-once under interleaved awaits — including across a parked
+  auto-advance window — is pinned
+  (`interleaved_awaits_deliver_each_lobby_broadcast_exactly_once`).
 - [ ] **Recovery:** cancellation at relevant await boundaries; partial state
   mutation or publication; rollback failure and retry; task panic recovery;
   cleanup racing join/reconnect; deadlines at before/equal/after boundaries;
