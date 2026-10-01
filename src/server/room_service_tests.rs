@@ -9034,9 +9034,9 @@ async fn spectator_leave_wins_disconnect_race_with_exactly_one_voluntary_detach(
             ..
         }) if *spectator_id == spectator
     ));
-    assert!(
-        matches!(creator_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-        "the losing disconnect must not publish a second spectator event"
+    assert_no_queued_message(
+        &mut creator_rx,
+        "the losing disconnect must not publish a second spectator event",
     );
     assert!(!server.spectator_service.is_spectating(&spectator));
     assert!(server
@@ -9189,9 +9189,9 @@ async fn spectator_disconnect_wins_race_and_the_late_leave_detaches_nothing() {
             ..
         }) if *spectator_id == spectator
     ));
-    assert!(
-        matches!(creator_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-        "the losing leave must not publish a second spectator event"
+    assert_no_queued_message(
+        &mut creator_rx,
+        "the losing leave must not publish a second spectator event",
     );
     assert!(!server.spectator_service.is_spectating(&spectator));
     assert!(
