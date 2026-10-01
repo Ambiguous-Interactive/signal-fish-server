@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tests: pin healthy-room progress during another room's stall (#647, C1
+  delivery). Two independent rooms on one server: room A wedges a
+  never-reading recipient (clamped receive buffer, deterministic wedge)
+  whose fan-out parks until the slow-consumer deadline evicts it, while
+  room B runs a continuous relay flood, a member that joins mid-stall, and
+  two drains. At the eviction room B must already have relayed frames
+  through the whole grace window with its join broadcast delivered, no
+  fair-room member may ever see a `PlayerLeft`, `Error`, or socket close,
+  and the fair-room relay's longest inter-frame gap must stay under half
+  the stall window. Exactly one eviction is counted and message
+  conservation balances. Red-proofed with a shared-gate probe across the
+  game-data dispatch: room B's relay went silent for the full stall window
+  and the pin failed on the gap oracle.
+
 - Tests: pin room-uniform lobby exactly-once under interleaved awaits
   (#713). The #713 report suspected the room-event lane's lease recovery of
   re-running a completed publication. That lease has no TTL and no re-run
