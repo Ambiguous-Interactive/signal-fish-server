@@ -627,10 +627,11 @@ applies the allowlist swap and the key swap together: revoked apps stop
 resolving for fresh handshakes, added apps resolve, and live connections keep
 their resolved context by design (live revocation stays a restart-level
 action). The install order is posture-before-key: arming briefly publishes
-required-with-old-key (token-less handshakes refused — fail-closed), and
-disarming publishes no-key-with-required (both refusal classes fail-closed);
-a presented token with no key installed is refused `NoKeyConfigured`, so
-every mixed state refuses closed. `install_connect_token_key` re-parses the
+required-with-old-key (token-less handshakes refused — fail-closed), and the
+reverse order is the only one that could open a required-but-unenforced
+window. A presented token with no key installed is refused `NoKeyConfigured`,
+so removing the key refuses closed, and every mixed state refuses closed.
+`install_connect_token_key` re-parses the
 key, but `validate_config_security` parses the same key first, so a
 corrupt-key SIGHUP is rejected before either swap and cannot regress below
 the gate.
@@ -640,12 +641,15 @@ glue; the allowlist state is observed with a public diff probe — re-applying
 a set reports an empty diff exactly when it is the running set):
 
 - `sighup_security_invalid_config_keeps_the_running_allowlist_and_key`:
-  duplicate app IDs, and a `require_connect_token=true` entry with the key
-  block removed, each keep the running allowlist, the running key (old
-  tokens verify; the rejected config's key does not install), and the
-  running posture. Red-proofed by disabling the validation gate: the probe
-  fails on key retention, proving the gate is what rejects before both
-  swaps.
+  duplicate app IDs (carrying an armed posture and a fresh key), and a
+  `require_connect_token=true` entry with the key block removed, each keep
+  the running allowlist, the running key (old tokens verify; the rejected
+  config's key does not install), and the running posture. Red-proofed by
+  disabling the validation gate: with the gate gone, the duplicates config
+  installs its key and arms the posture, and the test fails on key
+  retention. The duplicates variant is additionally defended in depth by
+  the swap's own entry validation (`AppIdAllowlist::reload` rejects it
+  again); the no-key variant isolates the glue gate alone.
 - `sighup_reload_applies_allowlist_and_key_swaps_together`: one valid SIGHUP
   revokes app-a, adds app-b, and rotates the key; the swapped set is live,
   fresh-key tokens verify, and old-key tokens stop verifying in the same

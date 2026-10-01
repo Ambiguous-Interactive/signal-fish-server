@@ -11,8 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Tests: pin the SIGHUP allowlist/key reload boundary (#647). A config that
   fails security validation applies nothing: the running allowlist, the
-  running verification key, and the enforcement posture all survive. One
-  valid reload applies the allowlist swap and the key swap together. The
+  running verification key, and the enforcement posture all survive, even
+  when the rejected config also carries an armed posture and a fresh key.
+  One valid reload applies the allowlist swap and the key swap together. The
   allowlist state is observed through a public reload diff probe.
 
 - Tests: pin the post-rotation reconnect token discard (#707). A one-shot

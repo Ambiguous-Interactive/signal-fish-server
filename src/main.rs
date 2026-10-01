@@ -1584,7 +1584,8 @@ mod connect_token_reload_tests {
     /// A SIGHUP config that fails security validation must apply nothing
     /// (issue #647 reload-boundary review): the running allowlist, the
     /// running key, and the running enforcement posture all survive, even
-    /// when the rejected config also carries a new key and an armed posture.
+    /// when the rejected config also carries a new key, an armed posture,
+    /// and a fresh allowlist set.
     #[tokio::test]
     async fn sighup_security_invalid_config_keeps_the_running_allowlist_and_key() {
         let server = allowlist_test_server().await;
@@ -1599,6 +1600,7 @@ mod connect_token_reload_tests {
         assert!(initial.applied && initial.added == vec!["app-a".to_string()]);
 
         let mut duplicates = security_with(&second);
+        duplicates.connect_token.as_mut().expect("key set").required = true;
         duplicates.allowed_apps = vec![app_entry("dup-app"), app_entry("dup-app")];
         let token_required_no_key = SecurityConfig {
             connect_token: None,
