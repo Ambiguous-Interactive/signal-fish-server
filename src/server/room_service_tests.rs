@@ -9082,7 +9082,7 @@ async fn spectator_disconnect_wins_race_and_the_late_leave_detaches_nothing() {
         .expect("room lookup succeeds")
         .expect("creator joins the room");
     drain_queued_messages(&mut creator_rx);
-    let (spectator, _spectator_rx) =
+    let (spectator, mut spectator_rx) =
         register_client(&server, "127.0.0.1:48404".parse().unwrap()).await;
     server
         .handle_join_as_spectator(
@@ -9093,6 +9093,10 @@ async fn spectator_disconnect_wins_race_and_the_late_leave_detaches_nothing() {
             None,
         )
         .await;
+    assert!(matches!(
+        spectator_rx.recv().await.as_deref(),
+        Some(ServerMessage::SpectatorJoined(_))
+    ));
     drain_queued_messages(&mut creator_rx);
 
     let room_gate = server
@@ -9117,10 +9121,25 @@ async fn spectator_disconnect_wins_race_and_the_late_leave_detaches_nothing() {
         "disconnect must park on the held room event gate before detaching"
     );
 
+    // Mechanism pin: the disconnect acquired the lifecycle gate before its
+    // detach parked, so the late leave's lock attempt can only block behind
+    // the disconnect's hold.
+    let lifecycle = server
+        .connection_manager
+        .client_lifecycle(&spectator)
+        .expect("the disconnect has not removed the client yet");
+    let attempts_before = lifecycle.lock_attempt_count_for_test();
+
     let leave_server = Arc::clone(&server);
     let leave_spectator = spectator;
     let mut leave =
         tokio::spawn(async move { leave_server.spectator_service.leave(&leave_spectator).await });
+    timeout(
+        Duration::from_secs(1),
+        lifecycle.wait_for_lock_attempt_after_for_test(attempts_before),
+    )
+    .await
+    .expect("the late leave attempts the lifecycle lock the disconnect holds");
     for _ in 0..64 {
         if leave.is_finished() {
             break;
@@ -9137,6 +9156,18 @@ async fn spectator_disconnect_wins_race_and_the_late_leave_detaches_nothing() {
         .await
         .expect("disconnect completes after the room gate drops")
         .expect("disconnect task joins");
+
+    // The departing spectator's own acknowledgement carries the winner's
+    // reason; test 1 pins the leave-side acknowledgement, this pins the
+    // disconnect-side one.
+    assert!(matches!(
+        spectator_rx.recv().await.as_deref(),
+        Some(ServerMessage::SpectatorLeft {
+            reason: Some(crate::protocol::SpectatorStateChangeReason::Disconnected),
+            ..
+        })
+    ));
+
     let leave_outcome = timeout(Duration::from_secs(1), &mut leave)
         .await
         .expect("leave completes after the disconnect releases the lifecycle gate")
