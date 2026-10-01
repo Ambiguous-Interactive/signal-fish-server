@@ -928,7 +928,7 @@ deadline evicts exactly that recipient; room B runs a continuous relay flood,
 a member that joins while the stall-room flood is in flight, and two draining
 recipients. When room A's sender observes the stalled peer's `PlayerLeft`,
 room B must already have relayed frames through the whole grace window, the
-join's `PlayerJoined` broadcast must have reached room B's members, and no
+join's `PlayerJoined` broadcast must have reached a room-B recipient, and no
 fair-room member may ever observe a `PlayerLeft`, an `Error`, or a socket
 close; the fair-room relay's longest inter-frame gap must stay under half the
 stall window (a bare frame count is not enough — early frames before the

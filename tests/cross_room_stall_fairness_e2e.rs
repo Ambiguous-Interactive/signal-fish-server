@@ -44,11 +44,11 @@
 //! margins, not positive timing assertions — the gap oracle allows half the
 //! stall window (healthy gaps are microseconds to milliseconds, so a spurious
 //! failure requires a multi-second scheduler starvation that would already
-//! break the suite's 10 s connect and drain deadlines), and every liveness
+//! break the suite's 10 s connect and join deadlines), and every liveness
 //! claim (joins, counts, sentinel delivery) is order-based. The 10 s window
-//! itself is load-bearing: the gap oracle's sensitivity equals the window, so
-//! shrinking it to the siblings' 300-500 ms would demand sub-100 ms gap
-//! bounds that flake on oversubscribed runners.
+//! itself is load-bearing: the gap oracle's sensitivity is half the window,
+//! so shrinking the window to the siblings' 300-500 ms would demand 150-250 ms
+//! gap bounds that flake on oversubscribed runners.
 
 mod test_helpers;
 mod websocket_test_helpers;
