@@ -4150,6 +4150,57 @@ mod tests {
         assert_eq!(message_id(&rx.recv().await.unwrap().unwrap()), 2);
     }
 
+    /// Cross-epoch exact accounting: each incarnation restarts `seq` at 1, so
+    /// a sender's loss ranges from different epochs are numerically
+    /// overlapping and a merge that ignored `epoch` would swallow the newer
+    /// incarnation's loss record into the older epoch's range (the client
+    /// would never learn of the newer loss). The report must keep one
+    /// distinct range per epoch.
+    #[tokio::test]
+    async fn cross_epoch_gaps_of_one_sender_stay_distinct_ranges() {
+        let (tx, mut rx) = channel(2, 2);
+        tx.set_protocol_version(3);
+        // Epoch 4: each successor supersedes its same-key predecessor.
+        tx.try_enqueue_data(data_with_epoch(1, DeliveryClass::Latest, Some(10), 4, 1))
+            .unwrap();
+        tx.try_enqueue_data(data_with_epoch(2, DeliveryClass::Latest, Some(10), 4, 2))
+            .unwrap();
+        tx.try_enqueue_data(data_with_epoch(3, DeliveryClass::Latest, Some(10), 4, 3))
+            .unwrap();
+        // Epoch 5 incarnation of the same sender: the key spans epochs and the
+        // seq stream restarts, so the ranges overlap numerically.
+        tx.try_enqueue_data(data_with_epoch(4, DeliveryClass::Latest, Some(10), 5, 1))
+            .unwrap();
+        tx.try_enqueue_data(data_with_epoch(5, DeliveryClass::Latest, Some(10), 5, 2))
+            .unwrap();
+
+        let report = report(rx.recv().await.unwrap().unwrap());
+        assert_eq!(
+            report.gaps.len(),
+            2,
+            "one distinct range per epoch: {:?}",
+            report.gaps
+        );
+        assert_eq!(
+            (
+                report.gaps[0].epoch,
+                report.gaps[0].from_seq,
+                report.gaps[0].to_seq
+            ),
+            (4, 1, 3)
+        );
+        assert_eq!(
+            (
+                report.gaps[1].epoch,
+                report.gaps[1].from_seq,
+                report.gaps[1].to_seq
+            ),
+            (5, 1, 1)
+        );
+        assert_eq!(report.per_class.latest.superseded, 4);
+        assert_eq!(message_id(&rx.recv().await.unwrap().unwrap()), 5);
+    }
+
     #[tokio::test]
     async fn queued_reports_materialize_current_counters_without_regression() {
         let (tx, mut rx) = channel(4, 4);

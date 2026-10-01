@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tests: pin cross-epoch exact gap accounting (#647, C1 delivery). Each
+  reconnect bumps a sender's incarnation epoch and restarts its `seq` at 1,
+  so loss ranges from different epochs overlap numerically. The gap merge
+  rule requires epoch equality, and one recipient's report must keep one
+  distinct range per epoch; a merge that ignored the epoch would swallow the
+  newer incarnation's loss record into the older epoch's range. Red-proofed
+  by removing the epoch-equality clause in a probe: the ranges collapsed and
+  the pin failed.
+
 - Tests: pin healthy-room progress during another room's stall (#647, C1
   delivery). Two independent rooms on one server: room A wedges a
   never-reading recipient (clamped receive buffer, deterministic wedge)
