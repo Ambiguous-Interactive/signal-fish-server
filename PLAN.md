@@ -142,6 +142,13 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   exactly-once under interleaved awaits — including across a parked
   auto-advance window — is pinned
   (`interleaved_awaits_deliver_each_lobby_broadcast_exactly_once`).
+  The reconnect epoch/sequence family is reviewed (audit ledger, 2026-10-01):
+  the resumed epoch is part of reassignment with no provisional value
+  observable, recipient-visible `(epoch, seq)` strictly increases across
+  reconnect/rejoin/room-switch, the stale-sender dispatch is lifecycle-gate
+  fenced (#686), and saturation is loud — with cross-epoch exact gap
+  accounting now pinned (`cross_epoch_gaps_of_one_sender_stay_distinct_ranges`;
+  red-proofed by dropping the merge rule's epoch-equality clause).
   The slow-recipient isolation and cross-room stall fairness families are
   reviewed (audit ledger, 2026-10-01): no shared seam is held across a
   stalled recipient's delivery wait, and the cross-room invariant — room B's

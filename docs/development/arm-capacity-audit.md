@@ -951,6 +951,69 @@ With this review, the delivery slice's cross-room fairness family has a
 recorded disposition. The coverage row for relay routing moves to partially
 reviewed: mixed conversion refusal remains.
 
+### C1 reconnect epoch and sequence review (2026-10-01)
+
+At `a096bf33` (main after #716), reviewed the delivery slice's "reconnect
+epoch and sequence changes" case families. Disposition per family; no
+violation was reproduced.
+
+- **Resumed epoch without a provisional value.** The reconnect path folds
+  `last_epoch + 1` (the pre-disconnect epoch survives in the reconnection
+  record) into the reassignment itself, so the first metadata read already
+  observes the final incarnation and no transient-socket epoch is ever
+  visible. Pinned (`reassign_connection_applies_the_resumed_epoch_immediately`,
+  `src/server/connection_manager.rs`; e2e
+  `reconnecting_sender_bumps_epoch_and_stamps_it_on_game_data`).
+- **Recipient-visible stream ordering.** A recipient that never left sees the
+  sender's `(epoch, seq)` stream strictly increase across reconnect (epoch
+  bump, seq restart at 1), rejoin (self-describing epoch jump), and room
+  switch (epoch carries forward, seq restarts). Pinned
+  (`sender_leave_and_rejoin_restarts_seq_at_one`,
+  `epoch_carries_across_a_room_switch_not_reset_to_one`); the recipient's
+  epoch attribution rides `PlayerReconnected.epoch` (golden
+  `golden_player_reconnected_with_epoch`) and the room snapshots (e2e
+  `v3_room_snapshots_carry_epoch_pre_v3_omit_it`).
+- **Stale-sender dispatch racing the rekey.** The reconnect rekey waits on
+  the sender's lifecycle gate, which is held across the budget charge, the
+  stamp, and the enqueue (issue-#686 fence,
+  `src/server/game_data.rs`); a stale socket's frame is dismissed with no
+  charge. Dispositioned by the completed lifecycle-capture-point sweep
+  (ARM-C030); the gate is released before backpressured fan-out completion,
+  so the rekey never waits on a queue drain.
+- **Epoch saturation.** Both bump paths (`prepare_client_to_room`, the
+  reconnect resume) use `saturating_add`, can never regress an epoch, and log
+  loudly at `u32::MAX` (`src/server/connection_manager.rs`,
+  `src/server/reconnection_service.rs`). The terminal-incarnation reuse is
+  unreachable in practice (~2^32 incarnations of one sender) and is reviewed
+  by inspection; no pin.
+- **Failed-restore rollback.** `restore_reassigned_connection` resets the
+  roomless transient identity's stamp state to 0, dominated by the
+  reconnect-path epoch resume on the retry. Dispositioned by the
+  failed-restore and retry review above (2026-09-30).
+- **Cross-epoch exact gap accounting.** Each incarnation restarts `seq` at 1,
+  so a sender's loss ranges from different epochs overlap numerically; a
+  merge that ignored `epoch` would swallow the newer incarnation's loss
+  record into the older epoch's range and the client would never learn of
+  the newer loss. The single merge rule
+  (`gaps_merge`, `src/coordination/outbound_queue.rs`) requires epoch
+  equality and is shared by the queue's gap reports and the writer's
+  pending unsupported-format report, so one clause guards both. Now pinned
+  (`cross_epoch_gaps_of_one_sender_stay_distinct_ranges`): epoch-4 and
+  epoch-5 supersession losses of one sender must surface as two distinct
+  ranges, each carrying its own epoch. Red-proofed by removing the
+  epoch-equality clause in a probe: the ranges collapsed into one
+  epoch-4 range and the pin failed; the probe was reverted byte-identically.
+- **Old-epoch frames queued across the reconnect.** Fan-out appends in stamp
+  order and the data lanes drain FIFO, so a recipient's undelivered
+  old-epoch frames precede every new-epoch frame and no spurious gap is
+  reported for them; per-epoch loss attribution is the pinned merge rule
+  above, and cross-epoch supersession attribution is pinned
+  (`latest_key_spans_sender_epochs_and_reports_the_replaced_epoch`).
+
+With this review, the delivery slice's reconnect epoch/sequence family has a
+recorded disposition. The coverage rows for reconnection and coordination
+gain the new evidence; their remaining items are unchanged.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -989,9 +1052,9 @@ neither is a deployed capacity preset.
 | Room lifecycle and moderation: `src/server/room_service.rs`, `moderation.rs`, `spectator_service.rs`, `spectator_handlers.rs` | Join, leave, kick, ban, spectator state and ownership agree | `tests/lobby_integration_tests.rs`, `src/server/room_service_tests.rs`; C1 admission-limit, leave/disconnect ordering, and identity-slice completion reviews above | ARM-C001–C004 fixed in spectator and room-code seams; identity cases (concurrent limits, join-only, leave/disconnect, spectator transitions, kick/ban races, application isolation) reviewed and pinned or derived; storage-fault interleavings on other adapters remain | Partially reviewed |
 | Readiness and gameplay: `src/server/ready_state.rs`, `authority.rs`, `session_policy.rs`, `signaling.rs` | Membership and transport changes invalidate stale plans/readiness | `tests/v3_session_plan_e2e.rs`, `formal/tla/SignalFishSession.tla`; C1 gameplay-transitions review above | Start/leave, authority loss, v2/v3 negotiation, capability intersections, stale reports, downgrade reconnects, and publication order are reviewed and pinned (including the spectator start-authorization coupling); shared `src/server.rs` state seams remain | Partially reviewed |
 | Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs`; C1 cross-room stall fairness review above | Slow-recipient isolation and cross-room stall fairness are reviewed and pinned (`stalled_room_does_not_strand_a_healthy_room`); mixed conversion refusal remains | Partially reviewed |
-| Coordination and queues: `src/coordination/**`, `src/distributed.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla`; C1 room-event duplicate-delivery disposition above | Lane job exactly-once and no lease re-run are dispositioned and pinned (`interleaved_awaits_deliver_each_lobby_broadcast_exactly_once`); cancellation/panic at reservation and commit remain | Unreviewed |
+| Coordination and queues: `src/coordination/**`, `src/distributed.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla`; C1 room-event duplicate-delivery disposition above | Lane job exactly-once and no lease re-run are dispositioned and pinned (`interleaved_awaits_deliver_each_lobby_broadcast_exactly_once`); cross-epoch gap ranges stay distinct per epoch (`cross_epoch_gaps_of_one_sender_stay_distinct_ranges`); cancellation/panic at reservation and commit remain | Unreviewed |
 | WebSocket ingress and egress: `src/websocket/**` | Bounded frames, priority control, close and drain semantics hold | `tests/transport_frame_limits_e2e.rs`, `tests/slow_consumer_no_cascade_e2e.rs` | Slow reader, batching age, TLS close paths | Unreviewed |
-| Reconnect and retry: `src/reconnection.rs`, `src/retry.rs`, `src/server/reconnection_service.rs` | Claims have one owner; replay and stale routes cannot leak or misroute | `tests/reconnect_window_races_e2e.rs`, `formal/tla/ReconnectionClaimLifecycle.tla`; C1 reaper-ordering, claim-expiry, failed-restore, and token-rotation reviews above | Simultaneous claim, expiry during claim, failed restore/retry, and rotation boundaries are reviewed and pinned (including the post-rotation discard via the drain-flip pin); `src/retry.rs` backoff seams and multi-failure detach accounting on failing backends remain | Partially reviewed |
+| Reconnect and retry: `src/reconnection.rs`, `src/retry.rs`, `src/server/reconnection_service.rs` | Claims have one owner; replay and stale routes cannot leak or misroute | `tests/reconnect_window_races_e2e.rs`, `formal/tla/ReconnectionClaimLifecycle.tla`; C1 reaper-ordering, claim-expiry, failed-restore, token-rotation, and reconnect epoch/sequence reviews above | Simultaneous claim, expiry during claim, failed restore/retry, rotation boundaries, and reconnect epoch/sequence transitions (including cross-epoch gap accounting) are reviewed and pinned; `src/retry.rs` backoff seams and multi-failure detach accounting on failing backends remain | Partially reviewed |
 | Maintenance and deadlines: `src/server/maintenance.rs`, `heartbeat.rs`, `dashboard_cache.rs`, `src/deadline.rs` | Expiry and cleanup are bounded; live state survives sweeps | `formal/tla/RoomLifecycleGC.tla`, `tests/clock_source_scan.rs` | Exact expiry boundary; churn growth; dashboard cost | Unreviewed |
 | Metrics and logging: `src/metrics.rs`, `src/logging.rs`, `src/websocket/metrics.rs`, `prometheus.rs` | Counters report outcomes; labels and logs stay bounded and safe | `tests/config_and_endpoints_tests.rs`, `tests/websocket_test_helpers/prometheus_scrape.rs` | Cardinality and logging pressure under floods | Unreviewed |
 | Admin and shutdown: `src/server/admin.rs`, `shutdown.rs`, `connection_manager.rs` | Drain closes all owned tasks and reports queued work accurately | `tests/close_code_semantics_e2e.rs`, `formal/tla/ConnectionTeardown.tla` | Drain racing claims, queued reliable data, panic | Unreviewed |
