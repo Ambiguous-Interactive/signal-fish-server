@@ -104,7 +104,13 @@ tokio time) and **test-module timing loops** (`src/main.rs`,
 Do not introduce a new std clock read in production decision paths — extend
 the injected-seam pattern instead. Do not add `#[cfg(test)]` constructor
 overrides (window/duration shrinking) to fake time control; they hide the real
-timing behavior the tests claim to cover.
+timing behavior the tests claim to cover. When a seam helper lives in a
+packaged `src/` file but its callers live in a repository-only `*_tests.rs`
+module, gate every piece of it (fields, hooks, methods)
+`#[cfg(all(test, signal_fish_repository_tests))]` — plain `#[cfg(test)]`
+turns into dead code in the packaged crate's `-D warnings` verifier build
+(see the packaging pitfall in
+[Documentation and CI Pitfalls](context-docs-and-ci-pitfalls.md)).
 
 Scope note: the guard pins `std` clock sources. `chrono` wall-clock reads
 (`Utc::now()` / `Local::now()`) are pinned by the same guard file's chrono

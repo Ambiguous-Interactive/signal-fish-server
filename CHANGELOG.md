@@ -13,7 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `get_room_players` pause seam parks a reconnect inside the `Reconnected`
   baseline builder. A shutdown-drain flip then refuses the commit after the
   fresh token is minted. The rejection must discard that token, restore the
-  transient identity, release the claim, and roll back membership.
+  transient identity, release the claim, and roll back membership. The seam
+  is gated `signal_fish_repository_tests` so the packaged crate stays
+  warning-free.
 
 - Security configuration: optional per-encoding game-data payload ceilings,
   `security.max_game_data_bytes` (#634). Each encoding (`json`,

@@ -908,11 +908,16 @@ pub struct InMemoryDatabase {
     /// read so a test can interleave (for example flip the shutdown drain)
     /// while a reconnect transaction is inside its baseline builder, before
     /// the builder's final rotation step.
-    #[cfg(test)]
+    ///
+    /// Gated `signal_fish_repository_tests` — like every seam whose only
+    /// callers live in a repository-only `*_tests.rs` module — so the
+    /// packaged crate (which strips those modules) never sees dead code
+    /// under the verifier's `-D warnings` build.
+    #[cfg(all(test, signal_fish_repository_tests))]
     pause_get_room_players: std::sync::atomic::AtomicBool,
-    #[cfg(test)]
+    #[cfg(all(test, signal_fish_repository_tests))]
     get_room_players_reached: tokio::sync::Notify,
-    #[cfg(test)]
+    #[cfg(all(test, signal_fish_repository_tests))]
     release_get_room_players: tokio::sync::Notify,
 }
 
@@ -1012,11 +1017,11 @@ impl InMemoryDatabase {
             release_authority_request_commit: tokio::sync::Notify::new(),
             #[cfg(test)]
             get_room_players_calls: std::sync::atomic::AtomicU32::new(0),
-            #[cfg(test)]
+            #[cfg(all(test, signal_fish_repository_tests))]
             pause_get_room_players: std::sync::atomic::AtomicBool::new(false),
-            #[cfg(test)]
+            #[cfg(all(test, signal_fish_repository_tests))]
             get_room_players_reached: tokio::sync::Notify::new(),
-            #[cfg(test)]
+            #[cfg(all(test, signal_fish_repository_tests))]
             release_get_room_players: tokio::sync::Notify::new(),
         }
     }
@@ -1142,7 +1147,7 @@ impl InMemoryDatabase {
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) fn pause_next_get_room_players_for_test(&self) {
         // The arming is process-global: the next `get_room_players` call
         // from ANY task consumes it. Deterministic use requires a test with
@@ -1152,12 +1157,12 @@ impl InMemoryDatabase {
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) async fn wait_for_paused_get_room_players_for_test(&self) {
         self.get_room_players_reached.notified().await;
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(crate) fn release_paused_get_room_players_for_test(&self) {
         self.release_get_room_players.notify_one();
     }
@@ -2157,7 +2162,7 @@ impl GameDatabase for InMemoryDatabase {
         self.get_room_players_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        #[cfg(test)]
+        #[cfg(all(test, signal_fish_repository_tests))]
         // The one-shot pause precedes the failure injection: an armed pause
         // is an observation point, so the caller resumes before a co-armed
         // `fail_get_room_players` fails the same call.
