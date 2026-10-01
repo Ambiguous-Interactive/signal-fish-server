@@ -1443,3 +1443,92 @@ async fn spectator_start_game_cannot_finalize_the_lobby() {
         "the refused start must not disturb the ready set"
     );
 }
+
+/// Room-uniform lobby broadcasts reach each member exactly once, even with
+/// per-frame `recv` awaits interleaved between awaited operations and with
+/// parked idle windows auto-advancing the paused clock between them (#713).
+///
+/// The #713 observation suspected the room-event lane's lease/stall recovery
+/// of re-running a completed publication when tokio's auto-advanced paused
+/// time tripped a lease deadline between yield points. That mechanism does
+/// not exist: the lane's mutation lease is a plain `tokio::sync::Mutex` with
+/// no TTL and no recovery path, and the drain executes each enqueued job
+/// exactly once. This pin encodes the report's detection recipe — interleaved
+/// expects consume one copy per toggle, then a drain must find no second
+/// copy — so the duplicate-delivery class stays pinned at the ready-toggle
+/// seam (audit ledger, #713 disposition).
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn interleaved_awaits_deliver_each_lobby_broadcast_exactly_once() {
+    let server = create_test_server().await;
+    let (player_a, mut rx_a) = register_client(&server).await;
+    let (player_b, mut rx_b) = register_client(&server).await;
+
+    server
+        .handle_join_room(
+            &player_a,
+            "exactly-once".to_string(),
+            Some("ONCE12".to_string()),
+            "PlayerA".to_string(),
+            Some(4),
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
+    server
+        .handle_join_room(
+            &player_b,
+            "exactly-once".to_string(),
+            Some("ONCE12".to_string()),
+            "PlayerB".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
+
+    server.handle_player_ready(&player_a).await;
+    expect_lobby_state_changed(&mut rx_a, false, "player_a").await;
+    expect_lobby_state_changed(&mut rx_b, false, "player_b").await;
+
+    // Fully idle parked windows let the paused clock auto-advance past any
+    // lease deadline the report suspected. No publication may re-run across
+    // them, and no frame may arrive during them.
+    assert_silent(&mut rx_a).await;
+    assert_silent(&mut rx_b).await;
+
+    server.handle_player_ready(&player_b).await;
+    expect_lobby_state_changed(&mut rx_a, true, "player_a").await;
+    expect_lobby_state_changed(&mut rx_b, true, "player_b").await;
+
+    for (rx, who) in [(&mut rx_a, "player_a"), (&mut rx_b, "player_b")] {
+        let duplicates = count_lobby_state_changed(rx);
+        assert_eq!(
+            duplicates, 0,
+            "{who} received a second copy of a toggle's LobbyStateChanged"
+        );
+    }
+}
+
+/// Count the `LobbyStateChanged` frames still queued for a receiver. The
+/// exactly-once pin drains with it after its interleaved expects: any second
+/// copy of a toggle's broadcast fails the count.
+fn count_lobby_state_changed(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) -> usize {
+    let mut count = 0;
+    loop {
+        match receiver.try_recv() {
+            Ok(message) => {
+                if matches!(message.as_ref(), ServerMessage::LobbyStateChanged { .. }) {
+                    count += 1;
+                }
+            }
+            Err(_) => return count,
+        }
+    }
+}

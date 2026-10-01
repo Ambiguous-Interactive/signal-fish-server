@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tests: pin room-uniform lobby exactly-once under interleaved awaits
+  (#713). The #713 report suspected the room-event lane's lease recovery of
+  re-running a completed publication. That lease has no TTL and no re-run
+  path, and the doubling was not reproducible in any paused-clock or
+  real-time arrangement. The new pin interleaves per-frame expects between
+  awaited toggles, parks idle windows that auto-advance the paused clock,
+  and then drains: no second copy may remain. Red-proofed by enqueueing the
+  publication twice in a probe.
+
 - Tests: pin the spectator `StartGame` refusal (#647). The start
   authorization trusts the sender's connection room assignment and never
   re-checks roster membership under the room gate; spectator connections are
