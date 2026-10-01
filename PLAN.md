@@ -125,7 +125,12 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   v2/v3 negotiation; transport capability intersections; stale transport
   reports (ARM-C012 fixes status delivery after leave/rejoin); reconnect with
   changed encoding or capabilities; publication order
-  of room snapshots, session plans, and gameplay events.
+  of room snapshots, session plans, and gameplay events. The
+  gameplay-transitions review is complete (audit ledger, 2026-10-01): every
+  case family carries a recorded disposition, and the start path's
+  room-assignment trust is now pinned (a spectator's `StartGame` refuses
+  `NOT_IN_ROOM`; `spectator-mode.md` lists `StartGame` as
+  spectator-forbidden).
 - [ ] **Delivery:** reliable ordering and duplicate handling; reconnect epoch
   and sequence changes; latest coalescing keys and generations; permitted
   volatile loss; exact gap/report accounting; mixed encodings and unsupported

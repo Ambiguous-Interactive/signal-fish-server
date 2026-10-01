@@ -117,6 +117,10 @@ available** to spectators:
   Attempted game data (JSON or raw binary) is answered with `NOT_IN_ROOM`,
   since spectator connections are never seated in the player roster.
 - **Send PlayerReady** -- Spectators cannot affect the ready-up flow.
+- **Send StartGame** -- Spectators cannot finalize the lobby. Like the other
+  in-room lobby control actions, a spectator's `StartGame` is answered with
+  `NOT_IN_ROOM`: the start authorization trusts the sender's room
+  assignment, and spectator connections are never assigned to a room.
 - **Send AuthorityRequest** -- Spectators cannot claim or release
   authority.
 - **Affect max_players** -- Spectators are tracked separately and do not
