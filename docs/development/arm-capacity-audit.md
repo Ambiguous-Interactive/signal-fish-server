@@ -607,6 +607,54 @@ No violation was reproduced. The rotation ordering, concurrent-claim refusals,
 both unwinding phases, and the post-rotation reject-path discard (through the
 drain-flip window) carry pinned evidence.
 
+### C1 allowlist and key reload boundary review (2026-10-01)
+
+At `a6b6214e`, reviewed the SIGHUP reload seam end to end: the glue
+`reload_allowed_apps_from_config` (`src/main.rs`), the allowlist swap
+`AppIdAllowlist::reload` (`src/auth/middleware.rs`), the key and posture swap
+`EnhancedGameServer::install_connect_token_key` (`src/server.rs`), the
+handshake consumption point (`src/websocket/connection.rs` `Authenticate`),
+and the configuration sources (`config::load` folds
+`public_key_path` into `public_key` at load, so the reload reads the same
+sources as startup and an unreadable key file is a load error, never a
+keyless server).
+
+The invariant chain: a config that fails to load or fails
+`validate_config_security` applies nothing — the gate runs before both swaps,
+and the two swaps are synchronous calls with no await between them, so a
+partially applied reload is unreachable on the SIGHUP path. A valid SIGHUP
+applies the allowlist swap and the key swap together: revoked apps stop
+resolving for fresh handshakes, added apps resolve, and live connections keep
+their resolved context by design (live revocation stays a restart-level
+action). The install order is posture-before-key: arming briefly publishes
+required-with-old-key (token-less handshakes refused — fail-closed), and
+disarming publishes no-key-with-required (both refusal classes fail-closed);
+a presented token with no key installed is refused `NoKeyConfigured`, so
+every mixed state refuses closed. `install_connect_token_key` re-parses the
+key, but `validate_config_security` parses the same key first, so a
+corrupt-key SIGHUP is rejected before either swap and cannot regress below
+the gate.
+
+Evidence added (binary `connect_token_reload_tests`, through the SIGHUP
+glue; the allowlist state is observed with a public diff probe — re-applying
+a set reports an empty diff exactly when it is the running set):
+
+- `sighup_security_invalid_config_keeps_the_running_allowlist_and_key`:
+  duplicate app IDs, and a `require_connect_token=true` entry with the key
+  block removed, each keep the running allowlist, the running key (old
+  tokens verify; the rejected config's key does not install), and the
+  running posture. Red-proofed by disabling the validation gate: the probe
+  fails on key retention, proving the gate is what rejects before both
+  swaps.
+- `sighup_reload_applies_allowlist_and_key_swaps_together`: one valid SIGHUP
+  revokes app-a, adds app-b, and rotates the key; the swapped set is live,
+  fresh-key tokens verify, and old-key tokens stop verifying in the same
+  pass. Red-proofed by disabling the allowlist swap: the probe fails on the
+  swapped-set assertion.
+
+No violation was reproduced. The reload boundary — key/allowlist swap order
+and invalid reload — carries pinned evidence through the SIGHUP glue.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -637,7 +685,7 @@ neither is a deployed capacity preset.
 | Subsystem and paths | Invariant to check | Existing evidence lead | Missing cases / next check | State |
 | --- | --- | --- | --- | --- |
 | Startup and CLI: `src/main.rs`, `src/lib.rs` | Startup rejects bad config; startup failure leaves no listener | `tests/config_and_endpoints_tests.rs` | Failure after partial startup; feature matrix | Unreviewed |
-| Config and reload: `src/config/**` | Defaults, validation, and reload preserve one coherent policy | `tests/config_and_endpoints_tests.rs`, `tests/config_validation_coverage_scan.rs` | Key/allowlist swap order and invalid reload | Unreviewed |
+| Config and reload: `src/config/**` | Defaults, validation, and reload preserve one coherent policy | `tests/config_and_endpoints_tests.rs`, `tests/config_validation_coverage_scan.rs`; C1 allowlist and key reload boundary review above | SIGHUP key/allowlist swap order and invalid reload are reviewed and pinned; default coherence and validation breadth (malformed documents, env-override interactions) remain | Unreviewed |
 | Authentication: `src/auth/**`, `src/rate_limit.rs` | Unauthorized traffic cannot enter a room; limits count refusals | `tests/auth_integration_tests.rs`, `formal/tla/RateLimitWindow.tla` | Concurrent admission and auth timeout boundary | Unreviewed |
 | Security: `src/security/**`, `src/websocket/token_binding.rs` | Token, origin, TLS, and TURN credential checks fail closed | `tests/mtls_token_binding_e2e.rs`, `fuzz/fuzz_targets/fuzz_reconnect_tokens.rs`; C1 token rotation boundary review above | Rotation ordering and concurrent-claim refusals are reviewed and pinned; TLS variants and connect-token claim boundaries remain | Unreviewed |
 | Protocol: `src/protocol/**`, `src/trace_validation.rs` | V2/V3 decoding, wire bytes, and delivery class match contract | `tests/v2_wire_golden.rs`, `tests/v3_wire_properties.rs`, `fuzz/fuzz_targets/decode_protocol.rs` | Malformed/deep frames, mixed format boundaries | Unreviewed |

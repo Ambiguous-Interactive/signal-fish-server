@@ -107,7 +107,12 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   recovery path. The token rotation boundary review is complete (audit
   ledger, 2026-09-30): rotation ordering, concurrent-claim refusals, both
   post-rotation unwinding phases, and the post-rotation reject-path discard
-  (drain-flip pin, #707) are pinned.
+  (drain-flip pin, #707) are pinned. The allowlist/key reload boundary review
+  is complete (audit ledger, 2026-10-01): the SIGHUP glue applies nothing on
+  a rejected config (validation gates both swaps synchronously), a valid
+  reload applies the allowlist and key swaps together, the posture-before-key
+  install order keeps every mixed state fail-closed, and both orderings are
+  pinned through the glue.
 - [ ] **Gameplay transitions:** ready-state invalidation on membership change;
   start/leave races; authority election and loss; host/direct readiness;
   v2/v3 negotiation; transport capability intersections; stale transport
