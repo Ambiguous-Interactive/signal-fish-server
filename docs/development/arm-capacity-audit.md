@@ -587,15 +587,25 @@ Evidence added (extends
   rotation has not happened yet and the reject-path discard is a no-op there.
   The post-rotation failure windows (builder fault, commit channel-close,
   drain flip between builder and commit) share this discard line and the
-  same unwinding as the pinned reassigned-failure path; none has an
-  injection seam today (the existing storage-fault flags are sticky and trip
-  the pre-rotation restore lookup first). A dedicated red-first pin needs a
-  new mid-transaction seam and is tracked as follow-up work. Until then the
-  reject-path discard has no directly pinned evidence on any path.
+  same unwinding as the pinned reassigned-failure path.
+- Post-rotation drain-flip pin (issue #707, 2026-09-30): a new one-shot
+  `get_room_players` pause seam parks the reconnect transaction inside the
+  baseline builder, before the builder's final rotation step. Flipping the
+  shutdown drain while parked makes the post-builder commit gate refuse with
+  `DeliveryOutcome::Canceled` — the exact drain-flip window — so the reject
+  path must discard the freshly minted token.
+  `reconnect_drain_flip_after_baseline_rotation_discards_the_fresh_token`
+  pins the full end state: `ReconnectionFailed(ServerDraining)` on the wire,
+  no pre-issued token for the unrestored identity, restored transient
+  identity, claim released for retry, and rolled-back membership. Red-proofed
+  by removing the discard line: the fresh token survives armed and the test
+  fails on the pre-issued-token assertion. The builder-fault and
+  channel-close windows keep derivation-only status for their own arrival
+  paths, but they exit through this same now-pinned discard line.
 
 No violation was reproduced. The rotation ordering, concurrent-claim refusals,
-and both unwinding phases carry pinned evidence; the derivation-only residual
-is the reject-path discard above, including its drain-flip window.
+both unwinding phases, and the post-rotation reject-path discard (through the
+drain-flip window) carry pinned evidence.
 
 ## Coverage ledger
 
@@ -637,7 +647,7 @@ neither is a deployed capacity preset.
 | Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs` | Mixed conversion refusal; stalled room fairness | Unreviewed |
 | Coordination and queues: `src/coordination/**`, `src/distributed.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla` | Cancellation/panic at reservation and commit | Unreviewed |
 | WebSocket ingress and egress: `src/websocket/**` | Bounded frames, priority control, close and drain semantics hold | `tests/transport_frame_limits_e2e.rs`, `tests/slow_consumer_no_cascade_e2e.rs` | Slow reader, batching age, TLS close paths | Unreviewed |
-| Reconnect and retry: `src/reconnection.rs`, `src/retry.rs`, `src/server/reconnection_service.rs` | Claims have one owner; replay and stale routes cannot leak or misroute | `tests/reconnect_window_races_e2e.rs`, `formal/tla/ReconnectionClaimLifecycle.tla`; C1 reaper-ordering, claim-expiry, failed-restore, and token-rotation reviews above | Simultaneous claim, expiry during claim, failed restore/retry, and rotation boundaries are reviewed and pinned; `src/retry.rs` backoff seams, multi-failure detach accounting on failing backends, and the drain-flip discard pin remain | Partially reviewed |
+| Reconnect and retry: `src/reconnection.rs`, `src/retry.rs`, `src/server/reconnection_service.rs` | Claims have one owner; replay and stale routes cannot leak or misroute | `tests/reconnect_window_races_e2e.rs`, `formal/tla/ReconnectionClaimLifecycle.tla`; C1 reaper-ordering, claim-expiry, failed-restore, and token-rotation reviews above | Simultaneous claim, expiry during claim, failed restore/retry, and rotation boundaries are reviewed and pinned (including the post-rotation discard via the drain-flip pin); `src/retry.rs` backoff seams and multi-failure detach accounting on failing backends remain | Partially reviewed |
 | Maintenance and deadlines: `src/server/maintenance.rs`, `heartbeat.rs`, `dashboard_cache.rs`, `src/deadline.rs` | Expiry and cleanup are bounded; live state survives sweeps | `formal/tla/RoomLifecycleGC.tla`, `tests/clock_source_scan.rs` | Exact expiry boundary; churn growth; dashboard cost | Unreviewed |
 | Metrics and logging: `src/metrics.rs`, `src/logging.rs`, `src/websocket/metrics.rs`, `prometheus.rs` | Counters report outcomes; labels and logs stay bounded and safe | `tests/config_and_endpoints_tests.rs`, `tests/websocket_test_helpers/prometheus_scrape.rs` | Cardinality and logging pressure under floods | Unreviewed |
 | Admin and shutdown: `src/server/admin.rs`, `shutdown.rs`, `connection_manager.rs` | Drain closes all owned tasks and reports queued work accurately | `tests/close_code_semantics_e2e.rs`, `formal/tla/ConnectionTeardown.tla` | Drain racing claims, queued reliable data, panic | Unreviewed |

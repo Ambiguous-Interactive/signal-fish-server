@@ -143,6 +143,25 @@ Config and binary wire-format drift rules:
   name, run step, and the policy test's pinned run-line literal). The
   feasibility contract lives in
   [Mutation Testing Performance](skills/mutation-testing-performance/SKILL.md).
+- **Test seams in packaged `src/` files must be gated by where their callers live** --
+  `build.rs` sets `signal_fish_repository_tests` only inside the repository; a
+  Cargo-generated package strips the repository-only `src/**/*_tests.rs`
+  modules (`REPOSITORY_ONLY_TEST_MODULES`). A `#[cfg(test)] pub(crate)` helper
+  whose only callers live in one of those modules therefore becomes dead code
+  in the packaged crate, and
+  `tests/package_contents_tests.rs::published_crate_contains_only_runtime_sources_and_metadata`
+  fails its `-D warnings` lib-test build (`methods ... are never used`) — the
+  hosted `Nextest (ubuntu-latest)` lane goes red even though the in-repo suite
+  is green and clippy is clean. Gate such helpers (fields, init, call-site
+  hooks, and methods together)
+  `#[cfg(all(test, signal_fish_repository_tests))]`, matching the
+  `pause_next_add_player_for_test` precedent in `src/database/mod.rs`. Keep
+  plain `#[cfg(test)]` only for items whose users live in test modules inside
+  packaged files (e.g. `mod tests` at the bottom of `src/database/mod.rs`).
+  The verifier is the class sweep: its packaged `-D warnings` build fails on
+  any instance, so run
+  `cargo nextest run --locked --test package_contents_tests -E 'test(published_crate_contains_only_runtime_sources_and_metadata)'`
+  after adding or re-gating a seam.
 - **`rustls-pemfile` (RUSTSEC-2025-0134) is banned proactively, not because it is present** --
   `deny.toml` carries a `[[bans.deny]]` for the unmaintained `rustls-pemfile`, but the crate is
   NOT in the dependency tree (`cargo tree -i rustls-pemfile` matches nothing) on the default build
