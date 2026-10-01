@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tests: pin the SIGHUP allowlist/key reload boundary (#647). A config that
+  fails security validation applies nothing: the running allowlist, the
+  running verification key, and the enforcement posture all survive, even
+  when the rejected config also carries an armed posture and a fresh key.
+  One valid reload applies the allowlist swap and the key swap together. The
+  allowlist state is observed through a public reload diff probe.
+
 - Tests: pin the post-rotation reconnect token discard (#707). A one-shot
   `get_room_players` pause seam parks a reconnect inside the `Reconnected`
   baseline builder. A shutdown-drain flip then refuses the commit after the

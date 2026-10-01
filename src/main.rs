@@ -1375,8 +1375,9 @@ mod connect_token_reload_tests {
     use sha2::{Digest, Sha256};
     use signal_fish_server::config;
     use signal_fish_server::config::{
-        ConnectTokenConfig, CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig,
-        SecurityConfig, SessionConfig, TransportSecurityConfig, TurnConfig,
+        AppRegistrationEntry, ConnectTokenConfig, CoordinationConfig, MetricsConfig,
+        ProtocolConfig, RelayTypeConfig, SecurityConfig, SessionConfig, TransportSecurityConfig,
+        TurnConfig,
     };
     use signal_fish_server::database::DatabaseConfig;
     use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
@@ -1533,6 +1534,149 @@ mod connect_token_reload_tests {
 
         // Disarm through a reload with the flag off (key still configured).
         reload_allowed_apps_from_config(&server, loaded_config(security_with(&signing))).await;
+        assert!(!server.connect_token_required());
+    }
+
+    fn app_entry(app_id: &str) -> AppRegistrationEntry {
+        AppRegistrationEntry {
+            app_id: app_id.to_string(),
+            app_name: app_id.to_string(),
+            max_rooms: None,
+            max_players_per_room: None,
+            rate_limit_per_minute: None,
+            max_relay_bytes: None,
+            require_connect_token: None,
+        }
+    }
+
+    async fn allowlist_test_server() -> Arc<EnhancedGameServer> {
+        EnhancedGameServer::new(
+            ServerConfig {
+                app_id_allowlist_enabled: true,
+                ..ServerConfig::default()
+            },
+            ProtocolConfig::default(),
+            RelayTypeConfig::default(),
+            SessionConfig::default(),
+            TurnConfig::default(),
+            DatabaseConfig::InMemory,
+            MetricsConfig::default(),
+            CoordinationConfig::default(),
+            TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("allowlist server constructs")
+    }
+
+    /// Re-applying a set reports an empty diff exactly when that set is the
+    /// running set, so the probe observes the allowlist through the public
+    /// reload API without a socket handshake.
+    async fn running_allowlist_is_exactly(server: &EnhancedGameServer, app_ids: &[&str]) -> bool {
+        let applied: Vec<String> = app_ids.iter().map(|id| (*id).to_string()).collect();
+        let entries = applied.iter().map(|id| app_entry(id)).collect();
+        match server.reload_allowed_apps(entries) {
+            Ok(diff) => diff.applied && diff.added.is_empty() && diff.removed.is_empty(),
+            Err(_) => false,
+        }
+    }
+
+    /// A SIGHUP config that fails security validation must apply nothing
+    /// (issue #647 reload-boundary review): the running allowlist, the
+    /// running key, and the running enforcement posture all survive, even
+    /// when the rejected config also carries a new key, an armed posture,
+    /// and a fresh allowlist set.
+    #[tokio::test]
+    async fn sighup_security_invalid_config_keeps_the_running_allowlist_and_key() {
+        let server = allowlist_test_server().await;
+        let first = SigningKey::from_bytes(&seed(b"reload-invalid-first"));
+        let second = SigningKey::from_bytes(&seed(b"reload-invalid-second"));
+        assert!(server
+            .install_connect_token_key(&security_with(&first))
+            .expect("initial key installs"));
+        let initial = server
+            .reload_allowed_apps(vec![app_entry("app-a")])
+            .expect("startup set applies");
+        assert!(initial.applied && initial.added == vec!["app-a".to_string()]);
+
+        let mut duplicates = security_with(&second);
+        duplicates.connect_token.as_mut().expect("key set").required = true;
+        duplicates.allowed_apps = vec![app_entry("dup-app"), app_entry("dup-app")];
+        let token_required_no_key = SecurityConfig {
+            connect_token: None,
+            allowed_apps: vec![AppRegistrationEntry {
+                require_connect_token: Some(true),
+                ..app_entry("tok-app")
+            }],
+            ..SecurityConfig::default()
+        };
+        // The duplicate-ID config keeps its key block, so the probe below
+        // also proves a rejected config never installs its key. The
+        // required-entry-without-key config drops the block entirely, so a
+        // wrongly applied reload would disable verification instead.
+        let cases = vec![duplicates, token_required_no_key];
+        for invalid in cases {
+            reload_allowed_apps_from_config(&server, loaded_config(invalid)).await;
+
+            assert!(
+                server.connect_token_verification_enabled(),
+                "a rejected reload must keep the running key installed"
+            );
+            server
+                .verify_connect_token("app-a", &mint(&first, "app-a", 60))
+                .expect("the running key still verifies tokens after a rejected reload");
+            assert!(
+                server
+                    .verify_connect_token("app-a", &mint(&second, "app-a", 60))
+                    .is_err(),
+                "the rejected config's key must not install"
+            );
+            assert!(
+                !server.connect_token_required(),
+                "the rejected config's armed posture must not install"
+            );
+            assert!(
+                running_allowlist_is_exactly(&server, &["app-a"]).await,
+                "a rejected reload must keep the running allowlist"
+            );
+        }
+    }
+
+    /// One valid SIGHUP applies the allowlist swap and the key swap together
+    /// (issue #647 reload-boundary review): revoked apps stop resolving,
+    /// added apps are live, and the rotated key replaces the old one in the
+    /// same pass.
+    #[tokio::test]
+    async fn sighup_reload_applies_allowlist_and_key_swaps_together() {
+        let server = allowlist_test_server().await;
+        let first = SigningKey::from_bytes(&seed(b"reload-both-first"));
+        let second = SigningKey::from_bytes(&seed(b"reload-both-second"));
+        assert!(server
+            .install_connect_token_key(&security_with(&first))
+            .expect("initial key installs"));
+        let initial = server
+            .reload_allowed_apps(vec![app_entry("app-a")])
+            .expect("startup set applies");
+        assert!(initial.applied && initial.added == vec!["app-a".to_string()]);
+
+        let mut combined = security_with(&second);
+        combined.allowed_apps = vec![app_entry("app-b")];
+        reload_allowed_apps_from_config(&server, loaded_config(combined)).await;
+
+        assert!(
+            running_allowlist_is_exactly(&server, &["app-b"]).await,
+            "the swapped set must be live: app-a revoked, app-b added"
+        );
+        server
+            .verify_connect_token("app-b", &mint(&second, "app-b", 60))
+            .expect("the swapped-in key verifies fresh tokens");
+        assert!(
+            server
+                .verify_connect_token("app-a", &mint(&first, "app-a", 60))
+                .is_err(),
+            "the swapped-out key must stop verifying"
+        );
+        assert!(server.connect_token_verification_enabled());
         assert!(!server.connect_token_required());
     }
 }
