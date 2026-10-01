@@ -162,6 +162,21 @@ Config and binary wire-format drift rules:
   any instance, so run
   `cargo nextest run --locked --test package_contents_tests -E 'test(published_crate_contains_only_runtime_sources_and_metadata)'`
   after adding or re-gating a seam.
+- **A `clippy --all-targets --all-features` run can poison the next scoped
+  nextest run with stale mixed-feature artifacts** -- the mandatory local
+  gate (`cargo fmt && cargo clippy --all-targets --all-features`) and the
+  scoped edit-test loop share one `target/` directory. After an all-features
+  clippy pass, a following `cargo nextest run --bins/--lib/--test <t>`
+  (default features) can link an inconsistent lib artifact and produce
+  impossible behavior: observed as a test whose state writes never persist
+  (every reload read an empty map) while the identical source was green
+  minutes earlier and green in a fresh worktree. The symptom is the tell:
+  behavior that contradicts the source with no await/concurrency window to
+  explain it. Recovery: `cargo clean -p signal-fish-server` (deps stay
+  cached, seconds) and re-run; only then suspect the test. Keep the order —
+  scoped nextest first, the full clippy gate last before publication — and
+  treat an all-features clippy run as invalidating previously built test
+  binaries for the default-feature targets.
 - **`rustls-pemfile` (RUSTSEC-2025-0134) is banned proactively, not because it is present** --
   `deny.toml` carries a `[[bans.deny]]` for the unmaintained `rustls-pemfile`, but the crate is
   NOT in the dependency tree (`cargo tree -i rustls-pemfile` matches nothing) on the default build

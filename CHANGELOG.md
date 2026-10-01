@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tests: pin the spectator leave/disconnect detach race (#647). A voluntary
+  `LeaveSpectator` and the physical disconnect teardown serialize on the
+  player's lifecycle gate; exactly one detach wins, the room events carry
+  the winner's reason, the losing operation is inert, and the roster, local
+  role, and retry backlog end clean. Both orders are pinned, red-proofed by
+  disabling the two serialization fences.
+
 - Tests: pin the SIGHUP allowlist/key reload boundary (#647). A config that
   fails security validation applies nothing: the running allowlist, the
   running verification key, and the enforcement posture all survive, even

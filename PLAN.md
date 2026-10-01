@@ -112,7 +112,14 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   a rejected config (validation gates both swaps synchronously), a valid
   reload applies the allowlist and key swaps together, the posture-before-key
   install order keeps every mixed state fail-closed, and both outcomes
-  (rejected and valid reloads) are pinned through the glue.
+  (rejected and valid reloads) are pinned through the glue. The identity
+  slice is complete (identity-slice completion review, audit ledger,
+  2026-10-01): spectator transitions (leave/disconnect detach race pinned in
+  both orders, red-proofed; detach idempotency and the #241 TOCTOU fence
+  verified), kick/ban races (gate-ordered ban vs claim, tombstone fences,
+  lifecycle-gate revalidation — pinned or derived), and application
+  isolation (owner gates on every admission perimeter, pinned) each carry a
+  recorded disposition.
 - [ ] **Gameplay transitions:** ready-state invalidation on membership change;
   start/leave races; authority election and loss; host/direct readiness;
   v2/v3 negotiation; transport capability intersections; stale transport
