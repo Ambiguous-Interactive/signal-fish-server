@@ -12,25 +12,43 @@
 //! sockets:
 //!
 //! - room A holds one flooding sender and one hard-stalled recipient (never
-//!   reads), so room A's fan-out parks in backpressure until the slow-consumer
-//!   deadline evicts exactly that recipient;
+//!   reads, connected over a clamped 4 KiB receive buffer so the wedge is
+//!   deterministic on every host), so room A's fan-out parks in backpressure
+//!   until the slow-consumer deadline evicts exactly that recipient;
 //! - room B runs on an independent connection set in a distinct game: a
 //!   continuously flooding sender and two draining recipients, one of which
-//!   joins WHILE room A's stall is live;
-//! - the eviction is observed from room A's sender (`PlayerLeft` for the
-//!   stalled peer only), and AT THAT MOMENT room B must already show progress:
-//!   its recipients have relayed frames, and the mid-stall join has completed;
-//! - after the stall resolves, room B's streams must still be complete and in
-//!   order — with no `PlayerLeft`, no `Error`, and no socket close ever
-//!   reaching a room-B member (a cross-room leak or cascade).
+//!   joins while the stall-room flood is in flight;
+//! - the eviction is observed from room A's sender (the first `PlayerLeft`
+//!   must be the stalled peer; the exactly-one oracle below carries the
+//!   rest), and AT THAT MOMENT room B must already show relay progress:
+//!   its recipients have relayed frames through the whole grace window;
+//! - room B's streams must stay complete and in order — with no
+//!   `PlayerLeft`, no `Error`, and no socket close ever reaching a room-B
+//!   member (a cross-room leak or cascade), and no single inter-frame gap
+//!   approaching the stall window (a bare frame count would pass a
+//!   mid-window strangulation that only blocks part of it);
+//! - the mid-stall join must reach room B as a `PlayerJoined` broadcast; the
+//!   join's own liveness is bounded by `join_room`'s `RoomJoined` timeout.
 //!
-//! Zero-flaky policy: the stalled peer never reads, so its eviction is not a
-//! timing race; the eviction deadline (10 s) only widens the stall window that
-//! the during-stall oracles are evaluated in, and those oracles need
-//! milliseconds of actual work; the flood ends via a stop flag and a sentinel
-//! frame, never an unbounded wait; the whole region is bounded by a generous
-//! ceiling that is a deadline, never a fixed sleep used as a sync or negative
-//! oracle.
+//! Zero-flaky policy: the stalled peer never reads and its receive buffer is
+//! clamped, so the wedge and its eviction are not timing races; the eviction
+//! deadline (10 s) only widens the stall window the during-stall oracles are
+//! evaluated in, and those oracles need milliseconds of actual work; the
+//! flood ends via a stop flag and a sentinel frame, never an unbounded wait;
+//! the whole region is bounded by a generous ceiling that is a deadline,
+//! never a fixed sleep used as a sync or negative oracle.
+//!
+//! PR-lane placement (`slow_consumer_no_cascade_e2e.rs` reserves
+//! freeze-duration and join-during-stall facets for the nightly lane): the
+//! duration-shaped facets of THIS test are negative bounds with large
+//! margins, not positive timing assertions — the gap oracle allows half the
+//! stall window (healthy gaps are microseconds to milliseconds, so a spurious
+//! failure requires a multi-second scheduler starvation that would already
+//! break the suite's 10 s connect and drain deadlines), and every liveness
+//! claim (joins, counts, sentinel delivery) is order-based. The 10 s window
+//! itself is load-bearing: the gap oracle's sensitivity equals the window, so
+//! shrinking it to the siblings' 300-500 ms would demand sub-100 ms gap
+//! bounds that flake on oversubscribed runners.
 
 mod test_helpers;
 mod websocket_test_helpers;
@@ -44,7 +62,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use test_helpers::{create_test_server_with_config, RunningTestServer};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use websocket_test_helpers::assert_message_conservation;
+use websocket_test_helpers::{assert_message_conservation, connect_with_small_recv_buffer};
 
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -67,21 +85,30 @@ const SEND_QUEUE_CAPACITY: usize = 4;
 const SLOW_CONSUMER_TIMEOUT_MS: u64 = 10_000;
 /// 16 KiB per stall-room frame: small enough to stay under the server's
 /// 64 KiB inbound `max_message_size` (larger frames are refused before they
-/// ever reach fan-out), large enough that the wedged connection cannot hide
-/// the backlog inside kernel socket buffers.
+/// ever reach fan-out). The wedge itself does not depend on frame size or
+/// host sysctls: the stalled peer's socket is connected with a clamped 4 KiB
+/// receive buffer (see `STALLED_RECV_BUFFER_BYTES`), so the server's socket
+/// writer parks after only a few kilobytes.
 const STALL_PADDING_BYTES: usize = 16 * 1_024;
 /// The stall-room flood ends when the sender's own fan-out parks in
 /// backpressure on the wedged recipient; this bound only terminates the tail
-/// it resumes after the eviction empties the room. ~16 MiB of offered volume
-/// guarantees the wedged recipient's delivery queue reports `Full` long
-/// before the flood is exhausted — the wedge is a queue-full event, not a
-/// guess. Only the pipe volume is ever transferred; the rest never leaves
-/// the sender.
+/// it resumes after the eviction empties the room. The wedge is a queue-full
+/// event, not a guess: the clamped receive buffer below parks the writer
+/// within the first few frames, and only the pipe volume is ever transferred
+/// — the rest never leaves the sender.
 const STALL_FLOOD_BOUND: u64 = 1000;
-/// Hard bound for the stop-flag-driven fair-room flood. The flood ends via the
-/// stop flag, not by exhausting this; it only prevents a runaway task if the
-/// test already failed elsewhere.
-const FAIR_FLOOD_BOUND: u64 = 1_000_000;
+/// The never-reading peer's socket is pre-clamped to this receive buffer so
+/// the wedge is deterministic on every host: the server's writer blocks
+/// after a few kilobytes regardless of autotuned loopback sysctls (which can
+/// otherwise absorb tens of MiB and never report `Full`).
+const STALLED_RECV_BUFFER_BYTES: u32 = 4_096;
+/// Hard bound for the stop-flag-driven fair-room flood. The flood ends via
+/// the stop flag once the eviction is observed; this bound only prevents a
+/// runaway task if the test has already failed elsewhere, and must sit far
+/// above any plausible flood rate over the grace window so a fast runner can
+/// never exhaust the stream (and void the during-stall coverage) before the
+/// stop flag is set.
+const FAIR_FLOOD_BOUND: u64 = 10_000_000;
 /// Last fair-room frame, sent when the stop flag is observed.
 const FAIR_SENTINEL_SEQ: u64 = u64::MAX;
 
@@ -318,7 +345,12 @@ async fn stalled_room_does_not_strand_a_healthy_room() {
         "StallSender",
     )
     .await;
-    let (mut stall_sink, mut stall_rx) = connect(addr).await;
+    // The never-reading peer connects over a clamped receive buffer so the
+    // wedge (the server's writer parking, then the delivery queue reporting
+    // `Full`) is deterministic on every host rather than a race against
+    // autotuned loopback sysctls.
+    let stalled_ws = connect_with_small_recv_buffer(addr, STALLED_RECV_BUFFER_BYTES).await;
+    let (mut stall_sink, mut stall_rx) = stalled_ws.split();
     let stalled_id = join_room(
         &mut stall_sink,
         &mut stall_rx,
@@ -352,9 +384,14 @@ async fn stalled_room_does_not_strand_a_healthy_room() {
     // recipient and stays parked until the slow-consumer deadline evicts it.
     let stall_flood = tokio::spawn(flood_stall_room(stall_sender_sink));
 
-    // Join a fourth member into room B while the stall is live. It joins
-    // before the fair-room flood starts, so its drain sees a mid-stream
-    // GameData window rather than the flood's beginning.
+    // Join a fourth member into room B while the stall-room flood is in
+    // flight. It joins before the fair-room flood starts, so its drain sees
+    // a mid-stream GameData window rather than the flood's beginning. The
+    // join's liveness oracle is `join_room`'s own bounded `RoomJoined`
+    // timeout plus the `PlayerJoined` broadcast asserted on the primary
+    // recipient below — the completion timestamp itself is not an oracle
+    // (the sequential await chain already orders it before the eviction
+    // observation).
     let (mut joiner_sink, mut joiner_rx) = connect(addr).await;
     let joiner_id = join_room(
         &mut joiner_sink,
@@ -364,7 +401,6 @@ async fn stalled_room_does_not_strand_a_healthy_room() {
         "MidStallJoiner",
     )
     .await;
-    let join_completed_at = tokio::time::Instant::now();
 
     // Start the room-B flood and drain both fair-room recipients concurrently
     // with the eviction wait.
@@ -380,8 +416,9 @@ async fn stalled_room_does_not_strand_a_healthy_room() {
     ));
     let joiner_drain = tokio::spawn(drain_mid_stall_joiner(joiner_rx));
 
-    // Observe the eviction from room A: the stalled peer's `PlayerLeft`, and
-    // nothing else.
+    // Observe the eviction from room A. The loop returns on the FIRST
+    // `PlayerLeft`; that it belongs to the stalled peer is asserted here, and
+    // the exactly-one-eviction oracle below carries the rest of the claim.
     tokio::time::timeout(TEST_DEADLINE, async {
         loop {
             let frame = stall_sender_rx
@@ -407,13 +444,11 @@ async fn stalled_room_does_not_strand_a_healthy_room() {
     })
     .await
     .expect("the stalled peer was never evicted (the wedge never reached the deadline)");
-    let eviction_observed_at = tokio::time::Instant::now();
 
-    // --- During-stall oracles, evaluated the moment the eviction is observed.
-
-    // 1. Room B relayed frames THROUGH the whole grace window: the fair-room
-    //    flood ran continuously from before this point, so a zero here means
-    //    the stall strangled a healthy room's relay plane.
+    // --- During-stall oracle, evaluated the moment the eviction is observed:
+    // room B relayed frames THROUGH the whole grace window. The fair-room
+    // flood ran continuously from before this point, so a zero here means the
+    // stall strangled a healthy room's relay plane.
     let progress_at_eviction = progress.load(Ordering::SeqCst);
     assert!(
         progress_at_eviction >= 1,
@@ -421,11 +456,6 @@ async fn stalled_room_does_not_strand_a_healthy_room() {
          — a stalled room stranded a healthy room"
     );
 
-    // 2. The mid-stall join completed while the stall was still live.
-    assert!(
-        join_completed_at < eviction_observed_at,
-        "the mid-stall join outlived room A's stall window — the event plane stalled too"
-    );
     // Release room B's flood and let both drains observe the sentinel.
     fair_stop.store(true, Ordering::SeqCst);
     let ((fair_total, fair_max_gap), joiner_total) = tokio::time::timeout(TEST_DEADLINE, async {

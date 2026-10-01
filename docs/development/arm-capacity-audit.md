@@ -878,7 +878,7 @@ any arrangement; no defect is confirmed.**
   expecting can hide such setup refusals; expect the first frame of a phase
   when its arrival is the phase's evidence.
 
-## C1 cross-room stall fairness review (2026-10-01)
+### C1 cross-room stall fairness review (2026-10-01)
 
 At `72d9188f` (main after #715), reviewed the delivery slice's
 "slow-recipient isolation; healthy-room progress during another room's
@@ -911,8 +911,9 @@ can hold across its delivery wait, and the invariant is now pinned.
   likewise owns only per-recipient state; the caller drops the shared guards
   before awaiting the reservation.
 - **No shared egress budget.** The delivery path contains no semaphore or
-  per-app budget a stalled recipient could exhaust: the only semaphores are
-  the distributed room-cap lock (room creation) and test scaffolding.
+  per-app budget a stalled recipient could exhaust: the only semaphore-class
+  primitives in `src/` are `#[cfg(test)]` scaffolding, and the distributed
+  room-cap lock (room creation) is mutex-based, not a delivery-path permit.
 - **Sender tasks.** A sender's connection task awaits its own room's fan-out
   (within-room ordering by design, bounded by the slow-consumer deadline);
   other rooms' connection tasks are independent tokio tasks.
@@ -920,29 +921,31 @@ can hold across its delivery wait, and the invariant is now pinned.
 **Pinned invariant.**
 `stalled_room_does_not_strand_a_healthy_room`
 (`tests/cross_room_stall_fairness_e2e.rs`) runs two independent rooms on one
-server: room A holds a flooding sender and a never-reading recipient, so its
-fan-out parks in backpressure until the slow-consumer deadline evicts exactly
-that recipient; room B runs a continuous relay flood, a member that joins
-while the stall is live, and two draining recipients. When room A's sender
-observes the stalled peer's `PlayerLeft`, room B must already have relayed
-frames through the whole grace window, the mid-stall join must have completed
-with its `PlayerJoined` broadcast, and no fair-room member may ever observe a
-`PlayerLeft`, an `Error`, or a socket close; the fair-room relay's longest
-inter-frame gap must stay under half the stall window (a bare frame count is
-not enough — early frames before the wedge would satisfy it); and exactly one
-slow-consumer eviction with abandoned-frame drops must be counted. Red-proofed
-by holding a shared gate across the game-data dispatch in a probe: room B's
-relay went silent for the full stall window and the pin failed on the gap
-oracle; the probe was reverted byte-identically.
+server: room A holds a flooding sender and a never-reading recipient
+(connected over a clamped 4 KiB receive buffer, so the wedge is deterministic
+on every host), so its fan-out parks in backpressure until the slow-consumer
+deadline evicts exactly that recipient; room B runs a continuous relay flood,
+a member that joins while the stall-room flood is in flight, and two draining
+recipients. When room A's sender observes the stalled peer's `PlayerLeft`,
+room B must already have relayed frames through the whole grace window, the
+join's `PlayerJoined` broadcast must have reached room B's members, and no
+fair-room member may ever observe a `PlayerLeft`, an `Error`, or a socket
+close; the fair-room relay's longest inter-frame gap must stay under half the
+stall window (a bare frame count is not enough — early frames before the
+wedge would satisfy it); and exactly one slow-consumer eviction with
+abandoned-frame drops must be counted. Red-proofed by holding a shared gate
+across the game-data dispatch in a probe: room B's relay went silent for the
+full stall window and the pin failed on the gap oracle; the probe was
+reverted byte-identically.
 
 **Pin-authoring notes.** Wedging a recipient deterministically requires (a)
 frames under the 64 KiB inbound `max_message_size` — larger frames are
 refused before fan-out and wedge nothing; (b) the heartbeat Pong deadline
 above the delivery deadline — otherwise the heartbeat reaper evicts the
 stalled peer first and `websocket_slow_consumer_disconnects` stays zero; and
-(c) offered flood volume in the tens of MiB — loopback kernel buffering
-absorbs far more than the queue capacity, while the wedge self-limits the
-actual transfer at the queue-full point.
+(c) a clamped receive buffer on the stalled peer's socket (the repo-standard
+`connect_with_small_recv_buffer` helper) — unclamped loopback autotuning can
+absorb tens of MiB, the writer never parks, and no `Full` is ever reported.
 
 With this review, the delivery slice's cross-room fairness family has a
 recorded disposition. The coverage row for relay routing moves to partially

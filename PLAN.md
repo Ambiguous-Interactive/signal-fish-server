@@ -145,10 +145,11 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   The slow-recipient isolation and cross-room stall fairness families are
   reviewed (audit ledger, 2026-10-01): no shared seam is held across a
   stalled recipient's delivery wait, and the cross-room invariant — room B's
-  relay plane, event plane, and a mid-stall join all progress through room
-  A's full slow-consumer window, with exactly one eviction and no leakage —
-  is pinned (`stalled_room_does_not_strand_a_healthy_room`; red-proofed with
-  a shared-gate probe).
+  relay plane progresses through room A's full slow-consumer window with no
+  inter-frame gap approaching it, a mid-stall join's lifecycle broadcast is
+  delivered, and the eviction tears down exactly one connection with no
+  leakage — is pinned (`stalled_room_does_not_strand_a_healthy_room`;
+  red-proofed with a shared-gate probe).
 - [ ] **Recovery:** cancellation at relevant await boundaries; partial state
   mutation or publication; rollback failure and retry; task panic recovery;
   cleanup racing join/reconnect; deadlines at before/equal/after boundaries;
