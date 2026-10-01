@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tests: pin the spectator `StartGame` refusal (#647). The start
+  authorization trusts the sender's connection room assignment and never
+  re-checks roster membership under the room gate; spectator connections are
+  never assigned a room, so a spectator's `StartGame` refuses `NOT_IN_ROOM`
+  and a fully ready authority-less lobby stays open with its ready set
+  intact. Red-proofed by performing the coupling-breaking refactor in a
+  probe (assigning the spectator's connection to the room): the lobby then
+  finalizes and the pin fails. `spectator-mode.md` now lists `StartGame`
+  among the actions spectators cannot take.
+
 - Tests: pin the spectator leave/disconnect detach race (#647). A voluntary
   `LeaveSpectator` and the physical disconnect teardown serialize on the
   player's lifecycle gate; exactly one detach wins, the room events carry

@@ -720,6 +720,113 @@ With this review, every case family in the identity and membership slice
 has a recorded disposition: pinned end to end, or derived from a fenced
 ordering with named evidence. The slice is complete.
 
+### C1 gameplay-transitions review (2026-10-01)
+
+At `9e553041` (main after #712), reviewed the gameplay-transitions case
+families of [#647](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/647):
+ready-state invalidation on membership change, start/leave races, authority
+election and loss, host/direct readiness, v2/v3 negotiation, transport
+capability intersections, stale transport reports, reconnects with changed
+encoding or capabilities, and the publication order of room snapshots,
+session plans, and gameplay events. Every family already carries pinned or
+derived evidence; the review found one unrecorded fail-closed coupling and
+pinned it.
+
+**Start authorization trusts room assignment.** The coordinator's
+`handle_start_game_with_publication` authorizes "the designated authority,
+otherwise any member" but never re-checks that the sender is a seated member
+under the room mutation gate; the handler-level `get_client_room` lookup is
+the only membership evidence ("the sender is already known to be in this
+room"). The shipped dispatch paths keep that trust sound: a spectator's
+connection is never assigned a room (`join_owned` requires
+`get_client_room(..).is_none()` and never assigns one), so a spectator's
+`StartGame` refuses `NOT_IN_ROOM` before the coordinator; a departing
+player's leave serializes on the sender's own `ClientLifecycle` gate, which
+the start handler holds from dispatch through the coordinator call, so no
+leave can interleave between the room lookup and the gate acquisition. The
+soundness is one refactor away from breaking: giving spectator connections a
+room assignment (for example to deliver snapshots or broadcasts — the gap
+`spectator-mode.md` records as a known limitation) would let a spectator
+finalize any authority-less room whose players are all ready. The coupling
+is now pinned (`spectator_start_game_cannot_finalize_the_lobby`):
+dispatching `StartGame` from a joined spectator through the real router
+against a fully ready authority-less lobby requires the `NOT_IN_ROOM`
+refusal with the lobby still open and the ready set intact. Red-proofed by
+performing that exact refactor in a probe (assigning the spectator's
+connection to the room): the start then finalizes the lobby and the test
+fails on the refusal assertion. `spectator-mode.md`'s "What Spectators
+Cannot Do" now lists `StartGame` explicitly.
+
+**Case-family dispositions** (reviewed at `9e553041`; no new violations):
+
+- **Ready-state invalidation on membership change.** Joins deliberately
+  break a cached `all_ready` without a corrective broadcast; the
+  authoritative `StartGame` gate recomputes readiness over routed membership
+  under the room gate (#447 F1 decision b,
+  `join_breaks_cached_all_ready_without_a_corrective_broadcast`). Rejoining
+  does not restore stale readiness; a reconnect into a finalized room
+  restores that member's recorded readiness; room snapshots read the
+  coordinator ready set through `snapshot_ready_players` (finalized rooms
+  report their final readiness); departures prune the departing id directly
+  and ready toggles prune non-members.
+- **Start/leave races.** Finalization commits through
+  `commit_room_messages_if_members` plus the `finalize_room_game` CAS on
+  (members, authority, lobby state): a member leaving before the commit
+  yields `RoutingChanged` (bounded retries, then the terminal-boundary
+  fallback), and the storage-level ghost-row case is the documented
+  `SnapshotChanged` deferral (session-193, #396). The exact-membership
+  snapshot gate is pinned
+  (`handle_player_ready_finalizes_with_member_snapshot_matching_game_starting_peers`,
+  `start_game_builder_gates_each_plan_by_that_exact_members_version`), and
+  old-socket lobby frames are lifecycle-refused
+  (`old_socket_lobby_frames_cannot_toggle_ready_or_start_game`).
+- **Authority election and loss.** `request_room_authority` is
+  membership-gated (`NotAMember`) and refuses a held designation
+  (`AlreadyHeld`); a departure that actually removed the authority clears
+  the designation and every `is_authority` flag (no auto-reassign, per
+  protocol); reconnect authority restore is live and replay-visible, never
+  overrides a successor, degrades explicitly on storage failure, and rolls
+  back without leaving an unrouted authority (pins in `signaling_tests`).
+- **Host/direct readiness.** Host+Direct plans carry empty ICE, and a host
+  without a validated endpoint falls back to the relay floor
+  (`emit_host_direct_room_carries_empty_ice_even_with_turn_enabled`,
+  `emit_host_direct_room_without_endpoint_falls_back_to_relay`).
+- **V2/v3 negotiation and capability intersections.** The selection ladder
+  is table-pinned rung by rung including every downgrade
+  (`selection_table_resolves_each_rung_and_downgrade`); the finalized
+  seat-fill gate demands v3 plus both sticky axes
+  (`seat_fill_predicate_tracks_version_and_both_sticky_axes`); signal
+  transport gates are v3+WebRTC on both ends
+  (`signal_sender_must_be_v3_even_if_webrtc_transport_is_present`,
+  `signal_to_v2_peer_reports_target_not_found`,
+  `signal_to_v3_relay_only_peer_reports_target_not_found`).
+- **Stale transport reports.** ARM-C012's post-leave/rejoin status fix is
+  pinned by the transport-status cohort (dedup without re-fan-out, flap
+  fan-out per transition, budget bounding, slow-peer sharing, non-v3
+  ignored).
+- **Reconnect with changed encoding or capabilities.** A downgraded
+  incumbent keeps its seat but can never be named host: `host_invalid`
+  flags the seated-but-incapable host (unit-pinned including the
+  Direct-endpoint loss), the downgrade-reconnect re-election re-emits fresh
+  plans end to end over real sockets
+  (`host_downgrade_reconnect_reelects_and_empties_downgraded_plan`), a
+  departure heals a wedged entry
+  (`non_host_departure_heals_present_but_unpairable_host`), and an aborted
+  re-plan retains the entry for the next event
+  (`aborted_replan_transaction_retains_the_wedged_entry_for_the_next_event`).
+- **Publication order.** The `start_game_publication_builder` mechanism
+  queues `GameStarting` as phase zero and each per-recipient `SessionPlan`
+  as phase one in one exact-membership transaction; finalized joins and
+  reconnects queue the actor's plan ahead of incumbents' in two ordered
+  phases (`actor_close_after_commit_does_not_suppress_incumbent_plan_phase`);
+  signal dispatch holds the room mutation gate so no `Signal` can overtake a
+  recipient's plan (`signal_dispatch_waits_for_room_plan_publication_gate`,
+  `signal_waiting_on_plan_gate_cannot_cross_target_incarnations`).
+
+With this review, the gameplay-transitions case families have recorded
+dispositions. The coverage row moves to partially reviewed: the shared
+`src/server.rs` state seams remain for later slices.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -756,7 +863,7 @@ neither is a deployed capacity preset.
 | Protocol: `src/protocol/**`, `src/trace_validation.rs` | V2/V3 decoding, wire bytes, and delivery class match contract | `tests/v2_wire_golden.rs`, `tests/v3_wire_properties.rs`, `fuzz/fuzz_targets/decode_protocol.rs` | Malformed/deep frames, mixed format boundaries | Unreviewed |
 | Room and player storage: `src/database/**` | Membership and room limits stay atomic and app isolated | `tests/integration_tests.rs`, `tests/model_based_state_machines.rs`; C1 admission-limit review above | Other adapters, rollback, and leave/disconnect races remain | Unreviewed |
 | Room lifecycle and moderation: `src/server/room_service.rs`, `moderation.rs`, `spectator_service.rs`, `spectator_handlers.rs` | Join, leave, kick, ban, spectator state and ownership agree | `tests/lobby_integration_tests.rs`, `src/server/room_service_tests.rs`; C1 admission-limit, leave/disconnect ordering, and identity-slice completion reviews above | ARM-C001–C004 fixed in spectator and room-code seams; identity cases (concurrent limits, join-only, leave/disconnect, spectator transitions, kick/ban races, application isolation) reviewed and pinned or derived; storage-fault interleavings on other adapters remain | Partially reviewed |
-| Readiness and gameplay: `src/server/ready_state.rs`, `authority.rs`, `session_policy.rs`, `signaling.rs` | Membership and transport changes invalidate stale plans/readiness | `tests/v3_session_plan_e2e.rs`, `formal/tla/SignalFishSession.tla` | Start/leave, authority loss, reconnect publication order | Unreviewed |
+| Readiness and gameplay: `src/server/ready_state.rs`, `authority.rs`, `session_policy.rs`, `signaling.rs` | Membership and transport changes invalidate stale plans/readiness | `tests/v3_session_plan_e2e.rs`, `formal/tla/SignalFishSession.tla`; C1 gameplay-transitions review above | Start/leave, authority loss, v2/v3 negotiation, capability intersections, stale reports, downgrade reconnects, and publication order are reviewed and pinned (including the spectator start-authorization coupling); shared `src/server.rs` state seams remain | Partially reviewed |
 | Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs` | Mixed conversion refusal; stalled room fairness | Unreviewed |
 | Coordination and queues: `src/coordination/**`, `src/distributed.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla` | Cancellation/panic at reservation and commit | Unreviewed |
 | WebSocket ingress and egress: `src/websocket/**` | Bounded frames, priority control, close and drain semantics hold | `tests/transport_frame_limits_e2e.rs`, `tests/slow_consumer_no_cascade_e2e.rs` | Slow reader, batching age, TLS close paths | Unreviewed |

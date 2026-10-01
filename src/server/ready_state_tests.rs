@@ -1318,3 +1318,128 @@ async fn spectator_snapshot_reports_live_readiness() {
         other => panic!("observer expected SpectatorJoined, got {other:?}"),
     }
 }
+
+/// A spectator cannot finalize the lobby (`docs/concepts/spectator-mode.md`:
+/// spectators are strictly read-only and cannot affect the ready-up flow).
+///
+/// The start path trusts the caller's room assignment ("the sender is already
+/// known to be in this room") and never re-checks roster membership under the
+/// room mutation gate, so the read-only contract is enforced only by the
+/// fail-closed coupling in spectator admission: `join_owned` requires
+/// `get_client_room(..).is_none()` and never assigns the spectator's
+/// connection to the room, so a spectator's `StartGame` dispatch resolves no
+/// room and refuses `NOT_IN_ROOM` before the coordinator. If a future change
+/// gives spectator connections a room assignment (for example, to deliver
+/// room snapshots or broadcasts to spectators — the gap `spectator-mode.md`
+/// records as a known limitation), this pin fails instead of silently
+/// letting a spectator start every authority-less room whose players are all
+/// ready.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn spectator_start_game_cannot_finalize_the_lobby() {
+    use crate::protocol::ClientMessage;
+
+    let server = create_test_server().await;
+    let (player_a, mut rx_a) = register_client(&server).await;
+    let (player_b, mut rx_b) = register_client(&server).await;
+    let (observer, mut observer_rx) = register_client(&server).await;
+
+    // An authority-less lobby (`supports_authority: false`): its `StartGame`
+    // authorization is "any member may start", which is exactly the rule a
+    // roomed spectator frame would pass. Both players ready removes every
+    // other gate between the frame and a finalized room.
+    server
+        .handle_join_room(
+            &player_a,
+            "spectated-start".to_string(),
+            Some("SPECT2".to_string()),
+            "PlayerA".to_string(),
+            Some(4),
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .await;
+    server
+        .handle_join_room(
+            &player_b,
+            "spectated-start".to_string(),
+            Some("SPECT2".to_string()),
+            "PlayerB".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
+
+    server.handle_player_ready(&player_a).await;
+    server.handle_player_ready(&player_b).await;
+    drain_pending(&mut rx_a);
+    drain_pending(&mut rx_b);
+
+    server
+        .handle_join_as_spectator(
+            &observer,
+            "spectated-start".to_string(),
+            "SPECT2".to_string(),
+            "Observer".to_string(),
+            None,
+        )
+        .await;
+    match recv(&mut observer_rx).await.as_ref() {
+        ServerMessage::SpectatorJoined(_) => {}
+        other => panic!("observer expected SpectatorJoined, got {other:?}"),
+    }
+
+    // The spectator's `StartGame` goes through the real router dispatch and
+    // must be refused without reaching the coordinator's start path.
+    server
+        .handle_client_message(&observer, ClientMessage::StartGame)
+        .await;
+    match recv(&mut observer_rx).await.as_ref() {
+        ServerMessage::Error { error_code, .. } => {
+            assert_eq!(
+                *error_code,
+                Some(ErrorCode::NotInRoom),
+                "a spectator's StartGame must be refused as roomless"
+            );
+        }
+        other => panic!("observer expected an Error refusal, got {other:?}"),
+    }
+
+    // The lobby stays open with its ready state intact: the spectator frame
+    // never reached the coordinator's start path, so nothing finalized (a
+    // finalize would flip `LobbyState` and clear the coordinator's ready set).
+    let room_id = server
+        .get_client_room(&player_a)
+        .await
+        .expect("player_a stays seated");
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room readable")
+        .expect("room still exists");
+    assert_eq!(
+        room.lobby_state,
+        LobbyState::Lobby,
+        "a spectator frame must never finalize the lobby"
+    );
+    let ready = server
+        .room_coordinator
+        .current_ready_players(&room_id)
+        .await;
+    let mut ready = ready;
+    ready.sort_unstable();
+    let mut expected_ready = vec![player_a, player_b];
+    expected_ready.sort_unstable();
+    assert_eq!(
+        ready, expected_ready,
+        "the refused start must not disturb the ready set"
+    );
+}
