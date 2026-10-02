@@ -1532,3 +1532,158 @@ async fn opaque_opt_in_encodings_relay_directly_and_report_cross_format() {
     drop(twin);
     running_server.shutdown().await;
 }
+
+/// Pre-v3 recipients of an unconvertible opaque payload stay accountable
+/// without any v3-only frame: no payload in any shape, the rate-limited
+/// `UnsupportedGameDataFormat` advisory, never a `DeliveryReport` (v2 queues
+/// accumulate no pending report at all), and a control plane that keeps
+/// flowing afterwards. The negotiated recipient format must not matter — the
+/// refusal follows the opaque source, and the wire purity follows the queue's
+/// protocol version.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn v2_recipients_of_opaque_payloads_get_advisories_without_v3_reports() {
+    let mut protocol = ProtocolConfig::default();
+    protocol.sdk_compatibility.enforce = false;
+    protocol.enable_rkyv_game_data = true;
+    let server = create_test_server_with_config(test_server_config(), protocol).await;
+    let metrics = server.metrics();
+    let router = create_router("http://localhost:3000").with_state(server.clone());
+    let running_server = RunningTestServer::spawn(server, router).await;
+    let addr = running_server.addr();
+
+    async fn join_peer(
+        addr: std::net::SocketAddr,
+        protocol_version: u16,
+        encoding: Option<GameDataEncoding>,
+        player_name: &str,
+    ) -> PlayerHandle {
+        let mut ws = connect(addr).await;
+        authenticate_with_encoding(&mut ws, protocol_version, encoding).await;
+        try_join(ws, "opaque-relay", "OPV201", Some(3), player_name)
+            .await
+            .unwrap_or_else(|(reason, code)| {
+                panic!("{player_name} (v{protocol_version}, {encoding:?}) failed to join: {reason} ({code:?})")
+            })
+    }
+
+    let mut sender = join_peer(addr, 3, Some(GameDataEncoding::Rkyv), "rkyv-sender").await;
+    let mut v2_json = join_peer(addr, 2, None, "v2-json").await;
+    // The last joiner's `RoomJoined.current_players` snapshot proves all three
+    // protocol/format combinations share one room.
+    let mut v2_message_pack =
+        join_peer(addr, 2, Some(GameDataEncoding::MessagePack), "v2-mp").await;
+    assert_eq!(v2_message_pack.room_player_count, 3);
+
+    // The opaque payload is deliberately not valid JSON or MessagePack: any
+    // conversion attempt would fabricate meaning that was never on the wire.
+    let opaque = vec![0x52, 0x4b, 0x59, 0x56, 0x00, 0xff];
+    sender
+        .ws
+        .send(Message::Binary(opaque.clone().into()))
+        .await
+        .expect("send opaque rkyv frame");
+
+    for (label, handle) in &mut [("v2-json", &mut v2_json), ("v2-mp", &mut v2_message_pack)] {
+        let ws = &mut handle.ws;
+        let mut saw_advisory = false;
+        let deadline = tokio::time::Instant::now() + FRAME_DEADLINE;
+        while !saw_advisory && tokio::time::Instant::now() < deadline {
+            let frame = tokio::time::timeout_at(deadline, ws.next())
+                .await
+                .unwrap_or_else(|_| panic!("{label} timed out waiting for the advisory"))
+                .unwrap_or_else(|| panic!("{label} closed before the advisory"))
+                .unwrap_or_else(|error| panic!("{label} socket failed: {error}"));
+            let Message::Text(text) = frame else {
+                panic!("{label} must never receive the opaque payload as {frame:?}");
+            };
+            match serde_json::from_str::<ServerMessage>(&text).unwrap_or_else(|error| {
+                panic!("{label} text frame is not a ServerMessage: {error}")
+            }) {
+                ServerMessage::DeliveryReport(_) => {
+                    panic!("{label} is pre-v3; a DeliveryReport leaked onto its wire: {text}");
+                }
+                ServerMessage::Error {
+                    message,
+                    error_code,
+                } => {
+                    assert_eq!(
+                        error_code,
+                        Some(ErrorCode::UnsupportedGameDataFormat),
+                        "{label} advisory must use the fallback error code: {message}"
+                    );
+                    assert!(
+                        message.contains("rkyv"),
+                        "{label} advisory must name the requested wire token: {message}"
+                    );
+                    saw_advisory = true;
+                }
+                ServerMessage::PlayerJoined { .. }
+                | ServerMessage::LobbyStateChanged { .. }
+                | ServerMessage::AuthorityChanged { .. } => {}
+                other => {
+                    panic!("{label} recipient observed unexpected server message: {other:?}")
+                }
+            }
+        }
+        assert!(
+            saw_advisory,
+            "{label} received no unsupported-format advisory"
+        );
+    }
+
+    // The omissions must not strand either recipient: the control plane still
+    // delivers afterwards, and the sockets stay open through the leave.
+    sender
+        .ws
+        .send(Message::Text(
+            serde_json::to_string(&ClientMessage::LeaveRoom)
+                .expect("serialize LeaveRoom")
+                .into(),
+        ))
+        .await
+        .expect("send LeaveRoom");
+    for (label, handle) in &mut [("v2-json", &mut v2_json), ("v2-mp", &mut v2_message_pack)] {
+        let ws = &mut handle.ws;
+        let mut saw_leave = false;
+        let deadline = tokio::time::Instant::now() + FRAME_DEADLINE;
+        while !saw_leave && tokio::time::Instant::now() < deadline {
+            let frame = tokio::time::timeout_at(deadline, ws.next())
+                .await
+                .unwrap_or_else(|_| panic!("{label} timed out waiting for the leave"))
+                .unwrap_or_else(|| panic!("{label} closed before the leave"))
+                .unwrap_or_else(|error| panic!("{label} socket failed: {error}"));
+            let Message::Text(text) = frame else {
+                panic!("{label} observed a non-text frame after the advisory: {frame:?}");
+            };
+            match serde_json::from_str::<ServerMessage>(&text).unwrap_or_else(|error| {
+                panic!("{label} text frame is not a ServerMessage: {error}")
+            }) {
+                ServerMessage::DeliveryReport(_) => {
+                    panic!("{label} is pre-v3; a DeliveryReport leaked onto its wire: {text}");
+                }
+                ServerMessage::PlayerLeft { player_id, .. } => {
+                    assert_eq!(
+                        player_id, sender.player_id,
+                        "{label} saw an unexpected player leave"
+                    );
+                    saw_leave = true;
+                }
+                ServerMessage::PlayerJoined { .. }
+                | ServerMessage::LobbyStateChanged { .. }
+                | ServerMessage::AuthorityChanged { .. } => {}
+                other => {
+                    panic!("{label} recipient observed unexpected server message: {other:?}")
+                }
+            }
+        }
+        assert!(saw_leave, "{label} never observed the sender's leave");
+    }
+
+    // Both omissions are counted as drops; nothing is stranded or duplicated.
+    websocket_test_helpers::assert_message_conservation(&metrics).await;
+
+    drop(sender);
+    drop(v2_json);
+    drop(v2_message_pack);
+    running_server.shutdown().await;
+}

@@ -164,6 +164,14 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   constant-key probe) beside the existing dispatch class/key gate,
   owner/room, generation-shielding, supersession-report, saturation,
   window, and counter-conservation pins.
+  The mixed encodings/unsupported conversions family is reviewed (audit
+  ledger, 2026-10-02): negotiation downgrades an unsupported request to
+  JSON, MessagePack falls back losslessly, opaque sources are refused to
+  every other format with an exact v3 gap plus a rate-limited advisory, and
+  pre-v3 recipients of opaque payloads get the advisory without any
+  v3-only report — now pinned
+  (`v2_recipients_of_opaque_payloads_get_advisories_without_v3_reports`;
+  red-proofed with a lossy-fabrication probe).
 - [ ] **Recovery:** cancellation at relevant await boundaries; partial state
   mutation or publication; rollback failure and retry; task panic recovery;
   cleanup racing join/reconnect; deadlines at before/equal/after boundaries;

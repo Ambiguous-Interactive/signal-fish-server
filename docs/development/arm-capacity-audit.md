@@ -1087,6 +1087,64 @@ queue families are dispositioned, while the reservation/commit
 cancellation and panic seam of `RoomMessageTransaction` still needs its own
 review.
 
+### C1 mixed encoding and unsupported conversion review (2026-10-02)
+
+At `3b83e00e` (main after #720), reviewed the delivery slice's "mixed
+encodings and unsupported conversions" case families. Disposition per
+family; no violation was reproduced. One explicit-pin gap was closed: the
+pre-v3 recipient side of an opaque refusal had no end-to-end evidence.
+
+- **Negotiation boundary.** A requested `game_data_format` outside the
+  deployment's supported set is refused with a budget-charged
+  `UnsupportedGameDataFormat` error and downgrades to JSON, the universal
+  text floor (`test_rkyv_game_data_format_request_falls_back_to_json_and_is_not_advertised`,
+  `test_opt_in_rkyv_and_protobuf_negotiate_and_advertise`). Format
+  negotiation is protocol-version-agnostic.
+- **Same-format and lossless cohorts.** A JSON sender reaches every
+  recipient as text; a MessagePack payload reaches same-format recipients
+  as a direct binary cohort and JSON recipients through a lossless
+  MessagePack-to-JSON decode, with no error amplification
+  (`mixed_json_and_message_pack_relay_without_error_amplification`).
+- **Opaque refusal.** rkyv and protobuf payloads carry no schema the
+  server can convert, so every cross-format recipient is skipped instead
+  of receiving a lossy guess (`decode_binary_to_json` refuses both). A
+  same-format peer still receives byte-identical strict-v3 envelopes;
+  cross-format v3 peers receive an exact `UnsupportedFormat` gap report
+  before any later frame plus the per-sender rate-limited advisory
+  (`opaque_opt_in_encodings_relay_directly_and_report_cross_format`).
+  The refusal is pair-complete: every directed pair from an opaque source
+  is unsupported, and the preflight unit matrix pins the same decision per
+  pair (`unsupported_binary_fallback_preflight_is_exact`).
+- **Pre-v3 recipients (new pin).** A v2 queue never accumulates a pending
+  unsupported report (`record_unsupported_format` refuses non-v3 queues)
+  and the report writer keeps its own v3 gate, so a `DeliveryReport` can
+  never leak onto a v2 wire. The omission is still counted
+  (`websocket_messages_dropped`, per-connection `dropped_for_you`) and the
+  recipient still receives the rate-limited advisory, now pinned by
+  `v2_recipients_of_opaque_payloads_get_advisories_without_v3_reports`:
+  a v2 JSON and a v2 MessagePack recipient of one opaque rkyv frame each
+  observe no payload frame, one advisory, no report, and a control plane
+  that keeps flowing through the sender's leave. Red-proofed by probing
+  the opaque refusal into a lossy JSON fabrication: both v2 recipients
+  received the fabricated `GameData` frame and the pin failed; the probe
+  was reverted byte-identically.
+- **Oversized fallback.** A cross-format payload whose decoded JSON would
+  exceed the outbound cap is refused by the preflight before cache
+  allocation and accounted as an omission
+  (`binary_fallback_decode_budget_rejects_compact_tree_before_cache_allocation`).
+- **Amplification under load.** The throttled unsupported-format storm
+  scenario (a weaker recipient must not be evicted; advisories only) is
+  pinned by the nightly-only
+  `unsupported_message_pack_fallback_does_not_flap_weaker_recipient` and
+  the report/advisory ordering conformance tests
+  (`conformance_gap_counters_are_causal_with_rate_limited_unsupported_advisories`,
+  `conformance_unsupported_advisory_requires_prior_report_but_not_adjacency`);
+  the storm cohort stays out of the default CI run by design.
+
+With this review, the delivery slice's mixed encodings and unsupported
+conversions family has a recorded disposition. The relay-routing coverage
+row is fully reviewed.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -1124,7 +1182,7 @@ neither is a deployed capacity preset.
 | Room and player storage: `src/database/**` | Membership and room limits stay atomic and app isolated | `tests/integration_tests.rs`, `tests/model_based_state_machines.rs`; C1 admission-limit review above | Other adapters, rollback, and leave/disconnect races remain | Unreviewed |
 | Room lifecycle and moderation: `src/server/room_service.rs`, `moderation.rs`, `spectator_service.rs`, `spectator_handlers.rs` | Join, leave, kick, ban, spectator state and ownership agree | `tests/lobby_integration_tests.rs`, `src/server/room_service_tests.rs`; C1 admission-limit, leave/disconnect ordering, and identity-slice completion reviews above | ARM-C001–C004 fixed in spectator and room-code seams; identity cases (concurrent limits, join-only, leave/disconnect, spectator transitions, kick/ban races, application isolation) reviewed and pinned or derived; storage-fault interleavings on other adapters remain | Partially reviewed |
 | Readiness and gameplay: `src/server/ready_state.rs`, `authority.rs`, `session_policy.rs`, `signaling.rs` | Membership and transport changes invalidate stale plans/readiness | `tests/v3_session_plan_e2e.rs`, `formal/tla/SignalFishSession.tla`; C1 gameplay-transitions review above | Start/leave, authority loss, v2/v3 negotiation, capability intersections, stale reports, downgrade reconnects, and publication order are reviewed and pinned (including the spectator start-authorization coupling); shared `src/server.rs` state seams remain | Partially reviewed |
-| Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs`; C1 cross-room stall fairness review above | Slow-recipient isolation and cross-room stall fairness are reviewed and pinned (`stalled_room_does_not_strand_a_healthy_room`); mixed conversion refusal remains | Partially reviewed |
+| Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs`; C1 cross-room stall fairness and mixed encoding/unsupported conversion reviews above | Slow-recipient isolation, cross-room stall fairness, and the mixed encoding/unsupported conversion matrix (direct cohorts, lossless fallback, opaque refusal with exact gap plus advisory, pre-v3 advisory-only wire) are reviewed and pinned (`stalled_room_does_not_strand_a_healthy_room`, `v2_recipients_of_opaque_payloads_get_advisories_without_v3_reports`) | Reviewed |
 | Coordination and queues: `src/coordination/**`, `src/distributed.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla`; C1 room-event duplicate-delivery disposition and latest coalescing keys/generations review above | Lane job exactly-once and no lease re-run are dispositioned and pinned (`interleaved_awaits_deliver_each_lobby_broadcast_exactly_once`); cross-epoch gap ranges stay distinct per epoch (`cross_epoch_gaps_of_one_sender_stay_distinct_ranges`); latest key composition, generation shielding, supersession, saturation, and counter conservation are reviewed and pinned; cancellation/panic at reservation and commit remain | Partially reviewed |
 | WebSocket ingress and egress: `src/websocket/**` | Bounded frames, priority control, close and drain semantics hold | `tests/transport_frame_limits_e2e.rs`, `tests/slow_consumer_no_cascade_e2e.rs` | Slow reader, batching age, TLS close paths | Unreviewed |
 | Reconnect and retry: `src/reconnection.rs`, `src/retry.rs`, `src/server/reconnection_service.rs` | Claims have one owner; replay and stale routes cannot leak or misroute | `tests/reconnect_window_races_e2e.rs`, `formal/tla/ReconnectionClaimLifecycle.tla`; C1 reaper-ordering, claim-expiry, failed-restore, token-rotation, and reconnect epoch/sequence reviews above | Simultaneous claim, expiry during claim, failed restore/retry, rotation boundaries, and reconnect epoch/sequence transitions (including cross-epoch gap accounting) are reviewed and pinned; `src/retry.rs` backoff seams and multi-failure detach accounting on failing backends remain | Partially reviewed |
