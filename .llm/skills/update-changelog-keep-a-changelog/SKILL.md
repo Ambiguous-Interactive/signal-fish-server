@@ -38,6 +38,9 @@ description: >-
 4. Use concise, user-centered language that states externally observable impact.
 5. Mark breaking changes explicitly with `**Breaking:**`.
 6. Do not add custom change categories outside Keep a Changelog.
+7. Never add `Tests:` or `CI:` bullets. The changelog is release notes for
+   users of the server; test pins, red-proof probes, and workflow changes
+   are recorded in tests, PRs, and issues instead (issue #722).
 
 ---
 
@@ -90,6 +93,7 @@ Only include sections that have entries.
 | `- Fix WebSocket reconnect cleanup on abrupt disconnect.` | `- Refactor connection lifecycle code.` |
 | `- **Breaking:** Change room code validation to reject lowercase.` | `- Update validation logic.` |
 | `- Add server metric for active lobby count.` | `- Misc metrics updates.` |
+| `- Fix the exhaustion close signal (#697).` | `- Tests: pin the exhaustion close (#697).` |
 
 ---
 

@@ -848,6 +848,155 @@ pub enum GameDataEncoding {
             must_not_contain: vec!["[ERROR]"],
         },
         // ---------------------------------------------------------------
+        // [Unreleased] user-visibility lint (issue #722)
+        // ---------------------------------------------------------------
+        ScriptCase {
+            name: "unreleased_tests_bullet_fails_user_visibility_lint",
+            overrides: vec![(
+                "CHANGELOG.md",
+                r#"# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [Unreleased]
+
+### Added
+- Tests: pin an internal invariant.
+
+## [0.1.0] - 2026-02-15
+
+### Added
+- Initial release.
+
+[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/releases/tag/v0.1.0
+"#,
+            )],
+            args: vec!["--changed-files", "CHANGELOG.md"],
+            expected_exit: 1,
+            must_contain: vec!["not user-visible", "issue #722", "- Tests: pin an internal invariant."],
+            must_not_contain: vec![],
+        },
+        ScriptCase {
+            name: "unreleased_ci_bullet_fails_user_visibility_lint",
+            overrides: vec![(
+                "CHANGELOG.md",
+                r#"# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [Unreleased]
+
+### Added
+- ci: rework the workflow matrix.
+
+## [0.1.0] - 2026-02-15
+
+### Added
+- Initial release.
+
+[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/releases/tag/v0.1.0
+"#,
+            )],
+            args: vec!["--changed-files", "CHANGELOG.md"],
+            expected_exit: 1,
+            must_contain: vec!["not user-visible", "- ci: rework the workflow matrix."],
+            must_not_contain: vec![],
+        },
+        ScriptCase {
+            name: "unreleased_bold_tests_bullet_fails_user_visibility_lint",
+            overrides: vec![(
+                "CHANGELOG.md",
+                r#"# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [Unreleased]
+
+### Added
+- **Tests:** pin an internal invariant.
+
+## [0.1.0] - 2026-02-15
+
+### Added
+- Initial release.
+
+[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/releases/tag/v0.1.0
+"#,
+            )],
+            args: vec!["--changed-files", "CHANGELOG.md"],
+            expected_exit: 1,
+            must_contain: vec!["not user-visible", "- **Tests:** pin an internal invariant."],
+            must_not_contain: vec![],
+        },
+        ScriptCase {
+            name: "released_section_test_bullet_is_not_relinted",
+            overrides: vec![(
+                "CHANGELOG.md",
+                r#"# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [Unreleased]
+
+### Changed
+- Keep docs aligned with protocol payloads.
+
+## [0.1.0] - 2026-02-15
+
+### Added
+- Initial release.
+- Tests: frozen history is not re-linted.
+
+[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/releases/tag/v0.1.0
+"#,
+            )],
+            args: vec!["--changed-files", "CHANGELOG.md"],
+            expected_exit: 0,
+            must_contain: vec!["No non-internal changed files detected"],
+            must_not_contain: vec!["[ERROR]"],
+        },
+        ScriptCase {
+            name: "prose_mentioning_tests_passes_user_visibility_lint",
+            overrides: vec![(
+                "CHANGELOG.md",
+                r#"# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [Unreleased]
+
+### Changed
+- Improve the hosted test diagnostics visible to operators.
+
+## [0.1.0] - 2026-02-15
+
+### Added
+- Initial release.
+
+[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/releases/tag/v0.1.0
+"#,
+            )],
+            args: vec!["--changed-files", "CHANGELOG.md"],
+            expected_exit: 0,
+            must_contain: vec!["No non-internal changed files detected"],
+            must_not_contain: vec!["[ERROR]"],
+        },
+        // ---------------------------------------------------------------
         // Changelog gate: Cargo.toml / Cargo.lock edge cases
         // ---------------------------------------------------------------
         ScriptCase {
@@ -1234,4 +1383,229 @@ fn test_dep_detect_commit_message_pattern_data_driven() {
             case.should_match,
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Changelog gate: test-module-only Rust diffs (issue #722)
+//
+// A non-internal Rust file whose hunks all start at or after the file's last
+// top-level `#[cfg(test)]` line carries only unit-test work and needs no
+// changelog entry, provided the marker opens the file-final test module.
+// These cases need a real Git object graph (committed base plus a
+// working-tree delta), so they run the checker with --diff-base HEAD inside
+// a throwaway repository instead of the plain fixture runner.
+// ---------------------------------------------------------------------------
+
+const TEST_MODULE_SRC_BASE: &str = r#"pub fn ready() -> bool {
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ready_true() {
+        assert!(super::ready());
+    }
+}
+"#;
+
+fn run_checker_with_git_base(
+    base_overrides: &[(&str, &str)],
+    head_overrides: &[(&str, &str)],
+    args: &[&str],
+) -> (i32, String) {
+    let temp_root = unique_temp_dir("doc-consistency-git-base");
+    let script_src = repo_root().join("scripts/check-doc-consistency.sh");
+    let script = fs::read_to_string(&script_src)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {e}", script_src.display()));
+    write_file(
+        &temp_root.path().join("scripts/check-doc-consistency.sh"),
+        &script,
+    );
+
+    for (path, content) in base_fixture_files() {
+        write_file(&temp_root.path().join(path), &content);
+    }
+    for (path, content) in base_overrides {
+        write_file(&temp_root.path().join(path), content);
+    }
+
+    for arguments in [
+        vec!["init", "--quiet"],
+        vec!["config", "user.name", "Fixture"],
+        vec!["config", "user.email", "fixture@example.invalid"],
+        vec!["add", "."],
+        vec!["commit", "--quiet", "-m", "fixture base"],
+    ] {
+        let status = Command::new("git")
+            .args(arguments)
+            .current_dir(temp_root.path())
+            .status()
+            .expect("run fixture Git command");
+        assert!(status.success(), "fixture Git setup failed");
+    }
+
+    for (path, content) in head_overrides {
+        write_file(&temp_root.path().join(path), content);
+    }
+
+    let mut command = bash_command();
+    command.arg("scripts/check-doc-consistency.sh");
+    for arg in args {
+        command.arg(arg);
+    }
+    let output = command
+        .current_dir(temp_root.path())
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "Failed to run checker script in {}: {e}",
+                temp_root.path().display()
+            )
+        });
+
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    (
+        output.status.code().unwrap_or(-1),
+        combined.replace("\r\n", "\n"),
+    )
+}
+
+#[test]
+fn test_only_rust_diff_passes_changelog_gate_with_diff_base() {
+    let insertion = "        assert!(super::ready());\n    }\n";
+    let replacement = "        assert!(super::ready());\n    }\n\n    #[test]\n    fn ready_still_true() {\n        assert!(super::ready());\n    }\n";
+    let head = TEST_MODULE_SRC_BASE.replacen(insertion, replacement, 1);
+    assert_ne!(head, TEST_MODULE_SRC_BASE, "fixture edit must apply");
+
+    let (exit, output) = run_checker_with_git_base(
+        &[("src/main.rs", TEST_MODULE_SRC_BASE)],
+        &[("src/main.rs", head.as_str())],
+        &["--diff-base", "HEAD", "--changed-files", "src/main.rs"],
+    );
+
+    assert_eq!(
+        exit, 0,
+        "a test-module-only Rust diff must pass the changelog gate without a CHANGELOG.md update.\n{output}"
+    );
+    assert!(
+        !output.contains("without CHANGELOG.md update"),
+        "the gate must not list the test-only file as an offender.\n{output}"
+    );
+}
+
+#[test]
+fn production_hunk_above_test_module_still_requires_changelog() {
+    let head = TEST_MODULE_SRC_BASE.replace("    true", "    false");
+    assert_ne!(head, TEST_MODULE_SRC_BASE, "fixture edit must apply");
+
+    let (exit, output) = run_checker_with_git_base(
+        &[("src/main.rs", TEST_MODULE_SRC_BASE)],
+        &[("src/main.rs", head.as_str())],
+        &["--diff-base", "HEAD", "--changed-files", "src/main.rs"],
+    );
+
+    assert_ne!(
+        exit, 0,
+        "a production hunk above the test module must still require a changelog entry.\n{output}"
+    );
+    assert!(output.contains("without CHANGELOG.md update"));
+    assert!(output.contains("src/main.rs"));
+}
+
+#[test]
+fn changed_files_mode_without_diff_base_stays_conservative() {
+    // Same test-only delta as the passing case, but without --diff-base the
+    // gate cannot see hunks and must keep the file in scope; the failure
+    // names the flag so a missing CI wiring is diagnosable.
+    let insertion = "        assert!(super::ready());\n    }\n";
+    let replacement = "        assert!(super::ready());\n    }\n\n    #[test]\n    fn ready_still_true() {\n        assert!(super::ready());\n    }\n";
+    let head = TEST_MODULE_SRC_BASE.replacen(insertion, replacement, 1);
+    assert_ne!(head, TEST_MODULE_SRC_BASE, "fixture edit must apply");
+
+    let (exit, output) = run_checker_with_git_base(
+        &[("src/main.rs", TEST_MODULE_SRC_BASE)],
+        &[("src/main.rs", head.as_str())],
+        &["--changed-files", "src/main.rs"],
+    );
+
+    assert_ne!(
+        exit, 0,
+        "without a diff base the gate must stay conservative.\n{output}"
+    );
+    assert!(output.contains("without CHANGELOG.md update"));
+    assert!(output.contains("--diff-base"));
+}
+
+#[test]
+fn deleting_production_code_after_test_module_requires_changelog() {
+    // The base file violates the file-final convention (production code
+    // continues past the test module). Deleting that trailing production
+    // code is a production change and must not inherit the exemption, even
+    // though the deleted lines sit below the old marker.
+    let base = format!("{TEST_MODULE_SRC_BASE}\npub fn after_tests() -> u8 {{\n    7\n}}\n");
+    let head = format!("{TEST_MODULE_SRC_BASE}\n");
+    assert_ne!(head, base, "fixture edit must apply");
+
+    let (exit, output) = run_checker_with_git_base(
+        &[("src/main.rs", base.as_str())],
+        &[("src/main.rs", head.as_str())],
+        &["--diff-base", "HEAD", "--changed-files", "src/main.rs"],
+    );
+
+    assert_ne!(
+        exit, 0,
+        "deleting production code that followed the test module must require a changelog entry.\n{output}"
+    );
+    assert!(output.contains("without CHANGELOG.md update"));
+}
+
+#[test]
+fn deleting_from_a_file_without_a_test_module_requires_changelog() {
+    // The base file has no test module at all, so there is no test region
+    // to delete from: every non-blank deletion is a production change.
+    let head = TEST_MODULE_SRC_BASE
+        .lines()
+        .filter(|line| line.trim() != "true")
+        .collect::<Vec<_>>()
+        .join("\n");
+    let base = "pub fn ready() -> bool {\n    true\n}\n";
+    assert_ne!(head, base, "fixture edit must apply");
+
+    let (exit, output) = run_checker_with_git_base(
+        &[("src/main.rs", base)],
+        &[("src/main.rs", head.as_str())],
+        &["--diff-base", "HEAD", "--changed-files", "src/main.rs"],
+    );
+
+    assert_ne!(
+        exit, 0,
+        "a deletion from a file that never had a test module must require a changelog entry.\n{output}"
+    );
+    assert!(output.contains("without CHANGELOG.md update"));
+}
+
+#[test]
+fn deleting_test_code_from_a_clean_module_stays_exempt() {
+    // Both sides satisfy the file-final convention; removing part of the
+    // test module is internal work and needs no entry.
+    let head = TEST_MODULE_SRC_BASE.replacen(
+        "    #[test]\n    fn ready_true() {\n        assert!(super::ready());\n    }\n",
+        "",
+        1,
+    );
+    assert_ne!(head, TEST_MODULE_SRC_BASE, "fixture edit must apply");
+
+    let (exit, output) = run_checker_with_git_base(
+        &[("src/main.rs", TEST_MODULE_SRC_BASE)],
+        &[("src/main.rs", head.as_str())],
+        &["--diff-base", "HEAD", "--changed-files", "src/main.rs"],
+    );
+
+    assert_eq!(
+        exit, 0,
+        "removing test code from a file-final test module must stay exempt.\n{output}"
+    );
 }

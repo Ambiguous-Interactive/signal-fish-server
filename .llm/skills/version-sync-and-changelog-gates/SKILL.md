@@ -15,6 +15,17 @@ description: >-
 2. Selected version references in docs/LLM context must match that version.
 3. `CHANGELOG.md` must remain Keep a Changelog compliant.
 4. If non-internal files change, `CHANGELOG.md` must be updated in the same change.
+5. `[Unreleased]` entries describe user-visible change only (issue #722).
+   `Tests:`/`CI:` bullets (including markup-wrapped or indented variants)
+   are rejected by the checker and the pre-commit hook.
+6. Rust diffs confined to a file's trailing test module are internal work:
+   the changelog gate exempts them, so a test-only session needs no entry.
+   The convention is that `#[cfg(test)] mod tests { ... }` is the final item
+   of a source file. The new side must always satisfy it; when the base
+   side has a test module it must satisfy it too and deletions are keyed on
+   the old marker, while a base without any test module refuses every
+   non-blank deletion. Production code above the test module, or after it
+   on either side, keeps the file in scope.
 
 ## Release History Invariants
 
@@ -61,7 +72,15 @@ path dependencies without writing a TOML assignment; in templates, use the
 
 # Pre-commit scope validation (staged files)
 ./scripts/check-doc-consistency.sh --staged
+
+# PR scope validation (hosted CI passes the same pair it diffs for names)
+./scripts/check-doc-consistency.sh --diff-base "BASE...HEAD" --changed-files src/main.rs
 ```
+
+The `--diff-base` revision pair is what lets the changelog gate classify
+test-module-only Rust diffs as internal in changed-files mode; without it,
+changed-file mode conservatively treats every non-internal Rust file as
+production.
 
 ---
 

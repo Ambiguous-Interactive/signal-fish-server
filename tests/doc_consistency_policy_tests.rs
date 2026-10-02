@@ -49,11 +49,20 @@ fn test_ci_workflow_runs_doc_consistency_check_with_changed_files() {
         workflow.contains("Doc Consistency") || workflow.contains("doc-consistency"),
         "ci.yml must define a doc consistency job or step."
     );
+    let invocation_line = workflow
+        .lines()
+        .find(|line| line.contains("check-doc-consistency.sh") && line.contains("--changed-files"));
+    let invocation_line = invocation_line.expect(
+        "ci.yml must have a line that invokes check-doc-consistency.sh with --changed-files for PR/push diff-aware changelog gating.",
+    );
     assert!(
-        workflow.lines().any(|line| {
-            line.contains("check-doc-consistency.sh") && line.contains("--changed-files")
-        }),
-        "ci.yml must have a line that invokes check-doc-consistency.sh with --changed-files for PR/push diff-aware changelog gating."
+        invocation_line.contains("--diff-base"),
+        "ci.yml must pass --diff-base so the changelog gate can exempt test-module-only Rust diffs in hosted CI (issue #722); \
+         without it the hook passes locally while hosted CI demands an entry.\nline: {invocation_line}"
+    );
+    assert!(
+        workflow.contains("diff_base="),
+        "ci.yml must publish the diff_base output the doc-consistency invocation consumes."
     );
 }
 
@@ -643,4 +652,82 @@ fn test_protocol_sample_files_are_present_and_valid_data_driven() {
             case.file,
         );
     }
+}
+
+/// The `[Unreleased]` user-visibility rule (issue #722: no Tests:/CI:
+/// release notes) is enforced by both the bash checker and the PowerShell
+/// pre-commit hook. Extract the declared pattern from each and require the
+/// same `(tests?|ci)` core so the two implementations cannot drift apart.
+#[test]
+fn test_unreleased_user_visibility_pattern_matches_checker_and_hook() {
+    let root = repo_root();
+    let checker = read_live_file(&root.join("scripts/check-doc-consistency.sh"));
+    let hook = read_live_file(&root.join("scripts/hooks/pre-commit.ps1"));
+
+    const BASH_DECLARATION: &str = "CHANGELOG_FORBIDDEN_BULLET_RE='";
+    let bash_start = checker
+        .find(BASH_DECLARATION)
+        .expect("scripts/check-doc-consistency.sh must declare CHANGELOG_FORBIDDEN_BULLET_RE");
+    let bash_body = &checker[bash_start + BASH_DECLARATION.len()..];
+    let bash_end = bash_body
+        .find('\'')
+        .expect("CHANGELOG_FORBIDDEN_BULLET_RE must be a single-quoted POSIX ERE");
+    let bash_pattern = &bash_body[..bash_end];
+
+    const HOOK_DECLARATION: &str = "$script:ChangelogForbiddenBulletRes = [string[]]@(";
+    let hook_start = hook
+        .find(HOOK_DECLARATION)
+        .expect("scripts/hooks/pre-commit.ps1 must declare $script:ChangelogForbiddenBulletRes");
+    let hook_body = &hook[hook_start + HOOK_DECLARATION.len()..];
+    let hook_end = hook_body.find("\n)").expect(
+        "$script:ChangelogForbiddenBulletRes array must be closed by a ')' on its own line",
+    );
+    // Entries are single-quoted .NET regexes and may themselves contain
+    // double quotes (markup-wrapper character classes), so parse quoted
+    // strings instead of splitting on '"'.
+    let hook_patterns: Vec<String> = hook_body[..hook_end]
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            line.strip_prefix('\'')
+                .and_then(|rest| rest.strip_suffix('\''))
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    panic!("hook forbidden-bullet entry must be single-quoted: {line}")
+                })
+        })
+        .collect();
+
+    // Both sides must express the same rule: bullets of the form "- Tests:"
+    // or "- CI:" (any case, flexible spacing, optional markup wrappers and
+    // indentation). The bash side spells out both letter cases because POSIX
+    // ERE has no inline case-insensitive flag; the PowerShell side matches
+    // case-insensitively via -imatch.
+    assert!(
+        bash_pattern.contains("([Tt]ests?|[Cc][Ii])"),
+        "the bash pattern must spell out both cases of the tests/ci core: {bash_pattern}"
+    );
+    assert!(
+        bash_pattern.starts_with("^[[:space:]]*-+")
+            && bash_pattern.contains("[*_\"`]*")
+            && bash_pattern.ends_with(":"),
+        "the bash pattern must anchor the bullet prefix, tolerate markup wrappers, and end at the tag colon: {bash_pattern}"
+    );
+    assert_eq!(
+        hook_patterns.len(),
+        1,
+        "the hook must declare exactly one forbidden-bullet pattern: {hook_patterns:?}"
+    );
+    let hook_pattern = &hook_patterns[0];
+    assert!(
+        hook_pattern.contains("(tests?|ci)"),
+        "the hook pattern must carry the tests/ci core for case-insensitive matching: {hook_pattern}"
+    );
+    assert!(
+        hook_pattern.starts_with("^\\s*-+")
+            && hook_pattern.contains("[*_\"`]*")
+            && hook_pattern.ends_with(":"),
+        "the hook pattern must anchor the bullet prefix, tolerate markup wrappers, and end at the tag colon: {hook_pattern}"
+    );
 }

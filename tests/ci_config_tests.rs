@@ -24448,9 +24448,11 @@ fn test_pre_commit_changelog_gate_blocks_src_changes_without_changelog_when_pwsh
     // SIGNAL_FISH_HOOK_PROFILE=1.
 
     // GREEN: staging the changelog entry alongside the src change passes.
+    // The bullet must be user-visible (issue #722): test pins are internal
+    // work and the "Changelog content" check rejects them.
     write_file(
         &dir.join("CHANGELOG.md"),
-        "## [Unreleased]\n\n### Fixed\n\n- Tests: pin the exhaustion close (#697).\n",
+        "## [Unreleased]\n\n### Fixed\n\n- Fix the exhaustion close signal (#697).\n",
     );
     assert!(git(&["add", "CHANGELOG.md"]).unwrap().status.success());
 
@@ -24465,6 +24467,58 @@ fn test_pre_commit_changelog_gate_blocks_src_changes_without_changelog_when_pwsh
     assert!(
         stdout.contains("PASS: Changelog gate"),
         "the pass verdict must be reported.\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("PASS: Changelog content"),
+        "the user-visibility check must pass for a user-facing bullet.\nstdout: {stdout}"
+    );
+
+    // Land the fix so later phases stage src changes without the changelog
+    // accompaniment in the index.
+    assert!(git(&["commit", "-q", "-m", "land fix", "--no-verify"])
+        .unwrap()
+        .status
+        .success());
+
+    // GREEN: a test-module-only src diff passes the changelog gate with no
+    // CHANGELOG.md change at all (issue #722): unit tests never change
+    // user-visible behavior, so they never warrant a release note.
+    write_file(
+        &src.join("server.rs"),
+        "pub fn ready() -> bool {\n    true\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn ready_true() {\n        assert!(super::ready());\n    }\n}\n",
+    );
+    assert!(git(&["add", "src/server.rs"]).unwrap().status.success());
+
+    let output = run_hook().expect("pwsh run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "a test-module-only Rust diff must pass the changelog gate without a changelog entry.\n\
+         stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("PASS: Changelog gate"),
+        "the test-only exemption must be reported as a pass.\nstdout: {stdout}"
+    );
+
+    // TRAP: production code above the test module keeps the file in scope;
+    // the exemption never covers a mixed diff.
+    write_file(
+        &src.join("server.rs"),
+        "pub fn ready() -> bool {\n    false\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn ready_true() {\n        assert!(!super::ready());\n    }\n}\n",
+    );
+    assert!(git(&["add", "src/server.rs"]).unwrap().status.success());
+
+    let output = run_hook().expect("pwsh run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !output.status.success(),
+        "a production hunk above the test module must still fail the changelog gate.\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("FAIL: Changelog gate"),
+        "the mixed diff must fail the changelog gate.\nstdout: {stdout}"
     );
 
     // TRAP: a staged `git rm CHANGELOG.md` is not changelog accompaniment.
@@ -24491,6 +24545,52 @@ fn test_pre_commit_changelog_gate_blocks_src_changes_without_changelog_when_pwsh
     assert!(
         stdout.contains("FAIL: Changelog gate"),
         "the deletion trap must fail the changelog gate.\nstdout: {stdout}"
+    );
+
+    // CONTENT: a staged `Tests:` bullet fails the user-visibility check even
+    // though the changelog accompaniment itself satisfies the gate (issue
+    // #722): test work is real but never user-visible.
+    write_file(
+        &dir.join("CHANGELOG.md"),
+        "## [Unreleased]\n\n### Fixed\n\n- Tests: pin the exhaustion close (#697).\n",
+    );
+    assert!(git(&["add", "CHANGELOG.md"]).unwrap().status.success());
+
+    let output = run_hook().expect("pwsh run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !output.status.success(),
+        "a staged Tests: bullet must fail the changelog content check.\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("FAIL: Changelog content"),
+        "the failure must name the changelog content check.\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("issue #722"),
+        "the failure must cite the user-visibility policy.\nstdout: {stdout}"
+    );
+
+    // GREEN: rewriting the same entry as a user-visible fix passes. The text
+    // must differ from the already-landed entry: an unchanged file is not a
+    // changelog update, so accompaniment requires a real staged delta.
+    write_file(
+        &dir.join("CHANGELOG.md"),
+        "## [Unreleased]\n\n### Fixed\n\n- Fix the exhaustion close signal after a reconnect identity swap (#697).\n",
+    );
+    assert!(git(&["add", "CHANGELOG.md"]).unwrap().status.success());
+
+    let output = run_hook().expect("pwsh run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "a user-visible bullet must pass the changelog content check.\n\
+         stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("PASS: Changelog content"),
+        "the content pass verdict must be reported.\nstdout: {stdout}"
     );
 }
 
@@ -32154,9 +32254,15 @@ fn test_internal_path_classification_data_driven() {
 
     // Extract the case patterns from is_internal_path().
     // Find the block between "case \"$path\" in" and the closing "esac".
-    let case_start = script_content
+    // Anchor on the function header: file_diff_is_test_only() also opens a
+    // `case "$path" in` dispatch, and it precedes is_internal_path().
+    let function_start = script_content
+        .find("is_internal_path() {")
+        .expect("is_internal_path() not found in check-doc-consistency.sh");
+    let case_start = script_content[function_start..]
         .find("case \"$path\" in")
-        .expect("is_internal_path() case statement not found in check-doc-consistency.sh");
+        .expect("is_internal_path() case statement not found in check-doc-consistency.sh")
+        + function_start;
     let case_block = &script_content[case_start..];
     let esac_offset = case_block
         .find("\n    esac")

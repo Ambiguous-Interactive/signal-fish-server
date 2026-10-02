@@ -66,6 +66,14 @@ $script:ChangelogInternalPathGlobs = [string[]]@(
     # Build tool configs
     "clippy.toml", "deny.toml", "tarpaulin.toml", "rust-toolchain.toml", "mkdocs.yml", "requirements-docs.txt"
 )
+# [Unreleased] bullets must describe user-visible change only (issue #722).
+# Case-insensitive .NET regexes; the prefix tolerates indentation and markup
+# wrappers so `- **Tests:** ...` cannot slip through. Mirrored by
+# CHANGELOG_FORBIDDEN_BULLET_RE in scripts/check-doc-consistency.sh and kept
+# in lockstep by tests/doc_consistency_policy_tests.rs.
+$script:ChangelogForbiddenBulletRes = [string[]]@(
+    '^\s*-+\s*[*_"`]*\s*(tests?|ci)\s*:'
+)
 $script:WorktreePolicyPathspecs = @(
     "src",
     ".llm",
@@ -1656,6 +1664,212 @@ function Test-ChangelogGateInternalPath {
     $false
 }
 
+function Test-FileDiffIsTestOnly {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Path)
+
+    if (-not $Path.EndsWith(".rs", [System.StringComparison]::Ordinal)) {
+        return $false
+    }
+
+    # Mode-aware tree selection: hunks and content must describe the same
+    # trees. The staged gate diffs the index against HEAD, so both content
+    # sides come from those blobs; the -Worktree preflight predicts the gate
+    # for the tree committed as-is, so it diffs the working tree against
+    # HEAD and reads the new side from disk.
+    $diffArgs = if ($script:InspectWorktree) { @() } else { @("--cached") }
+    $diff = Invoke-Native -FileName "git" -Arguments (@("diff") + $diffArgs + @("HEAD", "-U0", "--", $Path))
+    if ($diff.ExitCode -ne 0 -or [string]::IsNullOrEmpty($diff.Stdout) -or -not $diff.Stdout.Contains("@@ ")) {
+        return $false
+    }
+
+    if ($script:InspectWorktree) {
+        $newLines = Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue
+    } else {
+        $newBlob = Invoke-Native -FileName "git" -Arguments @("show", ":$Path")
+        if ($newBlob.ExitCode -ne 0) {
+            return $false
+        }
+        $newLines = $newBlob.Stdout -split "`n"
+    }
+    $oldResult = Invoke-Native -FileName "git" -Arguments @("show", "HEAD:$Path")
+    if ($null -eq $newLines -or $oldResult.ExitCode -ne 0) {
+        return $false
+    }
+    $oldLines = $oldResult.Stdout -split "`n"
+
+    # File-final layout convention: the last top-level `#[cfg(test)]` marker
+    # opens the test module and no top-level item follows it. Between the
+    # marker and the module, blank lines, attributes, and comments may
+    # appear. After the module opens, only blank lines, indented lines, and
+    # closing punctuation may continue at column 0 — anything else (a later
+    # item, keyword- or macro-led) means the module is not file-final and
+    # the file forfeits the exemption.
+    function Test-SideLayout {
+        param([string[]]$Side)
+        $sideMarkerIdx = -1
+        for ($i = $Side.Count - 1; $i -ge 0; $i--) {
+            if ($Side[$i].TrimEnd().TrimEnd("`r") -ceq '#[cfg(test)]') {
+                $sideMarkerIdx = $i
+                break
+            }
+        }
+        if ($sideMarkerIdx -lt 0) {
+            return $false
+        }
+
+        $sawModule = $false
+        for ($i = $sideMarkerIdx + 1; $i -lt $Side.Count; $i++) {
+            $text = $Side[$i].TrimEnd("`r")
+            if (-not $sawModule) {
+                if ($text.Length -eq 0 -or $text -cmatch '^(\s|#|//|/\*|\*)') {
+                    continue
+                }
+                if ($text -cmatch '^mod ') {
+                    $sawModule = $true
+                    continue
+                }
+                return $false
+            }
+            if ($text.Length -gt 0 -and -not ($text -cmatch '^(\s|\}|;|\)|//|/\*|\*|#)')) {
+                return $false
+            }
+        }
+        $sawModule
+    }
+
+    if (-not (Test-SideLayout $newLines)) {
+        return $false
+    }
+
+    # The old side keys the deletion rule. When the base file had a test
+    # module, it must also satisfy the file-final convention and deletions
+    # are keyed on the old marker. When it had none, there is no test region
+    # to delete from and every non-blank deletion is a production change.
+    $oldMarker = 0
+    for ($i = $oldLines.Count - 1; $i -ge 0; $i--) {
+        if ($oldLines[$i].TrimEnd().TrimEnd("`r") -ceq '#[cfg(test)]') {
+            $oldMarker = $i + 1
+            break
+        }
+    }
+    $oldHasMarker = $oldMarker -ge 1
+    if ($oldHasMarker -and -not (Test-SideLayout $oldLines)) {
+        return $false
+    }
+
+    $newMarker = 0
+    for ($i = $newLines.Count - 1; $i -ge 0; $i--) {
+        if ($newLines[$i].TrimEnd().TrimEnd("`r") -ceq '#[cfg(test)]') {
+            $newMarker = $i + 1
+            break
+        }
+    }
+    if ($newMarker -lt 1) {
+        return $false
+    }
+
+    # Any non-blank changed line outside the test-module region keeps the
+    # file in scope: additions are keyed on the new-file marker, deletions
+    # on the old-file marker (or refused outright when the base file had no
+    # test module). Walk the hunk bodies tracking absolute line numbers
+    # (each "@@ -o[,n] +s[,len] @@" header reports the first body line on
+    # both sides), so a hunk that merely begins with the blank separators
+    # ahead of an added test module still qualifies while any production
+    # edit refuses.
+    $newLine = 0
+    $oldLine = 0
+    $inBody = $false
+    foreach ($line in ($diff.Stdout -split "`n")) {
+        $text = $line.TrimEnd("`r")
+        # Every "@@" header resets the counters, so multi-hunk diffs re-sync
+        # exactly like the bash walk.
+        if ($text.StartsWith('@@', [System.StringComparison]::Ordinal)) {
+            if ($text -cnotmatch '-(\d+)') {
+                return $false
+            }
+            $oldLine = [int]$Matches[1]
+            if ($text -cnotmatch '\+(\d+)') {
+                return $false
+            }
+            $newLine = [int]$Matches[1]
+            $inBody = $true
+            continue
+        }
+        if (-not $inBody) {
+            continue
+        }
+        if ($text.StartsWith('\', [System.StringComparison]::Ordinal)) {
+            # "\ No newline at end of file"
+            continue
+        }
+        if ($text.StartsWith('+', [System.StringComparison]::Ordinal)) {
+            if ($text.Trim().Length -gt 1 -and $newLine -lt $newMarker) {
+                return $false
+            }
+            $newLine++
+        } elseif ($text.StartsWith('-', [System.StringComparison]::Ordinal)) {
+            if ($text.Trim().Length -gt 1) {
+                if (-not $oldHasMarker) {
+                    return $false
+                }
+                if ($oldLine -lt $oldMarker) {
+                    return $false
+                }
+            }
+            $oldLine++
+        } else {
+            $newLine++
+            $oldLine++
+        }
+    }
+
+    $true
+}
+
+function Test-ChangelogContentVisibility {
+    # Lint the staged blob so the verdict matches what is being committed;
+    # nothing to lint when CHANGELOG.md is not part of the commit.
+    $blob = Invoke-Native -FileName "git" -Arguments @("show", ":CHANGELOG.md")
+    if ($blob.ExitCode -ne 0) {
+        Skip "Changelog content" "CHANGELOG.md not staged"
+        return
+    }
+
+    $inUnreleased = $false
+    $violations = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in ($blob.Stdout -split "`n")) {
+        $text = $line.TrimEnd("`r")
+        if ($text -ceq '## [Unreleased]') {
+            $inUnreleased = $true
+            continue
+        }
+        if ($inUnreleased -and $text.StartsWith('## [', [System.StringComparison]::Ordinal)) {
+            $inUnreleased = $false
+            continue
+        }
+        if (-not $inUnreleased) {
+            continue
+        }
+        foreach ($pattern in $script:ChangelogForbiddenBulletRes) {
+            if ($text -imatch $pattern) {
+                $violations.Add($text)
+                break
+            }
+        }
+    }
+
+    if ($violations.Count -gt 0) {
+        Fail "Changelog content" (@(
+                "[Unreleased] bullets must describe user-visible change only (issue #722):",
+                ($violations | ForEach-Object { "  - $_" }) -join "`n",
+                "Test and CI work is real but never user-visible; record it in the PR, tests, and issues."
+            ) -join "`n")
+        return
+    }
+
+    Pass "Changelog content"
+}
+
 function Test-ChangelogGate {
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ChangedFiles)
 
@@ -1675,11 +1889,20 @@ function Test-ChangelogGate {
         return
     }
 
-    $offenders = ($nonInternal | ForEach-Object { "  - $_" }) -join "`n"
+    # Test-module-only Rust diffs are internal work, not changelog material
+    # (issue #722); the checker applies the same exemption.
+    $remaining = @($nonInternal | Where-Object { -not (Test-FileDiffIsTestOnly -Path $_) })
+    if ($remaining.Count -eq 0) {
+        Pass "Changelog gate"
+        return
+    }
+
+    $offenders = ($remaining | ForEach-Object { "  - $_" }) -join "`n"
     Fail "Changelog gate" (@(
             "Non-internal changed files without a CHANGELOG.md update:",
             $offenders,
             "Add a Keep a Changelog entry under '## [Unreleased]' for user-facing impact.",
+            "Rust diffs confined to a file's trailing test module (at or after its last top-level #[cfg(test)] line) classify as internal.",
             "If a path is truly internal, add it to the internal-path lists in scripts/check-doc-consistency.sh and this hook."
         ) -join "`n")
 }
@@ -1879,6 +2102,9 @@ if (-not (Invoke-Check "Doc version sync" { Repair-DocVersionsIfNeeded -ChangedF
 # Mirror the hosted changelog gate at commit time (issue #700): a non-internal
 # change without a CHANGELOG.md update must fail here, not in hosted CI.
 if (-not (Invoke-Check "Changelog gate" { Test-ChangelogGate -ChangedFiles (Get-ChangelogGateChangedFiles) })) { Complete-PreCommit }
+
+# [Unreleased] entries stay user-visible (issue #722): no Tests:/CI: release notes.
+if (-not (Invoke-Check "Changelog content" { Test-ChangelogContentVisibility })) { Complete-PreCommit }
 
 if (-not (Invoke-Check "Hook speed policy" { Test-FastHookSource })) { Complete-PreCommit }
 $changedProductionRustFiles = [string[]]@($allChangedFiles | Where-Object { Test-ProductionRustSourcePath -Path $_ })

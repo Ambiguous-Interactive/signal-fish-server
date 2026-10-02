@@ -478,6 +478,10 @@ jobs:
           HEAD_SHA="${{ github.sha }}"
           git diff --name-only "$BASE_SHA...$HEAD_SHA" > changed-files.txt
 
+          # The doc-consistency step reuses this pair so the changelog gate can
+          # classify test-module-only Rust diffs as internal (issue #722).
+          echo "diff_base=${BASE_SHA}...${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+
           COUNT=$(wc -l < changed-files.txt | tr -d ' ')
           echo "Changed files count: $COUNT"
           cat changed-files.txt || true
@@ -541,7 +545,7 @@ jobs:
             SKIP_FLAG="--skip-changelog-gate"
           fi
           if [ "${#CHANGED_FILES[@]}" -gt 0 ]; then
-            bash scripts/check-doc-consistency.sh $SKIP_FLAG --changed-files "${CHANGED_FILES[@]}"
+            bash scripts/check-doc-consistency.sh $SKIP_FLAG --diff-base "${{ steps.changes.outputs.diff_base }}" --changed-files "${CHANGED_FILES[@]}"
           else
             bash scripts/check-doc-consistency.sh $SKIP_FLAG
           fi

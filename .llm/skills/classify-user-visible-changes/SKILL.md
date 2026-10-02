@@ -28,6 +28,9 @@ description: >-
 
 - If users can notice it, configure it, call it, or depend on it: update `CHANGELOG.md`.
 - If only internal tooling changed and user behavior is unchanged: usually no changelog entry.
+- Never add `Tests:` or `CI:` bullets. Regression pins, red-proof probes, and
+  workflow changes are internal quality work; their record lives in tests,
+  PRs, issues, and the audit ledger — never in the changelog.
 - When in doubt, treat as user-visible and add an entry.
 
 ---
@@ -42,8 +45,8 @@ description: >-
 | Breaking API/behavior | Yes | Yes | Add under `Changed` and label as breaking |
 | Security fix with user impact | Yes | Yes | Add under `Security` |
 | Pure refactor with no behavior change | No | No | Mention only in PR/commit notes |
-| CI workflow/internal script updates only | No | No | Unless they change user-facing release behavior |
-| Test-only changes | No | No | Unless they document a shipped behavior change |
+| CI workflow/internal script updates only | No | No | Changelog must stay free of CI notes |
+| Test-only changes, regression pins, red-proof probes | No | No | Never write a `Tests:` bullet; no exception |
 | Docs-only clarifications | Usually No | Optional | Required only if documenting a shipped behavior correction |
 
 ---
@@ -53,8 +56,12 @@ description: >-
 1. List changed files and the behavior affected.
 2. Ask: "Would a user of the server observe any change in behavior, API, performance, security, or configuration?"
 3. If yes, mark as changelog-required and open `CHANGELOG.md`.
-4. If no, explicitly note "internal-only change" in your task summary.
+4. If no, explicitly note "internal-only change" in your task summary and add no entry.
 5. If mixed changes exist, log user-visible parts only.
+6. If a change is test-only but touches non-internal paths, do not add an
+   entry to satisfy the changelog gate: Rust diffs confined to a file's
+   trailing test module are classified internal automatically, and a mixed
+   diff warrants a real user-visible entry (never a `Tests:` bullet).
 
 ---
 
@@ -64,6 +71,8 @@ description: >-
 - Performance work: include if measurable and user-relevant.
 - Docs updates: include only if they reflect a real shipped behavior change or migration requirement.
 - Unreleased feature edits: update existing unreleased bullet instead of creating duplicate fragmented bullets.
+- Test-support seams in production files (`#[cfg(test)]` additions): internal;
+  covered by the changelog gate's test-module exemption, not by an entry.
 
 ---
 
