@@ -1237,42 +1237,56 @@ every case family now carries a disposition.
   dropped by a caller (detached-job pin at the lane level), so the only
   caller-visible cancellation is process teardown (drain row).
 - **Red-first defect: panic released reservations without accounting.** A
-  panic inside the commit hook or the phase callback unwound through both
-  publication paths and dropped every held permit silently: no
-  `websocket_deliveries_canceled` movement, while the same terminal paths
-  reached by `Err`/`false` each count exactly once. Red evidence:
-  `panicking_commit_hook_releases_and_accounts_every_reservation` failed
-  with `left: 0, right: 4` and
+  panic inside the commit hook, the phase callback, or the broadcast replay
+  hook unwound through its publication path and dropped every held permit
+  silently: no `websocket_deliveries_canceled` movement, while the same
+  terminal paths reached by `Err`/`false` each count exactly once. Red
+  evidence: `panicking_commit_hook_releases_and_accounts_every_reservation`
+  failed with `left: 0, right: 4` and
   `panicking_phase_callback_accounts_remaining_frames_and_never_delivers_phase_one`
-  failed with `left: 0, right: 1`.
+  failed with `left: 0, right: 1` on the unfixed code; the broadcast
+  replay-hook pin was red-probed against the fixed code by disabling
+  `ConditionalReservationGuard`'s accounting flag (`left: 0, right: 2`);
+  the probe was reverted byte-identically.
 - **Fix (class sweep).** Reservation ownership on both publication paths now
-  flows through drop-accounting guards
-  (`RoomBatchReservationGuard`, `ConditionalReservationGuard`) that count
-  each still-undelivered reserved frame exactly once on any exit that is not
-  an explicit, accounted terminal path. The two explicit helper functions
-  and all twelve manual call sites were removed; the guards make a missed
-  accounting exit unreachable for the whole reservation-to-commit window,
-  including future early returns. The phase-cancel break defuses the guard
-  only after its explicit per-frame counting, so no outcome double-counts.
-- **New pins.** The two red tests above now pin: a panicking commit hook
-  delivers no frame, counts all four reserved frames exactly once, releases
-  recipient capacity (a follow-up transaction's worth of `try_send`
-  succeeds), and surfaces as the job's panic; a panicking phase callback
-  delivers phase zero exactly once, never delivers phase one, counts the
-  unpublished phase-one frame, and releases its capacity.
-- **Panic recovery shape (by inspection, no new pin).** Both panics surface
+  flows through drop-accounting guards (`RoomBatchReservationGuard` and a
+  sibling `ConditionalReservationGuard` of the same design) that count each
+  still-undelivered reserved frame exactly once on any exit that is not an
+  explicit, accounted terminal path. The two explicit helper functions and
+  all twelve manual call sites were removed; the guards cover the window
+  from guard arm (immediately after the batch reservation resolves) through
+  commit, so a missed accounting exit is unreachable there, including for
+  future early returns. The commit loop consumes permits through the guard,
+  so its own per-frame accounting never double-counts.
+- **New pins (one per fixed seam).** The three pins (two red-first, one
+  red-probed) cover each fixed seam. `panicking_commit_hook_releases_and_accounts_every_reservation`:
+  a panicking commit hook delivers no frame, counts all four reserved frames
+  exactly once, releases recipient capacity (a follow-up transaction's worth
+  of `try_send` succeeds), and surfaces as the job's panic.
+  `panicking_phase_callback_accounts_remaining_frames_and_never_delivers_phase_one`:
+  a panicking phase callback delivers phase zero exactly once, never
+  delivers phase one, counts the unpublished phase-one frame, and releases
+  its capacity.
+  `panicking_broadcast_replay_hook_releases_and_accounts_every_reservation`:
+  a panicking broadcast replay hook delivers no frame, counts both reserved
+  frames, and releases their capacity. All three bind the observed panic to
+  its sentinel message, not just to `is_panic`.
+- **Panic recovery shape (by inspection, no new pin).** Each panic surfaces
   as the room-event job's `JoinError`, which the lane isolates (pinned,
   `panicking_room_event_isolated_from_the_next_job`) and converts to a
   caller error, so each caller's existing publication-failure arm (for
   example the join fallback) runs unchanged. A panic after the hook's
   durable mutation commits leaves phase zero or nothing published; the
   reconnect baseline is the client-driven recovery path, matching the
-  recorded degraded-restore disposition.
+  recorded degraded-restore disposition. The broadcast pin drives
+  `broadcast_to_room_if_members_with_hook`, whose wrapper differs from the
+  production replay-hook callers only in membership filtering before the
+  same guarded core.
 - **Sibling sweep.** `broadcast_to_room_if_with_hook` had the same silent
-  window inside its replay hook; its reservations now flow through the same
-  guard, and its drain/continue/rejection paths keep their exact prior
-  accounting semantics. `reserve_one_if`'s parked waits were already fenced
-  (`ParkedWaitAccounting`, #417).
+  window inside its replay hook; its reservations now flow through a sibling
+  guard of the same design, and its drain/continue/rejection paths keep
+  their exact prior accounting semantics. `reserve_one_if`'s parked waits
+  were already fenced (`ParkedWaitAccounting`, #417).
 
 With this review, the coordination and queues coverage row is fully
 reviewed: its remaining reservation/commit cancellation and panic families
@@ -1318,7 +1332,7 @@ neither is a deployed capacity preset.
 | Room lifecycle and moderation: `src/server/room_service.rs`, `moderation.rs`, `spectator_service.rs`, `spectator_handlers.rs` | Join, leave, kick, ban, spectator state and ownership agree | `tests/lobby_integration_tests.rs`, `src/server/room_service_tests.rs`; C1 admission-limit, leave/disconnect ordering, and identity-slice completion reviews above | ARM-C001–C004 fixed in spectator and room-code seams; identity cases (concurrent limits, join-only, leave/disconnect, spectator transitions, kick/ban races, application isolation) reviewed and pinned or derived; storage-fault interleavings on other adapters remain | Partially reviewed |
 | Readiness and gameplay: `src/server/ready_state.rs`, `authority.rs`, `session_policy.rs`, `signaling.rs` | Membership and transport changes invalidate stale plans/readiness | `tests/v3_session_plan_e2e.rs`, `formal/tla/SignalFishSession.tla`; C1 gameplay-transitions review above | Start/leave, authority loss, v2/v3 negotiation, capability intersections, stale reports, downgrade reconnects, and publication order are reviewed and pinned (including the spectator start-authorization coupling); shared `src/server.rs` state seams remain | Partially reviewed |
 | Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs`; C1 cross-room stall fairness, mixed encoding/unsupported conversion, and permitted volatile loss reviews above | Slow-recipient isolation, cross-room stall fairness, the mixed encoding/unsupported conversion matrix (direct cohorts, lossless fallback, opaque refusal with exact gap plus advisory, pre-v3 advisory-only wire), and real-socket volatile eviction with exact reports plus a non-zero per-connection `dropped_for_you` (`flooded_nonreading_recipient_observes_exact_volatile_gaps_and_dropped_for_you`) are reviewed and pinned | Reviewed |
-| Coordination and queues: `src/coordination/**`, `src/distributed.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla`; C1 room-event duplicate-delivery, latest coalescing keys/generations, and transaction reservation/commit cancellation/panic reviews above | Lane job exactly-once and no lease re-run are dispositioned and pinned (`interleaved_awaits_deliver_each_lobby_broadcast_exactly_once`); cross-epoch gap ranges stay distinct per epoch (`cross_epoch_gaps_of_one_sender_stay_distinct_ranges`); latest key composition, generation shielding, supersession, saturation, and counter conservation are reviewed and pinned; cancellation/panic at reservation and commit are reviewed, the silent panic-accounting class is fixed, and both panic seams are pinned (`panicking_commit_hook_releases_and_accounts_every_reservation`, `panicking_phase_callback_accounts_remaining_frames_and_never_delivers_phase_one`) | Reviewed |
+| Coordination and queues: `src/coordination/**`, `src/distributed.rs`; the in-memory coordinator seams in `src/server.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla`; C1 room-event duplicate-delivery, latest coalescing keys/generations, and transaction reservation/commit cancellation/panic reviews above | Lane job exactly-once and no lease re-run are dispositioned and pinned (`interleaved_awaits_deliver_each_lobby_broadcast_exactly_once`); cross-epoch gap ranges stay distinct per epoch (`cross_epoch_gaps_of_one_sender_stay_distinct_ranges`); latest key composition, generation shielding, supersession, saturation, and counter conservation are reviewed and pinned; cancellation/panic at reservation and commit are reviewed, the silent panic-accounting class is fixed, and all three fixed seams are pinned (`panicking_commit_hook_releases_and_accounts_every_reservation`, `panicking_phase_callback_accounts_remaining_frames_and_never_delivers_phase_one`, `panicking_broadcast_replay_hook_releases_and_accounts_every_reservation`); other `src/server.rs` state seams remain with their own rows | Reviewed |
 | WebSocket ingress and egress: `src/websocket/**` | Bounded frames, priority control, close and drain semantics hold | `tests/transport_frame_limits_e2e.rs`, `tests/slow_consumer_no_cascade_e2e.rs` | Slow reader, batching age, TLS close paths | Unreviewed |
 | Reconnect and retry: `src/reconnection.rs`, `src/retry.rs`, `src/server/reconnection_service.rs` | Claims have one owner; replay and stale routes cannot leak or misroute | `tests/reconnect_window_races_e2e.rs`, `formal/tla/ReconnectionClaimLifecycle.tla`; C1 reaper-ordering, claim-expiry, failed-restore, token-rotation, and reconnect epoch/sequence reviews above | Simultaneous claim, expiry during claim, failed restore/retry, rotation boundaries, and reconnect epoch/sequence transitions (including cross-epoch gap accounting) are reviewed and pinned; `src/retry.rs` backoff seams and multi-failure detach accounting on failing backends remain | Partially reviewed |
 | Maintenance and deadlines: `src/server/maintenance.rs`, `heartbeat.rs`, `dashboard_cache.rs`, `src/deadline.rs` | Expiry and cleanup are bounded; live state survives sweeps | `formal/tla/RoomLifecycleGC.tla`, `tests/clock_source_scan.rs` | Exact expiry boundary; churn growth; dashboard cost | Unreviewed |
