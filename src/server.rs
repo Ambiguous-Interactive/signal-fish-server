@@ -2094,6 +2094,109 @@ enum RoomBatchReservation {
     Canceled,
 }
 
+/// Drop accounting for a room transaction's reserved-but-undelivered frames.
+///
+/// Armed from the moment the transaction owns reservations until its end.
+/// Every exit that is not the commit loop's own per-frame accounting —
+/// routing change, hook rejection, hook error, or an unwind between
+/// reservation and phase commit — releases the permits through this guard,
+/// so no reserved frame is released without its cancellation accounting.
+/// The commit loop consumes permits through [`Self::reservations_mut`], so
+/// taken frames are already `None` and are never counted here.
+struct RoomBatchReservationGuard<'a> {
+    metrics: &'a ServerMetrics,
+    reservations: &'a mut [RoomBatchReservation],
+}
+
+impl<'a> RoomBatchReservationGuard<'a> {
+    fn arm(metrics: &'a ServerMetrics, reservations: &'a mut Vec<RoomBatchReservation>) -> Self {
+        Self {
+            metrics,
+            reservations: reservations.as_mut_slice(),
+        }
+    }
+
+    fn get(&self) -> &[RoomBatchReservation] {
+        self.reservations
+    }
+
+    fn reservations_mut(&mut self) -> &mut [RoomBatchReservation] {
+        self.reservations
+    }
+}
+
+impl Drop for RoomBatchReservationGuard<'_> {
+    fn drop(&mut self) {
+        for reservation in self.reservations.iter() {
+            if let RoomBatchReservation::Reserved {
+                player_id, permits, ..
+            } = reservation
+            {
+                for _ in permits.iter().filter(|permit| permit.is_some()) {
+                    self.metrics.increment_websocket_deliveries_canceled();
+                    tracing::debug!(
+                        %player_id,
+                        "Room transaction reservation released without delivery"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Drop accounting for a conditional broadcast's reserved-but-undelivered
+/// frames.
+///
+/// Armed while the broadcast owns its reservations and defused by
+/// [`Self::release`] when the commit loop takes ownership. Any other exit —
+/// drain flip, routing change, or an unwind inside the replay hook — releases
+/// the permits through this guard, so no reserved frame is released without
+/// its cancellation accounting.
+struct ConditionalReservationGuard {
+    metrics: Arc<ServerMetrics>,
+    reservations: Vec<ConditionalDeliveryReservation>,
+    armed: bool,
+}
+
+impl ConditionalReservationGuard {
+    fn arm(
+        metrics: &Arc<ServerMetrics>,
+        reservations: Vec<ConditionalDeliveryReservation>,
+    ) -> Self {
+        Self {
+            metrics: Arc::clone(metrics),
+            reservations,
+            armed: true,
+        }
+    }
+
+    fn get(&self) -> &[ConditionalDeliveryReservation] {
+        &self.reservations
+    }
+
+    fn release(mut self) -> Vec<ConditionalDeliveryReservation> {
+        self.armed = false;
+        std::mem::take(&mut self.reservations)
+    }
+}
+
+impl Drop for ConditionalReservationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        for reservation in &self.reservations {
+            if let ConditionalDeliveryReservation::Reserved { player_id, .. } = reservation {
+                self.metrics.increment_websocket_deliveries_canceled();
+                tracing::debug!(
+                    %player_id,
+                    "Conditional broadcast reservation released without delivery"
+                );
+            }
+        }
+    }
+}
+
 /// Cancellation guard for one parked conditional-delivery wait.
 ///
 /// Every select arm inside a parked wait resolves the attempt (enqueued,
@@ -2785,14 +2888,6 @@ impl InMemoryMessageCoordinator {
         tracing::debug!(%player_id, "Conditional delivery canceled after attempt");
     }
 
-    fn record_reserved_cancellations(&self, reservations: &[ConditionalDeliveryReservation]) {
-        for reservation in reservations {
-            if let ConditionalDeliveryReservation::Reserved { player_id, .. } = reservation {
-                self.record_canceled_delivery(*player_id);
-            }
-        }
-    }
-
     /// Await `inner` under a parked-wait cancellation guard.
     ///
     /// Normal completion defuses the guard; cancelling the combined future
@@ -3369,19 +3464,6 @@ impl InMemoryMessageCoordinator {
         }
     }
 
-    fn record_batch_cancellations(&self, reservations: &[RoomBatchReservation]) {
-        for reservation in reservations {
-            if let RoomBatchReservation::Reserved {
-                player_id, permits, ..
-            } = reservation
-            {
-                for _ in permits {
-                    self.record_canceled_delivery(*player_id);
-                }
-            }
-        }
-    }
-
     fn batch_reservations_cover_recipients(
         reservations: &[RoomBatchReservation],
         recipients: &[(PlayerId, ClientDeliveryHandle)],
@@ -3425,7 +3507,8 @@ impl InMemoryMessageCoordinator {
 
             let recipients = self.collect_room_recipients(room_id, except_player).await;
 
-            let reservations =
+            let guard = ConditionalReservationGuard::arm(
+                &self.metrics,
                 futures_util::future::join_all(recipients.iter().map(|(player_id, handle)| {
                     self.reserve_one_if(
                         *player_id,
@@ -3436,10 +3519,10 @@ impl InMemoryMessageCoordinator {
                         None,
                     )
                 }))
-                .await;
+                .await,
+            );
 
             if *drain.borrow() || !should_send() {
-                self.record_reserved_cancellations(&reservations);
                 tracing::debug!(%room_id, ?except_player, "Conditional room broadcast canceled before replay record");
                 return Ok(false);
             }
@@ -3449,16 +3532,17 @@ impl InMemoryMessageCoordinator {
             // snapshot, not the room event itself. Cancel permits already held
             // for stable peers and retry resolution; aborting here would drop a
             // valid event for every stable recipient.
-            if reservations
+            if guard
+                .get()
                 .iter()
                 .any(|reservation| matches!(reservation, ConditionalDeliveryReservation::Canceled))
             {
-                self.record_reserved_cancellations(&reservations);
                 tokio::task::yield_now().await;
                 continue;
             }
 
-            let slow_consumers: Vec<(PlayerId, DeliverySender)> = reservations
+            let slow_consumers: Vec<(PlayerId, DeliverySender)> = guard
+                .get()
                 .iter()
                 .filter_map(|reservation| match reservation {
                     ConditionalDeliveryReservation::SlowConsumer { player_id, sender } => {
@@ -3470,7 +3554,6 @@ impl InMemoryMessageCoordinator {
                 })
                 .collect();
             if !slow_consumers.is_empty() {
-                self.record_reserved_cancellations(&reservations);
                 for (player_id, attempted_sender) in &slow_consumers {
                     self.remove_client_if_same_sender(*player_id, attempted_sender)
                         .await;
@@ -3505,21 +3588,18 @@ impl InMemoryMessageCoordinator {
                 current.sort_unstable();
                 expected.sort_unstable();
                 if current != expected {
-                    self.record_reserved_cancellations(&reservations);
                     tracing::debug!(%room_id, "Room broadcast canceled because published membership changed");
                     return Ok(false);
                 }
             }
 
-            if !Self::reservations_cover_recipients(&reservations, &current_recipients) {
-                self.record_reserved_cancellations(&reservations);
+            if !Self::reservations_cover_recipients(guard.get(), &current_recipients) {
                 drop(clients);
                 drop(room_players);
                 continue;
             }
 
             if *drain.borrow() || !should_send() {
-                self.record_reserved_cancellations(&reservations);
                 tracing::debug!(%room_id, ?except_player, "Conditional room broadcast canceled before replay record");
                 return Ok(false);
             }
@@ -3536,6 +3616,7 @@ impl InMemoryMessageCoordinator {
                 return Ok(false);
             };
             before_send().await;
+            let reservations = guard.release();
 
             let mut delivered = false;
             for reservation in reservations {
@@ -4192,30 +4273,34 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             let Some(reservation_inputs) = reservation_inputs else {
                 anyhow::bail!("validated room transaction recipient lost its message batch");
             };
-            let reservations = futures_util::future::join_all(reservation_inputs.into_iter().map(
-                |(player_id, handle, frame_count)| {
-                    self.reserve_room_batch(
-                        player_id,
-                        handle,
-                        frame_count,
-                        &should_send,
-                        drain.clone(),
-                        *room_id,
-                    )
-                },
-            ))
-            .await;
+            let mut reservations =
+                futures_util::future::join_all(reservation_inputs.into_iter().map(
+                    |(player_id, handle, frame_count)| {
+                        self.reserve_room_batch(
+                            player_id,
+                            handle,
+                            frame_count,
+                            &should_send,
+                            drain.clone(),
+                            *room_id,
+                        )
+                    },
+                ))
+                .await;
 
-            if reservations
+            let mut guard = RoomBatchReservationGuard::arm(&self.metrics, &mut reservations);
+
+            if guard
+                .get()
                 .iter()
                 .any(|reservation| matches!(reservation, RoomBatchReservation::Canceled))
             {
-                self.record_batch_cancellations(&reservations);
                 tokio::task::yield_now().await;
                 continue;
             }
 
-            let unavailable_recipients: Vec<(PlayerId, DeliverySender)> = reservations
+            let unavailable_recipients: Vec<(PlayerId, DeliverySender)> = guard
+                .get()
                 .iter()
                 .filter_map(|reservation| match reservation {
                     RoomBatchReservation::SlowConsumer { player_id, sender }
@@ -4226,7 +4311,6 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 })
                 .collect();
             if !unavailable_recipients.is_empty() {
-                self.record_batch_cancellations(&reservations);
                 for (player_id, attempted_sender) in &unavailable_recipients {
                     self.remove_client_if_same_sender(*player_id, attempted_sender)
                         .await;
@@ -4256,9 +4340,8 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 .collect();
             current_members.sort_unstable();
             if current_members != expected
-                || !Self::batch_reservations_cover_recipients(&reservations, &current_recipients)
+                || !Self::batch_reservations_cover_recipients(guard.get(), &current_recipients)
             {
-                self.record_batch_cancellations(&reservations);
                 return Ok(RoomMessageTransactionOutcome::RoutingChanged);
             }
 
@@ -4266,26 +4349,22 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             drop(room_players);
 
             let Some(commit_hook) = before_send.take() else {
-                self.record_batch_cancellations(&reservations);
                 anyhow::bail!("room message transaction hook was already consumed");
             };
             match commit_hook().await {
                 Ok(true) => {}
                 Ok(false) => {
-                    self.record_batch_cancellations(&reservations);
                     return Ok(RoomMessageTransactionOutcome::HookRejected);
                 }
                 Err(error) => {
-                    self.record_batch_cancellations(&reservations);
                     return Err(error);
                 }
             }
 
-            let mut reservations = reservations;
             let mut failed_frames = 0_usize;
             for phase in 0..max_phases {
                 let failed_before_phase = failed_frames;
-                for reservation in &mut reservations {
+                for reservation in guard.reservations_mut() {
                     let RoomBatchReservation::Reserved {
                         player_id,
                         permits,
@@ -4317,14 +4396,16 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                     let Some(message) = batch.message_in_phase(phase) else {
                         continue;
                     };
+                    // `message_in_phase` returned `Some`, so `phase` is inside
+                    // this batch's phase range. The impossible fall-through arm
+                    // must not record a cancellation: the still-armed guard
+                    // owns the metric for any permit it leaves behind.
                     let Some(permit_index) = phase.checked_sub(batch.first_phase) else {
                         failed_frames = failed_frames.saturating_add(1);
-                        self.record_canceled_delivery(*player_id);
                         tracing::error!(
                             %room_id,
                             %player_id,
                             phase,
-                            first_phase = batch.first_phase,
                             "Room transaction phase preceded its batch origin"
                         );
                         continue;
@@ -4385,18 +4466,15 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                         }
                     };
                     if !continue_publication {
-                        for reservation in &reservations {
-                            let RoomBatchReservation::Reserved {
-                                player_id, permits, ..
-                            } = reservation
-                            else {
+                        // The outcome field must name every unpublished frame;
+                        // the still-armed guard counts their cancellation
+                        // metric exactly once at drop.
+                        for reservation in guard.get() {
+                            let RoomBatchReservation::Reserved { permits, .. } = reservation else {
                                 continue;
                             };
                             let skipped = permits.iter().filter(|permit| permit.is_some()).count();
                             failed_frames = failed_frames.saturating_add(skipped);
-                            for _ in 0..skipped {
-                                self.record_canceled_delivery(*player_id);
-                            }
                         }
                         break;
                     }
