@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tests: pin latest coalescing key-value isolation (#647, C1 delivery). The
+  latest coalescing scan matches the full `(from_player, room_id, key)`
+  composition, so two distinct keys of one sender in one room are
+  independent streams: both newest values deliver, each keeping its own key
+  metadata. A scan that dropped the key discriminant would coalesce
+  unrelated state channels and report a causal gap for data that was never
+  superseded. Red-proofed by probing the key to a constant: the second
+  value superseded the first and the pin failed.
+
 - Tests: pin cross-epoch exact gap accounting (#647, C1 delivery). Each
   reconnect bumps a sender's incarnation epoch and restarts its `seq` at 1,
   so loss ranges from different epochs overlap numerically. The gap merge

@@ -1014,6 +1014,79 @@ With this review, the delivery slice's reconnect epoch/sequence family has a
 recorded disposition. The coverage rows for reconnection and coordination
 gain the new evidence; their remaining items are unchanged.
 
+### C1 latest coalescing keys and generations review (2026-10-01)
+
+At `b851bf50` (main after #717), reviewed the delivery slice's "latest
+coalescing keys and generations" case families. Disposition per family; no
+violation was reproduced. One explicit-pin gap was closed.
+
+- **Key composition `(from_player, room_id, key)`.** An equal application
+  key from a different sender, routed through a different room, or carrying
+  a different key value is an independent stream. Owner and room isolation
+  are pinned (`latest_supersede_requires_matching_stream_owner_and_room`);
+  the key value now has its own pin
+  (`latest_supersede_requires_the_matching_key_value`): two keys of one
+  sender in one room both deliver in enqueue order with no supersession
+  counter movement and no gap report. Red-proofed by probing `latest_key()`
+  to a constant key: the second value superseded the first (`losses: 1`)
+  and the pin failed on the enqueue outcome; the probe was reverted
+  byte-identically. Cross-epoch, the key deliberately excludes `epoch` so
+  one logical stream continues across a sender's reconnect; the
+  supersession report carries the replaced (older) incarnation's epoch
+  (`latest_key_spans_sender_epochs_and_reports_the_replaced_epoch`).
+- **Class/key contract at dispatch.** A v3 `latest` frame without `key`, a
+  `reliable`/`volatile` frame with one, and any class/key on a pre-v3
+  sender are refused `InvalidDeliveryClass` before the payload cap and the
+  relay-budget charge, before fan-out, and without consuming a relay
+  sequence (pinned e2e `invalid_delivery_class_does_not_consume_a_relay_sequence`
+  over all four illegal pairings;
+  `pre_v3_sender_with_delivery_metadata_rejects_invalid_delivery_class`;
+  v2 wire tests). The queue's `InvalidMetadata` fail-closed guard is
+  defense in depth behind the dispatch gate
+  (`queue_rejects_control_data_and_mismatched_delivery_metadata`).
+- **Generation shielding.** After a room transition, the coalescing scan
+  and the volatile-eviction scan match only current-generation rows: a
+  stale-generation same-key row is neither superseded nor evicted, stale
+  rows drain in fence order before the transition barrier, and a
+  dropped-full report lands after the barrier
+  (`room_transition_shields_stale_generation_rows_from_latest_scans`).
+  A stale-scope arrival is canceled by `scope_matches` before any scan.
+- **Supersession mechanics.** Each supersession removes the exact
+  predecessor, emits its causal `LatestSuperseded` gap carrying the
+  predecessor's `(from_player, epoch, seq)`, and enqueues the successor
+  with the key's original pendency time, so a continuously superseded key
+  neither extends its coalesce deadline nor loses its causal report
+  (`latest_supersession_appends_successor_and_reports_exact_predecessor`;
+  e2e `latest_coalescing_reports_exact_gap_before_successor`; the
+  anti-starvation bound is pinned by
+  `continuously_superseded_latest_key_still_reaches_the_socket`).
+- **Saturation paths.** A latest arrival at a full data lane evicts the
+  oldest current-generation volatile with a causal `VolatileDropped`
+  report, never a reliable row; with no eligible victim the arrival drops
+  with `LatestDroppedFull` (`full_latest_evicts_oldest_volatile_before_dropping_arrival`,
+  `volatile_replaces_oldest_volatile_but_never_reliable`,
+  `sustained_latest_overload_coalesces_reports_without_fail_close`); an
+  unreportable loss fails closed
+  (`lossy_change_fails_closed_when_report_lane_is_full`).
+- **Coalescing window.** Only a `Latest` front arms the batch window and it
+  releases on window elapse, batch threshold, or queue progress; an
+  interleaved control pop never consumes the armed budget; the pre-v3
+  legacy lane never coalesces and fails closed on a `Some(Latest)` row
+  (`regression_198_latest_behind_reliable_still_coalesces`,
+  `interleaved_control_pop_preserves_armed_latest_batch_budget`,
+  `pre_v3_data_never_arms_latest_coalescing_deadline`,
+  `latest_row_on_legacy_lane_fails_closed_as_accountability_breach`).
+- **Counter conservation.** Per-class counters conserve every terminal
+  outcome, including latest supersession
+  (`per_class_metrics_conserve_every_terminal_outcome`).
+
+With this review, the delivery slice's latest coalescing keys/generations
+family has a recorded disposition. The coordination and queues coverage row
+gains the new evidence and moves to partially reviewed: its delivery-side
+queue families are dispositioned, while the reservation/commit
+cancellation and panic seam of `RoomMessageTransaction` still needs its own
+review.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -1052,7 +1125,7 @@ neither is a deployed capacity preset.
 | Room lifecycle and moderation: `src/server/room_service.rs`, `moderation.rs`, `spectator_service.rs`, `spectator_handlers.rs` | Join, leave, kick, ban, spectator state and ownership agree | `tests/lobby_integration_tests.rs`, `src/server/room_service_tests.rs`; C1 admission-limit, leave/disconnect ordering, and identity-slice completion reviews above | ARM-C001–C004 fixed in spectator and room-code seams; identity cases (concurrent limits, join-only, leave/disconnect, spectator transitions, kick/ban races, application isolation) reviewed and pinned or derived; storage-fault interleavings on other adapters remain | Partially reviewed |
 | Readiness and gameplay: `src/server/ready_state.rs`, `authority.rs`, `session_policy.rs`, `signaling.rs` | Membership and transport changes invalidate stale plans/readiness | `tests/v3_session_plan_e2e.rs`, `formal/tla/SignalFishSession.tla`; C1 gameplay-transitions review above | Start/leave, authority loss, v2/v3 negotiation, capability intersections, stale reports, downgrade reconnects, and publication order are reviewed and pinned (including the spectator start-authorization coupling); shared `src/server.rs` state seams remain | Partially reviewed |
 | Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs`; C1 cross-room stall fairness review above | Slow-recipient isolation and cross-room stall fairness are reviewed and pinned (`stalled_room_does_not_strand_a_healthy_room`); mixed conversion refusal remains | Partially reviewed |
-| Coordination and queues: `src/coordination/**`, `src/distributed.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla`; C1 room-event duplicate-delivery disposition above | Lane job exactly-once and no lease re-run are dispositioned and pinned (`interleaved_awaits_deliver_each_lobby_broadcast_exactly_once`); cross-epoch gap ranges stay distinct per epoch (`cross_epoch_gaps_of_one_sender_stay_distinct_ranges`); cancellation/panic at reservation and commit remain | Unreviewed |
+| Coordination and queues: `src/coordination/**`, `src/distributed.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla`; C1 room-event duplicate-delivery disposition and latest coalescing keys/generations review above | Lane job exactly-once and no lease re-run are dispositioned and pinned (`interleaved_awaits_deliver_each_lobby_broadcast_exactly_once`); cross-epoch gap ranges stay distinct per epoch (`cross_epoch_gaps_of_one_sender_stay_distinct_ranges`); latest key composition, generation shielding, supersession, saturation, and counter conservation are reviewed and pinned; cancellation/panic at reservation and commit remain | Partially reviewed |
 | WebSocket ingress and egress: `src/websocket/**` | Bounded frames, priority control, close and drain semantics hold | `tests/transport_frame_limits_e2e.rs`, `tests/slow_consumer_no_cascade_e2e.rs` | Slow reader, batching age, TLS close paths | Unreviewed |
 | Reconnect and retry: `src/reconnection.rs`, `src/retry.rs`, `src/server/reconnection_service.rs` | Claims have one owner; replay and stale routes cannot leak or misroute | `tests/reconnect_window_races_e2e.rs`, `formal/tla/ReconnectionClaimLifecycle.tla`; C1 reaper-ordering, claim-expiry, failed-restore, token-rotation, and reconnect epoch/sequence reviews above | Simultaneous claim, expiry during claim, failed restore/retry, rotation boundaries, and reconnect epoch/sequence transitions (including cross-epoch gap accounting) are reviewed and pinned; `src/retry.rs` backoff seams and multi-failure detach accounting on failing backends remain | Partially reviewed |
 | Maintenance and deadlines: `src/server/maintenance.rs`, `heartbeat.rs`, `dashboard_cache.rs`, `src/deadline.rs` | Expiry and cleanup are bounded; live state survives sweeps | `formal/tla/RoomLifecycleGC.tla`, `tests/clock_source_scan.rs` | Exact expiry boundary; churn growth; dashboard cost | Unreviewed |
