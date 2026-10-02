@@ -528,8 +528,8 @@ async fn latest_coalescing_reports_exact_gap_before_successor() {
 
     let class_metrics = server.metrics().delivery_metrics_by_class().latest;
     assert_eq!(class_metrics.attempted, 2);
-    assert_eq!(class_metrics.delivered, 1);
     assert_eq!(class_metrics.superseded, 1);
+    settled_class_delivered(&server, DeliveryClass::Latest, 1).await;
     running_server.shutdown().await;
 }
 
@@ -1243,24 +1243,10 @@ async fn flooded_nonreading_recipient_observes_exact_volatile_gaps_and_dropped_f
         max_reported_dropped, missing,
         "reported cumulative volatile.dropped must equal the exact missing count"
     );
-    // The writer task records a delivered row only after its socket write
-    // resolves, so the class ledger can lag the recipient's observation by a
-    // scheduling beat: settle before asserting conservation. A counter that
-    // never settles fails the deadline below.
-    let settle_deadline = tokio::time::Instant::now() + SERVER_MESSAGE_TIMEOUT;
-    let class_metrics = loop {
-        let class_metrics = metrics.delivery_metrics_by_class().volatile;
-        if class_metrics.delivered == delivered_in_stream {
-            break class_metrics;
-        }
-        assert!(
-            tokio::time::Instant::now() < settle_deadline,
-            "volatile delivered counter never settled: server={}, \
-             observed={delivered_in_stream}",
-            class_metrics.delivered
-        );
-        tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
-    };
+    // Settle the class ledger before asserting conservation (the writer
+    // records a delivered row only after its socket write resolves).
+    settled_class_delivered(&server, DeliveryClass::Volatile, delivered_in_stream).await;
+    let class_metrics = metrics.delivery_metrics_by_class().volatile;
     assert_eq!(
         class_metrics.dropped, missing,
         "server-wide volatile drop counter must equal the exact missing count"
@@ -1338,6 +1324,32 @@ async fn flooded_nonreading_recipient_observes_exact_volatile_gaps_and_dropped_f
 /// Sum of the inclusive range lengths recorded so far.
 fn total_range_len(ranges: &[(u64, u64)]) -> u64 {
     ranges.iter().map(|&(lo, hi)| hi - lo + 1).sum()
+}
+
+/// Wait for the server-side class ledger to settle at `expected` delivered
+/// rows. The writer records a delivered row only after its socket write
+/// resolves, so a live sample can lag the recipient's observation by a
+/// scheduling beat; a ledger that settles anywhere else fails the deadline
+/// with both values.
+async fn settled_class_delivered(server: &EnhancedGameServer, class: DeliveryClass, expected: u64) {
+    let deadline = tokio::time::Instant::now() + SERVER_MESSAGE_TIMEOUT;
+    loop {
+        let by_class = server.metrics().delivery_metrics_by_class();
+        let delivered = match class {
+            DeliveryClass::Reliable => by_class.reliable.delivered,
+            DeliveryClass::Latest => by_class.latest.delivered,
+            DeliveryClass::Volatile => by_class.volatile.delivered,
+        };
+        if delivered == expected {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{class:?} delivered counter never settled: server={delivered}, \
+             expected={expected}"
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+    }
 }
 
 /// Read text frames until the next server message of `type_name`, returning its
