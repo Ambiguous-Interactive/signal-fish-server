@@ -185,6 +185,15 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   cleanup racing join/reconnect; deadlines at before/equal/after boundaries;
   wall-clock changes versus monotonic expiry; drain/shutdown with queued data
   and active reconnect claims; process-loss behavior versus documented limits.
+  The transaction reservation/commit cancellation and panic seam is reviewed
+  (audit ledger, 2026-10-02): structured cancellation at every pre-hook await
+  was already explicit, the silent panic-accounting class (hook and phase
+  callback panics released reserved frames without cancellation accounting)
+  is fixed with drop-accounting guards on both publication paths, both panic
+  seams are pinned (no frame past the panic, exact once accounting, capacity
+  release), and the panic-recovery shape (lane job isolation plus the
+  caller's publication-failure arm and the reconnect baseline) carries a
+  recorded disposition.
 - [ ] **Resource and input safety:** queue and replay bounds; inactive records;
   pending detach/claim retention; task ownership; metrics label cardinality;
   parser depth, size, malformed frames, Unicode, and numeric boundaries;

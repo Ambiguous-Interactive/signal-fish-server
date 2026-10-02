@@ -3365,6 +3365,164 @@ async fn classified_hook_rejection_and_error_release_every_reservation() {
 }
 
 #[tokio::test]
+async fn panicking_commit_hook_releases_and_accounts_every_reservation() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(1),
+        Arc::clone(&metrics),
+    ));
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0490);
+    let alice = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0491);
+    let bob = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0492);
+    let (alice_handle, alice_sender, _alice_next, mut alice_receiver) =
+        classified_room_member(room_id, alice).await;
+    let (bob_handle, bob_sender, _bob_next, mut bob_receiver) =
+        classified_room_member(room_id, bob).await;
+    coordinator
+        .register_local_client(alice, Some(room_id), alice_handle)
+        .await
+        .expect("register classified Alice");
+    coordinator
+        .register_local_client(bob, Some(room_id), bob_handle)
+        .await
+        .expect("register classified Bob");
+
+    let transaction = {
+        let coordinator = Arc::clone(&coordinator);
+        tokio::spawn(async move {
+            coordinator
+                .commit_room_messages_if_members_with_hook(
+                    &room_id,
+                    &[alice, bob],
+                    vec![two_frame_batch(alice), two_frame_batch(bob)],
+                    Box::new(|| {
+                        Box::pin(async {
+                            panic!("sentinel commit hook panic");
+                        })
+                    }),
+                    Box::new(|_| true),
+                )
+                .await
+        })
+    };
+    let join_error = transaction
+        .await
+        .expect_err("a panicking commit hook must surface as a job panic");
+    assert!(join_error.is_panic(), "the failure must be the hook panic");
+    assert_eq!(
+        metrics
+            .websocket_deliveries_canceled
+            .load(Ordering::Relaxed),
+        4,
+        "every reservation released by the panic must be counted exactly once"
+    );
+    for (receiver, player) in [(&mut alice_receiver, alice), (&mut bob_receiver, bob)] {
+        let unexpected_frame = receiver.try_recv();
+        assert!(
+            matches!(
+                unexpected_frame,
+                Err(crate::coordination::outbound_queue::TryReceiveError::Empty)
+            ),
+            "a panicking hook must deliver no frame to {player}"
+        );
+    }
+    for (sender, receiver, player) in [
+        (&alice_sender, &mut alice_receiver, alice),
+        (&bob_sender, &mut bob_receiver, bob),
+    ] {
+        for _ in 0..2 {
+            sender
+                .try_send(Arc::new(ServerMessage::Pong), Some(room_id))
+                .unwrap_or_else(|error| {
+                    panic!("reservations for {player} leaked after the panic: {error:?}")
+                });
+        }
+        for _ in 0..2 {
+            assert!(receiver
+                .recv()
+                .await
+                .expect("classified queue remains accountable")
+                .is_some());
+        }
+    }
+}
+
+#[tokio::test]
+async fn panicking_phase_callback_accounts_remaining_frames_and_never_delivers_phase_one() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(1),
+        Arc::clone(&metrics),
+    ));
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0493);
+    let player = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0494);
+    let (handle, sender, _next, mut receiver) = classified_room_member(room_id, player).await;
+    coordinator
+        .register_local_client(player, Some(room_id), handle)
+        .await
+        .expect("register classified transaction member");
+
+    let transaction = {
+        let coordinator = Arc::clone(&coordinator);
+        tokio::spawn(async move {
+            coordinator
+                .commit_room_messages_if_members_with_hook(
+                    &room_id,
+                    &[player],
+                    vec![two_frame_batch(player)],
+                    Box::new(|| Box::pin(async { Ok(true) })),
+                    Box::new(|_| panic!("sentinel phase callback panic")),
+                )
+                .await
+        })
+    };
+    let join_error = transaction
+        .await
+        .expect_err("a panicking phase callback must surface as a job panic");
+    assert!(
+        join_error.is_panic(),
+        "the failure must be the callback panic"
+    );
+    let phase_zero = receiver
+        .recv()
+        .await
+        .expect("phase zero must stay delivered")
+        .expect("classified queue remains accountable");
+    assert!(
+        matches!(
+            phase_zero.payload,
+            crate::coordination::outbound_queue::OutboundPayload::Message(ref message)
+                if matches!(message.as_ref(), ServerMessage::Pong)
+        ),
+        "phase zero must be the only delivered frame, got {phase_zero:?}"
+    );
+    let unexpected_phase_one = receiver.try_recv();
+    assert!(matches!(
+        unexpected_phase_one,
+        Err(crate::coordination::outbound_queue::TryReceiveError::Empty)
+    ));
+    assert_eq!(
+        metrics
+            .websocket_deliveries_canceled
+            .load(Ordering::Relaxed),
+        1,
+        "the unpublished phase-one frame released by the panic must be counted"
+    );
+    for _ in 0..2 {
+        sender
+            .try_send(Arc::new(ServerMessage::Pong), Some(room_id))
+            .expect("the released phase-one permit must free capacity");
+    }
+    for _ in 0..2 {
+        assert!(receiver
+            .recv()
+            .await
+            .expect("classified queue remains accountable")
+            .is_some());
+    }
+}
+
+#[tokio::test]
 async fn room_transaction_commits_every_phase_zero_frame_before_phase_one() {
     let coordinator = InMemoryMessageCoordinator::new();
     let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0430);
