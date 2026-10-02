@@ -27,7 +27,8 @@ description: >-
 ## Severity Rubric
 
 - `CRITICAL`: Wrong section, missing required entry, non-user-facing noise
-  for internal-only changes, or broken structure under `[Unreleased]`.
+  for internal-only changes, a `Tests:` or `CI:` bullet anywhere under
+  `[Unreleased]`, or broken structure under `[Unreleased]`.
 - `WARNING`: Vague wording, missing breaking label, duplicate or conflicting bullets.
 - `SUGGESTION`: Clarity or concision improvements.
 
@@ -40,6 +41,7 @@ description: >-
 - [ ] Section headers follow canonical order: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`
 - [ ] No custom non-standard categories are used
 - [ ] Entry describes user-visible impact, not internal refactor details
+- [ ] No `Tests:` or `CI:` bullets; test and CI work never appear in the changelog
 - [ ] Section choice is correct (`Added/Changed/Deprecated/Removed/Fixed/Security`)
 - [ ] Breaking changes use `**Breaking:**`
 - [ ] No accidental edits to previously released sections
@@ -68,6 +70,7 @@ PASS: CHANGELOG.md entries are compliant and high quality.
 
 - Move runtime bug-fix entries from `Changed` to `Fixed`.
 - Replace implementation-heavy text with user outcomes.
+- Delete `Tests:`/`CI:` bullets outright; the evidence belongs in tests, PRs, and issues.
 - Merge multiple bullets that describe the same unreleased feature adjustment.
 - Add migration note and `**Breaking:**` marker where compatibility changed.
 

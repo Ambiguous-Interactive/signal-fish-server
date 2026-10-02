@@ -5,7 +5,11 @@
 # 1) Selected project version references are synchronized with Cargo.toml package version.
 # 2) CHANGELOG.md follows Keep a Changelog structure and link conventions.
 # 3) Non-internal changed files are accompanied by a CHANGELOG.md update.
+#    Rust diffs confined to a file's trailing test module are internal work:
+#    tests never change user-visible behavior, so they never require an entry
+#    (issue #722 — the changelog records user-visible changes only).
 # 4) Public protocol/.llm references do not drift from canonical wire samples.
+# 5) [Unreleased] bullets stay user-visible: no "Tests:"/"CI:" release notes.
 #
 # Usage:
 #   ./scripts/check-doc-consistency.sh
@@ -35,6 +39,17 @@ WARNINGS=0
 VERSION_DRIFT=0
 CHANGED_MODE=none
 SKIP_CHANGELOG_GATE=0
+DIFF_BASE=
+
+# [Unreleased] bullets must describe user-visible change only (issue #722).
+# Test and CI work is real but never user-visible; its evidence lives in
+# tests, pull requests, and issues rather than in release notes. POSIX ERE
+# (bash =~ is case-sensitive, so both cases are spelled out; the PowerShell
+# mirror $script:ChangelogForbiddenBulletRes in scripts/hooks/pre-commit.ps1
+# matches case-insensitively). The prefix tolerates indentation and markup
+# wrappers so `- **Tests:** ...` cannot slip through. Lockstep is kept by
+# tests/doc_consistency_policy_tests.rs.
+CHANGELOG_FORBIDDEN_BULLET_RE='^[[:space:]]*-+[[:space:]]*[*_"`]*[[:space:]]*([Tt]ests?|[Cc][Ii])[[:space:]]*:'
 
 declare -a CHANGED_FILES=()
 
@@ -62,9 +77,14 @@ Usage:
   ./scripts/check-doc-consistency.sh
   ./scripts/check-doc-consistency.sh --staged
   ./scripts/check-doc-consistency.sh --changed-files <file1> <file2> ...
-  ./scripts/check-doc-consistency.sh --skip-changelog-gate [--staged|--changed-files ...]
+  ./scripts/check-doc-consistency.sh [--diff-base <rev>] [--skip-changelog-gate] [--staged|--changed-files ...]
 
 Options:
+  --diff-base <rev>      Git revision the --changed-files list is diffed
+                         against (for example "BASE...HEAD"). Enables the
+                         test-module-only exemption of the changelog gate;
+                         without it, changed-file mode treats every
+                         non-internal Rust file as production.
   --skip-changelog-gate  Skip the changelog-required gate (check 3). All other
                          consistency checks still run. Intended for automated
                          PRs (e.g. dependabot) where changelog entries are not
@@ -82,6 +102,15 @@ while [ "$#" -gt 0 ]; do
         --skip-changelog-gate)
             SKIP_CHANGELOG_GATE=1
             shift
+            ;;
+        --diff-base)
+            if [ "$#" -le 1 ] || [[ "$2" == --* ]]; then
+                action_error "--diff-base requires a Git revision argument"
+                usage
+                exit 2
+            fi
+            DIFF_BASE="$2"
+            shift 2
             ;;
         --changed-files)
             CHANGED_MODE=explicit
@@ -489,7 +518,34 @@ validate_changelog() {
     done
 }
 
+# [Unreleased] entries must describe user-visible change only (issue #722):
+# the changelog is the release-notes source, so test and CI work must stay
+# out of it no matter which gate forced a changelog touch. Released sections
+# are frozen history and are not re-linted.
+validate_unreleased_user_visibility() {
+    local file="CHANGELOG.md"
+    local in_unreleased=0
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            "## [Unreleased]")
+                in_unreleased=1
+                continue
+                ;;
+            "## ["*)
+                in_unreleased=0
+                continue
+                ;;
+        esac
+        [ "$in_unreleased" -eq 1 ] || continue
+        if [[ "$line" =~ ${CHANGELOG_FORBIDDEN_BULLET_RE} ]]; then
+            action_error "CHANGELOG.md [Unreleased] bullet is not user-visible (issue #722: no test/CI entries): $line"
+        fi
+    done < <(tr -d '\r' < "$file")
+}
+
 validate_changelog
+validate_unreleased_user_visibility
 
 # ---------------------------------------------------------------------------
 # 3) Protocol quick-reference anti-drift checks
@@ -636,6 +692,186 @@ done
 # 4) Changelog-required gate for non-internal changed files
 # ---------------------------------------------------------------------------
 
+# Test-module-only diff detection: a non-internal Rust file whose changed
+# lines all sit inside the file-final test module carries only unit-test
+# work. Tests and their seams never change user-visible behavior, so they
+# never warrant a changelog entry (issue #722: the changelog records
+# user-visible changes only). The exemption requires the file-final layout
+# convention on BOTH sides of the diff: the last top-level `#[cfg(test)]`
+# marker opens the test module and no top-level item follows it. Additions
+# are keyed on the new-file marker; deletions are keyed on the old-file
+# marker, and a base file whose items continue past the module forfeits the
+# exemption — deleting that trailing production code is a production change.
+file_diff_is_test_only() {
+    local path="$1"
+    case "$path" in
+        *.rs) ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    local diff_cmd old_content_cmd new_content_cmd
+    case "$CHANGED_MODE" in
+        staged)
+            diff_cmd=(git diff --cached -U0 -- "$path")
+            # Hunks and content must describe the same trees: the index
+            # against HEAD.
+            new_content_cmd=(git show ":$path")
+            old_content_cmd=(git show "HEAD:$path")
+            ;;
+        explicit)
+            # Without a diff base (ad-hoc local invocations, fixtures) the
+            # changed-file mode cannot see hunks; fall back to treating the
+            # file as production. An "A...B" pair diffs from the merge base,
+            # so the old-content read must use that merge base, not A's tip.
+            [ -n "$DIFF_BASE" ] || return 1
+            diff_cmd=(git diff "$DIFF_BASE" -U0 -- "$path")
+            local old_rev="${DIFF_BASE%%...*}"
+            if [[ "$DIFF_BASE" == *"..."* ]]; then
+                old_rev="$(git merge-base "${DIFF_BASE%%...*}" "${DIFF_BASE##*...}" 2>/dev/null || true)"
+            fi
+            [ -n "$old_rev" ] || return 1
+            new_content_cmd=(cat "$path")
+            old_content_cmd=(git show "${old_rev}:$path")
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    local diff_output
+    diff_output="$("${diff_cmd[@]}" 2>/dev/null || true)"
+    [ -n "$diff_output" ] || return 1
+    grep -q '^@@ ' <<< "$diff_output" || return 1
+
+    local new_content old_content
+    new_content="$("${new_content_cmd[@]}" 2>/dev/null || true)"
+    old_content="$("${old_content_cmd[@]}" 2>/dev/null || true)"
+    [ -n "$new_content" ] || return 1
+    [ -n "$old_content" ] || return 1
+
+    # File-final layout convention: the last top-level `#[cfg(test)]` marker
+    # opens the test module and no top-level item follows it. Between the
+    # marker and the module, blank lines, attributes, and comments may
+    # appear. After the module opens, only blank lines, indented lines, and
+    # closing punctuation may continue at column 0 — anything else (a later
+    # item, keyword- or macro-led) means the module is not file-final and
+    # the file forfeits the exemption.
+    content_layout_marker_line() {
+        local content="$1"
+        local marker_line
+        marker_line="$(grep -n '^#\[cfg(test)\][[:space:]]*$' <<< "$content" | tail -n 1 | cut -d: -f1 || true)"
+        [ -n "$marker_line" ] || return 1
+
+        local saw_module=0
+        local line_number=0
+        local line
+        while IFS= read -r line || [ -n "$line" ]; do
+            line_number=$((line_number + 1))
+            [ "$line_number" -gt "$marker_line" ] || continue
+            if [ "$saw_module" -eq 0 ]; then
+                case "$line" in
+                    ""|" "*|"#"*|"//"*|"/*"|"*"*)
+                        continue
+                        ;;
+                    mod\ *)
+                        saw_module=1
+                        continue
+                        ;;
+                    *)
+                        return 1
+                        ;;
+                esac
+            else
+                case "$line" in
+                    ""|" "*|"}"*|")"*|";"*|"//"*|"/*"|"*"*|"#"*)
+                        continue
+                        ;;
+                    *)
+                        return 1
+                        ;;
+                esac
+            fi
+        done <<< "$content"
+        [ "$saw_module" -eq 1 ] || return 1
+    }
+
+    content_layout_marker_line "$new_content" || return 1
+
+    # The old side keys the deletion rule. When the base file had a test
+    # module, it must also satisfy the file-final convention and deletions
+    # are keyed on the old marker. When it had none, there is no test region
+    # to delete from and every non-blank deletion is a production change.
+    local old_marker_line
+    old_marker_line="$(grep -n '^#\[cfg(test)\][[:space:]]*$' <<< "$old_content" | tail -n 1 | cut -d: -f1 || true)"
+    if [ -n "$old_marker_line" ]; then
+        content_layout_marker_line "$old_content" || return 1
+    fi
+
+    # Any non-blank changed line outside the test-module region keeps the
+    # file in scope: additions are keyed on the new-file marker, deletions
+    # on the old-file marker. Walk the hunk bodies tracking absolute line
+    # numbers (each "@@ -o[,n] +s[,len] @@" header reports the first body
+    # line on both sides), so a hunk that merely begins with the blank
+    # separators ahead of an added test module still qualifies while any
+    # production edit refuses.
+    local marker_line
+    marker_line="$(grep -n '^#\[cfg(test)\][[:space:]]*$' <<< "$new_content" | tail -n 1 | cut -d: -f1 || true)"
+    [ -n "$marker_line" ] || return 1
+
+    local new_line=0 old_line=0
+    local in_diff=0
+    local changed_line content
+    while IFS= read -r changed_line; do
+        case "$changed_line" in
+            "@@"*)
+                [[ "$changed_line" =~ -([0-9]+) ]] || return 1
+                old_line="${BASH_REMATCH[1]}"
+                [[ "$changed_line" =~ \+([0-9]+) ]] || return 1
+                new_line="${BASH_REMATCH[1]}"
+                in_diff=1
+                continue
+                ;;
+            *)
+                [ "$in_diff" -eq 1 ] || continue
+                ;;
+        esac
+        case "$changed_line" in
+            "\\"*)
+                # "\ No newline at end of file"
+                continue
+                ;;
+            "+"*)
+                content="${changed_line#+}"
+                if [ -n "${content//[[:space:]]/}" ] && [ "$new_line" -lt "$marker_line" ]; then
+                    return 1
+                fi
+                new_line=$((new_line + 1))
+                ;;
+            "-"*)
+                content="${changed_line#-}"
+                if [ -n "${content//[[:space:]]/}" ]; then
+                    if [ -z "$old_marker_line" ]; then
+                        # The base file had no test module: every deletion
+                        # removes production code.
+                        return 1
+                    fi
+                    if [ "$old_line" -lt "$old_marker_line" ]; then
+                        return 1
+                    fi
+                fi
+                old_line=$((old_line + 1))
+                ;;
+            "")
+                new_line=$((new_line + 1))
+                old_line=$((old_line + 1))
+                ;;
+        esac
+    done <<< "$diff_output"
+    return 0
+}
+
 # Internal path patterns for changelog gate: paths that never require a CHANGELOG entry.
 # The dep-detect step in .github/workflows/ci.yml uses a superset of these patterns
 # (adding Cargo.toml and CHANGELOG.md) to skip changelog checks for dependency bumps.
@@ -699,10 +935,15 @@ elif [ "$CHANGED_MODE" != "none" ]; then
     done
 
     declare -a NON_INTERNAL_CHANGED=()
+    local_exempted_test_only=0
     for path in "${CHANGED_FILES[@]}"; do
         [ -z "$path" ] && continue
         [ "$path" = "CHANGELOG.md" ] && continue
         if is_internal_path "$path"; then
+            continue
+        fi
+        if file_diff_is_test_only "$path"; then
+            local_exempted_test_only=$((local_exempted_test_only + 1))
             continue
         fi
         NON_INTERNAL_CHANGED+=("$path")
@@ -721,8 +962,13 @@ elif [ "$CHANGED_MODE" != "none" ]; then
         echo ""
         echo "Add a Keep a Changelog entry under '## [Unreleased]' for user-facing impact,"
         echo "or add the path to is_internal_path() in scripts/check-doc-consistency.sh if truly internal."
+        echo "Rust diffs confined to a file's trailing test module (every changed line inside"
+        echo "the module, on both sides of the diff) classify as internal and need no entry;"
+        echo "pass --diff-base in changed-files mode so the gate can see hunks."
     elif [ "${#NON_INTERNAL_CHANGED[@]}" -gt 0 ]; then
         action_ok "CHANGELOG.md updated alongside non-internal changes"
+    elif [ "$local_exempted_test_only" -gt 0 ]; then
+        action_ok "Non-internal changes are test-module-only; no CHANGELOG.md entry required"
     else
         action_ok "No non-internal changed files detected for changelog gate"
     fi

@@ -24,8 +24,7 @@
 
 - Generated skill catalog: [skills/index.md](skills/index.md)
 - Select skills by their catalog descriptions, then read the chosen `SKILL.md` completely.
-- Regenerate after skill changes:
-  `python3 .llm/skills/manage-skills/scripts/generate_skills_index.py`
+- Regenerate after skill changes: `python3 .llm/skills/manage-skills/scripts/generate_skills_index.py`
 
 ---
 
@@ -95,13 +94,14 @@ relevant source, test, documentation, issue, or pull request.
 cargo fmt && cargo clippy --all-targets --all-features
 ```
 
-**Changelog gate (publication blocker)** -- production `src/` changes need a
-`CHANGELOG.md` entry under `## [Unreleased]`. The hosted `Doc Consistency`
-job enforces this, and the pre-commit hook's `Changelog gate` check mirrors
-it at commit time; the local fmt/clippy gate does not. Add the entry before
-committing. Gate rules, internal-path scope, and the scoped ~3 s pre-push
-check (`bash scripts/check-doc-consistency.sh --changed-files <files...>`)
-live in [version-sync-and-changelog-gates](skills/version-sync-and-changelog-gates/SKILL.md)
+**Changelog gate (publication blocker)** -- user-visible changes need a
+`CHANGELOG.md` entry under `## [Unreleased]`, and only user-visible changes
+may appear there (issue #722): never write `Tests:`/`CI:` bullets; test
+pins, probes, and workflow work live in tests, PRs, and issues. The hosted
+`Doc Consistency` job and the pre-commit hook's `Changelog gate` +
+`Changelog content` checks enforce both directions, and Rust diffs confined
+to a file's trailing test module are internal (no entry). Gate rules,
+internal-path scope, and the scoped pre-push check live in [version-sync-and-changelog-gates](skills/version-sync-and-changelog-gates/SKILL.md)
 and the [changelog flow](skills/classify-user-visible-changes/SKILL.md).
 
 ### Local vs hosted-CI work split (Required)
