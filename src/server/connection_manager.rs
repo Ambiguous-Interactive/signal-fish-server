@@ -1504,7 +1504,7 @@ impl ConnectionManager {
 mod tests {
     use super::*;
     use crate::coordination::{
-        MembershipUpdate, MessageCoordinator, RoomEventCompletion, RoomEventJob,
+        CloseReason, MembershipUpdate, MessageCoordinator, RoomEventCompletion, RoomEventJob,
         RoomEventMutationGuard, RoomEventSequencer,
     };
     use crate::distributed::SequencedMessage;
@@ -2491,6 +2491,61 @@ mod tests {
         assert!(
             manager.should_update_last_seen(&late_id, std::time::Duration::from_secs(30)),
             "freshly registered player keeps the first-update release"
+        );
+    }
+
+    /// The activity reaper owns the client-facing silent-disconnect decision,
+    /// and its two seams must flip at the same boundary: a client silent for
+    /// exactly `ping_timeout` is still alive (the snapshot does not collect it
+    /// and the atomic revalidation refuses to pin the close), while the same
+    /// silent client is expired one tick later. Driven purely by
+    /// `tokio::time::advance(..)` so "exactly at" is deterministic; any drift
+    /// between the snapshot and the pin-before-teardown revalidation (the
+    /// pairing that lets a racing Pong rescue the connection) fails here.
+    #[tokio::test(start_paused = true)]
+    async fn activity_reaper_expiry_flips_once_at_the_ping_timeout_boundary() {
+        let manager = make_manager(4);
+        let addr: SocketAddr = "127.0.0.1:7102".parse().unwrap();
+        let (tx, _rx) = channel();
+        let (close, listener) = ConnectionCloseSignal::channel();
+        let player_id = manager
+            .register_client(tx, close, addr, Uuid::new_v4())
+            .await
+            .expect("registration succeeds");
+        let ping_timeout = std::time::Duration::from_millis(50);
+
+        // Exactly at the timeout the client is still alive on both seams.
+        tokio::time::advance(ping_timeout).await;
+        assert!(
+            manager.collect_expired_clients(ping_timeout).is_empty(),
+            "a client silent for exactly ping_timeout must survive the snapshot"
+        );
+        assert!(
+            !manager.request_activity_timeout_if_expired(&player_id, ping_timeout),
+            "a client silent for exactly ping_timeout must not be pinned"
+        );
+        assert_eq!(
+            listener.requested_reason(),
+            None,
+            "the boundary-spared client must keep a clean close state"
+        );
+
+        // One tick later the same silent client is expired on both seams, and
+        // the revalidation pins the client-facing ActivityTimeout close.
+        tokio::time::advance(std::time::Duration::from_nanos(1)).await;
+        assert_eq!(
+            manager.collect_expired_clients(ping_timeout),
+            vec![player_id],
+            "a client silent past ping_timeout must appear in the snapshot"
+        );
+        assert!(
+            manager.request_activity_timeout_if_expired(&player_id, ping_timeout),
+            "a client silent past ping_timeout must be pinned for teardown"
+        );
+        assert_eq!(
+            listener.requested_reason(),
+            Some(CloseReason::ActivityTimeout),
+            "the pinned close must carry the activity-timeout reason"
         );
     }
 

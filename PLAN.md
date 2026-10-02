@@ -194,7 +194,14 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   replay hook) is pinned (no frame past the panic, exact once accounting,
   capacity release). The panic-recovery shape (lane job isolation plus the
   caller's publication-failure arm and the reconnect baseline) carries a
-  recorded disposition.
+  recorded disposition. The deadlines and wall-clock-versus-monotonic family
+  is reviewed (audit ledger, 2026-10-02): the activity-reaper pair flips once
+  at the strict `ping_timeout` boundary and is now pinned
+  (`activity_reaper_expiry_flips_once_at_the_ping_timeout_boundary`;
+  red-proofed by flipping both comparisons), the zero-timeout reaper disable
+  and every sibling expiry predicate carry a pinned or inspected disposition,
+  and wall-clock steps cannot open or close any monotonic deadline (reconnect
+  window, room GC, dashboard staleness, drain waits).
 - [ ] **Resource and input safety:** queue and replay bounds; inactive records;
   pending detach/claim retention; task ownership; metrics label cardinality;
   parser depth, size, malformed frames, Unicode, and numeric boundaries;

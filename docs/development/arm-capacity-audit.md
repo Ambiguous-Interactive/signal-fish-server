@@ -1294,6 +1294,83 @@ carry pinned evidence and the row moves to reviewed. The recovery slice
 continues with deadlines, wall-clock versus monotonic expiry, drain/shutdown
 with queued data, and process-loss behavior (admin/shutdown coverage row).
 
+### C1 maintenance and deadlines expiry boundary review (2026-10-02)
+
+At `98d86306` (main after #725), reviewed the recovery slice's
+deadlines-at-boundary and wall-clock-versus-monotonic families across
+`src/server/maintenance.rs`, `heartbeat.rs`, `dashboard_cache.rs`, and
+`src/deadline.rs`. No defect was found; the one unpinned player-visible
+boundary now carries a pin, and every family carries a disposition.
+
+- **The activity-reaper pair flips once at the boundary (new pin).**
+  `collect_expired_clients` and `request_activity_timeout_if_expired` both
+  read monotonic `tokio::time::Instant` and agree at exactly `ping_timeout`:
+  the snapshot does not collect the client and the atomic revalidation
+  refuses to pin the close, while one tick later both expire and the
+  revalidation pins the `ActivityTimeout` close. The pairing is what lets a
+  Pong arriving between the snapshot and the revalidation rescue the
+  connection (the entry-guard exclusion documented on the revalidation).
+  New pin `activity_reaper_expiry_flips_once_at_the_ping_timeout_boundary`
+  (paused clock), red-proofed by flipping the snapshot comparison to `>=`
+  and the revalidation to `<`: the pin failed at the exactly-at survival
+  assertion; the probe was reverted byte-identically.
+- **Zero timeout disables the reaper end to end (pinned, existing).** The
+  cleanup task's `ping_timeout.is_zero()` guard short-circuits the snapshot,
+  pinning the documented "`0` disables the activity reaper" contract
+  (`zero_ping_timeout_disables_activity_reaper`). The revalidation predicate
+  has no internal zero guard by design; its only production callers sit
+  inside that guarded loop.
+- **Monotonic decision paths (pinned, existing).** Reaper, throttle,
+  reconnect window, room GC, dashboard staleness, and the cleanup-claim
+  window all decide on the runtime clock, and `tests/clock_source_scan.rs`
+  walls production time reads behind injectable or tokio seams. Boundary
+  pins: `should_update_last_seen_throttles_until_threshold_elapses`
+  (inclusive by design for the last-seen database-write throttle),
+  `reconnect_eligibility_flips_once_at_the_monotonic_deadline` (strict),
+  `wall_clock_step_cannot_reap_monotonic_fresh_occupied_room`,
+  `monotonic_idle_rooms_are_reaped_despite_fresh_wall_stamps`,
+  `every_activity_path_refreshes_monotonic_liveness`,
+  `cleanup_claim_and_prune_boundaries_run_on_monotonic_time`, and
+  `staleness_gate_decides_on_monotonic_elapsed_time` (strict).
+- **Wall-clock changes cannot open or close a monotonic deadline.**
+  Reconnect records capture both clocks at the same moment; a wall-clock
+  jump rewrites every stored UTC field but not the decision deadline
+  (`wall_clock_jumps_cannot_open_or_close_the_reconnect_window`). Room rows
+  pair the wall `last_activity` stamp with the monotonic liveness stamp, and
+  the wall fallback exists only so a foreign row insertion cannot become an
+  immortal room. The drain's advertised wall-clock deadline is clamped by
+  one grace period for later observers (`wait_before_close_since`), so an
+  overflowed sentinel or a backwards step cannot stretch the drain
+  (in-file pins). The public `ReconnectionToken::is_expired`/`is_valid`
+  wall-clock answers are embedder conveniences documented as not the
+  admission decision; verified to have no server-internal caller.
+- **Deadline overflow never inverts into immediate expiry (pinned,
+  existing).** `deadline::after`/`saturating_after`/`wait_until` are pinned
+  in file and consumed by the backpressure, reconnect-window, ping-write,
+  and shutdown-wait seams; the shutdown deadline arithmetic saturates, and
+  the dashboard's staleness conversion saturates
+  (`chrono::Duration::from_std(..).unwrap_or(chrono::Duration::MAX)`).
+- **Sibling sweep of expiry predicates (recorded dispositions).**
+  Rate-limit window (inclusive,
+  `window_admits_up_to_limit_then_expires_at_the_inclusive_boundary`),
+  batching write deadline (inclusive,
+  `selected_write_expires_at_or_after_deadline_without_completing_accounting`),
+  room-state expiry at caller-injected now
+  (`is_expired_at_times_windows_off_last_activity_at_the_callers_now`), and
+  the database room-idle comparisons (strict, consistent with the in-memory
+  reaper) are each pinned or inspected-consistent. The
+  `InMemoryDistributedLock` lease predicates uniformly read `expires_at >
+  now` with no dedicated fail-open/fail-closed branch; covered off-boundary
+  by real-time tests and recorded here by inspection, since an exactly-at
+  early expiry errs toward releasing a lease, the safe direction for a
+  coordination lock and not player-visible.
+
+The maintenance and deadlines coverage row moves to partially reviewed: the
+expiry-boundary and clock-source families are reviewed and pinned, while
+churn growth and dashboard cost remain measurement work for C3/C5. The
+recovery slice continues with drain/shutdown racing active reconnect claims
+and queued data, cleanup racing join/reconnect, and process-loss behavior.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -1335,7 +1412,7 @@ neither is a deployed capacity preset.
 | Coordination and queues: `src/coordination/**`, `src/distributed.rs`; the in-memory coordinator seams in `src/server.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla`; C1 room-event duplicate-delivery, latest coalescing keys/generations, and transaction reservation/commit cancellation/panic reviews above | Lane job exactly-once and no lease re-run are dispositioned and pinned (`interleaved_awaits_deliver_each_lobby_broadcast_exactly_once`); cross-epoch gap ranges stay distinct per epoch (`cross_epoch_gaps_of_one_sender_stay_distinct_ranges`); latest key composition, generation shielding, supersession, saturation, and counter conservation are reviewed and pinned; cancellation/panic at reservation and commit are reviewed, the silent panic-accounting class is fixed, and all three fixed seams are pinned (`panicking_commit_hook_releases_and_accounts_every_reservation`, `panicking_phase_callback_accounts_remaining_frames_and_never_delivers_phase_one`, `panicking_broadcast_replay_hook_releases_and_accounts_every_reservation`); other `src/server.rs` state seams remain with their own rows | Reviewed |
 | WebSocket ingress and egress: `src/websocket/**` | Bounded frames, priority control, close and drain semantics hold | `tests/transport_frame_limits_e2e.rs`, `tests/slow_consumer_no_cascade_e2e.rs` | Slow reader, batching age, TLS close paths | Unreviewed |
 | Reconnect and retry: `src/reconnection.rs`, `src/retry.rs`, `src/server/reconnection_service.rs` | Claims have one owner; replay and stale routes cannot leak or misroute | `tests/reconnect_window_races_e2e.rs`, `formal/tla/ReconnectionClaimLifecycle.tla`; C1 reaper-ordering, claim-expiry, failed-restore, token-rotation, and reconnect epoch/sequence reviews above | Simultaneous claim, expiry during claim, failed restore/retry, rotation boundaries, and reconnect epoch/sequence transitions (including cross-epoch gap accounting) are reviewed and pinned; `src/retry.rs` backoff seams and multi-failure detach accounting on failing backends remain | Partially reviewed |
-| Maintenance and deadlines: `src/server/maintenance.rs`, `heartbeat.rs`, `dashboard_cache.rs`, `src/deadline.rs` | Expiry and cleanup are bounded; live state survives sweeps | `formal/tla/RoomLifecycleGC.tla`, `tests/clock_source_scan.rs` | Exact expiry boundary; churn growth; dashboard cost | Unreviewed |
+| Maintenance and deadlines: `src/server/maintenance.rs`, `heartbeat.rs`, `dashboard_cache.rs`, `src/deadline.rs` | Expiry and cleanup are bounded; live state survives sweeps | `formal/tla/RoomLifecycleGC.tla`, `tests/clock_source_scan.rs`; C1 maintenance and deadlines expiry boundary review above | Expiry boundaries and clock sources are reviewed and pinned (reaper pair boundary, zero-timeout disable, monotonic windows, wall-clock-step immunity, overflow); churn growth and dashboard cost remain measurement work | Partially reviewed |
 | Metrics and logging: `src/metrics.rs`, `src/logging.rs`, `src/websocket/metrics.rs`, `prometheus.rs` | Counters report outcomes; labels and logs stay bounded and safe | `tests/config_and_endpoints_tests.rs`, `tests/websocket_test_helpers/prometheus_scrape.rs` | Cardinality and logging pressure under floods | Unreviewed |
 | Admin and shutdown: `src/server/admin.rs`, `shutdown.rs`, `connection_manager.rs` | Drain closes all owned tasks and reports queued work accurately | `tests/close_code_semantics_e2e.rs`, `formal/tla/ConnectionTeardown.tla` | Drain racing claims, queued reliable data, panic | Unreviewed |
 | Browser client: `clients/browser/src/**` | Reconnect, delivery reports, fallback, and negotiation match server | `clients/browser/src/page/*.test.ts` | Browser network fault and client revision matrix | Unreviewed |
