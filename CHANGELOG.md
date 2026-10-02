@@ -90,11 +90,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Metrics: reserved room-transaction and conditional-broadcast frames released
   by a panic between reservation and commit are now counted in
-  `websocket_deliveries_canceled`. A commit-hook or phase-callback panic
-  previously released every held reservation silently, while the same exits
-  reached by an error or rejection each counted once. Delivery behavior is
-  unchanged: no frame past the panic, recipient capacity released, and the
-  room-event lane stays usable.
+  `websocket_deliveries_canceled` (#725). A commit-hook, phase-callback, or
+  broadcast replay-hook panic previously released every held reservation
+  silently, while the same exits reached by an error or rejection each counted
+  once. Delivery behavior is unchanged: no frame past the panic, recipient
+  capacity released, and the room-event lane stays usable.
 
 - Rate limits: a socket whose error-reply budget is exhausted now always
   receives its semantic `4006 inbound_rate_limited` close, even when a

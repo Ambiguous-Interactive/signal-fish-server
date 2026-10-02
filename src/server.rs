@@ -2096,16 +2096,16 @@ enum RoomBatchReservation {
 
 /// Drop accounting for a room transaction's reserved-but-undelivered frames.
 ///
-/// Armed while the transaction owns reservations and defused only once every
-/// remaining permit is counted on an explicit commit or cancel path. Any other
-/// exit from that window — routing change, hook rejection, hook error, or an
-/// unwind between reservation and phase commit — releases the permits through
-/// this guard, so no reserved frame is released without its cancellation
-/// accounting.
+/// Armed from the moment the transaction owns reservations until its end.
+/// Every exit that is not the commit loop's own per-frame accounting —
+/// routing change, hook rejection, hook error, or an unwind between
+/// reservation and phase commit — releases the permits through this guard,
+/// so no reserved frame is released without its cancellation accounting.
+/// The commit loop consumes permits through [`Self::reservations_mut`], so
+/// taken frames are already `None` and are never counted here.
 struct RoomBatchReservationGuard<'a> {
     metrics: &'a ServerMetrics,
     reservations: &'a mut [RoomBatchReservation],
-    armed: bool,
 }
 
 impl<'a> RoomBatchReservationGuard<'a> {
@@ -2113,7 +2113,6 @@ impl<'a> RoomBatchReservationGuard<'a> {
         Self {
             metrics,
             reservations: reservations.as_mut_slice(),
-            armed: true,
         }
     }
 
@@ -2124,17 +2123,10 @@ impl<'a> RoomBatchReservationGuard<'a> {
     fn reservations_mut(&mut self) -> &mut [RoomBatchReservation] {
         self.reservations
     }
-
-    fn defuse(&mut self) {
-        self.armed = false;
-    }
 }
 
 impl Drop for RoomBatchReservationGuard<'_> {
     fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
         for reservation in self.reservations.iter() {
             if let RoomBatchReservation::Reserved {
                 player_id, permits, ..
@@ -4404,14 +4396,16 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                     let Some(message) = batch.message_in_phase(phase) else {
                         continue;
                     };
+                    // `message_in_phase` returned `Some`, so `phase` is inside
+                    // this batch's phase range. The impossible fall-through arm
+                    // must not record a cancellation: the still-armed guard
+                    // owns the metric for any permit it leaves behind.
                     let Some(permit_index) = phase.checked_sub(batch.first_phase) else {
                         failed_frames = failed_frames.saturating_add(1);
-                        self.record_canceled_delivery(*player_id);
                         tracing::error!(
                             %room_id,
                             %player_id,
                             phase,
-                            first_phase = batch.first_phase,
                             "Room transaction phase preceded its batch origin"
                         );
                         continue;
@@ -4472,20 +4466,16 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                         }
                     };
                     if !continue_publication {
+                        // The outcome field must name every unpublished frame;
+                        // the still-armed guard counts their cancellation
+                        // metric exactly once at drop.
                         for reservation in guard.get() {
-                            let RoomBatchReservation::Reserved {
-                                player_id, permits, ..
-                            } = reservation
-                            else {
+                            let RoomBatchReservation::Reserved { permits, .. } = reservation else {
                                 continue;
                             };
                             let skipped = permits.iter().filter(|permit| permit.is_some()).count();
                             failed_frames = failed_frames.saturating_add(skipped);
-                            for _ in 0..skipped {
-                                self.record_canceled_delivery(*player_id);
-                            }
                         }
-                        guard.defuse();
                         break;
                     }
                 }

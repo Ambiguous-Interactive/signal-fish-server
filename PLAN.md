@@ -189,9 +189,10 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   (audit ledger, 2026-10-02): structured cancellation at every pre-hook await
   was already explicit, the silent panic-accounting class (hook and phase
   callback panics released reserved frames without cancellation accounting)
-  is fixed with drop-accounting guards on both publication paths, both panic
-  seams are pinned (no frame past the panic, exact once accounting, capacity
-  release), and the panic-recovery shape (lane job isolation plus the
+  is fixed with drop-accounting guards on both publication paths, and each of
+  the three fixed panic seams (batch commit hook, phase callback, broadcast
+  replay hook) is pinned (no frame past the panic, exact once accounting,
+  capacity release). The panic-recovery shape (lane job isolation plus the
   caller's publication-failure arm and the reconnect baseline) carries a
   recorded disposition.
 - [ ] **Resource and input safety:** queue and replay bounds; inactive records;

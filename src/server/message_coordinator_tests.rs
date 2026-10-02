@@ -3408,7 +3408,15 @@ async fn panicking_commit_hook_releases_and_accounts_every_reservation() {
     let join_error = transaction
         .await
         .expect_err("a panicking commit hook must surface as a job panic");
-    assert!(join_error.is_panic(), "the failure must be the hook panic");
+    let panic_message = join_error
+        .try_into_panic()
+        .expect("the failure must be the hook panic, not a cancellation");
+    assert!(
+        panic_message
+            .downcast_ref::<&'static str>()
+            .is_some_and(|message| message.contains("sentinel commit hook panic")),
+        "the panic must be the sentinel commit hook panic"
+    );
     assert_eq!(
         metrics
             .websocket_deliveries_canceled
@@ -3479,14 +3487,19 @@ async fn panicking_phase_callback_accounts_remaining_frames_and_never_delivers_p
     let join_error = transaction
         .await
         .expect_err("a panicking phase callback must surface as a job panic");
+    let panic_message = join_error
+        .try_into_panic()
+        .expect("the failure must be the callback panic, not a cancellation");
     assert!(
-        join_error.is_panic(),
-        "the failure must be the callback panic"
+        panic_message
+            .downcast_ref::<&'static str>()
+            .is_some_and(|message| message.contains("sentinel phase callback panic")),
+        "the panic must be the sentinel phase callback panic"
     );
-    let phase_zero = receiver
-        .recv()
+    let phase_zero = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
         .await
         .expect("phase zero must stay delivered")
+        .expect("phase zero read must not hang")
         .expect("classified queue remains accountable");
     assert!(
         matches!(
@@ -3514,6 +3527,92 @@ async fn panicking_phase_callback_accounts_remaining_frames_and_never_delivers_p
             .expect("the released phase-one permit must free capacity");
     }
     for _ in 0..2 {
+        assert!(receiver
+            .recv()
+            .await
+            .expect("classified queue remains accountable")
+            .is_some());
+    }
+}
+
+#[tokio::test]
+async fn panicking_broadcast_replay_hook_releases_and_accounts_every_reservation() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(1),
+        Arc::clone(&metrics),
+    ));
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0495);
+    let alice = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0496);
+    let bob = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0497);
+    let (alice_handle, alice_sender, _alice_next, mut alice_receiver) =
+        classified_room_member(room_id, alice).await;
+    let (bob_handle, bob_sender, _bob_next, mut bob_receiver) =
+        classified_room_member(room_id, bob).await;
+    coordinator
+        .register_local_client(alice, Some(room_id), alice_handle)
+        .await
+        .expect("register classified Alice");
+    coordinator
+        .register_local_client(bob, Some(room_id), bob_handle)
+        .await
+        .expect("register classified Bob");
+
+    let broadcast = {
+        let coordinator = Arc::clone(&coordinator);
+        tokio::spawn(async move {
+            coordinator
+                .broadcast_to_room_if_members_with_hook(
+                    &room_id,
+                    &[alice, bob],
+                    Arc::new(ServerMessage::Pong),
+                    Box::new(|| {
+                        Box::pin(async {
+                            panic!("sentinel replay hook panic");
+                        })
+                    }),
+                )
+                .await
+        })
+    };
+    let join_error = broadcast
+        .await
+        .expect_err("a panicking replay hook must surface as a job panic");
+    let panic_message = join_error
+        .try_into_panic()
+        .expect("the failure must be the hook panic, not a cancellation");
+    assert!(
+        panic_message
+            .downcast_ref::<&'static str>()
+            .is_some_and(|message| message.contains("sentinel replay hook panic")),
+        "the panic must be the sentinel replay hook panic"
+    );
+    assert_eq!(
+        metrics
+            .websocket_deliveries_canceled
+            .load(Ordering::Relaxed),
+        2,
+        "every reservation released by the panic must be counted exactly once"
+    );
+    for (receiver, player) in [(&mut alice_receiver, alice), (&mut bob_receiver, bob)] {
+        let unexpected_frame = receiver.try_recv();
+        assert!(
+            matches!(
+                unexpected_frame,
+                Err(crate::coordination::outbound_queue::TryReceiveError::Empty)
+            ),
+            "a panicking replay hook must deliver no frame to {player}"
+        );
+    }
+    for (sender, receiver, player) in [
+        (&alice_sender, &mut alice_receiver, alice),
+        (&bob_sender, &mut bob_receiver, bob),
+    ] {
+        sender
+            .try_send(Arc::new(ServerMessage::Pong), Some(room_id))
+            .unwrap_or_else(|error| {
+                panic!("reservations for {player} leaked after the panic: {error:?}")
+            });
         assert!(receiver
             .recv()
             .await
