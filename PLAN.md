@@ -172,6 +172,14 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   v3-only report — now pinned
   (`v2_recipients_of_opaque_payloads_get_advisories_without_v3_reports`;
   red-proofed with a lossy-fabrication probe).
+  The permitted volatile loss and exact gap/report accounting families are
+  reviewed (audit ledger, 2026-10-02): every lossy drop path emits a causal
+  exact gap or fails the connection closed, the observable stream stays a
+  gap-free prefix plus exact reports, and the two composed-path gaps (no
+  real-socket volatile eviction, no non-zero per-connection
+  `dropped_for_you`) are now pinned
+  (`flooded_nonreading_recipient_observes_exact_volatile_gaps_and_dropped_for_you`;
+  red-proofed by suppressing the eviction's causal gap report).
 - [ ] **Recovery:** cancellation at relevant await boundaries; partial state
   mutation or publication; rollback failure and retry; task panic recovery;
   cleanup racing join/reconnect; deadlines at before/equal/after boundaries;

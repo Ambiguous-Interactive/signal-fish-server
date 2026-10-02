@@ -1145,6 +1145,79 @@ With this review, the delivery slice's mixed encodings and unsupported
 conversions family has a recorded disposition. The relay-routing coverage
 row is fully reviewed.
 
+### C1 permitted volatile loss and exact gap/report accounting review (2026-10-02)
+
+At `b4d30b1a` (main after #723), reviewed the delivery slice's "permitted
+volatile loss" and "exact gap/report accounting" case families. Disposition
+per family; no violation was reproduced. Two composed-path pin gaps were
+closed with one real-socket pin.
+
+- **Queue-level lossy drops.** Supersession, full-lane volatile eviction,
+  and dropped-full arrivals each drop at most one row per lossy enqueue and
+  emit a causal exact gap (`try_enqueue_latest`, `try_enqueue_volatile`):
+  the matrix is pinned at queue level
+  (`latest_supersession_appends_successor_and_reports_exact_predecessor`,
+  `full_latest_evicts_oldest_volatile_before_dropping_arrival`,
+  `volatile_replaces_oldest_volatile_but_never_reliable`,
+  `room_transition_shields_stale_generation_rows_from_latest_scans`,
+  `sustained_latest_overload_coalesces_reports_without_fail_close`), and the
+  supersession half is pinned end to end
+  (`latest_coalescing_reports_exact_gap_before_successor`). An unreportable
+  loss never drops silently: `fail_accountability` fails the whole queue
+  closed (`lossy_change_fails_closed_when_report_lane_is_full`), so loss can
+  never outrun its report capacity.
+- **Coordinator fan-out drops.** Accounted drops land in both the server-wide
+  counter and the per-connection ledger (`record_queue_outcome`);
+  accountability-unavailable closes the connection loudly; a cancelled park
+  resolves attempted+abandoned without closing (the recipient is not at
+  fault, and latest/volatile loss is part of the delivery model).
+- **Teardown and writer abandonment.** Abandonment counts per class from the
+  queue and batcher, and the abandoned-in-flight fence abandons the remainder
+  rather than write a hole no report covers
+  (`close_flush_never_writes_the_queue_behind_an_abandoned_write`): the
+  observable stream stays a gap-free prefix plus exact reports.
+- **Generation fences.** A stale-scope lossy arrival is canceled
+  (CANCELED, `websocket_deliveries_canceled`), not dropped-and-reported: the
+  epoch bump plus transition barrier make the boundary self-describing, and
+  stale rows drain before the barrier.
+- **Report exactness mechanics.** Lossy enqueues reserve causal report
+  capacity before mutating the data lane (`can_record_gap`); the single merge
+  rule requires epoch equality (`cross_epoch_gaps_of_one_sender_stay_distinct_ranges`);
+  frontier stamps clamp to what was written and commit only after flush;
+  exact ranges are never throttled while the advisory prose is limited to 1/s
+  per sender; the 256-range bound rolls over; the v3-only gates hold at
+  record and write time. Each is pinned (queue and writer unit tests, the
+  conformance auditor's counter-delta/range-validity oracles, and the golden
+  wire tests).
+- **Persistence across reconnect.** Reports do not persist across reconnect
+  by design: a resumed recipient is baselined by authoritative
+  `SenderWatermark`s, and the cumulative per-connection ledger survives a
+  rekey. Permitted silent drops are limited to advisory `RelayStats` frames
+  on a full control queue (cumulative counters; the teardown is the signal)
+  and the farewell advisory skip on a connection that is closing anyway.
+- **New pin (closes both composed-path gaps).** No PR-lane test had observed
+  a real volatile eviction over a socket, and no test had observed the
+  per-connection `dropped_for_you` ledger move off zero.
+  `flooded_nonreading_recipient_observes_exact_volatile_gaps_and_dropped_for_you`
+  (`tests/v3_game_data_sequencing_e2e.rs`) floods 2,000×16 KiB volatile
+  frames at a silent recipient whose data lane is two slots: the sender is
+  never backpressured and the recipient is never closed; the observed seqs
+  plus the exact disjoint `VolatileDropped` ranges must cover the whole
+  offered stream; the cumulative `volatile.dropped` counters (wire report
+  and class ledger) must equal the missing count; `dropped_for_you` must be
+  non-zero in both the `RelayStats` frame and the server-side connection
+  ledger; and a marker frame must arrive with the stream's next seq.
+  Red-proofed by suppressing the causal gap report at the volatile-eviction
+  site: coverage never closed (`delivered=19, gaps=[]` with 1,981 counted
+  drops) and the pin failed; the probe was reverted byte-identically.
+
+With this review, the delivery slice's permitted-volatile-loss and
+gap/report-accounting families have recorded dispositions. Reviewed by
+inspection with no separate pin: the advisory limiter's oldest-sender
+eviction at its 256-sender cap (the bound itself is pinned by
+`unsupported_notice_limiter_bounds_sender_state`), and the metadata-less
+`record_unsupported_class` branch that sits behind the fail-closed arm.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -1182,7 +1255,7 @@ neither is a deployed capacity preset.
 | Room and player storage: `src/database/**` | Membership and room limits stay atomic and app isolated | `tests/integration_tests.rs`, `tests/model_based_state_machines.rs`; C1 admission-limit review above | Other adapters, rollback, and leave/disconnect races remain | Unreviewed |
 | Room lifecycle and moderation: `src/server/room_service.rs`, `moderation.rs`, `spectator_service.rs`, `spectator_handlers.rs` | Join, leave, kick, ban, spectator state and ownership agree | `tests/lobby_integration_tests.rs`, `src/server/room_service_tests.rs`; C1 admission-limit, leave/disconnect ordering, and identity-slice completion reviews above | ARM-C001–C004 fixed in spectator and room-code seams; identity cases (concurrent limits, join-only, leave/disconnect, spectator transitions, kick/ban races, application isolation) reviewed and pinned or derived; storage-fault interleavings on other adapters remain | Partially reviewed |
 | Readiness and gameplay: `src/server/ready_state.rs`, `authority.rs`, `session_policy.rs`, `signaling.rs` | Membership and transport changes invalidate stale plans/readiness | `tests/v3_session_plan_e2e.rs`, `formal/tla/SignalFishSession.tla`; C1 gameplay-transitions review above | Start/leave, authority loss, v2/v3 negotiation, capability intersections, stale reports, downgrade reconnects, and publication order are reviewed and pinned (including the spectator start-authorization coupling); shared `src/server.rs` state seams remain | Partially reviewed |
-| Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs`; C1 cross-room stall fairness and mixed encoding/unsupported conversion reviews above | Slow-recipient isolation, cross-room stall fairness, and the mixed encoding/unsupported conversion matrix (direct cohorts, lossless fallback, opaque refusal with exact gap plus advisory, pre-v3 advisory-only wire) are reviewed and pinned (`stalled_room_does_not_strand_a_healthy_room`, `v2_recipients_of_opaque_payloads_get_advisories_without_v3_reports`) | Reviewed |
+| Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs`; C1 cross-room stall fairness, mixed encoding/unsupported conversion, and permitted volatile loss reviews above | Slow-recipient isolation, cross-room stall fairness, the mixed encoding/unsupported conversion matrix (direct cohorts, lossless fallback, opaque refusal with exact gap plus advisory, pre-v3 advisory-only wire), and real-socket volatile eviction with exact reports plus a non-zero per-connection `dropped_for_you` (`flooded_nonreading_recipient_observes_exact_volatile_gaps_and_dropped_for_you`) are reviewed and pinned | Reviewed |
 | Coordination and queues: `src/coordination/**`, `src/distributed.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla`; C1 room-event duplicate-delivery disposition and latest coalescing keys/generations review above | Lane job exactly-once and no lease re-run are dispositioned and pinned (`interleaved_awaits_deliver_each_lobby_broadcast_exactly_once`); cross-epoch gap ranges stay distinct per epoch (`cross_epoch_gaps_of_one_sender_stay_distinct_ranges`); latest key composition, generation shielding, supersession, saturation, and counter conservation are reviewed and pinned; cancellation/panic at reservation and commit remain | Partially reviewed |
 | WebSocket ingress and egress: `src/websocket/**` | Bounded frames, priority control, close and drain semantics hold | `tests/transport_frame_limits_e2e.rs`, `tests/slow_consumer_no_cascade_e2e.rs` | Slow reader, batching age, TLS close paths | Unreviewed |
 | Reconnect and retry: `src/reconnection.rs`, `src/retry.rs`, `src/server/reconnection_service.rs` | Claims have one owner; replay and stale routes cannot leak or misroute | `tests/reconnect_window_races_e2e.rs`, `formal/tla/ReconnectionClaimLifecycle.tla`; C1 reaper-ordering, claim-expiry, failed-restore, token-rotation, and reconnect epoch/sequence reviews above | Simultaneous claim, expiry during claim, failed restore/retry, rotation boundaries, and reconnect epoch/sequence transitions (including cross-epoch gap accounting) are reviewed and pinned; `src/retry.rs` backoff seams and multi-failure detach accounting on failing backends remain | Partially reviewed |

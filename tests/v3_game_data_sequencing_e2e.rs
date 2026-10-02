@@ -1053,6 +1053,276 @@ async fn evicted_recipient_observes_seq_gap_after_reconnect() {
     running_server.shutdown().await;
 }
 
+/// (e2) Permitted volatile loss over a real socket, observed exactly. The C1
+/// delivery review (2026-10-02) dispositioned the permitted-volatile-loss and
+/// exact gap/report-accounting families; the queue-level eviction matrix
+/// (`full_latest_evicts_oldest_volatile_before_dropping_arrival`,
+/// `volatile_replaces_oldest_volatile_but_never_reliable`) and the
+/// per-connection drop-ledger wiring (`record_queue_outcome`) were pinned only
+/// at unit level, and no PR-lane test observed either seam end to end. This
+/// pin closes both composed-path gaps.
+///
+/// Contract: a full volatile data lane never backpressures the sender and
+/// never closes the recipient. Every evicted row surfaces as an exact,
+/// disjoint `VolatileDropped` range whose union with the delivered frames
+/// covers the whole offered stream; the cumulative `volatile.dropped` counters
+/// equal the missing count; the per-connection `dropped_for_you` ledger moves
+/// off zero (both in the periodic `RelayStats` frame and in the server-side
+/// ledger); and the connection keeps delivering after the losses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn flooded_nonreading_recipient_observes_exact_volatile_gaps_and_dropped_for_you() {
+    /// Flood size: with 16 KiB padding this cannot hide inside kernel socket
+    /// buffers, so the tiny data lane must overflow into accounted volatile
+    /// evictions — the deterministic socket-level counterpart of the
+    /// queue-level eviction pins.
+    const FLOOD: u64 = 2_000;
+    const FLOOD_PADDING_BYTES: usize = 16 * 1_024;
+
+    let mut server_config = test_server_config();
+    // A two-slot data lane overflows as soon as the silent recipient's socket
+    // buffers fill; the flood is far larger than every buffer in the path, so
+    // accounted evictions are guaranteed, not timing-dependent.
+    server_config.websocket_config.send_queue_capacity = 2;
+    // The recipient never reads (and so never Pongs) until the flood ends:
+    // disable the server's ping probes so liveness cannot fire mid-test. The
+    // volatile class applies no sender backpressure and parks the writer only
+    // on its write-progress budget (15 s default), far outside this test's
+    // flood duration.
+    server_config.websocket_config.server_ping_interval_secs = 0;
+    server_config.websocket_config.delivery_stats_interval_secs = 1;
+    let (running_server, server) = start_test_server(server_config).await;
+    let addr = running_server.addr();
+    let metrics = server.metrics();
+
+    let mut sender = connect(addr).await;
+    let mut victim = connect(addr).await;
+    authenticate_v3(&mut sender).await;
+    authenticate_v3(&mut victim).await;
+    let (sender_id, _) = join_room(&mut sender, "VOLDRP", "VolatileSender").await;
+    let (victim_id, _) = join_room(&mut victim, "VOLDRP", "VolatileVictim").await;
+
+    // The victim goes silent (never polls its socket) while the sender floods
+    // volatile frames; the loss policy must absorb the overflow by evicting
+    // the oldest rows with exact causal reports instead of backpressuring the
+    // sender or closing the recipient.
+    let writer = tokio::spawn(async move {
+        let padding = "x".repeat(FLOOD_PADDING_BYTES);
+        for n in 0..FLOOD {
+            let message = ClientMessage::GameData {
+                class: Some(DeliveryClass::Volatile),
+                key: None,
+                data: serde_json::json!({ "n": n, "padding": padding.as_str() }),
+            };
+            let json = serde_json::to_string(&message).expect("serialize GameData");
+            sender
+                .send(Message::Text(json.into()))
+                .await
+                .expect("send volatile GameData while the victim is silent");
+        }
+        sender
+    });
+    let mut sender = tokio::time::timeout(TEST_DEADLINE, writer)
+        .await
+        .expect("volatile flood exceeded its deadline")
+        .expect("flood writer task panicked");
+
+    // Every offered frame was attempted against the victim's queue before the
+    // drain starts, so the coverage oracle below closes over the full stream.
+    let attempt_deadline = tokio::time::Instant::now() + TEST_DEADLINE;
+    loop {
+        if metrics.delivery_metrics_by_class().volatile.attempted >= FLOOD {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < attempt_deadline,
+            "server never attempted all {FLOOD} volatile frames"
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+    }
+
+    // Drain until the observed seqs plus the reported gap ranges cover the
+    // whole offered stream exactly. A stream that stops short of full coverage
+    // (a reported range that never delivers, or a hole with no report) fails
+    // the deadline loudly with the accounting collected so far.
+    let mut seen = vec![false; usize::try_from(FLOOD).expect("flood count fits usize") + 1];
+    let mut delivered_in_stream = 0u64;
+    let mut gap_ranges: Vec<(u64, u64)> = Vec::new();
+    let mut max_reported_dropped = 0u64;
+    let drain_deadline = tokio::time::Instant::now() + TEST_DEADLINE;
+    loop {
+        if delivered_in_stream + total_range_len(&gap_ranges) == FLOOD {
+            break;
+        }
+        let frame = tokio::time::timeout_at(drain_deadline, victim.next())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "volatile stream never reached exact coverage: delivered={}, \
+                     gaps={gap_ranges:?}, reported_dropped_max={max_reported_dropped}",
+                    delivered_in_stream
+                )
+            })
+            .expect("victim websocket stream closed before exact coverage")
+            .expect("victim websocket error before exact coverage");
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        match serde_json::from_str::<ServerMessage>(&text).expect("valid ServerMessage") {
+            ServerMessage::GameData {
+                from_player, seq, ..
+            } => {
+                assert_eq!(
+                    from_player, sender_id,
+                    "frame misrouted from another sender"
+                );
+                let seq = seq.expect("v3 volatile frames carry seq");
+                assert!(
+                    (1..=FLOOD).contains(&seq),
+                    "unexpected out-of-stream seq {seq}"
+                );
+                let slot = usize::try_from(seq).expect("seq fits usize");
+                assert!(!seen[slot], "duplicate delivery of seq {seq}");
+                assert!(
+                    !gap_ranges.iter().any(|&(lo, hi)| (lo..=hi).contains(&seq)),
+                    "seq {seq} was delivered after being reported as dropped"
+                );
+                seen[slot] = true;
+                delivered_in_stream += 1;
+            }
+            ServerMessage::DeliveryReport(report) => {
+                max_reported_dropped = max_reported_dropped.max(report.per_class.volatile.dropped);
+                for gap in &report.gaps {
+                    assert_eq!(gap.from_player, sender_id, "gap names another sender");
+                    assert_eq!(gap.epoch, 1, "gap carries the sender's first epoch");
+                    assert_eq!(
+                        gap.reason,
+                        DeliveryGapReason::VolatileDropped,
+                        "only volatile loss is possible in this workload"
+                    );
+                    assert!(
+                        gap.from_seq >= 1 && gap.to_seq <= FLOOD,
+                        "gap escapes the offered stream 1..={FLOOD}"
+                    );
+                    assert!(gap.from_seq <= gap.to_seq, "invalid gap range");
+                    for &(lo, hi) in &gap_ranges {
+                        assert!(
+                            gap.to_seq < lo || gap.from_seq > hi,
+                            "overlapping gap ranges {lo}..={hi} and {}..={}",
+                            gap.from_seq,
+                            gap.to_seq
+                        );
+                    }
+                    for seq in gap.from_seq..=gap.to_seq {
+                        let slot = usize::try_from(seq).expect("seq fits usize");
+                        assert!(
+                            !seen[slot],
+                            "seq {seq} was delivered before being reported as dropped"
+                        );
+                    }
+                    gap_ranges.push((gap.from_seq, gap.to_seq));
+                }
+            }
+            ServerMessage::Error {
+                message,
+                error_code,
+            } => panic!("victim got server error: {message} ({error_code:?})"),
+            _ => continue,
+        }
+    }
+
+    // The cumulative drop counters equal the exact missing count, on the wire
+    // and in the server-wide class ledger. The wire counter is cumulative
+    // since the connection opened (refreshed on every gap append and clamped
+    // monotonically at write), so the max across reports equals the last.
+    let missing = FLOOD - delivered_in_stream;
+    assert!(
+        missing >= 1,
+        "the flood must have overflowed into real loss"
+    );
+    assert_eq!(
+        max_reported_dropped, missing,
+        "reported cumulative volatile.dropped must equal the exact missing count"
+    );
+    let class_metrics = metrics.delivery_metrics_by_class().volatile;
+    assert_eq!(
+        class_metrics.dropped, missing,
+        "server-wide volatile drop counter must equal the exact missing count"
+    );
+    assert_eq!(
+        class_metrics.delivered, delivered_in_stream,
+        "server-wide volatile delivered counter must equal the observed frames"
+    );
+    assert_eq!(
+        metrics
+            .websocket_slow_consumer_disconnects
+            .load(Ordering::Relaxed),
+        0,
+        "a lossy-only overflow must never close the recipient (the victim's \
+         volatile write parks only on its 15 s write-progress budget; a close \
+         here means the runner ran past it, not that lossy data may evict)"
+    );
+
+    // The per-connection ledger observed the same loss: off zero both in the
+    // periodic RelayStats frame and in the server-side connection stats.
+    let victim_stats = server
+        .metrics()
+        .connection_delivery_stats(&victim_id)
+        .expect("RelayStats-enabled connection keeps a delivery ledger");
+    assert!(
+        victim_stats.dropped_for_you.load(Ordering::Relaxed) >= 1,
+        "per-connection dropped_for_you must count the evicted rows"
+    );
+    let (stats_sent_to_you, stats_dropped_for_you) = next_matching_server_message_within(
+        &mut victim,
+        SERVER_MESSAGE_TIMEOUT,
+        "RelayStats frame after the losses",
+        |message| match message {
+            ServerMessage::RelayStats {
+                sent_to_you,
+                dropped_for_you,
+                ..
+            } => Some((sent_to_you, dropped_for_you)),
+            _ => None,
+        },
+    )
+    .await;
+    assert!(
+        stats_dropped_for_you >= 1,
+        "RelayStats dropped_for_you must count the evicted rows: \
+         sent_to_you={stats_sent_to_you}, dropped_for_you={stats_dropped_for_you}"
+    );
+    assert!(
+        stats_sent_to_you >= 1,
+        "RelayStats sent_to_you must be non-zero"
+    );
+
+    // The connection survived the losses and keeps delivering: one marker
+    // frame gets through with the stream's next seq.
+    send(
+        &mut sender,
+        &ClientMessage::GameData {
+            class: Some(DeliveryClass::Volatile),
+            key: None,
+            data: serde_json::json!({ "phase": "marker" }),
+        },
+    )
+    .await;
+    let marker = collect_game_data(&mut victim, 1).await;
+    assert_eq!(
+        marker[0].seq,
+        Some(FLOOD + 1),
+        "the sender's stream continues contiguously after the accounted loss"
+    );
+
+    assert_message_conservation(&metrics).await;
+    running_server.shutdown().await;
+}
+
+/// Sum of the inclusive range lengths recorded so far.
+fn total_range_len(ranges: &[(u64, u64)]) -> u64 {
+    ranges.iter().map(|&(lo, hi)| hi - lo + 1).sum()
+}
+
 /// Read text frames until the next server message of `type_name`, returning its
 /// parsed JSON `Value` so field presence/absence can be asserted directly (a v3
 /// field omitted for a pre-v3 recipient is ABSENT from the object, so
