@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tests: pin the pre-v3 recipient side of opaque cross-format refusals
+  (#647, C1 delivery). A v2 recipient of an rkyv payload receives no
+  payload in any shape, the rate-limited `UnsupportedGameDataFormat`
+  advisory, and never a `DeliveryReport`, while its control plane keeps
+  flowing. The preflight unit matrix now covers every directed pair from
+  an opaque source, including the MessagePack target. A refusal probe
+  that fabricated a lossy JSON shape failed the pin on the leaked
+  `GameData` frame.
+
 - Tests: pin latest coalescing key-value isolation (#647, C1 delivery). The
   latest coalescing scan matches the full `(from_player, room_id, key)`
   composition, so two distinct keys of one sender in one room are

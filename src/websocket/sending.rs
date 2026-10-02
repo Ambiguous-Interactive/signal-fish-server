@@ -2996,6 +2996,20 @@ mod tests {
             None,
         )
         .is_unsupported());
+        // Every directed pair from an opaque source is unsupported: the
+        // MessagePack target takes the same refusal as the JSON target.
+        assert!(preflight_binary_fallback(
+            &message(GameDataEncoding::Rkyv, &[0x01]),
+            GameDataEncoding::MessagePack,
+            None,
+        )
+        .is_unsupported());
+        assert!(preflight_binary_fallback(
+            &message(GameDataEncoding::Protobuf, &[0x01]),
+            GameDataEncoding::MessagePack,
+            None,
+        )
+        .is_unsupported());
         assert!(!preflight_binary_fallback(
             &message(GameDataEncoding::MessagePack, &[0xc1]),
             GameDataEncoding::MessagePack,
