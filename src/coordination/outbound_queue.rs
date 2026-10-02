@@ -3804,6 +3804,63 @@ mod tests {
         }
     }
 
+    /// The coalescing scan matches the full `(from_player, room_id, key)`
+    /// composition: two distinct application keys of one sender in one room are
+    /// independent streams. Dropping the `key` discriminant would coalesce
+    /// unrelated state channels of the same player and emit a causal gap for
+    /// data that was never superseded.
+    #[tokio::test]
+    async fn latest_supersede_requires_the_matching_key_value() {
+        let (tx, mut rx) = channel(4, 4);
+        tx.set_protocol_version(3);
+        assert_eq!(
+            tx.try_enqueue_data(data_for(1, DeliveryClass::Latest, Some(7), 1, 1, 1, 2))
+                .unwrap(),
+            EnqueueOutcome {
+                enqueued: true,
+                losses: 0
+            },
+            "the first key's arrival must enqueue without loss"
+        );
+
+        assert_eq!(
+            tx.try_enqueue_data(data_for(2, DeliveryClass::Latest, Some(8), 1, 2, 1, 2))
+                .unwrap(),
+            EnqueueOutcome {
+                enqueued: true,
+                losses: 0
+            },
+            "a different key of the same sender must not supersede"
+        );
+
+        {
+            let state = rx.shared.state();
+            assert_eq!(state.data.len(), 2);
+            assert_eq!(state.counters.latest.superseded, 0);
+            drop(state);
+        }
+        drop(tx);
+        let drained = drain_to_end(&mut rx).await;
+        assert_eq!(
+            drained.iter().map(message_id).collect::<Vec<_>>(),
+            vec![1, 2],
+            "both keys' newest values must survive in enqueue order"
+        );
+        for (item, key) in drained.iter().zip([Some(7), Some(8)]) {
+            assert!(
+                !matches!(&item.payload, OutboundPayload::DeliveryReport(_)),
+                "independent keys must never produce an omission gap"
+            );
+            assert!(
+                matches!(&item.payload, OutboundPayload::Message(message)
+                    if matches!(message.as_ref(), ServerMessage::GameData {
+                        key: carried, ..
+                    } if *carried == key)),
+                "each stream must keep its own key metadata"
+            );
+        }
+    }
+
     /// After a room transition, both eviction scans see only current-generation
     /// rows: a pre-transition `Latest` row can never be matched as a same-key
     /// predecessor and no pre-transition `Volatile` row can be picked as an

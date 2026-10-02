@@ -157,6 +157,13 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   delivered, and the eviction tears down exactly one connection with no
   leakage — is pinned (`stalled_room_does_not_strand_a_healthy_room`;
   red-proofed with a shared-gate probe).
+  The latest coalescing keys/generations family is reviewed (audit ledger,
+  2026-10-01): the full `(from_player, room_id, key)` composition isolates
+  streams — key-value isolation now pinned
+  (`latest_supersede_requires_the_matching_key_value`, red-proofed with a
+  constant-key probe) beside the existing dispatch class/key gate,
+  owner/room, generation-shielding, supersession-report, saturation,
+  window, and counter-conservation pins.
 - [ ] **Recovery:** cancellation at relevant await boundaries; partial state
   mutation or publication; rollback failure and retry; task panic recovery;
   cleanup racing join/reconnect; deadlines at before/equal/after boundaries;
