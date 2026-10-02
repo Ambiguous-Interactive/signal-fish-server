@@ -1243,7 +1243,24 @@ async fn flooded_nonreading_recipient_observes_exact_volatile_gaps_and_dropped_f
         max_reported_dropped, missing,
         "reported cumulative volatile.dropped must equal the exact missing count"
     );
-    let class_metrics = metrics.delivery_metrics_by_class().volatile;
+    // The writer task records a delivered row only after its socket write
+    // resolves, so the class ledger can lag the recipient's observation by a
+    // scheduling beat: settle before asserting conservation. A counter that
+    // never settles fails the deadline below.
+    let settle_deadline = tokio::time::Instant::now() + SERVER_MESSAGE_TIMEOUT;
+    let class_metrics = loop {
+        let class_metrics = metrics.delivery_metrics_by_class().volatile;
+        if class_metrics.delivered == delivered_in_stream {
+            break class_metrics;
+        }
+        assert!(
+            tokio::time::Instant::now() < settle_deadline,
+            "volatile delivered counter never settled: server={}, \
+             observed={delivered_in_stream}",
+            class_metrics.delivered
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+    };
     assert_eq!(
         class_metrics.dropped, missing,
         "server-wide volatile drop counter must equal the exact missing count"

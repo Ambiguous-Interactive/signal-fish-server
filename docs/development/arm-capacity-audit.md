@@ -1209,7 +1209,11 @@ closed with one real-socket pin.
   ledger; and a marker frame must arrive with the stream's next seq.
   Red-proofed by suppressing the causal gap report at the volatile-eviction
   site: coverage never closed (`delivered=19, gaps=[]` with 1,981 counted
-  drops) and the pin failed; the probe was reverted byte-identically.
+  drops) and the pin failed; the probe was reverted byte-identically. The
+  class-ledger conservation read settles before asserting equality: the
+  writer records a delivered row after its socket write resolves, so the
+  ledger can lag the recipient's observation by a scheduling beat (first
+  CI run caught exactly that sampling race, 18 counted vs 19 observed).
 
 With this review, the delivery slice's permitted-volatile-loss and
 gap/report-accounting families have recorded dispositions. Reviewed by
