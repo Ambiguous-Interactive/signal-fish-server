@@ -571,6 +571,12 @@ function Test-CommandTextForDirectScript {
     if (Test-ShellAssignmentOnly -CommandText $trimmed) {
         return
     }
+    if ($trimmed.EndsWith(")")) {
+        # A bash `case` arm introducer (`pattern|pattern)`) lists path globs;
+        # it selects on paths and never executes them, and no invocation line
+        # in this repository's workflows ends with a closing paren.
+        return
+    }
 
     $tokenText = $trimmed -replace "&&|\|\||[;&|()]", " "
     $tokens = @($tokenText -split "\s+" | Where-Object { $_ -ne "" })
