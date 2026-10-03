@@ -1837,6 +1837,14 @@ function Test-ChangelogContentVisibility {
 
     $inUnreleased = $false
     $violations = [System.Collections.Generic.List[string]]::new()
+    # Keep-a-Changelog kinds repeat across releases, and markdownlint's MD024
+    # (siblings_only) only forbids repeats among siblings of one section. The
+    # hosted Markdown Lint job owns the whole-repo rule; this check owns the
+    # high-traffic [Unreleased] section so a duplicate-kind heading fails at
+    # commit time instead of in CI (observed: a second "### Changed" under
+    # [Unreleased] passed the pre-push changelog checks, then failed
+    # hosted MD024 on PR #737).
+    $unreleasedHeadings = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     foreach ($line in ($blob.Stdout -split "`n")) {
         $text = $line.TrimEnd("`r")
         if ($text -ceq '## [Unreleased]') {
@@ -1850,6 +1858,12 @@ function Test-ChangelogContentVisibility {
         if (-not $inUnreleased) {
             continue
         }
+        if ($text.StartsWith('### ', [System.StringComparison]::Ordinal)) {
+            if (-not $unreleasedHeadings.Add($text)) {
+                $violations.Add("$text is a duplicate heading under [Unreleased]; append its bullets to the existing section instead")
+            }
+            continue
+        }
         foreach ($pattern in $script:ChangelogForbiddenBulletRes) {
             if ($text -imatch $pattern) {
                 $violations.Add($text)
@@ -1860,9 +1874,9 @@ function Test-ChangelogContentVisibility {
 
     if ($violations.Count -gt 0) {
         Fail "Changelog content" (@(
-                "[Unreleased] bullets must describe user-visible change only (issue #722):",
+                "[Unreleased] entry rules violated:",
                 ($violations | ForEach-Object { "  - $_" }) -join "`n",
-                "Test and CI work is real but never user-visible; record it in the PR, tests, and issues."
+                "Duplicate headings break MD024 (siblings_only); bullets must describe user-visible change only (issue #722)."
             ) -join "`n")
         return
     }

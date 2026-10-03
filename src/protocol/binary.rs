@@ -121,23 +121,52 @@ pub const MSGPACK_MAX_NESTING_DEPTH: usize = 128;
 /// other error, so the caller never reports a shallower error than the
 /// decoder would.
 pub fn msgpack_depth_within(payload: &[u8], limit: usize) -> bool {
-    // Remaining sibling elements per open container. Arrays push their element
-    // count; maps push twice their entry count. `open.len()` is the number of
-    // containers enclosing the value being read.
-    let mut open: Vec<u32> = Vec::new();
+    // Fixed-size sibling stack: its capacity IS the enforced limit, so the
+    // walk never allocates. The conversion path runs per relay in mixed
+    // rooms, and the #558 allocation ceilings count every operation and byte
+    // on that path (PR #737: a `Vec` stack cost one allocation per relay and
+    // broke the checked-in mixed-source baseline).
+    let mut open = [0u32; MSGPACK_MAX_NESTING_DEPTH];
+    let mut depth = 0usize;
     let mut cursor = payload;
 
     // Consume one sibling slot at the current depth, closing any containers
     // that just ran out of elements.
     macro_rules! take_element {
         () => {
-            while open.last() == Some(&0) {
-                open.pop();
+            while depth > 0 {
+                let top = open.get(depth.saturating_sub(1)).copied().unwrap_or(0);
+                if top != 0 {
+                    break;
+                }
+                depth = depth.saturating_sub(1);
             }
-            if let Some(top) = open.last_mut() {
-                *top = top.saturating_sub(1);
+            if depth > 0 {
+                if let Some(top) = open.get_mut(depth.saturating_sub(1)) {
+                    *top = top.saturating_sub(1);
+                }
             }
         };
+    }
+
+    // Enter one container level. `false` means the payload exceeds the limit.
+    macro_rules! enter_container {
+        ($siblings:expr) => {{
+            if depth >= limit {
+                return false;
+            }
+            match open.get_mut(depth) {
+                Some(slot) => {
+                    // A sibling count above u32::MAX cannot exist in a frame
+                    // the size cap admits, and the decoder rejects impossible
+                    // lengths anyway; the clamp only keeps the walk alive
+                    // until the decoder speaks.
+                    *slot = u32::try_from($siblings).unwrap_or(u32::MAX);
+                    depth = depth.saturating_add(1);
+                }
+                None => return false,
+            }
+        }};
     }
 
     // Read one big-endian `size`-byte length prefix plus the bytes after it.
@@ -165,9 +194,7 @@ pub fn msgpack_depth_within(payload: &[u8], limit: usize) -> bool {
         cursor = match marker {
             // fixmap / map16 / map32: every entry costs a key and a value.
             0x80..=0x8f => {
-                if !push_container(&mut open, u64::from(marker & 0x0f).saturating_mul(2), limit) {
-                    return false;
-                }
+                enter_container!(u64::from(marker & 0x0f).saturating_mul(2));
                 rest
             }
             0xde | 0xdf => {
@@ -175,16 +202,12 @@ pub fn msgpack_depth_within(payload: &[u8], limit: usize) -> bool {
                 let Some((entries, tail)) = read_len(rest, size) else {
                     return true;
                 };
-                if !push_container(&mut open, entries.saturating_mul(2), limit) {
-                    return false;
-                }
+                enter_container!(entries.saturating_mul(2));
                 tail
             }
             // fixarray / array16 / array32
             0x90..=0x9f => {
-                if !push_container(&mut open, u64::from(marker & 0x0f), limit) {
-                    return false;
-                }
+                enter_container!(u64::from(marker & 0x0f));
                 rest
             }
             0xdc | 0xdd => {
@@ -192,9 +215,7 @@ pub fn msgpack_depth_within(payload: &[u8], limit: usize) -> bool {
                 let Some((count, tail)) = read_len(rest, size) else {
                     return true;
                 };
-                if !push_container(&mut open, count, limit) {
-                    return false;
-                }
+                enter_container!(count);
                 tail
             }
             // fixstr / str8 / str16 / str32: opaque bytes, never containers.
@@ -271,37 +292,22 @@ pub fn msgpack_depth_within(payload: &[u8], limit: usize) -> bool {
             // f32 / f64
             0xca | 0xcb => {
                 let size = if marker == 0xca { 4 } else { 8 };
-                if rest.len() < size {
+                let Some((_, tail)) = rest.split_at_checked(size) else {
                     return true;
-                }
-                let (_, tail) = rest.split_at(size);
+                };
                 tail
             }
             // u8/u16/u32/u64 and i8/i16/i32/i64
-            0xcc..=0xcf => {
+            0xcc..=0xd3 => {
                 let size = match marker {
-                    0xcc => 1usize,
-                    0xcd => 2,
-                    0xce => 4,
+                    0xcc | 0xd0 => 1usize,
+                    0xcd | 0xd1 => 2,
+                    0xce | 0xd2 => 4,
                     _ => 8,
                 };
-                if rest.len() < size {
+                let Some((_, tail)) = rest.split_at_checked(size) else {
                     return true;
-                }
-                let (_, tail) = rest.split_at(size);
-                tail
-            }
-            0xd0..=0xd3 => {
-                let size = match marker {
-                    0xd0 => 1usize,
-                    0xd1 => 2,
-                    0xd2 => 4,
-                    _ => 8,
                 };
-                if rest.len() < size {
-                    return true;
-                }
-                let (_, tail) = rest.split_at(size);
                 tail
             }
             // nil, bool, never-use 0xc1, fixint, negative fixint: leaf values
@@ -309,18 +315,6 @@ pub fn msgpack_depth_within(payload: &[u8], limit: usize) -> bool {
             _ => rest,
         };
     }
-    true
-}
-
-/// Enter one container level. `false` means the payload exceeds `limit`.
-fn push_container(open: &mut Vec<u32>, siblings: u64, limit: usize) -> bool {
-    if open.len() >= limit {
-        return false;
-    }
-    // A sibling count above u32::MAX cannot exist in a frame the size cap
-    // admits, and the decoder rejects impossible lengths anyway; the clamp
-    // only keeps the walk alive until the decoder speaks.
-    open.push(u32::try_from(siblings).unwrap_or(u32::MAX));
     true
 }
 

@@ -2549,15 +2549,21 @@ mod tests {
     /// One fixarray marker per byte is the densest legal nesting: a payload
     /// under the 64 KiB frame cap can request ~65k decoder recursion levels.
     /// The guard must refuse it before any recursive decode. The probe runs
-    /// on a 256 KiB stack so a guard regression fails loudly here (stack
+    /// on a small stack so a guard regression fails loudly here (stack
     /// overflow abort) instead of silently re-exposing the decode path; the
-    /// refusal itself needs only constant stack.
+    /// refusal itself needs only constant stack. The spawn falls back to a
+    /// larger stack under pathological thread limits: even 2 MiB aborts on a
+    /// regression, so the pin stays loud either way.
     #[test]
     fn over_deep_message_pack_is_refused_before_decoder_recursion() {
         let deep = vec![0x91u8; 60_000];
-        let handle = std::thread::Builder::new()
-            .stack_size(256 * 1024)
-            .spawn(move || decode_binary_to_json(GameDataEncoding::MessagePack, &deep))
+        let spawn_probe = |stack: usize, payload: Vec<u8>| {
+            std::thread::Builder::new()
+                .stack_size(stack)
+                .spawn(move || decode_binary_to_json(GameDataEncoding::MessagePack, &payload))
+        };
+        let handle = spawn_probe(256 * 1024, deep.clone())
+            .or_else(|_| spawn_probe(2 * 1024 * 1024, deep))
             .expect("probe thread spawns");
         let result = handle.join().expect("decode thread must not abort");
         let error = result.expect_err("over-deep MessagePack must be refused");
