@@ -184,9 +184,13 @@ pub const fn default_max_protocol_version() -> u16 {
 // Session Defaults
 // =============================================================================
 
-/// Default session topology: the relay floor (v2-equivalent, always available).
+/// Default session topology: mesh-first. Rooms attempt the richest WebRTC
+/// peer-to-peer rung and fall back host → relay as member capability requires
+/// (issue #729: relay is the fallback, never the goal; the relay floor itself
+/// never closes). Pin `session.default_topology: "relay"` for the old
+/// relay-first behavior.
 pub const fn default_session_topology() -> crate::protocol::Topology {
-    crate::protocol::Topology::Relay
+    crate::protocol::Topology::Mesh
 }
 
 /// WebRTC transport is enabled by default (it is the only true browser P2P path).

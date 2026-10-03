@@ -84,7 +84,7 @@
     "game_relay_mappings": {}
   },
   "session": {
-    "default_topology": "relay",
+    "default_topology": "mesh",
     "game_topology_mappings": {},
     "enable_webrtc": true,
     "enable_direct": true,

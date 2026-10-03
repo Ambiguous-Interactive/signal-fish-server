@@ -197,16 +197,16 @@ signaling endpoint must be `wss://`, which is load-bearing for WebRTC security
 
 ## Per-game topology mapping
 
-Route specific games to a WebRTC or host topology while everything else stays on
-the relay floor.
+Pin specific games to a topology while unmapped games use the mesh-first
+default.
 
 ```json
 {
   "session": {
-    "default_topology": "relay",
+    "default_topology": "mesh",
     "game_topology_mappings": {
-      "chess": "mesh",
-      "BoardGame": "host"
+      "BoardGame": "host",
+      "idle-clicker": "relay"
     },
     "enable_webrtc": true,
     "enable_direct": true
@@ -217,16 +217,18 @@ the relay floor.
 Environment equivalent (the mapping is a JSON object of game name to topology):
 
 ```bash
-export SIGNAL_FISH__SESSION__DEFAULT_TOPOLOGY=relay
-export SIGNAL_FISH__SESSION__GAME_TOPOLOGY_MAPPINGS='{"chess":"mesh","BoardGame":"host"}'
+export SIGNAL_FISH__SESSION__DEFAULT_TOPOLOGY=mesh
+export SIGNAL_FISH__SESSION__GAME_TOPOLOGY_MAPPINGS='{"BoardGame":"host","idle-clicker":"relay"}'
 ```
 
-When to use: when different games want different transports — e.g. a low-latency
-title on `mesh` (full WebRTC peer mesh) and a turn-based title on `host` while
-unmapped games default to `relay`. Valid topologies are `relay`, `host`, and
-`mesh`. Every upgrade gracefully degrades to the relay floor, so this is always
-safe: if both `enable_webrtc` and `enable_direct` are `false`, mapped games
-simply fall back to relay (the server warns but still starts).
+When to use: when different games want different transports — e.g. unmapped
+titles default to `mesh` (full WebRTC peer mesh), a turn-based title pins
+`host`, and a latency-insensitive title pins `relay`. Valid topologies are
+`relay`, `host`, and `mesh`. Set `"default_topology": "relay"` to restore the
+old relay-first behavior for every unmapped game. Every upgrade gracefully
+degrades to the relay floor, so this is always safe: if both `enable_webrtc`
+and `enable_direct` are `false`, rooms that want peer-to-peer simply fall back
+to relay (the server warns but still starts).
 
 ## Token binding
 

@@ -66,6 +66,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Session defaults: `session.default_topology` now defaults to `mesh` instead
+  of `relay` (#729). v3 rooms attempt the richest peer-to-peer rung their
+  members negotiated (mesh WebRTC first, then host), and any member that
+  cannot run peer-to-peer (v2 or relay-only) floors the room to relay. The
+  relay floor itself never closes, so fallback data flow is unchanged. Pin
+  `session.default_topology: "relay"` to keep the previous relay-first
+  behavior.
+
 - Observability: pending room creation now counts the room and creator at the
   atomic insert. Rollback, direct deletion, and abandoned-room repair count
   the creator leaving once, even when setup panics after insertion (#658).

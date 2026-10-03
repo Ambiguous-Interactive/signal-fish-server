@@ -57,10 +57,9 @@ fn app_entry() -> AppRegistrationEntry {
     }
 }
 
-/// A mesh-preferring `SessionConfig` (so a finalized v3+webrtc room resolves to
-/// a mesh `SessionPlan` instead of the default relay floor). Mirrors the
-/// multipeer suite's `session_config_with_topology(Mesh)`; the default
-/// `SessionConfig.default_topology` is `Relay` (`src/config/session.rs:146`).
+/// An explicitly mesh-first `SessionConfig` (the shipped default; kept
+/// explicit so this suite pins mesh behavior even if the default ever
+/// changes). Mirrors the multipeer suite's `session_config_with_topology(Mesh)`.
 fn mesh_session_config() -> SessionConfig {
     SessionConfig {
         default_topology: Topology::Mesh,
@@ -69,8 +68,8 @@ fn mesh_session_config() -> SessionConfig {
 }
 
 /// Boot the production router around an allowlist-enabled in-memory server using the
-/// DEFAULT (relay-floor) `SessionConfig`. Validation / room-lifecycle tests that
-/// never finalize a non-relay session use this.
+/// default (mesh-first) `SessionConfig`. Validation / room-lifecycle tests that
+/// never finalize a session use this.
 async fn start_server() -> (RunningTestServer, Arc<EnhancedGameServer>) {
     start_server_with_session(SessionConfig::default()).await
 }
