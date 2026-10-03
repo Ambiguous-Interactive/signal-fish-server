@@ -215,6 +215,17 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   parser depth, size, malformed frames, Unicode, and numeric boundaries;
   unauthenticated floods; rate-limit rejection accounting; configuration
   validation and reload consistency; error and logging paths under pressure.
+  The unauthenticated-admission boundary review is complete (audit ledger,
+  2026-10-03): flood posture verified (budget charged before credential
+  verification, refusal closes the socket, log-safety gate and app-ID cap
+  ahead of every policy path), the absolute activity-immune auth deadline
+  pinned (`pre_handshake_activity_does_not_extend_the_auth_deadline`;
+  red-proofed with a sliding-deadline probe), and concurrent ceiling
+  conservation with exact rejection accounting pinned
+  (`concurrent_handshakes_conserve_the_app_ceiling_and_count_every_rejection`;
+  red-proofed by disabling app-window enforcement). The Authentication
+  ledger row is reviewed. The slice continues with queue/replay bounds,
+  parser boundaries, and metrics label cardinality.
 - [ ] **Client and deployment boundaries:** inspect reference-client handling
   of reconnect, reports, transport fallback, and negotiation. Audit plain/TLS
   server paths and optional features, including `legacy-fullmesh`. Distinguish
