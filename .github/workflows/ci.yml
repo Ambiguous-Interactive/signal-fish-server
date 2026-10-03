@@ -684,39 +684,19 @@ jobs:
         uses: actions/setup-node@v7.0.0
         with:
           node-version: "22"
-      # The npm advisory bulk endpoint answers 503 under registry load, which
-      # failed the whole audit lane on an otherwise-green tree (PR #533,
-      # 2026-09-04). A bounded retry with backoff absorbs the transient
-      # class; a genuine advisory finding still fails because `npm audit`
-      # exits non-zero on vulnerabilities and the loop exits 1 after the
-      # last attempt. Do not capture `status=$?` after the `if`: a false
-      # `if` condition leaves $? at 0 for the if-statement, which would
-      # swallow every finding (issue #601).
+      # `npm audit` cannot ignore advisories, so one unfixable advisory (no
+      # patched release upstream) would leave this lane permanently red. The
+      # gate script carries a documented per-graph accepted-advisories list
+      # (mirroring deny.toml's advisory ignore), fails on anything unlisted or
+      # stale, and keeps the #533 transient-503 retry with backoff. The #601
+      # rule holds: a parseable report is authoritative and never retried, so
+      # no finding can be swallowed by the retry loop's exit status.
       - name: Run npm audit (repository tooling)
         if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
-        run: |
-          for attempt in 1 2 3; do
-            if npm audit; then
-              exit 0
-            fi
-            echo "npm audit attempt $attempt failed; retrying after backoff" >&2
-            sleep $((attempt * 15))
-          done
-          echo "npm audit failed after 3 attempts" >&2
-          exit 1
+        run: bash scripts/npm-audit-gate.sh root
       - name: Run npm audit (browser reference client)
         if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
-        working-directory: clients/browser
-        run: |
-          for attempt in 1 2 3; do
-            if npm audit; then
-              exit 0
-            fi
-            echo "npm audit attempt $attempt failed; retrying after backoff" >&2
-            sleep $((attempt * 15))
-          done
-          echo "npm audit failed after 3 attempts" >&2
-          exit 1
+        run: bash scripts/npm-audit-gate.sh browser
       - name: Read Rust toolchain
         if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         id: toolchain
