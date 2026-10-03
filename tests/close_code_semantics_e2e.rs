@@ -313,6 +313,97 @@ async fn auth_timeout_closes_with_4001() {
     running_server.shutdown().await;
 }
 
+/// Inbound frames before the app-ID handshake do NOT extend the
+/// `4001 auth_timeout` deadline: the deadline is absolute from the
+/// connection start, so a peer that drips protocol-level keep-alive Pings
+/// across the window is still cut at the deadline with `auth_timeout` —
+/// never parked forever by its own activity, and never reclassified as an
+/// idle-timeout cut. A silent cut counts as a zero-frame disconnect; a cut
+/// with received frames must not.
+#[tokio::test]
+async fn pre_handshake_activity_does_not_extend_the_auth_deadline() {
+    let mut config = base_config();
+    config.app_id_allowlist_enabled = true;
+    config.websocket_config.auth_timeout_secs = 5;
+    config.websocket_config.server_ping_interval_secs = 0;
+    let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
+    let metrics = server.metrics();
+    let zero_frame_before = metrics
+        .websocket_zero_frame_timeout_disconnects
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let running_server = start_server(server).await;
+    let addr = running_server.addr();
+
+    let mut ws = connect(addr).await;
+    let start = std::time::Instant::now();
+    // Drip one Ping roughly every second across the 5s window. If any of
+    // these frames reset or deferred the auth deadline, the close below
+    // would not arrive inside the bound.
+    for index in 0..4 {
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        ws.send(Message::Ping(format!("keepalive {index}").into()))
+            .await
+            .expect("send pre-handshake keep-alive Ping");
+    }
+
+    // The close must arrive promptly after the 5s deadline. Eight seconds
+    // keeps ~3s of scheduling slack above the absolute deadline while staying
+    // below every sliding-deadline outcome (a drip-deferred cut lands at
+    // last-drip + 5s ≈ 9.4s), so a sliding deadline fails loudly here.
+    let cut_bound = start + std::time::Duration::from_secs(8);
+    let (code, reason): (u16, String) = match tokio::time::timeout(
+        cut_bound.saturating_duration_since(std::time::Instant::now()),
+        async {
+            loop {
+                match ws.next().await {
+                    Some(Ok(Message::Close(Some(frame)))) => {
+                        break (frame.code.into(), frame.reason.to_string())
+                    }
+                    Some(Ok(Message::Close(None))) => {
+                        panic!("auth deadline cut must carry a close code")
+                    }
+                    Some(Ok(_)) => continue,
+                    Some(Err(error)) => {
+                        panic!("transport error instead of a semantic close: {error}")
+                    }
+                    None => panic!("stream ended with no close frame at all"),
+                }
+            }
+        },
+    )
+    .await
+    {
+        Ok(observed) => observed,
+        Err(_elapsed) => {
+            panic!(
+                "connection stayed open {}ms past connect: pre-handshake activity must not \
+                 extend the auth deadline",
+                start.elapsed().as_millis()
+            )
+        }
+    };
+    assert_eq!(
+        code, 4001,
+        "an activity-during-handshake cut is still an auth timeout ({reason})"
+    );
+    assert_eq!(reason, "auth_timeout");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(8),
+        "the cut must track the 5s deadline, not the drip schedule"
+    );
+
+    // Frames DID arrive, so this cut must not be counted as a zero-frame
+    // deadline disconnect (that counter is the upgrade-black-hole signal).
+    let zero_frame_after = metrics
+        .websocket_zero_frame_timeout_disconnects
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        zero_frame_after, zero_frame_before,
+        "a deadline cut with received frames must not be counted as zero-frame"
+    );
+    running_server.shutdown().await;
+}
+
 /// A slow consumer evicted by the delivery contract is closed with
 /// `4002 slow_consumer` — readable even though the farewell `Error` frame may
 /// be buried behind the congested queue.

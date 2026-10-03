@@ -1205,4 +1205,63 @@ mod tests {
         assert!(outcome.added.is_empty() && outcome.removed.is_empty());
         assert!(open.resolve_app_id("game-1", LOCALHOST).await.is_ok());
     }
+
+    /// Concurrent handshakes through the full resolution seam (probe-then-
+    /// commit across both windows) conserve the application ceiling exactly:
+    /// 8 sources × 2 racing `Authenticate`s against a ceiling of 4 admit
+    /// exactly 4, and every one of the 12 rejections increments the auth
+    /// rejection metrics exactly once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_handshakes_conserve_the_app_ceiling_and_count_every_rejection() {
+        let metrics = Arc::new(crate::metrics::ServerMetrics::new());
+        let mw = Arc::new(
+            AppIdAllowlist::with_metrics(vec![entry("limited", Some(4))], metrics.clone())
+                .expect("unique app IDs"),
+        );
+        // One frozen timestamp for every racer: this is the worst-case
+        // probe/commit race, where every probe sees the empty window.
+        let now = Instant::now();
+        let sources = distinct_sources(8);
+        let barrier = Arc::new(tokio::sync::Barrier::new(16));
+
+        let mut tasks = Vec::with_capacity(16);
+        for source in &sources {
+            for _ in 0..2 {
+                let mw = Arc::clone(&mw);
+                let barrier = Arc::clone(&barrier);
+                let source = *source;
+                tasks.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    mw.resolve_app_id_at("limited", source, now).await.is_ok()
+                }));
+            }
+        }
+
+        let mut admitted_per_source = HashMap::new();
+        for (index, task) in tasks.into_iter().enumerate() {
+            if task.await.expect("handshake task must not panic") {
+                *admitted_per_source.entry(index / 2).or_insert(0u32) += 1;
+            }
+        }
+
+        let snapshot = metrics.snapshot().await.rate_limiting;
+        assert_eq!(
+            snapshot.rate_limit_rejections, 12,
+            "every rejected handshake must be counted exactly once"
+        );
+        assert_eq!(
+            snapshot.auth_rejections, 12,
+            "the auth-rejection counter must match the rejected handshakes"
+        );
+        assert_eq!(
+            admitted_per_source.values().sum::<u32>(),
+            4,
+            "the application ceiling must hold exactly under the commit race"
+        );
+        assert_eq!(
+            mw.rate_limiter.window_len("limited"),
+            4,
+            "the app window must hold exactly the admitted stamps"
+        );
+    }
 }

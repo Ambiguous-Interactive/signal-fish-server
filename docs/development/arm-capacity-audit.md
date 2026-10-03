@@ -1459,6 +1459,61 @@ interactions are reviewed and pinned or fixed, while distinct-metric
 export remains follow-up work. The recovery slice continues with cleanup
 racing join/reconnect and process-loss behavior versus documented limits.
 
+### C1 authentication admission boundary review (2026-10-03)
+
+At `d70867db` (main after #734), reviewed the resource-and-input-safety
+slice's unauthenticated-admission families across `src/auth/middleware.rs`,
+`src/auth/rate_limiter.rs`, the room-side budgets in `src/rate_limit.rs`,
+and the connection receive loop's handshake handling
+(`src/websocket/connection.rs`). No defect was found; every family carries
+a disposition and the two named remaining cases are now pinned.
+
+- **Unauthenticated flood posture (verified).** Every `Authenticate`
+  spends the app's handshake windows before credential verification
+  (`resolve_app_id` precedes `verify_connect_token`), and any resolution
+  or token refusal breaks the receive loop and closes the socket — a
+  refused peer cannot retry on the same connection. Pre-handshake
+  application frames are refused `MISSING_APP_ID` and close the
+  connection; the log-safety gate rejects hostile app IDs before any
+  policy path; app-ID length is capped (`MAX_APP_ID_LENGTH`).
+- **Auth timeout boundary is absolute (pinned,
+  `pre_handshake_activity_does_not_extend_the_auth_deadline`; red-proofed
+  by making the deadline slide per read).** The pre-handshake deadline is
+  frozen at `connection_start + auth_timeout_secs`; protocol-level
+  keep-alives and other inbound frames neither extend it nor reclassify
+  the cut as idle. The cut keeps code 4001 / `auth_timeout`, and a cut
+  with received frames correctly stays out of the zero-frame disconnect
+  counter. Config bounds (5–60s, no disable) were already pinned; the
+  deadline is the only admission-bound deadline in the receive loop (the
+  ping-write and pong deadlines are per-operation caps by contract, and
+  the idle window is intentionally activity-reset).
+- **Concurrent admission conserves the ceiling (pinned,
+  `concurrent_handshakes_conserve_the_app_ceiling_and_count_every_rejection`;
+  red-proofed by disabling app-window enforcement).** 8 sources × 2
+  racing handshakes against a ceiling of 4 admit exactly 4 under the
+  worst-case probe/commit race; each of the 12 rejections increments the
+  aggregate and auth rejection counters exactly once. The enforcement rests
+  on the commit-time re-check under the limiter entry lock
+  (`concurrent_rate_limit_enforcement` pins the primitive); a rejection
+  never charges the other window, and the documented worst case is one
+  wasted stamp in the offending source's own window under a probe/commit
+  race (the #502 split-budget pin covers the sequential composition; this
+  pin covers the concurrent one).
+- **Room-side budgets (verified, previously reviewed).** The room
+  creation/join/signal/relay budgets check-and-charge atomically under
+  the entry lock (`try_*`/`charge` on `RateLimitEntry`), the error-reply
+  gate charges under the connection's own serialization, and the
+  budget/refusal accounting pins from the earlier budget and error-reply
+  sessions hold. `PlayerRejectionStats` forensics are saturated-add and
+  reset with the window.
+
+The Authentication coverage row moves to reviewed: unauthorized traffic
+cannot enter a room, limits count refusals exactly once, concurrent
+admission conserves the ceiling, and the auth timeout boundary is
+absolute and activity-immune. The resource-and-input-safety slice
+continues with queue/replay bounds, parser boundaries, and metrics label
+cardinality.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -1490,7 +1545,7 @@ neither is a deployed capacity preset.
 | --- | --- | --- | --- | --- |
 | Startup and CLI: `src/main.rs`, `src/lib.rs` | Startup rejects bad config; startup failure leaves no listener | `tests/config_and_endpoints_tests.rs` | Failure after partial startup; feature matrix | Unreviewed |
 | Config and reload: `src/config/**` | Defaults, validation, and reload preserve one coherent policy | `tests/config_and_endpoints_tests.rs`, `tests/config_validation_coverage_scan.rs`; C1 allowlist and key reload boundary review above | SIGHUP key/allowlist swap order and invalid reload are reviewed and pinned; default coherence and validation breadth (malformed documents, env-override interactions) remain | Unreviewed |
-| Authentication: `src/auth/**`, `src/rate_limit.rs` | Unauthorized traffic cannot enter a room; limits count refusals | `tests/auth_integration_tests.rs`, `formal/tla/RateLimitWindow.tla` | Concurrent admission and auth timeout boundary | Unreviewed |
+| Authentication: `src/auth/**`, `src/rate_limit.rs` | Unauthorized traffic cannot enter a room; limits count refusals | `tests/auth_integration_tests.rs`, `formal/tla/RateLimitWindow.tla`; C1 authentication admission boundary review above | Flood posture, budget-before-credential ordering, refusal closes, the absolute activity-immune auth deadline (`pre_handshake_activity_does_not_extend_the_auth_deadline`), and concurrent ceiling conservation (`concurrent_handshakes_conserve_the_app_ceiling_and_count_every_rejection`) are reviewed and pinned; room-side budget charge paths verified against their earlier pins | Reviewed |
 | Security: `src/security/**`, `src/websocket/token_binding.rs` | Token, origin, TLS, and TURN credential checks fail closed | `tests/mtls_token_binding_e2e.rs`, `fuzz/fuzz_targets/fuzz_reconnect_tokens.rs`; C1 token rotation boundary review above | Rotation ordering and concurrent-claim refusals are reviewed and pinned; TLS variants and connect-token claim boundaries remain | Unreviewed |
 | Protocol: `src/protocol/**`, `src/trace_validation.rs` | V2/V3 decoding, wire bytes, and delivery class match contract | `tests/v2_wire_golden.rs`, `tests/v3_wire_properties.rs`, `fuzz/fuzz_targets/decode_protocol.rs` | Malformed/deep frames, mixed format boundaries | Unreviewed |
 | Room and player storage: `src/database/**` | Membership and room limits stay atomic and app isolated | `tests/integration_tests.rs`, `tests/model_based_state_machines.rs`; C1 admission-limit review above | Other adapters, rollback, and leave/disconnect races remain | Unreviewed |
