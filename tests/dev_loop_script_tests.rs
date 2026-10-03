@@ -428,6 +428,10 @@ fn test_dev_loop_changed_mode_validates_the_script_itself() {
         !output.contains("--lib"),
         "a script-only delta schedules no root-crate test work: {output}"
     );
+    assert!(
+        !output.contains("ignoring non-crate Rust change ''"),
+        "the empty changed-files list must not iterate as an empty path: {output}"
+    );
 }
 
 #[test]

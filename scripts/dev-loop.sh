@@ -165,6 +165,10 @@ if [ "$CHANGED_MODE" -eq 1 ]; then
     lib_owner=0
     owners=()
     while IFS= read -r file; do
+        # A here-string over an empty list still yields one empty line; skip
+        # it so a script-only delta (or any non-.rs-only delta) never reports
+        # an ignored change with an empty path.
+        [ -n "$file" ] || continue
         case "$file" in
             src/*.rs)
                 lib_owner=1
