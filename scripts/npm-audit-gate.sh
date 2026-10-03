@@ -87,7 +87,7 @@ STDERR=$(mktemp)
 trap 'rm -f "$REPORT" "${REPORT}.advisories" "$STDERR"' EXIT
 
 # A parseable audit report is authoritative whether it exits 0 (clean) or 1
-# (findings); only unparseable or malformed output is transient (issue #601:
+# (findings); only unparsable or malformed output is transient (issue #601:
 # never swallow a real finding behind the retry loop's exit status). The
 # shape probe also rejects parseable non-report JSON (an error body), which
 # would otherwise read as "zero advisories" — a false green on graphs whose
