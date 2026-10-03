@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Metrics: `websocket_shutdown_disconnects` counts every registered
+  connection torn down with the server-initiated shutdown close (code 4000)
+  (#727). The drain close fan-out and any close a drain superseded become
+  observable on the Prometheus endpoint and the bounded `/metrics` snapshot
+  without log scraping. A late WebSocket registration refused during a drain
+  never registered, so it stays under `websocket_upgrades_rejected_draining`.
+
 - Security configuration: optional per-encoding game-data payload ceilings,
   `security.max_game_data_bytes` (#634). Each encoding (`json`,
   `message_pack`, `rkyv`, `protobuf`) can carry its own payload cap, checked

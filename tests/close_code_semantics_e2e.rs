@@ -468,6 +468,10 @@ async fn activity_reaper_eviction_closes_with_4003() {
     config.websocket_config.slow_consumer_timeout_ms = 500;
     config.room_cleanup_interval = std::time::Duration::from_secs(1);
     let server = create_test_server_with_config(config, ProtocolConfig::default()).await;
+    let metrics = server.metrics();
+    let shutdown_disconnects_before = metrics
+        .websocket_shutdown_disconnects
+        .load(std::sync::atomic::Ordering::Relaxed);
     // The test router does not run the maintenance loop (production wiring
     // starts it separately); this scenario is ABOUT the reaper, so start it.
     let reaper = server.clone();
@@ -486,6 +490,15 @@ async fn activity_reaper_eviction_closes_with_4003() {
         "reaper eviction must close with 4003 ({reason})"
     );
     assert_eq!(reason, "activity_timeout");
+    // The shutdown counter is classified by close reason: a non-shutdown
+    // teardown must never land in it (issue #727).
+    let shutdown_disconnects_after = metrics
+        .websocket_shutdown_disconnects
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        shutdown_disconnects_after, shutdown_disconnects_before,
+        "a non-shutdown close must not count as a shutdown disconnect"
+    );
     running_server.shutdown().await;
 }
 
@@ -1000,6 +1013,10 @@ async fn shutdown_drain_sends_goingaway_and_closes_4000_without_reconnect_record
     let reconnection_manager = server
         .reconnection_manager()
         .expect("test config enables reconnection");
+    let metrics = server.metrics();
+    let shutdown_disconnects_before = metrics
+        .websocket_shutdown_disconnects
+        .load(std::sync::atomic::Ordering::Relaxed);
     let running_server = start_server(server.clone()).await;
     let addr = running_server.addr();
 
@@ -1031,6 +1048,16 @@ async fn shutdown_drain_sends_goingaway_and_closes_4000_without_reconnect_record
     let (code, reason) = read_close_frame(&mut ws, "shutdown drain").await;
     assert_eq!(code, 4000, "shutdown must close with 4000 ({reason})");
     assert_eq!(reason, "server_shutdown");
+    // The coded close fan-out is observable in metrics, not only in the
+    // shutdown log (issue #727): exactly this connection's teardown counts.
+    let shutdown_disconnects_after = metrics
+        .websocket_shutdown_disconnects
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        shutdown_disconnects_after,
+        shutdown_disconnects_before + 1,
+        "the drain's coded 4000 close must be counted per closed connection"
+    );
 
     let deadline = tokio::time::Instant::now() + CLOSE_DEADLINE;
     loop {
