@@ -582,7 +582,8 @@ jobs:
         # touches none of them cannot change the audit's verdict and would
         # reprove an identical dependency graph. The path set covers the
         # server, native, fuzz, Fortress, and Fortress-WASM Cargo graphs plus
-        # both npm graphs (and this workflow file, so gate changes always
+        # both npm graphs, and the gate surfaces themselves (this workflow
+        # file and the npm advisory gate script, so gate changes always
         # re-audit) and is pinned in lockstep by
         # test_ci_deny_job_skips_dependency_irrelevant_pull_requests.
         # Fail-open: any resolution problem runs the full audit.
@@ -620,7 +621,7 @@ jobs:
                 RELEVANT="true"
                 break
                 ;;
-              .github/workflows/ci.yml)
+              .github/workflows/ci.yml|scripts/npm-audit-gate.sh)
                 RELEVANT="true"
                 break
                 ;;

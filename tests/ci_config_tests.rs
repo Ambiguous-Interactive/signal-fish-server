@@ -512,6 +512,14 @@ fn workflow_direct_script_violations_for_content(
         if is_shell_assignment_only(command) {
             continue;
         }
+        if command.ends_with(')') {
+            // A bash `case` arm introducer (`pattern|pattern)`) lists path
+            // globs; it selects on paths and never executes them, and no
+            // invocation line in this repository's workflows ends with a
+            // closing paren. Without this skip, every script path in a case
+            // pattern is misread as a direct invocation.
+            continue;
+        }
         let command = normalize_github_workspace_expression(command);
         let mut token_text = command.replace("&&", " ").replace("||", " ");
         for separator in [';', '&', '|', '(', ')'] {
@@ -5922,12 +5930,22 @@ fn test_ci_deny_job_skips_dependency_irrelevant_pull_requests() {
                 consumed.insert("Cargo.lock".to_owned());
             }
         }
-        if run
-            .lines()
-            .any(|line| matches!(line.trim(), "npm audit" | "if npm audit; then"))
-        {
+        if run.lines().any(|line| {
+            let trimmed = line.trim();
+            // Either bare `npm audit` shape (kept for the historical retry
+            // form) or the gate invocation, whose graph argument names the
+            // audited directory (root → repo root, browser → clients/browser).
+            matches!(trimmed, "npm audit" | "if npm audit; then")
+                || trimmed == "bash scripts/npm-audit-gate.sh root"
+        }) {
             consumed.insert(in_directory("package.json"));
             consumed.insert(in_directory("package-lock.json"));
+        }
+        if run.contains("bash scripts/npm-audit-gate.sh browser") {
+            // The gate script cds into the graph's directory itself, so the
+            // step carries no `working-directory`; the argument is the graph.
+            consumed.insert("clients/browser/package.json".to_owned());
+            consumed.insert("clients/browser/package-lock.json".to_owned());
         }
         if run.contains("cargo sbom") {
             // cargo-sbom shells out to `cargo metadata` over the root graph.
@@ -5975,13 +5993,15 @@ fn test_ci_deny_job_skips_dependency_irrelevant_pull_requests() {
 
     // Entries the consumed-input extraction cannot see: the root graphs and
     // the root cargo-deny policy file, the .cargo config the analyzers
-    // inherit, and this workflow file so gate changes always re-audit.
+    // inherit, and the gate surfaces (this workflow file and the npm
+    // advisory gate script) so gate changes always re-audit.
     for required in [
         "Cargo.toml",
         "Cargo.lock",
         "deny.toml",
         ".cargo/**",
         ".github/workflows/ci.yml",
+        "scripts/npm-audit-gate.sh",
     ] {
         assert!(
             filters.contains(&required.to_string()),
@@ -27570,21 +27590,33 @@ fn test_audit_job_covers_every_dependabot_managed_npm_graph() {
 
     let audited_directories = steps
         .iter()
-        .filter(|step| {
-            step.as_mapping_get("run")
-                .and_then(Yaml::as_str)
-                .is_some_and(|run| {
-                    // Either the bare invocation or the transient-5xx retry
-                    // form (`if npm audit; then`) counts; the failure-echo
-                    // line must not match.
-                    run.lines()
-                        .any(|line| matches!(line.trim(), "npm audit" | "if npm audit; then"))
-                })
-        })
-        .map(|step| {
-            step.as_mapping_get("working-directory")
-                .and_then(Yaml::as_str)
-                .unwrap_or(".")
+        .filter_map(|step| {
+            let run = step.as_mapping_get("run").and_then(Yaml::as_str)?;
+            // Either historical inline shape (`npm audit`, with the audited
+            // directory in `working-directory`) or the gate invocation, whose
+            // graph argument names the directory the script cds into.
+            if run
+                .lines()
+                .any(|line| matches!(line.trim(), "npm audit" | "if npm audit; then"))
+            {
+                return Some(
+                    step.as_mapping_get("working-directory")
+                        .and_then(Yaml::as_str)
+                        .unwrap_or(".")
+                        .to_owned(),
+                );
+            }
+            let graph = run
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("bash scripts/npm-audit-gate.sh "))?;
+            match graph.trim() {
+                "root" => Some(".".to_owned()),
+                "browser" => Some("clients/browser".to_owned()),
+                other => panic!(
+                    "npm audit gate graph `{other}` is not a Dependabot-managed npm \
+                     graph; extend dependabot_npm_directories and this mapping together"
+                ),
+            }
         })
         .map(|directory| {
             if directory == "." {
@@ -27608,8 +27640,12 @@ fn test_audit_job_covers_every_dependabot_managed_npm_graph() {
 fn test_npm_audit_retry_steps_fail_closed() {
     // Issue #601: `status=$?` after a false `if` condition is always 0 (the
     // if-statement's own exit code), so `exit "$status"` passed the step even
-    // when every `npm audit` attempt reported vulnerabilities. The retry must
-    // keep the transient-5xx absorption and terminate fail closed.
+    // when every `npm audit` attempt reported vulnerabilities. The retry
+    // contract now lives in scripts/npm-audit-gate.sh (per-graph advisory
+    // allowlist, #533 transient-503 retry/backoff, #601 no-swallow), so this
+    // test pins both halves of the seam: every Dependabot-managed graph keeps
+    // its `Run npm audit` step invoking the gate with its graph key, and the
+    // live gate script keeps the fail-closed contract the steps inherit.
     let root = repo_root();
     let content = read_live_file(&root.join(".github/workflows/ci.yml"));
     let documents = Yaml::load_from_str(&content).expect("ci.yml must parse as YAML");
@@ -27633,29 +27669,88 @@ fn test_npm_audit_retry_steps_fail_closed() {
                 .map(str::to_owned)
         })
         .collect::<Vec<_>>();
+    let graphs = dependabot_npm_directories()
+        .iter()
+        .map(|directory| match directory.as_str() {
+            "/" => "root".to_owned(),
+            "/clients/browser" => "browser".to_owned(),
+            other => panic!(
+                "new Dependabot npm graph `{other}` needs a matching npm-audit-gate \
+                 graph key here and in test_audit_job_covers_every_dependabot_managed_\
+                 npm_graph"
+            ),
+        })
+        .collect::<BTreeSet<_>>();
     assert_eq!(
         audit_runs.len(),
-        dependabot_npm_directories().len(),
+        graphs.len(),
         "every Dependabot-managed npm graph must keep its `Run npm audit` step"
     );
 
+    let mut invoked_graphs = BTreeSet::new();
     for run in &audit_runs {
         assert!(
-            run.contains("if npm audit; then"),
-            "npm audit steps must keep the retry form `if npm audit; then`"
-        );
-        assert!(
             !run.contains("status=$?"),
-            "npm audit steps must not capture `status=$?` after the `if`: a false \
-             `if` condition leaves the if-statement's exit code at 0, so `exit \
-             \"$status\"` passes despite vulnerabilities (issue #601)"
+            "npm audit steps must not capture `status=$?` after a conditional: a \
+             swallowed exit code passes the step despite vulnerabilities (issue #601)"
         );
+        let mut invocations = run
+            .lines()
+            .filter(|line| line.trim().starts_with("bash scripts/npm-audit-gate.sh "));
+        let Some(invocation) = invocations.next() else {
+            panic!(
+                "every `Run npm audit` step must invoke the gate script with its \
+                 graph key; step run was: {run:?}"
+            )
+        };
         assert!(
-            run.trim_end().ends_with("exit 1"),
-            "npm audit steps must terminate with an explicit `exit 1` after the \
-             final attempt so genuine advisory findings fail the step"
+            invocations.next().is_none() && run.lines().count() == 1,
+            "the gate step must be a single gate invocation; retry policy lives in \
+             the script so it stays testable and identical across graphs: {run:?}"
         );
+        let graph = invocation
+            .trim()
+            .strip_prefix("bash scripts/npm-audit-gate.sh ")
+            .expect("prefix checked above");
+        assert!(
+            graph == "root" || graph == "browser",
+            "npm audit gate graph `{graph}` must name a Dependabot-managed npm graph"
+        );
+        invoked_graphs.insert(graph.to_owned());
     }
+    assert_eq!(
+        invoked_graphs, graphs,
+        "the gate invocations must cover exactly the Dependabot-managed npm graphs"
+    );
+
+    // The step delegates its contract to the gate script; pin that contract
+    // in the live script so step and script cannot drift apart silently.
+    let gate = std::fs::read_to_string(root.join("scripts/npm-audit-gate.sh"))
+        .expect("scripts/npm-audit-gate.sh must be readable");
+    assert!(
+        gate.contains("npm audit --json"),
+        "the gate must run `npm audit --json`: a parseable report is authoritative \
+         whether npm exits 0 (clean) or 1 (findings), so findings can never be \
+         retried away (issue #601)"
+    );
+    assert!(
+        !gate.contains("status=$?"),
+        "the gate must not capture `status=$?` after a conditional (issue #601)"
+    );
+    assert!(
+        gate.contains("for attempt in 1 2 3"),
+        "the gate must keep the bounded #533 retry/backoff for transient registry \
+         failures instead of failing the lane on endpoint flakiness"
+    );
+    assert!(
+        gate.contains("npm audit failed after 3 attempts without a usable report"),
+        "exhausted transient retries must fail the step explicitly"
+    );
+    assert!(
+        gate.contains("exit \"$FAILED\""),
+        "the gate must terminate on the accumulated findings verdict so advisory \
+         findings cannot be swallowed by the retry loop's exit status (issue #601)"
+    );
 }
 
 /// Line-level scan for the issue-#601 failure class: an exit-code capture on

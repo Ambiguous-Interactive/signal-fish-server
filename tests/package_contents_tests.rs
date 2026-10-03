@@ -121,10 +121,12 @@ fn is_expected_package_diagnostic(line: &str) -> bool {
 /// broken metadata) instead of crates.io flakiness, which failed the hosted
 /// ASan lane with ~90 spurious HTTP2 warnings on an otherwise-green tree
 /// (issue #733, run 37089452222). The same class as the npm advisory
-/// endpoint's transient 503s (#533).
+/// endpoint's transient 503s (#533). The `(N tries remaining)` suffix is
+/// part of cargo's retry notice and keeps the class scoped to recovered
+/// attempts rather than any string starting with a similar prefix.
 fn is_registry_transport_warning(line: &str) -> bool {
     line.trim_start()
-        .starts_with("warning: spurious network error")
+        .starts_with("warning: spurious network error (")
 }
 
 fn assert_published_readme_links_resolve(package: &BTreeSet<String>) {
@@ -471,6 +473,21 @@ fn cargo_package_diagnostics_classify_cache_contention_without_hiding_warnings()
             "warning: ignoring benchmark `relay_allocations` as `benches/relay_allocations.rs` is not included in the published package",
             true,
             "expected omitted benchmark target",
+        ),
+        (
+            "warning: spurious network error (3 tries remaining): [16] Error in the HTTP2 framing layer",
+            true,
+            "recovered registry transport warning (#733)",
+        ),
+        (
+            "error: spurious network error (3 tries remaining): failed to get registry index",
+            false,
+            "unrecovered transport failure near miss",
+        ),
+        (
+            "warning: spurious network errors during dependency resolution",
+            false,
+            "prefix-widening near miss",
         ),
         (
             "warning: package `signal-fish-server` has no documentation",

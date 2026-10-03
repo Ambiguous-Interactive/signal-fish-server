@@ -49,13 +49,17 @@ ROOT_ALLOWED_ADVISORIES=(
 BROWSER_ALLOWED_ADVISORIES=()
 
 GRAPH="${1:-}"
+if [ "$#" -gt 1 ]; then
+    echo "Usage: $0 [root|browser]" >&2
+    exit 2
+fi
 case "$GRAPH" in
     root)
-        ALLOWED_ADVISORIES=("${ROOT_ALLOWED_ADVISORIES[@]}")
+        ALLOWED_ADVISORIES=("${ROOT_ALLOWED_ADVISORIES[@]+"${ROOT_ALLOWED_ADVISORIES[@]}"}")
         GRAPH_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
         ;;
     browser)
-        ALLOWED_ADVISORIES=("${BROWSER_ALLOWED_ADVISORIES[@]}")
+        ALLOWED_ADVISORIES=("${BROWSER_ALLOWED_ADVISORIES[@]+"${BROWSER_ALLOWED_ADVISORIES[@]}"}")
         GRAPH_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/clients/browser"
         ;;
     *)
@@ -63,10 +67,6 @@ case "$GRAPH" in
         exit 2
         ;;
 esac
-if [ "$#" -gt 1 ]; then
-    echo "Usage: $0 [root|browser]" >&2
-    exit 2
-fi
 if [ ! -f "$GRAPH_DIR/package.json" ]; then
     echo "[FAIL] $GRAPH: no package.json at $GRAPH_DIR" >&2
     exit 2
@@ -83,15 +83,28 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 
 REPORT=$(mktemp)
-trap 'rm -f "$REPORT" "${REPORT}.advisories"' EXIT
+STDERR=$(mktemp)
+trap 'rm -f "$REPORT" "${REPORT}.advisories" "$STDERR"' EXIT
 
+# A parseable audit report is authoritative whether it exits 0 (clean) or 1
+# (findings); only unparseable or malformed output is transient (issue #601:
+# never swallow a real finding behind the retry loop's exit status). The
+# shape probe also rejects parseable non-report JSON (an error body), which
+# would otherwise read as "zero advisories" — a false green on graphs whose
+# allowlist is empty.
 ATTEMPTS_OK=false
 for attempt in 1 2 3; do
-    if npm audit --json >"$REPORT" 2>/dev/null; then
+    if npm audit --json >"$REPORT" 2>"$STDERR"; then
         ATTEMPTS_OK=true
         break
     fi
-    if node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$REPORT" 2>/dev/null; then
+    if node -e '
+const report = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+if (report === null || typeof report !== "object" ||
+    report.vulnerabilities === null || typeof report.vulnerabilities !== "object") {
+    process.exit(1);
+}
+' "$REPORT" 2>/dev/null; then
         ATTEMPTS_OK=true
         break
     fi
@@ -101,6 +114,8 @@ done
 
 if [ "$ATTEMPTS_OK" != true ]; then
     echo "[FAIL] $GRAPH: npm audit failed after 3 attempts without a usable report" >&2
+    echo "--- npm audit stderr (last 20 lines) ---" >&2
+    tail -n 20 "$STDERR" >&2 || true
     exit 1
 fi
 
@@ -134,7 +149,7 @@ UNACCEPTED=0
 while IFS=$'\t' read -r id package severity title url; do
     [ -n "$id" ] || continue
     accepted=false
-    for allowed in "${ALLOWED_ADVISORIES[@]}"; do
+    for allowed in ${ALLOWED_ADVISORIES[@]+"${ALLOWED_ADVISORIES[@]}"}; do
         if [ "$id" = "$allowed" ]; then
             accepted=true
             break
@@ -150,7 +165,7 @@ while IFS=$'\t' read -r id package severity title url; do
     fi
 done <"${REPORT}.advisories"
 
-for allowed in "${ALLOWED_ADVISORIES[@]}"; do
+for allowed in ${ALLOWED_ADVISORIES[@]+"${ALLOWED_ADVISORIES[@]}"}; do
     if ! awk -F'\t' -v id="$allowed" '$1 == id { found = 1; exit } END { exit !found }' "${REPORT}.advisories"; then
         echo "[FAIL] $GRAPH: allowlist entry $allowed is no longer reported by npm audit; remove it from scripts/npm-audit-gate.sh"
         FAILED=1
