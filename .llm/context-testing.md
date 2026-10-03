@@ -25,7 +25,9 @@ See [Core Testing Patterns](skills/testing/SKILL.md) and
   alive when the assertion means "nothing was enqueued", or assert
   `Disconnected` explicitly when closure is the expected state. Assert each
   expected setup message by type/content, or use an explicit helper
-  that distinguishes empty channels from disconnected channels.
+  that distinguishes empty channels from disconnected channels. These
+  scanners run in hosted CI's Nextest lane and via `scripts/dev-loop.sh
+  --changed`; scoped `--lib` runs never execute them.
 - Test code must fail **loudly**. An error logged with `tracing::error!` must never
   be followed by a silent `return;`/`return Ok(());` (which lets CI pass while the
   setup/exchange actually failed). Use `panic!`/`assert!`/`.expect()`, or make the

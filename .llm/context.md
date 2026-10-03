@@ -118,9 +118,9 @@ and the [changelog flow](skills/classify-user-visible-changes/SKILL.md).
   `--clippy` when needed): it resolves each pattern to its owning target
   with grep and runs the scoped command, so the fast path is one command.
   `scripts/dev-loop.sh --changed [base-ref]` runs the whole edit-test loop
-  in one command: it maps the working tree's Rust deltas onto owning targets
-  and runs each owning target's full suite once (src/ deltas run the unit
-  tests; helper modules run every top-level target including them).
+  in one command: Rust deltas map onto owning targets (src/ runs the unit
+  tests; helper modules run every including target), root-crate deltas add
+  the source-policy scanners, a dev-loop.sh delta adds its contract suite.
 - Run the full local gate once before publication, not every loop:
   `cargo fmt` + `cargo clippy --all-targets --all-features`, zero warnings.
 - Do NOT run expensive suites locally: full `cargo test`/nextest sweeps,
