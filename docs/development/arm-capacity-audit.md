@@ -1514,6 +1514,50 @@ absolute and activity-immune. The resource-and-input-safety slice
 continues with queue/replay bounds, parser boundaries, and metrics label
 cardinality.
 
+### C1 metrics label cardinality review (2026-10-03)
+
+At `85abff77` (main after #735), reviewed the resource-and-input-safety
+slice's metrics-label-cardinality family across `src/metrics.rs`, the
+Prometheus renderer (`src/websocket/prometheus.rs`), and the bounded
+`/metrics` dashboard snapshot (`src/websocket/metrics.rs`). No defect was
+found; every label surface carries a documented bound with a pin or tested
+lifecycle wiring.
+
+- **Per-connection ledgers are registration-scoped (verified, pinned).**
+  `connection_delivery_stats` and `slow_consumer_eviction_attributions`
+  key by live player id: registered at connection registration
+  (`src/server/connection_manager.rs`), re-keyed in both directions across
+  a reconnection identity swap, and removed at unregistration.
+  `attribution_ledgers_accumulate_rekey_and_unregister` pins the
+  accumulate/rekey/unregister/no-resurrection lifecycle, including the
+  zero-ledger-exists-only-for-bounding rule.
+- **Per-app relay attribution is allowlist-bounded (verified, pinned).**
+  `app_relay_bytes` records only senders with an app policy
+  (`check_and_charge_relay_bytes` charges under `if let Some(policy)`), so
+  open-mode client-chosen app IDs never create series and the map is
+  bounded by the allowlist.
+  `allowlist_reload_prunes_revoked_app_relay_series` pins the #552
+  pruning of a revoked tenant's series on allowlist reload.
+- **Client-chosen game-name maps are response-bounded (verified).**
+  `roomsByGame` and `gamePercentiles` are derived from the dashboard view
+  per request and truncated by `bound_response_game_map` on both the
+  current view and every history sample (issue #518); nothing accumulates
+  them server-side.
+- **Shutdown closes are counted at the coded close fan-out (new, #727).**
+  `websocket_shutdown_disconnects` counts registered connections torn down
+  with the server-initiated 4000 close, classified at the semantic close
+  step after every reason override, so the drain close fan-out is
+  observable without log scraping. The drain pin proves one closed
+  connection counts exactly once, and the activity-reaper pin proves a
+  non-shutdown close cannot land in the counter
+  (`tests/close_code_semantics_e2e.rs`). A late registration refused
+  during a drain never registered, so it stays under
+  `websocket_upgrades_rejected_draining`.
+
+The metrics label cardinality family is closed with bounded-series
+dispositions. The resource-and-input-safety slice continues with
+queue/replay bounds and parser boundaries.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**

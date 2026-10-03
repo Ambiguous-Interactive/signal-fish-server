@@ -224,8 +224,13 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   conservation with exact rejection accounting pinned
   (`concurrent_handshakes_conserve_the_app_ceiling_and_count_every_rejection`;
   red-proofed by disabling app-window enforcement). The Authentication
-  ledger row is reviewed. The slice continues with queue/replay bounds,
-  parser boundaries, and metrics label cardinality.
+  ledger row is reviewed. The metrics label cardinality family is reviewed
+  (audit ledger, 2026-10-03): every label surface is bounded —
+  connection-scoped ledgers die with their registration, per-app relay
+  attribution is allowlist-bounded with #552 pruning, client-chosen
+  game-name maps are response-bounded — and the shutdown-drain close
+  fan-out is exported as `websocket_shutdown_disconnects` (#727).
+  The slice continues with queue/replay bounds and parser boundaries.
 - [ ] **Client and deployment boundaries:** inspect reference-client handling
   of reconnect, reports, transport fallback, and negotiation. Audit plain/TLS
   server paths and optional features, including `legacy-fullmesh`. Distinguish

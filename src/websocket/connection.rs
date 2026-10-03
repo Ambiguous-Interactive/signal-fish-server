@@ -1089,6 +1089,13 @@ async fn finalize_closed_connection(
     // the same normal closure, so the coded frame is TOTAL over server-side
     // teardowns: no path falls back to a bare, code-less close.
     let reason = close_frame_reason_for_server(terminal_reason, server);
+    if reason == CloseReason::Shutdown {
+        // Counted at the coded close fan-out, after every override above, so
+        // the counter observes exactly the teardowns that close 4000 (issue
+        // #727). The drain close request count stays in the shutdown log;
+        // this counter counts the closes themselves.
+        server.metrics().increment_websocket_shutdown_disconnects();
+    }
     let close_frame = Message::Close(Some(axum::extract::ws::CloseFrame {
         code: reason.websocket_close_code(),
         reason: reason.close_frame_reason().into(),

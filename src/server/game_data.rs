@@ -635,6 +635,7 @@ impl EnhancedGameServer {
 /// coordinator handoff. Compatibility entry for direct-coordinator tests;
 /// the production lanes use the gated `EnhancedGameServer`
 /// `broadcast_game_data_with` method above.
+#[cfg(any(test, feature = "allocation-tracking"))]
 pub async fn broadcast_game_data_with<F>(
     message_coordinator: &dyn crate::coordination::MessageCoordinator,
     metrics: &crate::metrics::ServerMetrics,

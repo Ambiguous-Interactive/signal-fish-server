@@ -191,6 +191,12 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
     );
     counter(
         &mut buf,
+        "signal_fish_websocket_shutdown_disconnects_total",
+        "Registered connections closed with the server-initiated shutdown close (code 4000): the drain close fan-out plus closes a drain superseded",
+        snapshot.connections.websocket_shutdown_disconnects,
+    );
+    counter(
+        &mut buf,
         "signal_fish_websocket_zero_frame_timeout_disconnects_total",
         "Deadline cuts whose session never received a frame: the upgrade succeeded but no client data ever arrived; the cut's log line carries the upgrade request_id",
         snapshot.connections.websocket_zero_frame_timeout_disconnects,
@@ -889,6 +895,10 @@ mod tests {
         assert!(
             rendered.contains("signal_fish_websocket_ping_probes_cancelled_activity_total 0"),
             "expected activity-cancelled websocket ping counter line"
+        );
+        assert!(
+            rendered.contains("signal_fish_websocket_shutdown_disconnects_total 0"),
+            "expected shutdown-drain close counter line"
         );
         assert!(
             rendered.contains("signal_fish_websocket_zero_frame_timeout_disconnects_total 0"),

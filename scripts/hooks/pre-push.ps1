@@ -690,7 +690,15 @@ if ($SourceOnly) {
 }
 
 $timer = [System.Diagnostics.Stopwatch]::StartNew()
-$script:RepoRoot = (Invoke-Git -Arguments @("rev-parse", "--show-toplevel")).Stdout.Trim()
+# Git runs hooks from the work-tree root (githooks(1)), so the common push
+# path needs no discovery spawn. A manual invocation from a subdirectory —
+# or a bare repository, where the CWD is the git dir — falls back to
+# `git rev-parse --show-toplevel`.
+if (Test-Path .git) {
+    $script:RepoRoot = (Get-Location).Path
+} else {
+    $script:RepoRoot = (Invoke-Git -Arguments @("rev-parse", "--show-toplevel")).Stdout.Trim()
+}
 Set-Location $script:RepoRoot
 
 if ($Worktree) {
