@@ -1371,6 +1371,91 @@ churn growth and dashboard cost remain measurement work for C3/C5. The
 recovery slice continues with drain/shutdown racing active reconnect claims
 and queued data, cleanup racing join/reconnect, and process-loss behavior.
 
+### C1 drain/shutdown with queued data and active reconnect claims review (2026-10-03)
+
+At `54feb610` (main after #726) with this review's fix, reviewed the
+recovery slice's drain/shutdown family across `src/server/shutdown.rs`,
+`connection_manager.rs`, `reconnection_service.rs`, `room_service.rs`,
+`spectator_service.rs`, the coordinator's initial-transition registration
+(`src/server.rs`), and the per-connection close path
+(`src/websocket/connection.rs`). Two accounting defects were found and
+fixed; every family carries a disposition.
+
+- **A committed reconnect claim always reaches the close fan-out
+  (fence verified).** `begin_shutdown_drain` takes
+  `shutdown_drain_commit_gate` before flipping the drain atomic, so a
+  baseline commit either finishes under the gate before the flip or sees
+  `should_commit() == false` and refuses. The restored identity is inserted
+  into `connection_manager` before the coordinator commit, so the later
+  `close_connections_for_shutdown` iteration sees it; a fan-out that ran
+  before the swap pins the transient socket, and the `Shutdown` reason is
+  classified as crossing the identity swap and is carried into the restored
+  connection's close signal (pinned,
+  `reassign_still_adopts_entry_pinned_for_shutdown`). New upgrades are
+  refused while draining, with a post-registration recheck pinning the
+  inline 4000 if the flip races the insert. The committed-claim end state —
+  `Reconnected` baseline, then the coded 4000 — is therefore guaranteed and
+  is pinned piecewise: the wire shape by
+  `shutdown_drain_sends_goingaway_and_closes_4000_without_reconnect_record`
+  and the swap-crossing pin above.
+- **A drain flip during a parked baseline reservation was misaccounted
+  (fixed, new pin).** The initial-transition reservation's backpressure
+  park had no drain arm, so the outer drain race dropped the parked future
+  and the parked-wait guard resolved the attempt as
+  `websocket_messages_dropped` — the sibling conditional-delivery park
+  records the identical event as `websocket_deliveries_canceled` with an
+  explicit not-a-drop pin. The reservation park now carries the same biased
+  drain arm (cancellation precedence over capacity and expiry), and the
+  pre-attempt refusal moved into the reservation itself. New pin
+  `drain_flip_during_initial_transition_park_cancels_instead_of_dropping`,
+  red-proofed by stashing the fix: the flip counted a dropped message and
+  left the cancellation ledger untouched.
+- **Two silent releases of a reserved baseline (fixed, new pins).** A
+  failed baseline build and a drain-gated commit refusal each released the
+  reserved initial frame with no paired outcome for the counted attempt —
+  the same class the #725 panic-accounting fix closed for transaction
+  hooks. Reservation ownership now flows through
+  `InitialTransitionReservationGuard`, defused only when the commit
+  resolves the attempt. New pins
+  `drain_gated_commit_refusal_accounts_the_reserved_baseline`,
+  `failed_baseline_builder_accounts_the_reserved_transition`, and
+  `committed_initial_transition_resolves_its_attempt_exactly_once`
+  (no double count on the committed path), all red-proven against the
+  unfixed revision.
+- **Close ordering and queued data (contract-consistent, pinned
+  piecewise).** The close frame is written by the per-connection send task
+  after a bounded flush (one second per close step), so a coded 4000 never
+  overtakes queued frames; a remainder past the budget is abandoned and
+  counted, never written late. A cancelled mid-write frame makes the
+  remainder abandoned instead of flushed (a gap-free prefix that stops
+  early; a hole never). Per the protocol contract, messages abandoned
+  during close need no gap records because the recipient's own disconnect
+  terminates the observable stream; the conservation identity
+  `attempted = delivered + abandoned + unsupported` holds per class, and a
+  pending unsupported-format report is flushed before the close frame.
+- **Shutdown closes are terminal for reconnection state (pinned,
+  existing).** A draining unregistration skips the reconnection record,
+  discards the pre-issued token, and hard-removes the room row; a record
+  registered just before the flip is discarded when the removal observes
+  the `Shutdown` reason
+  (`draining_unregister_discards_reconnect_when_drain_starts_during_leave`,
+  `shutdown_drain_sends_goingaway_and_closes_4000_without_reconnect_record`).
+  Replay rings are instance-local memory, so a restart cannot resume them;
+  the restart-invalidates-tokens behavior is pinned in the multiprocess
+  suite.
+- **Shutdown-close observability (recorded disposition).** The drain's
+  close fan-out is logged but there is no exported counter distinguishing
+  code 4000 closes; upgrade refusals during drain are counted
+  (`websocket_upgrades_rejected_draining`) and abandoned queue frames are
+  counted per class. A dedicated 4000-close counter is filed as follow-up
+  observability work (#727), not a correctness defect.
+
+The admin and shutdown coverage row moves to partially reviewed: the drain
+choreography, its commit fence, queued-data close ordering, and reconnect
+interactions are reviewed and pinned or fixed, while distinct-metric
+export remains follow-up work. The recovery slice continues with cleanup
+racing join/reconnect and process-loss behavior versus documented limits.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -1414,7 +1499,7 @@ neither is a deployed capacity preset.
 | Reconnect and retry: `src/reconnection.rs`, `src/retry.rs`, `src/server/reconnection_service.rs` | Claims have one owner; replay and stale routes cannot leak or misroute | `tests/reconnect_window_races_e2e.rs`, `formal/tla/ReconnectionClaimLifecycle.tla`; C1 reaper-ordering, claim-expiry, failed-restore, token-rotation, and reconnect epoch/sequence reviews above | Simultaneous claim, expiry during claim, failed restore/retry, rotation boundaries, and reconnect epoch/sequence transitions (including cross-epoch gap accounting) are reviewed and pinned; `src/retry.rs` backoff seams and multi-failure detach accounting on failing backends remain | Partially reviewed |
 | Maintenance and deadlines: `src/server/maintenance.rs`, `heartbeat.rs`, `dashboard_cache.rs`, `src/deadline.rs` | Expiry and cleanup are bounded; live state survives sweeps | `formal/tla/RoomLifecycleGC.tla`, `tests/clock_source_scan.rs`; C1 maintenance and deadlines expiry boundary review above | Expiry boundaries and clock sources are reviewed and pinned (reaper pair boundary, zero-timeout disable, monotonic windows, wall-clock-step immunity, overflow); churn growth and dashboard cost remain measurement work | Partially reviewed |
 | Metrics and logging: `src/metrics.rs`, `src/logging.rs`, `src/websocket/metrics.rs`, `prometheus.rs` | Counters report outcomes; labels and logs stay bounded and safe | `tests/config_and_endpoints_tests.rs`, `tests/websocket_test_helpers/prometheus_scrape.rs` | Cardinality and logging pressure under floods | Unreviewed |
-| Admin and shutdown: `src/server/admin.rs`, `shutdown.rs`, `connection_manager.rs` | Drain closes all owned tasks and reports queued work accurately | `tests/close_code_semantics_e2e.rs`, `formal/tla/ConnectionTeardown.tla` | Drain racing claims, queued reliable data, panic | Unreviewed |
+| Admin and shutdown: `src/server/admin.rs`, `shutdown.rs`, `connection_manager.rs` | Drain closes all owned tasks and reports queued work accurately | `tests/close_code_semantics_e2e.rs`, `formal/tla/ConnectionTeardown.tla`; C1 drain/shutdown review above | The drain choreography, the reconnect-commit fence, close ordering with queued data, and the drain reservation accounting are reviewed, fixed where defective, and pinned; a distinct 4000-close counter remains follow-up observability | Partially reviewed |
 | Browser client: `clients/browser/src/**` | Reconnect, delivery reports, fallback, and negotiation match server | `clients/browser/src/page/*.test.ts` | Browser network fault and client revision matrix | Unreviewed |
 | Native client: `clients/native/src/**` | Same client contract across native sockets | `clients/native/tests/interop_e2e.rs` | Restore and mixed-encoding error paths | Unreviewed |
 | Fortress clients: `clients/fortress/src/**`, `clients/fortress-wasm/src/**` | Reference peers handle relay and fallback without silent loss | `clients/fortress/README.md`, `clients/fortress-wasm/README.md` | Cross-stack fault and resource cases | Unreviewed |

@@ -88,6 +88,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Metrics: a shutdown-drain flip that cancels a parked reconnect-baseline
+  reservation is now counted in `websocket_deliveries_canceled` instead of
+  `websocket_messages_dropped`, matching the conditional-delivery park, and
+  the two remaining silent releases of a reserved reconnect/join baseline —
+  a failed baseline build and a drain-gated commit refusal — now resolve
+  their counted delivery attempt as canceled too (#647). Queue capacity was
+  always released; only the diagnostic attempt/outcome ledger was loose.
+  Delivery behavior is unchanged.
+
 - Metrics: reserved room-transaction and conditional-broadcast frames released
   by a panic between reservation and commit are now counted in
   `websocket_deliveries_canceled` (#725). A commit-hook, phase-callback, or

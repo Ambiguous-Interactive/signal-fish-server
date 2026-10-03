@@ -201,7 +201,15 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   red-proofed by flipping both comparisons), the zero-timeout reaper disable
   and every sibling expiry predicate carry a pinned or inspected disposition,
   and wall-clock steps cannot open or close any monotonic deadline (reconnect
-  window, room GC, dashboard staleness, drain waits).
+  window, room GC, dashboard staleness, drain waits). The drain/shutdown with
+  queued data and active reconnect claims family is reviewed (audit ledger,
+  2026-10-03): the reconnect-commit fence guarantees every committed claim
+  reaches the coded 4000 close fan-out, close ordering flushes queued frames
+  before the close frame with abandoned remainders counted, terminal
+  reconnection teardown is pinned, and the two drain-accounting defects found
+  (a parked-baseline drain flip counted as a dropped message; silent releases
+  on baseline build failure and gate refusal) are fixed and red-proofed with
+  four new pins.
 - [ ] **Resource and input safety:** queue and replay bounds; inactive records;
   pending detach/claim retention; task ownership; metrics label cardinality;
   parser depth, size, malformed frames, Unicode, and numeric boundaries;
