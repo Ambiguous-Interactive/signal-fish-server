@@ -9,8 +9,9 @@ server-side guarantees and the observability it exposes.
 
 The server's WebSocket relay is the **universal floor**: every client supports it,
 and the server relays `GameData` through it **unconditionally**, regardless of any
-peer-to-peer state. P2P (WebRTC or direct) is an opt-in _upgrade_ on top of the
-floor — never a replacement the server enforces.
+peer-to-peer state. P2P (WebRTC or direct) is an upgrade on top of the floor —
+attempted by default for capable v3 clients (the mesh-first `session.default_topology`),
+and only ever an additive path: never a replacement the server enforces.
 
 Concretely, the server keeps relaying `GameData` even after a client reports its
 P2P path failed (`TransportStatus { connected: false }`). The floor never closes,

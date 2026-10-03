@@ -1851,8 +1851,67 @@ async fn emit_host_room_pairs_clients_with_host() {
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
-async fn emit_default_relay_config_sends_explicit_no_peer_plan_to_v3_room() {
+async fn emit_default_config_finalizes_v3_webrtc_room_to_mesh() {
+    // The shipped default is mesh-first (#729): a default-config room of
+    // v3 + webrtc members settles on the richest rung (Mesh + WebRtc) instead
+    // of the relay floor. The explicit relay-desired opt-out is pinned by
+    // `emit_relay_desired_config_sends_explicit_no_peer_plan_to_v3_room`.
     let server = create_server_with_session(SessionConfig::default()).await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    server.set_client_protocol(&alice, v3_webrtc());
+    server.set_client_protocol(&bob, v3_webrtc());
+
+    let room_id = uuid::Uuid::new_v4();
+    let finalized = finalized(
+        "game",
+        vec![
+            player_info(alice, "Alice", false),
+            player_info(bob, "Bob", false),
+        ],
+        None,
+    );
+
+    emit_session_plan_for_published_members(&server, &room_id, &finalized).await;
+
+    let alice_plan = match recv(&mut alice_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => plan.clone(),
+        other => panic!("alice expected SessionPlan, got {other:?}"),
+    };
+    let bob_plan = match recv(&mut bob_rx).await.as_ref() {
+        ServerMessage::SessionPlan(plan) => plan.clone(),
+        other => panic!("bob expected SessionPlan, got {other:?}"),
+    };
+
+    for plan in [&alice_plan, &bob_plan] {
+        assert_eq!(plan.topology, Topology::Mesh);
+        assert_eq!(plan.transport, Transport::WebRtc);
+        assert_eq!(plan.fallback, Transport::Relay);
+        assert_eq!(plan.peers.len(), 1);
+    }
+    // No static ICE and no `[turn]` block: the plan carries no ICE list (the
+    // empty list is skipped on the wire, nothing is minted or counted).
+    assert!(alice_plan.ice_servers.is_empty());
+    assert!(bob_plan.ice_servers.is_empty());
+    // Each names the other, and exactly one initiates (glare avoidance).
+    assert_eq!(alice_plan.peers[0].player_id, bob);
+    assert_eq!(bob_plan.peers[0].player_id, alice);
+    assert_ne!(alice_plan.peers[0].initiate, bob_plan.peers[0].initiate);
+    assert_silent(&mut alice_rx).await;
+    assert_silent(&mut bob_rx).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn emit_relay_desired_config_sends_explicit_no_peer_plan_to_v3_room() {
+    // Pinning the relay-first opt-out (#729): `default_topology: "relay"`
+    // caps the desired ceiling at the relay floor, so even an all-v3+webrtc
+    // room gets the explicit no-peer relay plan instead of a WebRTC rung.
+    let server = create_server_with_session(SessionConfig {
+        default_topology: Topology::Relay,
+        ..SessionConfig::default()
+    })
+    .await;
     let (alice, mut alice_rx) = register_client(&server).await;
     let (bob, mut bob_rx) = register_client(&server).await;
     server.set_client_protocol(&alice, v3_webrtc());

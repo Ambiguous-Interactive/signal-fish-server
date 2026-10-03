@@ -462,7 +462,7 @@ const CONFIG_REFERENCE_ROWS: &[ConfigReferenceRow] = &[
     ConfigReferenceRow {
         env: "SIGNAL_FISH__SESSION__DEFAULT_TOPOLOGY",
         path: "session.default_topology",
-        default: Some("relay"),
+        default: Some("mesh"),
     },
     ConfigReferenceRow {
         env: "SIGNAL_FISH__SESSION__GAME_TOPOLOGY_MAPPINGS",
@@ -1082,15 +1082,15 @@ fn test_config_example_includes_all_rate_limit_fields() {
     }
     assert_eq!(
         config.session.default_topology,
-        signal_fish_server::protocol::Topology::Relay,
-        "session.default_topology must default to the relay floor"
+        signal_fish_server::protocol::Topology::Mesh,
+        "session.default_topology must default to mesh-first"
     );
     assert!(config.session.enable_webrtc);
     assert!(config.session.enable_direct);
     assert!(config.session.enable_ice_pregather);
     assert_eq!(
         value.pointer("/session/default_topology"),
-        Some(&serde_json::json!("relay")),
+        Some(&serde_json::json!("mesh")),
         "config.example.json must use the canonical lowercase topology token"
     );
     // The example config must pass session validation.

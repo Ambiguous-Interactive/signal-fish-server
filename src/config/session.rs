@@ -195,9 +195,9 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_relay_floor_with_p2p_enabled() {
+    fn defaults_are_mesh_first_with_p2p_enabled() {
         let cfg = SessionConfig::default();
-        assert_eq!(cfg.default_topology, Topology::Relay);
+        assert_eq!(cfg.default_topology, Topology::Mesh);
         assert!(cfg.game_topology_mappings.is_empty());
         assert!(cfg.enable_webrtc);
         assert!(cfg.enable_direct);
@@ -432,7 +432,7 @@ mod tests {
     fn round_trips_through_json_with_defaults() {
         let json = "{}";
         let cfg: SessionConfig = serde_json::from_str(json).expect("empty object uses defaults");
-        assert_eq!(cfg.default_topology, Topology::Relay);
+        assert_eq!(cfg.default_topology, Topology::Mesh);
         assert!(cfg.enable_webrtc);
         assert!(cfg.enable_direct);
         assert!(cfg.enable_ice_pregather);

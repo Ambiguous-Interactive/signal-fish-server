@@ -190,7 +190,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__METRICS__DASHBOARD_CACHE_HISTORY_FIELDS` | `metrics.dashboard_cache_history_fields` | `["active_rooms","rooms_by_game","player_percentiles","game_percentiles"]` | Dashboard history fields |
 | `SIGNAL_FISH__RELAY_TYPES__DEFAULT_RELAY_TYPE` | `relay_types.default_relay_type` | `matchbox` | Default relay integration label |
 | `SIGNAL_FISH__RELAY_TYPES__GAME_RELAY_MAPPINGS` | `relay_types.game_relay_mappings` | `{}` | JSON object mapping game names to relay labels |
-| `SIGNAL_FISH__SESSION__DEFAULT_TOPOLOGY` | `session.default_topology` | `relay` | Preferred topology for unmapped games (`relay`, `host`, `mesh`) |
+| `SIGNAL_FISH__SESSION__DEFAULT_TOPOLOGY` | `session.default_topology` | `mesh` | Preferred topology for unmapped games (`relay`, `host`, `mesh`) |
 | `SIGNAL_FISH__SESSION__GAME_TOPOLOGY_MAPPINGS` | `session.game_topology_mappings` | `{}` | JSON object mapping game names to topologies |
 | `SIGNAL_FISH__SESSION__ENABLE_WEBRTC` | `session.enable_webrtc` | `true` | Permit the WebRTC transport for `mesh`/`host` upgrades |
 | `SIGNAL_FISH__SESSION__ENABLE_DIRECT` | `session.enable_direct` | `true` | Permit the Direct (LAN/routable) transport for `host` upgrades |
@@ -479,7 +479,7 @@ the exact gap-authorization contract.
 
 {
   "session": {
-    "default_topology": "relay",
+    "default_topology": "mesh",
     "game_topology_mappings": {},
     "enable_webrtc": true,
     "enable_direct": true,
@@ -490,7 +490,7 @@ the exact gap-authorization contract.
 
 ```
 
-- `default_topology` - Preferred topology for games not in `game_topology_mappings` (`relay`, `host`, `mesh`; default: `relay`)
+- `default_topology` - Preferred topology for games not in `game_topology_mappings` (`relay`, `host`, `mesh`; default: `mesh`)
 - `game_topology_mappings` - Per-game topology overrides, e.g. `{"FastFPS": "mesh", "BoardGame": "host"}`
 - `enable_webrtc` - Permit the WebRTC transport for `mesh`/`host` upgrades (default: true)
 - `enable_direct` - Permit the Direct (LAN/routable) transport for `host`
@@ -512,10 +512,12 @@ Every upgrade gracefully degrades to the `relay` floor, so a fully-disabled
 deployment keeps working exactly like v2. ICE servers are advertised only when a
 WebRTC topology (`mesh`, or `host` with the WebRTC transport) is actually
 selected — plus, with `enable_ice_pregather`, at join/reconnect time for v3
-WebRTC-capable members of non-relay-desired games still in the lobby; under the
-default `relay` topology each v3 member receives an explicit no-peer
-`relay`/`relay` `SessionPlan`, while no ICE is pre-gathered at all. V2 members
-receive no plan.
+WebRTC-capable members of non-relay-desired games still in the lobby. The
+default `mesh` topology is non-relay, so capable v3 rooms settle on the richest
+ladder rung and eligible joiners are pre-gathered; pin `default_topology:
+"relay"` to cap every room at the floor instead — each v3 member then receives
+an explicit no-peer `relay`/`relay` `SessionPlan`, and no ICE is pre-gathered
+at all. V2 members receive no plan.
 
 ## TURN and STUN (ICE Credentials) (Protocol v3)
 
@@ -562,9 +564,9 @@ it into the config file.
 (`stun:stun.l.google.com:19302`). It is only advertised to clients once a WebRTC
 topology (`mesh`, or `host` with the WebRTC transport) is actually selected — or,
 with `session.enable_ice_pregather`, when a v3 WebRTC-capable client joins a
-non-relay-desired game's lobby — it is **never** sent under the default `relay`
-topology. Operators who want no third-party STUN dependency should set
-`stun_urls: []`.
+non-relay-desired game's lobby. The default `mesh` topology is non-relay, so
+eligible v3 lobby joiners are advertised the STUN entry by default. Operators
+who want no third-party STUN dependency should set `stun_urls: []`.
 
 ## Validation
 

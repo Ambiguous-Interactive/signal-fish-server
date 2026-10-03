@@ -18,16 +18,19 @@ keys — see [environment variable format](configuration.md#environment-variable
 The modes below are **not** mutually exclusive — they are feature layers you
 combine. A production deployment is typically "Prod relay v2 + app allowlist" **plus**
 "TLS (or reverse proxy)" **plus** "Metrics + Prometheus", and optionally the v3
-WebRTC / TURN layers on top. Every v3 WebRTC upgrade gracefully degrades to the
-v2 relay floor, so enabling v3 never breaks a v2-only client.
+WebRTC / TURN layers on top. v3 rooms are mesh-first by default (peer-to-peer
+WebRTC is attempted first; the relay floor is the fallback), so the v3 layer
+needs no opt-in — TURN remains the optional layer for peers that cannot
+hole-punch.
 
 ## Mode reference
 
 | Mode | What it does | Key config (file keys + env overrides) | Exact command |
 | --- | --- | --- | --- |
-| Dev (relay v2, open app IDs) | Plain v2 WebSocket relay, open CORS, no app-ID restriction — for local development | `security.enforce_app_id_allowlist=false`, `security.cors_origins="*"` (env: `SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false`) | `cargo run` |
+| Dev (relay v2, open app IDs) | v2 clients relay over plain WebSocket with open CORS and no app-ID restriction; v3 clients get the mesh-first default — for local development | `security.enforce_app_id_allowlist=false`, `security.cors_origins="*"` (env: `SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false`) | `cargo run` |
 | Prod relay v2 + app allowlist | v2 relay with public app-ID allowlisting and locked-down CORS | `security.enforce_app_id_allowlist=true`, `security.allowed_apps=[…]`, `security.cors_origins="https://yourgame.com"`, `security.max_connections_per_ip=10` (env: `SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=true`) | `cargo run -- --validate-config && cargo run` |
-| v3 WebRTC mesh/host + STUN | Advertises a v3 `SessionPlan` so peers connect over WebRTC, using public/self-hosted STUN to hole-punch | `session.default_topology="mesh"` (or `"host"`), `session.enable_webrtc=true`, `turn.stun_urls=["stun:…"]` (env: `SIGNAL_FISH__SESSION__DEFAULT_TOPOLOGY=mesh`) | `SIGNAL_FISH__SESSION__DEFAULT_TOPOLOGY=mesh cargo run` |
+| Relay-only (mesh off) | Pins every room to the server relay floor: no peer-to-peer attempts, pre-v3-compatible behavior | `session.default_topology="relay"` (env: `SIGNAL_FISH__SESSION__DEFAULT_TOPOLOGY=relay`) | `SIGNAL_FISH__SESSION__DEFAULT_TOPOLOGY=relay cargo run` |
+| v3 WebRTC mesh/host + STUN | Mesh-first default: v3 rooms settle on the richest WebRTC rung their members negotiated, using STUN to hole-punch | `session.default_topology="mesh"` (default; `"host"` for host-star-only), `session.enable_webrtc=true` (default), `turn.stun_urls` (public STUN by default) | `cargo run` |
 | v3 + TURN | Adds a self-hosted coturn relay for the ~15–20% of peers that cannot hole-punch; the server mints ephemeral coturn credentials | `turn.enabled=true`, `turn.urls=["turn:turn.yourgame.com:3478"]`, `turn.static_auth_secret=<shared>`, `turn.credential_ttl_secs=3600` (env: `SIGNAL_FISH__TURN__STATIC_AUTH_SECRET`) | `export TURN_STATIC_AUTH_SECRET="$(openssl rand -hex 32)"`<br>`export SIGNAL_FISH__TURN__STATIC_AUTH_SECRET="$TURN_STATIC_AUTH_SECRET"`<br>`docker compose --profile turn up -d` |
 | TLS (built-in) | Terminates HTTPS/`wss://` in the server itself | `security.transport.tls.enabled=true`, `security.transport.tls.certificate_path`, `security.transport.tls.private_key_path` (env: `SIGNAL_FISH__SECURITY__TRANSPORT__TLS__ENABLED=true`) | `cargo run` (with the three TLS keys set) |
 | TLS (reverse proxy) | Terminates TLS at nginx/Caddy; server stays plain `ws://` on loopback | none on the server; configure the proxy (see [reverse proxy setup](deployment.md#reverse-proxy-setup)) | `cargo run` (server) + proxy in front |
@@ -74,17 +77,19 @@ safe to chain with `&&`.
 
 ### v3 WebRTC mesh/host + STUN
 
-Set a non-`relay` topology (globally via `session.default_topology` or per game
-via `session.game_topology_mappings`) and keep `session.enable_webrtc=true`. The
-server then emits a v3 `SessionPlan` and advertises ICE servers (the configured
-`turn.stun_urls`, plus any static `session.ice_servers`) when a WebRTC topology
-is actually selected:
+v3 rooms are mesh-first by default: the server emits a v3 `SessionPlan` and
+peers connect over WebRTC whenever every room member negotiated a
+peer-to-peer-capable rung (any member that cannot — v2 or relay-only — floors
+the room to relay). `turn.stun_urls` already defaults to a public STUN server,
+so no extra configuration is needed:
 
 ```bash
-SIGNAL_FISH__SESSION__DEFAULT_TOPOLOGY=mesh cargo run
+cargo run
 ```
 
-For a per-game mapping such as `{"chess":"mesh"}`, see the
+Pin `session.default_topology="host"` for host-star-only sessions, or
+`session.default_topology="relay"` to turn peer-to-peer attempts off entirely.
+For a per-game mapping such as `{"chess":"host"}`, see the
 [topology recipe](configuration-recipes.md#per-game-topology-mapping). STUN is
 effectively free and handles roughly 80–85% of connections; the rest need TURN.
 
