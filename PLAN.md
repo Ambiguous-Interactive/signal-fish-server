@@ -449,6 +449,13 @@ outside this plan's architecture scope.
 These items remain live but are not active phases. Re-rank them whenever new
 correctness evidence appears.
 
+- #733 — the scheduled ASan lane went red on 2026-10-03 (`54feb610`, exit
+  101). Local full-ASan on current main (aarch64) is green; #730 (mesh
+  default) is the only production delta to the failing head. Discriminators
+  and fix policy are in the issue; npm-side red is fixed by the #732 gate.
+- #732 — GHSA-vfj7-8cjw-p6xm (braces) is unfixable upstream; the npm audit
+  gate accepts it per-graph with a 2026-12-01 revisit date. Drop the entry
+  when a patched braces release exists.
 - #636 — promoted to the highest-priority correctness-first ARM capacity
   campaign above. Its C0-C5 tasks own the active audit and optimization queue.
 - #512 — hosted CI: the session-239 audit found every per-event workflow
