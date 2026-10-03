@@ -230,7 +230,15 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   attribution is allowlist-bounded with #552 pruning, client-chosen
   game-name maps are response-bounded — and the shutdown-drain close
   fan-out is exported as `websocket_shutdown_disconnects` (#727).
-  The slice continues with queue/replay bounds and parser boundaries.
+  The slice continues with queue/replay bounds and parser boundaries. The
+parser-boundary families are reviewed (audit ledger, 2026-10-03): every
+ingress parser carries a bounded or flat decode — the confirmed exception
+(rmp-serde recursion into a recursive target) is fixed as ARM-C030 with an
+iterative depth scanner shared by the JSON conversion path and the
+token-bound binary envelope, red-proven by a stack-overflow abort and pinned
+at the exact 128-level boundary. The slice continues with inactive records,
+pending detach/claim retention, task ownership, rate-limit rejection
+accounting, and error/logging paths under pressure.
 - [ ] **Client and deployment boundaries:** inspect reference-client handling
   of reconnect, reports, transport fallback, and negotiation. Audit plain/TLS
   server paths and optional features, including `legacy-fullmesh`. Distinguish

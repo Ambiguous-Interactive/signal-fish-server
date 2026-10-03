@@ -1,7 +1,7 @@
 use crate::coordination::outbound_queue::{DataDeliveryMetadata, OutboundReceiver};
 use crate::protocol::{
-    ErrorCode, GameDataEncoding, PlayerId, PlayerInfo, RoomOperationResult, ServerMessage,
-    SpectatorInfo,
+    msgpack_depth_within, ErrorCode, GameDataEncoding, PlayerId, PlayerInfo, RoomOperationResult,
+    ServerMessage, SpectatorInfo, MSGPACK_MAX_NESTING_DEPTH,
 };
 use crate::server::EnhancedGameServer;
 use axum::extract::ws::{Message, WebSocket};
@@ -2510,7 +2510,18 @@ fn decode_binary_to_json(
     payload: &[u8],
 ) -> Result<serde_json::Value, String> {
     match encoding {
-        GameDataEncoding::MessagePack => from_slice(payload).map_err(|err| err.to_string()),
+        GameDataEncoding::MessagePack => {
+            // Enforce the wire's nesting contract before any recursive
+            // decode. rmp-serde 1.3 carries only an internal 1024-level
+            // guard; the 128-level wire budget stays independent of that
+            // implementation detail and matches serde_json's JSON limit.
+            if !msgpack_depth_within(payload, MSGPACK_MAX_NESTING_DEPTH) {
+                return Err(format!(
+                    "MessagePack nesting exceeds the {MSGPACK_MAX_NESTING_DEPTH}-level decode limit"
+                ));
+            }
+            from_slice(payload).map_err(|err| err.to_string())
+        }
         GameDataEncoding::Json => serde_json::from_slice(payload).map_err(|err| err.to_string()),
         // Opaque byte-oriented encodings (rkyv, protobuf) cannot be converted
         // to JSON without their schema. Cross-format delivery reports these as
@@ -2527,13 +2538,60 @@ fn decode_binary_to_json(
 mod tests {
     use super::*;
     use crate::protocol::{
-        decode_v3_binary_game_data, ConnectionInfo, LobbyState, PlayerInfo, ReconnectedPayload,
-        ReplayStatus, RoomId, ServerMessage, SpectatorInfo, SpectatorJoinedPayload,
-        V3BinaryGameDataFrame as DecodedV3BinaryGameDataFrame,
+        decode_v3_binary_game_data, msgpack_depth_within, ConnectionInfo, LobbyState, PlayerInfo,
+        ReconnectedPayload, ReplayStatus, RoomId, ServerMessage, SpectatorInfo,
+        SpectatorJoinedPayload, V3BinaryGameDataFrame as DecodedV3BinaryGameDataFrame,
     };
     use chrono::Utc;
     use serde::{Deserialize, Serializer};
     use uuid::Uuid;
+
+    /// One fixarray marker per byte is the densest legal nesting: a payload
+    /// under the 64 KiB frame cap can request ~65k decoder recursion levels.
+    /// The guard must refuse it before any recursive decode. The probe runs
+    /// on a 256 KiB stack so a guard regression fails loudly here (stack
+    /// overflow abort) instead of silently re-exposing the decode path; the
+    /// refusal itself needs only constant stack.
+    #[test]
+    fn over_deep_message_pack_is_refused_before_decoder_recursion() {
+        let deep = vec![0x91u8; 60_000];
+        let handle = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || decode_binary_to_json(GameDataEncoding::MessagePack, &deep))
+            .expect("probe thread spawns");
+        let result = handle.join().expect("decode thread must not abort");
+        let error = result.expect_err("over-deep MessagePack must be refused");
+        assert!(
+            error.contains("nesting exceeds"),
+            "expected the depth-limit refusal, got: {error}"
+        );
+    }
+
+    /// The limit is exact and ours, not the decoder's: a chain at the boundary
+    /// decodes to a `Value`, one deeper is refused by the guard alone.
+    #[test]
+    fn message_pack_depth_limit_is_exact() {
+        let chain = |levels: usize| {
+            let mut wire = vec![0x91u8; levels];
+            wire.push(0xc0);
+            wire
+        };
+        let at_limit = chain(MSGPACK_MAX_NESTING_DEPTH);
+        assert!(msgpack_depth_within(&at_limit, MSGPACK_MAX_NESTING_DEPTH));
+        let decoded = decode_binary_to_json(GameDataEncoding::MessagePack, &at_limit)
+            .expect("a boundary-depth tree stays decodable");
+        let mut expected = serde_json::Value::Null;
+        for _ in 0..MSGPACK_MAX_NESTING_DEPTH {
+            expected = serde_json::Value::Array(vec![expected]);
+        }
+        assert_eq!(decoded, expected);
+
+        let over_limit = chain(MSGPACK_MAX_NESTING_DEPTH + 1);
+        assert!(!msgpack_depth_within(
+            &over_limit,
+            MSGPACK_MAX_NESTING_DEPTH
+        ));
+    }
 
     const PLAYER_A_STR: &str = "00112233-4455-6677-8899-aabbccddeeff";
 

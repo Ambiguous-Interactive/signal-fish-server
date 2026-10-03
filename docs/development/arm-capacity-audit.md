@@ -353,6 +353,17 @@ No new finding is confirmed by this initial inventory.
 | Confidence and reproduction | `old_relay_budget_admission_serializes_restored_player_reconnect` failed with the gate disabled: the reconnect rekeyed while the old relay sat paused at each budget wait. The green table covers text and binary lanes at both budget waits, proves the rekey waits for admission, and checks the charged-byte count against the delivered frame plus the replacement's unthrottled follow-up relay. |
 | Disposition | Both relay lanes hold the source gate across the budget waits and the coordinator start. A new `enqueue_relay_broadcast_after_contention` seam splits the coordinator contention fallback so its routing waits stay under the gate and only the drain awaits outside it. Budget rejections reply after the gate releases. [#686](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/686) remains open for the lifecycle-capture-point sweep. |
 
+### ARM-C030 — MessagePack conversion decode had no wire-level depth contract
+
+| Field | Record |
+| --- | --- |
+| State, severity | Hardened, low (defense-in-depth; no production abort reproduced) |
+| Player impact | Before this change, the conversion path's recursion budget was an implementation detail of one dependency version: rmp-serde 1.3's internal 1024-level guard. A 60 KB sub-cap fixarray chain requests ~60k levels, so an upgrade or replacement dropping that internal guard would have turned a cross-format relay into a stack-overflow process abort. Payloads nested 129-1023 levels, which JSON game data could never reach at the same boundary, converted successfully; they now refuse. |
+| Source and revision | `src/websocket/sending.rs::decode_binary_to_json` decoded attacker-supplied MessagePack into a recursive `serde_json::Value` with `rmp_serde::from_slice`, reviewed at `48bdc7fb`. The frame-size cap bounds bytes, not depth: one fixarray marker byte adds one nesting level. |
+| Invariant | The MessagePack nesting the server decodes must sit under an explicit wire contract (128 levels, serde_json's own JSON limit), enforced before any recursive decode, not on the decoder's internal recursion counter. |
+| Confidence and reproduction | `scripts/dev-loop.sh over_deep_message_pack_is_refused_before_decoder_recursion` runs the production decode on a 256 KiB stack: before the guard it aborted (`fatal runtime error: stack overflow`, SIGABRT), with the guard it returns the refusal (constant stack). On production 2 MB tokio worker stacks, guardless rmp-serde 1.3.1 stops at its internal 1024-level limit with a clean decoder error, so the abort class was latent, not live; the probe pins the guard against regressions on every platform. |
+| Disposition | An iterative depth scanner (`msgpack_depth_within`, `MSGPACK_MAX_NESTING_DEPTH = 128`) walks the structure with an explicit stack before any recursive decode and refuses deeper trees as an undeliverable conversion, reusing the existing exact report and advisory accounting. The same scan guards the token-bound binary envelope (`parse_binary_message`). Malformed input stays a decoder error; the scanner only answers depth. Differential review: a spec-faithful reference parser agreed with the scanner on 200k random well-formed payloads at limits {1, 2, 3, 4, 8, 128}, exhaustive 1- and 2-byte marker spaces, and all truncations; 100k mutation fuzz found no scanner-refused-but-decoder-accepted case. Pins: `depth_scanner_matches_the_limit_boundary`, `depth_scanner_counts_map_entries_as_two_slots`, `message_pack_depth_limit_is_exact`, `depth_scanner_accepts_shallow_wires_and_skips_payload_bytes`, `depth_scanner_is_conservative_on_malformed_input`. |
+
 These findings cover room-code rotation, player names, transport status, and spectator,
 reconnect, room-creation drain, and terminal routing seams. The rest of the C1 room and storage
 rows remain unreviewed.
@@ -1558,6 +1569,52 @@ The metrics label cardinality family is closed with bounded-series
 dispositions. The resource-and-input-safety slice continues with
 queue/replay bounds and parser boundaries.
 
+### C1 parser boundaries and queue/replay bounds review (2026-10-03)
+
+At `48bdc7fb` (main before this change), reviewed the
+resource-and-input-safety slice's parser-boundary families (depth, size,
+malformed frames, Unicode, numeric boundaries) across the ingress parsers
+(`src/websocket/token_binding.rs`, `src/protocol/binary.rs`, `serde_json`
+typed envelope decodes) and the conversion path
+(`src/websocket/sending.rs`). One hardening was landed with differential
+evidence: ARM-C030.
+
+- **Depth (hardened).** rmp-serde decode into a recursive target leaned on
+  that dependency's internal 1024-level guard, not a wire contract; the
+  boundary is now an explicit 128-level scan before any recursive decode
+  (ARM-C030 for the rationale, differential evidence, and pins). The same
+  class was swept: the v3 binary envelope decodes through flat `rmp::decode`
+  field reads, the JSON envelope decodes under serde_json's 128-level limit,
+  and the token-bound binary envelope shares the scanner. rkyv and protobuf
+  payloads are opaque to the server by design and are never decoded. On
+  production 2 MB stacks no abort was reachable through the locked
+  rmp-serde 1.3.1; the hardening removes the dependency-version dependence.
+- **Size.** The transport caps inbound frames at `2 × max_message_size` and
+  the receive loop re-checks `max_message_size` before parsing; per-encoding
+  payload ceilings (`security.max_game_data_bytes`, #634) gate game data at
+  admission; the conversion preflight bounds the decode input against the
+  outbound budget before any allocation
+  (`binary_fallback_decode_budget_rejects_compact_tree_before_cache_allocation`).
+- **Malformed frames and numeric boundaries.** Every malformed JSON,
+  MessagePack, and binary envelope returns a classified parse error with a
+  budget-charged refusal; fatal classes disconnect with a farewell, other
+  classes keep the connection. MessagePack integers outside the value domain
+  and non-UTF-8 strings are decoder errors; the strict v3 envelope pins
+  exact field types (`src/protocol/binary.rs` tests).
+- **Unicode.** Player names canonicalize through `icu_casemap` and
+  `unicode-normalization` with length caps (identity slice); wire strings
+  are UTF-8-validated by both decoders before use.
+- **Queue and replay bounds.** The delivery-side queue families (bounds,
+  saturation, coalescing, counter conservation) carry their dispositions in
+  the delivery reviews above; the reconnect replay ledger is bound by the
+  reconnect epoch/sequence review (2026-10-01) and the drain review
+  (2026-10-03). No new violation was reproduced this review.
+
+With this review, the parser-boundary families have recorded dispositions.
+The resource-and-input-safety slice continues with inactive records, pending
+detach/claim retention, task ownership, rate-limit rejection accounting, and
+error and logging paths under pressure.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -1597,7 +1654,7 @@ neither is a deployed capacity preset.
 | Readiness and gameplay: `src/server/ready_state.rs`, `authority.rs`, `session_policy.rs`, `signaling.rs` | Membership and transport changes invalidate stale plans/readiness | `tests/v3_session_plan_e2e.rs`, `formal/tla/SignalFishSession.tla`; C1 gameplay-transitions review above | Start/leave, authority loss, v2/v3 negotiation, capability intersections, stale reports, downgrade reconnects, and publication order are reviewed and pinned (including the spectator start-authorization coupling); shared `src/server.rs` state seams remain | Partially reviewed |
 | Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs`; C1 cross-room stall fairness, mixed encoding/unsupported conversion, and permitted volatile loss reviews above | Slow-recipient isolation, cross-room stall fairness, the mixed encoding/unsupported conversion matrix (direct cohorts, lossless fallback, opaque refusal with exact gap plus advisory, pre-v3 advisory-only wire), and real-socket volatile eviction with exact reports plus a non-zero per-connection `dropped_for_you` (`flooded_nonreading_recipient_observes_exact_volatile_gaps_and_dropped_for_you`) are reviewed and pinned | Reviewed |
 | Coordination and queues: `src/coordination/**`, `src/distributed.rs`; the in-memory coordinator seams in `src/server.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla`; C1 room-event duplicate-delivery, latest coalescing keys/generations, and transaction reservation/commit cancellation/panic reviews above | Lane job exactly-once and no lease re-run are dispositioned and pinned (`interleaved_awaits_deliver_each_lobby_broadcast_exactly_once`); cross-epoch gap ranges stay distinct per epoch (`cross_epoch_gaps_of_one_sender_stay_distinct_ranges`); latest key composition, generation shielding, supersession, saturation, and counter conservation are reviewed and pinned; cancellation/panic at reservation and commit are reviewed, the silent panic-accounting class is fixed, and all three fixed seams are pinned (`panicking_commit_hook_releases_and_accounts_every_reservation`, `panicking_phase_callback_accounts_remaining_frames_and_never_delivers_phase_one`, `panicking_broadcast_replay_hook_releases_and_accounts_every_reservation`); other `src/server.rs` state seams remain with their own rows | Reviewed |
-| WebSocket ingress and egress: `src/websocket/**` | Bounded frames, priority control, close and drain semantics hold | `tests/transport_frame_limits_e2e.rs`, `tests/slow_consumer_no_cascade_e2e.rs` | Slow reader, batching age, TLS close paths | Unreviewed |
+| WebSocket ingress and egress: `src/websocket/**` | Bounded frames, priority control, close and drain semantics hold | `tests/transport_frame_limits_e2e.rs`, `tests/slow_consumer_no_cascade_e2e.rs`; C1 parser-boundary review above (ARM-C030 fixed: bounded-depth MessagePack conversion and token-bound envelope decode) | Slow reader, batching age, TLS close paths | Partially reviewed |
 | Reconnect and retry: `src/reconnection.rs`, `src/retry.rs`, `src/server/reconnection_service.rs` | Claims have one owner; replay and stale routes cannot leak or misroute | `tests/reconnect_window_races_e2e.rs`, `formal/tla/ReconnectionClaimLifecycle.tla`; C1 reaper-ordering, claim-expiry, failed-restore, token-rotation, and reconnect epoch/sequence reviews above | Simultaneous claim, expiry during claim, failed restore/retry, rotation boundaries, and reconnect epoch/sequence transitions (including cross-epoch gap accounting) are reviewed and pinned; `src/retry.rs` backoff seams and multi-failure detach accounting on failing backends remain | Partially reviewed |
 | Maintenance and deadlines: `src/server/maintenance.rs`, `heartbeat.rs`, `dashboard_cache.rs`, `src/deadline.rs` | Expiry and cleanup are bounded; live state survives sweeps | `formal/tla/RoomLifecycleGC.tla`, `tests/clock_source_scan.rs`; C1 maintenance and deadlines expiry boundary review above | Expiry boundaries and clock sources are reviewed and pinned (reaper pair boundary, zero-timeout disable, monotonic windows, wall-clock-step immunity, overflow); churn growth and dashboard cost remain measurement work | Partially reviewed |
 | Metrics and logging: `src/metrics.rs`, `src/logging.rs`, `src/websocket/metrics.rs`, `prometheus.rs` | Counters report outcomes; labels and logs stay bounded and safe | `tests/config_and_endpoints_tests.rs`, `tests/websocket_test_helpers/prometheus_scrape.rs` | Cardinality and logging pressure under floods | Unreviewed |

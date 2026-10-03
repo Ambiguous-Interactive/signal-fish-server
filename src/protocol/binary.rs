@@ -102,6 +102,228 @@ pub fn decode_v3_binary_game_data(wire: &[u8]) -> Result<V3BinaryGameDataFrame, 
     })
 }
 
+/// Maximum MessagePack nesting the server decodes into a recursive value.
+///
+/// serde_json refuses JSON deeper than 128 levels during decode; rmp-serde
+/// 1.3 carries only its own internal 1024-level guard, an implementation
+/// detail of one dependency version rather than a wire contract, and it
+/// allows nesting JSON game data could never reach at the same boundary. 128
+/// keeps both wire encodings symmetric with serde_json's default and makes
+/// the conversion budget independent of the decoder's internal limit.
+pub const MSGPACK_MAX_NESTING_DEPTH: usize = 128;
+
+/// Check MessagePack nesting with an explicit stack, not recursion.
+///
+/// Returns `true` when the payload stays within [`MSGPACK_MAX_NESTING_DEPTH`]
+/// container levels. Depth is judged wherever the structure is readable; any
+/// byte-level truncation or malformed marker also returns `true`: this
+/// scanner only answers the depth question, and the real decoder owns every
+/// other error, so the caller never reports a shallower error than the
+/// decoder would.
+pub fn msgpack_depth_within(payload: &[u8], limit: usize) -> bool {
+    // Remaining sibling elements per open container. Arrays push their element
+    // count; maps push twice their entry count. `open.len()` is the number of
+    // containers enclosing the value being read.
+    let mut open: Vec<u32> = Vec::new();
+    let mut cursor = payload;
+
+    // Consume one sibling slot at the current depth, closing any containers
+    // that just ran out of elements.
+    macro_rules! take_element {
+        () => {
+            while open.last() == Some(&0) {
+                open.pop();
+            }
+            if let Some(top) = open.last_mut() {
+                *top = top.saturating_sub(1);
+            }
+        };
+    }
+
+    // Read one big-endian `size`-byte length prefix plus the bytes after it.
+    // `None` means the prefix itself is truncated; the decoder owns that
+    // error, so the caller reports no depth violation.
+    fn read_len(cursor: &[u8], size: usize) -> Option<(u64, &[u8])> {
+        let (bytes, tail) = cursor.split_at_checked(size)?;
+        let mut value = 0u64;
+        for byte in bytes {
+            value = value.checked_mul(256)?.checked_add(u64::from(*byte))?;
+        }
+        Some((value, tail))
+    }
+
+    // Advance past `count` payload bytes. A length longer than the remaining
+    // payload is a decoder error, not a depth violation.
+    fn skip_bytes(cursor: &[u8], count: u64) -> Option<&[u8]> {
+        cursor
+            .split_at_checked(usize::try_from(count).ok()?)
+            .map(|(_, tail)| tail)
+    }
+
+    while let Some((&marker, rest)) = cursor.split_first() {
+        take_element!();
+        cursor = match marker {
+            // fixmap / map16 / map32: every entry costs a key and a value.
+            0x80..=0x8f => {
+                if !push_container(&mut open, u64::from(marker & 0x0f).saturating_mul(2), limit) {
+                    return false;
+                }
+                rest
+            }
+            0xde | 0xdf => {
+                let size = if marker == 0xde { 2 } else { 4 };
+                let Some((entries, tail)) = read_len(rest, size) else {
+                    return true;
+                };
+                if !push_container(&mut open, entries.saturating_mul(2), limit) {
+                    return false;
+                }
+                tail
+            }
+            // fixarray / array16 / array32
+            0x90..=0x9f => {
+                if !push_container(&mut open, u64::from(marker & 0x0f), limit) {
+                    return false;
+                }
+                rest
+            }
+            0xdc | 0xdd => {
+                let size = if marker == 0xdc { 2 } else { 4 };
+                let Some((count, tail)) = read_len(rest, size) else {
+                    return true;
+                };
+                if !push_container(&mut open, count, limit) {
+                    return false;
+                }
+                tail
+            }
+            // fixstr / str8 / str16 / str32: opaque bytes, never containers.
+            0xa0..=0xbf => {
+                let Some(tail) = skip_bytes(rest, u64::from(marker & 0x1f)) else {
+                    return true;
+                };
+                tail
+            }
+            0xd9..=0xdb => {
+                let size = match marker {
+                    0xd9 => 1usize,
+                    0xda => 2,
+                    _ => 4,
+                };
+                let Some((len, tail)) = read_len(rest, size) else {
+                    return true;
+                };
+                let Some(skipped) = skip_bytes(tail, len) else {
+                    return true;
+                };
+                skipped
+            }
+            // bin8 / bin16 / bin32
+            0xc4..=0xc6 => {
+                let size = match marker {
+                    0xc4 => 1usize,
+                    0xc5 => 2,
+                    _ => 4,
+                };
+                let Some((len, tail)) = read_len(rest, size) else {
+                    return true;
+                };
+                let Some(skipped) = skip_bytes(tail, len) else {
+                    return true;
+                };
+                skipped
+            }
+            // ext8 / ext16 / ext32: one type byte plus the declared bytes.
+            0xc7..=0xc9 => {
+                let size = match marker {
+                    0xc7 => 1usize,
+                    0xc8 => 2,
+                    _ => 4,
+                };
+                let Some((len, tail)) = read_len(rest, size) else {
+                    return true;
+                };
+                let Some(total) = len.checked_add(1) else {
+                    return true;
+                };
+                let Some(skipped) = skip_bytes(tail, total) else {
+                    return true;
+                };
+                skipped
+            }
+            // fixext1 / fixext2 / fixext4 / fixext8 / fixext16
+            0xd4..=0xd8 => {
+                let size = match marker {
+                    0xd4 => 1u64,
+                    0xd5 => 2,
+                    0xd6 => 4,
+                    0xd7 => 8,
+                    _ => 16,
+                };
+                let Some(total) = size.checked_add(1) else {
+                    return true;
+                };
+                let Some(skipped) = skip_bytes(rest, total) else {
+                    return true;
+                };
+                skipped
+            }
+            // f32 / f64
+            0xca | 0xcb => {
+                let size = if marker == 0xca { 4 } else { 8 };
+                if rest.len() < size {
+                    return true;
+                }
+                let (_, tail) = rest.split_at(size);
+                tail
+            }
+            // u8/u16/u32/u64 and i8/i16/i32/i64
+            0xcc..=0xcf => {
+                let size = match marker {
+                    0xcc => 1usize,
+                    0xcd => 2,
+                    0xce => 4,
+                    _ => 8,
+                };
+                if rest.len() < size {
+                    return true;
+                }
+                let (_, tail) = rest.split_at(size);
+                tail
+            }
+            0xd0..=0xd3 => {
+                let size = match marker {
+                    0xd0 => 1usize,
+                    0xd1 => 2,
+                    0xd2 => 4,
+                    _ => 8,
+                };
+                if rest.len() < size {
+                    return true;
+                }
+                let (_, tail) = rest.split_at(size);
+                tail
+            }
+            // nil, bool, never-use 0xc1, fixint, negative fixint: leaf values
+            // with no payload bytes.
+            _ => rest,
+        };
+    }
+    true
+}
+
+/// Enter one container level. `false` means the payload exceeds `limit`.
+fn push_container(open: &mut Vec<u32>, siblings: u64, limit: usize) -> bool {
+    if open.len() >= limit {
+        return false;
+    }
+    // A sibling count above u32::MAX cannot exist in a frame the size cap
+    // admits, and the decoder rejects impossible lengths anyway; the clamp
+    // only keeps the walk alive until the decoder speaks.
+    open.push(u32::try_from(siblings).unwrap_or(u32::MAX));
+    true
+}
+
 fn read_string<'a>(remaining: &mut &'a [u8], field: &str) -> Result<&'a str, String> {
     let (value, tail) = read_str_from_slice(*remaining)
         .map_err(|error| format!("v3 binary GameData {field} is not a string: {error}"))?;
@@ -145,6 +367,116 @@ mod tests {
     use rmp::encode::{
         write_bin, write_bin_len, write_map_len, write_sint, write_str, write_u32, write_uint,
     };
+
+    /// N `fixarray(1)` markers followed by one `nil` leaf: a chain exactly
+    /// `levels` containers deep, one byte per level.
+    fn chain(levels: usize) -> Vec<u8> {
+        let mut wire = vec![0x91u8; levels];
+        wire.push(0xc0);
+        wire
+    }
+
+    #[test]
+    fn depth_scanner_matches_the_limit_boundary() {
+        for levels in 0..=MSGPACK_MAX_NESTING_DEPTH {
+            assert!(
+                msgpack_depth_within(&chain(levels), MSGPACK_MAX_NESTING_DEPTH),
+                "depth {levels} must be accepted"
+            );
+        }
+        for levels in MSGPACK_MAX_NESTING_DEPTH + 1..MSGPACK_MAX_NESTING_DEPTH + 32 {
+            assert!(
+                !msgpack_depth_within(&chain(levels), MSGPACK_MAX_NESTING_DEPTH),
+                "depth {levels} must be refused"
+            );
+        }
+    }
+
+    /// Map entries cost two sibling slots (key + value); the boundary pins
+    /// the doubled counting so a regression cannot under-count map depth.
+    #[test]
+    fn depth_scanner_counts_map_entries_as_two_slots() {
+        // fixmap(1) chain: one entry whose key is nil and whose value is the
+        // next map. Each level costs exactly one map container.
+        let map_chain = |levels: usize| {
+            let mut wire = Vec::new();
+            for _ in 0..levels {
+                wire.push(0x81); // fixmap(1)
+                wire.push(0xc0); // nil key
+            }
+            wire.push(0xc0); // nil value at the innermost level
+            wire
+        };
+        assert!(msgpack_depth_within(
+            &map_chain(MSGPACK_MAX_NESTING_DEPTH),
+            MSGPACK_MAX_NESTING_DEPTH
+        ));
+        assert!(!msgpack_depth_within(
+            &map_chain(MSGPACK_MAX_NESTING_DEPTH + 1),
+            MSGPACK_MAX_NESTING_DEPTH
+        ));
+        // An ext payload's bytes are opaque: a following sibling at the same
+        // depth is scanned, not swallowed by the ext skip.
+        let mut wire = vec![0x92]; // fixarray(2)
+        wire.extend_from_slice(&[0xc7, 0x02, 0x00, 0x01, 0xff]); // ext8 len 2
+        wire.push(0x90); // second element: empty array, depth 2
+        assert!(msgpack_depth_within(&wire, MSGPACK_MAX_NESTING_DEPTH));
+    }
+
+    #[test]
+    fn depth_scanner_accepts_shallow_wires_and_skips_payload_bytes() {
+        let mut wire = Vec::new();
+        write_map_len(&mut wire, 2).unwrap();
+        write_str(&mut wire, "payload").unwrap();
+        write_bin(&mut wire, &[0x91, 0x91, 0x91]).unwrap();
+        write_str(&mut wire, "seq").unwrap();
+        write_uint(&mut wire, 7).unwrap();
+        wire.push(0xca); // f32 0.0
+        wire.extend_from_slice(&[0; 4]);
+        wire.push(0xd4); // fixext1
+        wire.extend_from_slice(&[0x00, 0xff]);
+        assert!(msgpack_depth_within(&wire, MSGPACK_MAX_NESTING_DEPTH));
+        // Container-looking bytes inside skipped payloads never count.
+        assert!(msgpack_depth_within(
+            &[0xa3, 0x91, 0x91, 0x91],
+            MSGPACK_MAX_NESTING_DEPTH
+        ));
+        // Empty and scalar roots.
+        assert!(msgpack_depth_within(&[], MSGPACK_MAX_NESTING_DEPTH));
+        assert!(msgpack_depth_within(&[0xc0], MSGPACK_MAX_NESTING_DEPTH));
+        assert!(msgpack_depth_within(&[0x2a], MSGPACK_MAX_NESTING_DEPTH));
+        assert!(msgpack_depth_within(&[0xff], MSGPACK_MAX_NESTING_DEPTH));
+        // An empty container counts as one level, then closes.
+        assert!(msgpack_depth_within(&[0x90], MSGPACK_MAX_NESTING_DEPTH));
+    }
+
+    #[test]
+    fn depth_scanner_is_conservative_on_malformed_input() {
+        // The decoder owns byte-level errors; the scanner must not reject a
+        // payload it cannot parse except for depth.
+        let truncated: [(&str, Vec<u8>); 5] = [
+            ("array32 header without length", vec![0xdd]),
+            (
+                "str16 past end of payload",
+                vec![0xda, 0xff, 0xff, 0x91, 0x91],
+            ),
+            ("bin8 past end of payload", vec![0xc4, 0x10, 0x00]),
+            ("ext32 truncated", vec![0xc9, 0x00, 0x00, 0x10, 0x00]),
+            ("fixext16 truncated", vec![0xd8, 0x00]),
+        ];
+        for (name, wire) in truncated {
+            assert!(
+                msgpack_depth_within(&wire, MSGPACK_MAX_NESTING_DEPTH),
+                "{name} must be left to the decoder"
+            );
+        }
+        // Depth is still judged when every length prefix is readable: a
+        // truncated chain of limit+1 markers refuses at the last push.
+        assert!(!msgpack_depth_within(
+            &chain(MSGPACK_MAX_NESTING_DEPTH + 1)[..MSGPACK_MAX_NESTING_DEPTH + 1],
+            MSGPACK_MAX_NESTING_DEPTH
+        ));
+    }
 
     /// A canonical five-field envelope: bin-marked 16-byte UUID, string
     /// encoding token, bin payload, positive u64 seq, positive u32 epoch.
