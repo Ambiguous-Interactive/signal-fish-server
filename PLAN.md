@@ -450,9 +450,11 @@ These items remain live but are not active phases. Re-rank them whenever new
 correctness evidence appears.
 
 - #733 — the scheduled ASan lane went red on 2026-10-03 (`54feb610`, exit
-  101). Local full-ASan on current main (aarch64) is green; #730 (mesh
-  default) is the only production delta to the failing head. Discriminators
-  and fix policy are in the issue; npm-side red is fixed by the #732 gate.
+  101). Root-caused via the run artifact: crates.io transport flakiness
+  tripped the zero-diagnostics packaging pin — zero sanitizer findings.
+  The recovered-transport warning class is now tolerated in both packaging
+  filters (PR #734); remaining follow-up is watching one scheduled run on
+  main post-merge. The npm-side red is fixed by the #732 gate.
 - #732 — GHSA-vfj7-8cjw-p6xm (braces) is unfixable upstream; the npm audit
   gate accepts it per-graph with a 2026-12-01 revisit date. Drop the entry
   when a patched braces release exists.
