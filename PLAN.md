@@ -208,8 +208,8 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   before the close frame with abandoned remainders counted, terminal
   reconnection teardown is pinned, and the two drain-accounting defects found
   (a parked-baseline drain flip counted as a dropped message; silent releases
-  on baseline build failure and gate refusal) are fixed and red-proofed with
-  four new pins.
+  on baseline build failure and gate refusal) are fixed; four red-proven pins
+  and two no-double-count/regression pins cover the seams.
 - [ ] **Resource and input safety:** queue and replay bounds; inactive records;
   pending detach/claim retention; task ownership; metrics label cardinality;
   parser depth, size, malformed frames, Unicode, and numeric boundaries;

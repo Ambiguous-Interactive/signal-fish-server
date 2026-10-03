@@ -1406,9 +1406,10 @@ fixed; every family carries a disposition.
   records the identical event as `websocket_deliveries_canceled` with an
   explicit not-a-drop pin. The reservation park now carries the same biased
   drain arm (cancellation precedence over capacity and expiry), and the
-  pre-attempt refusal moved into the reservation itself. New pin
-  `drain_flip_during_initial_transition_park_cancels_instead_of_dropping`,
-  red-proofed by stashing the fix: the flip counted a dropped message and
+  pre-attempt refusal moved into the reservation itself (pinned by
+  `pre_flipped_drain_refuses_the_initial_transition_before_counting`). New
+  pin `drain_flip_during_initial_transition_park_cancels_instead_of_dropping`,
+  red-proofed by reverting the fix: the flip counted a dropped message and
   left the cancellation ledger untouched.
 - **Two silent releases of a reserved baseline (fixed, new pins).** A
   failed baseline build and a drain-gated commit refusal each released the
@@ -1416,12 +1417,14 @@ fixed; every family carries a disposition.
   the same class the #725 panic-accounting fix closed for transaction
   hooks. Reservation ownership now flows through
   `InitialTransitionReservationGuard`, defused only when the commit
-  resolves the attempt. New pins
-  `drain_gated_commit_refusal_accounts_the_reserved_baseline`,
-  `failed_baseline_builder_accounts_the_reserved_transition`, and
-  `committed_initial_transition_resolves_its_attempt_exactly_once`
-  (no double count on the committed path), all red-proven against the
-  unfixed revision.
+  resolves the attempt. `drain_gated_commit_refusal_accounts_the_reserved_baseline`
+  and `failed_baseline_builder_accounts_the_reserved_transition` and
+  `dropped_registration_between_reservation_and_commit_accounts_the_attempt`
+  (external cancellation mid-build) are red-proven against the unfixed
+  revision;
+  `committed_initial_transition_resolves_its_attempt_exactly_once` pins the
+  no-double-count property on the committed path. Release-path pins assert
+  the freed queue slot with a follow-up send on a one-slot channel.
 - **Close ordering and queued data (contract-consistent, pinned
   piecewise).** The close frame is written by the per-connection send task
   after a bounded flush (one second per close step), so a coded 4000 never
