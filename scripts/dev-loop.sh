@@ -135,9 +135,10 @@ add_owner() {
 }
 
 # `--changed [base-ref]` mode: map the working tree's Rust deltas onto owning
-# targets and run each owning target's FULL suite once. The ownership mirror
-# of the pattern mode below, minus the name filter — changed files identify
-# the suites, not individual test names.
+# targets and run each owning target's FULL suite once, plus the repo's
+# source-hygiene policy scanners. The ownership mirror of the pattern mode
+# below, minus the name filter — changed files identify the suites, not
+# individual test names.
 if [ "$CHANGED_MODE" -eq 1 ]; then
     if ! git rev-parse --verify --quiet "$CHANGED_BASE" >/dev/null; then
         echo "dev-loop: '$CHANGED_BASE' is not a valid git ref" >&2
@@ -207,6 +208,16 @@ if [ "$CHANGED_MODE" -eq 1 ]; then
         if [ "$WITH_CLIPPY" -eq 1 ]; then
             run_cargo cargo clippy ${feature_args[@]+"${feature_args[@]}"} --test "${target%.rs}" -- -D warnings || overall=1
         fi
+    done
+
+    # Source-hygiene policy scanners: AST scans over src/, tests/, and the
+    # native client that no compile gate implies (assertion-discipline rules
+    # such as "never discard a try_recv()/timeout result" and "test failures
+    # must be loud" live here). A src/ test-module edit only runs --lib above,
+    # so these scanners would otherwise first run in hosted CI.
+    for target in async_timeout_policy_scan loud_test_failures_scan; do
+        echo "dev-loop: source-policy scan -> $target"
+        run_cargo cargo nextest run --no-tests warn --test "$target" || overall=1
     done
     exit "$overall"
 fi

@@ -2251,8 +2251,9 @@ async fn drain_flip_during_initial_transition_park_cancels_instead_of_dropping()
         .recv()
         .await
         .expect("the pre-filled frame is still readable");
+    let unexpected = receiver.try_recv();
     assert!(
-        receiver.try_recv().is_err(),
+        matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)),
         "no transition frame may be enqueued by a canceled registration"
     );
     // The parked reservation never held a permit; the dropped in-flight
@@ -2276,6 +2277,9 @@ async fn pre_flipped_drain_refuses_the_initial_transition_before_counting() {
     let player_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0A19);
 
     let (sender, mut receiver) = mpsc::channel(1);
+    // Keep the channel open past the refused call so the emptiness assert
+    // below observes `Empty`, not the test plumbing's `Disconnected`.
+    let _channel_liveness_probe = sender.clone();
     let delivery = ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached());
     let (drain_tx, drain_rx) = watch::channel(true);
 
@@ -2311,8 +2315,9 @@ async fn pre_flipped_drain_refuses_the_initial_transition_before_counting() {
         0,
         "a pre-attempt refusal drops nothing"
     );
+    let unexpected = receiver.try_recv();
     assert!(
-        receiver.try_recv().is_err(),
+        matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)),
         "a pre-attempt refusal must not enqueue its baseline"
     );
 }
@@ -2369,8 +2374,9 @@ async fn drain_gated_commit_refusal_accounts_the_reserved_baseline() {
         0,
         "a gate refusal enqueued nothing and must not count as a dropped message"
     );
+    let unexpected = receiver.try_recv();
     assert!(
-        receiver.try_recv().is_err(),
+        matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)),
         "a refused transition must not enqueue its baseline"
     );
     capacity_probe
@@ -2432,8 +2438,9 @@ async fn failed_baseline_builder_accounts_the_reserved_transition() {
         0,
         "a failed build enqueued nothing and must not count as a dropped message"
     );
+    let unexpected = receiver.try_recv();
     assert!(
-        receiver.try_recv().is_err(),
+        matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)),
         "a failed build must not enqueue its baseline"
     );
     capacity_probe
@@ -2497,8 +2504,9 @@ async fn dropped_registration_between_reservation_and_commit_accounts_the_attemp
         0,
         "a dropped registration enqueued nothing and must not count as a dropped message"
     );
+    let unexpected = receiver.try_recv();
     assert!(
-        receiver.try_recv().is_err(),
+        matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)),
         "a dropped registration must not enqueue its baseline"
     );
     capacity_probe
@@ -2551,10 +2559,11 @@ async fn committed_initial_transition_resolves_its_attempt_exactly_once() {
         0,
         "a committed transition must not also count as canceled"
     );
-    assert!(matches!(
-        receiver.try_recv().as_deref(),
-        Ok(ServerMessage::Pong)
-    ));
+    let delivered = receiver.try_recv();
+    assert!(
+        matches!(delivered.as_deref(), Ok(ServerMessage::Pong)),
+        "the committed transition must deliver its baseline exactly once"
+    );
 }
 
 #[tokio::test]
