@@ -135,9 +135,10 @@ add_owner() {
 }
 
 # `--changed [base-ref]` mode: map the working tree's Rust deltas onto owning
-# targets and run each owning target's FULL suite once. The ownership mirror
-# of the pattern mode below, minus the name filter — changed files identify
-# the suites, not individual test names.
+# targets and run each owning target's FULL suite once, plus the repo's
+# source-hygiene policy scanners. The ownership mirror of the pattern mode
+# below, minus the name filter — changed files identify the suites, not
+# individual test names.
 if [ "$CHANGED_MODE" -eq 1 ]; then
     if ! git rev-parse --verify --quiet "$CHANGED_BASE" >/dev/null; then
         echo "dev-loop: '$CHANGED_BASE' is not a valid git ref" >&2
@@ -149,7 +150,14 @@ if [ "$CHANGED_MODE" -eq 1 ]; then
             git ls-files --others --exclude-standard -- '*.rs'
         } | sort -u
     )
-    if [ -z "$changed_files" ]; then
+    # The script's own contract suite: a dev-loop.sh edit is not a .rs delta,
+    # so the ownership mapping below would never validate the script being
+    # changed. Contract: tests/dev_loop_script_tests.rs.
+    script_changed=0
+    if git diff --name-only "$CHANGED_BASE" -- scripts/dev-loop.sh | grep -q .; then
+        script_changed=1
+    fi
+    if [ -z "$changed_files" ] && [ "$script_changed" -eq 0 ]; then
         echo "dev-loop: no Rust changes under $CHANGED_BASE; nothing to run"
         exit 0
     fi
@@ -157,6 +165,10 @@ if [ "$CHANGED_MODE" -eq 1 ]; then
     lib_owner=0
     owners=()
     while IFS= read -r file; do
+        # A here-string over an empty list still yields one empty line; skip
+        # it so a script-only delta (or any non-.rs-only delta) never reports
+        # an ignored change with an empty path.
+        [ -n "$file" ] || continue
         case "$file" in
             src/*.rs)
                 lib_owner=1
@@ -208,6 +220,24 @@ if [ "$CHANGED_MODE" -eq 1 ]; then
             run_cargo cargo clippy ${feature_args[@]+"${feature_args[@]}"} --test "${target%.rs}" -- -D warnings || overall=1
         fi
     done
+
+    # Source-hygiene policy scanners: AST scans over src/, tests/, and the
+    # native client that no compile gate implies (assertion-discipline rules
+    # such as "never discard a try_recv()/timeout result" and "test failures
+    # must be loud" live here). A src/ test-module edit only runs --lib above,
+    # so these scanners would otherwise first run in hosted CI. Root-crate
+    # deltas only: a clients/-only delta must not schedule root-crate work
+    # (tests/dev_loop_script_tests.rs contract).
+    if [ "$lib_owner" -eq 1 ] || [ "${#owners[@]}" -gt 0 ]; then
+        for target in async_timeout_policy_scan loud_test_failures_scan; do
+            echo "dev-loop: source-policy scan -> $target"
+            run_cargo cargo nextest run --no-tests warn --test "$target" || overall=1
+        done
+    fi
+    if [ "$script_changed" -eq 1 ]; then
+        echo "dev-loop: changed scripts/dev-loop.sh -> its contract suite"
+        run_cargo cargo nextest run --no-tests warn --test dev_loop_script_tests || overall=1
+    fi
     exit "$overall"
 fi
 

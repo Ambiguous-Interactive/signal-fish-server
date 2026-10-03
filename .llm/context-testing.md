@@ -14,10 +14,20 @@ See [Core Testing Patterns](skills/testing/SKILL.md) and
   `tests/websocket_test_helpers` so failures report timeout/closed/error diagnostics.
   For expected silence, assign the timeout result to a named variable and assert it
   timed out.
-- Do not use silent channel drains such as `let _ = rx.try_recv()`, `while let
-  Ok(_) = rx.try_recv()`, or `rx.try_recv().is_ok()` before later assertions.
-  Assert each expected setup message by type/content, or use an explicit helper
-  that distinguishes empty channels from disconnected channels.
+- Do not discard `try_recv()` results in tests. Any statement-level use is
+  rejected by `tests/async_timeout_policy_scan.rs` — including
+  `let _ = rx.try_recv()`, a bare `rx.try_recv();`, `while`/`if` conditions,
+  and even `assert!(rx.try_recv().is_err())` or
+  `matches!(rx.try_recv(), ...)`. Bind the result to a named variable first,
+  then assert the exact expected state, for example:
+  `let unexpected = rx.try_recv(); assert!(matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)), "...")`.
+  Distinguish empty channels from disconnected channels: keep a sender clone
+  alive when the assertion means "nothing was enqueued", or assert
+  `Disconnected` explicitly when closure is the expected state. Assert each
+  expected setup message by type/content, or use an explicit helper
+  that distinguishes empty channels from disconnected channels. These
+  scanners run in hosted CI's Nextest lane and via `scripts/dev-loop.sh
+  --changed`; scoped `--lib` runs never execute them.
 - Test code must fail **loudly**. An error logged with `tracing::error!` must never
   be followed by a silent `return;`/`return Ok(());` (which lets CI pass while the
   setup/exchange actually failed). Use `panic!`/`assert!`/`.expect()`, or make the

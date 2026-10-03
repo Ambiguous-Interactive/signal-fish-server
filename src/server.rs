@@ -2197,6 +2197,38 @@ impl Drop for ConditionalReservationGuard {
     }
 }
 
+/// Drop accounting for one reserved initial-transition frame.
+///
+/// Armed the moment the reservation yields its permit and defused when the
+/// commit resolves the attempt. Every other exit — baseline build error,
+/// drain-gated commit refusal, or an unwind between the two — releases the
+/// permit through this guard, so no reserved initial frame is released
+/// without its cancellation accounting.
+struct InitialTransitionReservationGuard<'a> {
+    metrics: &'a ServerMetrics,
+    player_id: PlayerId,
+    armed: bool,
+}
+
+impl InitialTransitionReservationGuard<'_> {
+    fn defuse(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for InitialTransitionReservationGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.metrics.increment_websocket_deliveries_canceled();
+        tracing::debug!(
+            %self.player_id,
+            "Initial transition reservation released without delivery"
+        );
+    }
+}
+
 /// Cancellation guard for one parked conditional-delivery wait.
 ///
 /// Every select arm inside a parked wait resolves the attempt (enqueued,
@@ -2909,7 +2941,13 @@ impl InMemoryMessageCoordinator {
         &self,
         player_id: PlayerId,
         delivery: &ClientDeliveryHandle,
+        mut drain: Option<tokio::sync::watch::Receiver<bool>>,
     ) -> Result<DeliveryPermit, DeliveryOutcome> {
+        // A drain that already flipped refuses the attempt before it starts:
+        // no attempt is counted and no outcome resolves.
+        if drain.as_ref().is_some_and(|drain| *drain.borrow()) {
+            return Err(DeliveryOutcome::Canceled);
+        }
         self.metrics.increment_websocket_delivery_attempts();
         let stats = self.metrics.connection_delivery_stats(&player_id);
         let capacity_witness = match delivery.sender.try_reserve_control(None) {
@@ -2939,6 +2977,7 @@ impl InMemoryMessageCoordinator {
         let reserve = delivery.sender.reserve_control(None);
         tokio::pin!(reserve);
         enum ReservationWait {
+            Drain,
             Deadline(tokio::time::Instant),
             Result(Result<DeliveryPermit, DeliveryReserveError>),
         }
@@ -2956,14 +2995,35 @@ impl InMemoryMessageCoordinator {
                 },
                 async {
                     let reservation = tokio::select! {
-                        // Capacity returning at or after the deadline cannot revive an
-                        // expired transition. Tokio's `timeout` polls its inner future
-                        // first, so use a timer-first biased select here.
+                        // Drain completion retains cancellation precedence. The
+                        // timeout branch then wins when capacity and expiry are
+                        // both ready: capacity returning at or after the deadline
+                        // cannot revive an expired transition, so the timer is
+                        // polled ahead of the reservation.
                         biased;
+                        _ = async {
+                            match drain.as_mut() {
+                                Some(drain) => {
+                                    if !*drain.borrow() {
+                                        let _ = drain.changed().await;
+                                    }
+                                }
+                                // No drain to observe: this arm never wins.
+                                None => std::future::pending::<()>().await,
+                            }
+                        } => ReservationWait::Drain,
                         deadline = crate::deadline::wait_until(deadline) => ReservationWait::Deadline(deadline),
                         result = &mut reserve => ReservationWait::Result(result),
                     };
                     match reservation {
+                        ReservationWait::Drain => {
+                            tracing::debug!(
+                                %player_id,
+                                "Initial transition canceled for shutdown drain"
+                            );
+                            self.record_canceled_delivery(player_id);
+                            Err(DeliveryOutcome::Canceled)
+                        }
                         ReservationWait::Result(Ok(permit)) => Ok(permit),
                         ReservationWait::Result(Err(DeliveryReserveError::Canceled)) => {
                             self.record_canceled_delivery(player_id);
@@ -4734,7 +4794,10 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         delivery: ClientDeliveryHandle,
         build_message: Box<dyn FnOnce() -> Arc<ServerMessage> + Send + 'a>,
     ) -> anyhow::Result<DeliveryOutcome> {
-        let permit = match self.reserve_initial_transition(player_id, &delivery).await {
+        let permit = match self
+            .reserve_initial_transition(player_id, &delivery, None)
+            .await
+        {
             Ok(permit) => permit,
             Err(outcome) => return Ok(outcome),
         };
@@ -4788,20 +4851,19 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 + 'a,
         >,
     ) -> anyhow::Result<DeliveryOutcome> {
-        let reservation = if let Some(mut drain) = drain {
-            tokio::select! {
-                result = self.reserve_initial_transition(player_id, &delivery) => result,
-                _ = async {
-                    if !*drain.borrow() {
-                        let _ = drain.changed().await;
-                    }
-                } => return Ok(DeliveryOutcome::Canceled),
-            }
-        } else {
-            self.reserve_initial_transition(player_id, &delivery).await
+        let mut reservation_guard = InitialTransitionReservationGuard {
+            metrics: &self.metrics,
+            player_id,
+            armed: false,
         };
-        let permit = match reservation {
-            Ok(permit) => permit,
+        let permit = match self
+            .reserve_initial_transition(player_id, &delivery, drain)
+            .await
+        {
+            Ok(permit) => {
+                reservation_guard.armed = true;
+                permit
+            }
             Err(outcome) => return Ok(outcome),
         };
         let routing = self
@@ -4827,16 +4889,24 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
             routed_players.push(player_id);
         }
         routed_players.sort_unstable();
-        let message = build_message(routed_players).await?;
+        let message = match build_message(routed_players).await {
+            Ok(message) => message,
+            // Dropping the guard here accounts the reserved attempt: the
+            // baseline build failed after the capacity was reserved.
+            Err(error) => return Err(error),
+        };
         let outcome = {
             // Drain takes the same gate before flipping its atomic state. No
             // reconnect baseline can pass the check and queue after that flip.
             let _commit_guard = commit_gate
                 .map(|gate| gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
             if !should_commit() {
+                // The armed guard accounts the released reservation.
                 return Ok(DeliveryOutcome::Canceled);
             }
-            self.commit_initial_transition(player_id, permit, message)
+            let outcome = self.commit_initial_transition(player_id, permit, message);
+            reservation_guard.defuse();
+            outcome
         };
         if outcome == DeliveryOutcome::Delivered {
             let mut room_players = self.room_players.write().await;

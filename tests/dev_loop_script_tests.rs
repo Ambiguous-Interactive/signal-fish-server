@@ -311,6 +311,10 @@ fn test_dev_loop_changed_mode_runs_every_owning_target_without_a_name_filter() {
         "an untracked new target is owned too: {output}"
     );
     assert!(
+        output.contains("--test async_timeout_policy_scan"),
+        "a root-crate delta schedules the source-policy scanners: {output}"
+    );
+    assert!(
         !output.contains("-E test("),
         "changed mode runs whole targets, never name-filtered: {output}"
     );
@@ -397,6 +401,36 @@ fn test_dev_loop_changed_mode_clean_tree_and_non_crate_deltas() {
     assert!(
         !output.contains("cargo nextest"),
         "a clients/ delta must not schedule root-crate work: {output}"
+    );
+}
+
+#[test]
+fn test_dev_loop_changed_mode_validates_the_script_itself() {
+    let temp_root = unique_temp_dir("dev-loop-script-changed-self");
+    copy_dev_loop_script(temp_root.path());
+    seed_fixture_repo(temp_root.path());
+    commit_fixture_repo(temp_root.path());
+
+    // A dev-loop.sh edit is not a .rs delta, so the ownership mapping cannot
+    // see it; the script must still schedule its own contract suite, and must
+    // not schedule root-crate test work for a script-only delta.
+    let script_path = temp_root.path().join("scripts/dev-loop.sh");
+    let script = fs::read_to_string(&script_path).expect("read the copied dev-loop script");
+    write_file(&script_path, &format!("{script}\n# touched\n"));
+
+    let (code, output) = run_dev_loop_changed(temp_root.path(), &["--dry-run", "--changed"]);
+    assert_eq!(code, 0, "a script-only delta must resolve: {output}");
+    assert!(
+        output.contains("--test dev_loop_script_tests"),
+        "a dev-loop.sh edit must schedule its contract suite: {output}"
+    );
+    assert!(
+        !output.contains("--lib"),
+        "a script-only delta schedules no root-crate test work: {output}"
+    );
+    assert!(
+        !output.contains("ignoring non-crate Rust change ''"),
+        "the empty changed-files list must not iterate as an empty path: {output}"
     );
 }
 

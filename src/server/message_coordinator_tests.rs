@@ -154,7 +154,7 @@ fn start_control_capacity_wait(
     match case {
         ControlCapacityWait::InitialTransition => Box::pin(async move {
             match coordinator
-                .reserve_initial_transition(player_id, &handle)
+                .reserve_initial_transition(player_id, &handle, None)
                 .await
             {
                 Ok(_permit) => DeliveryOutcome::Delivered,
@@ -2166,6 +2166,403 @@ async fn drain_canceled_conditional_delivery_is_not_a_drop_or_relay_stat_loss() 
         connection_stats.backpressure_events.load(Ordering::Relaxed),
         1,
         "the attempt did wait on the recipient's full outbound queue"
+    );
+}
+
+/// A drain that flips while an initial transition is parked on its reserved
+/// frame must resolve the attempt as canceled — the same outcome the
+/// conditional-delivery park records — instead of the parked-wait guard's
+/// generic dropped-message accounting. Red condition: the flip dropped the
+/// parked reservation, counting `messages_dropped` and leaving
+/// `deliveries_canceled` untouched.
+#[tokio::test(start_paused = true)]
+async fn drain_flip_during_initial_transition_park_cancels_instead_of_dropping() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(30),
+        Arc::clone(&metrics),
+    ));
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0A10);
+    let player_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0A11);
+
+    let (sender, mut receiver) = mpsc::channel(1);
+    let capacity_probe = sender.clone();
+    sender
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("fill the one-slot transition queue");
+    let (close, close_listener) = ConnectionCloseSignal::channel();
+    let delivery = ClientDeliveryHandle::new(sender, close);
+
+    let (drain_tx, drain_rx) = watch::channel(false);
+    let registration = {
+        let coordinator = Arc::clone(&coordinator);
+        tokio::spawn(async move {
+            coordinator
+                .register_local_client_with_initial_message_async(
+                    player_id,
+                    room_id,
+                    delivery,
+                    &|| true,
+                    None,
+                    Some(drain_rx),
+                    Box::new(|_| Box::pin(async { Ok(Arc::new(ServerMessage::Pong)) })),
+                )
+                .await
+        })
+    };
+    wait_for_counter("initial transition reached backpressure", 10_000, || {
+        metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed)
+            == 1
+    })
+    .await;
+
+    drain_tx.send(true).expect("start shutdown drain");
+    let outcome = tokio::time::timeout(Duration::from_secs(1), registration)
+        .await
+        .expect("the drain flip must wake the parked transition")
+        .expect("registration task should not panic")
+        .expect("registration should not error");
+    assert_eq!(outcome, DeliveryOutcome::Canceled);
+    assert_eq!(
+        close_listener.requested_reason(),
+        None,
+        "a drain cancellation is not the recipient's fault and requests no close"
+    );
+    assert_eq!(
+        metrics.websocket_delivery_attempts.load(Ordering::Relaxed),
+        1,
+        "the attempt was counted when the reservation parked"
+    );
+    assert_eq!(
+        metrics
+            .websocket_deliveries_canceled
+            .load(Ordering::Relaxed),
+        1,
+        "the drain flip must resolve the attempt as canceled"
+    );
+    assert_eq!(
+        metrics.websocket_messages_dropped.load(Ordering::Relaxed),
+        0,
+        "a drain cancellation enqueued nothing and must not count as a dropped message"
+    );
+    receiver
+        .recv()
+        .await
+        .expect("the pre-filled frame is still readable");
+    let unexpected = receiver.try_recv();
+    assert!(
+        matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)),
+        "no transition frame may be enqueued by a canceled registration"
+    );
+    // The parked reservation never held a permit; the dropped in-flight
+    // reserve must likewise leave the queue fully usable.
+    capacity_probe
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("capacity released after the canceled park");
+}
+
+/// A drain that flipped before the transition starts refuses without
+/// counting an attempt: no reservation is taken, no ledger resolves, and no
+/// baseline is enqueued.
+#[tokio::test]
+async fn pre_flipped_drain_refuses_the_initial_transition_before_counting() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(30),
+        Arc::clone(&metrics),
+    ));
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0A18);
+    let player_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0A19);
+
+    let (sender, mut receiver) = mpsc::channel(1);
+    // Keep the channel open past the refused call so the emptiness assert
+    // below observes `Empty`, not the test plumbing's `Disconnected`.
+    let _channel_liveness_probe = sender.clone();
+    let delivery = ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached());
+    let (drain_tx, drain_rx) = watch::channel(true);
+
+    let outcome = coordinator
+        .register_local_client_with_initial_message_async(
+            player_id,
+            room_id,
+            delivery,
+            &|| true,
+            None,
+            Some(drain_rx),
+            Box::new(|_| Box::pin(async { Ok(Arc::new(ServerMessage::Pong)) })),
+        )
+        .await
+        .expect("a pre-flipped drain refusal is not an error");
+    let _keep_drain_sender_alive = drain_tx;
+
+    assert_eq!(outcome, DeliveryOutcome::Canceled);
+    assert_eq!(
+        metrics.websocket_delivery_attempts.load(Ordering::Relaxed),
+        0,
+        "a refusal before the attempt starts must not count an attempt"
+    );
+    assert_eq!(
+        metrics
+            .websocket_deliveries_canceled
+            .load(Ordering::Relaxed),
+        0,
+        "no attempt means no outcome to resolve"
+    );
+    assert_eq!(
+        metrics.websocket_messages_dropped.load(Ordering::Relaxed),
+        0,
+        "a pre-attempt refusal drops nothing"
+    );
+    let unexpected = receiver.try_recv();
+    assert!(
+        matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)),
+        "a pre-attempt refusal must not enqueue its baseline"
+    );
+}
+
+/// A drain-gated commit refusal happens after the transition reserved its
+/// frame, so the released reservation must be accounted as a canceled
+/// delivery attempt. Red condition: the refusal returned `Canceled` without
+/// resolving the attempt, leaving `deliveries_canceled` untouched.
+#[tokio::test]
+async fn drain_gated_commit_refusal_accounts_the_reserved_baseline() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(30),
+        Arc::clone(&metrics),
+    ));
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0A12);
+    let player_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0A13);
+
+    let (sender, mut receiver) = mpsc::channel(1);
+    let capacity_probe = sender.clone();
+    let delivery = ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached());
+    let commit_gate = std::sync::Mutex::new(());
+    let (drain_tx, drain_rx) = watch::channel(false);
+
+    let outcome = coordinator
+        .register_local_client_with_initial_message_async(
+            player_id,
+            room_id,
+            delivery,
+            &|| false,
+            Some(&commit_gate),
+            Some(drain_rx),
+            Box::new(|_| Box::pin(async { Ok(Arc::new(ServerMessage::Pong)) })),
+        )
+        .await
+        .expect("a gate refusal is not an error");
+
+    assert_eq!(outcome, DeliveryOutcome::Canceled);
+    let _keep_drain_sender_alive = drain_tx;
+    assert_eq!(
+        metrics.websocket_delivery_attempts.load(Ordering::Relaxed),
+        1,
+        "the attempt was counted when the reservation succeeded"
+    );
+    assert_eq!(
+        metrics
+            .websocket_deliveries_canceled
+            .load(Ordering::Relaxed),
+        1,
+        "the gate refusal must resolve the attempt as canceled"
+    );
+    assert_eq!(
+        metrics.websocket_messages_dropped.load(Ordering::Relaxed),
+        0,
+        "a gate refusal enqueued nothing and must not count as a dropped message"
+    );
+    let unexpected = receiver.try_recv();
+    assert!(
+        matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)),
+        "a refused transition must not enqueue its baseline"
+    );
+    capacity_probe
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("the refused reservation released its capacity slot");
+}
+
+/// A failed baseline build releases the reserved frame after the attempt was
+/// counted, so the release must be accounted as a canceled delivery attempt.
+/// Red condition: the error propagated without resolving the attempt.
+#[tokio::test]
+async fn failed_baseline_builder_accounts_the_reserved_transition() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(30),
+        Arc::clone(&metrics),
+    ));
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0A14);
+    let player_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0A15);
+
+    let (sender, mut receiver) = mpsc::channel(1);
+    let capacity_probe = sender.clone();
+    let delivery = ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached());
+
+    let error = coordinator
+        .register_local_client_with_initial_message_async(
+            player_id,
+            room_id,
+            delivery,
+            &|| true,
+            None,
+            None,
+            Box::new(|_| {
+                Box::pin(async { Err(anyhow::anyhow!("sentinel baseline build failure")) })
+            }),
+        )
+        .await
+        .expect_err("the builder failure must propagate");
+    assert!(
+        error
+            .to_string()
+            .contains("sentinel baseline build failure"),
+        "the propagated error must be the builder's: {error}"
+    );
+    assert_eq!(
+        metrics.websocket_delivery_attempts.load(Ordering::Relaxed),
+        1,
+        "the attempt was counted when the reservation succeeded"
+    );
+    assert_eq!(
+        metrics
+            .websocket_deliveries_canceled
+            .load(Ordering::Relaxed),
+        1,
+        "the failed build must resolve the attempt as canceled"
+    );
+    assert_eq!(
+        metrics.websocket_messages_dropped.load(Ordering::Relaxed),
+        0,
+        "a failed build enqueued nothing and must not count as a dropped message"
+    );
+    let unexpected = receiver.try_recv();
+    assert!(
+        matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)),
+        "a failed build must not enqueue its baseline"
+    );
+    capacity_probe
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("the failed build released its capacity slot");
+}
+
+/// Dropping the registration future while its builder is parked — an external
+/// cancellation between the reservation and the commit — releases the
+/// reserved frame through the guard's cancellation accounting. Red condition:
+/// the drop released the permit silently, leaving the attempt unresolved.
+#[tokio::test]
+async fn dropped_registration_between_reservation_and_commit_accounts_the_attempt() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(30),
+        Arc::clone(&metrics),
+    ));
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0A1A);
+    let player_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0A1B);
+
+    let (sender, mut receiver) = mpsc::channel(1);
+    let capacity_probe = sender.clone();
+    let delivery = ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached());
+
+    let mut registration = Box::pin(
+        coordinator.register_local_client_with_initial_message_async(
+            player_id,
+            room_id,
+            delivery,
+            &|| true,
+            None,
+            None,
+            Box::new(|_| Box::pin(std::future::pending::<anyhow::Result<Arc<ServerMessage>>>())),
+        ),
+    );
+    // One poll reserves the permit on the empty queue and parks inside the
+    // never-resolving builder.
+    let waker = std::task::Waker::noop();
+    let mut cx = std::task::Context::from_waker(waker);
+    assert!(
+        std::future::Future::poll(registration.as_mut(), &mut cx).is_pending(),
+        "the parked builder must hold the registration open"
+    );
+    assert_eq!(
+        metrics.websocket_delivery_attempts.load(Ordering::Relaxed),
+        1,
+        "the attempt was counted when the reservation succeeded"
+    );
+
+    drop(registration);
+    assert_eq!(
+        metrics
+            .websocket_deliveries_canceled
+            .load(Ordering::Relaxed),
+        1,
+        "dropping the parked registration must resolve the attempt as canceled"
+    );
+    assert_eq!(
+        metrics.websocket_messages_dropped.load(Ordering::Relaxed),
+        0,
+        "a dropped registration enqueued nothing and must not count as a dropped message"
+    );
+    let unexpected = receiver.try_recv();
+    assert!(
+        matches!(unexpected, Err(mpsc::error::TryRecvError::Empty)),
+        "a dropped registration must not enqueue its baseline"
+    );
+    capacity_probe
+        .try_send(Arc::new(ServerMessage::Pong))
+        .expect("the dropped registration released its capacity slot");
+}
+
+/// The committed path defuses the reservation guard, so a successful
+/// transition resolves its attempt exactly once: the enqueued baseline is
+/// delivered and no cancellation is counted.
+#[tokio::test]
+async fn committed_initial_transition_resolves_its_attempt_exactly_once() {
+    let metrics = Arc::new(ServerMetrics::new());
+    let coordinator = Arc::new(InMemoryMessageCoordinator::with_delivery_policy(
+        Duration::from_secs(30),
+        Arc::clone(&metrics),
+    ));
+    let room_id = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0A16);
+    let player_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0A17);
+
+    let (sender, mut receiver) = mpsc::channel(4);
+    let delivery = ClientDeliveryHandle::new(sender, ConnectionCloseSignal::detached());
+    let commit_gate = std::sync::Mutex::new(());
+    let (drain_tx, drain_rx) = watch::channel(false);
+
+    let outcome = coordinator
+        .register_local_client_with_initial_message_async(
+            player_id,
+            room_id,
+            delivery,
+            &|| true,
+            Some(&commit_gate),
+            Some(drain_rx),
+            Box::new(|_| Box::pin(async { Ok(Arc::new(ServerMessage::Pong)) })),
+        )
+        .await
+        .expect("a committed transition is not an error");
+    let _keep_drain_sender_alive = drain_tx;
+
+    assert_eq!(outcome, DeliveryOutcome::Delivered);
+    assert_eq!(
+        metrics.websocket_delivery_attempts.load(Ordering::Relaxed),
+        1,
+        "the attempt was counted exactly once"
+    );
+    assert_eq!(
+        metrics
+            .websocket_deliveries_canceled
+            .load(Ordering::Relaxed),
+        0,
+        "a committed transition must not also count as canceled"
+    );
+    let delivered = receiver.try_recv();
+    assert!(
+        matches!(delivered.as_deref(), Ok(ServerMessage::Pong)),
+        "the committed transition must deliver its baseline exactly once"
     );
 }
 
