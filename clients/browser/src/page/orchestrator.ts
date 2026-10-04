@@ -62,6 +62,7 @@ import {
   sendOpaqueGameData,
   type ServerFrame,
 } from './wire.js';
+import type { GameDataFormat } from '../shared/types.js';
 
 /**
  * Delay between the relay-probe trigger and the `--relay-payload` send
@@ -172,6 +173,40 @@ export function observeJoinHandshakeFrame(
     default:
       return false;
   }
+}
+
+/**
+ * Consume one server frame of the authenticate handshake.
+ *
+ * The server reports an unsupported `game_data_format` with a budget-charged
+ * `Error` BEFORE `Authenticated` (pinned wire order, server
+ * `tests/e2e_tests.rs`) while downgrading the session to JSON, so the notice
+ * adopts JSON in place and the handshake continues instead of failing a
+ * viable session. A second notice, or any notice for an already-JSON
+ * session, stays fatal.
+ */
+export function advanceAuthenticateHandshake(
+  frame: ServerFrame,
+  effectiveFormat: GameDataFormat,
+): { fatal: string } | { authenticated: boolean; effectiveFormat: GameDataFormat } {
+  if (frame.type === 'Authenticated') {
+    return { authenticated: true, effectiveFormat };
+  }
+  if (frame.type === 'AuthenticationError') {
+    return {
+      fatal:
+        `authentication rejected: ${String(frame.data['error'])} ` +
+        `(${String(frame.data['error_code'])})`,
+    };
+  }
+  if (
+    frame.type === 'Error' &&
+    frame.data['error_code'] === 'UNSUPPORTED_GAME_DATA_FORMAT' &&
+    effectiveFormat !== 'json'
+  ) {
+    return { authenticated: false, effectiveFormat: 'json' };
+  }
+  return { fatal: `expected Authenticated, got ${frame.type}` };
 }
 
 /** Restore application membership after a retained seat reconnects. */
@@ -634,9 +669,17 @@ class Orchestrator {
    */
   private pongGraceApplied = false;
   private wakeTimer: ScheduledDeadline | null = null;
+  /**
+   * The game-data encoding the session actually runs on. Starts at the
+   * requested `config.gameDataFormat` and moves to JSON when the server's
+   * pinned downgrade notice arrives (`advanceAuthenticateHandshake`); every
+   * wire-shape decision after the handshake reads this, never the request.
+   */
+  private effectiveFormat: GameDataFormat;
 
   constructor(config: RunConfig) {
     this.config = config;
+    this.effectiveFormat = config.gameDataFormat;
     this.engine = new Engine(config.crippleIce, {
       onLocalCandidate: (peer, generation, candidateJson) => {
         // Crippled mode never reaches here (the engine drops gathered
@@ -774,17 +817,28 @@ class Orchestrator {
     }
     this.sendFrame(clientFrame('Authenticate', data));
 
-    const authResponse = await this.nextHandshakeFrame();
-    if (authResponse.type === 'Authenticated') {
-      emit({ event: 'authenticated' });
-    } else if (authResponse.type === 'AuthenticationError') {
-      throw FatalError.protocol(
-        `authentication rejected: ${String(authResponse.data['error'])} ` +
-          `(${String(authResponse.data['error_code'])})`,
+    // The server may answer the requested `game_data_format` with its pinned
+    // downgrade notice before `Authenticated`; adopt JSON and continue.
+    let effectiveFormat: GameDataFormat = this.config.gameDataFormat;
+    for (;;) {
+      const step = advanceAuthenticateHandshake(
+        await this.nextHandshakeFrame(),
+        effectiveFormat,
       );
-    } else {
-      throw FatalError.protocol(`expected Authenticated, got ${authResponse.type}`);
+      if ('fatal' in step) {
+        throw FatalError.protocol(step.fatal);
+      }
+      effectiveFormat = step.effectiveFormat;
+      if (step.authenticated) {
+        break;
+      }
+      emit({
+        event: 'error',
+        message: 'server refused the requested game data format; session downgraded to JSON',
+      });
     }
+    emit({ event: 'authenticated' });
+    this.effectiveFormat = effectiveFormat;
 
     const infoResponse = await this.nextHandshakeFrame();
     let negotiated: number;
@@ -796,11 +850,18 @@ class Orchestrator {
     // An opaque request must appear in ProtocolInfo.game_data_formats before
     // any opaque byte goes on the wire (#627): a knob-off deployment
     // advertises exactly ["json"] and silently downgraded the request.
-    if (this.config.gameDataFormat !== 'json') {
+    if (effectiveFormat !== 'json') {
       try {
-        negotiatedGameDataFormat(infoResponse, this.config.gameDataFormat);
+        negotiatedGameDataFormat(infoResponse, effectiveFormat);
       } catch (error) {
         throw FatalError.protocol(describe(error));
+      }
+      // The opaque wire shape is v3-only for this client (#627): the strict
+      // binary envelope is the only shape that carries sender attribution.
+      if (negotiated < 3) {
+        throw FatalError.protocol(
+          `opaque game data requires protocol version 3; the server negotiated v${negotiated}`,
+        );
       }
     }
     emit({
@@ -944,7 +1005,7 @@ class Orchestrator {
       // The negotiated game-data format owns the physical frame grammar (#627);
       // json keeps today's text-only classifier byte-for-byte.
       frame =
-        this.config.gameDataFormat === 'json'
+        this.effectiveFormat === 'json'
           ? classifyJsonNegotiatedServerInput(data)
           : classifyOpaqueNegotiatedServerInput(data);
     } catch (error) {
@@ -1911,7 +1972,7 @@ class Orchestrator {
       this.relaySent = true;
       return;
     }
-    if (this.config.gameDataFormat === 'json') {
+    if (this.effectiveFormat === 'json') {
       sendGameData((frame) => this.sendFrame(frame), {
         relay_msg: this.config.relayPayload,
       });

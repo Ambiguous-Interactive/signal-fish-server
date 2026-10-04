@@ -113,6 +113,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reference clients: the native and browser reference clients now apply the
+  server's JSON downgrade notice instead of aborting the handshake. The
+  server refuses an unsupported requested `game_data_format` with an error
+  frame before `Authenticated` and downgrades the session to JSON; both
+  clients treated that frame as fatal, so an opaque request against a
+  default deployment could not join at all. After the notice the clients
+  run the JSON wire shape for every send and receive decision, emit a
+  non-fatal notice event, and keep refusing repeat notices, other error
+  codes, and authentication refusals. Both clients also refuse an opaque
+  request when the server negotiates v2, matching their v3-only opaque
+  wire shape (#627). Reference-client documentation now matches the shipped
+  pins and the opaque runtime mode (ARM-C033, ARM-C034).
+
 - Logging: the rejected-app-ID authentication warning no longer echoes the
   raw client-supplied ID. The ID is Debug-escaped, so control characters in
   a rejected app ID cannot forge operator-facing log lines. The rejection
