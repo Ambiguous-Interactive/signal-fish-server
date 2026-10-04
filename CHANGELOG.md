@@ -113,6 +113,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Logging: the rejected-app-ID authentication warning no longer echoes the
+  raw client-supplied ID. The ID is Debug-escaped, so control characters in
+  a rejected app ID cannot forge operator-facing log lines. The rejection
+  itself is unchanged: the connection still receives `INVALID_APP_ID` and
+  closes.
+
+- Logging: the server warning for game data that cannot be converted for a
+  recipient now follows the existing one-notice-per-sender-per-second
+  advisory cadence and includes the suppressed count. Previously every
+  undelivered frame warned for every recipient, so one sender with an
+  unsupported encoding could flood operator logs. Delivery reports,
+  advisories, and drop counters are unchanged.
+
 - Metrics: a shutdown-drain flip that cancels a parked reconnect-baseline
   reservation is now counted in `websocket_deliveries_canceled` instead of
   `websocket_messages_dropped`, matching the conditional-delivery park, and

@@ -1758,13 +1758,6 @@ async fn notify_on_undeliverable(
     metadata: Option<DataDeliveryMetadata>,
     accounting: &mut SendAccounting<'_>,
 ) -> Result<SendDisposition, SendMessageError> {
-    tracing::warn!(
-        %player_id,
-        %from_player,
-        encoding = ?encoding,
-        reason = %reason,
-        "Game data undeliverable to this recipient; sending an error notice instead"
-    );
     let coalesced = accounting.complete_unsupported(metadata);
     if recipient_supports_v3 && metadata.is_none() {
         tracing::error!(
@@ -1792,6 +1785,17 @@ async fn notify_on_undeliverable(
         accounting.hold_unsupported(metadata);
     }
     if let Some(suppressed) = accounting.unsupported_notice(from_player) {
+        // The warn rides the advisory cadence (at most one per sender per
+        // second): every per-frame drop is already counted by the delivery
+        // ledgers, so a sustained mismatch must not flood operator logs.
+        tracing::warn!(
+            %player_id,
+            %from_player,
+            encoding = ?encoding,
+            reason = %reason,
+            suppressed_since_last_notice = suppressed,
+            "Game data undeliverable to this recipient; sending an error notice instead"
+        );
         // The advisory must never precede the exact report that
         // explains it, so the rate-limited notice is also the pending
         // report's flush cadence: at most one report per sender per
