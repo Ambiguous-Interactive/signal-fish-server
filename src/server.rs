@@ -485,6 +485,12 @@ pub struct EnhancedGameServer {
     scripted_room_codes: StdMutex<VecDeque<String>>,
     #[cfg(test)]
     owned_room_operation_panic: Arc<AtomicU8>,
+    /// Test-only one-shot panic at the top of the owned reconnect
+    /// transaction's in-task unwind supervisor. The supervisor body is itself
+    /// `catch_unwind`-guarded, so this exercises the supervisor-panic
+    /// fallback (direct claim release) rather than the outer `JoinError` arm.
+    #[cfg(test)]
+    owned_room_supervisor_panic: Arc<AtomicBool>,
     /// Test-only coordination-lock lease TTL in milliseconds. `0` keeps the
     /// production constants (`ROOM_JOIN_LOCK_TTL` and siblings). The #550
     /// stalled-lease pins shrink the lease so the renewal probe outlasts one
@@ -960,6 +966,8 @@ impl EnhancedGameServer {
             scripted_room_codes: StdMutex::new(VecDeque::new()),
             #[cfg(test)]
             owned_room_operation_panic: Arc::new(AtomicU8::new(0)),
+            #[cfg(test)]
+            owned_room_supervisor_panic: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             coordination_lock_ttl_override_ms: AtomicU64::new(0),
             spectator_service,
@@ -1692,6 +1700,27 @@ impl EnhancedGameServer {
     pub(crate) fn panic_owned_room_operation_for_test(&self, point: OwnedRoomOperationPanicPoint) {
         self.owned_room_operation_panic
             .store(point as u8, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Arm a one-shot panic at the top of the owned reconnect transaction's
+    /// in-task unwind supervisor (see the field docs). Callers live in the
+    /// repository-only test modules, so the helper carries the same
+    /// repository-only gate they do.
+    #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
+    pub(crate) fn panic_owned_room_supervisor_for_test(&self) {
+        self.owned_room_supervisor_panic
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn trigger_owned_room_supervisor_panic_for_test(&self) {
+        if self
+            .owned_room_supervisor_panic
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            panic!("injected owned room-operation supervisor panic");
+        }
     }
 
     #[cfg(test)]

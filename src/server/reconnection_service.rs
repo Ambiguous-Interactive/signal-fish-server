@@ -701,81 +701,148 @@ impl EnhancedGameServer {
                 Ok(result) => result,
                 Err(_) => {
                     tracing::error!(%current_player_id, %reconnect_player_id, %room_id, "Owned reconnect transaction panicked");
-                    let recovery = panic_recovery
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .clone();
-                    if terminal_response_committed.load(std::sync::atomic::Ordering::Acquire) {
-                        let _ = server
-                            .message_coordinator
-                            .unregister_local_client(&current_player_id)
-                            .await;
-                        if let (Some(manager), Some(claim)) =
-                            (&server.reconnection_manager, recovery.claim.as_ref())
-                        {
-                            let _ = manager.complete_claimed_reconnection(claim).await;
-                            if !opening_accounted.swap(true, std::sync::atomic::Ordering::AcqRel) {
-                                server.metrics.increment_players_joined();
-                            }
-                            if !lifecycle_finalized.load(std::sync::atomic::Ordering::Acquire) {
-                                if let Some(room_event_guard) = recovery.room_event_guard.clone() {
-                                    server
-                                        .repair_panicked_reconnect_publication_locked(
-                                            reconnect_player_id,
-                                            room_id,
-                                            &claim.disconnected,
-                                            room_event_guard,
-                                        )
-                                        .await;
+                    // The unwind supervisor itself must not be able to unwind
+                    // past the task: a panic here escapes the transaction's
+                    // `catch_unwind` as a `JoinError` at the outer
+                    // `task.await` while this snapshot may still hold the
+                    // reserved claim, and a claimed record is exempt from
+                    // every expiry surface — the player would answer
+                    // `AlreadyInProgress` until restart (#738). Catch a
+                    // supervisor panic and release the claim directly as a
+                    // last resort. The full rollback is deliberately not
+                    // retried: whatever panicked inside the supervisor can
+                    // panic again, and the release path itself is panic-free.
+                    let supervisor_outcome = AssertUnwindSafe(async {
+                        #[cfg(test)]
+                        server.trigger_owned_room_supervisor_panic_for_test();
+                        let recovery = panic_recovery
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .clone();
+                        if terminal_response_committed.load(std::sync::atomic::Ordering::Acquire) {
+                            let _ = server
+                                .message_coordinator
+                                .unregister_local_client(&current_player_id)
+                                .await;
+                            if let (Some(manager), Some(claim)) =
+                                (&server.reconnection_manager, recovery.claim.as_ref())
+                            {
+                                let _ = manager.complete_claimed_reconnection(claim).await;
+                                if !opening_accounted
+                                    .swap(true, std::sync::atomic::Ordering::AcqRel)
+                                {
+                                    server.metrics.increment_players_joined();
+                                }
+                                if !lifecycle_finalized.load(std::sync::atomic::Ordering::Acquire) {
+                                    if let Some(room_event_guard) =
+                                        recovery.room_event_guard.clone()
+                                    {
+                                        server
+                                            .repair_panicked_reconnect_publication_locked(
+                                                reconnect_player_id,
+                                                room_id,
+                                                &claim.disconnected,
+                                                room_event_guard,
+                                            )
+                                            .await;
+                                    }
                                 }
                             }
-                        }
-                        return true;
-                    }
+                            true
+                        } else {
+                            if recovery.reassigned {
+                                server
+                                    .discard_pre_issued_reconnection_token(&reconnect_player_id)
+                                    .await;
+                                let _ = server
+                                    .message_coordinator
+                                    .unregister_local_client(&reconnect_player_id)
+                                    .await;
+                                let _ = server.connection_manager.restore_reassigned_connection(
+                                    &current_player_id,
+                                    &reconnect_player_id,
+                                );
+                                if let Some(effective_player_id) = &effective_player_id_for_recovery
+                                {
+                                    *effective_player_id.write().await = current_player_id;
+                                }
+                            }
 
-                    if recovery.reassigned {
-                        server
-                            .discard_pre_issued_reconnection_token(&reconnect_player_id)
-                            .await;
-                        let _ = server
-                            .message_coordinator
-                            .unregister_local_client(&reconnect_player_id)
-                            .await;
-                        let _ = server.connection_manager.restore_reassigned_connection(
-                            &current_player_id,
-                            &reconnect_player_id,
-                        );
-                        if let Some(effective_player_id) = &effective_player_id_for_recovery {
-                            *effective_player_id.write().await = current_player_id;
+                            if let (Some(manager), Some(claim)) =
+                                (&server.reconnection_manager, recovery.claim)
+                            {
+                                let claim_guard =
+                                    ReconnectionClaimGuard::new(Arc::clone(manager), claim);
+                                server
+                                    .rollback_claimed_reconnect(
+                                        claim_guard,
+                                        &recovery.restore,
+                                        "Reconnect failed unexpectedly",
+                                    )
+                                    .await;
+                            }
+                            server
+                                .send_unexpected_room_operation_failure(
+                                    current_player_id,
+                                    operation_id,
+                                    "Reconnect failed unexpectedly",
+                                )
+                                .await;
+                            false
+                        }
+                    })
+                    .catch_unwind()
+                    .await;
+                    match supervisor_outcome {
+                        Ok(result) => result,
+                        Err(_) => {
+                            tracing::error!(%current_player_id, %reconnect_player_id, %room_id, "Owned reconnect transaction unwind supervisor panicked");
+                            let recovery = panic_recovery
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .clone();
+                            if let (Some(manager), Some(claim)) =
+                                (&server.reconnection_manager, recovery.claim)
+                            {
+                                // The record action must mirror the
+                                // supervisor's own commit-state branch. A
+                                // committed terminal response already spent
+                                // the one-time token, so the record is
+                                // completed (consumed) — releasing it would
+                                // reopen a spent credential for a retry that
+                                // re-restores an already-delivered session.
+                                // An uncommitted transaction leaves the
+                                // token unspent, so the record is released
+                                // for a fresh retry. Both manager calls are
+                                // claim-id-checked and degrade to warn
+                                // no-ops when the supervisor already
+                                // performed the action before panicking.
+                                if terminal_response_committed
+                                    .load(std::sync::atomic::Ordering::Acquire)
+                                {
+                                    let _ = manager.complete_claimed_reconnection(&claim).await;
+                                } else {
+                                    let _ = manager.release_reconnection_claim(&claim).await;
+                                }
+                            }
+                            false
                         }
                     }
-
-                    if let (Some(manager), Some(claim)) =
-                        (&server.reconnection_manager, recovery.claim)
-                    {
-                        let claim_guard = ReconnectionClaimGuard::new(Arc::clone(manager), claim);
-                        server
-                            .rollback_claimed_reconnect(
-                                claim_guard,
-                                &recovery.restore,
-                                "Reconnect failed unexpectedly",
-                            )
-                            .await;
-                    }
-                    server
-                        .send_unexpected_room_operation_failure(
-                            current_player_id,
-                            operation_id,
-                            "Reconnect failed unexpectedly",
-                        )
-                        .await;
-                    false
                 }
             }
         });
         match task.await {
             Ok(result) => result,
             Err(error) => {
+                // Reaching this arm requires the task to unwind outside its
+                // `catch_unwind` (whose supervisor body is itself
+                // `catch_unwind`-guarded with a commit-state-aware claim
+                // fallback) or to be cancelled — and nothing aborts this
+                // inline-awaited handle, so cancellation only happens at
+                // runtime shutdown, where all in-memory claim state dies with
+                // the process. There is therefore no reachable stranded-claim
+                // window left here to recover (#738); the log is the
+                // diagnostics.
                 tracing::error!(%current_player_id, %reconnect_player_id, %room_id, %error, "Owned reconnect transaction failed");
                 false
             }

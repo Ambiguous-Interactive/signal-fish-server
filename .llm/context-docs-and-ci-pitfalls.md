@@ -131,6 +131,17 @@ Config and binary wire-format drift rules:
   signal-fish-server` first: `cargo doc` can pass from stale doc artifacts or
   from a worktree that was reset to another branch -- always confirm `git
   branch` shows the PR branch before trusting a local green run.
+- **The changelog gate gates the STAGED set, and piping `git commit` masks
+  the rejection** -- `Test-ChangelogGate` fails any commit whose staged
+  non-internal files lack a staged `CHANGELOG.md` change. Two traps: (1)
+  `git commit ... | tail` hides the hook's FAIL block behind the pipe — the
+  commit silently never lands while the session believes it did (hit in
+  sessions 333 and 335); run gated commits unpiped and verify `git log
+  --oneline -1` afterward. (2) `git commit --amend --no-edit` re-runs the
+  gate against only the NEWLY staged files, so a follow-up production-code
+  fix on top of an already-committed changelog change still fails — land
+  follow-ups with `git reset --soft <base>` and one recommit of the whole
+  change.
 - **Mutation inventory drift fails the per-PR nextest lane** -- adding or
   changing mutation-scoped production code changes `cargo mutants --list`'s
   count, and `test_mutation_total_mutants_constant_matches_list` (ubuntu
