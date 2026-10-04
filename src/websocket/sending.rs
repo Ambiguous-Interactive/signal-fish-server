@@ -1763,6 +1763,8 @@ async fn notify_on_undeliverable(
         tracing::error!(
             %player_id,
             %from_player,
+            encoding = ?encoding,
+            reason = %reason,
             "Stamped v3 binary fallback lacked delivery metadata; closing fail-closed"
         );
         return Err(SendMessageError::Materialization);

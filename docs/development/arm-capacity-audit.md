@@ -372,7 +372,7 @@ No new finding is confirmed by this initial inventory.
 | Player impact | None on the wire: the rejection, error code, and close are unchanged. Operator impact: a client could forge or distort operator-facing log lines precisely when its app ID was rejected — the `Public app ID rejected` warning printed the raw ID with a Display field in the arm where the log-safety gate had just refused it for control characters (newlines, ANSI escapes) or length. |
 | Source and revision | `src/websocket/connection.rs` authentication error arm, reviewed at `dd37153b`. The gate (`app_id_is_log_safe`) rejects unsafe IDs at resolve time; the `Err` arm then logged `%app_id` unescaped. |
 | Invariant | A field the log-safety gate has not vetted must never reach a log line through a Display (`%`) field; client-chosen text in anomalous-path warnings is Debug-escaped. |
-| Confidence and reproduction | Direct code reading: the `Err` arm is reached by `AuthError::InvalidAppId`, the gate-rejection variant. The sibling anomalous-path warnings (`message_router.rs`, `room_service.rs` spans) already document and apply the Debug-escape rule for exactly this hazard. |
+| Confidence and reproduction | Direct code reading: the `Err` arm is reached by every resolve failure, each carrying the unvetted client-supplied ID — the gate-rejection `InvalidAppId` variant (which also serves unknown IDs), `RateLimitExceeded`, and the reserved app-status variants. The sibling anomalous-path warnings (`message_router.rs`, `room_service.rs` spans) already document and apply the Debug-escape rule for exactly this hazard. |
 | Disposition | The field is now `?app_id` (Debug-escaped) with the rule restated at the site. Sweep: every remaining `%app_id` log site is gate-vetted (inside `Ok(info)` arms) or a typed UUID; the wire-level rejection contract stays pinned by `test_unloggable_app_id_fails_authentication_with_invalid_app_id`. |
 
 ### ARM-C032 — The undeliverable-relay warning fired per frame per recipient
@@ -384,10 +384,11 @@ No new finding is confirmed by this initial inventory.
 | Source and revision | `src/websocket/sending.rs::notify_on_undeliverable`, reviewed at `dd37153b`. |
 | Invariant | A per-event log on a hot path must share the rate limit of the response it describes; per-event accounting belongs to counters, not to unbounded log emission. |
 | Confidence and reproduction | Direct code reading against the advisory limiter (`unsupported_notice`, one notice per sender per second with a suppressed count): every undeliverable conversion passed the unthrottled warn before any cadence check. |
-| Disposition | The warning now rides the advisory cadence and carries the suppressed count; the fail-closed missing-metadata error log is unchanged. The per-event totals stay observable through the delivery ledgers and drop metrics pinned in the mixed-encoding and volatile-loss reviews. |
+| Disposition | The warning now rides the advisory cadence and carries the suppressed count; the fail-closed missing-metadata error log is unchanged apart from gaining the same `encoding`/`reason` fields the old warn carried. The per-event totals stay observable through the delivery ledgers and drop metrics pinned in the mixed-encoding and volatile-loss reviews. Per-sender cadence holds under any sender count; as with the pre-existing advisory limiter, total log volume scales with distinct offending senders, bounded by concurrent connections. |
 
 These findings cover room-code rotation, player names, transport status, and spectator,
-reconnect, room-creation drain, and terminal routing seams. The rest of the C1 room and storage
+reconnect, room-creation drain, and terminal routing seams, plus the two log-bound
+hardenings above. The rest of the C1 room and storage
 rows remain unreviewed.
 
 ### C1 admission-limit review (2026-09-28)
@@ -1642,7 +1643,7 @@ error and logging paths under pressure.
 At `dd37153b` (main after #737), reviewed the resource-and-input-safety
 slice's inactive-record, pending detach/claim retention, and task-ownership
 families across the connection manager, reconnection service and manager,
-maintenance sweeps, spectator service, moderation, the websocket connection
+maintenance sweeps, spectator service, moderation, the WebSocket connection
 loop, and the shutdown/drain paths. No defect was found; every audited
 record and task carries a verified removal or abort on all exit paths.
 
@@ -1734,10 +1735,10 @@ disposition.
 ### C1 error and logging paths under pressure review (2026-10-04)
 
 At `dd37153b` (main after #737), reviewed the resource-and-input-safety
-slice's error/logging-under-pressure family across the websocket hot loop,
-the relay send path, heartbeat, and the messaging helpers. Two hardenings
-landed with this review (ARM-C031, ARM-C032); everything else is verified
-bounded or charged.
+slice's error/logging-under-pressure family across the WebSocket hot loop,
+the relay send path, heartbeat, the messaging helpers, and the subscriber
+in `src/logging.rs`. Two hardenings landed with this review (ARM-C031,
+ARM-C032); everything else is verified bounded or charged.
 
 - **Rejected app-ID log forged log lines (fixed, ARM-C031).** The
   `Public app ID rejected` warning logged the raw client-supplied app ID
@@ -1769,10 +1770,20 @@ bounded or charged.
   "update every message" mode combined with a persistently failing
   database would warn per frame. This is accepted: the mode is explicit
   operator configuration, the default cadence bounds the warnings, and the
-  failure itself is loud by design.
+  failure itself is loud by design. The subscriber in `src/logging.rs` is
+  a cold path — filter selection, JSON/text formatting, and a rolling
+  file appender that fails open to stdout (pinned by
+  `file_appender_init_failure_falls_back_without_panicking`, guard
+  deliberately leaked for process lifetime) — and carries no payload
+  content, so the call-site review above covers the family.
 
 With this review, the error and logging paths under pressure family has
-recorded dispositions, and the resource-and-input-safety slice is complete.
+recorded dispositions. The resource-and-input-safety slice closes with one
+carry-over: its configuration-validation family is half dispositioned —
+reload consistency carries the 2026-10-01 allowlist/key reload review,
+while default coherence and validation breadth (malformed documents,
+env-override interactions) remain with the Config and reload coverage row
+below.
 
 ## Coverage ledger
 

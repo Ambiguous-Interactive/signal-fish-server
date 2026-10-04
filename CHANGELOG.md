@@ -123,8 +123,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recipient now follows the existing one-notice-per-sender-per-second
   advisory cadence and includes the suppressed count. Previously every
   undelivered frame warned for every recipient, so one sender with an
-  unsupported encoding could flood operator logs. Delivery reports,
-  advisories, and drop counters are unchanged.
+  unsupported encoding could flood operator logs. The fail-closed
+  missing-metadata error log gained the same encoding and reason fields the
+  moved warning carried. Delivery reports, advisories, and drop counters
+  are unchanged.
 
 - Metrics: a shutdown-drain flip that cancels a parked reconnect-baseline
   reservation is now counted in `websocket_deliveries_canceled` instead of
