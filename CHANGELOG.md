@@ -73,6 +73,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Security defaults: `security.max_connections_per_ip` now defaults to `64`
+  instead of `24` (C1 config default coherence). Every seat of a fully
+  occupied room registers from its source IP — players plus the
+  auto-derived spectator capacity of 2× the player ceiling — so the old
+  default equaled exactly one default roster (8 players + 16 spectators)
+  with zero slack: the first reconnect or extra tab from behind one NAT was
+  refused `IP_LIMIT_EXCEEDED`. 64 covers the documented 16-player
+  NAT/LAN use case (16 players + 32 spectators = 48) with reconnect
+  headroom; deployments that pin the knob explicitly are unchanged.
+
 - Security: MessagePack game data nested deeper than 128 container levels
   now refuses on the JSON conversion path and on the token-bound binary
   envelope (#647, C1 parser boundaries). The conversion budget is an
@@ -112,6 +122,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   log at debug instead of failing the build (#621).
 
 ### Fixed
+
+- Configuration: a config source that is present but invalid now always
+  fails startup instead of silently degrading in one of three ways (C1
+  config validation breadth, ARM-C038/ARM-C039/ARM-C040). A JSON source
+  whose root is not an object — a truncated write leaving `null`, or a hand
+  edit leaving an array or scalar — previously replaced the whole merged
+  document in a mid-precedence file, silently reverting every
+  lower-priority setting to compiled defaults while the process appeared
+  healthy; it is now a hard error naming the source, at any precedence
+  position. An unrecognized or non-string `logging.level` previously
+  reverted silently to the default level; it now fails like every other
+  invalid value (`warning`/`err` aliases and case tolerance unchanged). A
+  configured config file whose stat fails — a broken symlink or symlink
+  loop — was silently treated as absent; only a genuinely missing file is
+  now tolerated, and every other read failure names the path.
+
+- Configuration: a `SIGNAL_FISH__` environment override nested deeper than
+  16 `__`-separated levels now fails with a named error instead of
+  overflowing the stack and aborting the process (ARM-C041); the deepest
+  legitimate config path is 4 levels. Two case-variant overrides of the
+  same knob (for example `SIGNAL_FISH__PORT` and `SIGNAL_FISH__port`) now
+  fail naming both variables instead of resolving by unspecified
+  environment iteration order behind a misleading warning (ARM-C042);
+  canonical-vs-legacy alias pairs keep their documented canonical-wins
+  resolution.
 
 - Reconnection: a panic in the owned reconnect transaction's unwind
   supervisor no longer strands the reserved reconnect claim. The supervisor

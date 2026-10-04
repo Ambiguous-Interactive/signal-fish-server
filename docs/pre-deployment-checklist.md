@@ -29,7 +29,7 @@ cargo run -- --print-config
   meaningful `app_id` / `app_name`.
 - [ ] Browser origins locked down — `security.cors_origins` set to your HTTP and
   WebSocket origin(s), **not** `*`.
-- [ ] `security.max_connections_per_ip` set to a sane ceiling (default `24`).
+- [ ] `security.max_connections_per_ip` set to a sane ceiling (default `64`).
 - [ ] `security.max_connections` set to a sane server-wide ceiling (default
   `10000`) — per-IP caps alone are multiplied by distinct source IP count.
 

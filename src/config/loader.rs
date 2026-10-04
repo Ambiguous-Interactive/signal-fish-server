@@ -21,11 +21,20 @@ use std::path::Path;
 /// `SIGNAL_FISH__LOGGING__LEVEL=debug`.
 ///
 /// Absent sources are optional: with no config file anywhere, the compiled
-/// defaults apply. A source that is present but invalid — unparsable JSON, an
-/// unreadable file, or a value whose type does not match its config field
-/// after merging and environment overrides — is a hard error: silently
-/// substituting defaults would revert every operator setting (allowlists,
-/// caps, timeouts) while the process appears healthy.
+/// defaults apply. A source that is present but invalid is a hard error:
+/// silently substituting defaults would revert every operator setting
+/// (allowlists, caps, timeouts) while the process appears healthy. Invalid
+/// means any of:
+/// - unparsable JSON, or JSON whose root is not an object (a truncated write
+///   can leave `null`; a non-object source would otherwise replace the whole
+///   merged document and discard every lower-priority source),
+/// - an unreadable file — including a broken symlink or symlink loop, which
+///   `Path::exists` misreports as absent,
+/// - a value whose type does not match its config field after merging and
+///   environment overrides,
+/// - a `SIGNAL_FISH__` override nested deeper than
+///   [`MAX_ENV_OVERRIDE_DEPTH`], or two case-variant overrides of the same
+///   knob (iteration order over `std::env::vars()` is unspecified).
 ///
 /// **Note:** Validation errors from [`validate_config_security`] are logged to stderr but are
 /// *not* propagated — `load()` always returns a semantically well-formed
@@ -89,7 +98,7 @@ pub fn load() -> anyhow::Result<Config> {
     );
 
     // Environment overrides with prefix SIGNAL_FISH__ and nested separator __
-    apply_env_overrides(&mut merged);
+    apply_env_overrides(&mut merged)?;
 
     finalize_config(merged)
 }
@@ -258,24 +267,58 @@ fn parse_json_document(raw: &str, label: &str) -> anyhow::Result<Option<Value>> 
         return Ok(None);
     }
 
-    match serde_json::from_str(raw) {
-        Ok(mut value) => match normalize_legacy_app_access_config(&mut value, label) {
-            Ok(()) => Ok(Some(value)),
-            Err(error) => Err(anyhow::anyhow!("Invalid config from {label}: {error}")),
-        },
+    match serde_json::from_str::<Value>(raw) {
+        Ok(mut value) => {
+            // The merged root must stay an object: `merge_values` replaces the
+            // accumulated document with any non-object source, so a `null`
+            // (truncated write) or scalar/array (hand edit) in a non-final
+            // source would silently discard every lower-priority source and
+            // revert the effective config to compiled defaults while the
+            // process appears healthy. Reject the source regardless of its
+            // precedence position, with the same attribution as parse errors.
+            if !value.is_object() {
+                return Err(anyhow::anyhow!(
+                    "Failed to parse config from {label}: expected a JSON object, got {}",
+                    json_root_kind(&value)
+                ));
+            }
+            match normalize_legacy_app_access_config(&mut value, label) {
+                Ok(()) => Ok(Some(value)),
+                Err(error) => Err(anyhow::anyhow!("Invalid config from {label}: {error}")),
+            }
+        }
         Err(err) => Err(anyhow::anyhow!(
             "Failed to parse config from {label}: {err}"
         )),
     }
 }
 
+/// Human-readable name for a parsed JSON root that failed the object-root
+/// requirement, matching serde's own type naming in deserialize errors.
+fn json_root_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "sequence",
+        Value::Object(_) => "map",
+    }
+}
+
 fn read_file_source(path: &Path) -> anyhow::Result<Option<Value>> {
-    if path.as_os_str().is_empty() || !path.exists() {
+    if path.as_os_str().is_empty() {
         return Ok(None);
     }
 
     match fs::read_to_string(path) {
         Ok(contents) => parse_json_document(&contents, &format!("file {}", path.display())),
+        // Absent is the one tolerated outcome: absent sources are optional.
+        // Every other read/stat failure — permission errors (handled here), a
+        // broken symlink or symlink loop (`Path::exists` reports `false` for
+        // those, so the previous `exists()` gate silently skipped them) — is
+        // present-but-unreadable and fails closed, naming the path.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(anyhow::anyhow!(
             "Failed to read config from {}: {err}",
             path.display()
@@ -310,20 +353,23 @@ fn merge_values(target: &mut Value, source: Value) {
     }
 }
 
-fn apply_env_overrides(root: &mut Value) {
-    apply_env_overrides_from_iter(root, std::env::vars());
+fn apply_env_overrides(root: &mut Value) -> anyhow::Result<()> {
+    apply_env_overrides_from_iter(root, std::env::vars())
 }
 
-fn apply_env_overrides_from_iter<I, K, V>(root: &mut Value, vars: I)
+/// Environment overrides are fail-closed: an ambiguous or unrepresentable
+/// override is a hard error naming the variable, never a silent skip.
+fn apply_env_overrides_from_iter<I, K, V>(root: &mut Value, vars: I) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = (K, V)>,
     K: AsRef<str>,
     V: AsRef<str>,
 {
-    let mut overrides: BTreeMap<Vec<String>, (bool, Value)> = BTreeMap::new();
+    let mut overrides: BTreeMap<Vec<String>, (bool, String, Value)> = BTreeMap::new();
 
     for (key, raw_value) in vars {
-        let Some(stripped) = key.as_ref().strip_prefix("SIGNAL_FISH__") else {
+        let key = key.as_ref();
+        let Some(stripped) = key.strip_prefix("SIGNAL_FISH__") else {
             continue;
         };
 
@@ -337,33 +383,71 @@ where
             continue;
         }
 
+        // `set_nested_value` and the resulting `Value`'s recursive drop both
+        // recurse once per segment, and `std::env` allows arguments far deeper
+        // than any legitimate config path (the deepest canonical path is 4
+        // segments). Cap the depth so a hostile or corrupted variable aborts
+        // with a named error instead of overflowing the stack (the same
+        // unbounded-recursion class as the wire-decoder depth walls).
+        if segments.len() > MAX_ENV_OVERRIDE_DEPTH {
+            return Err(anyhow::anyhow!(
+                "Environment override {key} nests {} levels deep; the maximum supported \
+                 depth is {MAX_ENV_OVERRIDE_DEPTH}",
+                segments.len()
+            ));
+        }
+
         let legacy_name = normalize_legacy_app_access_env_path(&mut segments);
         let mut value = parse_env_value(&segments, raw_value.as_ref());
         if segments.as_slice() == ["security", "allowed_apps"] {
-            discard_legacy_app_secrets(&mut value, key.as_ref());
+            discard_legacy_app_secrets(&mut value, key);
         }
 
         match overrides.entry(segments) {
             std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert((legacy_name, value));
+                entry.insert((legacy_name, key.to_owned(), value));
             }
             std::collections::btree_map::Entry::Occupied(mut entry) => {
-                let (existing_legacy, _) = entry.get();
-                eprintln!(
-                    "Conflicting canonical and legacy app-access environment overrides; \
-                     the canonical name takes precedence"
-                );
-                if *existing_legacy && !legacy_name {
-                    entry.insert((false, value));
+                let (existing_legacy, existing_var, _) = entry.get();
+                let path = entry.key().join(".");
+                if *existing_legacy != legacy_name {
+                    // Canonical-vs-legacy alias pair: both names address the
+                    // same knob, and the canonical name wins in either order.
+                    eprintln!(
+                        "Conflicting canonical and legacy environment overrides for \
+                         '{path}' ({existing_var} vs {key}); the canonical name takes \
+                         precedence"
+                    );
+                    if *existing_legacy {
+                        entry.insert((false, key.to_owned(), value));
+                    }
+                } else {
+                    // Two case variants of the same name address one knob with
+                    // two values. `std::env::vars()` order is unspecified, so
+                    // first-wins would make the effective config depend on the
+                    // launcher's iteration order; refuse instead.
+                    return Err(anyhow::anyhow!(
+                        "Conflicting duplicate environment overrides for '{path}': \
+                         {existing_var} and {key} both set this knob"
+                    ));
                 }
             }
         }
     }
 
-    for (segments, (_, value)) in overrides {
+    for (segments, (_, _, value)) in overrides {
         set_nested_value(root, &segments, value);
     }
+
+    Ok(())
 }
+
+/// Maximum `__`-separated path depth accepted for a `SIGNAL_FISH__` override.
+/// The deepest canonical config path is 4 segments
+/// (`security.transport.tls.certificate_path`); the cap keeps the deliberate
+/// recursion in [`set_nested_value`] — and the recursive `Drop` of the value
+/// it builds — bounded at a small multiple of that.
+pub(crate) const MAX_ENV_OVERRIDE_DEPTH: usize = 16;
 
 fn normalize_legacy_app_access_config(value: &mut Value, label: &str) -> Result<(), String> {
     let Some(security) = value.get_mut("security").and_then(Value::as_object_mut) else {
@@ -525,7 +609,8 @@ mod tests {
     fn config_with_env(vars: &[(&str, &str)]) -> Config {
         let mut merged =
             serde_json::to_value(Config::default()).expect("default config serializes");
-        apply_env_overrides_from_iter(&mut merged, vars.iter().copied());
+        apply_env_overrides_from_iter(&mut merged, vars.iter().copied())
+            .expect("env overrides apply cleanly");
         deserialize_merged_config(merged).expect("env overrides deserialize as Config")
     }
 
@@ -1085,7 +1170,8 @@ mod tests {
             let defaults =
                 serde_json::to_value(Config::default()).expect("default config serializes");
             let mut merged = defaults;
-            apply_env_overrides_from_iter(&mut merged, [(key, raw_value)]);
+            apply_env_overrides_from_iter(&mut merged, [(key, raw_value)])
+                .expect("override applies cleanly");
 
             let err = deserialize_merged_config(merged)
                 .expect_err("a type-mismatched override must be a hard error")
@@ -1177,7 +1263,8 @@ mod tests {
         apply_env_overrides_from_iter(
             &mut merged,
             [("SIGNAL_FISH__SECURITY__TRANSPORT__TLS__ENABLE", "true")],
-        );
+        )
+        .expect("override applies cleanly");
 
         let err = deserialize_merged_config(merged)
             .expect_err("an unknown security env override must be a hard error")
@@ -1251,7 +1338,8 @@ mod tests {
             .expect("parsed file source is present");
         let mut merged = defaults;
         merge_values(&mut merged, file_source);
-        apply_env_overrides_from_iter(&mut merged, [("SIGNAL_FISH__PORT", "5353")]);
+        apply_env_overrides_from_iter(&mut merged, [("SIGNAL_FISH__PORT", "5353")])
+            .expect("override applies cleanly");
 
         let config = deserialize_merged_config(merged).expect("merged config deserializes");
         assert_eq!(config.port, 5353, "env override wins");
@@ -1377,7 +1465,8 @@ mod tests {
                 "SIGNAL_FISH__SECURITY__CONNECT_TOKEN",
                 format!(r#"{{"public_key":"{key}"}}"#),
             )],
-        );
+        )
+        .expect("connect-token env override applies cleanly");
         let cfg = finalize_config(merged).expect("env override finalizes");
         let connect_token = cfg
             .security
@@ -1385,5 +1474,127 @@ mod tests {
             .expect("env override creates the block");
         assert_eq!(connect_token.public_key, key);
         assert_eq!(connect_token.public_key_path, None);
+    }
+
+    /// A JSON source that parses but is not an object (a truncated write can
+    /// leave `null`; a hand edit can leave an array or scalar) is present but
+    /// invalid: the loader contract (module doc) requires a hard error naming
+    /// the source, at any precedence position. Letting it through would let a
+    /// later object source silently rebuild a minimal config over it,
+    /// reverting every lower-priority knob while the process appears healthy.
+    #[test]
+    fn non_object_json_source_is_a_hard_error_naming_the_source() {
+        for (root, kind) in [
+            ("null", "null"),
+            ("[]", "sequence"),
+            ("42", "integer"),
+            ("\"corrupted\"", "string"),
+            ("true", "boolean"),
+        ] {
+            let error = parse_json_document(root, "probe source")
+                .err()
+                .unwrap_or_else(|| panic!("non-object root {kind} must be a hard error"));
+            assert!(
+                error.to_string().contains("probe source"),
+                "error must name the source for root {kind}: {error}"
+            );
+        }
+    }
+
+    /// The file-source counterpart of the pinned env-override type check: a
+    /// wrong-typed value in a JSON source must fail `finalize_config` naming
+    /// the knob, never fall back to the default.
+    #[test]
+    fn wrong_typed_file_value_is_a_hard_error_naming_the_knob() {
+        let defaults = serde_json::to_value(Config::default()).expect("defaults serialize");
+        let source = parse_json_document(r#"{"port":"8080"}"#, "file probe.json")
+            .expect("source parses")
+            .expect("source present");
+        let mut merged = defaults;
+        merge_values(&mut merged, source);
+        let error = finalize_config(merged).expect_err("wrong-typed file value is a hard error");
+        assert!(
+            error.to_string().contains("port"),
+            "error must name the knob: {error}"
+        );
+    }
+
+    /// A deeply nested config source is a bounded parse error (serde_json's
+    /// recursion limit), never a stack overflow — the same wall the wire
+    /// JSON path is pinned against in `protocol_fuzz_hardening`.
+    #[test]
+    fn deeply_nested_config_source_is_a_parse_error_not_a_crash() {
+        let deep = format!("{}1{}", "[".repeat(10_000), "]".repeat(10_000));
+        let error = parse_json_document(&deep, "deep source")
+            .expect_err("over-limit nesting is a hard parse error");
+        let _ = error; // the assertion is the non-crash plus the error above
+    }
+
+    /// A configured config file whose stat fails (broken symlink, symlink
+    /// loop, unsearchable parent) is present-but-unreadable: hard error
+    /// naming the path, not a silent fall-through to lower-priority sources.
+    #[cfg(unix)]
+    #[test]
+    fn config_file_that_fails_stat_is_a_hard_error_naming_the_path() {
+        let dir = tempfile::Builder::new()
+            .prefix("sf-config-stat-test")
+            .tempdir()
+            .expect("temporary directory is created");
+        let loop_path = dir.path().join("loop");
+        std::os::unix::fs::symlink(&loop_path, &loop_path)
+            .expect("self-referential symlink is created");
+        let error =
+            read_file_source(&loop_path).expect_err("stat-failing config file is a hard error");
+        assert!(
+            error
+                .to_string()
+                .contains(loop_path.to_string_lossy().as_ref()),
+            "error must name the path: {error}"
+        );
+    }
+
+    /// An override key nested beyond [`MAX_ENV_OVERRIDE_DEPTH`] is a named
+    /// hard error. Deeper keys are far outside every legitimate config path,
+    /// and the unbounded recursion previously overflowed the stack (SIGABRT,
+    /// reproduced live at 40k segments) instead of failing with a message.
+    #[test]
+    fn env_override_deeper_than_the_segment_cap_is_a_hard_error() {
+        let deep_key = format!(
+            "SIGNAL_FISH__{}",
+            "A__".repeat(MAX_ENV_OVERRIDE_DEPTH) + "X"
+        );
+        let mut merged =
+            serde_json::to_value(Config::default()).expect("default config serializes");
+        let error = apply_env_overrides_from_iter(&mut merged, [(deep_key, "1")])
+            .expect_err("over-deep override is a hard error");
+        assert!(
+            error.to_string().contains("maximum supported depth"),
+            "error must name the depth cap: {error}"
+        );
+    }
+
+    /// Two case variants of one override name address the same knob with two
+    /// values; `std::env::vars()` order is unspecified, so first-wins would
+    /// make the effective config depend on launcher iteration order. The
+    /// loader refuses instead, naming both variables. (True canonical-vs-
+    /// legacy alias pairs keep their pinned canonical-wins resolution.)
+    #[test]
+    fn duplicate_case_variant_env_overrides_are_a_hard_error_naming_both_vars() {
+        let mut merged =
+            serde_json::to_value(Config::default()).expect("default config serializes");
+        let error = apply_env_overrides_from_iter(
+            &mut merged,
+            [("SIGNAL_FISH__PORT", "5101"), ("SIGNAL_FISH__port", "5102")],
+        )
+        .expect_err("case-variant duplicate overrides are a hard error");
+        let message = error.to_string();
+        assert!(
+            message.contains("SIGNAL_FISH__PORT") && message.contains("SIGNAL_FISH__port"),
+            "error must name both variables: {message}"
+        );
+        assert!(
+            message.contains("port"),
+            "error must name the knob path: {message}"
+        );
     }
 }

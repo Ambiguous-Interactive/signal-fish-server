@@ -347,13 +347,17 @@ pub const fn default_max_connection_info_bytes() -> usize {
 
 /// Default cap on concurrent connections from one IP.
 ///
-/// 24, not 10: a 16-player session behind one NAT (LAN party, office, venue) is
-/// a first-class use case, and 10 silently refused the 11th same-IP client
-/// (GAP-3). 24 covers 16 players plus spectators and reconnect churn with slack.
-/// (This is the connection limiter only; the number of players in a single room
-/// is bounded separately by that room's `max_players`, default 8.)
+/// 64, not 24: a fully seated room roster registers every seat from its own
+/// IP — players plus the auto-derived spectator capacity of 2× the player
+/// ceiling — so the previous default of 24 equaled exactly one default roster
+/// (8 players + 16 spectators) with zero slack, refusing the first reconnect
+/// churn or extra tab behind one NAT. 64 covers the documented 16-player
+/// LAN-party/office NAT use case (16 players + 32 spectators = 48) with
+/// reconnect headroom. (This is the connection limiter only; the number of
+/// players in a single room is bounded separately by that room's
+/// `max_players`, default 8, and the server-wide ceiling stays 10,000.)
 pub const fn default_max_connections_per_ip() -> usize {
-    24
+    64
 }
 
 /// Default server-wide concurrent-connection ceiling (10,000).

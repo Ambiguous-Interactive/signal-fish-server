@@ -168,7 +168,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__SECURITY__MAX_SIGNAL_BYTES` | `security.max_signal_bytes` | `16384` | Max serialized size in bytes of a v3 `Signal` payload (must be > 0 and ≤ `max_message_size`) |
 | `SIGNAL_FISH__SECURITY__MAX_CONNECTION_INFO_BYTES` | `security.max_connection_info_bytes` | `8192` | Max serialized size in bytes of one `ProvideConnectionInfo` peer-metadata entry (must be > 0, ≤ `max_message_size`, and its product with `max_players_limit` must not exceed `max_outbound_message_size`) |
 | `SIGNAL_FISH__SECURITY__MAX_GAME_DATA_BYTES` | `security.max_game_data_bytes` | (absent) | Optional per-encoding game-data payload ceilings, given as a JSON object keyed by encoding (`json`, `message_pack`, `rkyv`, `protobuf`), e.g. `{"rkyv":32768}`. Each cap must be > 0 and ≤ `max_message_size`; unlisted encodings keep the `max_message_size` cap. Absent keeps the default behavior |
-| `SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP` | `security.max_connections_per_ip` | `24` | Max concurrent connections from one IP (covers a 16-player NAT/LAN session plus spectators and reconnect churn; must be > 0 — a zero cap rejects every registration; must not exceed `max_connections`) |
+| `SIGNAL_FISH__SECURITY__MAX_CONNECTIONS_PER_IP` | `security.max_connections_per_ip` | `64` | Max concurrent connections from one IP. A fully seated room registers every seat (players plus the auto-derived 2× spectator capacity) from its source IP, so this must cover a full NAT/LAN roster with reconnect churn headroom: the documented 16-player use case needs 48 seats. Must be > 0 — a zero cap rejects every registration; must not exceed `max_connections` |
 | `SIGNAL_FISH__SECURITY__MAX_CONNECTIONS` | `security.max_connections` | `10000` | Max concurrent connections server-wide, regardless of how many distinct IPs are in use (must be > 0 — a zero cap rejects every registration) |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TLS__ENABLED` | `security.transport.tls.enabled` | `false` | Enable built-in TLS listener |
 | `SIGNAL_FISH__SECURITY__TRANSPORT__TLS__CERTIFICATE_PATH` | `security.transport.tls.certificate_path` | `null` | Path to PEM certificate chain |
@@ -239,7 +239,8 @@ and the authenticated WebSocket relay floor remains available independently.
   },
   "security": {
     "cors_origins": "*",
-    "enforce_app_id_allowlist": false
+    "enforce_app_id_allowlist": false,
+    "require_metrics_auth": false
   }
 }
 
@@ -271,7 +272,7 @@ and the authenticated WebSocket relay floor remains available independently.
   "security": {
     "cors_origins": "https://yourgame.com",
     "enforce_app_id_allowlist": true,
-    "max_connections_per_ip": 24,
+    "max_connections_per_ip": 64,
     "max_connections": 10000
   }
 }

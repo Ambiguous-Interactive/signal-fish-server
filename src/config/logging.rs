@@ -19,7 +19,9 @@ pub struct LoggingConfig {
     /// Rotation policy: "daily" (default), "hourly", or "never"
     #[serde(default = "default_rotation")]
     pub rotation: String,
-    /// Optional tracing level; read from JSON as a string and converted to enum
+    /// Optional tracing level; parsed by `LogLevel`'s strict deserializer
+    /// (case/whitespace-tolerant, `warning`/`err` aliases); an unrecognized
+    /// or non-string value is a load-time error
     #[serde(default)]
     pub level: Option<LogLevel>,
     /// Enable rolling file logging in addition to stdout JSON logs
@@ -44,8 +46,13 @@ impl<'de> Deserialize<'de> for LoggingConfig {
             filename: String,
             #[serde(default = "default_rotation")]
             rotation: String,
+            /// Parsed by `LogLevel`'s own strict deserializer (case- and
+            /// whitespace-tolerant, with the `warning`/`err` aliases). An
+            /// unrecognized string or a non-string value is a hard error —
+            /// the same present-but-invalid treatment every other knob gets
+            /// from the loader — never a silent revert to the default level.
             #[serde(default)]
-            level: Option<serde_json::Value>,
+            level: Option<LogLevel>,
             #[serde(default = "default_enable_file_logging")]
             enable_file_logging: bool,
             #[serde(default = "default_log_format")]
@@ -54,46 +61,11 @@ impl<'de> Deserialize<'de> for LoggingConfig {
 
         let helper = LoggingConfigHelper::deserialize(deserializer)?;
 
-        // Process level field to handle different formats
-        let level = helper.level.and_then(|value| {
-            if let serde_json::Value::String(level_str) = value {
-                match level_str.trim().to_lowercase().as_str() {
-                    "trace" => Some(LogLevel::Trace),
-                    "debug" => Some(LogLevel::Debug),
-                    "info" => Some(LogLevel::Info),
-                    "warn" | "warning" => Some(LogLevel::Warn),
-                    "error" | "err" => Some(LogLevel::Error),
-                    _ => {
-                        // Invalid level string - use default (None)
-                        eprintln!("Invalid log level '{level_str}', using default");
-                        None
-                    }
-                }
-            } else if value.is_array() {
-                // Handle array case - take first string element if available
-                value
-                    .as_array()
-                    .and_then(|arr| arr.first())
-                    .and_then(|first| first.as_str())
-                    .and_then(|s| match s.trim().to_lowercase().as_str() {
-                        "trace" => Some(LogLevel::Trace),
-                        "debug" => Some(LogLevel::Debug),
-                        "info" => Some(LogLevel::Info),
-                        "warn" | "warning" => Some(LogLevel::Warn),
-                        "error" | "err" => Some(LogLevel::Error),
-                        _ => None,
-                    })
-            } else {
-                // Unknown format - use default (None)
-                None
-            }
-        });
-
         Ok(Self {
             dir: helper.dir,
             filename: helper.filename,
             rotation: helper.rotation,
-            level,
+            level: helper.level,
             enable_file_logging: helper.enable_file_logging,
             format: helper.format,
         })
@@ -202,5 +174,65 @@ impl<'de> Deserialize<'de> for LogFormat {
 impl fmt::Display for LogFormat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn logging_from_json(json: &str) -> Result<LoggingConfig, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+
+    /// An unrecognized level string is a hard error naming the knob value —
+    /// the same treatment `logging.rotation` gets — never a silent revert to
+    /// the default level (the loader's present-but-invalid contract).
+    #[test]
+    fn invalid_log_level_string_is_a_hard_error() {
+        let error = logging_from_json(r#"{"level":"warng"}"#)
+            .expect_err("unknown level string is a hard error");
+        assert!(
+            error.to_string().contains("invalid log level"),
+            "error must name the invalid level: {error}"
+        );
+    }
+
+    /// A non-string level value is a type error, not a silent `None` with no
+    /// diagnostic.
+    #[test]
+    fn non_string_log_level_is_a_type_error() {
+        logging_from_json(r#"{"level":7}"#).expect_err("numeric level is a type error");
+        logging_from_json(r#"{"level":true}"#).expect_err("boolean level is a type error");
+    }
+
+    /// Case/whitespace tolerance and the documented aliases survive the
+    /// strict parse; absent and explicit `null` both stay `None`.
+    #[test]
+    fn log_level_aliases_and_case_are_still_accepted() {
+        assert_eq!(
+            logging_from_json(r#"{"level":" WARNING "}"#)
+                .expect("trimmed alias parses")
+                .level,
+            Some(LogLevel::Warn)
+        );
+        assert_eq!(
+            logging_from_json(r#"{"level":"err"}"#)
+                .expect("err alias parses")
+                .level,
+            Some(LogLevel::Error)
+        );
+        assert_eq!(
+            logging_from_json(r#"{}"#)
+                .expect("absent level parses")
+                .level,
+            None
+        );
+        assert_eq!(
+            logging_from_json(r#"{"level":null}"#)
+                .expect("explicit null parses")
+                .level,
+            None
+        );
     }
 }
