@@ -188,7 +188,7 @@ async fn server_termination_invalidates_the_run_and_preserves_gap_free_prefixes(
     assert!(!outcome.summary.valid);
     // The declared termination is the root fault. Its consequences are
     // disconnect tails (permitted), never silent holes or spurious extra
-    // faults — those would mean the generator mis-accounted the kill.
+    // faults — those would mean the generator accounted the kill wrongly.
     assert!(outcome
         .summary
         .reasons
