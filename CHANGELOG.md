@@ -136,10 +136,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   position. An unrecognized or non-string `logging.level` previously
   reverted silently to the default level; it now fails like every other
   invalid value (`warning`/`err` aliases and case tolerance unchanged). A
-  configured config file whose read fails — a dangling symlink, a symlink
-  loop, or a permission error, all previously misreported as absent and
-  silently skipped — now names the path and fails; only a genuinely
-  missing file stays an optional, tolerated source.
+  configured config file that cannot be read — a dangling symlink or a
+  symlink loop, both previously misreported as absent and silently
+  skipped — now names the path and fails; only a genuinely missing file
+  stays an optional, tolerated source.
 
 - Configuration: a `SIGNAL_FISH__` environment override nested deeper than
   16 `__`-separated levels now fails with a named error instead of

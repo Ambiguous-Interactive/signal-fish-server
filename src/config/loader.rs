@@ -28,8 +28,9 @@ use std::path::Path;
 /// - unparsable JSON, or JSON whose root is not an object (a truncated write
 ///   can leave `null`; a non-object source would otherwise replace the whole
 ///   merged document and discard every lower-priority source),
-/// - an unreadable file — including a broken symlink or symlink loop, which
-///   `Path::exists` misreports as absent,
+/// - an unreadable file — a dangling symlink or symlink loop is
+///   present-but-unreadable even though a naive `Path::exists` check
+///   misreports it as absent,
 /// - a value whose type does not match its config field after merging and
 ///   environment overrides,
 /// - a `SIGNAL_FISH__` override nested deeper than

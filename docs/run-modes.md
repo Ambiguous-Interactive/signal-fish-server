@@ -64,9 +64,12 @@ check: `curl http://localhost:3536/v2/health`.
 ### Prod relay v2 + app allowlist
 
 Turn on public app-ID allowlisting, register your app labels, and lock down CORS. Validate
-first, then run:
+first, then run (the compiled defaults enable metrics authentication, so a
+real deployment sets a token):
 
 ```bash
+export SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN="$(openssl rand -hex 32)"
+export SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=true
 cargo run -- --validate-config && cargo run
 ```
 
@@ -81,10 +84,12 @@ v3 rooms are mesh-first by default: the server emits a v3 `SessionPlan` and
 peers connect over WebRTC whenever every room member negotiated a
 peer-to-peer-capable rung (any member that cannot — v2 or relay-only — floors
 the room to relay). `turn.stun_urls` already defaults to a public STUN server,
-so no extra configuration is needed:
+so no extra configuration is needed (the env override relaxes the
+fail-closed metrics gate for a local trial — a deployment instead sets a
+metrics token, as the Metrics row shows):
 
 ```bash
-cargo run
+SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false cargo run
 ```
 
 Pin `session.default_topology="host"` for host-star-only sessions, or
@@ -131,6 +136,7 @@ Built-in TLS terminates HTTPS in the server:
 SIGNAL_FISH__SECURITY__TRANSPORT__TLS__ENABLED=true \
   SIGNAL_FISH__SECURITY__TRANSPORT__TLS__CERTIFICATE_PATH=/etc/ssl/signal-fish/fullchain.pem \
   SIGNAL_FISH__SECURITY__TRANSPORT__TLS__PRIVATE_KEY_PATH=/etc/ssl/signal-fish/privkey.pem \
+  SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false \
   cargo run
 ```
 
@@ -175,6 +181,7 @@ both are metadata rather than coordination:
 ```bash
 SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX=USE \
   SIGNAL_FISH__SERVER__REGION_ID=us-east \
+  SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false \
   cargo run
 ```
 
