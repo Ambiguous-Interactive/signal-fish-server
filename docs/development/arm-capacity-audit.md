@@ -1905,7 +1905,7 @@ cases named below, and the deployment gaps are filed instead of open.
 | Source and revision | `src/main.rs` TLS serve/shutdown wiring; plain-only contract test `tests/close_code_semantics_e2e.rs`; reviewed at `a0af63b1`. |
 | Invariant | The drain choreography (GoingAway advisory, coded 4000, bounded exit) holds identically over TLS. |
 | Confidence and reproduction | Direct proof of absence: the mTLS e2e spawns the real TLS binary but never exercises shutdown; no TLS drain test existed. No defect claimed. |
-| Disposition | `tests/tls_deployment_boundaries_e2e.rs::shutdown_drain_over_tls_advises_then_closes_4000_and_exits_bounded` spawns the real TLS binary, seats a v3 client over wss, delivers SIGTERM, and pins the advisory (deadline anchored at the drain, `retry_after` mirroring the configured grace), the `4000 server_shutdown` close, and a clean bounded process exit. Red-proven: with the configured 1 s grace replaced by the 30 s default, the deadline/retry-after assertions fail loudly. |
+| Disposition | `tests/tls_deployment_boundaries_e2e.rs::shutdown_drain_over_tls_advises_then_closes_4000_and_exits_bounded` spawns the real TLS binary, seats a v3 client over wss, delivers SIGTERM, and pins the advisory (deadline anchored at the drain, `retry_after` mirroring the configured grace), the `4000 server_shutdown` close, and a clean bounded process exit. Unix-only (the drain trigger is a signal); Windows keeps the plain-socket pin. Red-proven: with the configured 1 s grace replaced by the 30 s default, the deadline/retry-after assertions fail loudly. |
 
 ### ARM-C036 — Failure after partial startup has no regression coverage
 
@@ -1916,7 +1916,7 @@ cases named below, and the deployment gaps are filed instead of open.
 | Source and revision | `src/main.rs` startup order and `src/websocket/routes.rs::bind_tcp_listener`, reviewed at `a0af63b1`. |
 | Invariant | A fallible startup step after background-task spawn (bind conflict, invalid TLS material) must abort with no listener and no "Server started" announcement. Holds by construction: every `?` precedes the bind and logs follow it. |
 | Confidence and reproduction | Direct proof of absence: no EADDRINUSE / invalid-PEM / log-ordering test existed. |
-| Disposition | Two regressions in `tests/tls_deployment_boundaries_e2e.rs` pin the invariant: `port_bind_conflict_exits_nonzero_without_start_announcement` (an occupied port must exit non-zero with no start announcement) and `invalid_tls_pem_exits_nonzero_without_announcement_or_listener` (invalid PEM must exit non-zero, attribute the abort to the TLS material, announce nothing, and leave no listener reachable on the port). |
+| Disposition | Two regressions in `tests/tls_deployment_boundaries_e2e.rs` pin the invariant (unix-only; Windows keeps the in-process order verification): `port_bind_conflict_exits_nonzero_without_start_announcement` (an occupied port must exit non-zero, attribute the abort to the address-in-use error, and announce no start) and `invalid_tls_pem_exits_nonzero_without_announcement_or_listener` (invalid PEM must exit non-zero, attribute the abort to the TLS material, announce nothing, and leave no listener reachable on the port). |
 
 ## Coverage ledger
 

@@ -9,8 +9,13 @@
 //!   "Server started" announcement, and no listener. The invariant holds by
 //!   construction (every fallible step precedes the bind and the start logs
 //!   follow it); these regressions pin it.
+//!
+//! Unix-only: the drain trigger is SIGTERM, and the bind-conflict outcome
+//! rests on Unix bind semantics (the server listener sets `SO_REUSEADDR`,
+//! which on Windows can bind over a blocker without `SO_EXCLUSIVEADDRUSE`).
+//! Windows CI keeps the plain-socket drain and startup pins.
 
-#![cfg(feature = "tls")]
+#![cfg(all(feature = "tls", unix))]
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -389,7 +394,6 @@ async fn join_room(socket: &mut TestSocket) {
 /// client receives the `GoingAway` advisory, then the coded
 /// `4000 server_shutdown` close, and the process exits cleanly within the
 /// bounded drain budget.
-#[cfg(unix)]
 #[tokio::test]
 async fn shutdown_drain_over_tls_advises_then_closes_4000_and_exits_bounded() {
     let mut server = spawn_ready_tls_server(|| {
@@ -461,6 +465,10 @@ async fn port_bind_conflict_exits_nonzero_without_start_announcement() {
         "a bind conflict must abort the process with a non-zero exit"
     );
     let combined = format!("{}{}", server.stdout(), server.stderr());
+    assert!(
+        combined.contains("Address already in use"),
+        "the abort must be attributed to the occupied port:\n{combined}"
+    );
     assert!(
         !combined.contains("Server started"),
         "a server that failed to bind must not announce a successful start:\n{combined}"
