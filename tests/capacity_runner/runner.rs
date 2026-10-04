@@ -232,10 +232,11 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         .unwrap_or(0);
     let hook_extra_us = config.pause_sends.map_or(0, |pause| micros(pause.duration))
         + config.stall_senders.map_or(0, micros);
-    // A sender may legitimately emit up to the lag bound late, so
-    // quiescence must never expire before a bound-late sender can finish.
+    // Quiescence must cover both a bound-late last send (up to the
+    // generator-lag bound past its intended time) AND the quiet delivery
+    // drain after that send — never one at the expense of the other.
     let quiescence_us =
-        max_intended_us + micros(config.drain_grace).max(micros(config.generator_lag_bound));
+        max_intended_us + micros(config.generator_lag_bound) + micros(config.drain_grace);
     let quiescence = epoch + Duration::from_micros(quiescence_us);
     // Belt over the schedule plus hooks: senders self-terminate well inside
     // this; a lapse means the generator itself wedged.
