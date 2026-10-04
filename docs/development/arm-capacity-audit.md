@@ -364,6 +364,28 @@ No new finding is confirmed by this initial inventory.
 | Confidence and reproduction | `scripts/dev-loop.sh over_deep_message_pack_is_refused_before_decoder_recursion` runs the production decode on a 256 KiB stack: before the guard it aborted (`fatal runtime error: stack overflow`, SIGABRT), with the guard it returns the refusal (constant stack). On production 2 MB tokio worker stacks, guardless rmp-serde 1.3.1 stops at its internal 1024-level limit with a clean decoder error, so the abort class was latent, not live; the probe pins the guard against regressions on every platform. |
 | Disposition | An iterative depth scanner (`msgpack_depth_within`, `MSGPACK_MAX_NESTING_DEPTH = 128`) walks the structure with an explicit stack before any recursive decode and refuses deeper trees as an undeliverable conversion, reusing the existing exact report and advisory accounting. The same scan guards the token-bound binary envelope (`parse_binary_message`). Malformed input stays a decoder error; the scanner only answers depth. The walk is allocation-free: its fixed-size sibling stack's capacity is the enforced limit itself, pinned by the #558 mixed-source allocation ceiling in `relay_serialization_allocations` (the first scanner draft cost one `Vec` allocation per relay and failed that ceiling on the per-PR lane). Differential review: a spec-faithful reference parser agreed with the scanner on 200k random well-formed payloads at limits {1, 2, 3, 4, 8, 128}, exhaustive 1- and 2-byte marker spaces, and all truncations; 100k mutation fuzz found no scanner-refused-but-decoder-accepted case. Pins: `depth_scanner_matches_the_limit_boundary`, `depth_scanner_counts_map_entries_as_two_slots`, `message_pack_depth_limit_is_exact`, `depth_scanner_accepts_shallow_wires_and_skips_payload_bytes`, `depth_scanner_is_conservative_on_malformed_input`. |
 
+### ARM-C031 — The rejected app-ID warning echoed the raw client-supplied ID
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed, low (log forgery; once per rejected connection) |
+| Player impact | None on the wire: the rejection, error code, and close are unchanged. Operator impact: a client could forge or distort operator-facing log lines precisely when its app ID was rejected — the `Public app ID rejected` warning printed the raw ID with a Display field in the arm where the log-safety gate had just refused it for control characters (newlines, ANSI escapes) or length. |
+| Source and revision | `src/websocket/connection.rs` authentication error arm, reviewed at `dd37153b`. The gate (`app_id_is_log_safe`) rejects unsafe IDs at resolve time; the `Err` arm then logged `%app_id` unescaped. |
+| Invariant | A field the log-safety gate has not vetted must never reach a log line through a Display (`%`) field; client-chosen text in anomalous-path warnings is Debug-escaped. |
+| Confidence and reproduction | Direct code reading: the `Err` arm is reached by `AuthError::InvalidAppId`, the gate-rejection variant. The sibling anomalous-path warnings (`message_router.rs`, `room_service.rs` spans) already document and apply the Debug-escape rule for exactly this hazard. |
+| Disposition | The field is now `?app_id` (Debug-escaped) with the rule restated at the site. Sweep: every remaining `%app_id` log site is gate-vetted (inside `Ok(info)` arms) or a typed UUID; the wire-level rejection contract stays pinned by `test_unloggable_app_id_fails_authentication_with_invalid_app_id`. |
+
+### ARM-C032 — The undeliverable-relay warning fired per frame per recipient
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed, low (log flood; bounded harm, no delivery impact) |
+| Player impact | None on delivery: reports, advisories, and drop counters are unchanged. Operator impact: one sender relaying an encoding a recipient cannot convert (e.g. rkyv into a JSON-only room) produced one `tracing::warn!` per frame per recipient with no throttle, so a single mismatched sender into a large room could flood the log sink (CPU/disk pressure) while the in-band advisory beside it was already limited to one per sender per second. |
+| Source and revision | `src/websocket/sending.rs::notify_on_undeliverable`, reviewed at `dd37153b`. |
+| Invariant | A per-event log on a hot path must share the rate limit of the response it describes; per-event accounting belongs to counters, not to unbounded log emission. |
+| Confidence and reproduction | Direct code reading against the advisory limiter (`unsupported_notice`, one notice per sender per second with a suppressed count): every undeliverable conversion passed the unthrottled warn before any cadence check. |
+| Disposition | The warning now rides the advisory cadence and carries the suppressed count; the fail-closed missing-metadata error log is unchanged. The per-event totals stay observable through the delivery ledgers and drop metrics pinned in the mixed-encoding and volatile-loss reviews. |
+
 These findings cover room-code rotation, player names, transport status, and spectator,
 reconnect, room-creation drain, and terminal routing seams. The rest of the C1 room and storage
 rows remain unreviewed.
@@ -1615,6 +1637,143 @@ The resource-and-input-safety slice continues with inactive records, pending
 detach/claim retention, task ownership, rate-limit rejection accounting, and
 error and logging paths under pressure.
 
+### C1 inactive records, pending detach/claim retention, and task ownership review (2026-10-04)
+
+At `dd37153b` (main after #737), reviewed the resource-and-input-safety
+slice's inactive-record, pending detach/claim retention, and task-ownership
+families across the connection manager, reconnection service and manager,
+maintenance sweeps, spectator service, moderation, the websocket connection
+loop, and the shutdown/drain paths. No defect was found; every audited
+record and task carries a verified removal or abort on all exit paths.
+
+- **Inactive records (verified clean).** Every audited map is bounded by a
+  paired lifecycle: connection admission slots release exactly once on
+  unregistration (with a loud saturated underflow guard); coordinator
+  routing maps prune empty room sets and re-sync the active set on every
+  mutation; client-supplied labels never key a server-side map (session
+  plans, ready sets, room applications, and app relay series are
+  server-keyed with maintenance prunes or allowlist-bounded; the
+  upgrade-rejection log evicts deterministically). The reconnection
+  replay/release families carry their dispositions in the delivery,
+  epoch/sequence, and drain reviews above.
+- **The pre-issued-token teardown branches are covered by layered
+  discards (hypothesis falsified).** The teardown chain in
+  `unregister_client_locked` handles draining, snapshot-registration, and
+  no-room discards, and its snapshot-unavailable branches
+  (`Ok(None)`, roster miss, storage error) fall through with no explicit
+  discard. A review hypothesis claimed each such exit leaks the
+  pre-issued token past teardown. The hypothesis is false: the same
+  unregister flow always reaches the room-removal path, which discards the
+  pre-issued token after the player leaves the room
+  (`room_service.rs`), and the maintenance sweep independently cleans up
+  clients whose room is missing. The pin
+  (`unregister_snapshot_failure_creates_no_broken_reconnect_record`)
+  already asserts both the pending-record absence and the pre-issued-token
+  discard under a snapshot storage fault.
+- **Pending detach/claim retention (verified clean).** Every
+  `pending_durable_player_detaches` insert has a removal: direct
+  resolution, reconnect reclaim, or the maintenance retry sweep (storage
+  success, room deleted, or live reclaim). Spectator
+  `pending_unpublished_detaches` entries resolve through owned rollback,
+  republished-identity checks, or the retried sweep, and re-queue on read
+  failure. Claim records are single-owner with `claim_id` verification on
+  every mutation; every expiry surface filters out claimed records so an
+  in-flight claim cannot be swept, and every rejection path funnels
+  through the claim rollback.
+- **Task ownership (verified clean, one theoretical residual).** Per-socket
+  send/receive tasks are joined; the ping and relay-stats tickers exit on
+  the socket close signal that every unregistration requests. Server-level
+  tasks are owned: the drain task is joined or aborted at shutdown, the
+  cleanup loop is aborted on cancellation via a task-abort guard, the
+  dashboard-cache and rate-limiter sweeps hold `Weak` owners and
+  self-terminate, and lease renewal aborts on drop. One theoretical
+  residual is tracked in
+  [#738](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/738):
+  an owned reconnect transaction's `task.await` error arm logs without
+  releasing the reserved claim; reaching it requires runtime shutdown
+  mid-task, at which point in-memory state dies with the process, and the
+  `JoinHandle` is awaited inline so nothing else can cancel the task.
+
+With this review, the inactive-record, pending detach/claim retention, and
+task-ownership families have recorded dispositions.
+
+### C1 rate-limit rejection accounting review (2026-10-04)
+
+At `dd37153b` (main after #737), reviewed the resource-and-input-safety
+slice's rate-limit rejection accounting family across
+`src/rate_limit.rs`, the auth sliding windows, the error-reply gate, the
+join/spectator/signal lanes, relay byte charging, and connection admission.
+No defect was found: every refusal path charges exactly once, every counter
+lands on the budget that refused, and no path double-charges or inflates.
+
+- **Charges and counters are paired exactly once (verified).** The compound
+  room-creation charge is both-or-neither; the relay charge is all-or-nothing
+  per budget with the room-ceiling rejection deliberately retaining the
+  sender charge (pinned); the signal preflight never consumes and records a
+  rejection only when it owns the drop; every retryable handshake, parse,
+  moderation, authority, and drain refusal charges the error-reply gate
+  exactly once via the charged helpers, and farewell/terminal refusals never
+  charge. Auth windows keep rejections free via probe-before-commit, with
+  the documented one-self-tightening race still counting every rejection
+  (pinned). Admission refusals consume no slot, so no budget is consumed
+  unaccounted.
+- **The drain-window creation refusal is deliberately budget-free (now
+  pinned).** The create-while-draining fast-path runs before the
+  join/creation budget charge, while everything else refused in the same
+  window spends its bucket. The drain comment shows the choice is
+  deliberate: the drain-window flood bound is the charged error-reply gate
+  (issue #518), not the join bucket. The asymmetry is now pinned by
+  extending `draining_server_rejects_room_creation_without_consuming_join_locks`:
+  the drain-window creation refusal creates no budget entry, and an
+  existing-room join admitted in the same window spends exactly one join
+  attempt.
+
+With this review, the rate-limit rejection accounting family has a recorded
+disposition.
+
+### C1 error and logging paths under pressure review (2026-10-04)
+
+At `dd37153b` (main after #737), reviewed the resource-and-input-safety
+slice's error/logging-under-pressure family across the websocket hot loop,
+the relay send path, heartbeat, and the messaging helpers. Two hardenings
+landed with this review (ARM-C031, ARM-C032); everything else is verified
+bounded or charged.
+
+- **Rejected app-ID log forged log lines (fixed, ARM-C031).** The
+  `Public app ID rejected` warning logged the raw client-supplied app ID
+  with a Display field in exactly the arm where the log-safety gate had
+  rejected it, so control characters in a rejected ID could forge operator
+  log lines. The ID is now Debug-escaped, matching the pre-gate escaping
+  pattern already used at the sibling anomalous-path warnings. A sweep of
+  every remaining `%app_id` log site found only gate-vetted or typed-UUID
+  fields.
+- **Undeliverable-relay warning flooded logs (fixed, ARM-C032).** The
+  per-recipient warning in `notify_on_undeliverable` fired once per
+  undelivered frame per recipient with no throttle, while the in-band
+  advisory it accompanies was already rate-limited to one per sender per
+  second; one sender with an unsupported encoding into a large room could
+  flood operator logs. The warning now rides the advisory cadence and
+  carries the suppressed count. Delivery reports, advisories, and drop
+  counters are unchanged.
+- **Error-reply amplification (verified clean).** Every polite per-frame
+  reply charges the per-connection budget and exhausts to one `4006`
+  close; relay error branches drop the lifecycle gate before re-acquiring
+  it in the refusal reply; teardown writes are deadline-bounded and
+  first-wins.
+- **Log content and volume (verified clean, one disposition).** No
+  hot-path log includes raw frame bodies, payloads, or credentials; parse
+  violations log decoder errors without content; upgrade and metrics
+  rejections use per-source quiet periods. The heartbeat
+  persistence-failure warnings fire inside the per-player heartbeat
+  throttle (default 30 s cadence); the documented `Duration::ZERO`
+  "update every message" mode combined with a persistently failing
+  database would warn per frame. This is accepted: the mode is explicit
+  operator configuration, the default cadence bounds the warnings, and the
+  failure itself is loud by design.
+
+With this review, the error and logging paths under pressure family has
+recorded dispositions, and the resource-and-input-safety slice is complete.
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -1646,7 +1805,7 @@ neither is a deployed capacity preset.
 | --- | --- | --- | --- | --- |
 | Startup and CLI: `src/main.rs`, `src/lib.rs` | Startup rejects bad config; startup failure leaves no listener | `tests/config_and_endpoints_tests.rs` | Failure after partial startup; feature matrix | Unreviewed |
 | Config and reload: `src/config/**` | Defaults, validation, and reload preserve one coherent policy | `tests/config_and_endpoints_tests.rs`, `tests/config_validation_coverage_scan.rs`; C1 allowlist and key reload boundary review above | SIGHUP key/allowlist swap order and invalid reload are reviewed and pinned; default coherence and validation breadth (malformed documents, env-override interactions) remain | Unreviewed |
-| Authentication: `src/auth/**`, `src/rate_limit.rs` | Unauthorized traffic cannot enter a room; limits count refusals | `tests/auth_integration_tests.rs`, `formal/tla/RateLimitWindow.tla`; C1 authentication admission boundary review above | Flood posture, budget-before-credential ordering, refusal closes, the absolute activity-immune auth deadline (`pre_handshake_activity_does_not_extend_the_auth_deadline`), and concurrent ceiling conservation (`concurrent_handshakes_conserve_the_app_ceiling_and_count_every_rejection`) are reviewed and pinned; room-side budget charge paths verified against their earlier pins | Reviewed |
+| Authentication: `src/auth/**`, `src/rate_limit.rs` | Unauthorized traffic cannot enter a room; limits count refusals | `tests/auth_integration_tests.rs`, `formal/tla/RateLimitWindow.tla`; C1 authentication admission boundary and rate-limit rejection accounting reviews above | Flood posture, budget-before-credential ordering, refusal closes, the absolute activity-immune auth deadline (`pre_handshake_activity_does_not_extend_the_auth_deadline`), concurrent ceiling conservation (`concurrent_handshakes_conserve_the_app_ceiling_and_count_every_rejection`), and every refusal path's exact-once charge/counter pairing (the drain-window creation refusal's deliberate budget-free shape is now pinned) are reviewed and pinned | Reviewed |
 | Security: `src/security/**`, `src/websocket/token_binding.rs` | Token, origin, TLS, and TURN credential checks fail closed | `tests/mtls_token_binding_e2e.rs`, `fuzz/fuzz_targets/fuzz_reconnect_tokens.rs`; C1 token rotation boundary review above | Rotation ordering and concurrent-claim refusals are reviewed and pinned; TLS variants and connect-token claim boundaries remain | Unreviewed |
 | Protocol: `src/protocol/**`, `src/trace_validation.rs` | V2/V3 decoding, wire bytes, and delivery class match contract | `tests/v2_wire_golden.rs`, `tests/v3_wire_properties.rs`, `fuzz/fuzz_targets/decode_protocol.rs` | Malformed/deep frames, mixed format boundaries | Unreviewed |
 | Room and player storage: `src/database/**` | Membership and room limits stay atomic and app isolated | `tests/integration_tests.rs`, `tests/model_based_state_machines.rs`; C1 admission-limit review above | Other adapters, rollback, and leave/disconnect races remain | Unreviewed |
@@ -1654,10 +1813,10 @@ neither is a deployed capacity preset.
 | Readiness and gameplay: `src/server/ready_state.rs`, `authority.rs`, `session_policy.rs`, `signaling.rs` | Membership and transport changes invalidate stale plans/readiness | `tests/v3_session_plan_e2e.rs`, `formal/tla/SignalFishSession.tla`; C1 gameplay-transitions review above | Start/leave, authority loss, v2/v3 negotiation, capability intersections, stale reports, downgrade reconnects, and publication order are reviewed and pinned (including the spectator start-authorization coupling); shared `src/server.rs` state seams remain | Partially reviewed |
 | Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs`; C1 cross-room stall fairness, mixed encoding/unsupported conversion, and permitted volatile loss reviews above | Slow-recipient isolation, cross-room stall fairness, the mixed encoding/unsupported conversion matrix (direct cohorts, lossless fallback, opaque refusal with exact gap plus advisory, pre-v3 advisory-only wire), and real-socket volatile eviction with exact reports plus a non-zero per-connection `dropped_for_you` (`flooded_nonreading_recipient_observes_exact_volatile_gaps_and_dropped_for_you`) are reviewed and pinned | Reviewed |
 | Coordination and queues: `src/coordination/**`, `src/distributed.rs`; the in-memory coordinator seams in `src/server.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla`; C1 room-event duplicate-delivery, latest coalescing keys/generations, and transaction reservation/commit cancellation/panic reviews above | Lane job exactly-once and no lease re-run are dispositioned and pinned (`interleaved_awaits_deliver_each_lobby_broadcast_exactly_once`); cross-epoch gap ranges stay distinct per epoch (`cross_epoch_gaps_of_one_sender_stay_distinct_ranges`); latest key composition, generation shielding, supersession, saturation, and counter conservation are reviewed and pinned; cancellation/panic at reservation and commit are reviewed, the silent panic-accounting class is fixed, and all three fixed seams are pinned (`panicking_commit_hook_releases_and_accounts_every_reservation`, `panicking_phase_callback_accounts_remaining_frames_and_never_delivers_phase_one`, `panicking_broadcast_replay_hook_releases_and_accounts_every_reservation`); other `src/server.rs` state seams remain with their own rows | Reviewed |
-| WebSocket ingress and egress: `src/websocket/**` | Bounded frames, priority control, close and drain semantics hold | `tests/transport_frame_limits_e2e.rs`, `tests/slow_consumer_no_cascade_e2e.rs`; C1 parser-boundary review above (ARM-C030 fixed: bounded-depth MessagePack conversion and token-bound envelope decode) | Slow reader, batching age, TLS close paths | Partially reviewed |
-| Reconnect and retry: `src/reconnection.rs`, `src/retry.rs`, `src/server/reconnection_service.rs` | Claims have one owner; replay and stale routes cannot leak or misroute | `tests/reconnect_window_races_e2e.rs`, `formal/tla/ReconnectionClaimLifecycle.tla`; C1 reaper-ordering, claim-expiry, failed-restore, token-rotation, and reconnect epoch/sequence reviews above | Simultaneous claim, expiry during claim, failed restore/retry, rotation boundaries, and reconnect epoch/sequence transitions (including cross-epoch gap accounting) are reviewed and pinned; `src/retry.rs` backoff seams and multi-failure detach accounting on failing backends remain | Partially reviewed |
+| WebSocket ingress and egress: `src/websocket/**` | Bounded frames, priority control, close and drain semantics hold | `tests/transport_frame_limits_e2e.rs`, `tests/slow_consumer_no_cascade_e2e.rs`; C1 parser-boundary and error/logging pressure reviews above (ARM-C030 bounded-depth MessagePack decode; ARM-C031/ARM-C032 log hardenings) | Slow reader, batching age, TLS close paths | Partially reviewed |
+| Reconnect and retry: `src/reconnection.rs`, `src/retry.rs`, `src/server/reconnection_service.rs` | Claims have one owner; replay and stale routes cannot leak or misroute | `tests/reconnect_window_races_e2e.rs`, `formal/tla/ReconnectionClaimLifecycle.tla`; C1 reaper-ordering, claim-expiry, failed-restore, token-rotation, reconnect epoch/sequence, and inactive-record/claim-retention reviews above | Simultaneous claim, expiry during claim, failed restore/retry, rotation boundaries, reconnect epoch/sequence transitions (including cross-epoch gap accounting), the pre-issued-token teardown discards (layered, hypothesis falsified), and claim/pending-detach retention lifecycles are reviewed and pinned; the theoretical owned-task cancellation residual is #738; `src/retry.rs` backoff seams and multi-failure detach accounting on failing backends remain | Partially reviewed |
 | Maintenance and deadlines: `src/server/maintenance.rs`, `heartbeat.rs`, `dashboard_cache.rs`, `src/deadline.rs` | Expiry and cleanup are bounded; live state survives sweeps | `formal/tla/RoomLifecycleGC.tla`, `tests/clock_source_scan.rs`; C1 maintenance and deadlines expiry boundary review above | Expiry boundaries and clock sources are reviewed and pinned (reaper pair boundary, zero-timeout disable, monotonic windows, wall-clock-step immunity, overflow); churn growth and dashboard cost remain measurement work | Partially reviewed |
-| Metrics and logging: `src/metrics.rs`, `src/logging.rs`, `src/websocket/metrics.rs`, `prometheus.rs` | Counters report outcomes; labels and logs stay bounded and safe | `tests/config_and_endpoints_tests.rs`, `tests/websocket_test_helpers/prometheus_scrape.rs` | Cardinality and logging pressure under floods | Unreviewed |
+| Metrics and logging: `src/metrics.rs`, `src/logging.rs`, `src/websocket/metrics.rs`, `prometheus.rs` | Counters report outcomes; labels and logs stay bounded and safe | `tests/config_and_endpoints_tests.rs`, `tests/websocket_test_helpers/prometheus_scrape.rs`; C1 metrics label cardinality and error/logging pressure reviews above (ARM-C031/ARM-C032 fixed the rejected-ID log forgery and the unthrottled undeliverable-relay warning) | Cardinality is bounded with pinned lifecycles; hot-path log content, amplification, and throttle cadences are reviewed and pinned or dispositioned | Reviewed |
 | Admin and shutdown: `src/server/admin.rs`, `shutdown.rs`, `connection_manager.rs` | Drain closes all owned tasks and reports queued work accurately | `tests/close_code_semantics_e2e.rs`, `formal/tla/ConnectionTeardown.tla`; C1 drain/shutdown review above | The drain choreography, the reconnect-commit fence, close ordering with queued data, and the drain reservation accounting are reviewed, fixed where defective, and pinned; a distinct 4000-close counter remains follow-up observability | Partially reviewed |
 | Browser client: `clients/browser/src/**` | Reconnect, delivery reports, fallback, and negotiation match server | `clients/browser/src/page/*.test.ts` | Browser network fault and client revision matrix | Unreviewed |
 | Native client: `clients/native/src/**` | Same client contract across native sockets | `clients/native/tests/interop_e2e.rs` | Restore and mixed-encoding error paths | Unreviewed |
