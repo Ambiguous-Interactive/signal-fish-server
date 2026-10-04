@@ -1918,6 +1918,182 @@ cases named below, and the deployment gaps are filed instead of open.
 | Confidence and reproduction | Direct proof of absence: no EADDRINUSE / invalid-PEM / log-ordering test existed. |
 | Disposition | Two regressions in `tests/tls_deployment_boundaries_e2e.rs` pin the invariant (unix-only; Windows keeps the in-process order verification): `port_bind_conflict_exits_nonzero_without_start_announcement` (an occupied port must exit non-zero, attribute the abort to the address-in-use error, and announce no start) and `invalid_tls_pem_exits_nonzero_without_announcement_or_listener` (invalid PEM must exit non-zero, attribute the abort to the TLS material, announce nothing, and leave no listener reachable on the port). |
 
+### C1 config and reload coverage review (2026-10-04)
+
+At `a479d3a4` (main), reviewed the last two open families of the Config and
+reload coverage row: default coherence and validation breadth (malformed
+documents, env-override interactions). Three parallel audits (defaults
+coherence, malformed documents, env-override interactions), every candidate
+defect reproduced against the real binary before the fix, five defect classes
+fixed (ARM-C038..ARM-C042 below), one default-coherence defect fixed
+(ARM-C043), and every family carries a disposition.
+
+- **Non-object JSON source silent revert (fixed, ARM-C038).** A JSON source
+  whose root was not an object replaced the whole merged document
+  (`merge_values` catch-all), so a truncated write leaving `null` in a
+  mid-precedence `config.json` silently discarded every lower-priority source
+  and booted on compiled defaults plus whatever the higher sources set —
+  exit 0, process healthy (reproduced live: `null` cwd file + inline
+  `{"port":1234}` → port 1234, all other knobs default). Position-dependent:
+  the same `null` in the highest source hard-errored. Now any present source
+  with a non-object root is a hard error naming the source and the root kind,
+  at every precedence position
+  (`non_object_json_source_is_a_hard_error_naming_the_source`).
+- **`logging.level` silent revert (fixed, ARM-C039).** The custom
+  `LoggingConfig` deserializer downgraded an unrecognized level string to a
+  stderr note and a wrong-typed value (number/bool/object) to a silent
+  `None` — the only knob where a present-but-invalid value did not fail
+  `load()`, contradicting the loader contract and the sibling
+  `logging.rotation` treatment (reproduced live: `level:7` → exit 0,
+  `level: null`, no diagnostic). The field now parses through `LogLevel`'s
+  own strict deserializer; case/whitespace tolerance and the
+  `warning`/`err` aliases survive, unknown strings and non-string values are
+  hard errors (`invalid_log_level_string_is_a_hard_error`,
+  `non_string_log_level_is_a_type_error`,
+  `log_level_aliases_and_case_are_still_accepted`).
+- **Stat-failing config file treated as absent (fixed, ARM-C040).**
+  `read_file_source` gated on `Path::exists()`, which reports `false` for a
+  broken symlink, symlink loop, or unsearchable parent, so a configured file
+  that could not be stat'ed was silently skipped in favor of lower-priority
+  sources (reproduced live: `SIGNAL_FISH_CONFIG_PATH` at a symlink loop →
+  defaults, exit 0; a dangling symlink behaved identically). Now the source's
+  directory entry is checked without following the final symlink
+  (`symlink_metadata`): `NotFound` there is the one tolerated outcome, and
+  every present-but-unreadable shape — dangling symlink, symlink loop,
+  permission errors — is a hard error naming the path
+  (`config_file_that_fails_stat_is_a_hard_error_naming_the_path`, covering
+  both symlink shapes).
+- **Env override key depth overflow (fixed, ARM-C041).** `set_nested_value`
+  and the resulting `Value`'s recursive drop recursed once per `__` segment
+  with no cap; `std::env` permits far deeper keys than any config path.
+  Reproduced live: a 40k-segment `SIGNAL_FISH__A__A__…` variable aborted the
+  process at startup with a stack overflow (SIGABRT). Overrides beyond 16
+  segments (`MAX_ENV_OVERRIDE_DEPTH`; the deepest canonical path is 4) now
+  fail with a named error
+  (`env_override_deeper_than_the_segment_cap_is_a_hard_error`). The same
+  class was already closed on the document path: serde_json's 128-level
+  recursion limit bounds every JSON source and env JSON value, now pinned for
+  the config path (`deeply_nested_config_source_is_a_parse_error_not_a_crash`).
+- **Order-dependent case-variant duplicate env overrides (fixed, ARM-C042).**
+  Two case variants of one override name (`SIGNAL_FISH__PORT` and
+  `SIGNAL_FISH__port`) map to one knob; resolution was first-in-iteration
+  (unspecified `std::env::vars()` order) behind a misleading
+  "canonical and legacy" warning (reproduced live). Same-class duplicates now
+  hard-error naming both variables; true canonical-vs-legacy alias pairs keep
+  their pinned order-independent canonical-wins resolution
+  (`duplicate_case_variant_env_overrides_are_a_hard_error_naming_both_vars`;
+  existing `canonical_app_access_env_keys_win_over_legacy_keys_in_either_order` /
+  `canonical_app_list_env_wins_over_legacy_list_in_either_order` re-run green).
+- **Default per-IP budget equaled one default roster (fixed, ARM-C043).**
+  `default_max_connections_per_ip` (24) equaled exactly one fully seated
+  default room (8 players + auto-derived 2× spectators = 16), leaving zero
+  per-IP slack for reconnect churn behind one NAT, while its own comment
+  claimed 16-player headroom (arithmetically 48 seats). The default is 64
+  with a corrected comment, pinned by a data-driven coherence test
+  (`default_per_ip_budget_admits_a_full_nat_roster_with_churn_slack`); the
+  config-reference drift guard and docs were updated with it.
+
+Clean dispositions:
+
+- **Defaults vs guards:** with the documented-by-design metrics-credential
+  gate satisfied, `Config::default()` passes every numeric, cross-field,
+  protocol-window, transport, TURN, session, metrics, logging, and rate
+  guard (guard-by-guard trace recorded in the session notes); enum defaults
+  round-trip through the loader's serialize→merge→deserialize pipeline.
+- **Malformed documents:** unparsable JSON, wrong types at any depth (file
+  side now pinned beside the pinned env side:
+  `wrong_typed_file_value_is_a_hard_error_naming_the_knob`), u8/u64
+  overflow, floats on integer knobs, invalid UTF-8, BOM, trailing garbage,
+  directory-at-path, and permission errors all hard-error with source or
+  knob attribution. Duplicate JSON keys are last-wins by serde semantics;
+  legacy normalization runs post-dedup and cannot be confused by them.
+- **Unknown keys:** the deny-strict-security / tolerate-elsewhere split is
+  deliberate, structurally pinned, and operator-documented; removed-key
+  tolerance is pinned. The one credential-bearing structure outside the
+  security subtree (`session.ice_servers` entries) tolerates unknown keys by
+  the same documented policy, and a missing TURN username/credential is
+  warned at validation with the entry index.
+- **Env interactions:** precedence (env over every JSON source, source order
+  1→6 as documented), scalar/JSON/comma-array value parsing, empty-value
+  refusals, secret redaction (`REDACTED_SECRET` + legacy discard paths hard-
+  error or strip on every intake path), the app-registry merge (append, not
+  replace, with downstream duplicate rejection), and the connect-token
+  inline-vs-path conflict are all pinned or dispositioned. The SIGHUP reload
+  re-runs the identical load pipeline (sources, env, folds, validation), so
+  startup and reload accept/reject identically.
+- **Docs vs code:** the ~70-row configuration reference matches the code
+  defaults; the audit's three documentation drift findings (run-modes rows
+  whose "exact command" fails under the fail-closed metrics gate, the
+  development snippet missing `require_metrics_auth`, the README Docker
+  trial missing the CORS override its browser-console step needs) are fixed
+  in this change.
+
+### ARM-C038 — A non-object JSON config source silently discarded lower-priority sources
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed, medium |
+| Player impact | A corrupted/truncated write leaving `null` (or a hand edit leaving an array/scalar) in a mid-precedence `config.json` reverted every lower-priority operator setting (allowlists, caps, timeouts) to compiled defaults while the process appeared healthy; under the documented README posture where env carries the security knobs, the silent revert was fully invisible. |
+| Source and revision | `src/config/loader.rs` `parse_json_document` (accepted any JSON root) and `merge_values` catch-all (non-object source replaced the accumulated document), reviewed at `a479d3a4`. |
+| Invariant | A config source that is present but invalid is a hard error naming the source, at any precedence position — never a silent substitution of defaults. |
+| Confidence and reproduction | Reproduced live at `a479d3a4`: cwd `config.json` containing `null` + `SIGNAL_FISH_CONFIG_JSON='{"port":1234}'` → exit 0, port 1234, every other knob at compiled defaults. |
+| Disposition | `parse_json_document` requires an object root and errors naming the source and root kind (`non_object_json_source_is_a_hard_error_naming_the_source`); the loader contract doc lists the non-object case explicitly. |
+
+### ARM-C039 — An invalid `logging.level` silently reverted to the default
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed, low |
+| Player impact | None directly; an operator typo (`"warng"`) or wrong-typed value (`7`) started the server on the default log level — on a deploy expecting `trace` or `error`, diagnostics were silently thinner than configured. |
+| Source and revision | `src/config/logging.rs` custom `LoggingConfig` deserializer (`Option<serde_json::Value>` + lenient coercion), reviewed at `a479d3a4`. |
+| Invariant | A present-but-invalid config value fails `load()` — the same treatment every other knob gets — instead of silently reverting. |
+| Confidence and reproduction | Reproduced live at `a479d3a4`: `SIGNAL_FISH_CONFIG_JSON='{"logging":{"level":7}}'` → exit 0, `level: null`, zero diagnostics; `"warng"` → exit 0 with only an unspecific stderr note. |
+| Disposition | The field is `Option<LogLevel>`, parsed by `LogLevel`'s strict deserializer (case/whitespace-tolerant, `warning`/`err` aliases kept); unknown strings and non-string values are hard errors. Pins: `invalid_log_level_string_is_a_hard_error`, `non_string_log_level_is_a_type_error`, `log_level_aliases_and_case_are_still_accepted`. |
+
+### ARM-C040 — A stat-failing config file was silently treated as absent
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed, low |
+| Player impact | None directly; a deployment whose `SIGNAL_FISH_CONFIG_PATH` (or cwd `config.json`) resolved to a broken symlink or symlink loop silently ran on lower-priority sources — the exact revert-on-provisioning-failure shape the app-registry fold is fail-closed against. |
+| Source and revision | `src/config/loader.rs` `read_file_source` `Path::exists()` gate, reviewed at `a479d3a4`. |
+| Invariant | `NotFound` on the source's directory entry (checked via `symlink_metadata`, not following the final symlink) is the one tolerated file outcome; every present-but-unreadable shape — dangling symlink, symlink loop, permission errors — is a hard error naming the path. |
+| Confidence and reproduction | Reproduced live at `a479d3a4`: `SIGNAL_FISH_CONFIG_PATH` at a self-referential symlink → defaults, exit 0, no log; a dangling symlink behaved identically (verified during adversarial review of the first fix, which only covered the loop). |
+| Disposition | The `exists()` gate is replaced by `symlink_metadata` (entry existence without following the final symlink); `NotFound → Ok(None)`, everything else the path-naming hard error (`config_file_that_fails_stat_is_a_hard_error_naming_the_path`, pinned for both the loop and the dangling-symlink shapes). |
+
+### ARM-C041 — A deep env override key crashed the process via stack overflow
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed, medium (robustness; input requires control of the process environment or a corrupted launcher script) |
+| Player impact | A hostile, corrupted, or buggy launcher environment variable (`SIGNAL_FISH__A__A__…`) aborted the whole server at startup or SIGHUP — every room's signaling dropped — with no diagnostic beyond the runtime's stack-overflow abort. |
+| Source and revision | `src/config/loader.rs` `set_nested_value` recursion and the recursive `Drop` of the built `Value`; no depth cap on `__`-separated override keys, reviewed at `a479d3a4`. |
+| Invariant | Recursion over external input is bounded by a named limit (the same class as the wire-decoder depth walls; cf. ARM-C030). |
+| Confidence and reproduction | Reproduced live at `a479d3a4`: 40k-segment key → `fatal runtime error: stack overflow`, SIGABRT (exit 134), on the main thread at startup. |
+| Disposition | Overrides beyond `MAX_ENV_OVERRIDE_DEPTH` (16; deepest canonical path is 4) fail with a named error (`env_override_deeper_than_the_segment_cap_is_a_hard_error`). The document path was already bounded by serde_json's 128-level recursion limit, now pinned for the config path (`deeply_nested_config_source_is_a_parse_error_not_a_crash`). |
+
+### ARM-C042 — Case-variant duplicate env overrides resolved by unspecified iteration order
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed, low |
+| Player impact | None directly; two case variants of one override (`SIGNAL_FISH__PORT` vs `SIGNAL_FISH__port`) silently resolved by unspecified `std::env::vars()` order behind a misleading "canonical and legacy" warning, making the effective config launcher-order-dependent. |
+| Source and revision | `src/config/loader.rs` env-override `Occupied` entry arm, reviewed at `a479d3a4`. |
+| Invariant | An ambiguous override is refused deterministically; the canonical-vs-legacy alias warning is factually accurate and keeps its order-independent resolution. |
+| Confidence and reproduction | Reproduced live at `a479d3a4`: both variants set → legacy-conflict warning (false) and first-iteration winner. |
+| Disposition | Same-class duplicates hard-error naming both variables and the knob path; cross-class alias pairs keep canonical-wins with an accurate warning including both names (`duplicate_case_variant_env_overrides_are_a_hard_error_naming_both_vars`; existing either-order alias pins re-run green). |
+
+### ARM-C043 — The default per-IP connection budget equaled exactly one default room roster
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed, low (default coherence) |
+| Player impact | A fully seated default room behind one NAT (8 players + auto-derived 16 spectators = 24 registrations, every seat through the per-IP limiter) consumed the default `security.max_connections_per_ip` exactly, so the first reconnect churn or extra tab from that NAT was refused `IpLimitExceeded`; the default's own comment promised 16-player headroom (arithmetically 48 seats) that did not exist. |
+| Source and revision | `src/config/defaults.rs` `default_max_connections_per_ip` (24) vs `src/server/room_service.rs` auto spectator capacity (2× player ceiling) and the `connection_manager` per-IP registration gate, reviewed at `a479d3a4`. |
+| Invariant | Compiled defaults compose: the documented NAT/LAN use case (16 players + 32 auto spectators) fits inside the default per-IP budget with reconnect churn headroom. |
+| Confidence and reproduction | Static roster arithmetic over the registration path (all registrations — players, spectators, reconnects — consume a per-IP slot in `register_delivery`). |
+| Disposition | Default raised 24 → 64 with a corrected comment; pinned by `default_per_ip_budget_admits_a_full_nat_roster_with_churn_slack` (data-driven over the roster formula). The parallel `ServerConfig::default()` literal in `src/server.rs` now derives from the same `default_max_connections_per_ip()` instead of a divergent hardcoded 24. Config-reference table, deployment docs, checklist, and example configs updated to the new default. |
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -1948,7 +2124,7 @@ neither is a deployed capacity preset.
 | Subsystem and paths | Invariant to check | Existing evidence lead | Missing cases / next check | State |
 | --- | --- | --- | --- | --- |
 | Startup and CLI: `src/main.rs`, `src/lib.rs` | Startup rejects bad config; startup failure leaves no listener | `tests/config_and_endpoints_tests.rs`, `tests/tls_deployment_boundaries_e2e.rs`; C1 client and deployment boundaries review above | Startup order verified: every fallible step precedes the bind and start logs follow it, so no half-started server is reachable; the failure-after-partial-startup regressions (bind conflict, invalid PEM post-spawn) are pinned over the real binary (ARM-C036 closed) | Reviewed |
-| Config and reload: `src/config/**` | Defaults, validation, and reload preserve one coherent policy | `tests/config_and_endpoints_tests.rs`, `tests/config_validation_coverage_scan.rs`; C1 allowlist and key reload boundary review above | SIGHUP key/allowlist swap order and invalid reload are reviewed and pinned; default coherence and validation breadth (malformed documents, env-override interactions) remain | Unreviewed |
+| Config and reload: `src/config/**` | Defaults, validation, and reload preserve one coherent policy | `tests/config_and_endpoints_tests.rs`, `tests/config_validation_coverage_scan.rs`; C1 allowlist and key reload boundary review and C1 config and reload coverage review above | SIGHUP key/allowlist swap order and invalid reload reviewed and pinned; default coherence verified guard-by-guard against `Config::default()`; malformed-document and env-override breadth reviewed with five fixed defect classes (ARM-C038..ARM-C042) and the per-IP default-coherence fix (ARM-C043), all red-proven and pinned | Reviewed |
 | Authentication: `src/auth/**`, `src/rate_limit.rs` | Unauthorized traffic cannot enter a room; limits count refusals | `tests/auth_integration_tests.rs`, `formal/tla/RateLimitWindow.tla`; C1 authentication admission boundary and rate-limit rejection accounting reviews above | Flood posture, budget-before-credential ordering, refusal closes, the absolute activity-immune auth deadline (`pre_handshake_activity_does_not_extend_the_auth_deadline`), concurrent ceiling conservation (`concurrent_handshakes_conserve_the_app_ceiling_and_count_every_rejection`), and every refusal path's exact-once charge/counter pairing (the drain-window creation refusal's deliberate budget-free shape is now pinned) are reviewed and pinned | Reviewed |
 | Security: `src/security/**`, `src/websocket/token_binding.rs` | Token, origin, TLS, and TURN credential checks fail closed | `tests/mtls_token_binding_e2e.rs`, `tests/tls_deployment_boundaries_e2e.rs`, `fuzz/fuzz_targets/fuzz_reconnect_tokens.rs`; C1 token rotation boundary and client/deployment boundaries reviews above | Rotation ordering and concurrent-claim refusals are reviewed and pinned; the TLS-variant posture is verified (silent enable impossible, cert/key fail closed pre-bind, mTLS binding pinned e2e over the real binary) and the drain close path over TLS is pinned over the real binary (ARM-C035 closed); connect-token claim boundaries remain | Partially reviewed |
 | Protocol: `src/protocol/**`, `src/trace_validation.rs` | V2/V3 decoding, wire bytes, and delivery class match contract | `tests/v2_wire_golden.rs`, `tests/v3_wire_properties.rs`, `fuzz/fuzz_targets/decode_protocol.rs` | Malformed/deep frames, mixed format boundaries | Unreviewed |

@@ -3,7 +3,7 @@
 //! GAP-3 / fix A3 (#140): the default per-IP connection cap was `10`, so the
 //! 11th concurrent connection from one IP was refused — a 16-player session
 //! behind a single NAT (LAN party, office, venue) could not assemble. A3 raised
-//! `default_max_connections_per_ip` to `24`. This suite drives 16 real
+//! `default_max_connections_per_ip` to `24` (since raised to `64`). This suite drives 16 real
 //! WebSocket clients from loopback (all sharing IP `127.0.0.1`, so the per-IP
 //! cap is genuinely exercised) through `Authenticate` + `JoinRoom` at the
 //! **default** cap and asserts all 16 land in one room — it would fail at the

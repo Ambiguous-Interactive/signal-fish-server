@@ -59,6 +59,7 @@ development posture explicitly:
 docker run --rm -p 127.0.0.1:3536:3536 \
   -e SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false \
   -e SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false \
+  -e SIGNAL_FISH__SECURITY__CORS_ORIGINS=http://localhost:3536 \
   ghcr.io/ambiguous-interactive/signal-fish-server:latest
 ```
 

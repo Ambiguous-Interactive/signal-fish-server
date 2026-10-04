@@ -112,6 +112,29 @@ mod tests {
         assert_eq!(config.logging.rotation, "daily");
     }
 
+    /// Default coherence: the compiled per-IP connection budget must admit a
+    /// fully seated room roster from one NAT with churn headroom, including
+    /// the documented 16-player LAN-party use case. A room seats players plus
+    /// auto-derived spectators (2× the player ceiling when unset), and every
+    /// seat — including reconnect churn before the old slot is released — is
+    /// one per-IP registration. The previous default (24) equaled exactly one
+    /// default roster (8 players + 16 spectators) with zero slack.
+    #[test]
+    fn default_per_ip_budget_admits_a_full_nat_roster_with_churn_slack() {
+        let budget = defaults::default_max_connections_per_ip();
+        let default_roster = 3 * usize::from(defaults::default_max_players());
+        assert!(
+            budget > default_roster,
+            "per-IP budget {budget} must exceed one default roster {default_roster}"
+        );
+        let documented_nat_roster = 3 * 16; // 16 players + 32 auto spectators
+        assert!(
+            budget >= documented_nat_roster + 8,
+            "per-IP budget {budget} must cover the documented 16-player NAT roster \
+             ({documented_nat_roster}) with churn slack"
+        );
+    }
+
     #[test]
     fn test_config_serialization() {
         let config = Config::default();

@@ -761,7 +761,7 @@ impl Default for ServerConfig {
             max_signal_bytes: 16384,                    // 16KB
             max_connection_info_bytes: 8192,            // 8KB
             max_game_data_bytes: None,
-            max_connections_per_ip: 24,
+            max_connections_per_ip: crate::config::defaults::default_max_connections_per_ip(),
             max_connections: crate::config::defaults::default_max_connections(),
             require_metrics_auth: true,
             metrics_auth_token: None,

@@ -27,15 +27,15 @@ hole-punch.
 
 | Mode | What it does | Key config (file keys + env overrides) | Exact command |
 | --- | --- | --- | --- |
-| Dev (relay v2, open app IDs) | v2 clients relay over plain WebSocket with open CORS and no app-ID restriction; v3 clients get the mesh-first default — for local development | `security.enforce_app_id_allowlist=false`, `security.cors_origins="*"` (env: `SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false`) | `cargo run` |
-| Prod relay v2 + app allowlist | v2 relay with public app-ID allowlisting and locked-down CORS | `security.enforce_app_id_allowlist=true`, `security.allowed_apps=[…]`, `security.cors_origins="https://yourgame.com"`, `security.max_connections_per_ip=10` (env: `SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=true`) | `cargo run -- --validate-config && cargo run` |
-| Relay-only (mesh off) | Pins every room to the server relay floor: no peer-to-peer attempts, pre-v3-compatible behavior | `session.default_topology="relay"` (env: `SIGNAL_FISH__SESSION__DEFAULT_TOPOLOGY=relay`) | `SIGNAL_FISH__SESSION__DEFAULT_TOPOLOGY=relay cargo run` |
-| v3 WebRTC mesh/host + STUN | Mesh-first default: v3 rooms settle on the richest WebRTC rung their members negotiated, using STUN to hole-punch | `session.default_topology="mesh"` (default; `"host"` for host-star-only), `session.enable_webrtc=true` (default), `turn.stun_urls` (public STUN by default) | `cargo run` |
+| Dev (relay v2, open app IDs) | v2 clients relay over plain WebSocket with open CORS and no app-ID restriction; v3 clients get the mesh-first default — for local development | `security.enforce_app_id_allowlist=false`, `security.cors_origins="*"` (env: `SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false`) | `cp config.example.json config.json && cargo run` |
+| Prod relay v2 + app allowlist | v2 relay with public app-ID allowlisting and locked-down CORS | `security.enforce_app_id_allowlist=true`, `security.allowed_apps=[…]`, `security.cors_origins="https://yourgame.com"` (env: `SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=true`) | `export SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN="$(openssl rand -hex 32)"; export SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=true; cargo run -- --validate-config && cargo run` |
+| Relay-only (mesh off) | Pins every room to the server relay floor: no peer-to-peer attempts, pre-v3-compatible behavior | `session.default_topology="relay"` (env: `SIGNAL_FISH__SESSION__DEFAULT_TOPOLOGY=relay`) | `SIGNAL_FISH__SESSION__DEFAULT_TOPOLOGY=relay SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false cargo run` |
+| v3 WebRTC mesh/host + STUN | Mesh-first default: v3 rooms settle on the richest WebRTC rung their members negotiated, using STUN to hole-punch | `session.default_topology="mesh"` (default; `"host"` for host-star-only), `session.enable_webrtc=true` (default), `turn.stun_urls` (public STUN by default) | `SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false cargo run` |
 | v3 + TURN | Adds a self-hosted coturn relay for the ~15–20% of peers that cannot hole-punch; the server mints ephemeral coturn credentials | `turn.enabled=true`, `turn.urls=["turn:turn.yourgame.com:3478"]`, `turn.static_auth_secret=<shared>`, `turn.credential_ttl_secs=3600` (env: `SIGNAL_FISH__TURN__STATIC_AUTH_SECRET`) | `export TURN_STATIC_AUTH_SECRET="$(openssl rand -hex 32)"`<br>`export SIGNAL_FISH__TURN__STATIC_AUTH_SECRET="$TURN_STATIC_AUTH_SECRET"`<br>`docker compose --profile turn up -d` |
-| TLS (built-in) | Terminates HTTPS/`wss://` in the server itself | `security.transport.tls.enabled=true`, `security.transport.tls.certificate_path`, `security.transport.tls.private_key_path` (env: `SIGNAL_FISH__SECURITY__TRANSPORT__TLS__ENABLED=true`) | `cargo run` (with the three TLS keys set) |
-| TLS (reverse proxy) | Terminates TLS at nginx/Caddy; server stays plain `ws://` on loopback | none on the server; configure the proxy (see [reverse proxy setup](deployment.md#reverse-proxy-setup)) | `cargo run` (server) + proxy in front |
+| TLS (built-in) | Terminates HTTPS/`wss://` in the server itself | `security.transport.tls.enabled=true`, `security.transport.tls.certificate_path`, `security.transport.tls.private_key_path` (env: `SIGNAL_FISH__SECURITY__TRANSPORT__TLS__ENABLED=true`) | `SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false cargo run` (with the three TLS keys set) |
+| TLS (reverse proxy) | Terminates TLS at nginx/Caddy; server stays plain `ws://` on loopback | none on the server; configure the proxy (see [reverse proxy setup](deployment.md#reverse-proxy-setup)) | `SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false cargo run` (server) + proxy in front |
 | Metrics + Prometheus | Exposes JSON + Prometheus metrics, optionally behind a bearer token | `security.require_metrics_auth=true`, `security.metrics_auth_token=<token>` (env: `SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN`) | `SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN="$(openssl rand -hex 32)" SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=true cargo run` |
-| Externally routed isolated deployments | An application-owned directory chooses one independent, single-process room home before any peer opens its WebSocket; Signal Fish does not share or hand off room state | Optional observability metadata: `server.room_code_prefix="USE"`, `server.region_id="us-east"` (env: `SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX=USE`) | After deploying the external directory: `SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX=USE SIGNAL_FISH__SERVER__REGION_ID=us-east cargo run` |
+| Externally routed isolated deployments | An application-owned directory chooses one independent, single-process room home before any peer opens its WebSocket; Signal Fish does not share or hand off room state | Optional observability metadata: `server.room_code_prefix="USE"`, `server.region_id="us-east"` (env: `SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX=USE`) | After deploying the external directory: `SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX=USE SIGNAL_FISH__SERVER__REGION_ID=us-east SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false cargo run` |
 
 Per-feature JSON snippets (with env equivalents and "when to use") live in the
 [configuration recipes](configuration-recipes.md).
@@ -64,9 +64,12 @@ check: `curl http://localhost:3536/v2/health`.
 ### Prod relay v2 + app allowlist
 
 Turn on public app-ID allowlisting, register your app labels, and lock down CORS. Validate
-first, then run:
+first, then run (the compiled defaults enable metrics authentication, so a
+real deployment sets a token):
 
 ```bash
+export SIGNAL_FISH__SECURITY__METRICS_AUTH_TOKEN="$(openssl rand -hex 32)"
+export SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=true
 cargo run -- --validate-config && cargo run
 ```
 
@@ -81,10 +84,12 @@ v3 rooms are mesh-first by default: the server emits a v3 `SessionPlan` and
 peers connect over WebRTC whenever every room member negotiated a
 peer-to-peer-capable rung (any member that cannot — v2 or relay-only — floors
 the room to relay). `turn.stun_urls` already defaults to a public STUN server,
-so no extra configuration is needed:
+so no extra configuration is needed (the env override relaxes the
+fail-closed metrics gate for a local trial — a deployment instead sets a
+metrics token, as the Metrics row shows):
 
 ```bash
-cargo run
+SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false cargo run
 ```
 
 Pin `session.default_topology="host"` for host-star-only sessions, or
@@ -131,6 +136,7 @@ Built-in TLS terminates HTTPS in the server:
 SIGNAL_FISH__SECURITY__TRANSPORT__TLS__ENABLED=true \
   SIGNAL_FISH__SECURITY__TRANSPORT__TLS__CERTIFICATE_PATH=/etc/ssl/signal-fish/fullchain.pem \
   SIGNAL_FISH__SECURITY__TRANSPORT__TLS__PRIVATE_KEY_PATH=/etc/ssl/signal-fish/privkey.pem \
+  SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false \
   cargo run
 ```
 
@@ -175,6 +181,7 @@ both are metadata rather than coordination:
 ```bash
 SIGNAL_FISH__SERVER__ROOM_CODE_PREFIX=USE \
   SIGNAL_FISH__SERVER__REGION_ID=us-east \
+  SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false \
   cargo run
 ```
 

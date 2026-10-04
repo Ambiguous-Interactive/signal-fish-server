@@ -254,11 +254,13 @@ ledger, 2026-10-04): the rejected app-ID log forgery is fixed (ARM-C031,
 Debug-escaped), the unthrottled per-recipient undeliverable warning now
 rides the advisory cadence (ARM-C032), and reply amplification, log
 content, and volume carry pinned or dispositioned bounds. The
-resource-and-input-safety slice closes except its configuration-validation
-family: reload consistency carries the 2026-10-01 allowlist/key reload
-review; default coherence and validation breadth (malformed documents,
-env-override interactions) remain with the Config and reload coverage row.
-The C1 slice continues with client and deployment boundaries and that row.
+configuration-validation family is reviewed (C1 config and reload coverage
+review, audit ledger, 2026-10-04): defaults pass every guard once the
+documented metrics-credential gate is satisfied, malformed-document and
+env-override breadth is pinned, and five fixed silent-revert / fail-open /
+crash classes (ARM-C038..ARM-C042) plus the per-IP default-roster coherence
+fix (ARM-C043) are red-proven. The resource-and-input-safety slice is
+complete.
 - [ ] **Client and deployment boundaries:** inspect reference-client handling
   of reconnect, reports, transport fallback, and negotiation. Audit plain/TLS
   server paths and optional features, including `legacy-fullmesh`. Distinguish
