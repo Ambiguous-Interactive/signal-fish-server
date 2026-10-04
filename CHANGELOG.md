@@ -81,7 +81,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with zero slack: the first reconnect or extra tab from behind one NAT was
   refused `IP_LIMIT_EXCEEDED`. 64 covers the documented 16-player
   NAT/LAN use case (16 players + 32 spectators = 48) with reconnect
-  headroom; deployments that pin the knob explicitly are unchanged.
+  headroom; deployments that pin the knob explicitly are unchanged. The
+  library-facing `ServerConfig::default()` derives from the same function
+  instead of a divergent hardcoded value.
 
 - Security: MessagePack game data nested deeper than 128 container levels
   now refuses on the JSON conversion path and on the token-bound binary
@@ -134,9 +136,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   position. An unrecognized or non-string `logging.level` previously
   reverted silently to the default level; it now fails like every other
   invalid value (`warning`/`err` aliases and case tolerance unchanged). A
-  configured config file whose stat fails — a broken symlink or symlink
-  loop — was silently treated as absent; only a genuinely missing file is
-  now tolerated, and every other read failure names the path.
+  configured config file whose read fails — a dangling symlink, a symlink
+  loop, or a permission error, all previously misreported as absent and
+  silently skipped — now names the path and fails; only a genuinely
+  missing file stays an optional, tolerated source.
 
 - Configuration: a `SIGNAL_FISH__` environment override nested deeper than
   16 `__`-separated levels now fails with a named error instead of

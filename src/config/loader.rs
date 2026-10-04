@@ -293,8 +293,8 @@ fn parse_json_document(raw: &str, label: &str) -> anyhow::Result<Option<Value>> 
     }
 }
 
-/// Human-readable name for a parsed JSON root that failed the object-root
-/// requirement, matching serde's own type naming in deserialize errors.
+/// Human-readable serde-style kind name for a parsed JSON root that failed
+/// the object-root requirement.
 fn json_root_kind(value: &Value) -> &'static str {
     match value {
         Value::Null => "null",
@@ -311,18 +311,27 @@ fn read_file_source(path: &Path) -> anyhow::Result<Option<Value>> {
         return Ok(None);
     }
 
-    match fs::read_to_string(path) {
-        Ok(contents) => parse_json_document(&contents, &format!("file {}", path.display())),
-        // Absent is the one tolerated outcome: absent sources are optional.
-        // Every other read/stat failure — permission errors (handled here), a
-        // broken symlink or symlink loop (`Path::exists` reports `false` for
-        // those, so the previous `exists()` gate silently skipped them) — is
-        // present-but-unreadable and fails closed, naming the path.
+    // The path must exist as a directory entry (`symlink_metadata` does not
+    // follow the final symlink, so a symlink loop still counts as present).
+    // A dangling symlink is present but unreadable — the operator pointed at
+    // a path whose target is missing — and so is every other read failure:
+    // all of them fail closed naming the path. The old `Path::exists()` gate
+    // reported exactly these shapes as absent and silently skipped the
+    // source. `NotFound` on the entry itself is the one tolerated outcome:
+    // absent sources are optional.
+    match fs::symlink_metadata(path) {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(anyhow::anyhow!(
             "Failed to read config from {}: {err}",
             path.display()
         )),
+        Ok(_) => match fs::read_to_string(path) {
+            Ok(contents) => parse_json_document(&contents, &format!("file {}", path.display())),
+            Err(err) => Err(anyhow::anyhow!(
+                "Failed to read config from {}: {err}",
+                path.display()
+            )),
+        },
     }
 }
 
@@ -1530,9 +1539,11 @@ mod tests {
         let _ = error; // the assertion is the non-crash plus the error above
     }
 
-    /// A configured config file whose stat fails (broken symlink, symlink
-    /// loop, unsearchable parent) is present-but-unreadable: hard error
-    /// naming the path, not a silent fall-through to lower-priority sources.
+    /// A configured config file that cannot be read is a hard error naming
+    /// the path: a symlink loop (ELOOP on read) and a dangling symlink (the
+    /// entry exists but its target is missing) are present-but-unreadable,
+    /// not absent — the old `Path::exists()` gate reported both as absent
+    /// and silently skipped the source.
     #[cfg(unix)]
     #[test]
     fn config_file_that_fails_stat_is_a_hard_error_naming_the_path() {
@@ -1540,16 +1551,35 @@ mod tests {
             .prefix("sf-config-stat-test")
             .tempdir()
             .expect("temporary directory is created");
+
         let loop_path = dir.path().join("loop");
         std::os::unix::fs::symlink(&loop_path, &loop_path)
             .expect("self-referential symlink is created");
-        let error =
-            read_file_source(&loop_path).expect_err("stat-failing config file is a hard error");
+        let error = read_file_source(&loop_path).expect_err("symlink loop is a hard error");
         assert!(
             error
                 .to_string()
                 .contains(loop_path.to_string_lossy().as_ref()),
             "error must name the path: {error}"
+        );
+
+        let dangling_path = dir.path().join("dangling");
+        std::os::unix::fs::symlink(dir.path().join("missing-target"), &dangling_path)
+            .expect("dangling symlink is created");
+        let error = read_file_source(&dangling_path)
+            .expect_err("dangling symlink is present but unreadable");
+        assert!(
+            error
+                .to_string()
+                .contains(dangling_path.to_string_lossy().as_ref()),
+            "error must name the path: {error}"
+        );
+
+        // The tolerated side of the boundary: a genuinely absent entry is
+        // still an absent (optional) source.
+        assert_eq!(
+            read_file_source(&dir.path().join("no-such-file")).expect("absent path is None"),
+            None
         );
     }
 

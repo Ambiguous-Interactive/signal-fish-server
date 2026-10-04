@@ -1956,9 +1956,13 @@ fixed (ARM-C038..ARM-C042 below), one default-coherence defect fixed
   broken symlink, symlink loop, or unsearchable parent, so a configured file
   that could not be stat'ed was silently skipped in favor of lower-priority
   sources (reproduced live: `SIGNAL_FISH_CONFIG_PATH` at a symlink loop →
-  defaults, exit 0). Now `NotFound` is the one tolerated outcome; every
-  other read failure is a hard error naming the path
-  (`config_file_that_fails_stat_is_a_hard_error_naming_the_path`).
+  defaults, exit 0; a dangling symlink behaved identically). Now the source's
+  directory entry is checked without following the final symlink
+  (`symlink_metadata`): `NotFound` there is the one tolerated outcome, and
+  every present-but-unreadable shape — dangling symlink, symlink loop,
+  permission errors — is a hard error naming the path
+  (`config_file_that_fails_stat_is_a_hard_error_naming_the_path`, covering
+  both symlink shapes).
 - **Env override key depth overflow (fixed, ARM-C041).** `set_nested_value`
   and the resulting `Value`'s recursive drop recursed once per `__` segment
   with no cap; `std::env` permits far deeper keys than any config path.
@@ -2053,9 +2057,9 @@ Clean dispositions:
 | State, severity | Fixed, low |
 | Player impact | None directly; a deployment whose `SIGNAL_FISH_CONFIG_PATH` (or cwd `config.json`) resolved to a broken symlink or symlink loop silently ran on lower-priority sources — the exact revert-on-provisioning-failure shape the app-registry fold is fail-closed against. |
 | Source and revision | `src/config/loader.rs` `read_file_source` `Path::exists()` gate, reviewed at `a479d3a4`. |
-| Invariant | `NotFound` is the one tolerated file outcome; every other read/stat failure is a hard error naming the path. |
-| Confidence and reproduction | Reproduced live at `a479d3a4`: `SIGNAL_FISH_CONFIG_PATH` at a self-referential symlink → defaults, exit 0, no log. |
-| Disposition | The `exists()` gate is gone; read errors map `NotFound → Ok(None)` and everything else to the existing path-naming hard error (`config_file_that_fails_stat_is_a_hard_error_naming_the_path`). |
+| Invariant | `NotFound` on the source's directory entry (checked via `symlink_metadata`, not following the final symlink) is the one tolerated file outcome; every present-but-unreadable shape — dangling symlink, symlink loop, permission errors — is a hard error naming the path. |
+| Confidence and reproduction | Reproduced live at `a479d3a4`: `SIGNAL_FISH_CONFIG_PATH` at a self-referential symlink → defaults, exit 0, no log; a dangling symlink behaved identically (verified during adversarial review of the first fix, which only covered the loop). |
+| Disposition | The `exists()` gate is replaced by `symlink_metadata` (entry existence without following the final symlink); `NotFound → Ok(None)`, everything else the path-naming hard error (`config_file_that_fails_stat_is_a_hard_error_naming_the_path`, pinned for both the loop and the dangling-symlink shapes). |
 
 ### ARM-C041 — A deep env override key crashed the process via stack overflow
 
@@ -2088,7 +2092,7 @@ Clean dispositions:
 | Source and revision | `src/config/defaults.rs` `default_max_connections_per_ip` (24) vs `src/server/room_service.rs` auto spectator capacity (2× player ceiling) and the `connection_manager` per-IP registration gate, reviewed at `a479d3a4`. |
 | Invariant | Compiled defaults compose: the documented NAT/LAN use case (16 players + 32 auto spectators) fits inside the default per-IP budget with reconnect churn headroom. |
 | Confidence and reproduction | Static roster arithmetic over the registration path (all registrations — players, spectators, reconnects — consume a per-IP slot in `register_delivery`). |
-| Disposition | Default raised 24 → 64 with a corrected comment; pinned by `default_per_ip_budget_admits_a_full_nat_roster_with_churn_slack` (data-driven over the roster formula). Config-reference table, deployment docs, checklist, and example configs updated to the new default. |
+| Disposition | Default raised 24 → 64 with a corrected comment; pinned by `default_per_ip_budget_admits_a_full_nat_roster_with_churn_slack` (data-driven over the roster formula). The parallel `ServerConfig::default()` literal in `src/server.rs` now derives from the same `default_max_connections_per_ip()` instead of a divergent hardcoded 24. Config-reference table, deployment docs, checklist, and example configs updated to the new default. |
 
 ## Coverage ledger
 
