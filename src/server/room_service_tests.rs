@@ -176,6 +176,7 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
         moderation_lifecycle_test_gate: StdMutex::new(None),
         scripted_room_codes: StdMutex::new(std::collections::VecDeque::new()),
         owned_room_operation_panic: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+        owned_room_supervisor_panic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         coordination_lock_ttl_override_ms: std::sync::atomic::AtomicU64::new(0),
         spectator_service,
         transport_security: TransportSecurityConfig::default(),
@@ -5805,6 +5806,59 @@ async fn correlated_reconnect_panic_after_identity_move_uses_the_still_routed_id
         "mid-reassignment reconnect panic",
     )
     .await;
+}
+
+/// A panic in the in-task unwind supervisor must not strand the reserved
+/// reconnect claim: claimed records are exempt from every expiry surface, so
+/// a stranded claim would answer `AlreadyInProgress` until restart (#738).
+/// The supervisor's own `catch_unwind` fallback releases the claim directly.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn supervisor_panic_still_releases_the_reconnect_claim_for_a_fresh_retry() {
+    let fixture = correlated_reconnect_panic_fixture().await;
+    let operation_id = uuid::Uuid::from_u128(0x48200);
+    fixture.server.panic_owned_room_operation_for_test(
+        OwnedRoomOperationPanicPoint::ReconnectAfterReassignment,
+    );
+    fixture.server.panic_owned_room_supervisor_for_test();
+
+    assert!(
+        !fixture
+            .server
+            .handle_reconnect_with_identity_operation(
+                &fixture.current_player_id,
+                &fixture.reconnect_player_id,
+                &fixture.room_id,
+                &fixture.token,
+                Arc::clone(&fixture.effective_player_id),
+                Some(operation_id),
+            )
+            .await
+    );
+
+    let reconnection_manager = fixture
+        .server
+        .reconnection_manager()
+        .expect("reconnection is enabled");
+    assert!(
+        reconnection_manager
+            .has_pending_reconnection(&fixture.reconnect_player_id)
+            .await
+    );
+    let retry_claim = reconnection_manager
+        .claim_reconnection(
+            &PlayerId::new_v4(),
+            &fixture.reconnect_player_id,
+            &fixture.room_id,
+            &fixture.token,
+        )
+        .await
+        .expect("the supervisor-panic fallback releases the claim for a fresh retry");
+    assert!(
+        reconnection_manager
+            .release_reconnection_claim(&retry_claim)
+            .await
+    );
 }
 
 #[tokio::test(start_paused = true)]
