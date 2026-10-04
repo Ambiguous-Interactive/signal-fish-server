@@ -24612,6 +24612,47 @@ fn test_pre_commit_changelog_gate_blocks_src_changes_without_changelog_when_pwsh
         stdout.contains("PASS: Changelog content"),
         "the content pass verdict must be reported.\nstdout: {stdout}"
     );
+
+    // TRAP: a second `### Fixed` heading under [Unreleased] duplicates a
+    // sibling and breaks MD024 (siblings_only) in hosted Markdown Lint (the
+    // PR #737 failure class). The hook must catch it at commit time.
+    write_file(
+        &dir.join("CHANGELOG.md"),
+        "## [Unreleased]\n\n### Fixed\n\n- Fix the exhaustion close signal after a reconnect identity swap (#697).\n\n### Fixed\n\n- Fix another close signal (#697).\n",
+    );
+    assert!(git(&["add", "CHANGELOG.md"]).unwrap().status.success());
+
+    let output = run_hook().expect("pwsh run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !output.status.success(),
+        "a duplicate sibling heading under [Unreleased] must fail the changelog content check.\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("FAIL: Changelog content"),
+        "the failure must name the changelog content check.\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("duplicate heading"),
+        "the failure must name the duplicate-heading rule.\nstdout: {stdout}"
+    );
+
+    // GREEN: bullets appended to the one existing `### Fixed` section pass;
+    // the rule rejects duplicate headings, not multiple bullets.
+    write_file(
+        &dir.join("CHANGELOG.md"),
+        "## [Unreleased]\n\n### Fixed\n\n- Fix the exhaustion close signal after a reconnect identity swap (#697).\n- Fix another close signal (#697).\n",
+    );
+    assert!(git(&["add", "CHANGELOG.md"]).unwrap().status.success());
+
+    let output = run_hook().expect("pwsh run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "bullets under one heading must pass the changelog content check.\n\
+         stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

@@ -13,7 +13,10 @@ pub mod validation;
 // This allows external code to use `use crate::protocol::*`
 
 // From binary
-pub use binary::{decode_v3_binary_game_data, V3BinaryGameDataFrame};
+pub use binary::{
+    decode_v3_binary_game_data, msgpack_depth_within, V3BinaryGameDataFrame,
+    MSGPACK_MAX_NESTING_DEPTH,
+};
 
 // From delivery
 pub use delivery::{

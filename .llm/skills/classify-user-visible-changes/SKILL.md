@@ -74,13 +74,26 @@ description: >-
 - Test-support seams in production files (`#[cfg(test)]` additions): internal;
   covered by the changelog gate's test-module exemption, not by an entry.
 
+## Section Mechanics (PR #737 failure class)
+
+- `[Unreleased]` accumulates bullets across many sessions. Keep-a-Changelog
+  kinds (`Added`, `Changed`, `Fixed`, ...) usually exist already: **append
+  bullets to the existing kind heading; do not add a second one.** markdownlint
+  MD024 (`siblings_only`) fails hosted Markdown Lint on duplicate sibling
+  headings, and the pre-commit hook rejects them at commit time.
+- After editing `CHANGELOG.md` (or any markdown), run `bash
+  scripts/check-markdown.sh` once before pushing: it is fast, uses the pinned
+  markdownlint version, and catches MD013/MD024-class issues the Rust gates
+  never see.
+
 ---
 
 ## Exit Checklist
 
 - [ ] Classification performed for every user request touching code/docs/config
 - [ ] A clear yes/no changelog decision is documented
-- [ ] If yes, `CHANGELOG.md` was updated under `[Unreleased]`
+- [ ] If yes, `CHANGELOG.md` was updated under `[Unreleased]`, appending to an existing kind heading when present
+- [ ] If yes, `bash scripts/check-markdown.sh` passed
 - [ ] If no, internal-only rationale is documented
 
 ---

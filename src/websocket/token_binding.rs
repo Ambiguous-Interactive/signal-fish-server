@@ -1,5 +1,4 @@
-use crate::protocol::ClientMessage;
-use crate::protocol::ErrorCode;
+use crate::protocol::{msgpack_depth_within, ClientMessage, ErrorCode, MSGPACK_MAX_NESTING_DEPTH};
 use crate::security::{
     derive_server_nonce_secret, ActiveTokenBinding, ClientCertificateFingerprint,
     TokenBindingChallenge, TokenBindingError, TokenBindingProof, TokenBoundBinaryFrame,
@@ -218,6 +217,13 @@ pub(super) fn parse_binary_message(
     raw: &[u8],
     binding: &TokenBindingHandshake,
 ) -> Result<Vec<u8>, TokenBindingViolation> {
+    // The token-bound envelope is flat, but its decoder still walks nested
+    // values while skipping unknown members. Enforce the 128-level wire
+    // contract before decode rather than leaning on the decoder's internal
+    // recursion guard.
+    if !msgpack_depth_within(raw, MSGPACK_MAX_NESTING_DEPTH) {
+        return Err(TokenBindingViolation::MalformedEnvelope);
+    }
     let frame: TokenBoundBinaryFrame =
         rmp_serde::from_slice(raw).map_err(TokenBindingViolation::InvalidBinaryEnvelope)?;
     binding

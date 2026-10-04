@@ -219,6 +219,15 @@ See [Rust Idioms And Patterns](../rust-idioms-and-patterns/SKILL.md) for `clone_
 - [ ] `Arc<str>` over `Arc<String>` for shared strings
 - [ ] `clone_from()` when reusing allocations
 - [ ] Hot paths profiled with `criterion` before micro-optimizing
+- [ ] Code on the relay/serialization paths adds zero allocations per message:
+      run the deterministic ceiling benches after touching them (they gate the
+      `Nextest (ubuntu-latest)` CI job, so a missed ceiling fails CI even when
+      every test passes):
+      `cargo bench --locked --bench relay_allocations --features allocation-tracking`
+      and `cargo bench --locked --bench relay_serialization_allocations --features allocation-tracking`
+      (PR #737: one `Vec` allocation per converted relay broke the checked-in
+      mixed-source ceiling; the fix was a fixed-capacity stack array sized by
+      the enforced limit)
 
 ---
 

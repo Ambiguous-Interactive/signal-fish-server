@@ -73,6 +73,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Security: MessagePack game data nested deeper than 128 container levels
+  now refuses on the JSON conversion path and on the token-bound binary
+  envelope (#647, C1 parser boundaries). The conversion budget is an
+  explicit wire contract enforced before any recursive decode, no longer
+  rmp-serde's internal 1024-level guard: payloads nested 129-1023 levels
+  that previously converted now refuse as undeliverable with the existing
+  exact report and advisory accounting. JSON already sat under serde_json's
+  own 128-level limit, so both wire encodings are now symmetric; direct
+  same-format relay is unchanged.
+
 - Session defaults: `session.default_topology` now defaults to `mesh` instead
   of `relay` (#729). v3 rooms attempt the richest peer-to-peer rung their
   members negotiated (mesh WebRTC first, then host), and any member that
