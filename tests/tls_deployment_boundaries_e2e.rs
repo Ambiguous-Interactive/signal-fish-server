@@ -456,7 +456,10 @@ async fn shutdown_drain_over_tls_advises_then_closes_4000_and_exits_bounded() {
 #[tokio::test]
 async fn port_bind_conflict_exits_nonzero_without_start_announcement() {
     let port = reserve_port();
-    let blocker = std::net::TcpListener::bind(("127.0.0.1", port)).expect("occupy the port");
+    // Occupy the SAME wildcard address the server binds (`0.0.0.0`, with
+    // `SO_REUSEADDR`): wildcard-vs-specific overlap rules differ across Unix
+    // variants, while a plain wildcard listener conflicts with it everywhere.
+    let blocker = std::net::TcpListener::bind(("0.0.0.0", port)).expect("occupy the port");
     let mut server = spawn_server(plain_server_config(port));
 
     let status = server.wait_for_exit(FAILURE_EXIT_BOUND).await;
