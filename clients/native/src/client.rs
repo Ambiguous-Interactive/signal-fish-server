@@ -479,7 +479,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         tick_stall_ms: cli.tick_stall_ms,
     });
 
-    let negotiated_version = authenticate(&mut ws, cli).await?;
+    let (negotiated_version, game_data_encoding) = authenticate(&mut ws, cli).await?;
     let (my_id, mut present, lobby_state, ready_players, accountability) =
         join_room(&mut ws, cli, negotiated_version >= 3).await?;
 
@@ -494,7 +494,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         selected_pair_rx,
         my_id,
         negotiated_version,
-        game_data_encoding: cli.game_data_encoding(),
+        game_data_encoding,
         accountability,
         present,
         members_seen,
@@ -560,8 +560,50 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
     orchestrator.run_loop().await
 }
 
+/// Consume one server frame of the authenticate handshake.
+///
+/// Returns `true` once `Authenticated` arrived and the handshake may advance
+/// to `ProtocolInfo`. The effective game-data encoding travels in `encoding`:
+/// the server reports an unsupported `game_data_format` with a budget-charged
+/// `Error` BEFORE `Authenticated` (pinned wire order, `tests/e2e_tests.rs`)
+/// while downgrading the session to JSON, so the notice adopts JSON in place
+/// and the handshake continues instead of failing a viable session. A second
+/// notice (or any notice for an already-JSON session) stays fatal.
+fn advance_authenticate_handshake(
+    message: ServerMessage,
+    encoding: &mut GameDataEncoding,
+) -> Result<bool, FatalError> {
+    match message {
+        ServerMessage::Authenticated { .. } => {
+            emit(&Event::Authenticated);
+            Ok(true)
+        }
+        ServerMessage::AuthenticationError { error, error_code } => Err(FatalError::protocol(
+            format!("app-ID handshake rejected: {error} ({error_code:?})"),
+        )),
+        ServerMessage::Error {
+            message,
+            error_code: Some(ErrorCode::UnsupportedGameDataFormat),
+        } if *encoding != GameDataEncoding::Json => {
+            *encoding = GameDataEncoding::Json;
+            emit(&Event::Error {
+                message: format!(
+                    "server refused the requested game data format and downgraded the session to JSON: {message}"
+                ),
+            });
+            Ok(false)
+        }
+        other => Err(FatalError::protocol(format!(
+            "expected Authenticated, got {other:?}"
+        ))),
+    }
+}
+
 /// Send `Authenticate` and consume `Authenticated` + `ProtocolInfo`.
-async fn authenticate(ws: &mut WsStream, cli: &Cli) -> Result<u16, FatalError> {
+///
+/// Returns the negotiated protocol version and the effective game-data
+/// encoding (JSON after a server downgrade notice).
+async fn authenticate(ws: &mut WsStream, cli: &Cli) -> Result<(u16, GameDataEncoding), FatalError> {
     let message = ClientMessage::Authenticate {
         app_id: cli.app_id.clone(),
         // The reference client targets public-app_id deployments and never
@@ -581,27 +623,16 @@ async fn authenticate(ws: &mut WsStream, cli: &Cli) -> Result<u16, FatalError> {
         .await
         .map_err(|error| FatalError::connection(format!("{error:#}")))?;
 
-    match next_handshake_message(ws).await? {
-        ServerMessage::Authenticated { .. } => emit(&Event::Authenticated),
-        ServerMessage::AuthenticationError { error, error_code } => {
-            return Err(FatalError::protocol(format!(
-                "app-ID handshake rejected: {error} ({error_code:?})"
-            )));
-        }
-        other => {
-            return Err(FatalError::protocol(format!(
-                "expected Authenticated, got {other:?}"
-            )));
-        }
-    }
+    let mut encoding = cli.game_data_encoding();
+    while !advance_authenticate_handshake(next_handshake_message(ws).await?, &mut encoding)? {}
 
     let negotiated_version = negotiated_version_from(
         next_handshake_message(ws).await?,
         cli.protocol_version,
-        cli.game_data_encoding(),
+        encoding,
     )?;
     emit(&Event::ProtocolInfo { negotiated_version });
-    Ok(negotiated_version)
+    Ok((negotiated_version, encoding))
 }
 
 fn negotiated_version_from(
@@ -612,7 +643,22 @@ fn negotiated_version_from(
     match message {
         // Negotiated v2 omits the additive field by wire contract.
         ServerMessage::ProtocolInfo(info) => match info.protocol_version {
-            None => Ok(2),
+            None => {
+                // The reference client's opaque wire shape is v3-only
+                // (issue #627): the strict binary envelope is the only shape
+                // that carries the sender attribution the success criteria
+                // consume. A v2 negotiation therefore cannot serve an opaque
+                // request, even when the deployment advertises the format
+                // (`ProtocolInfoPayload.game_data_formats` is not
+                // version-gated on the wire).
+                if requested_format != GameDataEncoding::Json {
+                    return Err(FatalError::protocol(format!(
+                        "{} game data requires protocol version 3; the server negotiated v2",
+                        requested_format.as_wire_str()
+                    )));
+                }
+                Ok(2)
+            }
             Some(version) if (2..=3).contains(&version) && version <= offered_version => {
                 // Fail the run before any room is touched when the deployment
                 // does not serve the requested opaque encoding (issue #627);
@@ -3111,23 +3157,23 @@ mod tests {
     use crate::wire;
 
     use super::{
-        apply_selected_pair_probes_before_run_deadline, arm_pair_window, authoritative_peer_delta,
-        automatic_p2p_retry_count, changed_transport_status, checked_deadline,
-        clear_departed_membership_plan, connection_targets_for_generation,
-        consume_join_accountability_preface, direct_plan_rejection_message,
-        harness_aware_base_wake, is_coordinated_p2p_rebuild_attempt, is_current_session_generation,
-        is_terminal_peer_connection_state, needs_ice_gathering_marker, negotiated_version_from,
-        next_handshake_message, note_current_pair_connected, p2p_retry_delay,
-        reject_unsupported_direct_plan_with, require_finalized_membership_plan,
-        requires_authoritative_finalization_plan, resolve_drop_ice_from,
-        restore_reconnected_member, retryable_missing_peers, selected_pair_evidence_deadline,
-        session_plan_peer_ids, should_buffer_signal_for_unpaired_peer,
-        should_defer_success_at_run_deadline, should_report_retry_gap,
-        should_resolve_connected_pair, take_ready_selected_pair_probes, try_buffer_planned_signal,
-        validate_json_negotiated_server_message, validate_p2p_rebuild_retry_count, ExchangeLedger,
-        Orchestrator, PairGeneration, SelectedPairEvidence, SelectedPairProbeDisposition,
-        StartGameGate, EXIT_PROTOCOL_ERROR, MAX_PENDING_SIGNALS_PER_PEER,
-        MAX_PENDING_SIGNALS_TOTAL, PING_INTERVAL, SELECTED_PAIR_POLL,
+        advance_authenticate_handshake, apply_selected_pair_probes_before_run_deadline,
+        arm_pair_window, authoritative_peer_delta, automatic_p2p_retry_count,
+        changed_transport_status, checked_deadline, clear_departed_membership_plan,
+        connection_targets_for_generation, consume_join_accountability_preface,
+        direct_plan_rejection_message, harness_aware_base_wake, is_coordinated_p2p_rebuild_attempt,
+        is_current_session_generation, is_terminal_peer_connection_state,
+        needs_ice_gathering_marker, negotiated_version_from, next_handshake_message,
+        note_current_pair_connected, p2p_retry_delay, reject_unsupported_direct_plan_with,
+        require_finalized_membership_plan, requires_authoritative_finalization_plan,
+        resolve_drop_ice_from, restore_reconnected_member, retryable_missing_peers,
+        selected_pair_evidence_deadline, session_plan_peer_ids,
+        should_buffer_signal_for_unpaired_peer, should_defer_success_at_run_deadline,
+        should_report_retry_gap, should_resolve_connected_pair, take_ready_selected_pair_probes,
+        try_buffer_planned_signal, validate_json_negotiated_server_message,
+        validate_p2p_rebuild_retry_count, ExchangeLedger, Orchestrator, PairGeneration,
+        SelectedPairEvidence, SelectedPairProbeDisposition, StartGameGate, EXIT_PROTOCOL_ERROR,
+        MAX_PENDING_SIGNALS_PER_PEER, MAX_PENDING_SIGNALS_TOTAL, PING_INTERVAL, SELECTED_PAIR_POLL,
     };
     use crate::engine::{
         SelectedCandidatePair, SelectedPairProbeResult, RELIABLE_LABEL, UNRELIABLE_LABEL,
@@ -4329,6 +4375,108 @@ mod tests {
             key: None,
         };
         assert!(negotiated_version_from(application_frame, 3, GameDataEncoding::Json).is_err());
+    }
+
+    #[test]
+    fn handshake_downgrade_error_adopts_json_and_continues() {
+        // The server enforces an unsupported `game_data_format` with a
+        // budget-charged Error BEFORE `Authenticated` (pinned wire order,
+        // server `tests/e2e_tests.rs`) while downgrading the session to JSON.
+        // Before this pin the reference client aborted a viable session with
+        // `expected Authenticated, got Error` (audit 2026-10-04).
+        fn downgrade_notice() -> ServerMessage {
+            serde_json::from_value(json!({
+                "type": "Error",
+                "data": {
+                    "message": "Requested game data format 'rkyv' is not supported. Falling back to JSON.",
+                    "error_code": "UNSUPPORTED_GAME_DATA_FORMAT",
+                },
+            }))
+            .unwrap()
+        }
+
+        let mut encoding = GameDataEncoding::Rkyv;
+        let step = advance_authenticate_handshake(downgrade_notice(), &mut encoding).unwrap();
+        assert!(!step, "a downgrade notice must continue the handshake");
+        assert_eq!(encoding, GameDataEncoding::Json);
+
+        let authenticated = serde_json::from_value::<ServerMessage>(json!({
+            "type": "Authenticated",
+            "data": {
+                "app_name": "default",
+                "rate_limits": { "per_minute": 60, "per_hour": 3600, "per_day": 86400 },
+            },
+        }))
+        .unwrap();
+        assert!(advance_authenticate_handshake(authenticated, &mut encoding).unwrap());
+        assert_eq!(encoding, GameDataEncoding::Json);
+    }
+
+    #[test]
+    fn handshake_stays_fatal_for_other_frames_and_repeat_notices() {
+        // A downgrade notice for an already-JSON session cannot adopt JSON
+        // again: the loop guard makes it a protocol violation, so a
+        // contract-violating server cannot keep the handshake spinning.
+        let mut encoding = GameDataEncoding::Json;
+        let repeat_notice = serde_json::from_value::<ServerMessage>(json!({
+            "type": "Error",
+            "data": {
+                "message": "Falling back to JSON.",
+                "error_code": "UNSUPPORTED_GAME_DATA_FORMAT",
+            },
+        }))
+        .unwrap();
+        assert_eq!(
+            advance_authenticate_handshake(repeat_notice, &mut encoding)
+                .unwrap_err()
+                .code,
+            EXIT_PROTOCOL_ERROR
+        );
+
+        // Every other error code stays fatal at the handshake boundary.
+        let mut encoding = GameDataEncoding::Rkyv;
+        let room_full = serde_json::from_value::<ServerMessage>(json!({
+            "type": "Error",
+            "data": { "message": "full", "error_code": "ROOM_FULL" },
+        }))
+        .unwrap();
+        assert_eq!(
+            advance_authenticate_handshake(room_full, &mut encoding)
+                .unwrap_err()
+                .code,
+            EXIT_PROTOCOL_ERROR
+        );
+        assert_eq!(encoding, GameDataEncoding::Rkyv);
+    }
+
+    #[test]
+    fn opaque_request_on_a_v2_negotiation_is_refused() {
+        // The advertisement arm covers v3; the absent-version (v2) sentinel
+        // must refuse opaque on the client's own v3-only wire-shape
+        // constraint (issue #627), regardless of what the deployment
+        // advertises (`game_data_formats` is not version-gated on the wire).
+        let v2_info = serde_json::from_value::<ServerMessage>(json!({
+            "type": "ProtocolInfo",
+            "data": { "game_data_formats": ["json", "rkyv"] },
+        }))
+        .unwrap();
+        assert_eq!(
+            negotiated_version_from(v2_info, 3, GameDataEncoding::Rkyv)
+                .unwrap_err()
+                .code,
+            EXIT_PROTOCOL_ERROR
+        );
+
+        // JSON requests keep negotiating v2.
+        let v2_info = serde_json::from_value::<ServerMessage>(json!({
+            "type": "ProtocolInfo",
+            "data": { "game_data_formats": ["json", "rkyv"] },
+        }))
+        .unwrap();
+        assert_eq!(
+            negotiated_version_from(v2_info, 3, GameDataEncoding::Json).unwrap(),
+            2
+        );
     }
 
     #[test]

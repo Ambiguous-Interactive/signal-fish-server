@@ -259,6 +259,15 @@ The C1 slice continues with client and deployment boundaries and that row.
   of reconnect, reports, transport fallback, and negotiation. Audit plain/TLS
   server paths and optional features, including `legacy-fullmesh`. Distinguish
   code/test evidence from untested external mobile, Steam, and TURN support.
+  The review is complete (audit ledger, 2026-10-04): the reference clients'
+  downgrade abort (ARM-C033) and the opaque-over-v2 seam are fixed with pins,
+  report/fallback/negotiation families are dispositioned per client, the
+  listener's no-half-started-server order and the `legacy-fullmesh`
+  separation are verified, and the missing TLS-drain and startup-failure
+  coverage is filed instead of open. Client rows are partially reviewed:
+  reconnect initiation stays out of scope by documentation, with the
+  restore-contract exercisability and fault-injection cells tracked as
+  follow-ups.
 
 For each finding:
 

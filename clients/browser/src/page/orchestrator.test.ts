@@ -1,5 +1,6 @@
 import {
   ExchangeLedger,
+  advanceAuthenticateHandshake,
   nextKeepaliveWake,
   scheduleSuccessReleasePoll,
   shouldDeferSuccessAtRunDeadline,
@@ -132,3 +133,55 @@ assert(
 }
 
 console.error('ok - browser timer and latched-exchange state avoids false success');
+
+// ---------------------------------------------------------------------------
+// Authenticate handshake: the server's pinned downgrade notice (#627 family).
+//
+// The server answers an unsupported requested `game_data_format` with a
+// budget-charged `Error` BEFORE `Authenticated` (pinned wire order, server
+// `tests/e2e_tests.rs`) while downgrading the session to JSON. Before this
+// pin the browser client aborted a viable session with
+// "expected Authenticated, got Error" (audit 2026-10-04).
+// ---------------------------------------------------------------------------
+{
+  const downgrade = {
+    type: 'Error',
+    data: {
+      message: "Requested game data format 'rkyv' is not supported. Falling back to JSON.",
+      error_code: 'UNSUPPORTED_GAME_DATA_FORMAT',
+    },
+  };
+
+  let step = advanceAuthenticateHandshake(downgrade, 'rkyv');
+  assert(
+    !('fatal' in step) && !step.authenticated,
+    'a downgrade notice continues the handshake',
+  );
+  assert(
+    !('fatal' in step) && step.effectiveFormat === 'json',
+    'a downgrade notice adopts JSON',
+  );
+
+  const authenticated = { type: 'Authenticated', data: { app_name: 'default' } };
+  step = advanceAuthenticateHandshake(authenticated, 'json');
+  assert(!('fatal' in step) && step.authenticated, 'Authenticated completes the handshake');
+
+  // A notice for an already-JSON session cannot adopt JSON again: the loop
+  // guard makes it fatal so a contract-violating server cannot spin it.
+  step = advanceAuthenticateHandshake(downgrade, 'json');
+  assert('fatal' in step, 'a repeat downgrade notice stays fatal');
+
+  // Any other error code stays fatal at the handshake boundary.
+  const roomFull = { type: 'Error', data: { message: 'full', error_code: 'ROOM_FULL' } };
+  step = advanceAuthenticateHandshake(roomFull, 'rkyv');
+  assert('fatal' in step, 'unrelated error codes stay fatal');
+
+  const rejected = {
+    type: 'AuthenticationError',
+    data: { error: 'nope', error_code: 'UNAUTHORIZED' },
+  };
+  step = advanceAuthenticateHandshake(rejected, 'rkyv');
+  assert('fatal' in step, 'AuthenticationError stays fatal');
+}
+
+console.error('ok - authenticate handshake adopts the pinned JSON downgrade notice');

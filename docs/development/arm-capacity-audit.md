@@ -1785,6 +1785,128 @@ while default coherence and validation breadth (malformed documents,
 env-override interactions) remain with the Config and reload coverage row
 below.
 
+### C1 client and deployment boundaries review (2026-10-04)
+
+At `a0af63b1` (main after #739), reviewed the C1 slice's client and
+deployment boundary families: the four shipped reference clients
+(`clients/browser`, `clients/native`, `clients/fortress`,
+`clients/fortress-wasm`) against the reconnect/report/fallback/negotiation
+contract, and the plain/TLS listener boundary with the optional features.
+Four parallel audits; one reproduced defect class fixed; every family
+carries a disposition.
+
+- **Reference-client downgrade abort (fixed, ARM-C033).** The server
+  refuses an unsupported requested `game_data_format` with a budget-charged
+  `Error` enqueued BEFORE `Authenticated` (pinned wire order, server
+  `tests/e2e_tests.rs`) and downgrades the session to JSON. Both the native
+  and the browser reference client kept a first-frame gate that accepted
+  only `Authenticated`/`AuthenticationError`, so an opaque request against
+  a default (knob-off) deployment aborted a viable, contract-conformant
+  session: native exit 2 `expected Authenticated, got Error` (reproduced
+  live against a default-config server), browser the same fatal at the
+  equivalent gate. The intended pre-room `ProtocolInfo.game_data_formats`
+  diagnostic was unreachable in both clients for this ordering. Both
+  clients now consume exactly one downgrade notice, adopt JSON for every
+  post-handshake wire decision (send shape, inbound classifier, format
+  gate), emit a non-fatal notice event, and stay fatal for repeat notices,
+  other error codes, and authentication refusals. Native pins:
+  `handshake_downgrade_error_adopts_json_and_continues`,
+  `handshake_stays_fatal_for_other_frames_and_repeat_notices`. Browser pin:
+  the `advanceAuthenticateHandshake` block in `orchestrator.test.ts`.
+- **Opaque over a v2 negotiation (fixed with the same sweep).** The native
+  client validated an opaque request against the requested version only;
+  the `ProtocolInfo` `None`-version (v2) arm skipped every format check,
+  and the browser's advertisement gate is version-blind. `game_data_formats`
+  is not version-gated on the wire, so a v2-capped deployment advertising
+  rkyv would have carried the clients' attribution-less binary shape over
+  v2, violating the reference clients' own v3-only opaque constraint
+  (#627). Both clients now refuse an opaque request on a sub-v3
+  negotiation (`opaque_request_on_a_v2_negotiation_is_refused` native; the
+  `negotiated < 3` guard browser-side).
+- **Docs drift (fixed, ARM-C034).** `clients/README.md` still said the
+  Fortress fixtures pin released client 0.8.0/0.9.0; both fixtures pin
+  `=0.13.0` since #588. The browser README described the runtime as
+  JSON-only, which stopped being true when opaque negotiation landed.
+  Both corrected.
+- **Sound families (verified, no defect).** Browser: delivery reports
+  (exact gaps, counter deltas, advisory causality, `RelayStats`),
+  fallback (plan replacement, ICE loss, `PeerTransportStatus`), and
+  version/format selection match the server; reconnect initiation is
+  absent by documented scope (`clients/browser/README.md`), with the
+  inbound `Reconnected`/watermark arms correct at unit level. Native:
+  accountability model, transport fallback (cripple, TURN bad-secret,
+  host-star, Direct rejection), and negotiation happy paths match and are
+  pinned; reconnect initiation likewise absent by documented scope
+  (`docs/guides/building-a-client.md` marks `Reconnect` optional) and the
+  restore contract has zero native exercisability. Fortress fixtures: the
+  "without silent loss" invariant is substantiated by executable CI gates
+  on both stacks (cross-peer ledger equality, contiguity, queue-age and
+  checksum gating; the WASM family adds an asserted expected-`BUSTED`
+  negative control); they are WebSocket-only, so they evidence no
+  ICE-fallback claim.
+- **Deployment boundaries (verified, gaps filed).** The listener cannot
+  half-start: every fallible startup step precedes the bind, the listener
+  socket exists only inside `bind_tcp_listener`, and start logs follow the
+  bind on both paths. TLS cannot be silently enabled (validation refuses a
+  `tls.enabled` config on a non-TLS binary, pinned + CI lane) and TLS-on
+  fails closed pre-bind on invalid material; mTLS token binding is pinned
+  e2e over the real binary. `legacy-fullmesh` is binary-local, spawns a
+  separate unauthenticated plane on port+1 with a loud warning and a
+  collision guard, and cannot be reached from the main router.
+  `trace-validation` and `allocation-tracking` are inert dev seams.
+  Missing coverage filed: the drain→4000 close path over TLS (ARM-C035)
+  and failure-after-partial-startup regressions (bind conflict, invalid
+  PEM post-spawn; ARM-C036) have no test; the Fortress native harness has
+  no negative control and no fault-injection cells.
+
+With this review, the client and deployment boundary slice has recorded
+dispositions: the client rows move to partially reviewed with the missing
+cases named below, and the deployment gaps are filed instead of open.
+
+### ARM-C033 — Reference clients aborted the server's JSON downgrade handshake
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed, medium |
+| Player impact | On any deployment without the opaque-encoding knobs (the defaults), a reference client requesting `rkyv`/`protobuf` could not join at all: the session died at the handshake with `expected Authenticated, got Error` instead of continuing on the JSON floor the protocol guarantees. |
+| Source and revision | `clients/native/src/client.rs` `authenticate` first-frame gate and `clients/browser/src/page/orchestrator.ts` `authenticate` gate, reviewed at `a0af63b1`; server side `src/websocket/connection.rs` (Error enqueued before `Authenticated`, session downgraded to JSON). |
+| Invariant | A refused `game_data_format` downgrades the session to JSON; a client must consume the pinned notice and continue on the downgraded negotiation. |
+| Confidence and reproduction | Native reproduced live: default-config server + `--protocol-version 3 --game-data-format rkyv --create-room` → exit 2 with `expected Authenticated, got Error`. Browser identical by code reading (same gate shape, same pinned server order). |
+| Disposition | Both clients consume exactly one downgrade notice and adopt JSON for every post-handshake wire decision; repeat notices, other error codes, and auth refusals stay fatal. Pins listed in the review section above. |
+
+### ARM-C034 — Client documentation described stale pins and a JSON-only runtime
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed, low |
+| Player impact | None on the wire; client authors were told the Fortress fixtures validate SDK 0.8.0/0.9.0 (actual pin `=0.13.0` since #588) and that the browser runtime never accepts binary frames (opaque negotiation does). |
+| Source and revision | `clients/README.md:20,21,58` and `clients/browser/README.md` binary-frame paragraph, reviewed at `a0af63b1`. |
+| Invariant | Shipped documentation describes the shipped flag surface and pin set. |
+| Confidence and reproduction | Direct file comparison against `clients/fortress/Cargo.toml` / `clients/fortress-wasm/Cargo.toml` and `wire.ts`'s format-conditional classifiers. |
+| Disposition | Both documents corrected in this change. |
+
+### ARM-C035 — The drain→4000 close path over TLS has no test
+
+| Field | Record |
+| --- | --- |
+| State, severity | Deferred, medium |
+| Player impact | A regression in the TLS shutdown wiring or rustls close would give wss players abrupt closes without the coded `4000 server_shutdown`, undetected by CI; the plain-socket contract is pinned, the TLS path is not. |
+| Source and revision | `src/main.rs` TLS serve/shutdown wiring; plain-only contract test `tests/close_code_semantics_e2e.rs`; reviewed at `a0af63b1`. |
+| Invariant | The drain choreography (GoingAway advisory, coded 4000, bounded exit) holds identically over TLS. |
+| Confidence and reproduction | Direct proof of absence: the mTLS e2e spawns the real TLS binary but never exercises shutdown; no TLS drain test exists. No defect claimed. |
+| Disposition | Tracked with the startup-coverage work in the follow-up issue opened with this change. |
+
+### ARM-C036 — Failure after partial startup has no regression coverage
+
+| Field | Record |
+| --- | --- |
+| State, severity | Deferred, low (invariant verified holding at `a0af63b1`) |
+| Player impact | None today; a future regression could ship a half-started or falsely-announced server unnoticed. |
+| Source and revision | `src/main.rs` startup order and `src/websocket/routes.rs::bind_tcp_listener`, reviewed at `a0af63b1`. |
+| Invariant | A fallible startup step after background-task spawn (bind conflict, invalid TLS material) must abort with no listener and no "Server started" announcement. Holds by construction: every `?` precedes the bind and logs follow it. |
+| Confidence and reproduction | Direct proof of absence: no EADDRINUSE / invalid-PEM / log-ordering test exists. |
+| Disposition | Tracked with the TLS close-path work in the follow-up issue opened with this change. |
+
 ## Coverage ledger
 
 All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
@@ -1814,24 +1936,24 @@ neither is a deployed capacity preset.
 
 | Subsystem and paths | Invariant to check | Existing evidence lead | Missing cases / next check | State |
 | --- | --- | --- | --- | --- |
-| Startup and CLI: `src/main.rs`, `src/lib.rs` | Startup rejects bad config; startup failure leaves no listener | `tests/config_and_endpoints_tests.rs` | Failure after partial startup; feature matrix | Unreviewed |
+| Startup and CLI: `src/main.rs`, `src/lib.rs` | Startup rejects bad config; startup failure leaves no listener | `tests/config_and_endpoints_tests.rs`; C1 client and deployment boundaries review above | Startup order verified: every fallible step precedes the bind and start logs follow it, so no half-started server is reachable; failure-after-partial-startup regressions (bind conflict, invalid PEM post-spawn) have no test (ARM-C036) | Partially reviewed |
 | Config and reload: `src/config/**` | Defaults, validation, and reload preserve one coherent policy | `tests/config_and_endpoints_tests.rs`, `tests/config_validation_coverage_scan.rs`; C1 allowlist and key reload boundary review above | SIGHUP key/allowlist swap order and invalid reload are reviewed and pinned; default coherence and validation breadth (malformed documents, env-override interactions) remain | Unreviewed |
 | Authentication: `src/auth/**`, `src/rate_limit.rs` | Unauthorized traffic cannot enter a room; limits count refusals | `tests/auth_integration_tests.rs`, `formal/tla/RateLimitWindow.tla`; C1 authentication admission boundary and rate-limit rejection accounting reviews above | Flood posture, budget-before-credential ordering, refusal closes, the absolute activity-immune auth deadline (`pre_handshake_activity_does_not_extend_the_auth_deadline`), concurrent ceiling conservation (`concurrent_handshakes_conserve_the_app_ceiling_and_count_every_rejection`), and every refusal path's exact-once charge/counter pairing (the drain-window creation refusal's deliberate budget-free shape is now pinned) are reviewed and pinned | Reviewed |
-| Security: `src/security/**`, `src/websocket/token_binding.rs` | Token, origin, TLS, and TURN credential checks fail closed | `tests/mtls_token_binding_e2e.rs`, `fuzz/fuzz_targets/fuzz_reconnect_tokens.rs`; C1 token rotation boundary review above | Rotation ordering and concurrent-claim refusals are reviewed and pinned; TLS variants and connect-token claim boundaries remain | Unreviewed |
+| Security: `src/security/**`, `src/websocket/token_binding.rs` | Token, origin, TLS, and TURN credential checks fail closed | `tests/mtls_token_binding_e2e.rs`, `fuzz/fuzz_targets/fuzz_reconnect_tokens.rs`; C1 token rotation boundary and client/deployment boundaries reviews above | Rotation ordering and concurrent-claim refusals are reviewed and pinned; the TLS-variant posture is verified (silent enable impossible, cert/key fail closed pre-bind, mTLS binding pinned e2e over the real binary) while the drain close path over TLS stays untested (ARM-C035); connect-token claim boundaries remain | Partially reviewed |
 | Protocol: `src/protocol/**`, `src/trace_validation.rs` | V2/V3 decoding, wire bytes, and delivery class match contract | `tests/v2_wire_golden.rs`, `tests/v3_wire_properties.rs`, `fuzz/fuzz_targets/decode_protocol.rs` | Malformed/deep frames, mixed format boundaries | Unreviewed |
 | Room and player storage: `src/database/**` | Membership and room limits stay atomic and app isolated | `tests/integration_tests.rs`, `tests/model_based_state_machines.rs`; C1 admission-limit review above | Other adapters, rollback, and leave/disconnect races remain | Unreviewed |
 | Room lifecycle and moderation: `src/server/room_service.rs`, `moderation.rs`, `spectator_service.rs`, `spectator_handlers.rs` | Join, leave, kick, ban, spectator state and ownership agree | `tests/lobby_integration_tests.rs`, `src/server/room_service_tests.rs`; C1 admission-limit, leave/disconnect ordering, and identity-slice completion reviews above | ARM-C001–C004 fixed in spectator and room-code seams; identity cases (concurrent limits, join-only, leave/disconnect, spectator transitions, kick/ban races, application isolation) reviewed and pinned or derived; storage-fault interleavings on other adapters remain | Partially reviewed |
 | Readiness and gameplay: `src/server/ready_state.rs`, `authority.rs`, `session_policy.rs`, `signaling.rs` | Membership and transport changes invalidate stale plans/readiness | `tests/v3_session_plan_e2e.rs`, `formal/tla/SignalFishSession.tla`; C1 gameplay-transitions review above | Start/leave, authority loss, v2/v3 negotiation, capability intersections, stale reports, downgrade reconnects, and publication order are reviewed and pinned (including the spectator start-authorization coupling); shared `src/server.rs` state seams remain | Partially reviewed |
 | Relay routing: `src/server/game_data.rs`, `message_router.rs`, `messaging.rs`, `relay_policy.rs` | Each permitted message reaches only valid peers with correct sequence/class | `tests/v3_game_data_sequencing_e2e.rs`, `tests/mixed_encoding_relay_e2e.rs`; C1 cross-room stall fairness, mixed encoding/unsupported conversion, and permitted volatile loss reviews above | Slow-recipient isolation, cross-room stall fairness, the mixed encoding/unsupported conversion matrix (direct cohorts, lossless fallback, opaque refusal with exact gap plus advisory, pre-v3 advisory-only wire), and real-socket volatile eviction with exact reports plus a non-zero per-connection `dropped_for_you` (`flooded_nonreading_recipient_observes_exact_volatile_gaps_and_dropped_for_you`) are reviewed and pinned | Reviewed |
 | Coordination and queues: `src/coordination/**`, `src/distributed.rs`; the in-memory coordinator seams in `src/server.rs` | Transaction and queue failure is explicit; one room cannot strand another | `tests/relay_backpressure_e2e.rs`, `formal/tla/RoomMessageTransaction.tla`; C1 room-event duplicate-delivery, latest coalescing keys/generations, and transaction reservation/commit cancellation/panic reviews above | Lane job exactly-once and no lease re-run are dispositioned and pinned (`interleaved_awaits_deliver_each_lobby_broadcast_exactly_once`); cross-epoch gap ranges stay distinct per epoch (`cross_epoch_gaps_of_one_sender_stay_distinct_ranges`); latest key composition, generation shielding, supersession, saturation, and counter conservation are reviewed and pinned; cancellation/panic at reservation and commit are reviewed, the silent panic-accounting class is fixed, and all three fixed seams are pinned (`panicking_commit_hook_releases_and_accounts_every_reservation`, `panicking_phase_callback_accounts_remaining_frames_and_never_delivers_phase_one`, `panicking_broadcast_replay_hook_releases_and_accounts_every_reservation`); other `src/server.rs` state seams remain with their own rows | Reviewed |
-| WebSocket ingress and egress: `src/websocket/**` | Bounded frames, priority control, close and drain semantics hold | `tests/transport_frame_limits_e2e.rs`, `tests/slow_consumer_no_cascade_e2e.rs`; C1 parser-boundary and error/logging pressure reviews above (ARM-C030 bounded-depth MessagePack decode; ARM-C031/ARM-C032 log hardenings) | Slow reader, batching age, TLS close paths | Partially reviewed |
+| WebSocket ingress and egress: `src/websocket/**` | Bounded frames, priority control, close and drain semantics hold | `tests/transport_frame_limits_e2e.rs`, `tests/slow_consumer_no_cascade_e2e.rs`; C1 parser-boundary, error/logging pressure, and client/deployment boundaries reviews above (ARM-C030 bounded-depth MessagePack decode; ARM-C031/ARM-C032 log hardenings) | Slow reader, batching age; the drain→4000 close path over TLS is the named remaining case (ARM-C035) | Partially reviewed |
 | Reconnect and retry: `src/reconnection.rs`, `src/retry.rs`, `src/server/reconnection_service.rs` | Claims have one owner; replay and stale routes cannot leak or misroute | `tests/reconnect_window_races_e2e.rs`, `formal/tla/ReconnectionClaimLifecycle.tla`; C1 reaper-ordering, claim-expiry, failed-restore, token-rotation, reconnect epoch/sequence, and inactive-record/claim-retention reviews above | Simultaneous claim, expiry during claim, failed restore/retry, rotation boundaries, reconnect epoch/sequence transitions (including cross-epoch gap accounting), the pre-issued-token teardown discards (layered, hypothesis falsified), and claim/pending-detach retention lifecycles are reviewed and pinned; the theoretical owned-task cancellation residual is #738; `src/retry.rs` backoff seams and multi-failure detach accounting on failing backends remain | Partially reviewed |
 | Maintenance and deadlines: `src/server/maintenance.rs`, `heartbeat.rs`, `dashboard_cache.rs`, `src/deadline.rs` | Expiry and cleanup are bounded; live state survives sweeps | `formal/tla/RoomLifecycleGC.tla`, `tests/clock_source_scan.rs`; C1 maintenance and deadlines expiry boundary review above | Expiry boundaries and clock sources are reviewed and pinned (reaper pair boundary, zero-timeout disable, monotonic windows, wall-clock-step immunity, overflow); churn growth and dashboard cost remain measurement work | Partially reviewed |
 | Metrics and logging: `src/metrics.rs`, `src/logging.rs`, `src/websocket/metrics.rs`, `prometheus.rs` | Counters report outcomes; labels and logs stay bounded and safe | `tests/config_and_endpoints_tests.rs`, `tests/websocket_test_helpers/prometheus_scrape.rs`; C1 metrics label cardinality and error/logging pressure reviews above (ARM-C031/ARM-C032 fixed the rejected-ID log forgery and the unthrottled undeliverable-relay warning) | Cardinality is bounded with pinned lifecycles; hot-path log content, amplification, and throttle cadences are reviewed and pinned or dispositioned | Reviewed |
 | Admin and shutdown: `src/server/admin.rs`, `shutdown.rs`, `connection_manager.rs` | Drain closes all owned tasks and reports queued work accurately | `tests/close_code_semantics_e2e.rs`, `formal/tla/ConnectionTeardown.tla`; C1 drain/shutdown review above | The drain choreography, the reconnect-commit fence, close ordering with queued data, and the drain reservation accounting are reviewed, fixed where defective, and pinned; a distinct 4000-close counter remains follow-up observability | Partially reviewed |
-| Browser client: `clients/browser/src/**` | Reconnect, delivery reports, fallback, and negotiation match server | `clients/browser/src/page/*.test.ts` | Browser network fault and client revision matrix | Unreviewed |
-| Native client: `clients/native/src/**` | Same client contract across native sockets | `clients/native/tests/interop_e2e.rs` | Restore and mixed-encoding error paths | Unreviewed |
-| Fortress clients: `clients/fortress/src/**`, `clients/fortress-wasm/src/**` | Reference peers handle relay and fallback without silent loss | `clients/fortress/README.md`, `clients/fortress-wasm/README.md` | Cross-stack fault and resource cases | Unreviewed |
+| Browser client: `clients/browser/src/**` | Reconnect, delivery reports, fallback, and negotiation match server | `clients/browser/src/page/*.test.ts`; C1 client and deployment boundaries review above | Reports, fallback, and negotiation verified and pinned (plus the ARM-C033 downgrade fix and its pin); reconnect initiation absent by documented scope with inbound arms unit-pinned; a live browser accountability cell, loss→recovery transitions, and browser-as-host remain | Partially reviewed |
+| Native client: `clients/native/src/**` | Same client contract across native sockets | `clients/native/tests/interop_e2e.rs`; C1 client and deployment boundaries review above | Accountability model, fallback (cripple/TURN/host-star/Direct rejection), and negotiation verified and pinned (plus the ARM-C033 downgrade fix, the v2-opaque guard, and their pins); restore/reconnect end-to-end, cross-format advisory consumption, and the MessagePack cohort remain | Partially reviewed |
+| Fortress clients: `clients/fortress/src/**`, `clients/fortress-wasm/src/**` | Reference peers handle relay without silent loss | `clients/fortress/tests/multiprocess.rs`, `clients/fortress-wasm/harness.mjs`, both interop workflows; C1 client and deployment boundaries review above | Silent-loss detection substantiated by executable CI gates on both stacks (contiguity, cross-peer ledger equality, queue-age/checksum gating; WASM adds an asserted expected-`BUSTED` control); fixtures are WebSocket-only and evidence no ICE-fallback claim; drain/restart and reconnect cells and a native negative control remain (issue opened with this change) | Partially reviewed |
 
 `src/server.rs` owns shared server state across the server rows. `src/websocket/routes.rs`
 and `src/main.rs` own the plain/TLS listener boundary. `src/config/coordination.rs`
