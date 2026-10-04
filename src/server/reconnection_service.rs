@@ -804,7 +804,26 @@ impl EnhancedGameServer {
                             if let (Some(manager), Some(claim)) =
                                 (&server.reconnection_manager, recovery.claim)
                             {
-                                let _ = manager.release_reconnection_claim(&claim).await;
+                                // The record action must mirror the
+                                // supervisor's own commit-state branch. A
+                                // committed terminal response already spent
+                                // the one-time token, so the record is
+                                // completed (consumed) — releasing it would
+                                // reopen a spent credential for a retry that
+                                // re-restores an already-delivered session.
+                                // An uncommitted transaction leaves the
+                                // token unspent, so the record is released
+                                // for a fresh retry. Both manager calls are
+                                // claim-id-checked and degrade to warn
+                                // no-ops when the supervisor already
+                                // performed the action before panicking.
+                                if terminal_response_committed
+                                    .load(std::sync::atomic::Ordering::Acquire)
+                                {
+                                    let _ = manager.complete_claimed_reconnection(&claim).await;
+                                } else {
+                                    let _ = manager.release_reconnection_claim(&claim).await;
+                                }
                             }
                             false
                         }
@@ -817,7 +836,7 @@ impl EnhancedGameServer {
             Err(error) => {
                 // Reaching this arm requires the task to unwind outside its
                 // `catch_unwind` (whose supervisor body is itself
-                // `catch_unwind`-guarded with a direct claim-release
+                // `catch_unwind`-guarded with a commit-state-aware claim
                 // fallback) or to be cancelled — and nothing aborts this
                 // inline-awaited handle, so cancellation only happens at
                 // runtime shutdown, where all in-memory claim state dies with

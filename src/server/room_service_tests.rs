@@ -5861,6 +5861,57 @@ async fn supervisor_panic_still_releases_the_reconnect_claim_for_a_fresh_retry()
     );
 }
 
+/// When the terminal response was already committed, the one-time token is
+/// spent: the supervisor-panic fallback must complete (consume) the record,
+/// not release it — a released record would keep the token valid for a
+/// retry that re-restores an already-delivered session (PR #743 review).
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn supervisor_panic_after_terminal_consumes_the_delivered_token() {
+    let fixture = correlated_reconnect_panic_fixture().await;
+    let operation_id = uuid::Uuid::from_u128(0x48201);
+    fixture
+        .server
+        .panic_owned_room_operation_for_test(OwnedRoomOperationPanicPoint::ReconnectAfterTerminal);
+    fixture.server.panic_owned_room_supervisor_for_test();
+
+    assert!(
+        !fixture
+            .server
+            .handle_reconnect_with_identity_operation(
+                &fixture.current_player_id,
+                &fixture.reconnect_player_id,
+                &fixture.room_id,
+                &fixture.token,
+                Arc::clone(&fixture.effective_player_id),
+                Some(operation_id),
+            )
+            .await
+    );
+
+    let reconnection_manager = fixture
+        .server
+        .reconnection_manager()
+        .expect("reconnection is enabled");
+    assert!(
+        !reconnection_manager
+            .has_pending_reconnection(&fixture.reconnect_player_id)
+            .await,
+        "a delivered reconnect must consume its record, leaving nothing to retry"
+    );
+    assert!(
+        reconnection_manager
+            .validate_reconnection(
+                &fixture.reconnect_player_id,
+                &fixture.room_id,
+                &fixture.token,
+            )
+            .await
+            .is_err(),
+        "the delivered token must not reopen after a supervisor panic"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn correlated_leave_retains_room_gate_across_outer_completion_failure() {

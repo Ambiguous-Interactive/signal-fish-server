@@ -242,8 +242,9 @@ on all exit paths, the pre-issued-token teardown-leak hypothesis was
 falsified by the layered room-removal and maintenance discards, and the
 owned-task supervisor-panic strand residual (#738) is fixed (ARM-C037): the
 reconnect transaction's in-task unwind supervisor is itself
-`catch_unwind`-guarded with a direct claim-release fallback, red-proven and
-pinned. The
+`catch_unwind`-guarded with a commit-state-aware record fallback — a
+delivered terminal consumes the record, an uncommitted one is released for
+retry — red-proven and pinned. The
 rate-limit rejection accounting family is reviewed (audit ledger,
 2026-10-04): every refusal path charges exactly once and every counter
 lands on the refusing budget; the drain-window creation refusal's

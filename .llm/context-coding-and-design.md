@@ -65,3 +65,12 @@ Key rules:
   `src/distributed.rs`). When a typed error also carries the wire-facing
   `reason`, make `Display` reproduce it so the type is the single source of truth
   for both code and text.
+- A recovery/cleanup fallback must mirror the commit-state branch of the path
+  it recovers -- never apply one blanket undo. When a panic-recovery fallback
+  resolves one-time credential state (reconnect claims/tokens), a committed
+  terminal response means the credential is spent and the record must be
+  consumed; an uncommitted one is released for retry. The #738
+  supervisor-panic fallback's first shape released unconditionally and would
+  have reopened a delivered token -- caught in PR #743 review and red-proven
+  by `supervisor_panic_after_terminal_consumes_the_delivered_token` (see the
+  ARM-C037 ledger record).

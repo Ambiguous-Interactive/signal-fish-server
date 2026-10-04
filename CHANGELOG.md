@@ -119,10 +119,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recovery itself escaped as a task failure while the claim snapshot still
   held the reservation — and claimed records are exempt from every expiry
   surface, so the player's reconnect would answer `AlreadyInProgress` until
-  restart. The supervisor is now panic-guarded and its fallback releases the
-  claim directly, leaving the pending reconnect record fresh for an
-  immediate retry. Successful and ordinary panic recovery are unchanged
-  (#738, ARM-C037).
+  restart. The supervisor is now panic-guarded and its fallback resolves the
+  record by the transaction's commit state: a delivered terminal response
+  consumes the record (the one-time token stays spent), an uncommitted one
+  is released for an immediate retry. Successful and ordinary panic
+  recovery are unchanged (#738, ARM-C037).
 
 - Reference clients: the native and browser reference clients now apply the
   server's JSON downgrade notice instead of aborting the handshake. The
