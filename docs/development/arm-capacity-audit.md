@@ -2201,31 +2201,43 @@ load only after generator negative controls pass. Keep load generators outside
 the server's CPU and memory limits. Record unavailable counters and invalid
 runs; do not omit them. AWS validation remains required for deployment claims.
 
-## Next two PR contracts
+## Next PR contract
 
-**C1 first slice: identity and membership ([#647](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/647)).**
-Start with concurrent joins at
-room and app limits, `join_only` stale-directory behavior, and leave/disconnect
-races. Inspect `src/database/mod.rs`, `src/server/room_service.rs`,
-`src/server/connection_manager.rs`, `src/server/message_router.rs`, and
-`src/websocket/connection.rs` at the
-reviewed SHA. Use barriers or paused time to reproduce any violated invariant;
-test both accepted and refused outcomes, cleanup, and application isolation.
-Update the relevant rows and finding records. A confirmed player-impacting
-defect blocks capacity tooling until fixed or separately tracked with a
-mitigation.
+**C1 first slice: identity and membership ([#647](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/647)). COMPLETE**
+(2026-10-01, five slices through 2026-10-04; see the review records above and
+the client-row follow-ups in #741.)
 
-**C2 first runner PR: standalone real-socket foundation
-([#648](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/648)).**
-Accept endpoint,
-seed, room/player count, protocol/encoding, payload bytes, sender rate,
-delivery class, warm-up, duration, churn/reconnect schedule, and output
-directory. Spawn or connect to
-a release server process; keep generators outside its resource limits. Use a
-single monotonic clock for scheduled send and receipt pairs. Emit a manifest,
-interval samples, latency histogram, exact per-recipient outcomes, unsent and
-outstanding work, and server/generator resource diagnostics. A small reliable
-relay scenario must pass. Inject missing, duplicate, misrouted, and delayed
-deliveries, a slow reader, generator saturation, and server termination; each
-must fail or invalidate the run with an explicit reason. Replaying artifacts
-must reproduce the outcome summary. Do not add a production wire field.
+**C2 runner foundation: LANDED.** The standalone delivery-aware runner lives
+at `tests/capacity_runner/` (issue #648, first runner PR). It accepts the full
+contract input set (endpoint, seed, room/player count, protocol/encoding,
+payload bytes, sender rate, delivery class, warm-up, duration, churn/reconnect
+schedule, output directory; `SIGNAL_FISH_CAPACITY_*` environment variables for
+standalone capacity-host use), spawns the release server binary as a separate
+process or connects to an external endpoint, schedules offered traffic
+independently of response completion with a generator-lag bound, measures
+scheduled send to same-clock recipient receipt on one monotonic run epoch,
+and writes versioned artifacts: `manifest.json` (schema, run ID, config,
+binary/config overlay hashes, toolchain, host, features, clock method),
+`deliveries.jsonl` (tagged sends/receipts/disconnects/faults),
+`intervals.jsonl` (scraped delivery counters, server RSS, cgroup memory,
+generator RSS, with unavailable counters recorded as null or explicit
+scrape errors), `summary.json` (the oracle outcome), and
+`latency-histogram-v2.hdr`. A replay
+of the raw events reproduces the outcome summary exactly (`artifacts::replay`).
+The small reliable relay scenario passes and every registered negative
+control invalidates with its explicit reason: missing, duplicate, misrouted,
+and out-of-order deliveries (deterministic oracle controls), a paused
+generator (lag lands in scheduled-send latency, not reduced offered load),
+generator saturation (explicit reason with worst lag and unsent work), server
+termination (declared fault, gap-free prefixes preserved), and a slow reader
+(eviction recorded and accounted by the server's
+`websocket_slow_consumer_disconnects_total` counter).
+
+**C2 next runner PR: latest/volatile delivery classes and churn/reconnect
+schedules (#648).** Extend `DeliveryClass` with the latest/volatile contract
+(permitted loss, supersession, and report validation, never reliable
+semantics) and `ChurnSchedule` with the reconnect-burst and room-replacement
+schedules their C3 cells need, with red-first controls for each new permitted
+outcome. Add per-recipient latency-tail reporting to the summary so
+aggregates cannot hide a starved room, and record queue depth/age and
+ingress/egress bytes in the interval samples before any C3 capacity claim.

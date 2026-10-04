@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Capacity runner: a standalone, delivery-aware runner for the ARM capacity
+  campaign (#648, #636 C2). It spawns the server binary as a separate
+  process (or connects to an external endpoint), drives deterministic
+  scheduled relay traffic over real WebSocket clients on one monotonic
+  clock, and writes versioned run artifacts — manifest with binary/config
+  hashes and host identity, per-send/receipt event log, interval server
+  resource samples, an HdrHistogram latency artifact, and an outcome summary
+  that a replay of the raw events reproduces exactly. Missing, duplicate,
+  misrouted, and out-of-order deliveries each invalidate with an explicit
+  reason naming the first offending key; a send delay inside the generator
+  bound stays a valid measurement and appears in the scheduled-send lag,
+  while generator saturation, a slow reader (accounted by the server's
+  slow-consumer counter), and server termination each invalidate with an
+  explicit reason. Configure through `SIGNAL_FISH_CAPACITY_*` variables; see
+  `tests/capacity_runner/` and `docs/development/arm-capacity-audit.md`.
+
 - Metrics: `websocket_shutdown_disconnects` counts every registered
   connection torn down with the server-initiated shutdown close (code 4000)
   (#727). The drain close fan-out and any close a drain superseded become
