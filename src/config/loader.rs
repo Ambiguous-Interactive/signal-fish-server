@@ -33,8 +33,8 @@ use std::path::Path;
 ///   misreports it as absent,
 /// - a value whose type does not match its config field after merging and
 ///   environment overrides,
-/// - a `SIGNAL_FISH__` override nested deeper than
-///   [`MAX_ENV_OVERRIDE_DEPTH`], or two case-variant overrides of the same
+/// - a `SIGNAL_FISH__` override nested deeper than 16 `__`-separated levels
+///   (`MAX_ENV_OVERRIDE_DEPTH`), or two case-variant overrides of the same
 ///   knob (iteration order over `std::env::vars()` is unspecified).
 ///
 /// **Note:** Validation errors from [`validate_config_security`] are logged to stderr but are
