@@ -267,11 +267,12 @@ The C1 slice continues with client and deployment boundaries and that row.
   downgrade abort (ARM-C033) and the opaque-over-v2 seam are fixed with pins,
   report/fallback/negotiation families are dispositioned per client, the
   listener's no-half-started-server order and the `legacy-fullmesh`
-  separation are verified, and the missing TLS-drain and startup-failure
-  coverage is filed instead of open. Client rows are partially reviewed:
+  separation are verified, and the TLS-drain and startup-failure coverage
+  gaps are closed over the real binary (`tests/tls_deployment_boundaries_e2e.rs`,
+  ARM-C035/ARM-C036, issue #740). Client rows are partially reviewed:
   reconnect initiation stays out of scope by documentation, with the
   restore-contract exercisability and fault-injection cells tracked as
-  follow-ups.
+  follow-ups (#741).
 
 For each finding:
 

@@ -23483,8 +23483,10 @@ test-group = 'powershell-subprocess'",
     );
     assert!(
         normalized.contains("binary(mtls_token_binding_e2e)")
+            && normalized.contains("binary(tls_deployment_boundaries_e2e)")
             && normalized.contains("test-group = 'process-spawning'"),
-        "the real-listener mTLS suite must run in nextest's serialized process-spawning group"
+        "every real-binary spawn suite (mTLS, TLS deployment boundaries) must run in \
+         nextest's serialized process-spawning group"
     );
     assert!(
         normalized.contains(
