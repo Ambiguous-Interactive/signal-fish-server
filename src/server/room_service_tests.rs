@@ -9219,6 +9219,33 @@ async fn spectator_disconnect_wins_race_and_the_late_leave_detaches_nothing() {
 async fn draining_server_rejects_room_creation_without_consuming_join_locks() {
     let server = create_test_server().await;
 
+    // A room that exists before the drain flip: its joins stay admitted in
+    // the grace window, so the same window can contrast the charged join
+    // path with the budget-free creation refusal.
+    let (host_id, mut host_receiver) =
+        register_client(&server, "127.0.0.1:48008".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &host_id,
+            "test-game".to_string(),
+            Some("DRN100".to_string()),
+            "host".to_string(),
+            Some(4),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await;
+    let joined = timeout(Duration::from_secs(1), host_receiver.recv())
+        .await
+        .expect("channel still open")
+        .expect("host join message present");
+    assert!(
+        matches!(joined.as_ref(), ServerMessage::RoomJoined(_)),
+        "host room must exist before the drain flips"
+    );
+
     let drain = server.begin_shutdown_drain();
     assert!(
         drain.started_by_this_call,
@@ -9289,7 +9316,54 @@ async fn draining_server_rejects_room_creation_without_consuming_join_locks() {
                 .expect("room cap lock check succeeds"),
             "drain rejection should happen before room-cap lock acquisition"
         );
+        // The creation fast-path also precedes the join/creation budget
+        // charge: a drain-window create flood is bounded by the charged
+        // error-reply gate (issue #518), not by the join bucket.
+        assert!(
+            server
+                .rate_limiter
+                .get_player_stats(&player_id)
+                .await
+                .is_none(),
+            "a drain-window creation refusal must not spend or create join/creation budget state"
+        );
     }
+
+    // The deliberate asymmetry: an existing-room join in the same window is
+    // admitted and pays the join budget like every join frame.
+    let (joiner_id, mut joiner_receiver) =
+        register_client(&server, "127.0.0.1:48011".parse().unwrap()).await;
+    server
+        .handle_join_room(
+            &joiner_id,
+            "test-game".to_string(),
+            Some("DRN100".to_string()),
+            "joiner".to_string(),
+            Some(4),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await;
+    let admitted = timeout(Duration::from_secs(1), joiner_receiver.recv())
+        .await
+        .expect("channel still open")
+        .expect("drain-window join message present");
+    assert!(
+        matches!(admitted.as_ref(), ServerMessage::RoomJoined(_)),
+        "an existing-room join stays admitted during drain"
+    );
+    let stats = server
+        .rate_limiter
+        .get_player_stats(&joiner_id)
+        .await
+        .expect("an admitted join creates the player's budget entry");
+    assert_eq!(
+        stats.join_attempts, 1,
+        "the admitted drain-window join spends exactly one join attempt"
+    );
+    assert_eq!(stats.room_creations, 0);
 }
 
 #[tokio::test(start_paused = true)]

@@ -230,15 +230,31 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   attribution is allowlist-bounded with #552 pruning, client-chosen
   game-name maps are response-bounded — and the shutdown-drain close
   fan-out is exported as `websocket_shutdown_disconnects` (#727).
-  The slice continues with queue/replay bounds and parser boundaries. The
-parser-boundary families are reviewed (audit ledger, 2026-10-03): every
+  The parser-boundary families are reviewed (audit ledger, 2026-10-03): every
 ingress parser carries a bounded or flat decode — the confirmed exception
 (rmp-serde recursion into a recursive target) is fixed as ARM-C030 with an
 iterative depth scanner shared by the JSON conversion path and the
 token-bound binary envelope, red-proven by a stack-overflow abort and pinned
-at the exact 128-level boundary. The slice continues with inactive records,
-pending detach/claim retention, task ownership, rate-limit rejection
-accounting, and error/logging paths under pressure.
+at the exact 128-level boundary. The inactive-record, pending detach/claim
+retention, and task-ownership families are reviewed (audit ledger,
+2026-10-04): every audited map and task carries a verified removal or abort
+on all exit paths, the pre-issued-token teardown-leak hypothesis was
+falsified by the layered room-removal and maintenance discards, and the one
+theoretical owned-task cancellation residual is tracked as #738. The
+rate-limit rejection accounting family is reviewed (audit ledger,
+2026-10-04): every refusal path charges exactly once and every counter
+lands on the refusing budget; the drain-window creation refusal's
+deliberate budget-free shape (bounded by the charged error-reply gate) is
+now pinned. The error and logging under pressure family is reviewed (audit
+ledger, 2026-10-04): the rejected app-ID log forgery is fixed (ARM-C031,
+Debug-escaped), the unthrottled per-recipient undeliverable warning now
+rides the advisory cadence (ARM-C032), and reply amplification, log
+content, and volume carry pinned or dispositioned bounds. The
+resource-and-input-safety slice closes except its configuration-validation
+family: reload consistency carries the 2026-10-01 allowlist/key reload
+review; default coherence and validation breadth (malformed documents,
+env-override interactions) remain with the Config and reload coverage row.
+The C1 slice continues with client and deployment boundaries and that row.
 - [ ] **Client and deployment boundaries:** inspect reference-client handling
   of reconnect, reports, transport fallback, and negotiation. Audit plain/TLS
   server paths and optional features, including `legacy-fullmesh`. Distinguish

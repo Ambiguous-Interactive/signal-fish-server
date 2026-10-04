@@ -2656,7 +2656,12 @@ pub(super) async fn handle_socket(
                                     }
                                 }
                                 Err(e) => {
-                                    tracing::warn!(%active_player_id, %app_id, "Public app ID rejected: {:?}", e);
+                                    // Debug-escaped deliberately: this arm
+                                    // runs when the log-safety gate already
+                                    // rejected the ID, so a raw `%` field
+                                    // would let control characters forge
+                                    // this log line.
+                                    tracing::warn!(%active_player_id, ?app_id, "Public app ID rejected: {:?}", e);
 
                                     // Send error response.
                                     // The AppIdExpired, AppIdRevoked, and AppIdSuspended
