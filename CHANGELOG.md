@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bound stays a valid measurement and appears in the scheduled-send lag,
   while generator saturation, a slow reader (accounted by the server's
   slow-consumer counter), and server termination each invalidate with an
-  explicit reason. Configure through `SIGNAL_FISH_CAPACITY_*` variables; see
+  explicit reason. Configure through `CAPACITY_RUNNER_*` variables; see
   `tests/capacity_runner/` and `docs/development/arm-capacity-audit.md`.
 
 - Metrics: `websocket_shutdown_disconnects` counts every registered

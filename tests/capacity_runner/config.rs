@@ -272,7 +272,7 @@ impl RunConfig {
         micros(self.duration).div_ceil(self.period_micros())
     }
 
-    /// Build the run config from `SIGNAL_FISH_CAPACITY_*` environment
+    /// Build the run config from `CAPACITY_RUNNER_*` environment
     /// variables so the runner is standalone on a capacity host:
     ///
     /// `ENDPOINT` (optional), `SEED`, `ROOMS`, `PLAYERS`, `ENCODING`
@@ -285,33 +285,33 @@ impl RunConfig {
     /// manifest is refused).
     pub fn from_env() -> Result<Self, String> {
         let var = |name: &str| -> Result<Option<String>, String> {
-            match std::env::var(format!("SIGNAL_FISH_CAPACITY_{name}")) {
+            match std::env::var(format!("CAPACITY_RUNNER_{name}")) {
                 Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
                 Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
-                Err(error) => Err(format!("SIGNAL_FISH_CAPACITY_{name}: {error}")),
+                Err(error) => Err(format!("CAPACITY_RUNNER_{name}: {error}")),
             }
         };
         let endpoint = var("ENDPOINT")?;
         let seed = var("SEED")?
             .map(|raw| raw.parse::<u64>())
             .transpose()
-            .map_err(|error| format!("SIGNAL_FISH_CAPACITY_SEED: {error}"))?;
+            .map_err(|error| format!("CAPACITY_RUNNER_SEED: {error}"))?;
         let rooms = var("ROOMS")?
             .map(|raw| raw.parse::<u32>())
             .transpose()
-            .map_err(|error| format!("SIGNAL_FISH_CAPACITY_ROOMS: {error}"))?;
+            .map_err(|error| format!("CAPACITY_RUNNER_ROOMS: {error}"))?;
         let players = var("PLAYERS")?
             .map(|raw| raw.parse::<u32>())
             .transpose()
-            .map_err(|error| format!("SIGNAL_FISH_CAPACITY_PLAYERS: {error}"))?;
+            .map_err(|error| format!("CAPACITY_RUNNER_PLAYERS: {error}"))?;
         let payload = var("PAYLOAD_BYTES")?
             .map(|raw| raw.parse::<u32>())
             .transpose()
-            .map_err(|error| format!("SIGNAL_FISH_CAPACITY_PAYLOAD_BYTES: {error}"))?;
+            .map_err(|error| format!("CAPACITY_RUNNER_PAYLOAD_BYTES: {error}"))?;
         let rate = var("RATE_PER_SENDER")?
             .map(|raw| raw.parse::<f64>())
             .transpose()
-            .map_err(|error| format!("SIGNAL_FISH_CAPACITY_RATE_PER_SENDER: {error}"))?;
+            .map_err(|error| format!("CAPACITY_RUNNER_RATE_PER_SENDER: {error}"))?;
         let encoding = match var("ENCODING")? {
             Some(raw) => Some(Encoding::parse(&raw)?),
             None => None,
@@ -327,20 +327,20 @@ impl RunConfig {
         let warmup_secs = var("WARMUP_SECS")?
             .map(|raw| raw.parse::<f64>())
             .transpose()
-            .map_err(|error| format!("SIGNAL_FISH_CAPACITY_WARMUP_SECS: {error}"))?;
+            .map_err(|error| format!("CAPACITY_RUNNER_WARMUP_SECS: {error}"))?;
         let duration_secs = var("DURATION_SECS")?
             .map(|raw| raw.parse::<f64>())
             .transpose()
-            .map_err(|error| format!("SIGNAL_FISH_CAPACITY_DURATION_SECS: {error}"))?;
+            .map_err(|error| format!("CAPACITY_RUNNER_DURATION_SECS: {error}"))?;
         let output_dir = var("OUTPUT_DIR")?;
         let lag_bound_ms = var("LAG_BOUND_MS")?
             .map(|raw| raw.parse::<u64>())
             .transpose()
-            .map_err(|error| format!("SIGNAL_FISH_CAPACITY_LAG_BOUND_MS: {error}"))?;
+            .map_err(|error| format!("CAPACITY_RUNNER_LAG_BOUND_MS: {error}"))?;
         let sample_ms = var("SAMPLE_INTERVAL_MS")?
             .map(|raw| raw.parse::<u64>())
             .transpose()
-            .map_err(|error| format!("SIGNAL_FISH_CAPACITY_SAMPLE_INTERVAL_MS: {error}"))?;
+            .map_err(|error| format!("CAPACITY_RUNNER_SAMPLE_INTERVAL_MS: {error}"))?;
 
         Ok(RunConfig {
             endpoint,

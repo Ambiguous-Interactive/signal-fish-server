@@ -17,7 +17,7 @@
 //!   explicit reason.
 //!
 //! Standalone use on a capacity host (release profile, external server):
-//! `SIGNAL_FISH_CAPACITY_*` environment variables shape a run — see
+//! `CAPACITY_RUNNER_*` environment variables shape a run — see
 //! `config::RunConfig::from_env`.
 //!
 //! Reconnect/churn schedules and latest/volatile delivery classes are later
@@ -475,26 +475,26 @@ fn the_environment_parser_shapes_a_run_and_rejects_unknown_values() {
     assert!(config.send_rate_per_sender > 0.0);
 
     // Unknown enum values fail loudly, naming the accepted values.
-    std::env::set_var("SIGNAL_FISH_CAPACITY_ENCODING", "cbor");
+    std::env::set_var("CAPACITY_RUNNER_ENCODING", "cbor");
     assert!(RunConfig::from_env().is_err());
-    std::env::set_var("SIGNAL_FISH_CAPACITY_ENCODING", "v3-json");
-    std::env::set_var("SIGNAL_FISH_CAPACITY_CLASS", "lossy");
+    std::env::set_var("CAPACITY_RUNNER_ENCODING", "v3-json");
+    std::env::set_var("CAPACITY_RUNNER_CLASS", "lossy");
     assert!(RunConfig::from_env().is_err());
-    std::env::set_var("SIGNAL_FISH_CAPACITY_CLASS", "reliable");
-    std::env::set_var("SIGNAL_FISH_CAPACITY_CHURN", "rejoin-storm");
+    std::env::set_var("CAPACITY_RUNNER_CLASS", "reliable");
+    std::env::set_var("CAPACITY_RUNNER_CHURN", "rejoin-storm");
     assert!(RunConfig::from_env().is_err());
-    std::env::remove_var("SIGNAL_FISH_CAPACITY_ENCODING");
-    std::env::remove_var("SIGNAL_FISH_CAPACITY_CLASS");
-    std::env::remove_var("SIGNAL_FISH_CAPACITY_CHURN");
+    std::env::remove_var("CAPACITY_RUNNER_ENCODING");
+    std::env::remove_var("CAPACITY_RUNNER_CLASS");
+    std::env::remove_var("CAPACITY_RUNNER_CHURN");
     assert!(RunConfig::from_env().is_ok());
 }
 
 /// Standalone entry point for a capacity host: configure the run entirely
-/// through `SIGNAL_FISH_CAPACITY_*` environment variables (see
+/// through `CAPACITY_RUNNER_*` environment variables (see
 /// `config::RunConfig::from_env`), e.g. against a release-profile server:
 ///
 /// ```text
-/// SIGNAL_FISH_CAPACITY_OUTPUT_DIR=/tmp/cap-run \
+/// CAPACITY_RUNNER_OUTPUT_DIR=/tmp/cap-run \
 /// cargo test --release --test capacity_runner \
 ///   a_standalone_env_configured_run_writes_artifacts_and_replays -- --ignored
 /// ```
@@ -502,9 +502,9 @@ fn the_environment_parser_shapes_a_run_and_rejects_unknown_values() {
 /// In CI the default configuration runs the same small scenario as the
 /// acceptance gate; on a capacity host the variables shape the real cells.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "standalone capacity-host entry point: shape via SIGNAL_FISH_CAPACITY_*"]
+#[ignore = "standalone capacity-host entry point: shape via CAPACITY_RUNNER_*"]
 async fn a_standalone_env_configured_run_writes_artifacts_and_replays() {
-    let config = RunConfig::from_env().expect("SIGNAL_FISH_CAPACITY_* env is valid");
+    let config = RunConfig::from_env().expect("CAPACITY_RUNNER_* env is valid");
     let outcome = runner::run(config).await.expect("run completes");
     println!("run {} valid: {}", outcome.run_id, outcome.summary.valid);
     for reason in &outcome.summary.reasons {

@@ -297,7 +297,7 @@ equivalent direct proof. Do not weaken correctness checks to improve capacity.
 ### C2 — Build a standalone, delivery-aware capacity runner ([#648](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/648))
 
 The runner foundation is landed (`tests/capacity_runner/`, first runner PR,
-2026-10-04): full contract input set with `SIGNAL_FISH_CAPACITY_*` standalone
+2026-10-04): full contract input set with `CAPACITY_RUNNER_*` standalone
 entry, spawn-or-connect to the real binary on a separate process, scheduled
 sends independent of response completion under a generator-lag bound, one
 monotonic run epoch for send/receipt pairs, versioned artifacts

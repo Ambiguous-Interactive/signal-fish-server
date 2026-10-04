@@ -2211,7 +2211,7 @@ the client-row follow-ups in #741.)
 at `tests/capacity_runner/` (issue #648, first runner PR). It accepts the full
 contract input set (endpoint, seed, room/player count, protocol/encoding,
 payload bytes, sender rate, delivery class, warm-up, duration, churn/reconnect
-schedule, output directory; `SIGNAL_FISH_CAPACITY_*` environment variables for
+schedule, output directory; `CAPACITY_RUNNER_*` environment variables for
 standalone capacity-host use), spawns the release server binary as a separate
 process or connects to an external endpoint, schedules offered traffic
 independently of response completion with a generator-lag bound, measures
