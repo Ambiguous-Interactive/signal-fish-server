@@ -180,6 +180,12 @@ access, misrouting, lost reliable data, stuck players, and unbounded resources.
   `dropped_for_you`) are now pinned
   (`flooded_nonreading_recipient_observes_exact_volatile_gaps_and_dropped_for_you`;
   red-proofed by suppressing the eviction's causal gap report).
+  The protocol subsystem coverage row is reviewed (audit ledger,
+  2026-10-05): wire bytes, delivery-class carry, depth/size symmetry, and
+  fail-closed enum handling match the contract on every decode path; the
+  previously undocumented decode behaviors (duplicate-member precedence
+  and out-of-i64/u64 integer-literal fidelity on the plain JSON lane) are
+  now pinned with recorded dispositions.
 - [ ] **Recovery:** cancellation at relevant await boundaries; partial state
   mutation or publication; rollback failure and retry; task panic recovery;
   cleanup racing join/reconnect; deadlines at before/equal/after boundaries;
