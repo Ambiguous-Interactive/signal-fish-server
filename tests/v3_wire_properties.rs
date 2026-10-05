@@ -25,6 +25,14 @@
 //!   `float_roundtrip` feature (a deliberate perf tradeoff left to the
 //!   maintainers — matchbox-shaped signal payloads carry only strings, so no
 //!   current client is affected).
+//!
+//!   The C1 protocol-subsystem review (2026-10-05) pinned the remaining
+//!   numeric and member cases of this approximation class: integer literals
+//!   outside the `i64`/`u64` range take the same f64 path (the relayed text
+//!   is the nearest f64's shortest form), literals beyond the f64 range
+//!   fail decode cleanly instead of relaying an infinity or null, and
+//!   duplicate members collapse last-wins inside opaque payload values
+//!   while every typed envelope level rejects duplicates outright.
 //! - `SessionPlanPayload` / `SessionPeer` / `IceServer` / `Topology` /
 //!   `Transport` round-trip with randomized contents (including the
 //!   `skip_serializing_if` optional fields).
@@ -296,6 +304,91 @@ proptest! {
             "JSON float drift exceeded the pinned bound: {float} -> {roundtripped} ({ulp_distance} ULP)"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// JSON ingress decode fidelity: numeric literals and duplicate members (C1)
+// ---------------------------------------------------------------------------
+
+/// Decode a client `GameData` frame exactly as the plain-JSON ingress does
+/// (`serde_json::from_str::<ClientMessage>`) and return the relayed text of
+/// the opaque payload. The relay hop re-serializes the decoded `Value` with
+/// the same serde_json serializer, so this is the exact wire transformation.
+fn relayed_game_data_text(literal: &str) -> Result<String, serde_json::Error> {
+    let frame = format!(r#"{{"type":"GameData","data":{{"data":{literal}}}}}"#);
+    match serde_json::from_str::<ClientMessage>(&frame)? {
+        ClientMessage::GameData { data, .. } => {
+            Ok(serde_json::to_string(&data).expect("payload re-serializes"))
+        }
+        _ => panic!("expected a GameData client message, got a different variant"),
+    }
+}
+
+/// Integer literals relay within the pinned fidelity contract: inside the
+/// `i64`/`u64` range they are exact; outside it serde_json parses them on
+/// the f64 path, so the relayed text is the nearest f64's shortest form (the
+/// documented float approximation above; 2^64 + 1 drifts to f64-exact 2^64).
+/// Negative zero is value-equal but re-renders in float form. An exact-text
+/// pin makes any serde_json number-handling or formatting change a loud,
+/// reviewable wire-contract event instead of a silent mutation.
+#[test]
+fn json_integer_literals_relay_within_the_pinned_fidelity_contract() {
+    let cases: &[(&str, &str)] = &[
+        ("0", "0"),
+        ("-9223372036854775808", "-9223372036854775808"), // i64::MIN: exact
+        ("18446744073709551615", "18446744073709551615"), // u64::MAX: exact
+        ("18446744073709551616", "1.8446744073709552e+19"), // 2^64: f64-exact
+        ("18446744073709551617", "1.8446744073709552e+19"), // 2^64 + 1: drifts
+        ("-9223372036854775809", "-9.223372036854776e+18"), // i64::MIN - 1
+        ("-0", "-0.0"),
+    ];
+    for (literal, expected) in cases {
+        assert_eq!(
+            &relayed_game_data_text(literal).expect("literal decodes"),
+            expected,
+            "integer literal {literal} must relay exactly as pinned"
+        );
+    }
+}
+
+/// A literal beyond the f64 range fails decode cleanly instead of relaying
+/// an infinity (which serde_json would serialize as `null`).
+#[test]
+fn json_out_of_range_float_literals_fail_decode_cleanly() {
+    for literal in ["1e400", "-1e400", "-1e999"] {
+        assert!(
+            relayed_game_data_text(literal).is_err(),
+            "{literal} must fail decode instead of relaying infinity or null"
+        );
+    }
+}
+
+/// Duplicate members have pinned precedence. Every typed envelope level —
+/// the tag, the content member, and the content's own fields — rejects
+/// duplicates outright, matching the token-bound lane's frame-wide
+/// pre-verification strictness. Only opaque payload values (never inspected
+/// by the server) collapse, deterministically to the last member, which is
+/// the only representable outcome once the payload is decoded into a JSON
+/// value map; the MessagePack path collapses the same way.
+#[test]
+fn json_duplicate_members_have_pinned_precedence() {
+    let envelope_duplicates = [
+        r#"{"type":"LeaveRoom","type":"PlayerReady"}"#,
+        r#"{"type":"GameData","data":{"data":1},"data":{"data":2}}"#,
+        r#"{"type":"GameData","data":{"data":1,"class":"volatile","class":"latest","key":9}}"#,
+    ];
+    for frame in envelope_duplicates {
+        assert!(
+            serde_json::from_str::<ClientMessage>(frame).is_err(),
+            "duplicate envelope members must be rejected: {frame}"
+        );
+    }
+
+    assert_eq!(
+        relayed_game_data_text(r#"{"gold":1,"gold":2}"#).expect("payload decodes"),
+        r#"{"gold":2}"#,
+        "opaque-value duplicates must resolve last-wins"
+    );
 }
 
 // ---------------------------------------------------------------------------

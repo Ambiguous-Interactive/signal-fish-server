@@ -2094,10 +2094,84 @@ Clean dispositions:
 | Confidence and reproduction | Static roster arithmetic over the registration path (all registrations — players, spectators, reconnects — consume a per-IP slot in `register_delivery`). |
 | Disposition | Default raised 24 → 64 with a corrected comment; pinned by `default_per_ip_budget_admits_a_full_nat_roster_with_churn_slack` (data-driven over the roster formula). The parallel `ServerConfig::default()` literal in `src/server.rs` now derives from the same `default_max_connections_per_ip()` instead of a divergent hardcoded 24. Config-reference table, deployment docs, checklist, and example configs updated to the new default. |
 
+### C1 protocol subsystem review (2026-10-05)
+
+At `8f80cc6e` (main after #746), reviewed the protocol coverage row across
+`src/protocol/**` and `src/trace_validation.rs` against the row invariant
+"V2/V3 decoding, wire bytes, and delivery class match contract", with the
+named missing cases (malformed/deep frames, mixed format boundaries) and
+the fuzz target `fuzz/fuzz_targets/decode_protocol.rs`. No defect was
+found; every hazard family carries a recorded disposition and the two
+previously undocumented decode behaviors are now pinned.
+
+- **Delivery-class decode carries explicitly (verified).** `class`/`key`
+  are `Option` fields decoded through `deserialize_present_optional`:
+  omission is `None`, an explicit `null` fails decode, and no present
+  value is ever defaulted at decode. The `None → reliable` floor is a
+  relay-layer rule exactly where the documented "omitted class means
+  reliable" lives, binary frames are hardwired reliable by contract, the
+  v2/v3 gate admits exactly the documented pairings, and the
+  `INVALID_DELIVERY_CLASS` before size/seat ordering matches the
+  documented validation order (all previously pinned).
+- **Strict v3 binary envelope (verified, previously pinned).** The
+  reference decoder rejects duplicate/unknown fields, trailing bytes,
+  non-UUID senders, and out-of-range stamps without truncation; boundary
+  stamps decode verbatim; per-frame encoding is negotiated, never
+  sender-controlled; unsupported formats fail with the exact gap plus the
+  throttled advisory (ARM-C032 cadence).
+- **Depth and size limits are symmetric across paths (verified).** The
+  JSON command path leans on serde_json's 128-level recursion limit
+  (documented at the scanner constant), the MessagePack ingress and
+  fallback conversion run the shared iterative 128-level scanner first
+  (ARM-C030), frame and payload caps precede decode on both lanes, and
+  the deep-nesting probes pin clean `Err` behavior on both formats
+  (`tests/protocol_fuzz_hardening.rs`).
+- **Enum and tag handling is fail-closed (verified).** Unknown class,
+  encoding, transport, topology, `type`, or error tokens and explicit
+  `null` metadata fail decode with `INVALID_INPUT` and the connection
+  kept open; `ErrorCode` has no catch-all variant, so unknown codes are
+  never silently coerced.
+- **Duplicate members have pinned precedence (new pins).** The plain
+  JSON lane rejects duplicate members at every typed envelope level —
+  tag, content member, and content fields (`duplicate field …` decode
+  error) — matching the token-bound lane's frame-wide
+  pre-verification rejection; only opaque payload values collapse,
+  deterministically last-wins, which is the only representable outcome
+  once a never-inspected payload is decoded into a JSON value map (the
+  MessagePack path and the Json-in-binary fallback decode
+  `decode_binary_to_json` share the same `Value` semantics, so they
+  collapse the same way). Pinned by
+  `json_duplicate_members_have_pinned_precedence`.
+- **Numeric literals have pinned fidelity (new pins).** Integer literals
+  inside the `i64`/`u64` range relay exactly; literals outside it take
+  serde_json's f64 path and relay as the nearest f64's shortest text
+  (2^64 + 1 drifts to f64-exact 2^64 — the documented, bounded float
+  approximation class, not a new defect; integer literals outside the
+  `i64`/`u64` range are the pinned exception to the unqualified
+  "relayed verbatim" payload guarantee, and clients needing exact large
+  integers have the signed lane's interoperable range as the normative
+  contract); literals beyond the f64 range fail
+  decode cleanly instead of relaying an infinity or `null`; `-0`
+  re-renders value-equal in float form. The exact-text pins make any
+  serde_json number-handling change a loud wire-contract event. Pinned by
+  `json_integer_literals_relay_within_the_pinned_fidelity_contract` and
+  `json_out_of_range_float_literals_fail_decode_cleanly` in
+  `tests/v3_wire_properties.rs`.
+- **`trace_validation.rs` is a recorder, not a validator (verified).** No
+  wire frame passes through it, so no decode bypass exists; its
+  fail-closed divergence labeling and queue-close races are pinned
+  in-module, and its two documented silent drops stay documented.
+
+The Protocol coverage row moves to reviewed: wire bytes, delivery class,
+and depth/size behavior match the contract on every decode path — with
+the pinned out-of-i64/u64 integer-literal exception recorded above — and
+the remaining numeric/member behaviors are pinned with recorded
+dispositions.
+
 ## Coverage ledger
 
-All rows were inventoried at `b24b5e13`. Their reviewed revision is **none**
-until a C1 audit records one. Paths identify the review seam;
+All rows were inventoried at `b24b5e13`; the review state of each row is
+recorded in its State column below. Paths identify the review seam;
 listed tests, models, and fuzz targets are leads, not completed reviews.
 Check default, `tls`, `legacy-fullmesh`, `trace-validation`, and
 `allocation-tracking` feature combinations where applicable (`Cargo.toml`).
@@ -2112,7 +2186,8 @@ nested under `/v2` by the binary. The binary also has a legacy listener path.
 The library API surface is the public modules exported from `src/lib.rs`:
 `auth`, `config`, `coordination`, `database`, `distributed`, `logging`,
 `metrics`, `protocol`, `rate_limit`, `reconnection`, `retry`, `security`,
-`trace_validation`, `server`, and `websocket`. Each remains unreviewed.
+`trace_validation`, `server`, and `websocket`. Each row's review state is
+recorded in the coverage table below.
 
 Feature coverage also starts unreviewed. Exercise `default=[]`, `tls`,
 `legacy-fullmesh`, `tls,legacy-fullmesh`, and `--all-features`. The legacy path
@@ -2127,7 +2202,7 @@ neither is a deployed capacity preset.
 | Config and reload: `src/config/**` | Defaults, validation, and reload preserve one coherent policy | `tests/config_and_endpoints_tests.rs`, `tests/config_validation_coverage_scan.rs`; C1 allowlist and key reload boundary review and C1 config and reload coverage review above | SIGHUP key/allowlist swap order and invalid reload reviewed and pinned; default coherence verified guard-by-guard against `Config::default()`; malformed-document and env-override breadth reviewed with five fixed defect classes (ARM-C038..ARM-C042) and the per-IP default-coherence fix (ARM-C043), all red-proven and pinned | Reviewed |
 | Authentication: `src/auth/**`, `src/rate_limit.rs` | Unauthorized traffic cannot enter a room; limits count refusals | `tests/auth_integration_tests.rs`, `formal/tla/RateLimitWindow.tla`; C1 authentication admission boundary and rate-limit rejection accounting reviews above | Flood posture, budget-before-credential ordering, refusal closes, the absolute activity-immune auth deadline (`pre_handshake_activity_does_not_extend_the_auth_deadline`), concurrent ceiling conservation (`concurrent_handshakes_conserve_the_app_ceiling_and_count_every_rejection`), and every refusal path's exact-once charge/counter pairing (the drain-window creation refusal's deliberate budget-free shape is now pinned) are reviewed and pinned | Reviewed |
 | Security: `src/security/**`, `src/websocket/token_binding.rs` | Token, origin, TLS, and TURN credential checks fail closed | `tests/mtls_token_binding_e2e.rs`, `tests/tls_deployment_boundaries_e2e.rs`, `fuzz/fuzz_targets/fuzz_reconnect_tokens.rs`; C1 token rotation boundary and client/deployment boundaries reviews above | Rotation ordering and concurrent-claim refusals are reviewed and pinned; the TLS-variant posture is verified (silent enable impossible, cert/key fail closed pre-bind, mTLS binding pinned e2e over the real binary) and the drain close path over TLS is pinned over the real binary (ARM-C035 closed); connect-token claim boundaries remain | Partially reviewed |
-| Protocol: `src/protocol/**`, `src/trace_validation.rs` | V2/V3 decoding, wire bytes, and delivery class match contract | `tests/v2_wire_golden.rs`, `tests/v3_wire_properties.rs`, `fuzz/fuzz_targets/decode_protocol.rs` | Malformed/deep frames, mixed format boundaries | Unreviewed |
+| Protocol: `src/protocol/**`, `src/trace_validation.rs` | V2/V3 decoding, wire bytes, and delivery class match contract | `tests/v2_wire_golden.rs`, `tests/v3_wire_properties.rs`, `fuzz/fuzz_targets/decode_protocol.rs`; C1 protocol subsystem review above | Malformed/deep frames, mixed format boundaries, delivery-class carry, enum/tag fail-closed behavior, duplicate-member precedence, and numeric-literal fidelity are reviewed and pinned (or previously pinned); the recorder-only `trace_validation.rs` has no decode seam | Reviewed |
 | Room and player storage: `src/database/**` | Membership and room limits stay atomic and app isolated | `tests/integration_tests.rs`, `tests/model_based_state_machines.rs`; C1 admission-limit review above | Other adapters, rollback, and leave/disconnect races remain | Unreviewed |
 | Room lifecycle and moderation: `src/server/room_service.rs`, `moderation.rs`, `spectator_service.rs`, `spectator_handlers.rs` | Join, leave, kick, ban, spectator state and ownership agree | `tests/lobby_integration_tests.rs`, `src/server/room_service_tests.rs`; C1 admission-limit, leave/disconnect ordering, and identity-slice completion reviews above | ARM-C001–C004 fixed in spectator and room-code seams; identity cases (concurrent limits, join-only, leave/disconnect, spectator transitions, kick/ban races, application isolation) reviewed and pinned or derived; storage-fault interleavings on other adapters remain | Partially reviewed |
 | Readiness and gameplay: `src/server/ready_state.rs`, `authority.rs`, `session_policy.rs`, `signaling.rs` | Membership and transport changes invalidate stale plans/readiness | `tests/v3_session_plan_e2e.rs`, `formal/tla/SignalFishSession.tla`; C1 gameplay-transitions review above | Start/leave, authority loss, v2/v3 negotiation, capability intersections, stale reports, downgrade reconnects, and publication order are reviewed and pinned (including the spectator start-authorization coupling); shared `src/server.rs` state seams remain | Partially reviewed |
