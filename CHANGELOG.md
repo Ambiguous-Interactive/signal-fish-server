@@ -27,7 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The runner also measures the `latest` and `volatile` delivery classes:
   policy loss must arrive as exact server-stamped gap reports with a reason
   the class can produce, per-recipient latency tails ride the summary, and
-  the summary cross-checks the server's per-class outcome counters.
+  the pressure cells cross-check the server's per-class outcome counters
+  against the validated gap coverage.
 
 - Metrics: `websocket_shutdown_disconnects` counts every registered
   connection torn down with the server-initiated shutdown close (code 4000)

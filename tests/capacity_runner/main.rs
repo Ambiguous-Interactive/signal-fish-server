@@ -949,6 +949,62 @@ fn a_disconnected_recipient_may_lose_only_the_uncovered_tail() {
         "expected the hole at seq 1, got {:?}",
         summary.reasons
     );
+
+    // Forbidden: an unreported hole at the HEAD of the stream, named exactly
+    // at seq 0 (the head is below every covered value, so the span scan must
+    // not miss it).
+    let mut head = complete_records(&context.plans);
+    drop_receipt(&mut head, "r0p0", "r0p1", 0);
+    head.disconnects.push(records::DisconnectEvent {
+        recipient: "r0p0".to_string(),
+        observation: records::DisconnectObservation::StreamEnded,
+    });
+    let summary = tail_permitted(&head);
+    assert!(!summary.valid);
+    assert!(
+        summary
+            .reasons
+            .contains(&oracle::InvalidReason::MissingDeliveries {
+                count: 1,
+                first: oracle::DeliveryKey {
+                    recipient: "r0p0".to_string(),
+                    sender: "r0p1".to_string(),
+                    seq: 0,
+                },
+            }),
+        "expected the head hole at seq 0, got {:?}",
+        summary.reasons
+    );
+}
+
+/// A gap naming the recipient as its own sender is a violation in every
+/// class: the server never reports a connection's own sends to itself.
+#[test]
+fn a_self_referential_gap_is_invalid() {
+    let context = unit_context_with_class(DeliveryClass::Volatile);
+    let mut records = complete_records(&context.plans);
+    records.gaps.push(gap_for(
+        "r0p1",
+        "r0p1",
+        2,
+        DeliveryGapReason::VolatileDropped,
+    ));
+    let summary = oracle::summarize(
+        &context.plans,
+        &context.roster,
+        &records,
+        1_000,
+        context.delivery_class,
+    );
+    assert!(!summary.valid);
+    assert!(
+        summary
+            .reasons
+            .iter()
+            .any(|reason| matches!(reason, oracle::InvalidReason::InvalidGapReports { .. })),
+        "expected the invalid-gap reason, got {:?}",
+        summary.reasons
+    );
 }
 
 /// Standalone invocation path: the environment parser accepts the small
@@ -993,9 +1049,10 @@ fn the_environment_parser_shapes_a_run_and_rejects_unknown_values() {
 /// each fault hook belongs to exactly one delivery contract.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn hook_and_class_mismatches_are_refused_before_any_spawn() {
+    let probe = std::env::temp_dir().join("signal-fish-capacity-refusal-probe");
     let mut config = scenario_config(Encoding::V3Json);
-    config.output_dir = std::env::temp_dir().join("signal-fish-capacity-refusal-probe");
-    let _ = std::fs::remove_dir_all(&config.output_dir);
+    config.output_dir = probe.clone();
+    let _ = std::fs::remove_dir_all(&probe);
 
     let mut mismatch = config.clone();
     mismatch.pause_reads = Some(Duration::from_millis(10));
@@ -1028,9 +1085,16 @@ async fn hook_and_class_mismatches_are_refused_before_any_spawn() {
         "a reliable run coalesces nothing"
     );
 
+    let mut mismatch = scenario_config(Encoding::V2Json);
+    mismatch.output_dir = probe.clone();
+    mismatch.delivery_class = DeliveryClass::Volatile;
     assert!(
-        !std::path::Path::new(&std::env::temp_dir().join("signal-fish-capacity-refusal-probe"))
-            .exists(),
+        runner::run(mismatch).await.is_err(),
+        "delivery classes require the v3 wire"
+    );
+
+    assert!(
+        !probe.exists(),
         "a refused config must not poison an output directory"
     );
 }

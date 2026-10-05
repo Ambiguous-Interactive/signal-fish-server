@@ -149,15 +149,17 @@ pub fn parse_counter(text: &str, name: &str) -> Option<u64> {
 }
 
 /// Lenient labeled Prometheus sample parse: `Some(value)` when a sample of
-/// `name` carries exactly the wanted `{label="value"}` pairs, `None` when
-/// absent. Records the server's per-class delivery outcomes
+/// `name` carries exactly the wanted `{label="value"}` pairs (order does not
+/// matter), `None` when absent. A malformed pair disqualifies its line, not
+/// the whole scan. Records the server's per-class delivery outcomes
 /// (`signal_fish_websocket_delivery_class_outcomes_total`) for the class a
 /// run measures.
 pub fn parse_labeled_counter(text: &str, name: &str, labels: &[(&str, &str)]) -> Option<u64> {
-    let wanted: Vec<(String, String)> = labels
+    let mut wanted: Vec<(String, String)> = labels
         .iter()
         .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
         .collect();
+    wanted.sort();
     for line in text.lines() {
         if line.starts_with('#') {
             continue;
@@ -173,14 +175,89 @@ pub fn parse_labeled_counter(text: &str, name: &str, labels: &[(&str, &str)]) ->
             continue;
         }
         let inner = sample[open + 1..].trim_end_matches('}');
-        let mut pairs: Vec<(String, String)> = Vec::new();
-        for pair in inner.split("\",") {
-            let (key, value) = pair.split_once('=')?;
-            pairs.push((key.to_string(), value.trim_matches('"').to_string()));
-        }
+        let Some(mut pairs) = inner
+            .split("\",")
+            .map(|pair| -> Option<(String, String)> {
+                let (key, value) = pair.split_once('=')?;
+                Some((key.to_string(), value.trim_matches('"').to_string()))
+            })
+            .collect::<Option<Vec<(String, String)>>>()
+        else {
+            continue; // malformed pair: skip the line, keep scanning
+        };
+        pairs.sort();
         if pairs == wanted {
             return raw_value.parse::<u64>().ok();
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_labeled_counter_matches_real_exposition_lines_order_insensitively() {
+        let text = "# HELP signal_fish_websocket_delivery_class_outcomes_total outcomes\n\
+                    # TYPE signal_fish_websocket_delivery_class_outcomes_total counter\n\
+                    signal_fish_websocket_delivery_class_outcomes_total{class=\"latest\",outcome=\"superseded\"} 41\n\
+                    signal_fish_websocket_delivery_class_outcomes_total{class=\"volatile\",outcome=\"dropped\"} 7\n";
+        let name = "signal_fish_websocket_delivery_class_outcomes_total";
+        assert_eq!(
+            parse_labeled_counter(
+                text,
+                name,
+                &[("class", "latest"), ("outcome", "superseded")]
+            ),
+            Some(41)
+        );
+        // The exposition format does not promise label order.
+        assert_eq!(
+            parse_labeled_counter(
+                text,
+                name,
+                &[("outcome", "superseded"), ("class", "latest")]
+            ),
+            Some(41)
+        );
+        assert_eq!(
+            parse_labeled_counter(text, name, &[("class", "volatile"), ("outcome", "dropped")]),
+            Some(7)
+        );
+        // A different label set on the same sample name is not a match.
+        assert_eq!(
+            parse_labeled_counter(text, name, &[("class", "latest"), ("outcome", "dropped")]),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_labeled_counter_skips_a_malformed_line_without_poisoning_the_scan() {
+        let text = "metric_total{broken=\"unterminated} 5\n\
+                    metric_total{class=\"latest\",outcome=\"dropped\"} 9\n";
+        assert_eq!(
+            parse_labeled_counter(
+                text,
+                "metric_total",
+                &[("class", "latest"), ("outcome", "dropped")]
+            ),
+            Some(9)
+        );
+        // A pair without '=' disqualifies its own line only.
+        let text = "metric_total{class=latest,outcome=\"dropped\"} 3\n\
+                    metric_total{class=\"latest\",outcome=\"dropped\"} 4\n";
+        assert_eq!(
+            parse_labeled_counter(
+                text,
+                "metric_total",
+                &[("class", "latest"), ("outcome", "dropped")]
+            ),
+            Some(4)
+        );
+        assert_eq!(
+            parse_labeled_counter("no labels here 1", "no labels here", &[]),
+            None
+        );
+    }
 }

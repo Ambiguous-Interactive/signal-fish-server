@@ -365,7 +365,8 @@ queue-age and ingress/egress instrumentation.
   cleanup backlog, maintenance duration, and generator CPU. Landed: server
   delivery counters, slow-consumer disconnects, active connections, server
   RSS, cgroup memory, generator RSS, disconnect reasons (recorded as
-  events), and the run class's seven accountable per-class outcomes, with
+  events), and — on lossy-class runs — the run class's seven accountable
+  per-class outcomes, with
   scrape failures recorded as explicit samples. Remaining:
   server CPU time, generator CPU, socket-memory accounting, ingress/egress
   bytes, queue depth/age, live objects, cleanup backlog, and maintenance

@@ -64,9 +64,11 @@ pub type WsReceiver = futures_util::stream::SplitStream<WsStream>;
 pub struct RunOutcome {
     pub run_id: String,
     pub output_dir: PathBuf,
-    /// The last interval sample's server counters, as recorded evidence
-    /// (delivery counters, slow-consumer disconnects, active connections).
-    /// `None` when no scrape succeeded — recorded absence, never omission.
+    /// The most recent successful scrape's server counters, as recorded
+    /// evidence (delivery counters, slow-consumer disconnects, active
+    /// connections, class outcomes). `None` when no scrape succeeded —
+    /// recorded absence, never omission. Failed scrapes stay visible as
+    /// explicit samples in `intervals.jsonl`.
     pub final_counters: Option<serde_json::Value>,
     pub summary: OutcomeSummary,
 }
@@ -131,6 +133,16 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     }
     if config.delivery_class == DeliveryClass::Latest && config.latest_keys_per_sender == 0 {
         return Err("latest_keys_per_sender must be at least 1".to_string());
+    }
+    // Delivery classes are a protocol-v3 feature: on the frozen v2 wire the
+    // server rejects every classed frame, so a v2 run with a lossy class
+    // could only produce an unexplained deficit.
+    if config.encoding == Encoding::V2Json && config.delivery_class != DeliveryClass::Reliable {
+        return Err(
+            "delivery classes require encoding \"v3-json\"; the server rejects classed frames \
+             on the frozen v2 wire"
+                .to_string(),
+        );
     }
 
     let run_id = uuid::Uuid::new_v4().to_string();
@@ -427,7 +439,9 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     let final_counters = samples
         .lock()
         .expect("interval samples poisoned")
-        .last()
+        .iter()
+        .rev()
+        .find(|sample| sample.scrape_error.is_none())
         .map(|sample| sample.counters.clone());
     Ok(RunOutcome {
         run_id,
@@ -830,6 +844,21 @@ async fn receiver_task(
                             reason: gap.reason,
                         });
                     }
+                }
+                Ok(ServerMessage::Error {
+                    message,
+                    error_code,
+                }) => {
+                    // A mid-run server rejection (bad class, payload cap,
+                    // rate limit) must not decay into an unexplained
+                    // delivery deficit: record it and keep reading.
+                    log.push_fault(InvalidReason::ServerRejected {
+                        recipient: recipient.clone(),
+                        detail: match error_code {
+                            Some(code) => format!("{message} ({code:?})"),
+                            None => message,
+                        },
+                    });
                 }
                 Ok(_) => {}
                 Err(error) => {

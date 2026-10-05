@@ -88,6 +88,10 @@ pub enum InvalidReason {
     MalformedServerFrame { recipient: String, detail: String },
     /// Generator tasks outlived the quiescence margin (a wedged generator).
     RunnerDeadlineExceeded { detail: String },
+    /// The server rejected a frame mid-run (bad class, payload cap, rate
+    /// limit) — recorded from the `Error` frame so the deficit is never
+    /// unexplained.
+    ServerRejected { recipient: String, detail: String },
 }
 
 /// Per-recipient accounting, in roster order.
@@ -391,6 +395,8 @@ pub fn summarize(
             || !member_names.contains(gap.sender.as_str())
         {
             detail = Some("gap references a peer outside the run roster".to_string());
+        } else if gap.recipient == gap.sender {
+            detail = Some("gap names the recipient as its own sender".to_string());
         } else if room_of.get(gap.recipient.as_str()) != room_of.get(gap.sender.as_str()) {
             detail = Some("gap names a sender from another room".to_string());
         } else if delivery_class == DeliveryClass::Reliable {
@@ -609,11 +615,18 @@ pub fn summarize(
                     outcome.gap_covered += to - from + 1;
                 }
                 // Holes: uncovered sequences at or below the highest covered
-                // position, counted from the sorted covered set. A hole means
-                // the server relayed (stamped) past it without delivering or
-                // reporting it — silent loss.
+                // position — the head below the first covered value and the
+                // spans between covered values. A hole means the server
+                // relayed (stamped) past it without delivering or reporting
+                // it — silent loss. The first hole is named exactly.
                 let mut holes: u64 = 0;
                 let mut first_hole: Option<u64> = None;
+                if let Some(lowest) = covered.first() {
+                    if *lowest > 0 {
+                        holes += *lowest;
+                        first_hole = Some(0);
+                    }
+                }
                 let mut previous: Option<u64> = None;
                 for seq in &covered {
                     if let Some(position) = previous {
