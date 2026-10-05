@@ -602,7 +602,10 @@ pub fn summarize(
                     }
                     let from = gap.from_seq - 1; // pre-validated: from_seq >= 1
                     let to = gap.to_seq - 1;
-                    if (from..=to).any(|seq| !covered.insert(seq)) {
+                    // Reject BEFORE inserting: a rejected range contributes
+                    // no coverage, so its non-overlapping remainder stays an
+                    // honest uncovered omission in the totals.
+                    if (from..=to).any(|seq| covered.contains(&seq)) {
                         invalid_gaps.record_violation(
                             gap,
                             format!(
@@ -611,6 +614,9 @@ pub fn summarize(
                             ),
                         );
                         continue;
+                    }
+                    for seq in from..=to {
+                        covered.insert(seq);
                     }
                     outcome.gap_covered += to - from + 1;
                 }

@@ -789,6 +789,38 @@ fn a_gap_overlapping_a_delivery_is_invalid() {
         "expected the invalid-gap reason, got {:?}",
         summary.reasons
     );
+
+    // A rejected range covers nothing: drop seq 3 and report a range
+    // spanning the delivered seq 2 and the missing seq 3 — the overlap
+    // rejects the whole range, so seq 3 stays an uncovered hole.
+    let mut records = complete_records(&context.plans);
+    drop_receipt(&mut records, "r0p0", "r0p1", 3);
+    let mut spanning = gap_for("r0p0", "r0p1", 2, DeliveryGapReason::LatestSuperseded);
+    spanning.to_seq = 4; // server range 3..=4 = ledger seqs 2..=3
+    records.gaps.push(spanning);
+    let summary = oracle::summarize(
+        &context.plans,
+        &context.roster,
+        &records,
+        1_000,
+        context.delivery_class,
+    );
+    assert!(!summary.valid);
+    assert_eq!(summary.totals.gap_covered, 0);
+    assert!(
+        summary
+            .reasons
+            .contains(&oracle::InvalidReason::MissingDeliveries {
+                count: 1,
+                first: oracle::DeliveryKey {
+                    recipient: "r0p0".to_string(),
+                    sender: "r0p1".to_string(),
+                    seq: 3,
+                },
+            }),
+        "the rejected range must not cover seq 3, got {:?}",
+        summary.reasons
+    );
 }
 
 /// A reason the run's class cannot produce is a violation: volatile
