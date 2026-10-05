@@ -1203,6 +1203,31 @@ async fn hook_and_class_mismatches_are_refused_before_any_spawn() {
         "generator-latency hooks do not compose with churn"
     );
 
+    let mut mismatch = scenario_config(Encoding::V2Json);
+    mismatch.output_dir = probe.clone();
+    mismatch.encoding = Encoding::V3Json;
+    mismatch.churn = churn;
+    mismatch.kill_server_after = Some(Duration::from_millis(500));
+    assert!(
+        runner::run(mismatch).await.is_err(),
+        "kill_server_after and churn are both run-level faults"
+    );
+
+    let mut mismatch = scenario_config(Encoding::V2Json);
+    mismatch.output_dir = probe.clone();
+    mismatch.encoding = Encoding::V3Json;
+    mismatch.churn = ChurnSchedule::ReconnectBurst {
+        fraction_percent: 50,
+        start: Duration::from_millis(300),
+        window: Duration::from_millis(400),
+    };
+    // The default lag bound is 250 ms: a 400 ms stagger window would let a
+    // boundary race inflate a send's lag past it.
+    assert!(
+        runner::run(mismatch).await.is_err(),
+        "the stagger window must stay below the generator-lag bound"
+    );
+
     // A storm outside the scheduled-send span would strand its reconnects
     // past quiescence.
     let mut mismatch = scenario_config(Encoding::V2Json);
@@ -1254,6 +1279,139 @@ async fn a_standalone_env_configured_run_writes_artifacts_and_replays() {
         serde_json::to_value(&replayed).expect("serialize replay"),
         serde_json::to_value(&outcome.summary).expect("serialize summary"),
         "replaying the artifacts must reproduce the outcome summary"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Churn schedule controls (deterministic, no server): the offline-window
+// shift is the mechanism that keeps a scheduled gap out of the generator's
+// lag accounting, so it is pinned exactly.
+// ---------------------------------------------------------------------------
+
+/// Every victim's post-disconnect sends move past its reconnect instant with
+/// count and spacing preserved; non-victims keep their exact timeline; and
+/// the whole storm lands inside the scheduled-send span.
+#[test]
+fn the_churn_shift_moves_victim_sends_past_their_reconnect_without_changing_the_workload() {
+    let mut config = scenario_config(Encoding::V3Json);
+    config.rooms = 2;
+    config.warmup = Duration::from_millis(200);
+    config.duration = Duration::from_millis(1_000);
+    config.churn = ChurnSchedule::ReconnectBurst {
+        fraction_percent: 50,
+        start: Duration::from_millis(400),
+        window: Duration::from_millis(200),
+    };
+
+    // The unshifted timeline is the reference workload shape.
+    let mut plain = config.clone();
+    plain.churn = ChurnSchedule::None;
+    let (reference, _) = build_run_shape(&plain).expect("reference shape");
+
+    let (plans, churn) = build_run_shape(&config).expect("churn shape");
+    assert_eq!(churn.cycles.len(), 1);
+    let cycle = &churn.cycles[0];
+    assert_eq!(cycle.peers.len(), 4, "half of the eight peers");
+
+    let ChurnSchedule::ReconnectBurst { start, window, .. } = config.churn else {
+        panic!("the burst shape is set");
+    };
+    let storm_end_us = crate::config::micros(start + window);
+    let span_us = reference
+        .iter()
+        .map(|plan| plan.sends.last().map(|send| send.intended_us).unwrap_or(0))
+        .max()
+        .unwrap_or(0);
+    assert!(
+        storm_end_us <= span_us,
+        "the storm must complete inside the scheduled-send span"
+    );
+
+    for plan in &plans {
+        let reference = reference
+            .iter()
+            .find(|other| other.name == plan.name)
+            .expect("same roster");
+        assert_eq!(
+            plan.sends.len(),
+            reference.sends.len(),
+            "{}: the shift preserves the offered workload",
+            plan.name
+        );
+        match cycle.reconnects_us.get(&plan.name) {
+            Some(&reconnect_us) => {
+                let mut previous = None;
+                for (send, reference) in plan.sends.iter().zip(&reference.sends) {
+                    assert_eq!(send.seq, reference.seq);
+                    if reference.intended_us >= cycle.disconnect_us {
+                        assert!(
+                            send.intended_us >= reconnect_us,
+                            "{} send {}: a shifted send must fire at or after its                              reconnect instant",
+                            plan.name,
+                            send.seq
+                        );
+                        // Spacing is preserved: every shifted send moved by
+                        // the same offline duration.
+                        let shift = send.intended_us - reference.intended_us;
+                        assert_eq!(
+                            shift,
+                            reconnect_us - cycle.disconnect_us,
+                            "{} send {}: the offline window shifts every late send                              by the same amount",
+                            plan.name,
+                            send.seq
+                        );
+                    } else {
+                        assert_eq!(
+                            send.intended_us, reference.intended_us,
+                            "{} send {}: early sends keep their timeline",
+                            plan.name, send.seq
+                        );
+                    }
+                    if let Some(previous) = previous {
+                        assert!(
+                            send.intended_us > previous,
+                            "{}: the shifted schedule never folds sends together",
+                            plan.name
+                        );
+                    }
+                    previous = Some(send.intended_us);
+                }
+            }
+            None => {
+                assert_eq!(
+                    plan.sends, reference.sends,
+                    "{}: a non-victim keeps its exact timeline",
+                    plan.name
+                );
+            }
+        }
+    }
+}
+
+/// A storm that would outlive the scheduled-send span is refused before
+/// anything is spawned: its reconnects could land past quiescence.
+#[test]
+fn a_churn_storm_beyond_the_scheduled_span_is_refused() {
+    let mut config = scenario_config(Encoding::V3Json);
+    config.churn = ChurnSchedule::ReconnectBurst {
+        fraction_percent: 50,
+        start: Duration::from_secs(5),
+        window: Duration::from_secs(5),
+    };
+    assert!(
+        build_run_shape(&config).is_err(),
+        "the storm must complete inside the scheduled-send span"
+    );
+    // Absurd env scalars are refused, not panics.
+    let mut config = scenario_config(Encoding::V3Json);
+    config.churn = ChurnSchedule::ReconnectBurst {
+        fraction_percent: 50,
+        start: Duration::from_secs(u64::MAX / 2_000_000),
+        window: Duration::from_secs(u64::MAX / 2_000_000),
+    };
+    assert!(
+        build_run_shape(&config).is_err(),
+        "start + window overflow must be a refusal"
     );
 }
 

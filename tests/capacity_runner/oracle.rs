@@ -305,10 +305,11 @@ struct ChurnView {
 
 /// Rebuild every roster peer's [`ChurnView`] from the run's recorded churn
 /// events, per room. Each viewer applies its room's events in
-/// `(at_us, own-rejoin-last)` order: when two churn actions share an
-/// instant, the server's publication order still delivers the rejoining
-/// member's new epoch either way, and the viewer's own snapshot is the
-/// later word on floors.
+/// `(at_us, own-events-first)` order: the recorded instants come from
+/// different tasks and can tie or invert, so every transition reconciles
+/// against the already-adopted epochs instead of trusting event order, the
+/// earliest close of a stream wins, and a snapshot floor is only ever
+/// overwritten by a later snapshot of the same viewer.
 fn churn_views(records: &RunRecords, roster: &[(String, u32)]) -> BTreeMap<String, ChurnView> {
     let room_of: BTreeMap<&str, u32> = roster
         .iter()
@@ -355,10 +356,14 @@ fn churn_views(records: &RunRecords, roster: &[(String, u32)]) -> BTreeMap<Strin
                         .copied()
                         .collect::<Vec<_>>()
                     {
-                        view.closed_at.insert((recipient.clone(), old), *at_us);
+                        view.closed_at
+                            .entry((recipient.clone(), old))
+                            .or_insert(*at_us);
                     }
                     epochs.insert(*new_epoch);
-                    view.floors.remove(&(recipient.clone(), *new_epoch));
+                    // A floor for this `(member, epoch)` can only have come
+                    // from a snapshot naming that epoch — it is
+                    // authoritative over this event, so it stays.
                 }
                 ChurnPhase::Rejoined => {
                     // This viewer rejoined: re-adopt every member from its
@@ -376,7 +381,9 @@ fn churn_views(records: &RunRecords, roster: &[(String, u32)]) -> BTreeMap<Strin
                                     .copied()
                                     .collect::<Vec<_>>()
                                 {
-                                    view.closed_at.insert((member.clone(), old), *at_us);
+                                    view.closed_at
+                                        .entry((member.clone(), old))
+                                        .or_insert(*at_us);
                                 }
                                 epochs.insert(snap_epoch);
                                 view.floors
@@ -385,7 +392,9 @@ fn churn_views(records: &RunRecords, roster: &[(String, u32)]) -> BTreeMap<Strin
                             None => {
                                 if let Some(epochs) = view.adopted.get(member) {
                                     for old in epochs.iter().copied().collect::<Vec<_>>() {
-                                        view.closed_at.insert((member.clone(), old), *at_us);
+                                        view.closed_at
+                                            .entry((member.clone(), old))
+                                            .or_insert(*at_us);
                                     }
                                 }
                             }
@@ -428,11 +437,17 @@ pub fn summarize(
         });
     }
     // A churn run must show its storm: every planned victim must have acted
-    // (its disconnect and rejoin are recorded churn events). A silent
-    // no-op storm would mislabel a churn-free measurement as churn evidence.
+    // (its disconnect AND rejoin are recorded churn events). A silent
+    // no-op storm — or a disconnect whose rejoin half never ran — would
+    // mislabel the run as churn evidence while the new incarnation's
+    // streams go unvalidated.
     for cycle in &churn.cycles {
         for peer in &cycle.peers {
-            if !records.churn.iter().any(|event| event.recipient == *peer) {
+            let acted = records
+                .churn
+                .iter()
+                .any(|event| event.recipient == *peer && event.phase == ChurnPhase::Rejoined);
+            if !acted {
                 reasons.push(InvalidReason::ChurnNotPerformed { peer: peer.clone() });
             }
         }
@@ -466,11 +481,13 @@ pub fn summarize(
         });
     }
 
-    // Per-sender relay blocks: every epoch the sender actually sent in, with
-    // its ledger sequences in send order. The server stamps each epoch's
-    // stream 1..=n in arrival order, so the block maps a wire
-    // `(epoch, server_seq)` stamp onto the sender-stamped ledger sequence
-    // (`block[server_seq - 1]`).
+    // Per-sender relay blocks: every incarnation the sender actually sent
+    // in, with its ledger sequences in send order. The server stamps each
+    // incarnation's stream 1..=n in arrival order, so a wire
+    // `(incarnation, server_seq)` stamp is in range exactly when
+    // `1 <= server_seq <= block.len()` — the bound the misroute checks
+    // enforce; the ledger position (`block[server_seq - 1]`) pairs the
+    // stream coordinates with the sender-stamped ledger sequence.
     let mut blocks: BTreeMap<(&str, u32), Vec<u64>> = BTreeMap::new();
     for sent in &records.sent {
         blocks

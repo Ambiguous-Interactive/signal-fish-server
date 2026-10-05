@@ -126,7 +126,11 @@ fn build_churn(config: &RunConfig, plans: &[SenderPlan]) -> Result<ChurnPlan, St
         .map(SenderPlan::last_intended_us)
         .max()
         .unwrap_or(0);
-    if micros(start + window) > span_us {
+    let storm_end_us = start
+        .checked_add(window)
+        .map(micros)
+        .ok_or_else(|| "churn start + window overflows the run clock".to_string())?;
+    if storm_end_us > span_us {
         return Err(format!(
             "the churn storm (start {start:?} + window {window:?}) must complete inside the \
              scheduled-send span ({span_us} µs)"

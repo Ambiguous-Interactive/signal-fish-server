@@ -189,6 +189,26 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
                     .to_string(),
             );
         }
+        if config.kill_server_after.is_some() {
+            return Err(
+                "kill_server_after and churn are both run-level faults; a churn cell's \
+                 disconnects must come from its own storm"
+                    .to_string(),
+            );
+        }
+        // A send whose wake slips past the churn boundary loses the race to
+        // the biased churn arm and fires after the rejoin with the whole
+        // offline window as lag — the bound must hold that margin, or a
+        // scheduling artifact would be mislabeled a generator fault.
+        if let ChurnSchedule::ReconnectBurst { window, .. } = config.churn {
+            if micros(window) >= micros(config.generator_lag_bound) {
+                return Err(format!(
+                    "the churn stagger window ({window:?}) must stay below the generator-lag \
+                     bound ({:?}) so a boundary race cannot inflate a send's lag past it",
+                    config.generator_lag_bound
+                ));
+            }
+        }
     }
 
     let run_id = uuid::Uuid::new_v4().to_string();

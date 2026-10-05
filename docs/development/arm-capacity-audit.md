@@ -2354,7 +2354,13 @@ server sequence, sends carry their incarnation, churn events record the
 disconnect/rejoin cycle with the rejoin snapshot tails). One real-socket
 storm cell (50% of a four-peer room, reliable) passes with replay
 equality; deterministic controls pin each new permitted outcome, and the
-red proof neuters the stale-epoch check (the control fails). Churn runs
+red proof neuters the stale-epoch check (the control fails). A schedule
+control pins the offline-window shift exactly (moved sends land at or
+after their reconnect instant with count and spacing preserved,
+non-victims untouched), and adversarial-review hardening keeps snapshot
+floors authoritative over later rejoin events, requires the rejoin half
+of every planned cycle, keeps the stagger window below the generator-lag
+bound, and refuses run-level fault hooks in churn cells. Churn runs
 require the v3 wire and exclude the socket-owning and generator-latency
 hooks.
 
