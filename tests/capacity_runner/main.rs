@@ -16,6 +16,9 @@
 //! - the reconnect-burst cell: a mid-run disconnect/rejoin storm whose
 //!   streams must complete exactly once across the victims' new
 //!   incarnations,
+//! - the room-replacement cell: whole rooms cycling into fresh room-code
+//!   generations per wave while other rooms keep serving, with the same
+//!   exactly-once stream contract across the replacements' incarnations,
 //! - the negative controls: missing, duplicate, misrouted, and out-of-order
 //!   deliveries, unreported lossy-class holes, gap-report violations,
 //!   stale-epoch and below-tail deliveries across a storm, an unperformed
@@ -1105,6 +1108,37 @@ fn the_environment_parser_shapes_a_run_and_rejects_unknown_values() {
     assert_eq!(config.delivery_class, DeliveryClass::Volatile);
     std::env::remove_var("CAPACITY_RUNNER_CLASS");
     assert!(RunConfig::from_env().is_ok());
+
+    // The room-replacement shape parses with its own interval knob, and the
+    // per-field overrides substitute into the shared default shape.
+    std::env::set_var("CAPACITY_RUNNER_CHURN", "room-replacement");
+    let config = RunConfig::from_env().expect("bare replacement env config parses");
+    assert_eq!(
+        config.churn,
+        ChurnSchedule::room_replacement_default(),
+        "bare CHURN=room-replacement is the shared default shape"
+    );
+    std::env::set_var("CAPACITY_RUNNER_CHURN_FRACTION_PERCENT", "25");
+    std::env::set_var("CAPACITY_RUNNER_CHURN_START_MS", "400");
+    std::env::set_var("CAPACITY_RUNNER_CHURN_WINDOW_MS", "150");
+    std::env::set_var("CAPACITY_RUNNER_CHURN_INTERVAL_MS", "600");
+    let config = RunConfig::from_env().expect("shaped replacement env config parses");
+    assert_eq!(
+        config.churn,
+        ChurnSchedule::RoomReplacement {
+            fraction_percent: 25,
+            start: Duration::from_millis(400),
+            window: Duration::from_millis(150),
+            interval: Duration::from_millis(600),
+        }
+    );
+    std::env::remove_var("CAPACITY_RUNNER_CHURN");
+    std::env::remove_var("CAPACITY_RUNNER_CHURN_FRACTION_PERCENT");
+    std::env::remove_var("CAPACITY_RUNNER_CHURN_START_MS");
+    std::env::remove_var("CAPACITY_RUNNER_CHURN_WINDOW_MS");
+    std::env::remove_var("CAPACITY_RUNNER_CHURN_INTERVAL_MS");
+    let config = RunConfig::from_env().expect("cleared churn env parses");
+    assert_eq!(config.churn, ChurnSchedule::None);
 }
 
 /// Hook/class mismatches are refused before anything is spawned or written:
@@ -1346,7 +1380,8 @@ fn the_churn_shift_moves_victim_sends_past_their_reconnect_without_changing_the_
                     if reference.intended_us >= cycle.disconnect_us {
                         assert!(
                             send.intended_us >= reconnect_us,
-                            "{} send {}: a shifted send must fire at or after its                              reconnect instant",
+                            "{} send {}: a shifted send must fire at or after its reconnect \
+                             instant",
                             plan.name,
                             send.seq
                         );
@@ -1356,7 +1391,8 @@ fn the_churn_shift_moves_victim_sends_past_their_reconnect_without_changing_the_
                         assert_eq!(
                             shift,
                             reconnect_us - cycle.disconnect_us,
-                            "{} send {}: the offline window shifts every late send                              by the same amount",
+                            "{} send {}: the offline window shifts every late send by the \
+                             same amount",
                             plan.name,
                             send.seq
                         );
@@ -1413,6 +1449,292 @@ fn a_churn_storm_beyond_the_scheduled_span_is_refused() {
         build_run_shape(&config).is_err(),
         "start + window overflow must be a refusal"
     );
+}
+
+/// A replacement wave replaces WHOLE rooms: every cycle's peers are exactly
+/// the full member set of seed-chosen rooms (that wave's untouched rooms
+/// never appear in it), reconnects stagger inside the wave window, and
+/// identical configs build identical plans.
+#[test]
+fn a_room_replacement_plan_replaces_whole_rooms_per_wave() {
+    let mut config = scenario_config(Encoding::V3Json);
+    config.rooms = 4;
+    config.players_per_room = 2;
+    config.warmup = Duration::from_millis(200);
+    config.duration = Duration::from_millis(1_000);
+    config.churn = ChurnSchedule::RoomReplacement {
+        fraction_percent: 50,
+        start: Duration::from_millis(300),
+        window: Duration::from_millis(150),
+        interval: Duration::from_millis(300),
+    };
+    let (plans, churn) = build_run_shape(&config).expect("replacement shape");
+    let mut members_of_room: BTreeMap<u32, Vec<String>> =
+        plans.iter().fold(BTreeMap::new(), |mut acc, plan| {
+            acc.entry(plan.room).or_default().push(plan.name.clone());
+            acc
+        });
+    for members in members_of_room.values_mut() {
+        members.sort();
+    }
+
+    // Waves fire at start + k * interval while they fit the span
+    // (300 + 150, 600 + 150, 900 + 150 all land inside ~1.2 s).
+    assert_eq!(churn.cycles.len(), 3, "three waves fit the span");
+    for (wave, cycle) in churn.cycles.iter().enumerate() {
+        let wave_offset = u32::try_from(wave).unwrap_or(0);
+        let wave_us = crate::config::micros(
+            Duration::from_millis(300) + Duration::from_millis(300) * wave_offset,
+        );
+        assert_eq!(
+            cycle.disconnect_us, wave_us,
+            "wave {wave} fires on schedule"
+        );
+        assert_eq!(cycle.peers.len(), 4, "half of the eight peers: whole rooms");
+        // The cycle's peers are exactly two whole rooms.
+        let mut cycle_rooms: BTreeMap<u32, Vec<String>> = BTreeMap::new();
+        for plan in &plans {
+            if cycle.peers.contains(&plan.name) {
+                cycle_rooms
+                    .entry(plan.room)
+                    .or_default()
+                    .push(plan.name.clone());
+            }
+        }
+        for members in cycle_rooms.values_mut() {
+            members.sort();
+        }
+        assert_eq!(
+            cycle_rooms.len(),
+            2,
+            "wave {wave} victimizes two rooms, not a mix of members"
+        );
+        for (room, members) in &cycle_rooms {
+            assert_eq!(
+                Some(members),
+                members_of_room.get(room),
+                "wave {wave}: room {room} cycles as a whole"
+            );
+        }
+        // Every victim rejoins inside the wave window; the map's keys are
+        // exactly the cycle's peers.
+        assert_eq!(cycle.reconnects_us.len(), cycle.peers.len());
+        for reconnect in cycle.reconnects_us.values() {
+            assert!(
+                *reconnect >= wave_us
+                    && *reconnect < wave_us + crate::config::micros(Duration::from_millis(150)),
+                "wave {wave}: rejoin {reconnect} must stagger inside the wave window"
+            );
+        }
+    }
+    // Identical configs build identical plans.
+    let (_, churn_again) = build_run_shape(&config).expect("deterministic shape");
+    assert_eq!(
+        churn, churn_again,
+        "the plan is a pure function of the config"
+    );
+}
+
+/// A replacement schedule that cannot fit its waves is refused before
+/// anything is spawned: a first wave past the span, overlapping waves, and
+/// a wave count that would exhaust a room's code generations are all
+/// refusals, and clock overflow is a refusal, not a panic.
+#[test]
+fn a_replacement_wave_beyond_its_bounds_is_refused() {
+    let base = |interval: Duration, start: Duration| {
+        let mut config = scenario_config(Encoding::V3Json);
+        config.churn = ChurnSchedule::RoomReplacement {
+            fraction_percent: 100,
+            start,
+            window: Duration::from_millis(100),
+            interval,
+        };
+        config
+    };
+    let config = base(Duration::from_millis(300), Duration::from_secs(5));
+    assert!(
+        build_run_shape(&config).is_err(),
+        "the first wave must complete inside the scheduled-send span"
+    );
+    let config = base(Duration::from_millis(100), Duration::from_millis(300));
+    assert!(
+        build_run_shape(&config).is_err(),
+        "the window must stay below the interval so waves never overlap"
+    );
+    let mut config = base(Duration::from_millis(300), Duration::from_millis(300));
+    if let ChurnSchedule::RoomReplacement { window, .. } = config.churn {
+        config.churn = ChurnSchedule::RoomReplacement {
+            fraction_percent: 100,
+            start: Duration::from_secs(u64::MAX / 2_000_000),
+            window,
+            interval: Duration::from_secs(u64::MAX / 2_000_000),
+        };
+    }
+    assert!(
+        build_run_shape(&config).is_err(),
+        "wave-instant overflow must be a refusal"
+    );
+    // A short interval over a long run would replace a room more often than
+    // its code generations allow.
+    let mut config = scenario_config(Encoding::V3Json);
+    config.warmup = Duration::ZERO;
+    config.duration = Duration::from_secs(3_600);
+    config.churn = ChurnSchedule::RoomReplacement {
+        fraction_percent: 100,
+        start: Duration::from_millis(100),
+        window: Duration::from_millis(50),
+        interval: Duration::from_millis(100),
+    };
+    assert!(
+        build_run_shape(&config).is_err(),
+        "a room replaced past the code space must be a refusal"
+    );
+    // The C3 churn shape — many waves over many rooms at a low fraction —
+    // builds: the generation cap rides each room's own victimization count,
+    // not the wave count.
+    let mut config = scenario_config(Encoding::V3Json);
+    config.rooms = 200;
+    config.warmup = Duration::ZERO;
+    config.duration = Duration::from_secs(60);
+    config.churn = ChurnSchedule::RoomReplacement {
+        fraction_percent: 1,
+        start: Duration::from_secs(1),
+        window: Duration::from_millis(200),
+        interval: Duration::from_secs(1),
+    };
+    let (_, churn) = build_run_shape(&config).expect("the C3 churn shape builds");
+    assert_eq!(churn.cycles.len(), 59, "every wave that fits the span");
+}
+
+/// Across repeated replacement waves, a victim's sends shift by the TOTAL
+/// offline time of every wave whose disconnect they were due past — and by
+/// nothing else: a send due between two waves keeps only the earlier wave's
+/// shift, and early sends keep their timeline.
+#[test]
+fn the_replacement_shift_moves_each_send_by_the_offline_time_of_every_wave_past_its_due() {
+    let mut config = scenario_config(Encoding::V3Json);
+    config.rooms = 1;
+    config.players_per_room = 2;
+    config.warmup = Duration::from_millis(200);
+    config.duration = Duration::from_millis(1_000);
+    config.churn = ChurnSchedule::RoomReplacement {
+        fraction_percent: 100,
+        start: Duration::from_millis(400),
+        window: Duration::from_millis(150),
+        interval: Duration::from_millis(300),
+    };
+
+    // The unshifted timeline is the reference workload shape.
+    let mut plain = config.clone();
+    plain.churn = ChurnSchedule::None;
+    let (reference, _) = build_run_shape(&plain).expect("reference shape");
+
+    let (plans, churn) = build_run_shape(&config).expect("replacement shape");
+    assert_eq!(churn.cycles.len(), 3);
+    for plan in &plans {
+        let reference = reference
+            .iter()
+            .find(|other| other.name == plan.name)
+            .expect("same roster");
+        assert_eq!(
+            plan.sends.len(),
+            reference.sends.len(),
+            "{}: the shift preserves the offered workload",
+            plan.name
+        );
+        // The peer's victim instants, in wave order.
+        let instants = churn.victim_instants(&plan.name);
+        assert_eq!(
+            instants.len(),
+            3,
+            "{}: the whole room churns every wave",
+            plan.name
+        );
+        for (send, reference) in plan.sends.iter().zip(&reference.sends) {
+            let expected_shift: u64 = instants
+                .iter()
+                .filter(|(disconnect_us, _)| reference.intended_us >= *disconnect_us)
+                .map(|(disconnect_us, reconnect_us)| reconnect_us - disconnect_us)
+                .sum();
+            assert_eq!(
+                send.intended_us,
+                reference.intended_us + expected_shift,
+                "{} send {}: shifted by exactly the offline time of every wave past its due",
+                plan.name,
+                send.seq
+            );
+            if expected_shift == 0 {
+                assert_eq!(
+                    send.intended_us, reference.intended_us,
+                    "{} send {}: a send due before every wave keeps its timeline",
+                    plan.name, send.seq
+                );
+            }
+        }
+    }
+}
+
+/// Replacement generations give every (room, generation) pair its own
+/// six-character alphanumeric code under the run prefix. Generation 0 is
+/// byte-identical to the decimal room code the initial join uses; every
+/// later generation starts with a lowercase letter, a character class the
+/// decimal generation-0 suffixes never start with, so no generation code
+/// can alias a live room's initial code.
+#[test]
+fn replacement_generations_get_distinct_alphanumeric_room_codes() {
+    let prefix = "F0a";
+    assert_eq!(
+        RunConfig::room_code_for_generation(Some(prefix), 7, 0),
+        format!("{prefix}007"),
+        "generation 0 is the decimal room code"
+    );
+    let mut config = scenario_config(Encoding::V3Json);
+    config.room_code_prefix = Some(prefix.to_string());
+    assert_eq!(
+        config.room_code(7),
+        RunConfig::room_code_for_generation(Some(prefix), 7, 0),
+        "room_code is the generation-0 code"
+    );
+    // Every (room, generation) pair in the enforced domain holds exactly
+    // one code: six alphanumeric characters under the prefix, and no two
+    // pairs share it.
+    let mut seen = std::collections::BTreeSet::new();
+    for room in 0..1000u32 {
+        for generation in 0..=RunConfig::MAX_ROOM_GENERATION {
+            let code = RunConfig::room_code_for_generation(Some(prefix), room, generation);
+            assert_eq!(code.len(), 6, "room {room} gen {generation}: {code}");
+            assert!(
+                code.chars().all(|c| c.is_ascii_alphanumeric()),
+                "room {room} gen {generation}: {code} must be alphanumeric"
+            );
+            assert!(
+                code.starts_with(prefix),
+                "room {room} gen {generation}: {code} must carry the run prefix"
+            );
+            assert!(
+                seen.insert(code),
+                "room {room} gen {generation}: code reuse across the space"
+            );
+        }
+    }
+    // Disjointness is structural: a generation code starts with a letter,
+    // an initial code starts with a decimal digit.
+    for room in 0..1000u32 {
+        let initial = RunConfig::room_code_for_generation(Some(prefix), room, 0);
+        let third_char = initial.as_bytes()[3];
+        assert!(
+            third_char.is_ascii_digit(),
+            "initial code {initial} must start its suffix with a decimal digit"
+        );
+        for generation in 1..=RunConfig::MAX_ROOM_GENERATION {
+            let code = RunConfig::room_code_for_generation(Some(prefix), room, generation);
+            let third_char = code.as_bytes()[3];
+            assert!(
+                third_char.is_ascii_lowercase(),
+                "generation code {code} must start its suffix with a lowercase letter"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1776,6 +2098,325 @@ fn a_churn_run_whose_storm_never_fires_is_invalid() {
 }
 
 // ---------------------------------------------------------------------------
+// Room-replacement oracle controls (deterministic, no server): a replaced
+// room's fresh generation is a fresh set of streams under the same member
+// roster — every stream completes exactly once across the generation, a
+// wave whose rejoin half never runs is not churn evidence, and a stale-
+// generation frame is a misroute.
+// ---------------------------------------------------------------------------
+
+/// A two-peer room replaced once: both members disconnect at the wave
+/// instant and rejoin at their staggered instants into the room's next
+/// generation. `interval` is huge, so exactly one wave fits the span.
+fn replacement_context() -> (UnitContext, ChurnPlan) {
+    let mut config = scenario_config(Encoding::V3Json);
+    config.rooms = 1;
+    config.players_per_room = 2;
+    config.warmup = Duration::ZERO;
+    config.duration = Duration::from_millis(400);
+    config.send_rate_per_sender = 10.0;
+    config.delivery_class = DeliveryClass::Reliable;
+    config.churn = ChurnSchedule::RoomReplacement {
+        fraction_percent: 100,
+        start: Duration::from_millis(150),
+        window: Duration::from_millis(100),
+        interval: Duration::from_secs(60),
+    };
+    let (plans, churn) = build_run_shape(&config).expect("replacement shape");
+    let roster: Vec<(String, u32)> = plans
+        .iter()
+        .map(|plan| (plan.name.clone(), plan.room))
+        .collect();
+    (
+        UnitContext {
+            plans,
+            roster,
+            delivery_class: DeliveryClass::Reliable,
+        },
+        churn,
+    )
+}
+
+/// The complete valid event set for a replaced room: both members' sends
+/// split across their pre- and post-replacement incarnations, receipts only
+/// for frames each seat could actually observe (frames fanned out to a dead
+/// or not-yet-seated member are the away window, accounted by the later
+/// seat's rejoin snapshot tail), and the churn cycle per member with the
+/// fresh-room snapshots.
+fn replacement_records(plans: &[SenderPlan], churn: &ChurnPlan) -> RunRecords {
+    let cycle = &churn.cycles[0];
+    let disconnect_us = cycle.disconnect_us;
+    let reconnects = &cycle.reconnects_us;
+    // Per (sender, incarnation): the sender's stream coordinates are
+    // recipient-independent, assigned in schedule order.
+    let mut stream_coords: BTreeMap<(&str, u32), u64> = BTreeMap::new();
+    let mut sends: Vec<(&SenderPlan, u32, u64, u64)> = Vec::new();
+    for plan in plans {
+        let reconnect = reconnects[&plan.name];
+        for send in &plan.sends {
+            let epoch = u32::from(send.intended_us >= reconnect) + 1;
+            let coord = stream_coords
+                .entry((plan.name.as_str(), epoch))
+                .or_insert(0);
+            *coord += 1;
+            sends.push((plan, epoch, *coord, send.intended_us));
+        }
+    }
+    let sent_us = |intended_us: u64| intended_us + 5;
+
+    let log = EventLog::new();
+    // Disconnect halves in roster order, then rejoin halves in seat order,
+    // with the fresh-room snapshots: a seat names the members that rejoined
+    // before it (their current incarnation, tailed at what the room fanned
+    // out before the seat); the first seat's snapshot is empty — the room
+    // starts fresh.
+    for plan in plans {
+        log.push_churn(records::ChurnEvent {
+            recipient: plan.name.clone(),
+            phase: records::ChurnPhase::Disconnect,
+            at_us: disconnect_us,
+            epoch: None,
+            tails: BTreeMap::new(),
+        });
+    }
+    let mut seat_order: Vec<&str> = plans.iter().map(|plan| plan.name.as_str()).collect();
+    seat_order.sort_by_key(|name| reconnects[*name]);
+    for (seat_index, name) in seat_order.iter().enumerate() {
+        let reconnect = reconnects[*name];
+        let mut tails: BTreeMap<String, (String, u64)> = BTreeMap::new();
+        for earlier in &seat_order[..seat_index] {
+            // The earlier seat's epoch-2 sends fanned out before this seat.
+            let tail = sends
+                .iter()
+                .filter(|(plan, epoch, _, intended)| {
+                    plan.name == **earlier && *epoch == 2 && sent_us(*intended) <= reconnect
+                })
+                .count() as u64;
+            let seat_id = format!("id-{earlier}b");
+            tails.insert(seat_id.clone(), (seat_id, tail));
+        }
+        log.push_churn(records::ChurnEvent {
+            recipient: (*name).to_string(),
+            phase: records::ChurnPhase::Rejoined,
+            at_us: reconnect,
+            epoch: Some(2),
+            tails,
+        });
+    }
+    // Sends and receipts: a frame is delivered iff its fanout found the
+    // recipient seated (before their disconnect or from their rejoin on);
+    // frames fanned to a dead seat are the away window, not deliveries.
+    for (plan, epoch, coord, intended_us) in &sends {
+        let fanout_us = sent_us(*intended_us);
+        let scheduled = plan
+            .sends
+            .iter()
+            .find(|send| send.intended_us == *intended_us)
+            .expect("send belongs to its plan");
+        log.push_sent(SentEvent {
+            sender: plan.name.clone(),
+            room: plan.room,
+            seq: scheduled.seq,
+            epoch: *epoch,
+            intended_us: *intended_us,
+            sent_us: fanout_us,
+            phase: scheduled.phase,
+        });
+        for recipient in plans {
+            if recipient.name == plan.name {
+                continue;
+            }
+            let recipient_reconnect = reconnects[&recipient.name];
+            let seated = fanout_us < disconnect_us || fanout_us >= recipient_reconnect;
+            if !seated {
+                continue;
+            }
+            log.push_receipt(ReceiptEvent {
+                recipient: recipient.name.clone(),
+                sender: plan.name.clone(),
+                seq: scheduled.seq,
+                epoch: *epoch,
+                server_seq: *coord,
+                received_us: fanout_us + 3,
+            });
+        }
+    }
+    log.set_registry(BTreeMap::from([
+        ("id-r0p0".to_string(), ("r0p0".to_string(), 1)),
+        ("id-r0p0b".to_string(), ("r0p0".to_string(), 2)),
+        ("id-r0p1".to_string(), ("r0p1".to_string(), 1)),
+        ("id-r0p1b".to_string(), ("r0p1".to_string(), 2)),
+    ]));
+    log.snapshot()
+}
+
+/// Across a room replacement, every member's two incarnations are distinct,
+/// complete streams: the pre-replacement epoch finishes before the wave,
+/// the fresh generation resumes exactly once, and both seats observe the
+/// full owed window.
+#[test]
+fn a_room_replacement_completes_every_stream_across_the_generation() {
+    let (context, churn) = replacement_context();
+    let records = replacement_records(&context.plans, &churn);
+    let summary = oracle::summarize(
+        &context.plans,
+        &context.roster,
+        &records,
+        1_000,
+        context.delivery_class,
+        &churn,
+    );
+    assert!(
+        summary.valid,
+        "a clean room replacement is contract-legal: {:?}",
+        summary.reasons
+    );
+    // Both members reached their second incarnation, and both observed
+    // post-replacement deliveries.
+    for recipient in &summary.per_recipient {
+        assert!(
+            recipient.connected_through,
+            "{}: the seat is back after the replacement",
+            recipient.recipient
+        );
+        assert_eq!(recipient.missing, 0, "{}", recipient.recipient);
+        assert_eq!(recipient.duplicates, 0, "{}", recipient.recipient);
+        assert_eq!(recipient.misrouted, 0, "{}", recipient.recipient);
+    }
+    let records = replacement_records(&context.plans, &churn);
+    for peer in ["r0p0", "r0p1"] {
+        assert!(
+            records
+                .receipts
+                .iter()
+                .any(|receipt| receipt.recipient == peer && receipt.epoch == 2),
+            "{peer} must observe fresh-generation deliveries"
+        );
+    }
+}
+
+/// A wave whose rejoin half never ran is not churn evidence: every planned
+/// victimization needs its own rejoin, so a two-wave plan with one rejoin
+/// per member is named invalid per member.
+#[test]
+fn a_replacement_wave_whose_rejoin_never_fires_is_invalid() {
+    let mut config = scenario_config(Encoding::V3Json);
+    config.rooms = 1;
+    config.players_per_room = 2;
+    config.warmup = Duration::ZERO;
+    config.duration = Duration::from_millis(400);
+    config.send_rate_per_sender = 10.0;
+    config.churn = ChurnSchedule::RoomReplacement {
+        fraction_percent: 100,
+        start: Duration::from_millis(100),
+        window: Duration::from_millis(50),
+        interval: Duration::from_millis(150),
+    };
+    let (plans, churn) = build_run_shape(&config).expect("two-wave replacement shape");
+    assert_eq!(churn.cycles.len(), 2, "both waves fit the span");
+    let roster: Vec<(String, u32)> = plans
+        .iter()
+        .map(|plan| (plan.name.clone(), plan.room))
+        .collect();
+    // Only the first wave's rejoin half runs; the second wave's members
+    // disconnect and never come back.
+    let first = &churn.cycles[0];
+    let log = EventLog::new();
+    for peer in first.peers.clone() {
+        log.push_churn(records::ChurnEvent {
+            recipient: peer.clone(),
+            phase: records::ChurnPhase::Disconnect,
+            at_us: first.disconnect_us,
+            epoch: None,
+            tails: BTreeMap::new(),
+        });
+        log.push_churn(records::ChurnEvent {
+            recipient: peer,
+            phase: records::ChurnPhase::Rejoined,
+            at_us: first.reconnects_us.values().copied().next().unwrap_or(0),
+            epoch: Some(2),
+            tails: BTreeMap::new(),
+        });
+    }
+    let second = &churn.cycles[1];
+    for peer in second.peers.clone() {
+        log.push_churn(records::ChurnEvent {
+            recipient: peer,
+            phase: records::ChurnPhase::Disconnect,
+            at_us: second.disconnect_us,
+            epoch: None,
+            tails: BTreeMap::new(),
+        });
+    }
+    let records = log.snapshot();
+    let summary = oracle::summarize(
+        &plans,
+        &roster,
+        &records,
+        1_000,
+        DeliveryClass::Reliable,
+        &churn,
+    );
+    assert!(!summary.valid);
+    for peer in ["r0p0", "r0p1"] {
+        assert!(
+            summary
+                .reasons
+                .contains(&oracle::InvalidReason::ChurnNotPerformed {
+                    peer: peer.to_string(),
+                }),
+            "the missing second-wave rejoin must be named for {peer}, got {:?}",
+            summary.reasons
+        );
+    }
+}
+
+/// A stale-generation frame — a delivery for a member's pre-replacement
+/// stream that arrives after the member rejoined the fresh generation — is
+/// a misroute, the same contract a reconnect burst enforces.
+#[test]
+fn a_stale_generation_delivery_after_the_replacement_is_a_misroute() {
+    let (context, churn) = replacement_context();
+    let mut records = replacement_records(&context.plans, &churn);
+    let cycle = &churn.cycles[0];
+    let sender_reconnect = cycle.reconnects_us["r0p1"];
+    // r0p1's epoch-1 stream was already delivered to r0p0 before the wave;
+    // the synthetic copy arrives after the sender's rejoin instant.
+    let original = records
+        .receipts
+        .iter()
+        .find(|receipt| {
+            receipt.recipient == "r0p0" && receipt.sender == "r0p1" && receipt.epoch == 1
+        })
+        .cloned()
+        .expect("the pre-wave delivery exists");
+    records.receipts.push(ReceiptEvent {
+        received_us: sender_reconnect + 10,
+        ..original
+    });
+    let summary = oracle::summarize(
+        &context.plans,
+        &context.roster,
+        &records,
+        1_000,
+        context.delivery_class,
+        &churn,
+    );
+    assert!(
+        !summary.valid,
+        "a stale-generation frame invalidates the run"
+    );
+    assert!(
+        summary
+            .per_recipient
+            .iter()
+            .any(|outcome| outcome.recipient == "r0p0" && outcome.misrouted >= 1),
+        "the stale frame must land as a misroute, got {:?}",
+        summary.per_recipient
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Reconnect-burst cell over real sockets (issue #648, third runner PR): the
 // C3 reconnect storm with reliable delivery.
 // ---------------------------------------------------------------------------
@@ -1846,6 +2487,106 @@ async fn a_reconnect_burst_delivers_every_stream_exactly_once_across_the_storm()
     // At least one rejoining peer's new epoch produced deliveries the
     // others observed, and every rejoin snapshot named the member tails.
     assert!(rejoined.iter().all(|event| !event.tails.is_empty()));
+
+    let replayed = artifacts::replay(output.path()).expect("replay artifacts");
+    assert_eq!(
+        serde_json::to_value(&replayed).expect("serialize replay"),
+        serde_json::to_value(&outcome.summary).expect("serialize summary"),
+        "replaying the artifacts must reproduce the outcome summary"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Room-replacement cell over real sockets (issue #648): the C3 churn cell —
+// whole rooms cycle into fresh generations while other rooms keep serving.
+// ---------------------------------------------------------------------------
+
+/// Half of the run's rooms are replaced per wave: every member disconnects
+/// at the wave instant and rejoins, staggered, into the room's next
+/// generation (a fresh room), while the other rooms keep serving. Every
+/// stream must complete exactly once across the generations, the fresh
+/// generations must be real rooms (new incarnations with snapshot tails),
+/// and the artifacts must replay to the same summary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_room_replacement_cycles_whole_rooms_while_others_keep_serving() {
+    let output = tempfile::tempdir().expect("create output tempdir");
+    let mut config = scenario_config(Encoding::V3Json);
+    config.output_dir = output.path().to_path_buf();
+    config.rooms = 2;
+    config.players_per_room = 2;
+    config.warmup = Duration::from_millis(200);
+    config.duration = Duration::from_millis(1_200);
+    config.churn = ChurnSchedule::RoomReplacement {
+        fraction_percent: 50,
+        start: Duration::from_millis(400),
+        window: Duration::from_millis(200),
+        interval: Duration::from_millis(500),
+    };
+    config.generator_lag_bound = Duration::from_millis(500);
+    config.drain_grace = Duration::from_secs(2);
+
+    let outcome = runner::run(config)
+        .await
+        .expect("replacement run completes");
+    assert!(
+        outcome.summary.valid,
+        "the room replacement must deliver exactly once across generations: {:?}",
+        outcome.summary.reasons
+    );
+    assert_eq!(
+        outcome.summary.totals.unsent, 0,
+        "the shifted schedule must still fire every send"
+    );
+    assert_eq!(outcome.summary.totals.outstanding, 0);
+    for recipient in &outcome.summary.per_recipient {
+        assert!(
+            recipient.connected_through,
+            "{}: every peer is seated again after its room's replacement",
+            recipient.recipient
+        );
+        assert_eq!(recipient.missing, 0, "{}", recipient.recipient);
+        assert_eq!(recipient.duplicates, 0, "{}", recipient.recipient);
+        assert_eq!(
+            recipient.misrouted, 0,
+            "{}: no cross-room leakage",
+            recipient.recipient
+        );
+    }
+
+    // The replacement actually happened: two waves, one room each, every
+    // victimization with its rejoin under a bumped incarnation epoch and a
+    // fresh-room snapshot.
+    let records = artifacts::read_records(output.path()).expect("read the run's event log");
+    let disconnects = records
+        .churn
+        .iter()
+        .filter(|event| event.phase == records::ChurnPhase::Disconnect)
+        .count();
+    let rejoined: Vec<_> = records
+        .churn
+        .iter()
+        .filter(|event| event.phase == records::ChurnPhase::Rejoined)
+        .collect();
+    assert_eq!(disconnects, 4, "two waves replace one two-peer room each");
+    assert_eq!(
+        rejoined.len(),
+        4,
+        "every planned victimization rejoined: {:?}",
+        records.churn
+    );
+    assert!(
+        rejoined
+            .iter()
+            .all(|event| event.epoch.is_some_and(|epoch| epoch >= 2)),
+        "a replacement rejoin bumps the incarnation epoch: {rejoined:?}"
+    );
+    assert!(
+        rejoined
+            .iter()
+            .any(|event| event.epoch.is_some_and(|epoch| epoch >= 3)),
+        "some room was replaced twice across the two waves, so its members \
+         reached a third incarnation: {rejoined:?}"
+    );
 
     let replayed = artifacts::replay(output.path()).expect("replay artifacts");
     assert_eq!(
