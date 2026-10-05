@@ -239,6 +239,15 @@ pub struct ServerMetrics {
     /// amplification is bounded by the roster ceiling.
     pub relay_bytes_total: AtomicU64,
 
+    /// Recipient-side app payload bytes written to client sockets: the
+    /// application payload length of every successfully written frame
+    /// (binary bytes, or the canonical JSON text length), charged once per
+    /// frame after the sink accepted it. Ping/pong/close control frames
+    /// carry no application payload and are not counted. Together with
+    /// [`Self::relay_bytes_total`] this is the fan-out amplification pair
+    /// the capacity runner samples.
+    pub websocket_egress_bytes_total: AtomicU64,
+
     // Heartbeat throttling metrics
     /// Player last_seen persistence attempts admitted by the throttle window
     /// (a failed persistence still consumed the window and counts here)
@@ -422,6 +431,9 @@ pub struct ConnectionMetrics {
     pub websocket_deliveries_enqueued: u64,
     pub websocket_deliveries_channel_closed: u64,
     pub websocket_deliveries_canceled: u64,
+    /// Recipient-side app payload bytes written to client sockets (the
+    /// server-side egress twin of `players.relay_bytes_total`).
+    pub websocket_egress_bytes: u64,
     /// Reliable-class slow-consumer evictions attributed per sender (issue
     /// #530): the sender of the frame that initiated each recipient's
     /// close, carried across reconnection identity swaps. Bounded by live
@@ -721,6 +733,7 @@ impl ServerMetrics {
             authority_transfers: AtomicU64::new(0),
             game_data_messages: AtomicU64::new(0),
             relay_bytes_total: AtomicU64::new(0),
+            websocket_egress_bytes_total: AtomicU64::new(0),
             heartbeat_updates: AtomicU64::new(0),
             heartbeat_skipped: AtomicU64::new(0),
             reconnection_tokens_issued: AtomicU64::new(0),
@@ -1301,6 +1314,16 @@ impl ServerMetrics {
         self.relay_bytes_total.fetch_add(bytes, Ordering::Relaxed);
     }
 
+    /// Record recipient-side app payload bytes written to one client
+    /// socket. One call per successfully written application frame,
+    /// charged after the sink accepted the frame; a failed or cancelled
+    /// write is not counted here (its drop, if any, is attributed by the
+    /// delivery-accounting counters).
+    pub fn record_websocket_egress_bytes(&self, bytes: u64) {
+        self.websocket_egress_bytes_total
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
     // Heartbeat throttling metrics
     pub fn increment_heartbeat_updates(&self) {
         self.heartbeat_updates.fetch_add(1, Ordering::Relaxed);
@@ -1570,6 +1593,7 @@ impl ServerMetrics {
                         .load(Ordering::Relaxed),
                 },
                 websocket_messages_dropped: self.websocket_messages_dropped.load(Ordering::Relaxed),
+                websocket_egress_bytes: self.websocket_egress_bytes_total.load(Ordering::Relaxed),
                 websocket_backpressure_events: self
                     .websocket_backpressure_events
                     .load(Ordering::Relaxed),
@@ -2174,6 +2198,24 @@ mod tests {
                 + rate_limits.signal_error_rejections
                 + rate_limits.relay_bandwidth_rejections
                 + rate_limits.relay_room_bandwidth_rejections
+        );
+    }
+
+    /// The egress counter is the scrape-side twin of the relay admission
+    /// counter: recordings accumulate additively into the connection
+    /// snapshot exactly as sent bytes land.
+    #[tokio::test]
+    async fn websocket_egress_bytes_accumulate_into_the_connection_snapshot() {
+        let metrics = ServerMetrics::new();
+        assert_eq!(
+            metrics.snapshot().await.connections.websocket_egress_bytes,
+            0
+        );
+        metrics.record_websocket_egress_bytes(96);
+        metrics.record_websocket_egress_bytes(1024);
+        assert_eq!(
+            metrics.snapshot().await.connections.websocket_egress_bytes,
+            1120
         );
     }
 

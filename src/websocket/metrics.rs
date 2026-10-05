@@ -517,7 +517,8 @@ pub async fn prometheus_metrics_handler(
     }
 
     let snapshot = server.metrics.snapshot().await;
-    let body = render_prometheus_metrics(&snapshot);
+    let queue_sample = server.outbound_queue_sample();
+    let body = render_prometheus_metrics(&snapshot, &queue_sample, tokio::time::Instant::now());
     let headers = [(
         CONTENT_TYPE,
         HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Metrics: WebSocket egress bytes and outbound-queue posture gauges on the
+  Prometheus endpoint (#648, #636 C2). `signal_fish_websocket_egress_bytes_total`
+  counts the application payload bytes actually written to client sockets —
+  the recipient-side fan-out twin of the sender-side
+  `signal_fish_relay_bytes_total`. `signal_fish_websocket_queue_depth` (items
+  resident across all classified outbound queues) and
+  `signal_fish_websocket_queue_oldest_age_milliseconds` (age of the oldest
+  resident item) are sampled at scrape time and never maintained on the write
+  path. The capacity runner records all three plus the ingress counter in
+  every interval resource sample, so run artifacts carry the fan-out
+  amplification pair and the queue backlog evidence next to the delivery
+  counters.
+
 - Capacity runner: a standalone, delivery-aware runner for the ARM capacity
   campaign (#648, #636 C2). It spawns the server binary as a separate
   process (or connects to an external endpoint), drives deterministic

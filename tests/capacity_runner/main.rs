@@ -112,6 +112,60 @@ async fn small_reliable_relay_scenario_passes_and_artifacts_replay_to_the_same_s
         recorded, replayed,
         "replaying the artifacts must reproduce the outcome summary"
     );
+
+    // The resource counters every C3 capacity claim reads from ride the
+    // interval samples: the ingress/egress byte pair and the queue-posture
+    // gauges. Unavailable counters are recorded as null (never omitted), but
+    // the spawned binary exposes every one of them, so this run's samples
+    // must carry real values: the byte counters must have advanced, and the
+    // queue gauges must be present and finite.
+    let intervals = artifacts::read_intervals(output.path()).expect("read interval samples");
+    assert!(
+        !intervals.is_empty(),
+        "the run must record at least one interval sample"
+    );
+    for sample in &intervals {
+        assert!(
+            sample.scrape_error.is_none(),
+            "every scrape of this run must succeed, got {:?}",
+            sample.scrape_error
+        );
+        for name in [
+            "signal_fish_relay_bytes_total",
+            "signal_fish_websocket_egress_bytes_total",
+            "signal_fish_websocket_queue_depth",
+            "signal_fish_websocket_queue_oldest_age_milliseconds",
+        ] {
+            assert!(
+                sample
+                    .counters
+                    .get(name)
+                    .is_some_and(serde_json::Value::is_u64),
+                "{name} must be a recorded u64 in every interval sample, got {}",
+                sample.counters
+            );
+        }
+    }
+    let last = intervals.last().expect("at least one interval sample");
+    let relay_bytes = last
+        .counters
+        .get("signal_fish_relay_bytes_total")
+        .and_then(serde_json::Value::as_u64)
+        .expect("ingress bytes recorded");
+    let egress_bytes = last
+        .counters
+        .get("signal_fish_websocket_egress_bytes_total")
+        .and_then(serde_json::Value::as_u64)
+        .expect("egress bytes recorded");
+    assert!(
+        relay_bytes > 0,
+        "a reliable relay run must admit payload bytes, got {relay_bytes}"
+    );
+    assert!(
+        egress_bytes > relay_bytes,
+        "fan-out amplification must put more bytes on recipient sockets than \
+         the senders admitted: ingress {relay_bytes}, egress {egress_bytes}"
+    );
 }
 
 /// A paused generator shows up as scheduled-send latency — the pause lands

@@ -300,6 +300,31 @@ fn is_transient_socket_close_reason(reason: crate::coordination::CloseReason) ->
     }
 }
 
+/// Server-wide outbound-queue posture read at scrape time by the metrics
+/// endpoints (the capacity runner's `queue_depth` / `queue_age` samples).
+/// Both fields describe the moment of the scrape; neither is maintained on
+/// the write path.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct OutboundQueueSample {
+    /// Sum of resident items over every live classified outbound queue.
+    pub total_depth: u64,
+    /// Enqueue instant of the oldest resident item across those queues;
+    /// `None` when nothing is queued anywhere.
+    pub oldest_enqueued_at: Option<Instant>,
+}
+
+impl OutboundQueueSample {
+    /// Age of the oldest resident item in whole milliseconds, floored at
+    /// zero (an empty sample reports no age). Whole milliseconds keep the
+    /// Prometheus exposition integer-valued, which is what the capacity
+    /// runner's lenient parser reads.
+    pub fn oldest_age_millis(&self, now: Instant) -> u64 {
+        self.oldest_enqueued_at.map_or(0, |oldest| {
+            u64::try_from(now.saturating_duration_since(oldest).as_millis()).unwrap_or(u64::MAX)
+        })
+    }
+}
+
 pub(crate) struct ConnectionManager {
     clients: DashMap<PlayerId, ClientConnection>,
     connections_per_ip: DashMap<IpAddr, usize>,
@@ -1043,6 +1068,31 @@ impl ConnectionManager {
     /// Snapshot currently registered client ids.
     pub fn client_ids(&self) -> Vec<PlayerId> {
         self.clients.iter().map(|entry| *entry.key()).collect()
+    }
+
+    /// Scrape-time walk over every live connection's classified outbound
+    /// queue: total resident items and the oldest resident item's enqueue
+    /// instant. This runs on the metrics endpoint, never the write path;
+    /// per-queue reads take each queue's state lock briefly and clone no
+    /// payload. Legacy senders carry no inspectable queue and contribute
+    /// nothing (every wire connection is classified; legacy entries exist
+    /// only in test harnesses).
+    pub fn outbound_queue_sample(&self) -> OutboundQueueSample {
+        let mut sample = OutboundQueueSample::default();
+        for client in self.clients.iter() {
+            let Some(queue) = client.sender.classified_queue() else {
+                continue;
+            };
+            let (depth, oldest) = queue.depth_and_oldest();
+            sample.total_depth += depth as u64;
+            if let Some(enqueued_at) = oldest {
+                sample.oldest_enqueued_at = Some(match sample.oldest_enqueued_at {
+                    Some(existing) if existing < enqueued_at => existing,
+                    _ => enqueued_at,
+                });
+            }
+        }
+        sample
     }
 
     pub fn reassign_connection(
@@ -2075,6 +2125,109 @@ mod tests {
         assert_eq!(
             manager.next_relay_stamp_in_room(&restored_id, &room_id),
             Some(RelayStamp { epoch: 7, seq: 1 }),
+        );
+    }
+
+    /// The scrape walks live connections only: a legacy sender contributes
+    /// nothing, an empty classified queue reads as depth zero with no age,
+    /// and a resident item shows both its depth and an age measured against
+    /// the scrape instant. This is the runner's queue_depth/queue_age sample
+    /// source.
+    #[tokio::test]
+    async fn outbound_queue_sample_walks_live_classified_queues_only() {
+        let metrics = Arc::new(ServerMetrics::new());
+        let coordinator: Arc<dyn MessageCoordinator> = Arc::new(TestCoordinator::default());
+        let manager = ConnectionManager::new(
+            usize::MAX,
+            4,
+            metrics,
+            coordinator,
+            false,
+            (2, tokio::time::Duration::from_secs(60)),
+        );
+        let addr: SocketAddr = "127.0.0.1:5045".parse().unwrap();
+        let (legacy_tx, _legacy_rx) = tokio::sync::mpsc::channel::<Arc<ServerMessage>>(4);
+        let (close_signal, _close_listener) = ConnectionCloseSignal::channel();
+        manager
+            .register_client(legacy_tx, close_signal.clone(), addr, Uuid::new_v4())
+            .await
+            .expect("legacy registration succeeds");
+
+        // A legacy-only population reads as an empty sample.
+        let sample = manager.outbound_queue_sample();
+        assert_eq!(
+            sample.total_depth, 0,
+            "legacy senders carry no inspectable queue"
+        );
+        assert_eq!(sample.oldest_enqueued_at, None);
+        assert_eq!(sample.oldest_age_millis(tokio::time::Instant::now()), 0);
+
+        let (classified_tx, _classified_rx) = crate::coordination::outbound_queue::channel(4, 4);
+        manager
+            .register_classified_client(
+                DeliverySender::classified(classified_tx.clone()),
+                close_signal,
+                addr,
+                Uuid::new_v4(),
+            )
+            .await
+            .expect("classified registration succeeds");
+
+        // An empty classified queue still reads as empty.
+        let sample = manager.outbound_queue_sample();
+        assert_eq!(sample.total_depth, 0);
+        assert_eq!(sample.oldest_enqueued_at, None);
+
+        // A resident item shows depth and an age that the scrape instant
+        // measures (one queued item, then a second one: the OLDEST stamps
+        // the age).
+        let from_player = PlayerId::new_v4();
+        let room_id = RoomId::new_v4();
+        let data = |seq: u64| {
+            crate::coordination::outbound_queue::OutboundData::new(
+                Arc::new(ServerMessage::GameData {
+                    from_player,
+                    data: serde_json::json!({ "seq": seq }),
+                    seq: Some(seq),
+                    epoch: Some(1),
+                    class: Some(crate::protocol::DeliveryClass::Reliable),
+                    key: None,
+                }),
+                crate::coordination::outbound_queue::DataDeliveryMetadata {
+                    class: crate::protocol::DeliveryClass::Reliable,
+                    key: None,
+                    from_player,
+                    room_id,
+                    epoch: 1,
+                    seq,
+                },
+            )
+        };
+        let sender = classified_tx.clone();
+        sender
+            .try_enqueue_data(data(1))
+            .expect("first enqueue fits");
+        let (_, first_enqueued_at) = sender.depth_and_oldest();
+        let first_enqueued_at = first_enqueued_at.expect("item is resident");
+        sender
+            .try_enqueue_data(data(2))
+            .expect("second enqueue fits");
+
+        let sample = manager.outbound_queue_sample();
+        assert_eq!(sample.total_depth, 2, "both resident items are counted");
+        assert_eq!(
+            sample.oldest_enqueued_at,
+            Some(first_enqueued_at),
+            "the age stamps the oldest resident item, not the newest"
+        );
+
+        // Scrape 250ms later: the age measures exactly the enqueue-to-scrape
+        // span, floored at whole milliseconds.
+        let age =
+            sample.oldest_age_millis(first_enqueued_at + std::time::Duration::from_millis(250));
+        assert_eq!(
+            age, 250,
+            "age is measured against the passed scrape instant"
         );
     }
 

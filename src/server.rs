@@ -383,7 +383,9 @@ mod spectator_handlers;
 mod spectator_service;
 
 use connection_manager::{ClientLifecycle, ConnectionManager};
-pub(crate) use connection_manager::{NegotiatedProtocol, TransportStatusUpdate};
+pub(crate) use connection_manager::{
+    NegotiatedProtocol, OutboundQueueSample, TransportStatusUpdate,
+};
 use dashboard_cache::{DashboardMetricsCache, DashboardMetricsView};
 pub use shutdown::{run_drain_choreography, ShutdownDrain};
 use spectator_service::SpectatorService;
@@ -1922,6 +1924,14 @@ impl EnhancedGameServer {
     /// Get server metrics
     pub fn metrics(&self) -> Arc<crate::metrics::ServerMetrics> {
         self.metrics.clone()
+    }
+
+    /// Server-wide outbound-queue posture for the metrics scrape: total
+    /// queued items and the oldest resident item's enqueue instant, walked
+    /// over live connections at scrape time (never maintained on the write
+    /// path).
+    pub fn outbound_queue_sample(&self) -> connection_manager::OutboundQueueSample {
+        self.connection_manager.outbound_queue_sample()
     }
 
     /// Access the reconnection manager for integration tests or admin tooling.
@@ -5569,7 +5579,11 @@ mod relay_projection_cache_tests {
                 + rate_limits.signal_error_rejections
         );
 
-        let rendered = crate::websocket::prometheus::render_prometheus_metrics(&snapshot);
+        let rendered = crate::websocket::prometheus::render_prometheus_metrics(
+            &snapshot,
+            &crate::server::OutboundQueueSample::default(),
+            tokio::time::Instant::now(),
+        );
         for expected in [
             "signal_fish_rate_limit_rejections_total 5",
             "signal_fish_rate_limit_auth_rejections_total 1",
@@ -5657,6 +5671,8 @@ mod relay_projection_cache_tests {
         // Prometheus output agrees with the snapshot.
         let rendered = crate::websocket::prometheus::render_prometheus_metrics(
             &server.metrics.snapshot().await,
+            &crate::server::OutboundQueueSample::default(),
+            tokio::time::Instant::now(),
         );
         assert!(
             !rendered.contains(&format!("app_id=\"{revoked_id}\"")),

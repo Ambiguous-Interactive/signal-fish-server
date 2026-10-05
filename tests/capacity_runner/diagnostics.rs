@@ -10,9 +10,10 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-/// The server counters the interval sampler records (delivery-contract
-/// counters plus the active-connections gauge; same names the strict
-/// delivery suites assert on, parsed leniently here).
+/// The server counters and gauges the interval sampler records: the
+/// delivery-contract counters, the ingress/egress byte pair (the fan-out
+/// amplification pair), and the scrape-time outbound-queue posture gauges
+/// (same names the strict delivery suites assert on, parsed leniently here).
 pub const TRACKED_COUNTERS: &[&str] = &[
     "signal_fish_websocket_delivery_attempts_total",
     "signal_fish_websocket_deliveries_enqueued_total",
@@ -22,6 +23,10 @@ pub const TRACKED_COUNTERS: &[&str] = &[
     "signal_fish_websocket_slow_consumer_disconnects_total",
     "signal_fish_websocket_backpressure_events_total",
     "signal_fish_connections_active",
+    "signal_fish_relay_bytes_total",
+    "signal_fish_websocket_egress_bytes_total",
+    "signal_fish_websocket_queue_depth",
+    "signal_fish_websocket_queue_oldest_age_milliseconds",
 ];
 
 /// SHA-256 of a file, hex-encoded (server binary and config overlay hashes).
