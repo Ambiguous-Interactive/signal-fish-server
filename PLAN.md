@@ -312,11 +312,19 @@ resource samples, latency histogram, summary), exact replay (`replay ==
 summary`), the passing small reliable scenario, and every registered negative
 control invalidating with an explicit reason (missing, duplicate, misrouted,
 out-of-order, paused generator, saturation, server termination, slow reader
-with server-counter accounting). Remaining below: latest/volatile classes,
-churn/reconnect schedules, richer resource counters, and the queue-age and
-ingress/egress instrumentation.
+with server-counter accounting). The latest/volatile slice is landed
+(second runner PR, 2026-10-05): permitted loss only with exact gap
+accounting (class-legal reasons, no overlaps, no out-of-range coverage),
+key isolation pinned, per-recipient latency tails in the summary, the run
+class's accountable server outcomes in every interval sample, and two
+deterministic pressure cells in exact server-counter agreement. Remaining
+below: churn/reconnect schedules, richer resource counters, and the
+queue-age and ingress/egress instrumentation.
 
-- [ ] Latest/volatile and unsupported-format cells: validate permitted
+- [ ] Churn/reconnect schedules: reconnect-burst and room-replacement
+  shapes per the C3 cells, with red-first controls for each new permitted
+  outcome.
+- [ ] Unsupported-format cells: validate permitted
   outcomes and reports per the delivery contract instead of reliable
   semantics; label them as separate contract experiments. Reuse existing
   WebSocket clients and the shared multiprocess harness
@@ -324,8 +332,9 @@ ingress/egress instrumentation.
   server as a separate process.
 - [ ] Extend runner inputs where a new cell needs them (encoding mix cohorts,
   churn schedule shapes). Current inputs: endpoint, seed, room/player count,
-  encoding (v2/v3 JSON), payload bytes, per-sender rate, delivery class,
-  warm-up, duration, churn/reconnect schedule, output directory. MessagePack
+  encoding (v2/v3 JSON), payload bytes, per-sender rate, delivery class
+  (with `latest_keys_per_sender`), warm-up, duration, churn/reconnect
+  schedule, output directory. MessagePack
   cohorts and mixed-format cohorts ride the existing `Encoding` input.
 - [x] Emit a run manifest, interval measurements, latency histograms, exact
   outcome summary, and diagnostic logs as machine-readable artifacts, with
@@ -350,13 +359,14 @@ ingress/egress instrumentation.
   against the delivery contract. Unfinished reliable work is a failure
   (outstanding/unsent, with unsent invalidating when no declared fault
   explains it), not an omitted latency sample. Latest/volatile permitted
-  outcomes are the next slice above.
+  outcomes are pinned (exact gap coverage; the class slice above).
 - [ ] Collect CPU, RSS, cgroup memory, available socket-memory accounting,
   ingress/egress bytes, queue depth/age, disconnect reasons, live objects,
   cleanup backlog, maintenance duration, and generator CPU. Landed: server
   delivery counters, slow-consumer disconnects, active connections, server
-  RSS, cgroup memory, generator RSS, and disconnect reasons (recorded as
-  events), with scrape failures recorded as explicit samples. Remaining:
+  RSS, cgroup memory, generator RSS, disconnect reasons (recorded as
+  events), and the run class's seven accountable per-class outcomes, with
+  scrape failures recorded as explicit samples. Remaining:
   server CPU time, generator CPU, socket-memory accounting, ingress/egress
   bytes, queue depth/age, live objects, cleanup backlog, and maintenance
   duration. Keep instrumentation out of timed hot paths.

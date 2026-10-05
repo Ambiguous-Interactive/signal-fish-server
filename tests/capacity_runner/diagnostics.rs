@@ -147,3 +147,40 @@ pub fn parse_counter(text: &str, name: &str) -> Option<u64> {
     }
     None
 }
+
+/// Lenient labeled Prometheus sample parse: `Some(value)` when a sample of
+/// `name` carries exactly the wanted `{label="value"}` pairs, `None` when
+/// absent. Records the server's per-class delivery outcomes
+/// (`signal_fish_websocket_delivery_class_outcomes_total`) for the class a
+/// run measures.
+pub fn parse_labeled_counter(text: &str, name: &str, labels: &[(&str, &str)]) -> Option<u64> {
+    let wanted: Vec<(String, String)> = labels
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+        .collect();
+    for line in text.lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let (Some(sample), Some(raw_value)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let Some(open) = sample.find('{') else {
+            continue;
+        };
+        if sample[..open] != *name {
+            continue;
+        }
+        let inner = sample[open + 1..].trim_end_matches('}');
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for pair in inner.split("\",") {
+            let (key, value) = pair.split_once('=')?;
+            pairs.push((key.to_string(), value.trim_matches('"').to_string()));
+        }
+        if pairs == wanted {
+            return raw_value.parse::<u64>().ok();
+        }
+    }
+    None
+}

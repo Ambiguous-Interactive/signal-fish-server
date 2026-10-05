@@ -2308,11 +2308,32 @@ termination (declared fault, gap-free prefixes preserved), and a slow reader
 (eviction recorded and accounted by the server's
 `websocket_slow_consumer_disconnects_total` counter).
 
-**C2 next runner PR: latest/volatile delivery classes and churn/reconnect
-schedules (#648).** Extend `DeliveryClass` with the latest/volatile contract
-(permitted loss, supersession, and report validation, never reliable
-semantics) and `ChurnSchedule` with the reconnect-burst and room-replacement
-schedules their C3 cells need, with red-first controls for each new permitted
-outcome. Add per-recipient latency-tail reporting to the summary so
-aggregates cannot hide a starved room, and record queue depth/age and
-ingress/egress bytes in the interval samples before any C3 capacity claim.
+**C2 next runner PR: latest/volatile delivery classes — LANDED** (second
+runner PR, 2026-10-05). `DeliveryClass` carries the full lossy-class
+contract: `latest` (keyed newest-value; `latest_keys_per_sender` selects
+newest-value or key isolation) and `volatile`. Every omission must arrive
+as an exact server-stamped gap report (`latest_superseded`,
+`latest_dropped_full`, or `volatile_dropped` — a reason the class cannot
+produce is a violation), gaps may not overlap each other or a delivery,
+ranges may not reach beyond the sender's relay stream or below the first
+1-based sequence, and reliable runs reject any gap at all. The oracle
+validates coverage per recipient (uncovered holes are `MissingDeliveries`;
+only the loud disconnect tail may stay uncovered) and the summary now
+carries per-recipient latency tails plus `gap_covered` totals, and records
+the run class's seven accountable server outcomes in every interval sample.
+Two pressure cells pin the contract over real sockets: a 600 ms read pause
+on a clamped socket with a tiny send queue and a bounded kernel handoff
+makes supersession (latest) and oldest-eviction (volatile) deterministic;
+each run stays valid, and the server's per-class counter equals the
+validated gap coverage exactly. Key isolation is pinned: distinct keys
+coalesce nothing. Artifacts bumped to schema 2 (gap-report event kind,
+class-aware summary). The e2e cells exposed one runner defect during the
+red run: a peer's join snapshot can miss the member that joined
+concurrently, so receivers now track `PlayerJoined`/`PlayerLeft` to resolve
+gap senders.
+
+**C2 next runner PR: churn/reconnect schedules and richer resource
+counters (#648).** Extend `ChurnSchedule` with the reconnect-burst and
+room-replacement schedules the C3 cells need, with red-first controls for
+each new permitted outcome, and record queue depth/age plus ingress/egress
+bytes in the interval samples before any C3 capacity claim.

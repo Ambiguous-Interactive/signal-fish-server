@@ -1,9 +1,10 @@
 //! Raw run events — the artifact-level truth a run replays from.
 //!
-//! Everything the oracle consumes is recorded as three append-only event
-//! lists (sends, receipts, disconnects) plus join failures. The summary is a
-//! pure function of these events plus the plans, so "replay the artifacts"
-//! and "summarize the run" are literally the same code path.
+//! Everything the oracle consumes is recorded as append-only event lists
+//! (sends, receipts, gap reports, disconnects) plus join failures. The
+//! summary is a pure function of these events plus the plans and the run's
+//! delivery class, so "replay the artifacts" and "summarize the run" are
+//! literally the same code path.
 
 use std::sync::Mutex;
 
@@ -42,6 +43,22 @@ pub enum DisconnectObservation {
     StreamEnded,
 }
 
+/// One exact server-stamped omission a recipient read off a
+/// `DeliveryReport`: the inclusive server sequence range
+/// `from_seq..=to_seq` (1-based, one sender, one epoch) was not delivered,
+/// with the contract reason. The oracle maps the range onto the sender's
+/// ledger stream (`server seq = ledger seq + 1`) and checks exact coverage.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GapEvent {
+    pub recipient: String,
+    /// Peer name resolved from the report's `from_player` id.
+    pub sender: String,
+    pub epoch: u32,
+    pub from_seq: u64,
+    pub to_seq: u64,
+    pub reason: signal_fish_server::protocol::DeliveryGapReason,
+}
+
 /// A recipient that stopped being a delivery target before quiescence.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DisconnectEvent {
@@ -60,6 +77,7 @@ pub struct EventLog {
 struct EventState {
     sent: Vec<SentEvent>,
     receipts: Vec<ReceiptEvent>,
+    gaps: Vec<GapEvent>,
     disconnects: Vec<DisconnectEvent>,
     join_failures: Vec<String>,
     /// Faults the runner itself observed (hook firings, send failures,
@@ -87,6 +105,14 @@ impl EventLog {
             .lock()
             .expect("event log poisoned")
             .receipts
+            .push(event);
+    }
+
+    pub fn push_gap(&self, event: GapEvent) {
+        self.state
+            .lock()
+            .expect("event log poisoned")
+            .gaps
             .push(event);
     }
 
@@ -165,6 +191,7 @@ impl EventLog {
         let mut records = RunRecords {
             sent: std::mem::take(&mut state.sent),
             receipts: std::mem::take(&mut state.receipts),
+            gaps: std::mem::take(&mut state.gaps),
             disconnects: std::mem::take(&mut state.disconnects),
             join_failures: std::mem::take(&mut state.join_failures),
             faults: std::mem::take(&mut state.faults),
@@ -182,6 +209,7 @@ impl EventLog {
 pub struct RunRecords {
     pub sent: Vec<SentEvent>,
     pub receipts: Vec<ReceiptEvent>,
+    pub gaps: Vec<GapEvent>,
     pub disconnects: Vec<DisconnectEvent>,
     pub join_failures: Vec<String>,
     pub faults: Vec<InvalidReason>,
@@ -195,6 +223,7 @@ pub struct RunRecords {
 pub enum DeliveryEvent {
     Sent(SentEvent),
     Receipt(ReceiptEvent),
+    Gap(GapEvent),
     Disconnect(DisconnectEvent),
     JoinFailure { detail: String },
     Fault(InvalidReason),
@@ -202,13 +231,14 @@ pub enum DeliveryEvent {
 
 impl RunRecords {
     /// Every event as a tagged JSONL line, in the canonical order
-    /// (sends, receipts, disconnects, join failures, faults).
+    /// (sends, receipts, gaps, disconnects, join failures, faults).
     pub fn events(&self) -> impl Iterator<Item = DeliveryEvent> + '_ {
         self.sent
             .iter()
             .cloned()
             .map(DeliveryEvent::Sent)
             .chain(self.receipts.iter().cloned().map(DeliveryEvent::Receipt))
+            .chain(self.gaps.iter().cloned().map(DeliveryEvent::Gap))
             .chain(
                 self.disconnects
                     .iter()

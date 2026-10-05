@@ -8,9 +8,10 @@
 //! schedule is a pure function of the seed plus these fields, so a manifest
 //! recorded with this config reproduces the exact workload.
 //!
-//! Slice boundary: [`DeliveryClass`] and [`ChurnSchedule`] currently accept
-//! only their foundational variant. The input surface exists so later slices
-//! (latest/volatile delivery classes, reconnect storms, room churn) extend the
+//! Slice boundary: [`ChurnSchedule`] currently accepts only its foundational
+//! variant. [`DeliveryClass`] carries the full latest/volatile contract as of
+//! the second runner PR (permitted loss with exact gap accounting). The input
+//! surface exists so later slices (reconnect storms, room churn) extend the
 //! enums instead of reshaping every call site.
 
 use std::path::PathBuf;
@@ -54,15 +55,26 @@ impl Encoding {
 pub enum DeliveryClass {
     /// Reliable, ordered, exactly-once fan-out: the primary capacity ceiling.
     Reliable,
+    /// Keyed newest-value fan-out: a newer value for the same key supersedes
+    /// the still-undelivered predecessor. Every omitted sequence must arrive
+    /// as an exact server-stamped gap report (`latest_superseded` or
+    /// `latest_dropped_full`), never as silence.
+    Latest,
+    /// Opportunistic fan-out with no sender backpressure: under pressure the
+    /// oldest queued volatile message is evicted. Every omitted sequence must
+    /// arrive as an exact `volatile_dropped` gap report, never as silence.
+    Volatile,
 }
 
 impl DeliveryClass {
     fn parse(raw: &str) -> Result<Self, String> {
         match raw {
             "reliable" => Ok(DeliveryClass::Reliable),
+            "latest" => Ok(DeliveryClass::Latest),
+            "volatile" => Ok(DeliveryClass::Volatile),
             other => Err(format!(
-                "unsupported delivery class {other:?} (expected \"reliable\"; \
-                 latest/volatile contract experiments are a later C2 slice)"
+                "unsupported delivery class {other:?} (expected \"reliable\", \"latest\", \
+                 or \"volatile\")"
             )),
         }
     }
@@ -139,6 +151,19 @@ pub struct RunConfig {
     pub server_overlay: Value,
     /// Negative-control hook: pause senders once (scheduled-send latency).
     pub pause_sends: Option<SendPause>,
+    /// Negative-control hook (latest/volatile cells): the designated peer
+    /// `r0p0` joins on a clamped socket, does not read for this long, then
+    /// resumes and drains. While paused, the server's bounded kernel handoff
+    /// and outbound queue fill, so lossy-class pressure (supersession or
+    /// eviction) engages deterministically.
+    #[serde(with = "duration_micros_option")]
+    pub pause_reads: Option<Duration>,
+    /// Distinct coalescing keys one sender round-robins (`class: latest`
+    /// only; `seq % latest_keys`). `1` is the newest-value cell — every send
+    /// supersedes its still-undelivered predecessor. Keys equal to or
+    /// exceeding the send count never coalesce and deliver everything.
+    #[serde(default = "default_latest_keys")]
+    pub latest_keys_per_sender: u32,
     /// Negative-control hook: stall every sender for this long from the first
     /// measured send, to trip the generator-lag bound deterministically.
     #[serde(with = "duration_micros_option")]
@@ -158,6 +183,11 @@ pub struct RunConfig {
     /// run ID before any join; serialized for audit only.
     #[serde(default)]
     pub room_code_prefix: Option<String>,
+}
+
+/// Default coalescing-key count: one key per sender (the newest-value cell).
+pub(crate) fn default_latest_keys() -> u32 {
+    1
 }
 
 /// `Duration` as whole microseconds (u64) for artifact-stable serialization.
@@ -277,8 +307,9 @@ impl RunConfig {
     ///
     /// `ENDPOINT` (optional), `SEED`, `ROOMS`, `PLAYERS`, `ENCODING`
     /// (`v2-json` | `v3-json`), `PAYLOAD_BYTES`, `RATE_PER_SENDER`, `CLASS`
-    /// (`reliable`), `WARMUP_SECS`, `DURATION_SECS`, `CHURN` (`none`),
-    /// `OUTPUT_DIR`, `LAG_BOUND_MS`, `SAMPLE_INTERVAL_MS`. Absent optional
+    /// (`reliable` | `latest` | `volatile`), `LATEST_KEYS`, `WARMUP_SECS`,
+    /// `DURATION_SECS`, `CHURN` (`none`), `OUTPUT_DIR`, `LAG_BOUND_MS`,
+    /// `SAMPLE_INTERVAL_MS`. Absent optional
     /// variables fall back to the small default scenario; required scalars
     /// fall back to the same defaults so a bare invocation just works. Each
     /// run needs a FRESH `OUTPUT_DIR` (a directory that already holds a run
@@ -328,6 +359,10 @@ impl RunConfig {
             .map(|raw| raw.parse::<f64>())
             .transpose()
             .map_err(|error| format!("CAPACITY_RUNNER_WARMUP_SECS: {error}"))?;
+        let latest_keys = var("LATEST_KEYS")?
+            .map(|raw| raw.parse::<u32>())
+            .transpose()
+            .map_err(|error| format!("CAPACITY_RUNNER_LATEST_KEYS: {error}"))?;
         let duration_secs = var("DURATION_SECS")?
             .map(|raw| raw.parse::<f64>())
             .transpose()
@@ -362,6 +397,8 @@ impl RunConfig {
             sample_interval: Duration::from_millis(sample_ms.unwrap_or(250)),
             server_overlay: Self::default_server_overlay(),
             pause_sends: None,
+            pause_reads: None,
+            latest_keys_per_sender: latest_keys.unwrap_or_else(default_latest_keys),
             stall_senders: None,
             slow_reader: false,
             kill_server_after: None,

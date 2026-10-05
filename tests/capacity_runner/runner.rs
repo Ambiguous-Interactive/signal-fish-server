@@ -25,14 +25,22 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use signal_fish_server::protocol::{ClientMessage, ServerMessage, Topology, Transport};
+// The runner's config delivery class and the wire enum share the token set;
+// the alias keeps the mapping at the one boundary where they meet.
+use signal_fish_server::protocol::DeliveryClass as WireDeliveryClass;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::artifacts::{self, BuildIdentity, IntervalSample, ServerIdentity, WorkloadShape};
-use crate::config::{count_u64, count_usize, micros, Encoding, RunConfig, SendPause};
+use crate::config::{
+    count_u64, count_usize, default_latest_keys, micros, DeliveryClass, Encoding, RunConfig,
+    SendPause,
+};
 use crate::diagnostics;
 use crate::oracle::{self, InvalidReason, OutcomeSummary};
-use crate::records::{DisconnectEvent, DisconnectObservation, EventLog, ReceiptEvent, SentEvent};
+use crate::records::{
+    DisconnectEvent, DisconnectObservation, EventLog, GapEvent, ReceiptEvent, SentEvent,
+};
 use crate::schedule::{build_plans, Phase, SenderPlan};
 use crate::websocket_test_helpers;
 use crate::websocket_test_helpers::server_process::{spawn_server, ServerProcess};
@@ -89,6 +97,41 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     if config.duration.is_zero() {
         return Err("duration must be positive".to_string());
     }
+    // Hook/class coherence: each fault hook belongs to exactly one delivery
+    // contract. A wedged reliable reader exercises the slow-consumer
+    // eviction; a paused lossy-class reader exercises supersession/eviction
+    // accounting. Mixing them would measure neither.
+    match config.delivery_class {
+        DeliveryClass::Reliable => {
+            if config.pause_reads.is_some() {
+                return Err(
+                    "pause_reads belongs to the latest/volatile cells; a reliable run has no \
+                     policy loss for a paused reader to surface"
+                        .to_string(),
+                );
+            }
+            if config.latest_keys_per_sender != default_latest_keys() {
+                return Err(
+                    "latest_keys_per_sender belongs to class \"latest\"; a reliable run \
+                     coalesces nothing"
+                        .to_string(),
+                );
+            }
+        }
+        DeliveryClass::Latest | DeliveryClass::Volatile => {
+            if config.slow_reader {
+                return Err(
+                    "slow_reader belongs to the reliable cell; latest/volatile never \
+                     backpressure a reader, so the wedge would exercise lossy-class \
+                     accounting under the wrong declared fault"
+                        .to_string(),
+                );
+            }
+        }
+    }
+    if config.delivery_class == DeliveryClass::Latest && config.latest_keys_per_sender == 0 {
+        return Err("latest_keys_per_sender must be at least 1".to_string());
+    }
 
     let run_id = uuid::Uuid::new_v4().to_string();
     // Room codes are scoped to this run so two concurrent runs against one
@@ -128,6 +171,16 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
             ));
         }
     }
+    // The paused reader must resume while traffic still flows, so the run
+    // measures the pressure phase and the drain — not a silence window.
+    if let Some(pause_reads) = config.pause_reads {
+        if micros(pause_reads) >= max_intended_us {
+            return Err(format!(
+                "pause_reads ({pause_reads:?}) must end before the last scheduled send \
+                 (last intended send at {max_intended_us} µs into the run)"
+            ));
+        }
+    }
     // A directory that already holds a manifest belongs to another run:
     // mixing two runs' artifacts would make the replay a lie. Refuse loudly.
     if config.output_dir.join(artifacts::MANIFEST_FILE).exists() {
@@ -159,7 +212,9 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
 
     // Join phase: every peer of a room joins before the next room starts
     // (the first join creates the room; intra-room joins are concurrent).
-    let mut peers: Vec<(String, u32, WsSink, WsReceiver)> = Vec::new();
+    // Each join records the room's member roster (`PlayerId` -> peer name)
+    // so `DeliveryReport` gap ranges attribute their omissions to a sender.
+    let mut peers: Vec<(String, u32, WsSink, WsReceiver, BTreeMap<String, String>)> = Vec::new();
     for room in 0..config.rooms {
         let room_plans: Vec<&SenderPlan> = plans.iter().filter(|plan| plan.room == room).collect();
         let joins = room_plans.into_iter().map(|plan| {
@@ -170,7 +225,9 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         let results = futures_util::future::join_all(joins).await;
         for (plan, result) in plans.iter().filter(|p| p.room == room).zip(results) {
             match result {
-                Ok((sink, rx)) => peers.push((plan.name.clone(), plan.room, sink, rx)),
+                Ok((sink, rx, member_ids)) => {
+                    peers.push((plan.name.clone(), plan.room, sink, rx, member_ids))
+                }
                 Err(failure) => log.push_join_failure(format!(
                     "{}: {failure}",
                     RunConfig::peer_name(plan.room, plan.player)
@@ -231,7 +288,8 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         .max()
         .unwrap_or(0);
     let hook_extra_us = config.pause_sends.map_or(0, |pause| micros(pause.duration))
-        + config.stall_senders.map_or(0, micros);
+        + config.stall_senders.map_or(0, micros)
+        + config.pause_reads.map_or(0, micros);
     // Quiescence must cover both a bound-late last send (up to the
     // generator-lag bound past its intended time) AND the quiet delivery
     // drain after that send — never one at the expense of the other.
@@ -264,6 +322,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
             config.sample_interval,
             metrics_url(&endpoint_base),
             pid,
+            (config.delivery_class != DeliveryClass::Reliable).then_some(config.delivery_class),
             samples,
         ));
     }
@@ -288,9 +347,14 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
 
     // Slow-reader hook: hold the designated peer's receive half without ever
     // polling it, so its socket wedges exactly like a stalled client. The
-    // peer still sends on its own sink.
+    // peer still sends on its own sink. The paused-reader hook is the
+    // lossy-class analog: the designated peer does not read for the
+    // configured window (server-side lossy-class pressure engages once the
+    // bounded kernel handoff and outbound queue fill), then resumes and
+    // drains.
+    let paused_reader = paused_reader_name(&config);
     let mut handles = Vec::new();
-    for (name, room, sink, rx) in peers {
+    for (name, room, sink, rx, member_ids) in peers {
         let plan = plans
             .iter()
             .find(|plan| plan.name == name && plan.room == room)
@@ -308,8 +372,18 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         } else {
             let log = Arc::clone(&log);
             let recipient = name.clone();
+            let resume_reads_after = paused_reader
+                .as_deref()
+                .filter(|designated| *designated == name.as_str())
+                .and(config.pause_reads);
             handles.push(tokio::spawn(receiver_task(
-                recipient, rx, epoch, log, quiescence,
+                recipient,
+                rx,
+                member_ids,
+                resume_reads_after,
+                epoch,
+                log,
+                quiescence,
             )));
         }
         handles.push(tokio::spawn(sender_task(
@@ -322,6 +396,8 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
                 payload_bytes: config.payload_bytes,
                 pause_sends: config.pause_sends,
                 stall_senders: config.stall_senders,
+                delivery_class: config.delivery_class,
+                latest_keys_per_sender: config.latest_keys_per_sender,
             },
         )));
     }
@@ -338,7 +414,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
 
     let records = log.snapshot();
     let bound_us = micros(config.generator_lag_bound);
-    let summary = oracle::summarize(&plans, &roster, &records, bound_us);
+    let summary = oracle::summarize(&plans, &roster, &records, bound_us, config.delivery_class);
 
     artifacts::write_deliveries(&config.output_dir, &records)?;
     artifacts::write_intervals(
@@ -370,15 +446,18 @@ fn overlay_sha256(config: &RunConfig) -> Result<String, String> {
     Ok(diagnostics::sha256_bytes(&bytes))
 }
 
-/// One peer: connect (clamped for the slow reader), negotiate (v3), join.
+/// One peer: connect (clamped for the designated reader hooks), negotiate
+/// (v3), join. Returns the sink, the receive half, and the room's member
+/// roster (`PlayerId` -> peer name) for gap attribution.
 async fn connect_and_join(
     config: &RunConfig,
     ws_url: &str,
     plan: &SenderPlan,
-) -> Result<(WsSink, WsReceiver), String> {
+) -> Result<(WsSink, WsReceiver, BTreeMap<String, String>), String> {
     let name = RunConfig::peer_name(plan.room, plan.player);
-    let is_slow_reader = slow_reader_name(config).as_deref() == Some(name.as_str());
-    let stream = if is_slow_reader {
+    let is_designated = slow_reader_name(config).as_deref() == Some(name.as_str())
+        || paused_reader_name(config).as_deref() == Some(name.as_str());
+    let stream = if is_designated {
         connect_clamped(ws_url, SLOW_READER_RECV_BUFFER_BYTES).await?
     } else {
         connect_plain(ws_url).await?
@@ -387,7 +466,7 @@ async fn connect_and_join(
     if config.encoding == Encoding::V3Json {
         authenticate_v3(&mut sink, &mut rx).await?;
     }
-    join_room(
+    let joined = join_room(
         &mut sink,
         &mut rx,
         &config.room_code(plan.room),
@@ -395,11 +474,24 @@ async fn connect_and_join(
         config.players_per_room,
     )
     .await?;
-    Ok((sink, rx))
+    let member_ids = joined
+        .current_players
+        .iter()
+        .map(|player| (player.id.to_string(), player.name.clone()))
+        .collect();
+    Ok((sink, rx, member_ids))
 }
 
 fn slow_reader_name(config: &RunConfig) -> Option<String> {
     config.slow_reader.then(|| RunConfig::peer_name(0, 0))
+}
+
+/// The designated read-pause peer (the lossy-class pressure control).
+fn paused_reader_name(config: &RunConfig) -> Option<String> {
+    config
+        .pause_reads
+        .is_some()
+        .then(|| RunConfig::peer_name(0, 0))
 }
 
 /// Connect to `ws://{url}` with default buffers.
@@ -480,14 +572,15 @@ async fn authenticate_v3(sink: &mut WsSink, rx: &mut WsReceiver) -> Result<(), S
     Ok(())
 }
 
-/// Join the run's room and fail loudly on any refusal.
+/// Join the run's room and fail loudly on any refusal. Returns the join
+/// payload (the room's member roster rides in `current_players`).
 async fn join_room(
     sink: &mut WsSink,
     rx: &mut WsReceiver,
     room_code: &str,
     player_name: &str,
     max_players: u32,
-) -> Result<(), String> {
+) -> Result<signal_fish_server::protocol::RoomJoinedPayload, String> {
     let join = ClientMessage::JoinRoom {
         game_name: GAME_NAME.to_string(),
         room_code: Some(room_code.to_string()),
@@ -509,7 +602,7 @@ async fn join_room(
             Err(_) => return Err(format!("join {room_code} timed out")),
         };
         match decode_server_frame(frame)? {
-            ServerMessage::RoomJoined(_) => return Ok(()),
+            ServerMessage::RoomJoined(payload) => return Ok(*payload),
             ServerMessage::RoomJoinFailed { reason, .. } => {
                 return Err(format!("join {room_code} refused: {reason:?}"))
             }
@@ -590,11 +683,27 @@ async fn sender_task(
             "seq": send.seq,
             "padding": padding.as_ref(),
         });
-        let message = ClientMessage::GameData {
-            class: None, // reliable delivery is the class under measurement
-            key: None,
-            data,
+        let (class, key) = match hooks.delivery_class {
+            DeliveryClass::Reliable => (None, None),
+            DeliveryClass::Latest => {
+                // The coalescing key is a sender-scoped u32; a sender
+                // round-robins its keys so a run can hold newest-value
+                // semantics (one key) or key isolation (many keys).
+                let key_index = send.seq % u64::from(hooks.latest_keys_per_sender);
+                match u32::try_from(key_index) {
+                    Ok(index) => (Some(WireDeliveryClass::Latest), Some(index)),
+                    Err(error) => {
+                        log.push_fault(InvalidReason::SendFailed {
+                            sender: plan.name.clone(),
+                            detail: error.to_string(),
+                        });
+                        return;
+                    }
+                }
+            }
+            DeliveryClass::Volatile => (Some(WireDeliveryClass::Volatile), None),
         };
+        let message = ClientMessage::GameData { class, key, data };
         let frame = match serde_json::to_string(&message) {
             Ok(frame) => frame,
             Err(error) => {
@@ -636,17 +745,31 @@ struct SenderHooks {
     payload_bytes: u32,
     pause_sends: Option<SendPause>,
     stall_senders: Option<Duration>,
+    delivery_class: DeliveryClass,
+    latest_keys_per_sender: u32,
 }
 
 /// Drain one recipient's stream until quiescence or disconnection, recording
-/// every relayed delivery with its same-clock receipt time.
+/// every relayed delivery with its same-clock receipt time and every
+/// `DeliveryReport` gap with its resolved sender name. The member roster
+/// starts from the join snapshot and tracks `PlayerJoined`/`PlayerLeft`
+/// broadcasts — concurrent joins mean the join snapshot can briefly miss the
+/// peer that joined microseconds earlier. A configured read pause
+/// (lossy-class pressure control) holds the stream unpolled — on a clamped
+/// socket, so the server's bounded kernel handoff fills — until the resume
+/// instant.
 async fn receiver_task(
     recipient: String,
     mut rx: WsReceiver,
+    mut member_ids: BTreeMap<String, String>,
+    resume_reads_after: Option<Duration>,
     epoch: Instant,
     log: Arc<EventLog>,
     until: Instant,
 ) {
+    if let Some(pause) = resume_reads_after {
+        tokio::time::sleep_until(epoch + pause).await;
+    }
     loop {
         let frame = tokio::select! {
             frame = rx.next() => match frame {
@@ -672,6 +795,39 @@ async fn receiver_task(
                             sender,
                             seq,
                             received_us: micros(epoch.elapsed()),
+                        });
+                    }
+                }
+                Ok(ServerMessage::PlayerJoined { player }) => {
+                    member_ids.insert(player.id.to_string(), player.name.clone());
+                }
+                Ok(ServerMessage::PlayerLeft { player_id, .. }) => {
+                    member_ids.remove(&player_id.to_string());
+                }
+                Ok(ServerMessage::DeliveryReport(report)) => {
+                    for gap in &report.gaps {
+                        let sender = member_ids.get(&gap.from_player.to_string());
+                        let Some(sender) = sender else {
+                            // Record the violation and keep reading: the
+                            // remaining stream is evidence, and the verdict
+                            // is already invalid.
+                            log.push_fault(InvalidReason::InvalidGapReports {
+                                count: 1,
+                                first: crate::oracle::GapViolation {
+                                    recipient: recipient.clone(),
+                                    sender: gap.from_player.to_string(),
+                                    detail: "gap names a player absent from the roster".to_string(),
+                                },
+                            });
+                            continue;
+                        };
+                        log.push_gap(GapEvent {
+                            recipient: recipient.clone(),
+                            sender: sender.clone(),
+                            epoch: gap.epoch,
+                            from_seq: gap.from_seq,
+                            to_seq: gap.to_seq,
+                            reason: gap.reason,
                         });
                     }
                 }
@@ -706,13 +862,16 @@ async fn receiver_task(
 }
 
 /// Periodic server resource sampling until `until`. A failed scrape is
-/// recorded as an explicit sample with `scrape_error` — never skipped.
+/// recorded as an explicit sample with `scrape_error` — never skipped. A
+/// lossy-class run also samples its class's accountable outcomes.
+#[allow(clippy::too_many_arguments)]
 async fn sample_loop(
     epoch: Instant,
     until: Instant,
     interval: Duration,
     metrics_url: String,
     pid: Option<u32>,
+    delivery_class: Option<DeliveryClass>,
     out: Arc<std::sync::Mutex<Vec<IntervalSample>>>,
 ) {
     let client = reqwest::Client::builder()
@@ -746,7 +905,7 @@ async fn sample_loop(
             }
             // Every tracked counter is recorded — its value, or null when
             // the exposition no longer carries it.
-            Ok(diagnostics::TRACKED_COUNTERS
+            let mut counters: BTreeMap<String, serde_json::Value> = diagnostics::TRACKED_COUNTERS
                 .iter()
                 .map(|name| {
                     let value = match diagnostics::parse_counter(&text, name) {
@@ -755,7 +914,39 @@ async fn sample_loop(
                     };
                     ((*name).to_string(), value)
                 })
-                .collect())
+                .collect();
+            // A lossy-class run also records its class's seven accountable
+            // outcomes, so server-side accounting can be checked against the
+            // gap reports the oracle validated.
+            if let Some(class) = delivery_class {
+                let class_token = match class {
+                    DeliveryClass::Latest => "latest",
+                    DeliveryClass::Volatile => "volatile",
+                    DeliveryClass::Reliable => "reliable",
+                };
+                for outcome in [
+                    "attempted",
+                    "delivered",
+                    "superseded",
+                    "dropped_full",
+                    "dropped",
+                    "abandoned",
+                    "unsupported_format",
+                ] {
+                    let value = diagnostics::parse_labeled_counter(
+                        &text,
+                        "signal_fish_websocket_delivery_class_outcomes_total",
+                        &[("class", class_token), ("outcome", outcome)],
+                    );
+                    counters.insert(
+                        format!("class_outcome_{outcome}"),
+                        value
+                            .map(serde_json::Value::from)
+                            .unwrap_or(serde_json::Value::Null),
+                    );
+                }
+            }
+            Ok(counters)
         }
         .await;
         let (counters, scrape_error) = match scrape {
