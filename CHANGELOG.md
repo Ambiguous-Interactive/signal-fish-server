@@ -20,7 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path. The capacity runner records all three plus the ingress counter in
   every interval resource sample, so run artifacts carry the fan-out
   amplification pair and the queue backlog evidence next to the delivery
-  counters.
+  counters. Queue-posture reads accumulate with saturating arithmetic and
+  the egress counter covers the immediate-send path (admission refusals,
+  the teardown final report flush, slow-consumer farewells, and
+  min-protocol refusals) as well as the queued write leaf.
 
 - Capacity runner: a standalone, delivery-aware runner for the ARM capacity
   campaign (#648, #636 C2). It spawns the server binary as a separate

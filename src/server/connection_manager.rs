@@ -1084,7 +1084,7 @@ impl ConnectionManager {
                 continue;
             };
             let (depth, oldest) = queue.depth_and_oldest();
-            sample.total_depth += depth as u64;
+            sample.total_depth = sample.total_depth.saturating_add(depth as u64);
             if let Some(enqueued_at) = oldest {
                 sample.oldest_enqueued_at = Some(match sample.oldest_enqueued_at {
                     Some(existing) if existing < enqueued_at => existing,

@@ -600,7 +600,7 @@ impl QueueState {
     /// observability only there) and the sender half reads both for the
     /// scrape-time queue gauges; both are reads, never mutations.
     fn depth_and_oldest(&self) -> (usize, Option<Instant>) {
-        let mut depth = 0;
+        let mut depth: usize = 0;
         let mut oldest = None;
         for queued in self
             .legacy
@@ -609,7 +609,7 @@ impl QueueState {
             .chain(self.data.iter())
             .chain(self.barriers.iter())
         {
-            depth += 1;
+            depth = depth.saturating_add(1);
             oldest = Some(match oldest {
                 Some(existing) if existing < queued.enqueued_at => existing,
                 _ => queued.enqueued_at,
