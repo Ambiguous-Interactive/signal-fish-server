@@ -557,8 +557,9 @@ correctness evidence appears.
   101). Root-caused via the run artifact: crates.io transport flakiness
   tripped the zero-diagnostics packaging pin — zero sanitizer findings.
   The recovered-transport warning class is now tolerated in both packaging
-  filters (PR #734); remaining follow-up is watching one scheduled run on
-  main post-merge. The npm-side red is fixed by the #732 gate.
+  filters (PR #734); the post-merge watch is complete: the scheduled
+  Advanced Safety run on main (2026-10-05, head `8f80cc6e`) is green. The
+  npm-side red is fixed by the #732 gate. CLOSED.
 - #732 — GHSA-vfj7-8cjw-p6xm (braces) is unfixable upstream; the npm audit
   gate accepts it per-graph with a 2026-12-01 revisit date. Drop the entry
   when a patched braces release exists.
