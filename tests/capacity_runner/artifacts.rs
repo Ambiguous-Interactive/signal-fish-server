@@ -5,7 +5,8 @@
 //! - `manifest.json` — schema version, run ID, the full [`RunConfig`],
 //!   workload shape, server identity (endpoint, PID, binary hash, config
 //!   overlay hash), toolchain, host, features, and the clock method.
-//! - `deliveries.jsonl` — every send, receipt, disconnect, and join failure.
+//! - `deliveries.jsonl` — every send, receipt, gap report, disconnect, and
+//!   join failure.
 //! - `intervals.jsonl` — periodic server resource samples (delivery
 //!   counters, RSS, cgroup memory) with unavailable counters recorded as
 //!   null, never omitted.
@@ -34,8 +35,9 @@ use crate::records::RunRecords;
 use crate::schedule::build_plans;
 
 /// Bump on any breaking artifact shape change (the audit contract requires
-/// every stored run to name its schema).
-pub const SCHEMA_VERSION: u64 = 1;
+/// every stored run to name its schema). Version 2 adds the gap-report event
+/// kind, the delivery-class-aware summary, and the latest/volatile inputs.
+pub const SCHEMA_VERSION: u64 = 2;
 
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const DELIVERIES_FILE: &str = "deliveries.jsonl";
@@ -252,6 +254,10 @@ pub fn read_records(output_dir: &Path) -> Result<RunRecords, String> {
                 serde_json::from_value(value)
                     .map_err(|error| format!("parse receipt event: {error}"))?,
             ),
+            "gap" => records.gaps.push(
+                serde_json::from_value(value)
+                    .map_err(|error| format!("parse gap event: {error}"))?,
+            ),
             "disconnect" => records.disconnects.push(
                 serde_json::from_value(value)
                     .map_err(|error| format!("parse disconnect event: {error}"))?,
@@ -295,5 +301,6 @@ pub fn replay(output_dir: &Path) -> Result<OutcomeSummary, String> {
         &roster,
         &records,
         micros(manifest.config.generator_lag_bound),
+        manifest.config.delivery_class,
     ))
 }
