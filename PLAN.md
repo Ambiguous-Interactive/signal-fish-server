@@ -296,45 +296,76 @@ equivalent direct proof. Do not weaken correctness checks to improve capacity.
 
 ### C2 — Build a standalone, delivery-aware capacity runner ([#648](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/648))
 
-- [ ] Reuse existing WebSocket clients, multiprocess tests, and delivery
-  ledgers. Run the release server as a separate process. The in-process
-  `tests/load_tests.rs` smoke tests are not socket-delivery capacity evidence.
-  The shared-process experiment in `docs/architecture/scaling.md` is not a
-  standalone server ceiling.
-- [ ] Define runner inputs for endpoint, workload/seed, room and player counts,
-  protocol/encoding mix, payload size, sender rate, delivery class, warm-up,
-  duration, churn schedule, and output directory. Keep the runner independent
-  of a cloud provider. Do not add production protocol fields for benchmarking.
-- [ ] Emit a run manifest, interval measurements, latency histograms, exact
-  outcome summary, and diagnostic logs as machine-readable artifacts. Include
-  schema version, run ID, SHAs, toolchain, features, binary/config hashes,
-  CPU/kernel, resource limits, TLS mode, network path, and generator resources.
-- [ ] Schedule offered traffic independently of response completion. Record
-  intended send time, actual send time, receipt time, generator lag, unsent
-  work, and outstanding deliveries. Bound generator queues and mark saturation
-  as an invalid measurement; never silently drop scheduled work.
-- [ ] Prefer sender and receiver tasks sharing one generator's monotonic clock
-  for latency pairs. For distributed generators, require a recorded clock
-  error bound or use same-clock round trips as a separate metric. Do not
-  compare unsynchronized timestamps to the 50-ms one-way target.
-- [ ] Track deliveries by run/room/sender/sequence/recipient. Check missing,
-  duplicate, unexpected, cross-room, and out-of-order outcomes against the
-  delivery contract. For latest/volatile traffic and unsupported formats,
-  validate permitted outcomes and reports rather than requiring reliable
-  delivery. Unfinished work remains a failure, not an omitted latency sample.
+The runner foundation is landed (`tests/capacity_runner/`, first runner PR,
+2026-10-04): full contract input set with `CAPACITY_RUNNER_*` standalone
+entry, spawn-or-connect to the real binary on a separate process, scheduled
+sends independent of response completion under a generator-lag bound, one
+monotonic run epoch for send/receipt pairs, versioned artifacts
+(manifest with binary/config hashes, tagged event log, interval server
+resource samples, latency histogram, summary), exact replay (`replay ==
+summary`), the passing small reliable scenario, and every registered negative
+control invalidating with an explicit reason (missing, duplicate, misrouted,
+out-of-order, paused generator, saturation, server termination, slow reader
+with server-counter accounting). Remaining below: latest/volatile classes,
+churn/reconnect schedules, richer resource counters, and the queue-age and
+ingress/egress instrumentation.
+
+- [ ] Latest/volatile and unsupported-format cells: validate permitted
+  outcomes and reports per the delivery contract instead of reliable
+  semantics; label them as separate contract experiments. Reuse existing
+  WebSocket clients and the shared multiprocess harness
+  (`tests/websocket_test_helpers/`); the runner already runs the release
+  server as a separate process.
+- [ ] Extend runner inputs where a new cell needs them (encoding mix cohorts,
+  churn schedule shapes). Current inputs: endpoint, seed, room/player count,
+  encoding (v2/v3 JSON), payload bytes, per-sender rate, delivery class,
+  warm-up, duration, churn/reconnect schedule, output directory. MessagePack
+  cohorts and mixed-format cohorts ride the existing `Encoding` input.
+- [x] Emit a run manifest, interval measurements, latency histograms, exact
+  outcome summary, and diagnostic logs as machine-readable artifacts, with
+  schema version, run ID, run-scoped room-code prefix, toolchain, features,
+  config-overlay and server-binary hashes, arch/kernel, resource samples
+  (server delivery counters, server RSS, cgroup memory, generator RSS), and
+  the clock method. Unavailable counters are recorded (as null or an explicit
+  scrape-error sample), never omitted. CPU model, resource limits, and the
+  network path are environment facts a capacity host records around the run
+  (the audit experiment contract), not things the generator can know.
+- [x] Schedule offered traffic independently of response completion. Record
+  intended send time, actual send time, receipt time, and generator lag per
+  delivery; bound the generator with the lag bound and mark saturation as an
+  invalid measurement (explicit reason with worst lag and unsent work) —
+  never silently drop scheduled work.
+- [x] Prefer sender and receiver tasks sharing one monotonic clock for
+  latency pairs (one run epoch in one process). Distributed generators are
+  out of scope for this runner; single-host same-clock pairs are the only
+  numbers compared to the 50-ms target.
+- [x] Track deliveries by run/room/sender/sequence/recipient and check
+  missing, duplicate, unexpected/misrouted, and out-of-order outcomes
+  against the delivery contract. Unfinished reliable work is a failure
+  (outstanding/unsent, with unsent invalidating when no declared fault
+  explains it), not an omitted latency sample. Latest/volatile permitted
+  outcomes are the next slice above.
 - [ ] Collect CPU, RSS, cgroup memory, available socket-memory accounting,
   ingress/egress bytes, queue depth/age, disconnect reasons, live objects,
-  cleanup backlog, and maintenance duration. Record unavailable counters.
-  Keep instrumentation out of timed hot paths where possible and quantify
-  its overhead before using profiled runs for capacity claims.
-- [ ] Add runner negative controls: deliberately missing/duplicate/misrouted
-  deliveries, delayed sends, slow readers, generator saturation, and server
-  termination must fail or invalidate the result as appropriate. Verify that
-  a pause appears in scheduled-send latency instead of reducing offered load.
+  cleanup backlog, maintenance duration, and generator CPU. Landed: server
+  delivery counters, slow-consumer disconnects, active connections, server
+  RSS, cgroup memory, generator RSS, and disconnect reasons (recorded as
+  events), with scrape failures recorded as explicit samples. Remaining:
+  server CPU time, generator CPU, socket-memory accounting, ingress/egress
+  bytes, queue depth/age, live objects, cleanup backlog, and maintenance
+  duration. Keep instrumentation out of timed hot paths.
+- [x] Runner negative controls: deliberately missing/duplicate/misrouted
+  deliveries, delayed sends (pause appears in scheduled-send latency instead
+  of reducing offered load), slow readers, generator saturation, and server
+  termination must fail or invalidate the result as appropriate — all seven
+  are pinned.
 
 Acceptance: a small real-socket scenario passes, each negative control is
-detected, artifacts replay the result, and generator limits are distinguishable
-from server saturation. No production API change is required for this phase.
+detected, artifacts replay the result, and generator limits are
+distinguishable from server saturation. No production API change is required
+for this phase. The scenario, replay-equality, and all controls are pinned in
+`tests/capacity_runner/`; acceptance for the remaining slices rides the same
+target.
 
 ### C3 — Measure capacity curves and resource costs
 
