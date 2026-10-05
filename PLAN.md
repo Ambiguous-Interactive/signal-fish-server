@@ -324,16 +324,24 @@ rejoins (runner-owned incarnation indices resolved per `PlayerId` through
 a sender registry, rejoin snapshot tails as owed floors, stale-epoch and
 below-tail misroute detection, storm-execution enforcement), schema-3
 artifacts, a real-socket 50% storm cell with replay equality, and
-deterministic controls for each new permitted outcome. Remaining
-below: room-replacement schedules, unsupported-format cells, and richer
+deterministic controls for each new permitted outcome. The
+room-replacement slice is landed (fourth runner PR, 2026-10-05): whole
+rooms cycle into fresh room-code generations per wave (the C3 churn
+cell), the member roster per room never changes so the oracle's static
+co-room checks and per-incarnation stream machinery validate unchanged,
+the multi-wave shift composes on the original timeline, and two
+real-socket cells plus deterministic controls (plan shape, composed
+shift, code uniqueness, missing rejoin half, stale-generation misroute)
+carry red proofs. Remaining below: unsupported-format cells, and richer
 resource counters.
 
-- [ ] Churn/reconnect schedules: reconnect-burst and room-replacement
+- [x] Churn/reconnect schedules: reconnect-burst and room-replacement
   shapes per the C3 cells, with red-first controls for each new permitted
   outcome. The reconnect-burst slice is landed (third runner PR,
   2026-10-05, see the ledger's contract record): the storm shape, per-
-  incarnation stream validation, and the storm cell plus controls.
-  Remaining: the room-replacement shape.
+  incarnation stream validation, and the storm cell plus controls. The
+  room-replacement shape is landed (fourth runner PR, 2026-10-05): whole
+  rooms cycle into fresh generations per wave while others keep serving.
 - [ ] Unsupported-format cells: validate permitted
   outcomes and reports per the delivery contract instead of reliable
   semantics; label them as separate contract experiments. Reuse existing

@@ -200,7 +200,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         // the biased churn arm and fires after the rejoin with the whole
         // offline window as lag — the bound must hold that margin, or a
         // scheduling artifact would be mislabeled a generator fault.
-        if let ChurnSchedule::ReconnectBurst { window, .. } = config.churn {
+        if let Some(window) = config.churn.window() {
             if micros(window) >= micros(config.generator_lag_bound) {
                 return Err(format!(
                     "the churn stagger window ({window:?}) must stay below the generator-lag \
@@ -479,14 +479,38 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
             .as_deref()
             .filter(|designated| *designated == name.as_str())
             .map(|_| epoch + config.pause_reads.expect("paused reader carries its pause"));
-        let churn_instants = churn_plan.victim_instants(&name);
+        let churn_cycles: Vec<PeerChurnCycle> = churn_plan
+            .victim_instants(&name)
+            .into_iter()
+            .enumerate()
+            .map(|(cycle_index, (disconnect_us, reconnect_us))| {
+                // A room replacement's k-th wave (per this peer) rejoins the
+                // room's generation k + 1 — a fresh room code, so the
+                // replacement creates a genuinely new room. A burst rejoins
+                // the same room every cycle.
+                let generation = match config.churn {
+                    ChurnSchedule::RoomReplacement { .. } => {
+                        u32::try_from(cycle_index).map_or(0, |index| index + 1)
+                    }
+                    _ => 0,
+                };
+                PeerChurnCycle {
+                    disconnect_us,
+                    reconnect_us,
+                    rejoin_room_code: RunConfig::room_code_for_generation(
+                        config.room_code_prefix.as_deref(),
+                        room,
+                        generation,
+                    ),
+                }
+            })
+            .collect();
         let is_slow_reader = slow_reader_name.as_deref() == Some(name.as_str());
         handles.push(tokio::spawn(peer_task(
             name,
             plan,
             PeerFacts {
                 ws_url: ws_url.clone(),
-                room_code: config.room_code(room),
                 encoding: config.encoding,
                 players_per_room: config.players_per_room,
                 payload_bytes: config.payload_bytes,
@@ -496,7 +520,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
                 pause_sends: config.pause_sends,
                 stall_senders: config.stall_senders,
             },
-            churn_instants,
+            churn_cycles,
             epoch,
             Arc::clone(&registry),
             (sink, rx, player_id, tails),
@@ -760,11 +784,11 @@ fn decode_server_frame(
 }
 
 /// The owned config facts one peer task needs (it is spawned, so it cannot
-/// borrow the run config).
+/// borrow the run config). Room codes are not here: the first join happens
+/// before the task spawns, and every rejoin carries its cycle's code.
 #[derive(Debug, Clone)]
 struct PeerFacts {
     ws_url: String,
-    room_code: String,
     encoding: Encoding,
     players_per_room: u32,
     payload_bytes: u32,
@@ -773,6 +797,18 @@ struct PeerFacts {
     generator_lag_bound_us: u64,
     pause_sends: Option<SendPause>,
     stall_senders: Option<Duration>,
+}
+
+/// One churn cycle for one peer: the peer disconnects at `disconnect_us`,
+/// rejoins at `reconnect_us` into the room code `rejoin_room_code`. For a
+/// reconnect burst the code is the peer's room (a rejoin re-seats the same
+/// room); for a room replacement it is the room's next generation — a fresh
+/// room — so the schedule knowledge stays in `run` and the task stays
+/// mechanical.
+struct PeerChurnCycle {
+    disconnect_us: u64,
+    reconnect_us: u64,
+    rejoin_room_code: String,
 }
 
 /// One peer's whole session lifecycle.
@@ -794,7 +830,7 @@ async fn peer_task(
     recipient: String,
     plan: SenderPlan,
     facts: PeerFacts,
-    churn_instants: Vec<(u64, u64)>,
+    churn_instants: Vec<PeerChurnCycle>,
     epoch: Instant,
     registry: SenderRegistry,
     initial: (WsSink, WsReceiver, String, BTreeMap<String, (String, u64)>),
@@ -832,13 +868,14 @@ async fn peer_task(
             Some(pair) => pair,
             None => {
                 // Offline window: reconnect at the scheduled instant of the
-                // cycle that just disconnected this peer.
-                let (_, reconnect_us) = churn_instants[churn_cursor - 1];
-                tokio::time::sleep_until(epoch + Duration::from_micros(reconnect_us)).await;
+                // cycle that just disconnected this peer, into that cycle's
+                // room code.
+                let cycle = &churn_instants[churn_cursor - 1];
+                tokio::time::sleep_until(epoch + Duration::from_micros(cycle.reconnect_us)).await;
                 match connect_and_join(
                     &facts.ws_url,
                     facts.encoding,
-                    facts.room_code.clone(),
+                    cycle.rejoin_room_code.clone(),
                     facts.players_per_room,
                     &plan,
                     false,
@@ -886,7 +923,9 @@ async fn peer_task(
                 // Declared churn disconnect: close the socket, record the
                 // action, and let the session loop sleep out the window.
                 _ = tokio::time::sleep_until(
-                    next_churn.map_or(until, |(at, _)| epoch + Duration::from_micros(*at)),
+                    next_churn.map_or(until, |cycle| {
+                        epoch + Duration::from_micros(cycle.disconnect_us)
+                    }),
                 ), if next_churn.is_some() => {
                     log.push_churn(ChurnEvent {
                         recipient: recipient.clone(),

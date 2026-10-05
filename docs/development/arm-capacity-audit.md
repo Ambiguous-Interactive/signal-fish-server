@@ -2377,9 +2377,67 @@ below the default generator-lag bound (250 ms) so the default env config
 runs. Churn runs require the v3 wire and exclude the socket-owning and
 generator-latency hooks.
 
-**C2 next runner PR: room-replacement churn and richer resource counters
-(#648).** Extend `ChurnSchedule` with the room-replacement schedule the C3
-churn cells need (whole rooms cycle while others keep serving), with
-red-first controls reusing the incarnation machinery, and record queue
-depth/age plus ingress/egress bytes in the interval samples before any C3
-capacity claim.
+**C2 next runner PR: room-replacement churn — LANDED** (fourth runner
+PR, 2026-10-05). `ChurnSchedule` carries the room-replacement shape (the
+C3 churn cell): on every wave `start + k * interval` — while the wave fits
+the scheduled-send span — a seed-chosen `fraction_percent` of whole ROOMS
+cycles: every member disconnects at the wave instant and rejoins, seeded-
+staggered inside the window, into the room's NEXT generation. The
+generation is a fresh six-character alphanumeric room code
+(`RunConfig::room_code_for_generation`: generation 0 keeps the decimal
+`{prefix}{room:03}` code; generation g ≥ 1 is
+`{prefix}{letter}{room in two base-36 digits}` — the leading lowercase
+letter is a character class the decimal generation-0 suffixes never start
+with, so the classes are structurally disjoint, `(letter, room)` is
+injective for rooms below 36², and the alphabet caps a room at 26
+generations), so the replacement creates a genuinely new room and the
+now-empty old room tears down — room creation/destruction churn, not a
+rejoin. Because the whole room moves together, the member roster per room
+is unchanged, so the oracle's static co-room checks and
+per-`(recipient, sender, incarnation)` stream machinery validate
+replacement runs unchanged; the member set a seat expects never changes,
+only the code. Replaced-room stream identity, fresh-room rejoin snapshots
+(the first seat's snapshot is empty — the room starts fresh; a later
+seat's snapshot tails the members that rejoined before it), and the
+derived-floor rule for members a snapshot omits all ride the existing
+controls. The multi-wave shift composes correctly: a send moves by the
+offline duration of exactly the waves whose disconnect it was originally
+due past (the comparison runs on the original timeline, so a send due
+between two waves does not inherit the later wave's shift), pinned per
+send. Coherence refusals: the window stays below the interval (waves
+never overlap, so a room is whole again before the next selection), the
+first wave and every wave must fit the scheduled-send span, a room's
+deterministic victimization count stays within its code space (the cap
+rides the built plan's per-room count, not the wave count, so the C3
+wide-low-fraction shape is never refused for a bound no room reaches),
+and clock overflow is a refusal, not a panic; the
+lag-bound refusal now covers every churn shape's window, and the
+rejoin-half requirement counts one rejoin per planned victimization (a
+two-wave plan with one rejoin per member is named invalid per member).
+Two real-socket cells pass with replay equality: a two-room run where
+half the rooms are replaced per wave (whole rooms cycle to new
+incarnations while the other rooms keep serving, no cross-room leakage)
+and the burst storm cell; deterministic controls pin the replacement
+plan shape (whole-room victim sets, wave instants, in-window stagger,
+determinism), the composed shift, generation-code uniqueness over the
+full enforced room range plus the structural class disjointness, the C3
+shape admission, and the three outcome families (valid replacement,
+missing rejoin half, stale-generation misroute). Red proofs: the
+missing-rejoin control fails when the per-victimization count is
+weakened to any-rejoin, and the plan control plus the e2e cell fail when
+the replacement plan builder is neutered to an empty plan; the
+stale-generation control rides the stale-epoch check the third PR
+red-proved. An adversarial review round caught the first encoding draft
+(`g * 1000 + room` in three base-36 digits) aliasing live generation-0
+codes — base-36 values at and past 36² can be all-decimal, so
+`(room 296, gen 1)` collided with room 100's initial code; the
+letter-first encoding replaced it, and the uniqueness control now sweeps
+every room 0..999 × generation 0..=26 instead of sampled rooms.
+
+**C2 next runner PR: richer resource counters (#648).** Record queue
+depth/age plus ingress/egress bytes in the interval samples before any
+C3 capacity claim (the ingress side exists as
+`signal_fish_relay_app_bytes_total`; egress and queue depth/age need
+production metrics kept out of timed hot paths). The unsupported-format
+cells (validate permitted outcomes and reports per the delivery contract
+as separately labeled contract experiments) remain after that.

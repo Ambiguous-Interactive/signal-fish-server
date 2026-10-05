@@ -9,10 +9,10 @@
 //! recorded with this config reproduces the exact workload.
 //!
 //! Slice boundary: [`ChurnSchedule`] carries the reconnect-burst storm (the
-//! C3 reconnect cell) as of the third runner PR; [`DeliveryClass`] carries
-//! the full latest/volatile contract. The input surface exists so later
-//! slices (room-replacement churn) extend the enums instead of reshaping
-//! every call site.
+//! C3 reconnect cell) and the room-replacement schedule (the C3 churn
+//! cell) as of the fourth runner PR; [`DeliveryClass`] carries the full
+//! latest/volatile contract. The input surface exists so later slices
+//! extend the enums instead of reshaping every call site.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -105,6 +105,32 @@ pub enum ChurnSchedule {
         #[serde(with = "duration_micros")]
         window: Duration,
     },
+    /// Room-replacement churn (the C3 churn cell): on every wave
+    /// `start + k * interval`, a seed-chosen `fraction_percent` of whole
+    /// ROOMS cycles — every member's socket closes at the wave instant and
+    /// rejoins, staggered inside the window, into the room's NEXT generation
+    /// (a fresh room code, so the old room is torn down and a new one is
+    /// created) — while the other rooms keep serving uninterrupted.
+    RoomReplacement {
+        /// Percentage of rooms replaced per wave (1-100; the C3 cell uses
+        /// 10 per minute).
+        fraction_percent: u32,
+        /// Time into the run when the first wave fires.
+        #[serde(with = "duration_micros")]
+        start: Duration,
+        /// Rejoin stagger window inside a wave. Every replaced room's
+        /// members are back inside it, the whole wave must complete inside
+        /// the scheduled-send span, and waves must not overlap
+        /// (`window < interval`). The default stays strictly below the
+        /// default generator-lag bound (250 ms), so the default env config
+        /// is runnable.
+        #[serde(with = "duration_micros")]
+        window: Duration,
+        /// Time between consecutive waves. Waves fire at
+        /// `start + k * interval` while they fit the scheduled-send span.
+        #[serde(with = "duration_micros")]
+        interval: Duration,
+    },
 }
 
 impl ChurnSchedule {
@@ -119,15 +145,40 @@ impl ChurnSchedule {
         }
     }
 
+    /// The default room-replacement shape: shared by the
+    /// `CHURN=room-replacement` parser and the per-field env overrides, so
+    /// the two paths cannot drift apart. The window sits strictly below
+    /// both the interval (waves never overlap) and the default
+    /// generator-lag bound (250 ms).
+    pub(crate) fn room_replacement_default() -> Self {
+        ChurnSchedule::RoomReplacement {
+            fraction_percent: 10,
+            start: Duration::from_millis(500),
+            window: Duration::from_millis(200),
+            interval: Duration::from_millis(500),
+        }
+    }
+
     fn parse(raw: &str) -> Result<Self, String> {
         match raw {
             "none" => Ok(ChurnSchedule::None),
             "reconnect-burst" => Ok(ChurnSchedule::reconnect_burst_default()),
+            "room-replacement" => Ok(ChurnSchedule::room_replacement_default()),
             other => Err(format!(
-                "unsupported churn schedule {other:?} (expected \"none\" or \
-                 \"reconnect-burst\"; shape the burst with CHURN_FRACTION_PERCENT, \
-                 CHURN_START_MS, and CHURN_WINDOW_MS)"
+                "unsupported churn schedule {other:?} (expected \"none\", \
+                 \"reconnect-burst\", or \"room-replacement\"; shape the burst with \
+                 CHURN_FRACTION_PERCENT, CHURN_START_MS, and CHURN_WINDOW_MS, and the \
+                 replacement with those plus CHURN_INTERVAL_MS)"
             )),
+        }
+    }
+
+    /// The variant's rejoin stagger window, whatever the shape.
+    pub(crate) fn window(&self) -> Option<Duration> {
+        match *self {
+            ChurnSchedule::None => None,
+            ChurnSchedule::ReconnectBurst { window, .. }
+            | ChurnSchedule::RoomReplacement { window, .. } => Some(window),
         }
     }
 }
@@ -307,9 +358,40 @@ impl RunConfig {
     /// never silent cross-talk). Rooms are limited to 999 per run (three
     /// decimal digits).
     pub fn room_code(&self, room: u32) -> String {
-        let prefix = self.room_code_prefix.as_deref().unwrap_or("FFF");
-        format!("{prefix}{room:03}")
+        Self::room_code_for_generation(self.room_code_prefix.as_deref(), room, 0)
     }
+
+    /// Six-character room code for one room's replacement generation.
+    /// Generation 0 is the initial join's code (`room_code`); every
+    /// replacement generation is `{prefix}{letter}{room in two base-36
+    /// digits}`: the leading lowercase letter is a character class the
+    /// decimal generation-0 suffixes never start with, so generation codes
+    /// are disjoint from every initial code, and `(letter, room)` is
+    /// injective for rooms below 36² (enforced: at most 999) — a replaced
+    /// room rejoins a genuinely fresh room (the server creates it; the
+    /// old, now-empty room tears down) instead of racing the old room's
+    /// garbage collection.
+    pub fn room_code_for_generation(prefix: Option<&str>, room: u32, generation: u32) -> String {
+        let prefix = prefix.unwrap_or("FFF");
+        if generation == 0 {
+            return format!("{prefix}{room:03}");
+        }
+        assert!(
+            generation <= Self::MAX_ROOM_GENERATION,
+            "room generation {generation} exceeds the {}-generation code space",
+            Self::MAX_ROOM_GENERATION,
+        );
+        let generation_letter =
+            char::from_u32(u32::from(b'a') + generation - 1).expect("a lowercase letter");
+        let high = char::from_digit(room / 36, 36).expect("the room fits two base-36 digits");
+        let low = char::from_digit(room % 36, 36).expect("a base-36 digit");
+        format!("{prefix}{generation_letter}{high}{low}")
+    }
+
+    /// Highest room-replacement generation the six-character code space
+    /// holds: one code per lowercase letter (`a`..`z`), so a room can be
+    /// replaced up to 26 times per run.
+    pub(crate) const MAX_ROOM_GENERATION: u32 = 26;
 
     /// Globally unique peer name: room-scoped sender keys are what make a
     /// cross-room delivery observable as a misroute.
@@ -341,8 +423,9 @@ impl RunConfig {
     /// `ENDPOINT` (optional), `SEED`, `ROOMS`, `PLAYERS`, `ENCODING`
     /// (`v2-json` | `v3-json`), `PAYLOAD_BYTES`, `RATE_PER_SENDER`, `CLASS`
     /// (`reliable` | `latest` | `volatile`), `LATEST_KEYS`, `WARMUP_SECS`,
-    /// `DURATION_SECS`, `CHURN` (`none` | `reconnect-burst`) with
-    /// `CHURN_FRACTION_PERCENT`, `CHURN_START_MS`, `CHURN_WINDOW_MS`,
+    /// `DURATION_SECS`, `CHURN` (`none` | `reconnect-burst` |
+    /// `room-replacement`) with `CHURN_FRACTION_PERCENT`,
+    /// `CHURN_START_MS`, `CHURN_WINDOW_MS`, `CHURN_INTERVAL_MS`,
     /// `OUTPUT_DIR`, `LAG_BOUND_MS`, `SAMPLE_INTERVAL_MS`. Absent optional
     /// variables fall back to the small default scenario; required scalars
     /// fall back to the same defaults so a bare invocation just works. Each
@@ -397,25 +480,55 @@ impl RunConfig {
             .map(|raw| raw.parse::<u64>())
             .transpose()
             .map_err(|error| format!("CAPACITY_RUNNER_CHURN_WINDOW_MS: {error}"))?;
+        let churn_interval_ms = var("CHURN_INTERVAL_MS")?
+            .map(|raw| raw.parse::<u64>())
+            .transpose()
+            .map_err(|error| format!("CAPACITY_RUNNER_CHURN_INTERVAL_MS: {error}"))?;
         let churn = match var("CHURN")? {
-            Some(raw) => match ChurnSchedule::parse(&raw)? {
-                ChurnSchedule::None => ChurnSchedule::None,
-                ChurnSchedule::ReconnectBurst { .. } => {
-                    let ChurnSchedule::ReconnectBurst {
-                        fraction_percent,
-                        start,
-                        window,
-                    } = ChurnSchedule::reconnect_burst_default()
-                    else {
-                        unreachable!("the default shape is a burst");
-                    };
-                    ChurnSchedule::ReconnectBurst {
-                        fraction_percent: churn_fraction.unwrap_or(fraction_percent),
-                        start: churn_start_ms.map(Duration::from_millis).unwrap_or(start),
-                        window: churn_window_ms.map(Duration::from_millis).unwrap_or(window),
+            Some(raw) => {
+                let parsed = ChurnSchedule::parse(&raw)?;
+                // Each shape's defaults live in its one constructor; the
+                // env overrides substitute per field, so the bare
+                // `CHURN=<kind>` config and the fully-shaped one cannot
+                // drift apart.
+                match parsed {
+                    ChurnSchedule::None => ChurnSchedule::None,
+                    ChurnSchedule::ReconnectBurst { .. } => {
+                        let ChurnSchedule::ReconnectBurst {
+                            fraction_percent,
+                            start,
+                            window,
+                        } = ChurnSchedule::reconnect_burst_default()
+                        else {
+                            unreachable!("the default shape is a burst");
+                        };
+                        ChurnSchedule::ReconnectBurst {
+                            fraction_percent: churn_fraction.unwrap_or(fraction_percent),
+                            start: churn_start_ms.map(Duration::from_millis).unwrap_or(start),
+                            window: churn_window_ms.map(Duration::from_millis).unwrap_or(window),
+                        }
+                    }
+                    ChurnSchedule::RoomReplacement { .. } => {
+                        let ChurnSchedule::RoomReplacement {
+                            fraction_percent,
+                            start,
+                            window,
+                            interval,
+                        } = ChurnSchedule::room_replacement_default()
+                        else {
+                            unreachable!("the default shape is a room replacement");
+                        };
+                        ChurnSchedule::RoomReplacement {
+                            fraction_percent: churn_fraction.unwrap_or(fraction_percent),
+                            start: churn_start_ms.map(Duration::from_millis).unwrap_or(start),
+                            window: churn_window_ms.map(Duration::from_millis).unwrap_or(window),
+                            interval: churn_interval_ms
+                                .map(Duration::from_millis)
+                                .unwrap_or(interval),
+                        }
                     }
                 }
-            },
+            }
             None => ChurnSchedule::None,
         };
         let warmup_secs = var("WARMUP_SECS")?

@@ -492,20 +492,30 @@ pub fn summarize(
             failures: records.join_failures.clone(),
         });
     }
-    // A churn run must show its storm: every planned victim must have acted
-    // (its disconnect AND rejoin are recorded churn events). A silent
+    // A churn run must show its storm: every planned victimization needs its
+    // rejoin half recorded (a wave run plans one cycle per wave, so a peer
+    // its room keeps getting replaced owes one rejoin per wave). A silent
     // no-op storm — or a disconnect whose rejoin half never ran — would
     // mislabel the run as churn evidence while the new incarnation's
     // streams go unvalidated.
+    let mut required_rejoins: BTreeMap<&str, usize> = BTreeMap::new();
     for cycle in &churn.cycles {
         for peer in &cycle.peers {
-            let acted = records
+            *required_rejoins.entry(peer.as_str()).or_default() += 1;
+        }
+    }
+    for (peer, required) in &required_rejoins {
+        let rejoins = count_u64(
+            records
                 .churn
                 .iter()
-                .any(|event| event.recipient == *peer && event.phase == ChurnPhase::Rejoined);
-            if !acted {
-                reasons.push(InvalidReason::ChurnNotPerformed { peer: peer.clone() });
-            }
+                .filter(|event| event.recipient == *peer && event.phase == ChurnPhase::Rejoined)
+                .count(),
+        );
+        if rejoins < count_u64(*required) {
+            reasons.push(InvalidReason::ChurnNotPerformed {
+                peer: (*peer).to_string(),
+            });
         }
     }
     let hook_exemptions: Vec<String> = reasons
