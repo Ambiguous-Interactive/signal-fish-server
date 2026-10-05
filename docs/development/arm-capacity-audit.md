@@ -2360,9 +2360,22 @@ after their reconnect instant with count and spacing preserved,
 non-victims untouched), and adversarial-review hardening keeps snapshot
 floors authoritative over later rejoin events, requires the rejoin half
 of every planned cycle, keeps the stagger window below the generator-lag
-bound, and refuses run-level fault hooks in churn cells. Churn runs
-require the v3 wire and exclude the socket-owning and generator-latency
-hooks.
+bound, and refuses run-level fault hooks in churn cells. The bot review
+round hardened identity further: rejoin snapshot tails are recorded
+UNRESOLVED and resolved against the registry recorded at end of run (the
+per-frame registry lookups are race-free because a peer registers its id
+before its first send; the per-tail lookups were not, and a wrong guess
+floored the wrong incarnation), a member omitted from a rejoin snapshot
+(the documented join-snapshot race under concurrent rejoins) is neither
+closed nor unfloored — its away window is derived from the sends that
+completed at or before the rejoin instant, a rule that errs safe —
+derived floors are bookkeeping only (only snapshot tails are
+server-enforced watermarks, so only they turn a redelivery into a
+misroute), closed streams are finished (nothing further owed, arrivals
+still misroute), and the default burst window (200 ms) sits strictly
+below the default generator-lag bound (250 ms) so the default env config
+runs. Churn runs require the v3 wire and exclude the socket-owning and
+generator-latency hooks.
 
 **C2 next runner PR: room-replacement churn and richer resource counters
 (#648).** Extend `ChurnSchedule` with the room-replacement schedule the C3

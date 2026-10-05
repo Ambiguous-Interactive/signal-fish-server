@@ -517,6 +517,9 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         });
     }
 
+    // The registry is complete only after every peer task is done: record
+    // it once, before the snapshot the artifacts write.
+    log.set_registry(registry.lock().expect("sender registry poisoned").clone());
     let records = log.snapshot();
     let bound_us = micros(config.generator_lag_bound);
     let summary = oracle::summarize(
@@ -842,28 +845,17 @@ async fn peer_task(
                 )
                 .await
                 {
-                    Ok((next_sink, next_rx, player_id, snapshot_tails)) => {
+                    Ok((next_sink, next_rx, player_id, tails)) => {
                         incarnation += 1;
                         registry
                             .lock()
                             .expect("sender registry")
                             .insert(player_id.to_string(), (recipient.clone(), incarnation));
-                        // Resolve every snapshot member's tail onto the
-                        // runner's incarnation coordinates through the
-                        // registry (a member that never churned is
-                        // incarnation 1; a member that rejoined while this
-                        // peer was out carries its own bumped index).
-                        let tails = snapshot_tails
-                            .into_iter()
-                            .map(|(name, (player_id, tail))| {
-                                let member_incarnation = registry
-                                    .lock()
-                                    .expect("sender registry")
-                                    .get(&player_id)
-                                    .map_or(1, |(_, incarnation)| *incarnation);
-                                (name, (member_incarnation, tail))
-                            })
-                            .collect();
+                        // The snapshot tails are recorded UNRESOLVED
+                        // (`PlayerId`, tail): the oracle resolves them
+                        // against the registry recorded at end of run, so
+                        // the mapping never depends on task scheduling
+                        // order.
                         log.push_churn(ChurnEvent {
                             recipient: recipient.clone(),
                             phase: ChurnPhase::Rejoined,

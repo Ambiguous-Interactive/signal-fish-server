@@ -1160,7 +1160,7 @@ async fn hook_and_class_mismatches_are_refused_before_any_spawn() {
     let churn = ChurnSchedule::ReconnectBurst {
         fraction_percent: 50,
         start: Duration::from_millis(300),
-        window: Duration::from_millis(300),
+        window: Duration::from_millis(200),
     };
     let mut mismatch = scenario_config(Encoding::V2Json);
     mismatch.output_dir = probe.clone();
@@ -1479,10 +1479,10 @@ fn churned_records(context: &UnitContext, churn: &ChurnPlan) -> RunRecords {
         at_us: reconnect_us,
         epoch: Some(2),
         tails: BTreeMap::from([
-            ("r0p0".to_string(), (1, 0)),
-            ("r0p1".to_string(), (2, 0)),
-            ("r0p2".to_string(), (1, 0)),
-            ("r0p3".to_string(), (1, 0)),
+            ("r0p0".to_string(), ("id-r0p0".to_string(), 0)),
+            ("r0p1".to_string(), ("id-r0p1b".to_string(), 0)),
+            ("r0p2".to_string(), ("id-r0p2".to_string(), 0)),
+            ("r0p3".to_string(), ("id-r0p3".to_string(), 0)),
         ]),
     });
     let mut epoch_positions: BTreeMap<u32, u64> = BTreeMap::new();
@@ -1512,6 +1512,14 @@ fn churned_records(context: &UnitContext, churn: &ChurnPlan) -> RunRecords {
             });
         }
     }
+    log.set_registry(BTreeMap::from([
+        ("id-r0p0".to_string(), ("r0p0".to_string(), 1)),
+        ("id-r0p0b".to_string(), ("r0p0".to_string(), 2)),
+        ("id-r0p1".to_string(), ("r0p1".to_string(), 1)),
+        ("id-r0p1b".to_string(), ("r0p1".to_string(), 2)),
+        ("id-r0p2".to_string(), ("r0p2".to_string(), 1)),
+        ("id-r0p3".to_string(), ("r0p3".to_string(), 1)),
+    ]));
     log.snapshot()
 }
 
@@ -1607,10 +1615,10 @@ fn a_rejoining_recipient_owes_nothing_below_its_tail_and_all_above_it() {
         at_us: 260_000,
         epoch: Some(2),
         tails: BTreeMap::from([
-            ("r0p1".to_string(), (1, 2)),
-            ("r0p0".to_string(), (2, 0)),
-            ("r0p2".to_string(), (1, 0)),
-            ("r0p3".to_string(), (1, 0)),
+            ("r0p1".to_string(), ("id-r0p1".to_string(), 2)),
+            ("r0p0".to_string(), ("id-r0p0b".to_string(), 0)),
+            ("r0p2".to_string(), ("id-r0p2".to_string(), 0)),
+            ("r0p3".to_string(), ("id-r0p3".to_string(), 0)),
         ]),
     });
     let summary = oracle::summarize(
@@ -1654,10 +1662,10 @@ fn a_rejoining_recipient_owes_nothing_below_its_tail_and_all_above_it() {
         at_us: 260_000,
         epoch: Some(2),
         tails: BTreeMap::from([
-            ("r0p1".to_string(), (1, 2)),
-            ("r0p0".to_string(), (2, 0)),
-            ("r0p2".to_string(), (1, 0)),
-            ("r0p3".to_string(), (1, 0)),
+            ("r0p1".to_string(), ("id-r0p1".to_string(), 2)),
+            ("r0p0".to_string(), ("id-r0p0b".to_string(), 0)),
+            ("r0p2".to_string(), ("id-r0p2".to_string(), 0)),
+            ("r0p3".to_string(), ("id-r0p3".to_string(), 0)),
         ]),
     });
     let summary = oracle::summarize(
@@ -1705,10 +1713,10 @@ fn a_below_tail_delivery_after_the_recipients_rejoin_is_a_misroute() {
         at_us: 210,
         epoch: Some(2),
         tails: BTreeMap::from([
-            ("r0p1".to_string(), (1, 2)),
-            ("r0p0".to_string(), (2, 0)),
-            ("r0p2".to_string(), (1, 0)),
-            ("r0p3".to_string(), (1, 0)),
+            ("r0p1".to_string(), ("id-r0p1".to_string(), 2)),
+            ("r0p0".to_string(), ("id-r0p0b".to_string(), 0)),
+            ("r0p2".to_string(), ("id-r0p2".to_string(), 0)),
+            ("r0p3".to_string(), ("id-r0p3".to_string(), 0)),
         ]),
     });
     // The server replays an already-accounted sequence to the new seat.
@@ -1844,6 +1852,379 @@ async fn a_reconnect_burst_delivers_every_stream_exactly_once_across_the_storm()
         serde_json::to_value(&replayed).expect("serialize replay"),
         serde_json::to_value(&outcome.summary).expect("serialize summary"),
         "replaying the artifacts must reproduce the outcome summary"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Concurrent-rejoin identity controls (deterministic, no server): snapshot
+// attribution must resolve through the recorded registry — exactly, per
+// PlayerId — and an omitted member's away window must be derived from send
+// times, never guessed.
+// ---------------------------------------------------------------------------
+
+/// A three-peer room: `r0p1` sends ledger 0..=3 (epoch 1, one send per
+/// 100 ms); the viewer `r0p0` rejoins at 250 ms. The snapshot race omits
+/// `r0p1` entirely even though it is seated and sending.
+fn omitted_member_context() -> (Vec<SenderPlan>, Vec<(String, u32)>) {
+    let mut config = scenario_config(Encoding::V3Json);
+    config.players_per_room = 3;
+    config.warmup = Duration::ZERO;
+    config.duration = Duration::from_millis(400);
+    config.send_rate_per_sender = 10.0;
+    let (plans, _) = build_run_shape(&config).expect("shape");
+    let roster = vec![
+        ("r0p0".to_string(), 0),
+        ("r0p1".to_string(), 0),
+        ("r0p2".to_string(), 0),
+    ];
+    (plans, roster)
+}
+
+/// The viewer's rejoin snapshot omits the seated, sending member: the
+/// member's sends that completed at or before the rejoin instant floor its
+/// stream, and everything after is owed and delivered. The run is valid —
+/// no false head hole, no false stale-epoch misroute.
+#[test]
+fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
+    let (mut plans, roster) = omitted_member_context();
+    plans.retain(|plan| plan.name == "r0p1");
+    let plan = &plans[0];
+    let log = EventLog::new();
+    log.push_churn(records::ChurnEvent {
+        recipient: "r0p0".to_string(),
+        phase: records::ChurnPhase::Rejoined,
+        at_us: 250_000,
+        epoch: Some(2),
+        tails: BTreeMap::new(),
+    });
+    for send in &plan.sends {
+        log.push_sent(SentEvent {
+            sender: plan.name.clone(),
+            room: plan.room,
+            seq: send.seq,
+            epoch: 1,
+            intended_us: send.intended_us,
+            sent_us: send.intended_us + 5,
+            phase: send.phase,
+        });
+        // The viewer's seat admits only the post-rejoin sends.
+        let received = if send.intended_us + 5 > 250_000 {
+            Some(("r0p0", send.intended_us + 8))
+        } else {
+            None
+        };
+        for (recipient, received_us) in [
+            received.map(|(_, at)| ("r0p0", at)),
+            Some(("r0p2", send.intended_us + 8)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            log.push_receipt(ReceiptEvent {
+                recipient: recipient.to_string(),
+                sender: plan.name.clone(),
+                seq: send.seq,
+                epoch: 1,
+                server_seq: send.seq + 1,
+                received_us,
+            });
+        }
+        // A frame whose recorded send time fell behind the rejoin instant
+        // can still be fanned out after the seat and delivered (the
+        // generator recorded its send before the recipient's task recorded
+        // the join): a derived floor is bookkeeping, not a server
+        // watermark, so its in-order arrival must not be a misroute (that
+        // strictness belongs to snapshot tails alone).
+        if send.seq == 1 {
+            log.push_receipt(ReceiptEvent {
+                recipient: "r0p0".to_string(),
+                sender: plan.name.clone(),
+                seq: 1,
+                epoch: 1,
+                server_seq: 2,
+                received_us: 305_000,
+            });
+        }
+    }
+    log.set_registry(BTreeMap::from([
+        ("id-r0p0".to_string(), ("r0p0".to_string(), 1)),
+        ("id-r0p0b".to_string(), ("r0p0".to_string(), 2)),
+        ("id-r0p1".to_string(), ("r0p1".to_string(), 1)),
+        ("id-r0p2".to_string(), ("r0p2".to_string(), 1)),
+    ]));
+    let records = log.snapshot();
+    let summary = oracle::summarize(
+        &plans,
+        &roster,
+        &records,
+        1_000,
+        DeliveryClass::Reliable,
+        &ChurnPlan::default(),
+    );
+    assert!(
+        summary.valid,
+        "the two pre-rejoin sends are the derived away window; the two \
+         post-rejoin sends delivered: {:?}",
+        summary.reasons
+    );
+    let reader = summary
+        .per_recipient
+        .iter()
+        .find(|outcome| outcome.recipient == "r0p0")
+        .expect("recipient on roster");
+    assert_eq!(reader.received.get("r0p1"), Some(&3));
+    assert_eq!(reader.missing, 0);
+    assert_eq!(
+        reader.misrouted, 0,
+        "a derived floor must not misroute a delivered frame"
+    );
+
+    // Forbidden: dropping the first post-rejoin delivery is a real hole at
+    // exactly the derived floor boundary (server seq 3), proving the floor
+    // is the send count at the rejoin instant — not zero, not "everything".
+    let log = EventLog::new();
+    log.push_churn(records::ChurnEvent {
+        recipient: "r0p0".to_string(),
+        phase: records::ChurnPhase::Rejoined,
+        at_us: 250_000,
+        epoch: Some(2),
+        tails: BTreeMap::new(),
+    });
+    for send in &plan.sends {
+        log.push_sent(SentEvent {
+            sender: plan.name.clone(),
+            room: plan.room,
+            seq: send.seq,
+            epoch: 1,
+            intended_us: send.intended_us,
+            sent_us: send.intended_us + 5,
+            phase: send.phase,
+        });
+        let received = if send.seq >= 3 {
+            Some(("r0p0", send.intended_us + 8))
+        } else {
+            None
+        };
+        for (recipient, received_us) in [
+            received.map(|(_, at)| ("r0p0", at)),
+            Some(("r0p2", send.intended_us + 8)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            log.push_receipt(ReceiptEvent {
+                recipient: recipient.to_string(),
+                sender: plan.name.clone(),
+                seq: send.seq,
+                epoch: 1,
+                server_seq: send.seq + 1,
+                received_us,
+            });
+        }
+        // A frame whose recorded send time fell behind the rejoin instant
+        // can still be fanned out after the seat and delivered (the
+        // generator recorded its send before the recipient's task recorded
+        // the join): a derived floor is bookkeeping, not a server
+        // watermark, so its in-order arrival must not be a misroute (that
+        // strictness belongs to snapshot tails alone).
+        if send.seq == 1 {
+            log.push_receipt(ReceiptEvent {
+                recipient: "r0p0".to_string(),
+                sender: plan.name.clone(),
+                seq: 1,
+                epoch: 1,
+                server_seq: 2,
+                received_us: 305_000,
+            });
+        }
+    }
+    log.set_registry(BTreeMap::from([
+        ("id-r0p0".to_string(), ("r0p0".to_string(), 1)),
+        ("id-r0p0b".to_string(), ("r0p0".to_string(), 2)),
+        ("id-r0p1".to_string(), ("r0p1".to_string(), 1)),
+        ("id-r0p2".to_string(), ("r0p2".to_string(), 1)),
+    ]));
+    let records = log.snapshot();
+    let summary = oracle::summarize(
+        &plans,
+        &roster,
+        &records,
+        1_000,
+        DeliveryClass::Reliable,
+        &ChurnPlan::default(),
+    );
+    assert!(!summary.valid);
+    assert!(
+        summary
+            .reasons
+            .contains(&oracle::InvalidReason::MissingDeliveries {
+                count: 1,
+                first: oracle::DeliveryKey {
+                    recipient: "r0p0".to_string(),
+                    sender: "r0p1".to_string(),
+                    epoch: 1,
+                    seq: 3,
+                },
+            }),
+        "the hole at the floor boundary must be named, got {:?}",
+        summary.reasons
+    );
+}
+
+/// The rejoin snapshot names the member's SECOND-incarnation `PlayerId`;
+/// the floor must land on that exact incarnation via the registry. A
+/// registry that (wrongly) resolves the same id to incarnation 1 must flip
+/// the run invalid — resolution is per id, never per name.
+#[test]
+fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
+    let (mut plans, roster) = omitted_member_context();
+    plans.retain(|plan| plan.name == "r0p1");
+    let plan = &plans[0];
+    let log = EventLog::new();
+    // r0p1's incarnation 2 sends ledger 2..=3 (server 1..=2) from 150 ms.
+    log.push_churn(records::ChurnEvent {
+        recipient: "r0p1".to_string(),
+        phase: records::ChurnPhase::Disconnect,
+        at_us: 100_000,
+        epoch: None,
+        tails: BTreeMap::new(),
+    });
+    log.push_churn(records::ChurnEvent {
+        recipient: "r0p1".to_string(),
+        phase: records::ChurnPhase::Rejoined,
+        at_us: 150_000,
+        epoch: Some(2),
+        tails: BTreeMap::new(),
+    });
+    // The viewer rejoins at 250 ms; its snapshot names r0p1 by the
+    // second-incarnation id with tail 1 (one frame already accounted).
+    log.push_churn(records::ChurnEvent {
+        recipient: "r0p0".to_string(),
+        phase: records::ChurnPhase::Rejoined,
+        at_us: 250_000,
+        epoch: Some(2),
+        tails: BTreeMap::from([("r0p1".to_string(), ("id-r0p1-bump".to_string(), 1))]),
+    });
+    let mut epoch_positions: BTreeMap<u32, u64> = BTreeMap::new();
+    for send in &plan.sends {
+        let epoch = u32::from(send.intended_us >= 150_000) + 1;
+        let server_seq = {
+            let next = *epoch_positions.get(&epoch).unwrap_or(&0) + 1;
+            epoch_positions.insert(epoch, next);
+            next
+        };
+        log.push_sent(SentEvent {
+            sender: plan.name.clone(),
+            room: plan.room,
+            seq: send.seq,
+            epoch,
+            intended_us: send.intended_us,
+            sent_us: send.intended_us + 5,
+            phase: send.phase,
+        });
+        // r0p2 stayed seated through the storm: it receives every send.
+        log.push_receipt(ReceiptEvent {
+            recipient: "r0p2".to_string(),
+            sender: plan.name.clone(),
+            seq: send.seq,
+            epoch,
+            server_seq,
+            received_us: send.intended_us + 8,
+        });
+        // The viewer's seat admits the second-incarnation sends fanned out
+        // after it (server 2 and 3); server 1 is behind the snapshot tail.
+        if epoch == 2 && server_seq >= 2 {
+            log.push_receipt(ReceiptEvent {
+                recipient: "r0p0".to_string(),
+                sender: plan.name.clone(),
+                seq: send.seq,
+                epoch: 2,
+                server_seq,
+                received_us: send.intended_us + 8,
+            });
+        }
+    }
+    log.set_registry(BTreeMap::from([
+        ("id-r0p0".to_string(), ("r0p0".to_string(), 1)),
+        ("id-r0p0b".to_string(), ("r0p0".to_string(), 2)),
+        ("id-r0p1".to_string(), ("r0p1".to_string(), 1)),
+        ("id-r0p1-bump".to_string(), ("r0p1".to_string(), 2)),
+        ("id-r0p2".to_string(), ("r0p2".to_string(), 1)),
+    ]));
+    let records = log.snapshot();
+    let summary = oracle::summarize(
+        &plans,
+        &roster,
+        &records,
+        1_000,
+        DeliveryClass::Reliable,
+        &ChurnPlan::default(),
+    );
+    assert!(
+        summary.valid,
+        "the tail on the second id floors the second incarnation exactly: {:?}",
+        summary.reasons
+    );
+
+    // Forbidden: a registry that resolves the same id to incarnation 1
+    // (the pre-migration bug's guess) must flip the verdict — resolution
+    // is per PlayerId, never per name.
+    let mut records = records;
+    records
+        .registry
+        .insert("id-r0p1-bump".to_string(), ("r0p1".to_string(), 1));
+    let summary = oracle::summarize(
+        &plans,
+        &roster,
+        &records,
+        1_000,
+        DeliveryClass::Reliable,
+        &ChurnPlan::default(),
+    );
+    assert!(
+        !summary.valid,
+        "the mis-resolved floor must leave the second incarnation owed"
+    );
+}
+
+/// A rejoin snapshot may not name an id the run's registry never recorded:
+/// the identity table is what replay resolves against, and its absence is
+/// a loud runner bug.
+#[test]
+fn an_unresolvable_snapshot_identity_is_a_loud_fault() {
+    let (plans, roster) = omitted_member_context();
+    let log = EventLog::new();
+    log.push_churn(records::ChurnEvent {
+        recipient: "r0p0".to_string(),
+        phase: records::ChurnPhase::Rejoined,
+        at_us: 250_000,
+        epoch: Some(2),
+        tails: BTreeMap::from([("r0p1".to_string(), ("id-phantom".to_string(), 0))]),
+    });
+    log.set_registry(BTreeMap::from([
+        ("id-r0p0".to_string(), ("r0p0".to_string(), 1)),
+        ("id-r0p0b".to_string(), ("r0p0".to_string(), 2)),
+        ("id-r0p1".to_string(), ("r0p1".to_string(), 1)),
+        ("id-r0p2".to_string(), ("r0p2".to_string(), 1)),
+    ]));
+    let records = log.snapshot();
+    let summary = oracle::summarize(
+        &plans,
+        &roster,
+        &records,
+        1_000,
+        DeliveryClass::Reliable,
+        &ChurnPlan::default(),
+    );
+    assert!(!summary.valid);
+    assert!(
+        summary
+            .reasons
+            .contains(&oracle::InvalidReason::UnresolvedSenderIdentity {
+                player_id: "id-phantom".to_string(),
+            }),
+        "the phantom id must be named, got {:?}",
+        summary.reasons
     );
 }
 

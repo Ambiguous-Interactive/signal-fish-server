@@ -279,6 +279,13 @@ pub fn read_records(output_dir: &Path) -> Result<RunRecords, String> {
                 serde_json::from_value(value)
                     .map_err(|error| format!("parse fault event: {error}"))?,
             ),
+            "registry" => {
+                let senders = value
+                    .get("senders")
+                    .ok_or_else(|| "registry line missing senders".to_string())?;
+                records.registry = serde_json::from_value(senders.clone())
+                    .map_err(|error| format!("parse registry senders: {error}"))?;
+            }
             other => return Err(format!("unknown deliveries event kind {other:?}")),
         }
     }

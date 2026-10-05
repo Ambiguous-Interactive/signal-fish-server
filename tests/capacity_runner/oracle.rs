@@ -95,6 +95,10 @@ pub enum InvalidReason {
     /// its own deterministic plan), so the run is not the churn measurement
     /// its manifest claims.
     ChurnNotPerformed { peer: String },
+    /// A rejoin snapshot named a `PlayerId` the run's registry never
+    /// recorded — the identity table a replay resolves against is
+    /// incomplete, so stream attribution cannot be trusted.
+    UnresolvedSenderIdentity { player_id: String },
     /// Generator tasks outlived the quiescence margin (a wedged generator).
     RunnerDeadlineExceeded { detail: String },
     /// The server rejected a frame mid-run (bad class, payload cap, rate
@@ -298,24 +302,59 @@ struct ChurnView {
     /// `(sender, epoch) -> instant past which deliveries for the stream are
     /// stale-epoch misroutes (the sender rejoined past it)`.
     closed_at: BTreeMap<(String, u32), u64>,
-    /// `(sender, epoch) -> (owed floor, from_us)`: from `from_us` on, the
-    /// stream's owed window starts at floor + 1.
-    floors: BTreeMap<(String, u32), (u64, u64)>,
+    /// `(sender, epoch) -> (owed floor, from_us, server_enforced)`: from
+    /// `from_us` on, the stream's owed window starts at floor + 1. A
+    /// `server_enforced` floor (a rejoin snapshot tail) is also a delivery
+    /// contract — the server gates its own queued frames against it, so a
+    /// redelivery is a misroute. A derived floor (send times at the rejoin
+    /// instant) is bookkeeping only: the server has no watermark for an
+    /// omitted member, so a frame just past the seat can legally arrive
+    /// with its recorded send time behind the rejoin instant.
+    floors: BTreeMap<(String, u32), (u64, u64, bool)>,
 }
 
 /// Rebuild every roster peer's [`ChurnView`] from the run's recorded churn
 /// events, per room. Each viewer applies its room's events in
 /// `(at_us, own-events-first)` order: the recorded instants come from
 /// different tasks and can tie or invert, so every transition reconciles
-/// against the already-adopted epochs instead of trusting event order, the
-/// earliest close of a stream wins, and a snapshot floor is only ever
-/// overwritten by a later snapshot of the same viewer.
-fn churn_views(records: &RunRecords, roster: &[(String, u32)]) -> BTreeMap<String, ChurnView> {
+/// against the already-adopted epochs instead of trusting event order, and
+/// the earliest close of a stream wins.
+///
+/// Rejoin snapshot tails arrive UNRESOLVED — `(PlayerId, tail)` — and are
+/// resolved here against the registry recorded at end of run, so snapshot
+/// attribution never depends on task scheduling order. A member the
+/// snapshot omits (the documented join-snapshot race under concurrent
+/// rejoins) is not closed: its dead incarnations cannot deliver to the new
+/// seat, its live incarnation is adopted by its own rejoin event, and a
+/// cross-room leak is caught by the roster check. Instead it receives a
+/// derived owed floor — the server cannot deliver a freshly seated
+/// recipient any frame fanned out before its seat, so the sends of its
+/// streams that completed at or before the rejoin instant are exactly the
+/// permitted-unobserved set. The derivation errs safe: a send whose
+/// recorded completion crossed the seat instant is either received (harmless
+/// to floor) or genuinely pre-seat (correctly floored).
+fn churn_views(
+    records: &RunRecords,
+    roster: &[(String, u32)],
+    sent_times: &BTreeMap<(&str, u32), Vec<u64>>,
+) -> (BTreeMap<String, ChurnView>, Vec<String>) {
     let room_of: BTreeMap<&str, u32> = roster
         .iter()
         .map(|(name, room)| (name.as_str(), *room))
         .collect();
+    let resolve =
+        |records: &RunRecords, player_id: &str, unresolved: &mut Vec<String>| -> Option<u32> {
+            records
+                .registry
+                .get(player_id)
+                .map(|(_, incarnation)| *incarnation)
+                .or_else(|| {
+                    unresolved.push(player_id.to_string());
+                    None
+                })
+        };
     let mut views: BTreeMap<String, ChurnView> = BTreeMap::new();
+    let mut unresolved: Vec<String> = Vec::new();
     for (viewer, room) in roster {
         let view = views.entry(viewer.clone()).or_default();
         // Seed: every co-room member starts in epoch 1 (the initial join).
@@ -361,19 +400,21 @@ fn churn_views(records: &RunRecords, roster: &[(String, u32)]) -> BTreeMap<Strin
                             .or_insert(*at_us);
                     }
                     epochs.insert(*new_epoch);
-                    // A floor for this `(member, epoch)` can only have come
-                    // from a snapshot naming that epoch — it is
-                    // authoritative over this event, so it stays.
                 }
                 ChurnPhase::Rejoined => {
-                    // This viewer rejoined: re-adopt every member from its
-                    // snapshot. A member whose epoch moved (or that is gone
-                    // from the snapshot) has its old streams closed; the
-                    // snapshot's streams floor at their tails from now on.
+                    // This viewer rejoined. The snapshot is the authority on
+                    // every member it names: adopt the named incarnation and
+                    // floor the stream at its tail. Members it omits are not
+                    // closed — see the function doc — they receive a
+                    // derived floor over every adopted stream instead.
                     let adopted_members: Vec<String> = view.adopted.keys().cloned().collect();
                     for member in &adopted_members {
                         match tails.get(member) {
-                            Some(&(snap_epoch, tail)) => {
+                            Some(&(ref player_id, tail)) => {
+                                let Some(snap_epoch) = resolve(records, player_id, &mut unresolved)
+                                else {
+                                    continue;
+                                };
                                 let epochs = view.adopted.entry(member.clone()).or_default();
                                 for old in epochs
                                     .iter()
@@ -387,14 +428,29 @@ fn churn_views(records: &RunRecords, roster: &[(String, u32)]) -> BTreeMap<Strin
                                 }
                                 epochs.insert(snap_epoch);
                                 view.floors
-                                    .insert((member.clone(), snap_epoch), (tail, *at_us));
+                                    .insert((member.clone(), snap_epoch), (tail, *at_us, true));
                             }
                             None => {
-                                if let Some(epochs) = view.adopted.get(member) {
-                                    for old in epochs.iter().copied().collect::<Vec<_>>() {
-                                        view.closed_at
-                                            .entry((member.clone(), old))
-                                            .or_insert(*at_us);
+                                // Absent from the snapshot: floor every
+                                // adopted stream at the sends that completed
+                                // at or before this rejoin.
+                                if let Some(epochs) = view.adopted.get(member).cloned() {
+                                    for old in epochs {
+                                        let completed = sent_times
+                                            .get(&(member.as_str(), old))
+                                            .map(|times| {
+                                                times
+                                                    .iter()
+                                                    .filter(|sent_us| **sent_us <= *at_us)
+                                                    .count()
+                                            })
+                                            .unwrap_or(0);
+                                        let completed =
+                                            u64::try_from(completed).unwrap_or(u64::MAX);
+                                        view.floors.insert(
+                                            (member.clone(), old),
+                                            (completed, *at_us, false),
+                                        );
                                     }
                                 }
                             }
@@ -404,7 +460,7 @@ fn churn_views(records: &RunRecords, roster: &[(String, u32)]) -> BTreeMap<Strin
             }
         }
     }
-    views
+    (views, unresolved)
 }
 
 /// Summarize one run: the single source of the outcome summary.
@@ -498,6 +554,18 @@ pub fn summarize(
     for block in blocks.values_mut() {
         block.sort_unstable();
     }
+    // Per-stream send completion times (ledger-seq order = send order), the
+    // basis for deriving an absent member's owed floor: the server cannot
+    // deliver a freshly seated recipient any frame fanned out before its
+    // seat, so a member missing from the rejoin snapshot owes exactly the
+    // sends that completed after it.
+    let sent_times: BTreeMap<(&str, u32), Vec<u64>> =
+        records.sent.iter().fold(BTreeMap::new(), |mut acc, sent| {
+            acc.entry((sent.sender.as_str(), sent.epoch))
+                .or_default()
+                .push(sent.sent_us);
+            acc
+        });
     let sender_epochs: BTreeMap<&str, BTreeSet<u32>> =
         blocks
             .keys()
@@ -541,7 +609,10 @@ pub fn summarize(
     // per-member `(epoch, seq tail)` raises the stream's owed floor ("a
     // recipient owes no GameData at or below this sequence in the paired
     // epoch"), covering the away window loudly.
-    let views = churn_views(records, roster);
+    let (views, unresolved) = churn_views(records, roster, &sent_times);
+    for player_id in unresolved {
+        reasons.push(InvalidReason::UnresolvedSenderIdentity { player_id });
+    }
 
     // Gap reports: global contract validation, then per-stream coverage.
     // Server-stamped sequences are 1-based within one `(sender, epoch)`
@@ -658,6 +729,7 @@ pub fn summarize(
         // sender, carry a stream sequence the sender actually stamped in
         // that epoch, not outlive its stream (the sender rejoined past it),
         // and never repeat what the rejoin snapshot already accounted.
+        let mut received_by_sender: BTreeMap<&str, u64> = BTreeMap::new();
         for ((arrival_recipient, sender, epoch), stream) in arrivals.iter() {
             if *arrival_recipient != recipient.as_str() {
                 continue;
@@ -673,6 +745,15 @@ pub fn summarize(
                 });
                 continue;
             }
+            // Delivered evidence counts every unique arrival on every
+            // stream — closed streams included: their arrivals were real
+            // deliveries, even though nothing further is owed.
+            let unique = stream
+                .iter()
+                .map(|(server_seq, _, _)| *server_seq)
+                .collect::<BTreeSet<_>>()
+                .len();
+            *received_by_sender.entry(sender).or_insert(0) += count_u64(unique);
             let block_len = count_u64(blocks.get(&(*sender, *epoch)).map_or(0, Vec::len));
             let closed_after = view.closed_at.get(&((*sender).to_string(), *epoch));
             let floor = view.floors.get(&((*sender).to_string(), *epoch));
@@ -691,11 +772,12 @@ pub fn summarize(
                     // rejoined past: the stale epoch must be silent.
                     outcome.misrouted += 1;
                     misrouted.record(key);
-                } else if floor.is_some_and(|(owed_floor, from_us)| {
-                    received_us >= *from_us && server_seq <= *owed_floor
+                } else if floor.is_some_and(|(owed_floor, from_us, enforced)| {
+                    *enforced && received_us >= *from_us && server_seq <= *owed_floor
                 }) {
-                    // The rejoin snapshot accounted this sequence; the
-                    // server must never send it to the new seat.
+                    // The rejoin snapshot accounted this sequence, and the
+                    // server gates its own queue against that watermark:
+                    // the server must never send it to the new seat.
                     outcome.misrouted += 1;
                     misrouted.record(key);
                 }
@@ -710,6 +792,13 @@ pub fn summarize(
                 continue;
             };
             for epoch in adopted {
+                // A closed stream is finished: its sender rejoined past it
+                // (or the viewer's snapshot superseded it), so nothing
+                // further is owed. Arrivals there are stale-epoch
+                // misroutes, caught by the arrival scan above.
+                if view.closed_at.contains_key(&(sender.to_string(), *epoch)) {
+                    continue;
+                }
                 let Some(block) = blocks.get(&(sender, *epoch)) else {
                     // Adopted, but the sender never got to send in this
                     // epoch (it rejoined before its first send): nothing is
@@ -756,11 +845,11 @@ pub fn summarize(
                 // sequence at or below the snapshot tail is not owed (the
                 // loud away window), and deliveries must resume exactly one
                 // past it.
-                let (owed_floor, _floor_from_us) = view
+                let (owed_floor, _floor_from_us, _enforced) = view
                     .floors
                     .get(&((*sender).to_string(), *epoch))
                     .copied()
-                    .unwrap_or((0, 0));
+                    .unwrap_or((0, 0, false));
                 let received_unique = count_u64(unique.len());
 
                 // Coverage model, shared by every class over the stream's
@@ -871,13 +960,13 @@ pub fn summarize(
                 } else if !connected_through {
                     outcome.undelivered_at_disconnect += deficit;
                 }
-                outcome
-                    .received
-                    .entry(sender.to_string())
-                    .and_modify(|count| *count += received_unique)
-                    .or_insert(received_unique);
+                let _ = received_unique;
             }
         }
+        outcome.received = received_by_sender
+            .iter()
+            .map(|(sender, count)| ((*sender).to_string(), *count))
+            .collect();
 
         per_recipient.push(outcome);
     }

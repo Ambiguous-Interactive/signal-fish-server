@@ -48,10 +48,12 @@ pub struct ReceiptEvent {
 
 /// One declared churn action a peer task performed: its socket closed for
 /// the storm (`disconnect`) or it rejoined under a new incarnation epoch
-/// (`rejoined`). The `tails` of a `rejoined` event are the rejoin snapshot's
-/// per-member `(epoch, seq)` stamps — the owed-floor the oracle applies for
-/// the away window ("a recipient owes no GameData at or below this sequence
-/// in the paired epoch").
+/// (`rejoined`). The `tails` of a `rejoined` event are the rejoin
+/// snapshot's per-member `(PlayerId, seq tail)` stamps, UNRESOLVED — the
+/// oracle resolves each id through the run's recorded registry, so the
+/// mapping never depends on task scheduling order. A tail is the owed
+/// floor for the away window ("a recipient owes no GameData at or below
+/// this sequence in the paired stream").
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChurnEvent {
     pub recipient: String,
@@ -60,9 +62,9 @@ pub struct ChurnEvent {
     /// The peer's incarnation epoch after the action (`None` on disconnect,
     /// where the connection is simply gone).
     pub epoch: Option<u32>,
-    /// For `rejoined`: the snapshot's member `(epoch, seq tail)` stamps.
+    /// For `rejoined`: the snapshot's member `(PlayerId, seq tail)` stamps.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub tails: BTreeMap<String, (u32, u64)>,
+    pub tails: BTreeMap<String, (String, u64)>,
 }
 
 /// Which half of a churn cycle an event records.
@@ -124,6 +126,11 @@ struct EventState {
     /// replay reproduces it exactly from the same events.
     faults: Vec<InvalidReason>,
     server_terminated: bool,
+    /// The complete sender registry at end of run: `PlayerId` ->
+    /// `(peer name, incarnation)`. Recorded once, after every task has
+    /// joined, so artifact consumers can resolve any snapshot identity
+    /// deterministically — never through a racy mid-run lookup.
+    registry: BTreeMap<String, (String, u32)>,
 }
 
 impl EventLog {
@@ -229,6 +236,14 @@ impl EventLog {
             .server_terminated
     }
 
+    /// Record the complete sender registry once, after every peer task has
+    /// finished joining. The registry is run-level state, not an event: it
+    /// exists so replay can resolve every rejoin snapshot identity exactly
+    /// as this run did.
+    pub fn set_registry(&self, registry: BTreeMap<String, (String, u32)>) {
+        self.state.lock().expect("event log poisoned").registry = registry;
+    }
+
     /// Snapshot every recorded event (deterministic order: sends by
     /// `(sender, seq)`; receipts, disconnects, churn actions, join failures,
     /// and faults in recorded arrival order — the oracle checks per-stream
@@ -243,6 +258,7 @@ impl EventLog {
             churn: std::mem::take(&mut state.churn),
             join_failures: std::mem::take(&mut state.join_failures),
             faults: std::mem::take(&mut state.faults),
+            registry: std::mem::take(&mut state.registry),
         };
         records
             .sent
@@ -262,6 +278,12 @@ pub struct RunRecords {
     pub churn: Vec<ChurnEvent>,
     pub join_failures: Vec<String>,
     pub faults: Vec<InvalidReason>,
+    /// The complete sender registry at end of run (`PlayerId` ->
+    /// `(peer name, incarnation)`). Recorded as one `registry` line of
+    /// `deliveries.jsonl` so replay resolves rejoin snapshot identities
+    /// exactly.
+    #[serde(default)]
+    pub registry: BTreeMap<String, (String, u32)>,
 }
 
 /// One tagged line of `deliveries.jsonl`: the raw events of a run, in
@@ -275,13 +297,21 @@ pub enum DeliveryEvent {
     Gap(GapEvent),
     Disconnect(DisconnectEvent),
     Churn(ChurnEvent),
-    JoinFailure { detail: String },
+    JoinFailure {
+        detail: String,
+    },
     Fault(InvalidReason),
+    /// The complete sender registry, recorded once. Not a run event — the
+    /// identity table replay needs to resolve churn snapshot tails.
+    Registry {
+        senders: BTreeMap<String, (String, u32)>,
+    },
 }
 
 impl RunRecords {
     /// Every event as a tagged JSONL line, in the canonical order
-    /// (sends, receipts, gaps, disconnects, churn, join failures, faults).
+    /// (sends, receipts, gaps, disconnects, churn, join failures, faults,
+    /// the registry).
     pub fn events(&self) -> impl Iterator<Item = DeliveryEvent> + '_ {
         self.sent
             .iter()
@@ -303,5 +333,8 @@ impl RunRecords {
                     .map(|detail| DeliveryEvent::JoinFailure { detail }),
             )
             .chain(self.faults.iter().cloned().map(DeliveryEvent::Fault))
+            .chain(std::iter::once(DeliveryEvent::Registry {
+                senders: self.registry.clone(),
+            }))
     }
 }

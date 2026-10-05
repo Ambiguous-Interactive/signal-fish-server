@@ -88,10 +88,9 @@ pub enum ChurnSchedule {
     /// Reconnect storm (the C3 reconnect-burst cell): at `start` into the
     /// run, the sockets of a seed-chosen `fraction_percent` of all peers
     /// close; each victim rejoins with a fresh connection at a seed-staggered
-    /// instant inside `[start, start + window)`. A rejoin bumps the peer's
-    /// incarnation epoch, so every victim's relay stream resumes under a new
-    /// `(epoch, seq)` pair — the delivery contract the oracle validates
-    /// across the storm.
+    /// instant inside `[start, start + window)`. A rejoin seats a fresh
+    /// incarnation, so every victim's relay stream resumes as a new stream —
+    /// the delivery contract the oracle validates across the storm.
     ReconnectBurst {
         /// Percentage of peers victimized (1-100; C3 cells use 10 and 50).
         fraction_percent: u32,
@@ -100,21 +99,30 @@ pub enum ChurnSchedule {
         #[serde(with = "duration_micros")]
         start: Duration,
         /// Reconnect stagger window. Every victim is back inside it, and the
-        /// whole storm must complete inside the scheduled-send span.
+        /// whole storm must complete inside the scheduled-send span. The
+        /// default stays strictly below the default generator-lag bound
+        /// (250 ms), so the default env config is runnable.
         #[serde(with = "duration_micros")]
         window: Duration,
     },
 }
 
 impl ChurnSchedule {
+    /// The default burst shape: shared by the `CHURN=reconnect-burst`
+    /// parser and the per-field env overrides, so the two paths cannot
+    /// drift apart.
+    pub(crate) fn reconnect_burst_default() -> Self {
+        ChurnSchedule::ReconnectBurst {
+            fraction_percent: 50,
+            start: Duration::from_millis(300),
+            window: Duration::from_millis(200),
+        }
+    }
+
     fn parse(raw: &str) -> Result<Self, String> {
         match raw {
             "none" => Ok(ChurnSchedule::None),
-            "reconnect-burst" => Ok(ChurnSchedule::ReconnectBurst {
-                fraction_percent: 50,
-                start: Duration::from_millis(300),
-                window: Duration::from_millis(300),
-            }),
+            "reconnect-burst" => Ok(ChurnSchedule::reconnect_burst_default()),
             other => Err(format!(
                 "unsupported churn schedule {other:?} (expected \"none\" or \
                  \"reconnect-burst\"; shape the burst with CHURN_FRACTION_PERCENT, \
@@ -392,11 +400,21 @@ impl RunConfig {
         let churn = match var("CHURN")? {
             Some(raw) => match ChurnSchedule::parse(&raw)? {
                 ChurnSchedule::None => ChurnSchedule::None,
-                ChurnSchedule::ReconnectBurst { .. } => ChurnSchedule::ReconnectBurst {
-                    fraction_percent: churn_fraction.unwrap_or(50),
-                    start: Duration::from_millis(churn_start_ms.unwrap_or(300)),
-                    window: Duration::from_millis(churn_window_ms.unwrap_or(300)),
-                },
+                ChurnSchedule::ReconnectBurst { .. } => {
+                    let ChurnSchedule::ReconnectBurst {
+                        fraction_percent,
+                        start,
+                        window,
+                    } = ChurnSchedule::reconnect_burst_default()
+                    else {
+                        unreachable!("the default shape is a burst");
+                    };
+                    ChurnSchedule::ReconnectBurst {
+                        fraction_percent: churn_fraction.unwrap_or(fraction_percent),
+                        start: churn_start_ms.map(Duration::from_millis).unwrap_or(start),
+                        window: churn_window_ms.map(Duration::from_millis).unwrap_or(window),
+                    }
+                }
             },
             None => ChurnSchedule::None,
         };
