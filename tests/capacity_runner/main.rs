@@ -2183,7 +2183,7 @@ fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
     );
     assert!(
         !summary.valid,
-        "the mis-resolved floor must leave the second incarnation owed"
+        "a floor resolved to the wrong incarnation must leave the second incarnation owed"
     );
 }
 
