@@ -13,17 +13,19 @@
 //! - the small reliable relay scenario (the C2 acceptance gate),
 //! - the latest/volatile delivery-class cells: policy loss with exact gap
 //!   accounting over real sockets, in server-counter agreement,
+//! - the reconnect-burst cell: a mid-run disconnect/rejoin storm whose
+//!   streams must complete exactly once across the victims' new
+//!   incarnations,
 //! - the negative controls: missing, duplicate, misrouted, and out-of-order
-//!   deliveries, unreported lossy-class holes, gap-report violations, a
-//!   paused generator, generator saturation, server termination, and a slow
-//!   reader — each must invalidate the run with its explicit reason.
+//!   deliveries, unreported lossy-class holes, gap-report violations,
+//!   stale-epoch and below-tail deliveries across a storm, an unperformed
+//!   storm, a paused generator, generator saturation, server termination,
+//!   and a slow reader — each must invalidate the run with its explicit
+//!   reason.
 //!
 //! Standalone use on a capacity host (release profile, external server):
 //! `CAPACITY_RUNNER_*` environment variables shape a run — see
 //! `config::RunConfig::from_env`.
-//!
-//! Reconnect/churn schedules are later C2 slices; the input surface already
-//! exists in [`config::RunConfig`].
 
 #[path = "../websocket_test_helpers/mod.rs"]
 mod websocket_test_helpers;
@@ -36,12 +38,13 @@ mod records;
 mod runner;
 mod schedule;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use config::{ChurnSchedule, DeliveryClass, Encoding, RunConfig};
 use records::{EventLog, GapEvent, ReceiptEvent, RunRecords, SentEvent};
-use schedule::{build_plans, SenderPlan};
+use schedule::{build_run_shape, ChurnPlan, SenderPlan};
 use signal_fish_server::protocol::DeliveryGapReason;
 
 /// The small scenario at the heart of the C2 acceptance gate: one room, four
@@ -202,6 +205,7 @@ async fn server_termination_invalidates_the_run_and_preserves_gap_free_prefixes(
             first: oracle::DeliveryKey {
                 recipient: String::new(),
                 sender: String::new(),
+                epoch: 0,
                 seq: 0,
             },
         },
@@ -522,6 +526,7 @@ fn a_missing_delivery_invalidates_the_run_with_the_exact_first_gap() {
         &records,
         1_000,
         context.delivery_class,
+        &ChurnPlan::default(),
     );
     assert!(!summary.valid);
     assert!(
@@ -532,7 +537,8 @@ fn a_missing_delivery_invalidates_the_run_with_the_exact_first_gap() {
                 first: oracle::DeliveryKey {
                     recipient: "r0p0".to_string(),
                     sender: "r0p1".to_string(),
-                    seq: 2,
+                    epoch: 1,
+                    seq: 3,
                 },
             }),
         "expected the exact first gap, got {:?}",
@@ -545,6 +551,7 @@ fn a_missing_delivery_invalidates_the_run_with_the_exact_first_gap() {
         &complete_records(&context.plans),
         1_000,
         context.delivery_class,
+        &ChurnPlan::default(),
     );
     assert!(
         baseline.valid,
@@ -562,6 +569,8 @@ fn a_duplicate_delivery_invalidates_the_run_naming_the_duplicate() {
         recipient: "r0p0".to_string(),
         sender: "r0p1".to_string(),
         seq: 1,
+        epoch: 1,
+        server_seq: 2,
         received_us: 999,
     };
     records.receipts.push(duplicate);
@@ -571,6 +580,7 @@ fn a_duplicate_delivery_invalidates_the_run_naming_the_duplicate() {
         &records,
         1_000,
         context.delivery_class,
+        &ChurnPlan::default(),
     );
     assert!(!summary.valid);
     assert!(
@@ -581,7 +591,8 @@ fn a_duplicate_delivery_invalidates_the_run_naming_the_duplicate() {
                 first: oracle::DeliveryKey {
                     recipient: "r0p0".to_string(),
                     sender: "r0p1".to_string(),
-                    seq: 1,
+                    epoch: 1,
+                    seq: 2,
                 },
             }),
         "expected the duplicate reason, got {:?}",
@@ -598,6 +609,8 @@ fn a_misrouted_cross_room_delivery_invalidates_the_run() {
         recipient: "r0p0".to_string(),
         sender: "r9p9".to_string(),
         seq: 0,
+        epoch: 1,
+        server_seq: 1,
         received_us: 999,
     });
     let summary = oracle::summarize(
@@ -606,6 +619,7 @@ fn a_misrouted_cross_room_delivery_invalidates_the_run() {
         &records,
         1_000,
         context.delivery_class,
+        &ChurnPlan::default(),
     );
     assert!(!summary.valid);
     assert!(
@@ -616,7 +630,8 @@ fn a_misrouted_cross_room_delivery_invalidates_the_run() {
                 first: oracle::DeliveryKey {
                     recipient: "r0p0".to_string(),
                     sender: "r9p9".to_string(),
-                    seq: 0,
+                    epoch: 1,
+                    seq: 1,
                 },
             }),
         "expected the misroute reason, got {:?}",
@@ -660,6 +675,7 @@ fn an_out_of_order_stream_invalidates_the_run() {
         &records,
         1_000,
         context.delivery_class,
+        &ChurnPlan::default(),
     );
     assert!(!summary.valid);
     assert!(
@@ -670,7 +686,8 @@ fn an_out_of_order_stream_invalidates_the_run() {
                 first: oracle::DeliveryKey {
                     recipient: "r0p0".to_string(),
                     sender: "r0p1".to_string(),
-                    seq: 1,
+                    epoch: 1,
+                    seq: 2,
                 },
             }),
         "expected the out-of-order reason at the first inversion, got {:?}",
@@ -708,6 +725,7 @@ fn a_latest_omission_without_a_gap_report_is_missing_work() {
         &records,
         1_000,
         context.delivery_class,
+        &ChurnPlan::default(),
     );
     assert!(!summary.valid);
     assert!(
@@ -718,7 +736,8 @@ fn a_latest_omission_without_a_gap_report_is_missing_work() {
                 first: oracle::DeliveryKey {
                     recipient: "r0p0".to_string(),
                     sender: "r0p1".to_string(),
-                    seq: 2,
+                    epoch: 1,
+                    seq: 3,
                 },
             }),
         "expected the exact first hole, got {:?}",
@@ -745,6 +764,7 @@ fn a_gap_reported_latest_omission_is_valid_and_accounted() {
         &records,
         1_000,
         context.delivery_class,
+        &ChurnPlan::default(),
     );
     assert!(
         summary.valid,
@@ -779,6 +799,7 @@ fn a_gap_overlapping_a_delivery_is_invalid() {
         &records,
         1_000,
         context.delivery_class,
+        &ChurnPlan::default(),
     );
     assert!(!summary.valid);
     assert!(
@@ -804,6 +825,7 @@ fn a_gap_overlapping_a_delivery_is_invalid() {
         &records,
         1_000,
         context.delivery_class,
+        &ChurnPlan::default(),
     );
     assert!(!summary.valid);
     assert_eq!(summary.totals.gap_covered, 0);
@@ -815,7 +837,8 @@ fn a_gap_overlapping_a_delivery_is_invalid() {
                 first: oracle::DeliveryKey {
                     recipient: "r0p0".to_string(),
                     sender: "r0p1".to_string(),
-                    seq: 3,
+                    epoch: 1,
+                    seq: 4,
                 },
             }),
         "the rejected range must not cover seq 3, got {:?}",
@@ -843,6 +866,7 @@ fn a_gap_reason_the_class_cannot_produce_is_invalid() {
         &records,
         1_000,
         context.delivery_class,
+        &ChurnPlan::default(),
     );
     assert!(!summary.valid);
     assert!(
@@ -869,6 +893,7 @@ fn a_gap_beyond_the_sent_stream_is_invalid() {
         &records,
         1_000,
         context.delivery_class,
+        &ChurnPlan::default(),
     );
     assert!(!summary.valid);
     assert!(
@@ -899,6 +924,7 @@ fn any_gap_in_a_reliable_run_is_invalid() {
         &records,
         1_000,
         context.delivery_class,
+        &ChurnPlan::default(),
     );
     assert!(!summary.valid);
     assert!(
@@ -925,6 +951,7 @@ fn a_disconnected_recipient_may_lose_only_the_uncovered_tail() {
             records,
             1_000,
             context.delivery_class,
+            &ChurnPlan::default(),
         )
     };
     let mut records = complete_records(&context.plans);
@@ -975,7 +1002,8 @@ fn a_disconnected_recipient_may_lose_only_the_uncovered_tail() {
                 first: oracle::DeliveryKey {
                     recipient: "r0p0".to_string(),
                     sender: "r0p1".to_string(),
-                    seq: 1,
+                    epoch: 1,
+                    seq: 2,
                 },
             }),
         "expected the hole at seq 1, got {:?}",
@@ -1001,7 +1029,8 @@ fn a_disconnected_recipient_may_lose_only_the_uncovered_tail() {
                 first: oracle::DeliveryKey {
                     recipient: "r0p0".to_string(),
                     sender: "r0p1".to_string(),
-                    seq: 0,
+                    epoch: 1,
+                    seq: 1,
                 },
             }),
         "expected the head hole at seq 0, got {:?}",
@@ -1027,6 +1056,7 @@ fn a_self_referential_gap_is_invalid() {
         &records,
         1_000,
         context.delivery_class,
+        &ChurnPlan::default(),
     );
     assert!(!summary.valid);
     assert!(
@@ -1125,6 +1155,94 @@ async fn hook_and_class_mismatches_are_refused_before_any_spawn() {
         "delivery classes require the v3 wire"
     );
 
+    // Churn runs on the v3 wire alone, and never composes with the hooks
+    // that own the designated peer's socket or the generator's timing.
+    let churn = ChurnSchedule::ReconnectBurst {
+        fraction_percent: 50,
+        start: Duration::from_millis(300),
+        window: Duration::from_millis(200),
+    };
+    let mut mismatch = scenario_config(Encoding::V2Json);
+    mismatch.output_dir = probe.clone();
+    mismatch.churn = churn;
+    assert!(
+        runner::run(mismatch).await.is_err(),
+        "churn requires the v3 wire's per-epoch stamps"
+    );
+
+    let mut mismatch = scenario_config(Encoding::V2Json);
+    mismatch.output_dir = probe.clone();
+    mismatch.encoding = Encoding::V3Json;
+    mismatch.churn = churn;
+    mismatch.slow_reader = true;
+    assert!(
+        runner::run(mismatch).await.is_err(),
+        "slow_reader and churn both own the designated socket"
+    );
+
+    let mut mismatch = scenario_config(Encoding::V2Json);
+    mismatch.output_dir = probe.clone();
+    mismatch.encoding = Encoding::V3Json;
+    mismatch.churn = churn;
+    mismatch.pause_reads = Some(Duration::from_millis(10));
+    assert!(
+        runner::run(mismatch).await.is_err(),
+        "pause_reads and churn both own the designated socket"
+    );
+
+    let mut mismatch = scenario_config(Encoding::V2Json);
+    mismatch.output_dir = probe.clone();
+    mismatch.encoding = Encoding::V3Json;
+    mismatch.churn = churn;
+    mismatch.pause_sends = Some(config::SendPause {
+        after_seq: 1,
+        duration: Duration::from_millis(10),
+    });
+    assert!(
+        runner::run(mismatch).await.is_err(),
+        "generator-latency hooks do not compose with churn"
+    );
+
+    let mut mismatch = scenario_config(Encoding::V2Json);
+    mismatch.output_dir = probe.clone();
+    mismatch.encoding = Encoding::V3Json;
+    mismatch.churn = churn;
+    mismatch.kill_server_after = Some(Duration::from_millis(500));
+    assert!(
+        runner::run(mismatch).await.is_err(),
+        "kill_server_after and churn are both run-level faults"
+    );
+
+    let mut mismatch = scenario_config(Encoding::V2Json);
+    mismatch.output_dir = probe.clone();
+    mismatch.encoding = Encoding::V3Json;
+    mismatch.churn = ChurnSchedule::ReconnectBurst {
+        fraction_percent: 50,
+        start: Duration::from_millis(300),
+        window: Duration::from_millis(400),
+    };
+    // The default lag bound is 250 ms: a 400 ms stagger window would let a
+    // boundary race inflate a send's lag past it.
+    assert!(
+        runner::run(mismatch).await.is_err(),
+        "the stagger window must stay below the generator-lag bound"
+    );
+
+    // A storm outside the scheduled-send span would strand its reconnects
+    // past quiescence.
+    let mut mismatch = scenario_config(Encoding::V2Json);
+    mismatch.output_dir = probe.clone();
+    mismatch.encoding = Encoding::V3Json;
+    mismatch.churn = ChurnSchedule::ReconnectBurst {
+        fraction_percent: 50,
+        start: Duration::from_secs(2),
+        window: Duration::from_secs(2),
+    };
+    assert!(
+        runner::run(mismatch).await.is_err(),
+        "the storm must complete inside the scheduled-send span"
+    );
+
     assert!(
         !probe.exists(),
         "a refused config must not poison an output directory"
@@ -1161,6 +1279,952 @@ async fn a_standalone_env_configured_run_writes_artifacts_and_replays() {
         serde_json::to_value(&replayed).expect("serialize replay"),
         serde_json::to_value(&outcome.summary).expect("serialize summary"),
         "replaying the artifacts must reproduce the outcome summary"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Churn schedule controls (deterministic, no server): the offline-window
+// shift is the mechanism that keeps a scheduled gap out of the generator's
+// lag accounting, so it is pinned exactly.
+// ---------------------------------------------------------------------------
+
+/// Every victim's post-disconnect sends move past its reconnect instant with
+/// count and spacing preserved; non-victims keep their exact timeline; and
+/// the whole storm lands inside the scheduled-send span.
+#[test]
+fn the_churn_shift_moves_victim_sends_past_their_reconnect_without_changing_the_workload() {
+    let mut config = scenario_config(Encoding::V3Json);
+    config.rooms = 2;
+    config.warmup = Duration::from_millis(200);
+    config.duration = Duration::from_millis(1_000);
+    config.churn = ChurnSchedule::ReconnectBurst {
+        fraction_percent: 50,
+        start: Duration::from_millis(400),
+        window: Duration::from_millis(200),
+    };
+
+    // The unshifted timeline is the reference workload shape.
+    let mut plain = config.clone();
+    plain.churn = ChurnSchedule::None;
+    let (reference, _) = build_run_shape(&plain).expect("reference shape");
+
+    let (plans, churn) = build_run_shape(&config).expect("churn shape");
+    assert_eq!(churn.cycles.len(), 1);
+    let cycle = &churn.cycles[0];
+    assert_eq!(cycle.peers.len(), 4, "half of the eight peers");
+
+    let ChurnSchedule::ReconnectBurst { start, window, .. } = config.churn else {
+        panic!("the burst shape is set");
+    };
+    let storm_end_us = crate::config::micros(start + window);
+    let span_us = reference
+        .iter()
+        .map(|plan| plan.sends.last().map(|send| send.intended_us).unwrap_or(0))
+        .max()
+        .unwrap_or(0);
+    assert!(
+        storm_end_us <= span_us,
+        "the storm must complete inside the scheduled-send span"
+    );
+
+    for plan in &plans {
+        let reference = reference
+            .iter()
+            .find(|other| other.name == plan.name)
+            .expect("same roster");
+        assert_eq!(
+            plan.sends.len(),
+            reference.sends.len(),
+            "{}: the shift preserves the offered workload",
+            plan.name
+        );
+        match cycle.reconnects_us.get(&plan.name) {
+            Some(&reconnect_us) => {
+                let mut previous = None;
+                for (send, reference) in plan.sends.iter().zip(&reference.sends) {
+                    assert_eq!(send.seq, reference.seq);
+                    if reference.intended_us >= cycle.disconnect_us {
+                        assert!(
+                            send.intended_us >= reconnect_us,
+                            "{} send {}: a shifted send must fire at or after its                              reconnect instant",
+                            plan.name,
+                            send.seq
+                        );
+                        // Spacing is preserved: every shifted send moved by
+                        // the same offline duration.
+                        let shift = send.intended_us - reference.intended_us;
+                        assert_eq!(
+                            shift,
+                            reconnect_us - cycle.disconnect_us,
+                            "{} send {}: the offline window shifts every late send                              by the same amount",
+                            plan.name,
+                            send.seq
+                        );
+                    } else {
+                        assert_eq!(
+                            send.intended_us, reference.intended_us,
+                            "{} send {}: early sends keep their timeline",
+                            plan.name, send.seq
+                        );
+                    }
+                    if let Some(previous) = previous {
+                        assert!(
+                            send.intended_us > previous,
+                            "{}: the shifted schedule never folds sends together",
+                            plan.name
+                        );
+                    }
+                    previous = Some(send.intended_us);
+                }
+            }
+            None => {
+                assert_eq!(
+                    plan.sends, reference.sends,
+                    "{}: a non-victim keeps its exact timeline",
+                    plan.name
+                );
+            }
+        }
+    }
+}
+
+/// A storm that would outlive the scheduled-send span is refused before
+/// anything is spawned: its reconnects could land past quiescence.
+#[test]
+fn a_churn_storm_beyond_the_scheduled_span_is_refused() {
+    let mut config = scenario_config(Encoding::V3Json);
+    config.churn = ChurnSchedule::ReconnectBurst {
+        fraction_percent: 50,
+        start: Duration::from_secs(5),
+        window: Duration::from_secs(5),
+    };
+    assert!(
+        build_run_shape(&config).is_err(),
+        "the storm must complete inside the scheduled-send span"
+    );
+    // Absurd env scalars are refused, not panics.
+    let mut config = scenario_config(Encoding::V3Json);
+    config.churn = ChurnSchedule::ReconnectBurst {
+        fraction_percent: 50,
+        start: Duration::from_secs(u64::MAX / 2_000_000),
+        window: Duration::from_secs(u64::MAX / 2_000_000),
+    };
+    assert!(
+        build_run_shape(&config).is_err(),
+        "start + window overflow must be a refusal"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Churn oracle controls (deterministic, no server): the reconnect contract
+// — new epochs are distinct streams, the away window is loud in snapshot
+// tails, and a storm that never fires is not a churn measurement.
+// ---------------------------------------------------------------------------
+
+/// A unit context whose sender `r0p1` churns mid-run: sends ledger 0..=1 in
+/// epoch 1, disconnects at 300 µs, rejoins at 400 µs (epoch 2), and sends
+/// ledger 2..=3 in epoch 2. The recipient `r0p0` stays seated; `r0p2` and
+/// `r0p3` are passive roster members.
+fn churn_context(delivery_class: DeliveryClass) -> (UnitContext, ChurnPlan) {
+    let mut config = scenario_config(Encoding::V3Json);
+    config.players_per_room = 4;
+    config.warmup = Duration::ZERO;
+    config.duration = Duration::from_millis(400);
+    config.send_rate_per_sender = 10.0;
+    config.delivery_class = delivery_class;
+    config.churn = ChurnSchedule::ReconnectBurst {
+        fraction_percent: 25,
+        start: Duration::from_millis(250),
+        window: Duration::from_millis(100),
+    };
+    let (mut plans, churn) = build_run_shape(&config).expect("churn shape");
+    // Keep only the churning sender's schedule for send events; the other
+    // plans stay in the roster for room membership.
+    plans.retain(|plan| plan.name == "r0p1");
+    let roster = vec![
+        ("r0p0".to_string(), 0),
+        ("r0p1".to_string(), 0),
+        ("r0p2".to_string(), 0),
+        ("r0p3".to_string(), 0),
+    ];
+    (
+        UnitContext {
+            plans,
+            roster,
+            delivery_class,
+        },
+        churn,
+    )
+}
+
+/// The complete valid event set for [`churn_context`]: the sender's
+/// epoch-1 stream (ledger 0..=1 -> server 1..=2), its epoch-2 stream
+/// (ledger 2..=3 -> server 1..=2), the recipient's receipts, and the
+/// sender's disconnect/rejoin churn events.
+fn churned_records(context: &UnitContext, churn: &ChurnPlan) -> RunRecords {
+    let log = EventLog::new();
+    let plan = &context.plans[0];
+    let disconnect_us = churn.cycles[0].disconnect_us;
+    let reconnect_us = churn.cycles[0].reconnects_us["r0p1"];
+    log.push_churn(records::ChurnEvent {
+        recipient: "r0p1".to_string(),
+        phase: records::ChurnPhase::Disconnect,
+        at_us: disconnect_us,
+        epoch: None,
+        tails: BTreeMap::new(),
+    });
+    log.push_churn(records::ChurnEvent {
+        recipient: "r0p1".to_string(),
+        phase: records::ChurnPhase::Rejoined,
+        at_us: reconnect_us,
+        epoch: Some(2),
+        tails: BTreeMap::from([
+            ("r0p0".to_string(), ("id-r0p0".to_string(), 0)),
+            ("r0p1".to_string(), ("id-r0p1b".to_string(), 0)),
+            ("r0p2".to_string(), ("id-r0p2".to_string(), 0)),
+            ("r0p3".to_string(), ("id-r0p3".to_string(), 0)),
+        ]),
+    });
+    let mut epoch_positions: BTreeMap<u32, u64> = BTreeMap::new();
+    for send in &plan.sends {
+        let epoch = u32::from(send.intended_us >= reconnect_us) + 1;
+        let epoch_ledger = *epoch_positions.get(&epoch).unwrap_or(&0);
+        *epoch_positions.entry(epoch).or_insert(0) += 1;
+        log.push_sent(SentEvent {
+            sender: plan.name.clone(),
+            room: plan.room,
+            seq: send.seq,
+            epoch,
+            intended_us: send.intended_us,
+            sent_us: send.intended_us + 5,
+            phase: send.phase,
+        });
+        // Every co-room peer receives every send exactly once, one after the
+        // next, stamped with the sender's per-epoch stream coordinates.
+        for recipient in ["r0p0", "r0p2", "r0p3"] {
+            log.push_receipt(ReceiptEvent {
+                recipient: recipient.to_string(),
+                sender: plan.name.clone(),
+                seq: send.seq,
+                epoch,
+                server_seq: epoch_ledger + 1,
+                received_us: send.intended_us + 8,
+            });
+        }
+    }
+    log.set_registry(BTreeMap::from([
+        ("id-r0p0".to_string(), ("r0p0".to_string(), 1)),
+        ("id-r0p0b".to_string(), ("r0p0".to_string(), 2)),
+        ("id-r0p1".to_string(), ("r0p1".to_string(), 1)),
+        ("id-r0p1b".to_string(), ("r0p1".to_string(), 2)),
+        ("id-r0p2".to_string(), ("r0p2".to_string(), 1)),
+        ("id-r0p3".to_string(), ("r0p3".to_string(), 1)),
+    ]));
+    log.snapshot()
+}
+
+/// Across a sender's rejoin, every stream must complete exactly once: the
+/// epoch-1 prefix and the epoch-2 resumption are distinct, complete streams.
+#[test]
+fn a_reconnect_run_completes_every_stream_exactly_once_across_epochs() {
+    let (context, churn) = churn_context(DeliveryClass::Reliable);
+    let records = churned_records(&context, &churn);
+    let summary = oracle::summarize(
+        &context.plans,
+        &context.roster,
+        &records,
+        1_000,
+        context.delivery_class,
+        &churn,
+    );
+    assert!(
+        summary.valid,
+        "a clean reconnect run is contract-legal: {:?}",
+        summary.reasons
+    );
+    // Both epochs of the churning sender arrived at the seated recipient.
+    let reader = summary
+        .per_recipient
+        .iter()
+        .find(|outcome| outcome.recipient == "r0p0")
+        .expect("recipient on roster");
+    assert_eq!(reader.received.get("r0p1"), Some(&4));
+    assert_eq!(reader.missing, 0);
+    assert_eq!(reader.duplicates, 0);
+    assert_eq!(reader.misrouted, 0);
+}
+
+/// A delivery for a stream its sender already rejoined past (a stale epoch
+/// arriving after the rejoin) is a misroute.
+#[test]
+fn a_stale_epoch_delivery_after_the_senders_rejoin_is_a_misroute() {
+    let (context, churn) = churn_context(DeliveryClass::Reliable);
+    let mut records = churned_records(&context, &churn);
+    let reconnect_us = churn.cycles[0].reconnects_us["r0p1"];
+    records.receipts.push(ReceiptEvent {
+        recipient: "r0p0".to_string(),
+        sender: "r0p1".to_string(),
+        seq: 0,
+        epoch: 1,
+        server_seq: 1,
+        received_us: reconnect_us + 10,
+    });
+    let summary = oracle::summarize(
+        &context.plans,
+        &context.roster,
+        &records,
+        1_000,
+        context.delivery_class,
+        &churn,
+    );
+    assert!(!summary.valid);
+    assert!(
+        summary
+            .reasons
+            .iter()
+            .any(|reason| matches!(reason, oracle::InvalidReason::MisroutedDeliveries { .. })),
+        "the stale-epoch redelivery must be a misroute, got {:?}",
+        summary.reasons
+    );
+}
+
+/// A recipient that rejoins owes nothing at or below its snapshot tail —
+/// the away window is permitted and loud — but everything above the tail is
+/// still owed exactly once.
+#[test]
+fn a_rejoining_recipient_owes_nothing_below_its_tail_and_all_above_it() {
+    let (context, churn) = churn_context(DeliveryClass::Volatile);
+    let mut records = churned_records(&context, &churn);
+    // The recipient r0p0 disconnects at 250 µs, missing the rest of the
+    // sender's epoch-1 stream (its snapshot tells it that stream is already
+    // at tail 2), rejoins at 260 µs, and receives only the fresh epoch-2
+    // stream.
+    records
+        .receipts
+        .retain(|receipt| receipt.recipient != "r0p0" || receipt.epoch == 2);
+    records.churn.push(records::ChurnEvent {
+        recipient: "r0p0".to_string(),
+        phase: records::ChurnPhase::Disconnect,
+        at_us: 250_000,
+        epoch: None,
+        tails: BTreeMap::new(),
+    });
+    records.churn.push(records::ChurnEvent {
+        recipient: "r0p0".to_string(),
+        phase: records::ChurnPhase::Rejoined,
+        at_us: 260_000,
+        epoch: Some(2),
+        tails: BTreeMap::from([
+            ("r0p1".to_string(), ("id-r0p1".to_string(), 2)),
+            ("r0p0".to_string(), ("id-r0p0b".to_string(), 0)),
+            ("r0p2".to_string(), ("id-r0p2".to_string(), 0)),
+            ("r0p3".to_string(), ("id-r0p3".to_string(), 0)),
+        ]),
+    });
+    let summary = oracle::summarize(
+        &context.plans,
+        &context.roster,
+        &records,
+        1_000,
+        context.delivery_class,
+        &churn,
+    );
+    assert!(
+        summary.valid,
+        "the away window (the whole epoch-1 stream) is accounted by the snapshot \
+         tail, and the fresh epoch-2 stream delivered: {:?}",
+        summary.reasons
+    );
+    let reader = summary
+        .per_recipient
+        .iter()
+        .find(|outcome| outcome.recipient == "r0p0")
+        .expect("recipient on roster");
+    assert_eq!(reader.received.get("r0p1"), Some(&2));
+    assert_eq!(reader.missing, 0);
+
+    // Forbidden: an unreported hole in the fresh epoch-2 stream is silent
+    // loss — the tail covers only what the snapshot accounted.
+    let mut holed = churned_records(&context, &churn);
+    holed.receipts.retain(|receipt| {
+        receipt.recipient != "r0p0" || receipt.epoch == 2 && receipt.server_seq >= 2
+    });
+    holed.churn.push(records::ChurnEvent {
+        recipient: "r0p0".to_string(),
+        phase: records::ChurnPhase::Disconnect,
+        at_us: 250_000,
+        epoch: None,
+        tails: BTreeMap::new(),
+    });
+    holed.churn.push(records::ChurnEvent {
+        recipient: "r0p0".to_string(),
+        phase: records::ChurnPhase::Rejoined,
+        at_us: 260_000,
+        epoch: Some(2),
+        tails: BTreeMap::from([
+            ("r0p1".to_string(), ("id-r0p1".to_string(), 2)),
+            ("r0p0".to_string(), ("id-r0p0b".to_string(), 0)),
+            ("r0p2".to_string(), ("id-r0p2".to_string(), 0)),
+            ("r0p3".to_string(), ("id-r0p3".to_string(), 0)),
+        ]),
+    });
+    let summary = oracle::summarize(
+        &context.plans,
+        &context.roster,
+        &holed,
+        1_000,
+        context.delivery_class,
+        &churn,
+    );
+    assert!(!summary.valid);
+    assert!(
+        summary
+            .reasons
+            .contains(&oracle::InvalidReason::MissingDeliveries {
+                count: 1,
+                first: oracle::DeliveryKey {
+                    recipient: "r0p0".to_string(),
+                    sender: "r0p1".to_string(),
+                    epoch: 2,
+                    seq: 1,
+                },
+            }),
+        "the hole above the tail must be named at the first owed sequence, got {:?}",
+        summary.reasons
+    );
+}
+
+/// A delivery at or below the rejoin snapshot's tail must never arrive at
+/// the new seat: replaying accounted sequences is a misroute.
+#[test]
+fn a_below_tail_delivery_after_the_recipients_rejoin_is_a_misroute() {
+    let (context, churn) = churn_context(DeliveryClass::Volatile);
+    let mut records = churned_records(&context, &churn);
+    records.churn.push(records::ChurnEvent {
+        recipient: "r0p0".to_string(),
+        phase: records::ChurnPhase::Disconnect,
+        at_us: 200,
+        epoch: None,
+        tails: BTreeMap::new(),
+    });
+    records.churn.push(records::ChurnEvent {
+        recipient: "r0p0".to_string(),
+        phase: records::ChurnPhase::Rejoined,
+        at_us: 210,
+        epoch: Some(2),
+        tails: BTreeMap::from([
+            ("r0p1".to_string(), ("id-r0p1".to_string(), 2)),
+            ("r0p0".to_string(), ("id-r0p0b".to_string(), 0)),
+            ("r0p2".to_string(), ("id-r0p2".to_string(), 0)),
+            ("r0p3".to_string(), ("id-r0p3".to_string(), 0)),
+        ]),
+    });
+    // The server replays an already-accounted sequence to the new seat.
+    records.receipts.push(ReceiptEvent {
+        recipient: "r0p0".to_string(),
+        sender: "r0p1".to_string(),
+        seq: 1,
+        epoch: 1,
+        server_seq: 2,
+        received_us: 300,
+    });
+    let summary = oracle::summarize(
+        &context.plans,
+        &context.roster,
+        &records,
+        1_000,
+        context.delivery_class,
+        &churn,
+    );
+    assert!(!summary.valid);
+    assert!(
+        summary
+            .reasons
+            .iter()
+            .any(|reason| matches!(reason, oracle::InvalidReason::MisroutedDeliveries { .. })),
+        "the replayed below-tail delivery must be a misroute, got {:?}",
+        summary.reasons
+    );
+}
+
+/// A churn run whose storm never fires is not the churn measurement its
+/// manifest claims: every planned victim must have acted.
+#[test]
+fn a_churn_run_whose_storm_never_fires_is_invalid() {
+    let (context, churn) = churn_context(DeliveryClass::Reliable);
+    let records = churned_records(&context, &churn);
+    let mut records = records;
+    records.churn.clear();
+    let summary = oracle::summarize(
+        &context.plans,
+        &context.roster,
+        &records,
+        1_000,
+        context.delivery_class,
+        &churn,
+    );
+    assert!(!summary.valid);
+    assert!(
+        summary
+            .reasons
+            .contains(&oracle::InvalidReason::ChurnNotPerformed {
+                peer: "r0p1".to_string(),
+            }),
+        "the unperformed storm must be named, got {:?}",
+        summary.reasons
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Reconnect-burst cell over real sockets (issue #648, third runner PR): the
+// C3 reconnect storm with reliable delivery.
+// ---------------------------------------------------------------------------
+
+/// Half of a four-peer room disconnects mid-run and rejoins under fresh
+/// incarnation epochs while the others keep sending. Every stream must
+/// complete exactly once across the storm: the rejoining senders' new
+/// epochs are fresh streams the seated peers owe in full, and the
+/// rejoining peers' away windows are accounted by their rejoin snapshot
+/// tails. The artifacts must replay to the same summary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reconnect_burst_delivers_every_stream_exactly_once_across_the_storm() {
+    let output = tempfile::tempdir().expect("create output tempdir");
+    let mut config = scenario_config(Encoding::V3Json);
+    config.output_dir = output.path().to_path_buf();
+    config.warmup = Duration::from_millis(200);
+    config.duration = Duration::from_millis(1_200);
+    config.churn = ChurnSchedule::ReconnectBurst {
+        fraction_percent: 50,
+        start: Duration::from_millis(400),
+        window: Duration::from_millis(300),
+    };
+    config.generator_lag_bound = Duration::from_millis(500);
+    config.drain_grace = Duration::from_secs(2);
+
+    let outcome = runner::run(config).await.expect("storm run completes");
+    assert!(
+        outcome.summary.valid,
+        "the reconnect storm must deliver exactly once across epochs: {:?}",
+        outcome.summary.reasons
+    );
+    assert_eq!(
+        outcome.summary.totals.unsent, 0,
+        "the shifted schedule must still fire every send"
+    );
+    assert_eq!(outcome.summary.totals.outstanding, 0);
+    for recipient in &outcome.summary.per_recipient {
+        assert!(
+            recipient.connected_through,
+            "{}: every peer is seated again after the storm",
+            recipient.recipient
+        );
+        assert_eq!(recipient.missing, 0);
+        assert_eq!(recipient.duplicates, 0);
+        assert_eq!(recipient.misrouted, 0);
+    }
+
+    // The storm actually happened: two victims disconnected and rejoined
+    // under a bumped incarnation epoch.
+    let records = artifacts::read_records(output.path()).expect("read the run's event log");
+    let rejoined: Vec<_> = records
+        .churn
+        .iter()
+        .filter(|event| event.phase == records::ChurnPhase::Rejoined)
+        .collect();
+    assert_eq!(
+        rejoined.len(),
+        2,
+        "half of the four peers rejoined: {:?}",
+        records.churn
+    );
+    assert!(
+        rejoined
+            .iter()
+            .all(|event| event.epoch.is_some_and(|epoch| epoch >= 2)),
+        "a rejoin bumps the incarnation epoch: {rejoined:?}"
+    );
+    // At least one rejoining peer's new epoch produced deliveries the
+    // others observed, and every rejoin snapshot named the member tails.
+    assert!(rejoined.iter().all(|event| !event.tails.is_empty()));
+
+    let replayed = artifacts::replay(output.path()).expect("replay artifacts");
+    assert_eq!(
+        serde_json::to_value(&replayed).expect("serialize replay"),
+        serde_json::to_value(&outcome.summary).expect("serialize summary"),
+        "replaying the artifacts must reproduce the outcome summary"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Concurrent-rejoin identity controls (deterministic, no server): snapshot
+// attribution must resolve through the recorded registry — exactly, per
+// PlayerId — and an omitted member's away window must be derived from send
+// times, never guessed.
+// ---------------------------------------------------------------------------
+
+/// A three-peer room: `r0p1` sends ledger 0..=3 (epoch 1, one send per
+/// 100 ms); the viewer `r0p0` rejoins at 250 ms. The snapshot race omits
+/// `r0p1` entirely even though it is seated and sending.
+fn omitted_member_context() -> (Vec<SenderPlan>, Vec<(String, u32)>) {
+    let mut config = scenario_config(Encoding::V3Json);
+    config.players_per_room = 3;
+    config.warmup = Duration::ZERO;
+    config.duration = Duration::from_millis(400);
+    config.send_rate_per_sender = 10.0;
+    let (plans, _) = build_run_shape(&config).expect("shape");
+    let roster = vec![
+        ("r0p0".to_string(), 0),
+        ("r0p1".to_string(), 0),
+        ("r0p2".to_string(), 0),
+    ];
+    (plans, roster)
+}
+
+/// The viewer's rejoin snapshot omits the seated, sending member: the
+/// member's sends that completed at or before the rejoin instant floor its
+/// stream, and everything after is owed and delivered. The run is valid —
+/// no false head hole, no false stale-epoch misroute.
+#[test]
+fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
+    let (mut plans, roster) = omitted_member_context();
+    plans.retain(|plan| plan.name == "r0p1");
+    let plan = &plans[0];
+    let log = EventLog::new();
+    log.push_churn(records::ChurnEvent {
+        recipient: "r0p0".to_string(),
+        phase: records::ChurnPhase::Rejoined,
+        at_us: 250_000,
+        epoch: Some(2),
+        tails: BTreeMap::new(),
+    });
+    for send in &plan.sends {
+        log.push_sent(SentEvent {
+            sender: plan.name.clone(),
+            room: plan.room,
+            seq: send.seq,
+            epoch: 1,
+            intended_us: send.intended_us,
+            sent_us: send.intended_us + 5,
+            phase: send.phase,
+        });
+        // The viewer's seat admits only the post-rejoin sends.
+        let received = if send.intended_us + 5 > 250_000 {
+            Some(("r0p0", send.intended_us + 8))
+        } else {
+            None
+        };
+        for (recipient, received_us) in [
+            received.map(|(_, at)| ("r0p0", at)),
+            Some(("r0p2", send.intended_us + 8)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            log.push_receipt(ReceiptEvent {
+                recipient: recipient.to_string(),
+                sender: plan.name.clone(),
+                seq: send.seq,
+                epoch: 1,
+                server_seq: send.seq + 1,
+                received_us,
+            });
+        }
+        // A frame whose recorded send time fell behind the rejoin instant
+        // can still be fanned out after the seat and delivered (the
+        // generator recorded its send before the recipient's task recorded
+        // the join): a derived floor is bookkeeping, not a server
+        // watermark, so its in-order arrival must not be a misroute (that
+        // strictness belongs to snapshot tails alone).
+        if send.seq == 1 {
+            log.push_receipt(ReceiptEvent {
+                recipient: "r0p0".to_string(),
+                sender: plan.name.clone(),
+                seq: 1,
+                epoch: 1,
+                server_seq: 2,
+                received_us: 305_000,
+            });
+        }
+    }
+    log.set_registry(BTreeMap::from([
+        ("id-r0p0".to_string(), ("r0p0".to_string(), 1)),
+        ("id-r0p0b".to_string(), ("r0p0".to_string(), 2)),
+        ("id-r0p1".to_string(), ("r0p1".to_string(), 1)),
+        ("id-r0p2".to_string(), ("r0p2".to_string(), 1)),
+    ]));
+    let records = log.snapshot();
+    let summary = oracle::summarize(
+        &plans,
+        &roster,
+        &records,
+        1_000,
+        DeliveryClass::Reliable,
+        &ChurnPlan::default(),
+    );
+    assert!(
+        summary.valid,
+        "the two pre-rejoin sends are the derived away window; the two \
+         post-rejoin sends delivered: {:?}",
+        summary.reasons
+    );
+    let reader = summary
+        .per_recipient
+        .iter()
+        .find(|outcome| outcome.recipient == "r0p0")
+        .expect("recipient on roster");
+    assert_eq!(reader.received.get("r0p1"), Some(&3));
+    assert_eq!(reader.missing, 0);
+    assert_eq!(
+        reader.misrouted, 0,
+        "a derived floor must not misroute a delivered frame"
+    );
+
+    // Forbidden: dropping the first post-rejoin delivery is a real hole at
+    // exactly the derived floor boundary (server seq 3), proving the floor
+    // is the send count at the rejoin instant — not zero, not "everything".
+    let log = EventLog::new();
+    log.push_churn(records::ChurnEvent {
+        recipient: "r0p0".to_string(),
+        phase: records::ChurnPhase::Rejoined,
+        at_us: 250_000,
+        epoch: Some(2),
+        tails: BTreeMap::new(),
+    });
+    for send in &plan.sends {
+        log.push_sent(SentEvent {
+            sender: plan.name.clone(),
+            room: plan.room,
+            seq: send.seq,
+            epoch: 1,
+            intended_us: send.intended_us,
+            sent_us: send.intended_us + 5,
+            phase: send.phase,
+        });
+        let received = if send.seq >= 3 {
+            Some(("r0p0", send.intended_us + 8))
+        } else {
+            None
+        };
+        for (recipient, received_us) in [
+            received.map(|(_, at)| ("r0p0", at)),
+            Some(("r0p2", send.intended_us + 8)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            log.push_receipt(ReceiptEvent {
+                recipient: recipient.to_string(),
+                sender: plan.name.clone(),
+                seq: send.seq,
+                epoch: 1,
+                server_seq: send.seq + 1,
+                received_us,
+            });
+        }
+        // A frame whose recorded send time fell behind the rejoin instant
+        // can still be fanned out after the seat and delivered (the
+        // generator recorded its send before the recipient's task recorded
+        // the join): a derived floor is bookkeeping, not a server
+        // watermark, so its in-order arrival must not be a misroute (that
+        // strictness belongs to snapshot tails alone).
+        if send.seq == 1 {
+            log.push_receipt(ReceiptEvent {
+                recipient: "r0p0".to_string(),
+                sender: plan.name.clone(),
+                seq: 1,
+                epoch: 1,
+                server_seq: 2,
+                received_us: 305_000,
+            });
+        }
+    }
+    log.set_registry(BTreeMap::from([
+        ("id-r0p0".to_string(), ("r0p0".to_string(), 1)),
+        ("id-r0p0b".to_string(), ("r0p0".to_string(), 2)),
+        ("id-r0p1".to_string(), ("r0p1".to_string(), 1)),
+        ("id-r0p2".to_string(), ("r0p2".to_string(), 1)),
+    ]));
+    let records = log.snapshot();
+    let summary = oracle::summarize(
+        &plans,
+        &roster,
+        &records,
+        1_000,
+        DeliveryClass::Reliable,
+        &ChurnPlan::default(),
+    );
+    assert!(!summary.valid);
+    assert!(
+        summary
+            .reasons
+            .contains(&oracle::InvalidReason::MissingDeliveries {
+                count: 1,
+                first: oracle::DeliveryKey {
+                    recipient: "r0p0".to_string(),
+                    sender: "r0p1".to_string(),
+                    epoch: 1,
+                    seq: 3,
+                },
+            }),
+        "the hole at the floor boundary must be named, got {:?}",
+        summary.reasons
+    );
+}
+
+/// The rejoin snapshot names the member's SECOND-incarnation `PlayerId`;
+/// the floor must land on that exact incarnation via the registry. A
+/// registry that (wrongly) resolves the same id to incarnation 1 must flip
+/// the run invalid — resolution is per id, never per name.
+#[test]
+fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
+    let (mut plans, roster) = omitted_member_context();
+    plans.retain(|plan| plan.name == "r0p1");
+    let plan = &plans[0];
+    let log = EventLog::new();
+    // r0p1's incarnation 2 sends ledger 2..=3 (server 1..=2) from 150 ms.
+    log.push_churn(records::ChurnEvent {
+        recipient: "r0p1".to_string(),
+        phase: records::ChurnPhase::Disconnect,
+        at_us: 100_000,
+        epoch: None,
+        tails: BTreeMap::new(),
+    });
+    log.push_churn(records::ChurnEvent {
+        recipient: "r0p1".to_string(),
+        phase: records::ChurnPhase::Rejoined,
+        at_us: 150_000,
+        epoch: Some(2),
+        tails: BTreeMap::new(),
+    });
+    // The viewer rejoins at 250 ms; its snapshot names r0p1 by the
+    // second-incarnation id with tail 1 (one frame already accounted).
+    log.push_churn(records::ChurnEvent {
+        recipient: "r0p0".to_string(),
+        phase: records::ChurnPhase::Rejoined,
+        at_us: 250_000,
+        epoch: Some(2),
+        tails: BTreeMap::from([("r0p1".to_string(), ("id-r0p1-bump".to_string(), 1))]),
+    });
+    let mut epoch_positions: BTreeMap<u32, u64> = BTreeMap::new();
+    for send in &plan.sends {
+        let epoch = u32::from(send.intended_us >= 150_000) + 1;
+        let server_seq = {
+            let next = *epoch_positions.get(&epoch).unwrap_or(&0) + 1;
+            epoch_positions.insert(epoch, next);
+            next
+        };
+        log.push_sent(SentEvent {
+            sender: plan.name.clone(),
+            room: plan.room,
+            seq: send.seq,
+            epoch,
+            intended_us: send.intended_us,
+            sent_us: send.intended_us + 5,
+            phase: send.phase,
+        });
+        // r0p2 stayed seated through the storm: it receives every send.
+        log.push_receipt(ReceiptEvent {
+            recipient: "r0p2".to_string(),
+            sender: plan.name.clone(),
+            seq: send.seq,
+            epoch,
+            server_seq,
+            received_us: send.intended_us + 8,
+        });
+        // The viewer's seat admits the second-incarnation sends fanned out
+        // after it (server 2 and 3); server 1 is behind the snapshot tail.
+        if epoch == 2 && server_seq >= 2 {
+            log.push_receipt(ReceiptEvent {
+                recipient: "r0p0".to_string(),
+                sender: plan.name.clone(),
+                seq: send.seq,
+                epoch: 2,
+                server_seq,
+                received_us: send.intended_us + 8,
+            });
+        }
+    }
+    log.set_registry(BTreeMap::from([
+        ("id-r0p0".to_string(), ("r0p0".to_string(), 1)),
+        ("id-r0p0b".to_string(), ("r0p0".to_string(), 2)),
+        ("id-r0p1".to_string(), ("r0p1".to_string(), 1)),
+        ("id-r0p1-bump".to_string(), ("r0p1".to_string(), 2)),
+        ("id-r0p2".to_string(), ("r0p2".to_string(), 1)),
+    ]));
+    let records = log.snapshot();
+    let summary = oracle::summarize(
+        &plans,
+        &roster,
+        &records,
+        1_000,
+        DeliveryClass::Reliable,
+        &ChurnPlan::default(),
+    );
+    assert!(
+        summary.valid,
+        "the tail on the second id floors the second incarnation exactly: {:?}",
+        summary.reasons
+    );
+
+    // Forbidden: a registry that resolves the same id to incarnation 1
+    // (the pre-migration bug's guess) must flip the verdict — resolution
+    // is per PlayerId, never per name.
+    let mut records = records;
+    records
+        .registry
+        .insert("id-r0p1-bump".to_string(), ("r0p1".to_string(), 1));
+    let summary = oracle::summarize(
+        &plans,
+        &roster,
+        &records,
+        1_000,
+        DeliveryClass::Reliable,
+        &ChurnPlan::default(),
+    );
+    assert!(
+        !summary.valid,
+        "a floor resolved to the wrong incarnation must leave the second incarnation owed"
+    );
+}
+
+/// A rejoin snapshot may not name an id the run's registry never recorded:
+/// the identity table is what replay resolves against, and its absence is
+/// a loud runner bug.
+#[test]
+fn an_unresolvable_snapshot_identity_is_a_loud_fault() {
+    let (plans, roster) = omitted_member_context();
+    let log = EventLog::new();
+    log.push_churn(records::ChurnEvent {
+        recipient: "r0p0".to_string(),
+        phase: records::ChurnPhase::Rejoined,
+        at_us: 250_000,
+        epoch: Some(2),
+        tails: BTreeMap::from([("r0p1".to_string(), ("id-phantom".to_string(), 0))]),
+    });
+    log.set_registry(BTreeMap::from([
+        ("id-r0p0".to_string(), ("r0p0".to_string(), 1)),
+        ("id-r0p0b".to_string(), ("r0p0".to_string(), 2)),
+        ("id-r0p1".to_string(), ("r0p1".to_string(), 1)),
+        ("id-r0p2".to_string(), ("r0p2".to_string(), 1)),
+    ]));
+    let records = log.snapshot();
+    let summary = oracle::summarize(
+        &plans,
+        &roster,
+        &records,
+        1_000,
+        DeliveryClass::Reliable,
+        &ChurnPlan::default(),
+    );
+    assert!(!summary.valid);
+    assert!(
+        summary
+            .reasons
+            .contains(&oracle::InvalidReason::UnresolvedSenderIdentity {
+                player_id: "id-phantom".to_string(),
+            }),
+        "the phantom id must be named, got {:?}",
+        summary.reasons
     );
 }
 
@@ -1216,7 +2280,7 @@ fn unit_context_with_class(delivery_class: DeliveryClass) -> UnitContext {
     config.duration = Duration::from_millis(400);
     config.send_rate_per_sender = 10.0;
     config.delivery_class = delivery_class;
-    let plans = build_plans(&config);
+    let (plans, _churn) = build_run_shape(&config).expect("unit shape");
     let roster = plans
         .iter()
         .map(|plan| (plan.name.clone(), plan.room))
@@ -1238,6 +2302,7 @@ fn complete_records(plans: &[SenderPlan]) -> RunRecords {
                 sender: plan.name.clone(),
                 room: plan.room,
                 seq: send.seq,
+                epoch: 1,
                 intended_us: send.intended_us,
                 sent_us: send.intended_us + 5,
                 phase: send.phase,
@@ -1254,6 +2319,8 @@ fn complete_records(plans: &[SenderPlan]) -> RunRecords {
                     recipient: plan.name.clone(),
                     sender: other.name.clone(),
                     seq: send.seq,
+                    epoch: 1,
+                    server_seq: send.seq + 1,
                     received_us: send.intended_us + 8,
                 });
             }

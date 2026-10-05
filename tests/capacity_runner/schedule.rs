@@ -7,7 +7,8 @@
 //! senders do not emit in lockstep) and then walks its period through the
 //! measured window.
 
-use crate::config::{micros, RunConfig};
+use crate::config::{micros, ChurnSchedule, RunConfig};
+use std::collections::BTreeMap;
 
 /// Which window a scheduled send lands in. Warm-up sends are
 /// completeness-checked by the oracle but excluded from the latency
@@ -43,6 +44,145 @@ impl SenderPlan {
     pub fn last_intended_us(&self) -> u64 {
         self.sends.last().map_or(0, |send| send.intended_us)
     }
+}
+
+/// One churn cycle: `peers` disconnect at `disconnect_us`, and each peer
+/// rejoins at its own staggered instant (`reconnects_us`, inside the cycle's
+/// window). A rejoin bumps the peer's incarnation epoch, so the peer's relay
+/// stream resumes under a fresh `(epoch, seq)` pair.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChurnCycle {
+    pub peers: Vec<String>,
+    pub disconnect_us: u64,
+    /// Per-peer reconnect instant (the map's keys are exactly `peers`).
+    pub reconnects_us: BTreeMap<String, u64>,
+}
+
+/// The full churn plan of one run: a pure function of `(seed, RunConfig)`
+/// plus the unshifted send plans (the storm must complete inside their
+/// span). Deterministic, so a manifest rebuilds it exactly.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChurnPlan {
+    pub cycles: Vec<ChurnCycle>,
+}
+
+impl ChurnPlan {
+    /// Whether this peer is victimized by any cycle.
+    pub fn victim_instants(&self, peer: &str) -> Vec<(u64, u64)> {
+        self.cycles
+            .iter()
+            .filter(|cycle| cycle.peers.iter().any(|name| name == peer))
+            .map(|cycle| {
+                (
+                    cycle.disconnect_us,
+                    cycle
+                        .reconnects_us
+                        .get(peer)
+                        .copied()
+                        .unwrap_or(cycle.disconnect_us),
+                )
+            })
+            .collect()
+    }
+}
+
+/// Build the run shape: the unshifted send plans and the churn plan, with
+/// every churn victim's post-disconnect sends shifted by its offline window
+/// (a scheduled offline gap is workload shape, not generator lag — the
+/// generator-lag bound must stay reserved for real generator faults).
+///
+/// The churn plan is validated against the unshifted span before any shift
+/// is applied: the whole storm (disconnects and reconnects) must complete
+/// inside the scheduled-send span, so quiescence always covers every rejoin.
+pub fn build_run_shape(config: &RunConfig) -> Result<(Vec<SenderPlan>, ChurnPlan), String> {
+    let plans = build_plans(config);
+    let churn = build_churn(config, &plans)?;
+    apply_churn_shifts(plans, &churn)
+}
+
+/// Deterministic churn plan for one run. `None` produces an empty plan; a
+/// reconnect burst picks its victims and reconnect offsets from
+/// seed-derived splitmix64 streams (the same discipline as the send
+/// schedule), so identical configs produce identical storms.
+fn build_churn(config: &RunConfig, plans: &[SenderPlan]) -> Result<ChurnPlan, String> {
+    let ChurnSchedule::ReconnectBurst {
+        fraction_percent,
+        start,
+        window,
+    } = config.churn
+    else {
+        return Ok(ChurnPlan::default());
+    };
+    if !(1..=100).contains(&fraction_percent) {
+        return Err(format!(
+            "churn fraction_percent must be in 1..=100, got {fraction_percent}"
+        ));
+    }
+    if window.is_zero() {
+        return Err("churn window must be positive".to_string());
+    }
+    let span_us = plans
+        .iter()
+        .map(SenderPlan::last_intended_us)
+        .max()
+        .unwrap_or(0);
+    let storm_end_us = start
+        .checked_add(window)
+        .map(micros)
+        .ok_or_else(|| "churn start + window overflows the run clock".to_string())?;
+    if storm_end_us > span_us {
+        return Err(format!(
+            "the churn storm (start {start:?} + window {window:?}) must complete inside the \
+             scheduled-send span ({span_us} µs)"
+        ));
+    }
+    let mut roster: Vec<String> = plans.iter().map(|plan| plan.name.clone()).collect();
+    // Seeded Fisher-Yates over the roster; the first `count` names of the
+    // shuffled order are the victims.
+    let mut state = config.seed ^ 0xC0DE_B0FF;
+    for index in (1..roster.len()).rev() {
+        let index = u64::try_from(index).unwrap_or(0);
+        let swap = usize::try_from(splitmix64(&mut state) % (index + 1)).unwrap_or(0);
+        roster.swap(usize::try_from(index).unwrap_or(0), swap);
+    }
+    let count = roster
+        .len()
+        .checked_mul(usize::try_from(fraction_percent).unwrap_or(0))
+        .map(|product| product.div_ceil(100))
+        .unwrap_or(0)
+        .clamp(1, roster.len());
+    let mut reconnects_us = BTreeMap::new();
+    for victim in &roster[..count] {
+        let offset = splitmix64(&mut state) % micros(window);
+        reconnects_us.insert(victim.clone(), micros(start) + offset);
+    }
+    Ok(ChurnPlan {
+        cycles: vec![ChurnCycle {
+            peers: roster[..count].to_vec(),
+            disconnect_us: micros(start),
+            reconnects_us,
+        }],
+    })
+}
+
+/// Shift every victim's post-disconnect sends by its offline duration. The
+/// shift preserves inter-send spacing, so the offered workload (send count
+/// and rate) is unchanged — only the timeline moves.
+fn apply_churn_shifts(
+    mut plans: Vec<SenderPlan>,
+    churn: &ChurnPlan,
+) -> Result<(Vec<SenderPlan>, ChurnPlan), String> {
+    for plan in &mut plans {
+        for (disconnect_us, reconnect_us) in churn.victim_instants(&plan.name) {
+            let shift = reconnect_us.saturating_sub(disconnect_us);
+            for send in &mut plan.sends {
+                if send.intended_us >= disconnect_us {
+                    send.intended_us += shift;
+                }
+            }
+        }
+    }
+    Ok((plans, churn.clone()))
 }
 
 /// splitmix64: a tiny, dependency-free, platform-stable PRNG. Only the

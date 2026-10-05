@@ -2333,8 +2333,53 @@ red run: a peer's join snapshot can miss the member that joined
 concurrently, so receivers now track `PlayerJoined`/`PlayerLeft` to resolve
 gap senders.
 
-**C2 next runner PR: churn/reconnect schedules and richer resource
-counters (#648).** Extend `ChurnSchedule` with the reconnect-burst and
-room-replacement schedules the C3 cells need, with red-first controls for
-each new permitted outcome, and record queue depth/age plus ingress/egress
-bytes in the interval samples before any C3 capacity claim.
+**C2 next runner PR: churn/reconnect schedules — LANDED** (third runner
+PR, 2026-10-05). `ChurnSchedule` carries the reconnect-burst storm (the C3
+reconnect cell): at `start`, the seed-chosen `fraction_percent` of peers
+disconnect; each rejoins at a seed-staggered instant inside `[start,
+start + window)`, and every victim's post-disconnect sends shift by its
+offline window (a scheduled gap is workload shape, never generator lag).
+The stream identity across a storm is the runner's own incarnation index —
+one join per connection, registered per `PlayerId` in a shared sender
+registry that receiving tasks resolve every inbound frame and gap report
+through — because the server's relay stamps are per connection and a fresh
+rejoin is a new member whose `(epoch, seq)` restarts at `(1, 1)`. The
+oracle validates per `(recipient, sender, incarnation)` streams: rejoin
+snapshots' per-member `(id, seq tail)` stamps raise each stream's owed
+floor (the loud away window), stale-epoch deliveries after a sender's
+rejoin and below-tail deliveries after a recipient's rejoin are misroutes,
+and a planned storm that never fires invalidates the run. Artifacts bumped
+to schema 3 (receipts carry the sending incarnation and per-connection
+server sequence, sends carry their incarnation, churn events record the
+disconnect/rejoin cycle with the rejoin snapshot tails). One real-socket
+storm cell (50% of a four-peer room, reliable) passes with replay
+equality; deterministic controls pin each new permitted outcome, and the
+red proof neuters the stale-epoch check (the control fails). A schedule
+control pins the offline-window shift exactly (moved sends land at or
+after their reconnect instant with count and spacing preserved,
+non-victims untouched), and adversarial-review hardening keeps snapshot
+floors authoritative over later rejoin events, requires the rejoin half
+of every planned cycle, keeps the stagger window below the generator-lag
+bound, and refuses run-level fault hooks in churn cells. The bot review
+round hardened identity further: rejoin snapshot tails are recorded
+UNRESOLVED and resolved against the registry recorded at end of run (the
+per-frame registry lookups are race-free because a peer registers its id
+before its first send; the per-tail lookups were not, and a wrong guess
+floored the wrong incarnation), a member omitted from a rejoin snapshot
+(the documented join-snapshot race under concurrent rejoins) is neither
+closed nor unfloored — its away window is derived from the sends that
+completed at or before the rejoin instant, a rule that errs safe —
+derived floors are bookkeeping only (only snapshot tails are
+server-enforced watermarks, so only they turn a redelivery into a
+misroute), closed streams are finished (nothing further owed, arrivals
+still misroute), and the default burst window (200 ms) sits strictly
+below the default generator-lag bound (250 ms) so the default env config
+runs. Churn runs require the v3 wire and exclude the socket-owning and
+generator-latency hooks.
+
+**C2 next runner PR: room-replacement churn and richer resource counters
+(#648).** Extend `ChurnSchedule` with the room-replacement schedule the C3
+churn cells need (whole rooms cycle while others keep serving), with
+red-first controls reusing the incarnation machinery, and record queue
+depth/age plus ingress/egress bytes in the interval samples before any C3
+capacity claim.

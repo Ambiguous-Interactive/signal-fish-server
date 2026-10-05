@@ -8,11 +8,11 @@
 //! schedule is a pure function of the seed plus these fields, so a manifest
 //! recorded with this config reproduces the exact workload.
 //!
-//! Slice boundary: [`ChurnSchedule`] currently accepts only its foundational
-//! variant. [`DeliveryClass`] carries the full latest/volatile contract as of
-//! the second runner PR (permitted loss with exact gap accounting). The input
-//! surface exists so later slices (reconnect storms, room churn) extend the
-//! enums instead of reshaping every call site.
+//! Slice boundary: [`ChurnSchedule`] carries the reconnect-burst storm (the
+//! C3 reconnect cell) as of the third runner PR; [`DeliveryClass`] carries
+//! the full latest/volatile contract. The input surface exists so later
+//! slices (room-replacement churn) extend the enums instead of reshaping
+//! every call site.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -85,15 +85,48 @@ impl DeliveryClass {
 pub enum ChurnSchedule {
     /// No churn: every client joins once and stays connected.
     None,
+    /// Reconnect storm (the C3 reconnect-burst cell): at `start` into the
+    /// run, the sockets of a seed-chosen `fraction_percent` of all peers
+    /// close; each victim rejoins with a fresh connection at a seed-staggered
+    /// instant inside `[start, start + window)`. A rejoin seats a fresh
+    /// incarnation, so every victim's relay stream resumes as a new stream —
+    /// the delivery contract the oracle validates across the storm.
+    ReconnectBurst {
+        /// Percentage of peers victimized (1-100; C3 cells use 10 and 50).
+        fraction_percent: u32,
+        /// Time into the run (from the epoch, warm-up included) when the
+        /// victims' sockets close.
+        #[serde(with = "duration_micros")]
+        start: Duration,
+        /// Reconnect stagger window. Every victim is back inside it, and the
+        /// whole storm must complete inside the scheduled-send span. The
+        /// default stays strictly below the default generator-lag bound
+        /// (250 ms), so the default env config is runnable.
+        #[serde(with = "duration_micros")]
+        window: Duration,
+    },
 }
 
 impl ChurnSchedule {
+    /// The default burst shape: shared by the `CHURN=reconnect-burst`
+    /// parser and the per-field env overrides, so the two paths cannot
+    /// drift apart.
+    pub(crate) fn reconnect_burst_default() -> Self {
+        ChurnSchedule::ReconnectBurst {
+            fraction_percent: 50,
+            start: Duration::from_millis(300),
+            window: Duration::from_millis(200),
+        }
+    }
+
     fn parse(raw: &str) -> Result<Self, String> {
         match raw {
             "none" => Ok(ChurnSchedule::None),
+            "reconnect-burst" => Ok(ChurnSchedule::reconnect_burst_default()),
             other => Err(format!(
-                "unsupported churn schedule {other:?} (expected \"none\"; reconnect storms and \
-                 room-replacement schedules are later C2 slices)"
+                "unsupported churn schedule {other:?} (expected \"none\" or \
+                 \"reconnect-burst\"; shape the burst with CHURN_FRACTION_PERCENT, \
+                 CHURN_START_MS, and CHURN_WINDOW_MS)"
             )),
         }
     }
@@ -308,8 +341,9 @@ impl RunConfig {
     /// `ENDPOINT` (optional), `SEED`, `ROOMS`, `PLAYERS`, `ENCODING`
     /// (`v2-json` | `v3-json`), `PAYLOAD_BYTES`, `RATE_PER_SENDER`, `CLASS`
     /// (`reliable` | `latest` | `volatile`), `LATEST_KEYS`, `WARMUP_SECS`,
-    /// `DURATION_SECS`, `CHURN` (`none`), `OUTPUT_DIR`, `LAG_BOUND_MS`,
-    /// `SAMPLE_INTERVAL_MS`. Absent optional
+    /// `DURATION_SECS`, `CHURN` (`none` | `reconnect-burst`) with
+    /// `CHURN_FRACTION_PERCENT`, `CHURN_START_MS`, `CHURN_WINDOW_MS`,
+    /// `OUTPUT_DIR`, `LAG_BOUND_MS`, `SAMPLE_INTERVAL_MS`. Absent optional
     /// variables fall back to the small default scenario; required scalars
     /// fall back to the same defaults so a bare invocation just works. Each
     /// run needs a FRESH `OUTPUT_DIR` (a directory that already holds a run
@@ -351,9 +385,38 @@ impl RunConfig {
             Some(raw) => Some(DeliveryClass::parse(&raw)?),
             None => None,
         };
+        let churn_fraction = var("CHURN_FRACTION_PERCENT")?
+            .map(|raw| raw.parse::<u32>())
+            .transpose()
+            .map_err(|error| format!("CAPACITY_RUNNER_CHURN_FRACTION_PERCENT: {error}"))?;
+        let churn_start_ms = var("CHURN_START_MS")?
+            .map(|raw| raw.parse::<u64>())
+            .transpose()
+            .map_err(|error| format!("CAPACITY_RUNNER_CHURN_START_MS: {error}"))?;
+        let churn_window_ms = var("CHURN_WINDOW_MS")?
+            .map(|raw| raw.parse::<u64>())
+            .transpose()
+            .map_err(|error| format!("CAPACITY_RUNNER_CHURN_WINDOW_MS: {error}"))?;
         let churn = match var("CHURN")? {
-            Some(raw) => Some(ChurnSchedule::parse(&raw)?),
-            None => None,
+            Some(raw) => match ChurnSchedule::parse(&raw)? {
+                ChurnSchedule::None => ChurnSchedule::None,
+                ChurnSchedule::ReconnectBurst { .. } => {
+                    let ChurnSchedule::ReconnectBurst {
+                        fraction_percent,
+                        start,
+                        window,
+                    } = ChurnSchedule::reconnect_burst_default()
+                    else {
+                        unreachable!("the default shape is a burst");
+                    };
+                    ChurnSchedule::ReconnectBurst {
+                        fraction_percent: churn_fraction.unwrap_or(fraction_percent),
+                        start: churn_start_ms.map(Duration::from_millis).unwrap_or(start),
+                        window: churn_window_ms.map(Duration::from_millis).unwrap_or(window),
+                    }
+                }
+            },
+            None => ChurnSchedule::None,
         };
         let warmup_secs = var("WARMUP_SECS")?
             .map(|raw| raw.parse::<f64>())
@@ -388,7 +451,7 @@ impl RunConfig {
             delivery_class: delivery_class.unwrap_or(DeliveryClass::Reliable),
             warmup: Duration::from_secs_f64(warmup_secs.unwrap_or(0.2)),
             duration: Duration::from_secs_f64(duration_secs.unwrap_or(1.2)),
-            churn: churn.unwrap_or(ChurnSchedule::None),
+            churn,
             output_dir: output_dir
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::temp_dir().join("signal-fish-capacity-run")),

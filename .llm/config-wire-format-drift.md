@@ -20,6 +20,19 @@ binary game-data transport.
 - Keep `docs/configuration.md` aligned with `Config::default()` and the
   `SIGNAL_FISH__...` environment override form.
 
+## Coupled Defaults
+
+- When one input's validity depends on another input's default (a window that
+  must stay below a bound, a count that must fit a capacity), define the
+  defaults in ONE constructor that both the enum-string parser and the
+  per-field env overrides use. Duplicated literal defaults drift and produce
+  configs that parse fine but are refused at run time.
+- A runnable default combination is a contract: the all-defaults config must
+  be exercised by a test (parse it and run the validation), or a coupled
+  refusal will silently kill the default path (seen: a burst window of
+  300 ms against a 250 ms bound made `CHURN=reconnect-burst` with no other
+  overrides impossible to start).
+
 ## Env Vars
 
 - Field overrides use the `SIGNAL_FISH__` prefix with double underscores between

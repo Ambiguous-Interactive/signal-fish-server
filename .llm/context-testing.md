@@ -88,6 +88,28 @@ contention, available CPU/ports, wall-clock, randomness, or test-execution order
   ephemeral port / temp dir / id per test; never share mutable global state.
 - No `Math.random` / `Instant::now`-derived values in assertions; pin fixtures.
 
+## Cross-task identity and bounds in test oracles
+
+An oracle that validates recorded events from many tasks (reconnect
+timelines, session ledgers) must not resolve identity or bounds through
+lookups whose correctness depends on another task's scheduling order:
+
+- Resolve identity against state recorded at END of run (a complete table
+  written once), never against a mid-run shared map another task may not
+  have populated yet. A wrong fallback guess is worse than a loud fault:
+  it silently attributes events to the wrong stream. Missing identity must
+  invalidate loudly.
+- Distinguish server-enforced bounds from derived bounds. A bound the
+  SERVER enforces (a watermark it gates its own queue against) makes a
+  violating arrival a contract break; a bound the TEST derives (from send
+  times, arrival counts) is bookkeeping only — it bounds what is owed and
+  must never classify a legal arrival as a violation. Cross-task recorded
+  timestamps can invert by a scheduling step, so derived bounds must err
+  in the direction that cannot false-fail a healthy run.
+- A finished stream (its sender moved on) owes nothing further: skip it in
+  completeness validation, keep counting its arrivals as evidence, and
+  still flag new arrivals on it as violations.
+
 ## Injectable time (clock convention)
 
 Production time-driven logic must stay deterministic to test. Server code uses
