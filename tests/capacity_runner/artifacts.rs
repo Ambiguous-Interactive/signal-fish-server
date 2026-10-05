@@ -32,12 +32,14 @@ use crate::diagnostics;
 use crate::config::{micros, RunConfig};
 use crate::oracle::{summarize, OutcomeSummary};
 use crate::records::RunRecords;
-use crate::schedule::build_plans;
+use crate::schedule::build_run_shape;
 
 /// Bump on any breaking artifact shape change (the audit contract requires
-/// every stored run to name its schema). Version 2 adds the gap-report event
-/// kind, the delivery-class-aware summary, and the latest/volatile inputs.
-pub const SCHEMA_VERSION: u64 = 2;
+/// every stored run to name its schema). Version 3 makes streams
+/// epoch-aware: receipts carry the server's `(epoch, server_seq)` stamps,
+/// sends carry the sender's incarnation epoch, and churn runs record their
+/// disconnect/rejoin events with rejoin snapshot tails.
+pub const SCHEMA_VERSION: u64 = 3;
 
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const DELIVERIES_FILE: &str = "deliveries.jsonl";
@@ -262,6 +264,10 @@ pub fn read_records(output_dir: &Path) -> Result<RunRecords, String> {
                 serde_json::from_value(value)
                     .map_err(|error| format!("parse disconnect event: {error}"))?,
             ),
+            "churn" => records.churn.push(
+                serde_json::from_value(value)
+                    .map_err(|error| format!("parse churn event: {error}"))?,
+            ),
             "join_failure" => records.join_failures.push(
                 value
                     .get("detail")
@@ -290,7 +296,7 @@ pub fn replay(output_dir: &Path) -> Result<OutcomeSummary, String> {
             manifest.schema_version
         ));
     }
-    let plans = build_plans(&manifest.config);
+    let (plans, churn) = build_run_shape(&manifest.config)?;
     let roster = plans
         .iter()
         .map(|plan| (plan.name.clone(), plan.room))
@@ -302,5 +308,6 @@ pub fn replay(output_dir: &Path) -> Result<OutcomeSummary, String> {
         &records,
         micros(manifest.config.generator_lag_bound),
         manifest.config.delivery_class,
+        &churn,
     ))
 }

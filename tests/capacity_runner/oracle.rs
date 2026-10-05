@@ -20,14 +20,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use hdrhistogram::Histogram;
 
 use crate::config::{count_u64, DeliveryClass};
-use crate::records::{GapEvent, RunRecords, SentEvent};
-use crate::schedule::{Phase, SenderPlan};
+use crate::records::{ChurnPhase, GapEvent, RunRecords, SentEvent};
+use crate::schedule::{ChurnPlan, Phase, SenderPlan};
 
-/// One delivery key that violated the contract, named exactly.
+/// One delivery key that violated the contract, named exactly. `epoch` and
+/// `seq` are the server's per-`(sender, epoch)` stream coordinates.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DeliveryKey {
     pub recipient: String,
     pub sender: String,
+    pub epoch: u32,
     pub seq: u64,
 }
 
@@ -86,6 +88,13 @@ pub enum InvalidReason {
     SendFailed { sender: String, detail: String },
     /// A server frame a recipient task could not decode.
     MalformedServerFrame { recipient: String, detail: String },
+    /// A peer could not rejoin after its declared churn disconnect (its
+    /// remaining schedule is unsent work, and its seat is unproven).
+    ReconnectFailed { peer: String, detail: String },
+    /// A planned churn cycle never happened (the runner failed to execute
+    /// its own deterministic plan), so the run is not the churn measurement
+    /// its manifest claims.
+    ChurnNotPerformed { peer: String },
     /// Generator tasks outlived the quiescence margin (a wedged generator).
     RunnerDeadlineExceeded { detail: String },
     /// The server rejected a frame mid-run (bad class, payload cap, rate
@@ -271,6 +280,124 @@ fn percentiles(samples: &[u64]) -> (u64, u64, u64, u64) {
     )
 }
 
+/// How one recipient's co-room relay streams evolved across the storm.
+///
+/// Every member starts in epoch 1 (the initial join). A member's rejoin
+/// adopts its new epoch (and closes its previous epoch's stream — deliveries
+/// for a closed stream are stale-epoch misroutes). The recipient's own
+/// rejoin re-adopts every member from its join snapshot: the snapshot's
+/// per-member `(epoch, seq tail)` sets the stream's owed floor — everything
+/// at or below the tail was accounted to the away window ("a recipient owes
+/// no GameData at or below this sequence in the paired epoch"), and the
+/// stream's owed window starts one past it.
+#[derive(Default)]
+struct ChurnView {
+    /// Member -> the epoch this recipient's seat adopts (and every epoch it
+    /// has adopted, which are the streams it can be owed).
+    adopted: BTreeMap<String, BTreeSet<u32>>,
+    /// `(sender, epoch) -> instant past which deliveries for the stream are
+    /// stale-epoch misroutes (the sender rejoined past it)`.
+    closed_at: BTreeMap<(String, u32), u64>,
+    /// `(sender, epoch) -> (owed floor, from_us)`: from `from_us` on, the
+    /// stream's owed window starts at floor + 1.
+    floors: BTreeMap<(String, u32), (u64, u64)>,
+}
+
+/// Rebuild every roster peer's [`ChurnView`] from the run's recorded churn
+/// events, per room. Each viewer applies its room's events in
+/// `(at_us, own-rejoin-last)` order: when two churn actions share an
+/// instant, the server's publication order still delivers the rejoining
+/// member's new epoch either way, and the viewer's own snapshot is the
+/// later word on floors.
+fn churn_views(records: &RunRecords, roster: &[(String, u32)]) -> BTreeMap<String, ChurnView> {
+    let room_of: BTreeMap<&str, u32> = roster
+        .iter()
+        .map(|(name, room)| (name.as_str(), *room))
+        .collect();
+    let mut views: BTreeMap<String, ChurnView> = BTreeMap::new();
+    for (viewer, room) in roster {
+        let view = views.entry(viewer.clone()).or_default();
+        // Seed: every co-room member starts in epoch 1 (the initial join).
+        for (member, _) in roster
+            .iter()
+            .filter(|(_, member_room)| *member_room == *room)
+        {
+            view.adopted.entry(member.clone()).or_default().insert(1);
+        }
+        let mut events: Vec<&crate::records::ChurnEvent> = records
+            .churn
+            .iter()
+            .filter(|event| room_of.get(event.recipient.as_str()) == Some(room))
+            .collect();
+        events.sort_by_key(|event| (event.at_us, event.recipient != *viewer));
+        for event in events {
+            let crate::records::ChurnEvent {
+                recipient,
+                phase,
+                at_us,
+                epoch,
+                tails,
+            } = event;
+            match phase {
+                ChurnPhase::Disconnect => {}
+                ChurnPhase::Rejoined if recipient != viewer => {
+                    // Another member rejoined: adopt its new epoch and close
+                    // its previous epoch's stream.
+                    let Some(new_epoch) = epoch else {
+                        continue;
+                    };
+                    let Some(epochs) = view.adopted.get_mut(recipient) else {
+                        continue;
+                    };
+                    for old in epochs
+                        .iter()
+                        .filter(|old| **old != *new_epoch)
+                        .copied()
+                        .collect::<Vec<_>>()
+                    {
+                        view.closed_at.insert((recipient.clone(), old), *at_us);
+                    }
+                    epochs.insert(*new_epoch);
+                    view.floors.remove(&(recipient.clone(), *new_epoch));
+                }
+                ChurnPhase::Rejoined => {
+                    // This viewer rejoined: re-adopt every member from its
+                    // snapshot. A member whose epoch moved (or that is gone
+                    // from the snapshot) has its old streams closed; the
+                    // snapshot's streams floor at their tails from now on.
+                    let adopted_members: Vec<String> = view.adopted.keys().cloned().collect();
+                    for member in &adopted_members {
+                        match tails.get(member) {
+                            Some(&(snap_epoch, tail)) => {
+                                let epochs = view.adopted.entry(member.clone()).or_default();
+                                for old in epochs
+                                    .iter()
+                                    .filter(|old| **old != snap_epoch)
+                                    .copied()
+                                    .collect::<Vec<_>>()
+                                {
+                                    view.closed_at.insert((member.clone(), old), *at_us);
+                                }
+                                epochs.insert(snap_epoch);
+                                view.floors
+                                    .insert((member.clone(), snap_epoch), (tail, *at_us));
+                            }
+                            None => {
+                                if let Some(epochs) = view.adopted.get(member) {
+                                    for old in epochs.iter().copied().collect::<Vec<_>>() {
+                                        view.closed_at.insert((member.clone(), old), *at_us);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    views
+}
+
 /// Summarize one run: the single source of the outcome summary.
 ///
 /// Every input comes from the recorded events: faults the runner observed
@@ -292,12 +419,23 @@ pub fn summarize(
     records: &RunRecords,
     generator_lag_bound_us: u64,
     delivery_class: DeliveryClass,
+    churn: &ChurnPlan,
 ) -> OutcomeSummary {
     let mut reasons = records.faults.clone();
     if !records.join_failures.is_empty() {
         reasons.push(InvalidReason::JoinFailed {
             failures: records.join_failures.clone(),
         });
+    }
+    // A churn run must show its storm: every planned victim must have acted
+    // (its disconnect and rejoin are recorded churn events). A silent
+    // no-op storm would mislabel a churn-free measurement as churn evidence.
+    for cycle in &churn.cycles {
+        for peer in &cycle.peers {
+            if !records.churn.iter().any(|event| event.recipient == *peer) {
+                reasons.push(InvalidReason::ChurnNotPerformed { peer: peer.clone() });
+            }
+        }
     }
     let hook_exemptions: Vec<String> = reasons
         .iter()
@@ -308,18 +446,6 @@ pub fn summarize(
         .flatten()
         .collect();
 
-    // Offered work per sender.
-    let sent_count: BTreeMap<&str, u64> = plans
-        .iter()
-        .map(|plan| {
-            let sent = records
-                .sent
-                .iter()
-                .filter(|event| event.sender == plan.name)
-                .count();
-            (plan.name.as_str(), count_u64(sent))
-        })
-        .collect();
     let total_scheduled: u64 = plans.iter().map(|plan| count_u64(plan.sends.len())).sum();
     let total_sent: u64 = count_u64(records.sent.len());
     let total_unsent = total_scheduled.saturating_sub(total_sent);
@@ -340,13 +466,41 @@ pub fn summarize(
         });
     }
 
-    // Receipts grouped per (recipient, sender), in arrival order.
-    let mut arrivals: BTreeMap<(&str, &str), Vec<(u64, u64)>> = BTreeMap::new();
+    // Per-sender relay blocks: every epoch the sender actually sent in, with
+    // its ledger sequences in send order. The server stamps each epoch's
+    // stream 1..=n in arrival order, so the block maps a wire
+    // `(epoch, server_seq)` stamp onto the sender-stamped ledger sequence
+    // (`block[server_seq - 1]`).
+    let mut blocks: BTreeMap<(&str, u32), Vec<u64>> = BTreeMap::new();
+    for sent in &records.sent {
+        blocks
+            .entry((sent.sender.as_str(), sent.epoch))
+            .or_default()
+            .push(sent.seq);
+    }
+    for block in blocks.values_mut() {
+        block.sort_unstable();
+    }
+    let sender_epochs: BTreeMap<&str, BTreeSet<u32>> =
+        blocks
+            .keys()
+            .fold(BTreeMap::new(), |mut acc, (sender, epoch)| {
+                acc.entry(*sender).or_default().insert(*epoch);
+                acc
+            });
+
+    // Receipts grouped per `(recipient, sender, epoch)` stream, in arrival
+    // order: `(server_seq, ledger_seq, received_us)`.
+    let mut arrivals: BTreeMap<(&str, &str, u32), Vec<(u64, u64, u64)>> = BTreeMap::new();
     for receipt in &records.receipts {
         arrivals
-            .entry((receipt.recipient.as_str(), receipt.sender.as_str()))
+            .entry((
+                receipt.recipient.as_str(),
+                receipt.sender.as_str(),
+                receipt.epoch,
+            ))
             .or_default()
-            .push((receipt.seq, receipt.received_us));
+            .push((receipt.server_seq, receipt.seq, receipt.received_us));
     }
     let disconnected: BTreeSet<&str> = records
         .disconnects
@@ -363,11 +517,19 @@ pub fn summarize(
             .push(name.as_str());
     }
 
+    // Per-recipient churn view: how each co-room member's relay stream
+    // evolved across the storm. Every member starts in epoch 1 (the initial
+    // join); a member's rejoin adopts its new epoch, and the recipient's own
+    // rejoin re-adopts every member from its snapshot — where the snapshot's
+    // per-member `(epoch, seq tail)` raises the stream's owed floor ("a
+    // recipient owes no GameData at or below this sequence in the paired
+    // epoch"), covering the away window loudly.
+    let views = churn_views(records, roster);
+
     // Gap reports: global contract validation, then per-stream coverage.
-    // Server-stamped sequences are 1-based over one sender's relay stream;
-    // the runner's ledger sequences are 0-based over the same stream, so the
-    // mapping is `server seq = ledger seq + 1` (single-epoch slice: the
-    // runner never reconnects a sender).
+    // Server-stamped sequences are 1-based within one `(sender, epoch)`
+    // stream; the runner's ledger sequences are 0-based over that same
+    // stream's sends, so the block built above maps between them.
     let reasons_permitted =
         |class: DeliveryClass, reason: signal_fish_server::protocol::DeliveryGapReason| match class
         {
@@ -388,7 +550,7 @@ pub fn summarize(
         .map(|(name, room)| (name.as_str(), *room))
         .collect();
     let mut invalid_gaps = GapViolations::default();
-    let mut gaps_by_stream: BTreeMap<(&str, &str), Vec<&GapEvent>> = BTreeMap::new();
+    let mut gaps_by_stream: BTreeMap<(&str, &str, u32), Vec<&GapEvent>> = BTreeMap::new();
     for gap in &records.gaps {
         let mut detail: Option<String> = None;
         if !member_names.contains(gap.recipient.as_str())
@@ -402,9 +564,12 @@ pub fn summarize(
         } else if delivery_class == DeliveryClass::Reliable {
             detail =
                 Some("reliable delivery permits no loss, yet a gap report arrived".to_string());
-        } else if gap.epoch != 1 {
+        } else if !sender_epochs
+            .get(gap.sender.as_str())
+            .is_some_and(|epochs| epochs.contains(&gap.epoch))
+        {
             detail = Some(format!(
-                "gap names epoch {} but a no-reconnect run has only epoch 1",
+                "gap names epoch {} but the sender never sent in it",
                 gap.epoch
             ));
         } else if !reasons_permitted(delivery_class, gap.reason) {
@@ -430,7 +595,7 @@ pub fn summarize(
             continue;
         }
         gaps_by_stream
-            .entry((gap.recipient.as_str(), gap.sender.as_str()))
+            .entry((gap.recipient.as_str(), gap.sender.as_str(), gap.epoch))
             .or_default()
             .push(gap);
     }
@@ -442,6 +607,9 @@ pub fn summarize(
 
     let mut per_recipient = Vec::new();
     for (recipient, room) in roster {
+        let view = views
+            .get(recipient.as_str())
+            .expect("every roster peer has a churn view");
         let connected_through = !disconnected.contains(recipient.as_str());
         let exempt = hook_exemptions.iter().any(|name| name == recipient);
         let mut outcome = RecipientOutcome {
@@ -469,143 +637,148 @@ pub fn summarize(
             })
             .unwrap_or_default();
 
-        // Every observed sender must be a co-room member of this recipient.
-        // Each delivery from an out-of-roster sender is one misroute, with
-        // the first arrival naming the key.
-        for ((arrival_recipient, sender), stream) in arrivals.iter() {
+        // (a) Arrival-stream validity: an arrival must come from a co-room
+        // sender, carry a stream sequence the sender actually stamped in
+        // that epoch, not outlive its stream (the sender rejoined past it),
+        // and never repeat what the rejoin snapshot already accounted.
+        for ((arrival_recipient, sender, epoch), stream) in arrivals.iter() {
             if *arrival_recipient != recipient.as_str() {
                 continue;
             }
             if !expected_senders.contains(sender) {
-                let (seq, _) = stream.first().copied().unwrap_or((0, 0));
+                let (seq, _, _) = stream.first().copied().unwrap_or((0, 0, 0));
                 outcome.misrouted += count_u64(stream.len());
                 misrouted.record(DeliveryKey {
                     recipient: recipient.clone(),
                     sender: (*sender).to_string(),
+                    epoch: *epoch,
                     seq,
                 });
+                continue;
+            }
+            let block_len = count_u64(blocks.get(&(*sender, *epoch)).map_or(0, Vec::len));
+            let closed_after = view.closed_at.get(&((*sender).to_string(), *epoch));
+            let floor = view.floors.get(&((*sender).to_string(), *epoch));
+            for &(server_seq, _ledger_seq, received_us) in stream {
+                let key = DeliveryKey {
+                    recipient: recipient.clone(),
+                    sender: (*sender).to_string(),
+                    epoch: *epoch,
+                    seq: server_seq,
+                };
+                if server_seq == 0 || server_seq > block_len {
+                    outcome.misrouted += 1;
+                    misrouted.record(key);
+                } else if closed_after.is_some_and(|at_us| received_us > *at_us) {
+                    // A delivery for a stream its sender had already
+                    // rejoined past: the stale epoch must be silent.
+                    outcome.misrouted += 1;
+                    misrouted.record(key);
+                } else if floor.is_some_and(|(owed_floor, from_us)| {
+                    received_us >= *from_us && server_seq <= *owed_floor
+                }) {
+                    // The rejoin snapshot accounted this sequence; the
+                    // server must never send it to the new seat.
+                    outcome.misrouted += 1;
+                    misrouted.record(key);
+                }
             }
         }
 
+        // (b) Per-owed-stream completeness: duplicates, arrival order, and
+        // the class's omission contract, over every `(sender, epoch)` stream
+        // this recipient's seat ever adopted.
         for sender in expected_senders {
-            let total_sent = sent_count.get(sender).copied().unwrap_or(0);
-            let arrival = arrivals
-                .get(&(recipient.as_str(), sender))
-                .cloned()
-                .unwrap_or_default();
-
-            // Duplicates: a sequence observed more than once.
-            let mut seen = BTreeSet::new();
-            let mut unique: Vec<(u64, u64)> = Vec::with_capacity(arrival.len());
-            for (seq, received_us) in arrival {
-                if !seen.insert(seq) {
-                    outcome.duplicates += 1;
-                    duplicates.record(DeliveryKey {
-                        recipient: recipient.clone(),
-                        sender: sender.to_string(),
-                        seq,
-                    });
+            let Some(adopted) = view.adopted.get(sender) else {
+                continue;
+            };
+            for epoch in adopted {
+                let Some(block) = blocks.get(&(sender, *epoch)) else {
+                    // Adopted, but the sender never got to send in this
+                    // epoch (it rejoined before its first send): nothing is
+                    // owed, so there is nothing to check.
                     continue;
-                }
-                unique.push((seq, received_us));
-            }
+                };
+                let total_owed = count_u64(block.len());
+                let arrival = arrivals
+                    .get(&(recipient.as_str(), sender, *epoch))
+                    .cloned()
+                    .unwrap_or_default();
 
-            // Range: no sequence may exist beyond what the sender sent.
-            for (seq, _) in &unique {
-                if *seq >= total_sent {
-                    outcome.misrouted += 1;
-                    misrouted.record(DeliveryKey {
-                        recipient: recipient.clone(),
-                        sender: sender.to_string(),
-                        seq: *seq,
-                    });
-                }
-            }
-
-            // Arrival order: per-sender sequences must strictly increase.
-            for pair in unique.windows(2) {
-                if pair[1].0 <= pair[0].0 {
-                    outcome.out_of_order += 1;
-                    out_of_order.record(DeliveryKey {
-                        recipient: recipient.clone(),
-                        sender: sender.to_string(),
-                        seq: pair[1].0,
-                    });
-                }
-            }
-
-            // Omissions: the class selects the contract. Reliable permits
-            // none — the gap-free prefix rule. Latest/volatile permit policy
-            // loss, but only with exact gap coverage: delivered ∪ gap ranges
-            // must partition the sender's whole sent stream, holes without
-            // coverage are `MissingDeliveries`, and only the loud
-            // disconnect tail may stay uncovered.
-            let received_unique = count_u64(unique.len());
-            if delivery_class == DeliveryClass::Reliable {
-                // Gap-free prefix in arrival order: position i carries seq i.
-                // The first mismatch is the first hole; everything from there
-                // is a missing delivery (the permitted disconnect loss is
-                // only ever the unobserved TAIL, so a hole mid-stream is a
-                // violation even for a disconnected recipient).
-                let mut prefix_len = unique.len();
-                for (position, (seq, _)) in unique.iter().enumerate() {
-                    if *seq != count_u64(position) {
-                        prefix_len = position;
-                        break;
-                    }
-                }
-                let deficit = total_sent.saturating_sub(received_unique);
-                if prefix_len < unique.len() && deficit > 0 {
-                    // A hole (with unobserved deliveries) is missing work. A
-                    // pure reorder with zero deficit is already flagged by the
-                    // out-of-order category above — never double-counted as
-                    // loss.
-                    outcome.missing += deficit;
-                    if !exempt {
-                        missing.record(DeliveryKey {
+                // Duplicates: a stream sequence observed more than once.
+                let mut seen = BTreeSet::new();
+                let mut unique: Vec<(u64, u64, u64)> = Vec::with_capacity(arrival.len());
+                for (server_seq, ledger_seq, received_us) in arrival {
+                    if !seen.insert(server_seq) {
+                        outcome.duplicates += 1;
+                        duplicates.record(DeliveryKey {
                             recipient: recipient.clone(),
                             sender: sender.to_string(),
-                            seq: count_u64(prefix_len),
+                            epoch: *epoch,
+                            seq: server_seq,
                         });
+                        continue;
                     }
-                } else if connected_through && deficit > 0 {
-                    outcome.missing += deficit;
-                    if !exempt {
-                        missing.record(DeliveryKey {
+                    unique.push((server_seq, ledger_seq, received_us));
+                }
+
+                // Arrival order: per-stream sequences must strictly increase.
+                for pair in unique.windows(2) {
+                    if pair[1].0 <= pair[0].0 {
+                        outcome.out_of_order += 1;
+                        out_of_order.record(DeliveryKey {
                             recipient: recipient.clone(),
                             sender: sender.to_string(),
-                            seq: received_unique,
+                            epoch: *epoch,
+                            seq: pair[1].0,
                         });
                     }
-                } else if !connected_through {
-                    outcome.undelivered_at_disconnect += deficit;
                 }
-            } else {
-                // Coverage model for the lossy classes. Delivered unique
-                // sequences are covered; every gap range must add only
-                // uncovered ledger sequences (`server seq - 1`).
-                let stream_gaps = gaps_by_stream
-                    .get(&(recipient.as_str(), sender))
-                    .map_or(&[][..], Vec::as_slice);
-                let mut covered: BTreeSet<u64> = unique.iter().map(|(seq, _)| *seq).collect();
+
+                // The stream's rejoin floor: from this instant on, every
+                // sequence at or below the snapshot tail is not owed (the
+                // loud away window), and deliveries must resume exactly one
+                // past it.
+                let (owed_floor, _floor_from_us) = view
+                    .floors
+                    .get(&((*sender).to_string(), *epoch))
+                    .copied()
+                    .unwrap_or((0, 0));
+                let received_unique = count_u64(unique.len());
+
+                // Coverage model, shared by every class over the stream's
+                // owed window (above the rejoin floor, bounded by what the
+                // sender sent in this epoch). Delivered unique sequences are
+                // covered; the lossy classes may additionally cover an
+                // omission only with its exact gap report, while reliable
+                // permits no gap report at all (validated globally above) —
+                // so its coverage is receipts alone.
+                let stream_gaps = match delivery_class {
+                    DeliveryClass::Reliable => &[][..],
+                    _ => gaps_by_stream
+                        .get(&(recipient.as_str(), sender, *epoch))
+                        .map_or(&[][..], Vec::as_slice),
+                };
+                let mut covered: BTreeSet<u64> = unique
+                    .iter()
+                    .map(|(server_seq, _, _)| *server_seq)
+                    .collect();
                 for gap in stream_gaps {
-                    if gap.to_seq > total_sent {
+                    if gap.to_seq > total_owed {
                         invalid_gaps.record_violation(
                             gap,
                             format!(
                                 "gap range reaches beyond what the sender sent ({} > \
-                                 {total_sent} relayed)",
+                                 {total_owed} relayed in epoch {epoch})",
                                 gap.to_seq
                             ),
                         );
                         continue;
                     }
-                    let from = gap.from_seq - 1; // pre-validated: from_seq >= 1
-                    let to = gap.to_seq - 1;
                     // Reject BEFORE inserting: a rejected range contributes
                     // no coverage, so its non-overlapping remainder stays an
                     // honest uncovered omission in the totals.
-                    if (from..=to).any(|seq| covered.contains(&seq)) {
+                    if (gap.from_seq..=gap.to_seq).any(|seq| covered.contains(&seq)) {
                         invalid_gaps.record_violation(
                             gap,
                             format!(
@@ -615,37 +788,47 @@ pub fn summarize(
                         );
                         continue;
                     }
-                    for seq in from..=to {
+                    for seq in gap.from_seq..=gap.to_seq {
                         covered.insert(seq);
                     }
-                    outcome.gap_covered += to - from + 1;
+                    outcome.gap_covered += gap.to_seq - gap.from_seq + 1;
                 }
-                // Holes: uncovered sequences at or below the highest covered
-                // position — the head below the first covered value and the
-                // spans between covered values. A hole means the server
-                // relayed (stamped) past it without delivering or reporting
-                // it — silent loss. The first hole is named exactly.
+                // Work in the owed domain: shift everything at or below the
+                // rejoin floor out (not owed), so the hole scan and the
+                // deficit math see exactly the seat's owed window.
+                let owed: BTreeSet<u64> = covered
+                    .iter()
+                    .filter(|seq| **seq > owed_floor)
+                    .map(|seq| seq - owed_floor)
+                    .collect();
+                let owed_total = total_owed.saturating_sub(owed_floor);
+                // Holes: uncovered owed sequences at or below the highest
+                // covered position — the head below the first covered value
+                // and the spans between covered values. A hole means the
+                // server relayed (stamped) past it without delivering or
+                // reporting it — silent loss. The first hole is named
+                // exactly (in stream coordinates).
                 let mut holes: u64 = 0;
                 let mut first_hole: Option<u64> = None;
-                if let Some(lowest) = covered.first() {
-                    if *lowest > 0 {
-                        holes += *lowest;
-                        first_hole = Some(0);
+                if let Some(lowest) = owed.first() {
+                    if *lowest > 1 {
+                        holes += *lowest - 1;
+                        first_hole = Some(owed_floor + 1);
                     }
                 }
                 let mut previous: Option<u64> = None;
-                for seq in &covered {
+                for seq in &owed {
                     if let Some(position) = previous {
                         let span = seq - position - 1;
                         if span > 0 {
                             holes += span;
-                            first_hole.get_or_insert(position + 1);
+                            first_hole.get_or_insert(owed_floor + position + 1);
                         }
                     }
                     previous = Some(*seq);
                 }
-                let deficit = total_sent
-                    .saturating_sub(count_u64(covered.len()))
+                let deficit = owed_total
+                    .saturating_sub(count_u64(owed.len()))
                     .saturating_sub(holes);
                 if holes > 0 {
                     outcome.missing += holes;
@@ -653,7 +836,8 @@ pub fn summarize(
                         missing.record(DeliveryKey {
                             recipient: recipient.clone(),
                             sender: sender.to_string(),
-                            seq: first_hole.unwrap_or(0),
+                            epoch: *epoch,
+                            seq: first_hole.unwrap_or(owed_floor + 1),
                         });
                     }
                 }
@@ -663,16 +847,19 @@ pub fn summarize(
                         missing.record(DeliveryKey {
                             recipient: recipient.clone(),
                             sender: sender.to_string(),
-                            seq: previous.map_or(0, |highest| highest + 1),
+                            epoch: *epoch,
+                            seq: owed_floor + previous.map_or(0, |highest| highest) + 1,
                         });
                     }
                 } else if !connected_through {
                     outcome.undelivered_at_disconnect += deficit;
                 }
+                outcome
+                    .received
+                    .entry(sender.to_string())
+                    .and_modify(|count| *count += received_unique)
+                    .or_insert(received_unique);
             }
-
-            // Latency pairs are collected by [`latency_samples`] below.
-            outcome.received.insert(sender.to_string(), received_unique);
         }
 
         per_recipient.push(outcome);
@@ -736,6 +923,7 @@ pub fn summarize(
                 | InvalidReason::SendFailed { .. }
                 | InvalidReason::JoinFailed { .. }
                 | InvalidReason::RunnerDeadlineExceeded { .. }
+                | InvalidReason::ReconnectFailed { .. }
         )
     });
     if total_unsent > 0 && !fault_explains_unsent {

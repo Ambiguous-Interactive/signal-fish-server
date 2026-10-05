@@ -317,13 +317,23 @@ with server-counter accounting). The latest/volatile slice is landed
 accounting (class-legal reasons, no overlaps, no out-of-range coverage),
 key isolation pinned, per-recipient latency tails in the summary, the run
 class's accountable server outcomes in every interval sample, and two
-deterministic pressure cells in exact server-counter agreement. Remaining
-below: churn/reconnect schedules, richer resource counters, and the
-queue-age and ingress/egress instrumentation.
+deterministic pressure cells in exact server-counter agreement. The
+reconnect-burst slice is landed (third runner PR, 2026-10-05): the C3
+reconnect-storm shape with per-incarnation stream validation across
+rejoins (runner-owned incarnation indices resolved per `PlayerId` through
+a sender registry, rejoin snapshot tails as owed floors, stale-epoch and
+below-tail misroute detection, storm-execution enforcement), schema-3
+artifacts, a real-socket 50% storm cell with replay equality, and
+deterministic controls for each new permitted outcome. Remaining
+below: room-replacement schedules, unsupported-format cells, and richer
+resource counters.
 
 - [ ] Churn/reconnect schedules: reconnect-burst and room-replacement
   shapes per the C3 cells, with red-first controls for each new permitted
-  outcome.
+  outcome. The reconnect-burst slice is landed (third runner PR,
+  2026-10-05, see the ledger's contract record): the storm shape, per-
+  incarnation stream validation, and the storm cell plus controls.
+  Remaining: the room-replacement shape.
 - [ ] Unsupported-format cells: validate permitted
   outcomes and reports per the delivery contract instead of reliable
   semantics; label them as separate contract experiments. Reuse existing

@@ -6,6 +6,7 @@
 //! delivery class, so "replay the artifacts" and "summarize the run" are
 //! literally the same code path.
 
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use crate::oracle::InvalidReason;
@@ -14,24 +15,61 @@ use crate::schedule::Phase;
 /// One send a sender task actually completed (it left this process).
 ///
 /// `intended_us` vs `sent_us` is the scheduled-send lag: a pause must appear
-/// here (generator-side), never as reduced offered load.
+/// here (generator-side), never as reduced offered load. `epoch` is the
+/// sender's incarnation epoch at send time (1 on the first connection; each
+/// rejoin bumps it) — the wire `(epoch, server seq)` stream key pairs with
+/// it.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SentEvent {
     pub sender: String,
     pub room: u32,
     pub seq: u64,
+    pub epoch: u32,
     pub intended_us: u64,
     pub sent_us: u64,
     pub phase: Phase,
 }
 
 /// One delivery a recipient task actually read off the socket.
+///
+/// `seq` is the sender-stamped ledger sequence (unique across the whole run,
+/// what latency pairs on). `epoch` and `server_seq` are the server's
+/// per-`(sender, epoch)` relay stamps read off the v3 wire frame — the
+/// stream-identity pair the oracle validates.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReceiptEvent {
     pub recipient: String,
     pub sender: String,
     pub seq: u64,
+    pub epoch: u32,
+    pub server_seq: u64,
     pub received_us: u64,
+}
+
+/// One declared churn action a peer task performed: its socket closed for
+/// the storm (`disconnect`) or it rejoined under a new incarnation epoch
+/// (`rejoined`). The `tails` of a `rejoined` event are the rejoin snapshot's
+/// per-member `(epoch, seq)` stamps — the owed-floor the oracle applies for
+/// the away window ("a recipient owes no GameData at or below this sequence
+/// in the paired epoch").
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChurnEvent {
+    pub recipient: String,
+    pub phase: ChurnPhase,
+    pub at_us: u64,
+    /// The peer's incarnation epoch after the action (`None` on disconnect,
+    /// where the connection is simply gone).
+    pub epoch: Option<u32>,
+    /// For `rejoined`: the snapshot's member `(epoch, seq tail)` stamps.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tails: BTreeMap<String, (u32, u64)>,
+}
+
+/// Which half of a churn cycle an event records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ChurnPhase {
+    Disconnect,
+    Rejoined,
 }
 
 /// Why a recipient's stream ended before quiescence.
@@ -79,6 +117,7 @@ struct EventState {
     receipts: Vec<ReceiptEvent>,
     gaps: Vec<GapEvent>,
     disconnects: Vec<DisconnectEvent>,
+    churn: Vec<ChurnEvent>,
     join_failures: Vec<String>,
     /// Faults the runner itself observed (hook firings, send failures,
     /// malformed frames). The oracle folds these into the verdict, so a
@@ -121,6 +160,14 @@ impl EventLog {
             .lock()
             .expect("event log poisoned")
             .disconnects
+            .push(event);
+    }
+
+    pub fn push_churn(&self, event: ChurnEvent) {
+        self.state
+            .lock()
+            .expect("event log poisoned")
+            .churn
             .push(event);
     }
 
@@ -183,9 +230,9 @@ impl EventLog {
     }
 
     /// Snapshot every recorded event (deterministic order: sends by
-    /// `(sender, seq)`; receipts, disconnects, join failures, and faults in
-    /// recorded arrival order — the oracle checks per-stream ARRIVAL order,
-    /// so receipts must never be reordered).
+    /// `(sender, seq)`; receipts, disconnects, churn actions, join failures,
+    /// and faults in recorded arrival order — the oracle checks per-stream
+    /// ARRIVAL order, so receipts must never be reordered).
     pub fn snapshot(&self) -> RunRecords {
         let mut state = self.state.lock().expect("event log poisoned");
         let mut records = RunRecords {
@@ -193,6 +240,7 @@ impl EventLog {
             receipts: std::mem::take(&mut state.receipts),
             gaps: std::mem::take(&mut state.gaps),
             disconnects: std::mem::take(&mut state.disconnects),
+            churn: std::mem::take(&mut state.churn),
             join_failures: std::mem::take(&mut state.join_failures),
             faults: std::mem::take(&mut state.faults),
         };
@@ -211,6 +259,7 @@ pub struct RunRecords {
     pub receipts: Vec<ReceiptEvent>,
     pub gaps: Vec<GapEvent>,
     pub disconnects: Vec<DisconnectEvent>,
+    pub churn: Vec<ChurnEvent>,
     pub join_failures: Vec<String>,
     pub faults: Vec<InvalidReason>,
 }
@@ -225,13 +274,14 @@ pub enum DeliveryEvent {
     Receipt(ReceiptEvent),
     Gap(GapEvent),
     Disconnect(DisconnectEvent),
+    Churn(ChurnEvent),
     JoinFailure { detail: String },
     Fault(InvalidReason),
 }
 
 impl RunRecords {
     /// Every event as a tagged JSONL line, in the canonical order
-    /// (sends, receipts, gaps, disconnects, join failures, faults).
+    /// (sends, receipts, gaps, disconnects, churn, join failures, faults).
     pub fn events(&self) -> impl Iterator<Item = DeliveryEvent> + '_ {
         self.sent
             .iter()
@@ -245,6 +295,7 @@ impl RunRecords {
                     .cloned()
                     .map(DeliveryEvent::Disconnect),
             )
+            .chain(self.churn.iter().cloned().map(DeliveryEvent::Churn))
             .chain(
                 self.join_failures
                     .iter()
