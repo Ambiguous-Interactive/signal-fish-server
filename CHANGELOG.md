@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Metrics: `GET /metrics/sessions` (and `/v1/metrics/sessions`) exposes
   per-room session records (#708, #763). One bounded JSON record per room,
   active and completed: room id, current room code, game name, owning
-  application, region, creation and end timestamps, close reason
+  application (kept current through later claims and clears, not just the
+  creation-time owner), region, creation and end timestamps, close reason
   (`empty`, `expired`, or `deleted`), publication state, and player and
   spectator join/leave counts. The endpoint reuses the `/metrics`
   bearer-token gate (`security.require_metrics_auth` /

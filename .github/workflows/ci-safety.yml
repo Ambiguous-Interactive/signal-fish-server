@@ -146,7 +146,8 @@ jobs:
           - name: remaining
             filters:
               "auth config database deadline distributed logging metrics
-              reconnection rate_limit retry security trace_validation"
+              reconnection rate_limit retry security session_records
+              trace_validation"
     env:
       CARGO_TARGET_DIR: target/miri
     steps:

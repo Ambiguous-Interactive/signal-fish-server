@@ -154,6 +154,8 @@ impl SessionRecords {
     }
 
     fn now_ms() -> u64 {
+        // Wall clock (durable record): the ended stamp is the storage-removal
+        // time on the observability surface; no deadline reads it.
         u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0)
     }
 
@@ -176,6 +178,19 @@ impl SessionRecords {
     pub(crate) fn record_room_code_changed(&self, room_id: &RoomId, new_code: &str) {
         if let Some(mut record) = self.active.get_mut(room_id) {
             record.room_code = new_code.to_string();
+        }
+    }
+
+    /// Follow a later application claim or clear so the record never keeps a
+    /// stale creation-time owner: the admission path claims the room's owner
+    /// at first claimed join, and rollback clears it.
+    pub(crate) fn record_application_id_changed(
+        &self,
+        room_id: &RoomId,
+        application_id: Option<Uuid>,
+    ) {
+        if let Some(mut record) = self.active.get_mut(room_id) {
+            record.application_id = application_id;
         }
     }
 
@@ -223,7 +238,7 @@ impl SessionRecords {
         let mut completed = self
             .completed
             .lock()
-            .expect("session record ring lock poisoned");
+            .unwrap_or_else(|error| error.into_inner());
         completed.push_back(record);
         while completed.len() > SESSION_RECORDS_COMPLETED_CAP {
             completed.pop_front();
@@ -243,10 +258,12 @@ impl SessionRecords {
                 .cmp(&b.created_at_ms)
                 .then_with(|| a.room_id.cmp(&b.room_id))
         });
+        // Poisoning recovers the guarded data: the ring is a plain queue, so
+        // a panicked writer leaves element-consistent state behind.
         let completed: Vec<SessionRecord> = self
             .completed
             .lock()
-            .expect("session record ring lock poisoned")
+            .unwrap_or_else(|error| error.into_inner())
             .iter()
             .rev()
             .cloned()

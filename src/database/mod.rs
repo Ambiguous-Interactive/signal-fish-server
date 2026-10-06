@@ -2750,6 +2750,8 @@ impl GameDatabase for InMemoryDatabase {
             .get_mut(room_id)
             .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
         room.application_id = Some(application_id);
+        self.session_records
+            .record_application_id_changed(room_id, Some(application_id));
         Ok(())
     }
 
@@ -2764,6 +2766,8 @@ impl GameDatabase for InMemoryDatabase {
         let mut rooms = self.rooms.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
             room.application_id = None;
+            self.session_records
+                .record_application_id_changed(room_id, None);
         }
         Ok(())
     }
@@ -2788,6 +2792,8 @@ impl GameDatabase for InMemoryDatabase {
             return Ok(false);
         }
         room.application_id = None;
+        self.session_records
+            .record_application_id_changed(room_id, None);
         Ok(true)
     }
 
@@ -4361,6 +4367,75 @@ mod tests {
             .await
             .expect("delete_room should not error");
         assert_eq!(records.snapshot().completed_count, 1);
+    }
+
+    /// A room that gains or loses its application owner after creation must
+    /// keep the record current: the admission path claims the room's owner
+    /// at first claimed join (`record_room_application`), and rollback clears
+    /// it. A stale creation-time `None` would hide the session from its
+    /// owning application's directory (bugbot: session records miss later
+    /// app claims).
+    #[tokio::test]
+    async fn session_records_track_application_claims_after_creation() {
+        let db = InMemoryDatabase::new();
+        let records = db
+            .session_records()
+            .expect("in-memory backend tracks session records");
+
+        let room = create_test_room(&db, "claim_game", "CLAM01")
+            .await
+            .expect("room creation should succeed");
+        assert_eq!(
+            active_session_record(&records, &room.id).application_id,
+            None,
+            "fixture rooms are created unowned"
+        );
+
+        let owner = Uuid::new_v4();
+        db.set_room_application_id(&room.id, owner)
+            .await
+            .expect("claim should succeed");
+        assert_eq!(
+            active_session_record(&records, &room.id).application_id,
+            Some(owner),
+            "the record must follow the storage claim"
+        );
+
+        // A conditional clear that does not match the owner changes nothing.
+        let impostor = Uuid::new_v4();
+        assert!(!db
+            .clear_room_application_id_if_matches(&room.id, impostor)
+            .await
+            .expect("conditional clear should not error"));
+        assert_eq!(
+            active_session_record(&records, &room.id).application_id,
+            Some(owner),
+            "a non-matching conditional clear must not touch the record"
+        );
+
+        // The matching conditional clear (the rollback path) does.
+        assert!(db
+            .clear_room_application_id_if_matches(&room.id, owner)
+            .await
+            .expect("conditional clear should not error"));
+        assert_eq!(
+            active_session_record(&records, &room.id).application_id,
+            None,
+            "the record must follow the storage clear"
+        );
+
+        // The unconditional clear stays consistent too.
+        db.set_room_application_id(&room.id, owner)
+            .await
+            .expect("re-claim should succeed");
+        db.clear_room_application_id(&room.id)
+            .await
+            .expect("unconditional clear should succeed");
+        assert_eq!(
+            active_session_record(&records, &room.id).application_id,
+            None,
+            "the record must follow the unconditional clear"
+        );
     }
 
     /// The GC close reasons distinguish the cleanup path that removed the

@@ -2306,6 +2306,12 @@ async fn unsupported_token_binding_offer_rejection_is_correlatable_and_accounted
     running.shutdown().await;
 }
 
+/// The required-binding negotiation rejection needs `token_binding.required`,
+/// and construction fail-closes without the compiled `tls` feature
+/// (`validate_token_binding`), so this pin exists only in TLS builds. The
+/// non-TLS rejection contract is pinned by
+/// `validate_config_rejects_tls_for_a_binary_without_tls_support`.
+#[cfg(feature = "tls")]
 #[tokio::test]
 async fn token_binding_negotiation_rejection_is_correlatable_and_accounted() {
     use tokio_tungstenite::tungstenite::Error;
