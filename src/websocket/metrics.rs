@@ -364,6 +364,98 @@ fn bounded_metrics_snapshot(
     })
 }
 
+/// Maximum serialized size of the `/metrics/sessions` response.
+///
+/// Session records are room-cardinality data: the completed ring is capped in
+/// entries ([`crate::session_records::SESSION_RECORDS_COMPLETED_CAP`]), but a
+/// long-lived deployment with large rooms can exceed any fixed byte budget.
+/// When the budget is exceeded, the completed list is omitted first (the
+/// counts stay, the loss is marked), and a still-oversized response is
+/// replaced by the same fail-visible truncation marker the metrics snapshot
+/// uses.
+const SESSIONS_RESPONSE_MAX_BYTES: usize = 128 * 1024;
+
+/// Bound the serialized `/metrics/sessions` response.
+///
+/// Truncation is deterministic and fail-visible: the active list and every
+/// counter survive, the completed list is dropped first with an explicit
+/// `completedOmitted` count, and a still-oversized response collapses to the
+/// truncation marker.
+fn bounded_sessions_response(
+    server: &EnhancedGameServer,
+    mut value: serde_json::Value,
+) -> serde_json::Value {
+    // Serializing a `serde_json::Value` cannot fail; the `0` fallback is dead
+    // and degrades to pass-through.
+    let size_bytes = serde_json::to_vec(&value).map_or(0, |bytes| bytes.len());
+    if size_bytes <= SESSIONS_RESPONSE_MAX_BYTES {
+        return value;
+    }
+
+    // First lever: drop the completed list, keep the counters. The
+    // pre-truncation `completedCount` stays in the envelope, so the loss is
+    // visible as count-vs-list disagreement plus the explicit marker.
+    let omitted = value
+        .get("completed")
+        .and_then(|completed| completed.as_array())
+        .map_or(0, Vec::len);
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "completed".to_string(),
+            serde_json::Value::Array(Vec::new()),
+        );
+        object.insert("completedOmitted".to_string(), serde_json::json!(omitted));
+    }
+    let degraded_bytes = serde_json::to_vec(&value).map_or(0, |bytes| bytes.len());
+    if degraded_bytes <= SESSIONS_RESPONSE_MAX_BYTES {
+        server.metrics_truncation_log().record(
+            "Metrics sessions truncated",
+            "/metrics/sessions completed list omitted above the response cap",
+        );
+        return value;
+    }
+
+    server.metrics_truncation_log().record(
+        "Metrics sessions truncated",
+        "/metrics/sessions response exceeded the response cap",
+    );
+    serde_json::json!({
+        "truncated": true,
+        "sizeBytes": degraded_bytes,
+        "capBytes": SESSIONS_RESPONSE_MAX_BYTES,
+    })
+}
+
+/// Session records endpoint (issues #708, #763) - one record per room, active
+/// and completed, so consumers can derive per-session views (room length,
+/// roster churn, where a room lived) without a packet capture or aggregate
+/// scrape. Bearer-token-gated and size-bounded like `/metrics`.
+pub async fn sessions_metrics_handler(
+    headers: axum::http::HeaderMap,
+    State(server): State<Arc<EnhancedGameServer>>,
+) -> axum::response::Result<axum::response::Json<serde_json::Value>> {
+    // Check authentication if required (same posture as `/metrics`).
+    if server.config().require_metrics_auth {
+        enforce_metrics_auth(&headers, server.as_ref()).await?;
+    }
+    let Some(records) = server.session_records() else {
+        return Ok(axum::response::Json(serde_json::json!({
+            "available": false,
+            "reason":
+                "the configured database backend does not track session records",
+        })));
+    };
+    let mut value = serde_json::to_value(records.snapshot())
+        .unwrap_or_else(|_| serde_json::json!({ "truncated": true }));
+    if let Some(object) = value.as_object_mut() {
+        object.insert("available".to_string(), serde_json::Value::Bool(true));
+    }
+    Ok(axum::response::Json(bounded_sessions_response(
+        server.as_ref(),
+        value,
+    )))
+}
+
 /// Metrics API endpoint - returns real data from server metrics
 pub async fn metrics_handler(
     headers: axum::http::HeaderMap,
@@ -575,6 +667,70 @@ mod tests {
         assert_eq!(
             bounded["capBytes"],
             serde_json::json!(METRICS_SNAPSHOT_MAX_BYTES)
+        );
+    }
+
+    /// A `/metrics/sessions` response above the cap degrades in two visible
+    /// steps: the completed list is omitted first (counters survive), then a
+    /// still-oversized response collapses to the truncation marker.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn bounded_sessions_response_omits_completed_first_then_fails_visibly() {
+        let server = build_metrics_test_server(ServerConfig::default()).await;
+        let session = |padding: usize| {
+            serde_json::json!({
+                "roomId": uuid::Uuid::new_v4(),
+                "padding": "x".repeat(padding),
+            })
+        };
+
+        // Step 1: the completed list alone exceeds the cap. It is dropped,
+        // the counts and the omission marker stay, and the result fits.
+        let completed_len = (SESSIONS_RESPONSE_MAX_BYTES / 512) + 1;
+        let oversized = serde_json::json!({
+            "activeCount": 1,
+            "completedCount": completed_len,
+            "active": [session(0)],
+            "completed": (0..completed_len).map(|_| session(512)).collect::<Vec<_>>(),
+        });
+        let degraded = bounded_sessions_response(&server, oversized);
+        let degraded_size = serde_json::to_vec(&degraded)
+            .expect("a constructed value always serializes")
+            .len();
+        assert!(
+            degraded_size <= SESSIONS_RESPONSE_MAX_BYTES,
+            "the degraded response must respect the cap"
+        );
+        assert_eq!(degraded["truncated"], serde_json::Value::Null);
+        assert_eq!(
+            degraded["completed"],
+            serde_json::json!([]),
+            "the completed list is the first lever"
+        );
+        assert_eq!(
+            degraded["completedCount"],
+            serde_json::json!(completed_len),
+            "the true pre-truncation count stays visible"
+        );
+        assert_eq!(
+            degraded["completedOmitted"],
+            serde_json::json!(completed_len)
+        );
+        assert_eq!(degraded["active"].as_array().map(Vec::len), Some(1));
+
+        // Step 2: even without the completed list the response is oversized.
+        // The whole response collapses to the truncation marker.
+        let huge_active = serde_json::json!({
+            "activeCount": 1,
+            "completedCount": 0,
+            "active": [session(SESSIONS_RESPONSE_MAX_BYTES * 2)],
+            "completed": [],
+        });
+        let collapsed = bounded_sessions_response(&server, huge_active);
+        assert_eq!(collapsed["truncated"], serde_json::Value::Bool(true));
+        assert_eq!(
+            collapsed["capBytes"],
+            serde_json::json!(SESSIONS_RESPONSE_MAX_BYTES)
         );
     }
 

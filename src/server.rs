@@ -1017,6 +1017,15 @@ impl EnhancedGameServer {
         self.dashboard_metrics_cache.view().await
     }
 
+    /// Per-session record registry when the database backend tracks one
+    /// (issues #708, #763). `None` backends keep the `/metrics/sessions`
+    /// surface reporting itself unavailable.
+    pub(crate) fn session_records(
+        &self,
+    ) -> Option<std::sync::Arc<crate::session_records::SessionRecords>> {
+        self.database.session_records()
+    }
+
     /// Identifier for the current deployment region.
     pub fn region_id(&self) -> &str {
         &self.config.region_id

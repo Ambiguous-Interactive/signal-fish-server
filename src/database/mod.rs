@@ -550,6 +550,14 @@ pub trait GameDatabase: Send + Sync {
     /// Health check
     async fn health_check(&self) -> bool;
 
+    /// Per-session record registry for the metrics surface (issues #708,
+    /// #763). Backends that do not track session records return `None`; the
+    /// `/metrics/sessions` surface then reports itself unavailable instead of
+    /// showing an empty, misleading history.
+    fn session_records(&self) -> Option<std::sync::Arc<crate::session_records::SessionRecords>> {
+        None
+    }
+
     /// Update a player's `last_seen` timestamp for local liveness and cleanup.
     async fn update_player_last_seen(&self, player_id: &PlayerId) -> Result<()>;
 
@@ -780,6 +788,9 @@ struct CleanupEventEntry {
 /// Simple in-memory database for testing and single-instance deployments
 pub struct InMemoryDatabase {
     rooms: std::sync::Arc<tokio::sync::RwLock<HashMap<RoomId, Room>>>,
+    /// Per-session lifecycle records (issues #708, #763): every create,
+    /// join, leave, and close path below funnels through this registry.
+    session_records: std::sync::Arc<crate::session_records::SessionRecords>,
     /// Maps (game_name, room_code) -> room_id to allow same room codes across different games
     room_codes: std::sync::Arc<tokio::sync::RwLock<HashMap<(String, String), RoomId>>>,
     /// Missing means published. Lock after rooms, codes, and liveness when
@@ -925,6 +936,7 @@ impl InMemoryDatabase {
     pub fn new() -> Self {
         Self {
             rooms: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            session_records: std::sync::Arc::new(crate::session_records::SessionRecords::new()),
             room_codes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             room_publication: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             room_liveness_monotonic: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -1579,6 +1591,7 @@ impl InMemoryDatabase {
                 panic!("injected panic after pending room insertion");
             }
         }
+        self.session_records.record_created(&room, !pending);
 
         Ok(room)
     }
@@ -1586,6 +1599,10 @@ impl InMemoryDatabase {
 
 #[async_trait]
 impl GameDatabase for InMemoryDatabase {
+    fn session_records(&self) -> Option<std::sync::Arc<crate::session_records::SessionRecords>> {
+        Some(std::sync::Arc::clone(&self.session_records))
+    }
+
     async fn initialize(&self) -> Result<()> {
         Ok(())
     }
@@ -1747,6 +1764,8 @@ impl GameDatabase for InMemoryDatabase {
         room_codes.remove(&old_key);
         room_codes.insert(new_key, *room_id);
         liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
+        self.session_records
+            .record_room_code_changed(room_id, &room.code);
 
         Ok(room.clone())
     }
@@ -1906,6 +1925,7 @@ impl GameDatabase for InMemoryDatabase {
                     room.ready_players.push(player.id);
                 }
                 room.players.insert(player.id, player);
+                self.session_records.record_player_joined(room_id);
                 // A join is activity: refresh the reaper clock so a room that
                 // fills up long after creation is not GC'd mid-game (BUG-1).
                 room.last_activity = chrono::Utc::now();
@@ -1947,6 +1967,7 @@ impl GameDatabase for InMemoryDatabase {
             if removed_player.is_some() {
                 room.last_activity = chrono::Utc::now();
                 liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
+                self.session_records.record_player_left(room_id);
             }
 
             // Prune the departed player's ready entry so it cannot linger in
@@ -2224,6 +2245,8 @@ impl GameDatabase for InMemoryDatabase {
             room_codes.remove(&(game_name, room_code));
             liveness.remove(&room_id);
             publication.remove(&room_id);
+            self.session_records
+                .record_closed(&room_id, crate::session_records::SessionCloseReason::Empty);
             deleted_ids.push(room_id);
         }
 
@@ -2268,6 +2291,10 @@ impl GameDatabase for InMemoryDatabase {
             room_codes.remove(&(game_name, room_code));
             liveness.remove(&room_id);
             publication.remove(&room_id);
+            self.session_records.record_closed(
+                &room_id,
+                crate::session_records::SessionCloseReason::Expired,
+            );
 
             if was_empty {
                 outcome.empty_rooms_cleaned = outcome.empty_rooms_cleaned.saturating_add(1);
@@ -2306,6 +2333,8 @@ impl GameDatabase for InMemoryDatabase {
         let mut publication = self.room_publication.write().await;
 
         if let Some(room) = rooms.remove(room_id) {
+            self.session_records
+                .record_closed(room_id, crate::session_records::SessionCloseReason::Deleted);
             let accounting = publication.get(room_id).and_then(|state| match state {
                 PendingRoomState::Creating { accounting, .. }
                 | PendingRoomState::Abandoned { accounting, .. } => accounting.clone(),
@@ -2344,6 +2373,7 @@ impl GameDatabase for InMemoryDatabase {
             anyhow::bail!("Room {room_id} was abandoned before publication");
         }
         publication.remove(room_id);
+        self.session_records.record_published(room_id);
         Ok(())
     }
 
@@ -2435,6 +2465,8 @@ impl GameDatabase for InMemoryDatabase {
         room_codes.remove(&key);
         liveness.remove(room_id);
         publication.remove(room_id);
+        self.session_records
+            .record_closed(room_id, crate::session_records::SessionCloseReason::Deleted);
         if let Some(accounting) = accounting {
             accounting.record_creator_left();
         }
@@ -2659,6 +2691,7 @@ impl GameDatabase for InMemoryDatabase {
                 // refreshed the wall-clock record, so the monotonic GC stamp
                 // must move in lockstep.
                 liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
+                self.session_records.record_spectator_joined(room_id);
             }
             Ok(admitted)
         } else {
@@ -2687,6 +2720,7 @@ impl GameDatabase for InMemoryDatabase {
                 // A real departure is activity and starts the empty-room clock:
                 // refresh the monotonic stamp alongside the wall-clock record.
                 liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
+                self.session_records.record_spectator_left(room_id);
             }
             Ok(removed)
         } else {
@@ -4158,5 +4192,223 @@ mod tests {
             crate::protocol::LobbyState::Finalized,
             "a departure never regresses the Finalized state"
         );
+    }
+
+    // --- Session records (issues #708, #763) ---
+
+    fn active_session_record(
+        records: &crate::session_records::SessionRecords,
+        room_id: &RoomId,
+    ) -> crate::session_records::SessionRecord {
+        records
+            .snapshot()
+            .active
+            .into_iter()
+            .find(|record| &record.room_id == room_id)
+            .expect("active session record for the room")
+    }
+
+    /// Every storage seam (create, join, leave, spectator add/remove, delete)
+    /// must land exactly once on the session record, and a published room's
+    /// close must move the record to the completed ring with its reason.
+    #[tokio::test]
+    async fn session_records_track_the_storage_lifecycle_exactly_once() {
+        let db = InMemoryDatabase::new();
+        let records = db
+            .session_records()
+            .expect("in-memory backend tracks session records");
+
+        let room = create_test_room(&db, "session_game", "SESS01")
+            .await
+            .expect("room creation should succeed");
+        let creator = *room.players.keys().next().expect("creator present");
+
+        let created = active_session_record(&records, &room.id);
+        assert_eq!(created.room_id, room.id);
+        assert_eq!(created.room_code, "SESS01");
+        assert_eq!(created.game_name, "session_game");
+        assert!(created.published, "create_room rows are born visible");
+        assert_eq!(
+            created.players_joined, 1,
+            "the creator is the room's first membership"
+        );
+        assert_eq!(created.ended_at_ms, None);
+
+        assert!(db
+            .add_player_to_room(&room.id, member("Joiner"))
+            .await
+            .expect("add_player_to_room should not error"));
+        let watcher = spectator("Watcher");
+        assert!(db
+            .add_spectator_to_room(&room.id, watcher.clone())
+            .await
+            .expect("add_spectator_to_room should not error"));
+        let joined = active_session_record(&records, &room.id);
+        assert_eq!(joined.players_joined, 2);
+        assert_eq!(joined.spectators_joined, 1);
+        assert_eq!(joined.players_left, 0);
+
+        assert!(db
+            .remove_player_from_room(&room.id, &creator)
+            .await
+            .expect("remove_player_from_room should not error")
+            .is_some());
+        assert!(db
+            .remove_spectator_from_room(&room.id, &watcher.id)
+            .await
+            .expect("remove_spectator_from_room should not error")
+            .is_some());
+        let departed = active_session_record(&records, &room.id);
+        assert_eq!(departed.players_left, 1);
+        assert_eq!(departed.spectators_left, 1);
+
+        assert!(db
+            .delete_room(&room.id)
+            .await
+            .expect("delete_room should not error"));
+        let snapshot = records.snapshot();
+        assert_eq!(snapshot.active_count, 0);
+        assert_eq!(snapshot.completed_count, 1);
+        let completed = &snapshot.completed[0];
+        assert_eq!(
+            completed.close_reason,
+            Some(crate::session_records::SessionCloseReason::Deleted)
+        );
+        assert!(completed.ended_at_ms.is_some());
+        // Counters accumulate, they do not reset at close.
+        assert_eq!(completed.players_joined, 2);
+        assert_eq!(completed.players_left, 1);
+    }
+
+    /// A hidden pending room is recorded unpublished, code rotation keeps the
+    /// routable code current, publication flips visibility, and a pending
+    /// room deleted before publication leaves no completed record (no
+    /// directory ever saw it).
+    #[tokio::test]
+    async fn session_records_track_pending_publication_rotation_and_repair_deletion() {
+        let db = InMemoryDatabase::new();
+        let records = db
+            .session_records()
+            .expect("in-memory backend tracks session records");
+
+        let pending = db
+            .create_pending_room_classified(
+                "pending_game".to_string(),
+                Some("PEND01".to_string()),
+                4,
+                true,
+                Uuid::new_v4(),
+                "udp".to_string(),
+                "region-a".to_string(),
+                None,
+                None,
+            )
+            .await
+            .expect("pending room creation should succeed");
+        let pending_record = active_session_record(&records, &pending.id);
+        assert!(
+            !pending_record.published,
+            "a pending row is hidden until publication"
+        );
+
+        db.publish_room(&pending.id)
+            .await
+            .expect("publication should succeed");
+        assert!(active_session_record(&records, &pending.id).published);
+
+        db.update_room_code(&pending.id, "PEND02".to_string())
+            .await
+            .expect("code rotation should succeed");
+        assert_eq!(
+            active_session_record(&records, &pending.id).room_code,
+            "PEND02",
+            "the record must carry the currently routable code"
+        );
+
+        // A second hidden room abandoned by its creator and repaired by the
+        // sweep never becomes a completed record.
+        let aborted_creator = Uuid::new_v4();
+        let aborted = db
+            .create_pending_room_classified(
+                "pending_game".to_string(),
+                Some("PEND03".to_string()),
+                4,
+                true,
+                aborted_creator,
+                "udp".to_string(),
+                "region-a".to_string(),
+                None,
+                None,
+            )
+            .await
+            .expect("second pending room creation should succeed");
+        db.abandon_room(&aborted.id, &aborted_creator)
+            .await
+            .expect("abandonment should succeed");
+        assert!(db
+            .delete_room_if_pending(&aborted.id)
+            .await
+            .expect("delete_room_if_pending should not error"));
+
+        let snapshot = records.snapshot();
+        assert_eq!(snapshot.active_count, 1, "only the published room remains");
+        assert_eq!(
+            snapshot.completed_count, 0,
+            "an unpublished room leaves no completed record"
+        );
+
+        db.delete_room(&pending.id)
+            .await
+            .expect("delete_room should not error");
+        assert_eq!(records.snapshot().completed_count, 1);
+    }
+
+    /// The GC close reasons distinguish the cleanup path that removed the
+    /// room, so a directory can tell an expired session from an emptied one.
+    #[tokio::test]
+    async fn session_records_carry_cleanup_reasons_from_the_gc_paths() {
+        for expected in [
+            crate::session_records::SessionCloseReason::Empty,
+            crate::session_records::SessionCloseReason::Expired,
+        ] {
+            let db = InMemoryDatabase::new();
+            let records = db
+                .session_records()
+                .expect("in-memory backend tracks session records");
+            let room = create_test_room(&db, "gc_game", "GCSE01")
+                .await
+                .expect("room creation should succeed");
+            let creator = *room.players.keys().next().expect("creator present");
+            db.remove_player_from_room(&room.id, &creator)
+                .await
+                .expect("removal should not error");
+            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+
+            let empty_sweep = expected == crate::session_records::SessionCloseReason::Empty;
+            if empty_sweep {
+                let deleted = db
+                    .cleanup_empty_rooms(chrono::Duration::seconds(300), &HashSet::new())
+                    .await
+                    .expect("empty cleanup should not error");
+                assert_eq!(deleted, vec![room.id]);
+            } else {
+                let outcome = db
+                    .cleanup_expired_rooms(
+                        chrono::Duration::seconds(300),
+                        chrono::Duration::seconds(3600),
+                        &HashSet::new(),
+                    )
+                    .await
+                    .expect("expired cleanup should not error");
+                assert_eq!(
+                    outcome.empty_rooms_cleaned + outcome.inactive_rooms_cleaned,
+                    1
+                );
+            }
+
+            let snapshot = records.snapshot();
+            assert_eq!(snapshot.completed_count, 1);
+            assert_eq!(snapshot.completed[0].close_reason, Some(expected));
+        }
     }
 }

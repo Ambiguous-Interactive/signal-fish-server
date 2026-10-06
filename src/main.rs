@@ -368,7 +368,15 @@ async fn main() -> anyhow::Result<()> {
             "/v1/metrics/prom",
             get(websocket::prometheus_metrics_handler),
         )
-        .route("/metrics/prom", get(websocket::prometheus_metrics_handler));
+        .route("/metrics/prom", get(websocket::prometheus_metrics_handler))
+        .route(
+            "/v1/metrics/sessions",
+            get(websocket::sessions_metrics_handler),
+        )
+        .route(
+            "/metrics/sessions",
+            get(websocket::sessions_metrics_handler),
+        );
 
     // Spawn legacy full-mesh signaling on a separate port if enabled.
     //
