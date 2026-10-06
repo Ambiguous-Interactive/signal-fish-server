@@ -7,7 +7,7 @@ Rust application.
 
 ```toml
 [dependencies]
-signal-fish-server = "0.9.2"
+signal-fish-server = "0.10.0"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 
@@ -337,7 +337,7 @@ Enable optional features:
 
 ```toml
 [dependencies]
-signal-fish-server = { version = "0.9.2", features = ["tls", "legacy-fullmesh"] }
+signal-fish-server = { version = "0.10.0", features = ["tls", "legacy-fullmesh"] }
 
 ```
 

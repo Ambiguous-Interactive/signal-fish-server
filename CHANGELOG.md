@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-06
+
 ### Added
 
 - Native reference client: `--game-data-format message_pack` (#741). The
@@ -3730,7 +3732,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optional TLS/mTLS support via `rustls` (`tls` feature).
 - Optional legacy full-mesh mode (`legacy-fullmesh` feature).
 
-[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v0.8.0...v0.9.0
