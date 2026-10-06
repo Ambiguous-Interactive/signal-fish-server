@@ -382,9 +382,10 @@ jobs:
       - name: Reject TLS configuration in a non-TLS binary
         if: matrix.os == 'ubuntu-latest'
         run: >-
-          cargo test --locked --no-default-features
+          cargo nextest run --profile ci --locked --no-default-features
           --test config_and_endpoints_tests
-          validate_config_rejects_tls_for_a_binary_without_tls_support -- --exact
+          --no-tests fail
+          -E 'test(=validate_config_rejects_tls_for_a_binary_without_tls_support)'
 
       # Relay allocation ceilings (#558): the deterministic production-seam
       # allocation budgets run inside this job so one runner setup covers

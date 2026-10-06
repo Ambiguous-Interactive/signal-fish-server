@@ -23571,9 +23571,15 @@ fn test_ci_executes_non_tls_fail_closed_regression() {
     for required in [
         "- name: Reject TLS configuration in a non-TLS binary",
         "if: matrix.os == 'ubuntu-latest'",
-        "cargo test --locked --no-default-features",
+        // nextest form so the step runs under the repository's ci NEXTEST
+        // profile (.config/nextest.toml: ci slow-timeout tuning, fail-fast)
+        // and a renamed test fails loudly (`--no-tests fail`) instead of
+        // `cargo test`'s silent "0 passed". Same test, same feature-off
+        // graph, same lockfile — no coverage or build-graph change.
+        "cargo nextest run --profile ci --locked --no-default-features",
         "--test config_and_endpoints_tests",
-        "validate_config_rejects_tls_for_a_binary_without_tls_support -- --exact",
+        "--no-tests fail",
+        "-E 'test(=validate_config_rejects_tls_for_a_binary_without_tls_support)'",
     ] {
         assert!(
             nextest.contains(required),
