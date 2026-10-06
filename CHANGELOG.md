@@ -119,6 +119,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Native reference client: documents that a text `GameData` frame from a
+  JSON-speaking room-mate is applied as-is under a negotiated opaque
+  `--game-data-format` (#741). The server's text relay lane is
+  format-blind by design; the behavior is unchanged.
+
 - Security defaults: `security.max_connections_per_ip` now defaults to `64`
   instead of `24` (C1 config default coherence). Every seat of a fully
   occupied room registers from its source IP — players plus the

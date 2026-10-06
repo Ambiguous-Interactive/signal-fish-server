@@ -1304,6 +1304,19 @@ impl Orchestrator<'_> {
                             "invalid ServerMessage frame: {error}; text={text}"
                         ))
                     })?;
+                    // A text `GameData` under a negotiated opaque format is
+                    // LEGITIMATE here, so it is applied, not refused: the
+                    // server's text relay lane is format-blind — a JSON
+                    // sender's frame is broadcast as text `GameData` to every
+                    // room member, including opaque-negotiated recipients
+                    // (pinned by
+                    // `mixed_encoding_relay_e2e`), and JSON is also the
+                    // universal cross-format fallback carrier. Only binary
+                    // game data is encoding-tagged
+                    // (`GameDataBinary`/v3 envelope), which is why the mirror
+                    // guard in `validate_json_negotiated_server_message` is
+                    // sound in that direction and a text-direction guard
+                    // would kill mixed rooms (#741).
                     self.handle_server_message(message).await?;
                 }
                 LoopInput::Server(Some(Ok(Message::Close(frame)))) => {
