@@ -2295,7 +2295,8 @@ and writes versioned artifacts: `manifest.json` (schema, run ID, config,
 binary/config overlay hashes, toolchain, host, features, clock method),
 `deliveries.jsonl` (tagged sends/receipts/gap reports/disconnects/faults
 since schema 2),
-`intervals.jsonl` (scraped delivery counters, server RSS, cgroup memory,
+`intervals.jsonl` (scraped delivery counters, server RSS, server and
+generator CPU time, cgroup memory,
 generator RSS, with unavailable counters recorded as null or explicit
 scrape errors), `summary.json` (the oracle outcome), and
 `latency-histogram-v2.hdr`. A replay

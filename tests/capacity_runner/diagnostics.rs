@@ -329,14 +329,17 @@ mod tests {
     #[test]
     fn process_cpu_seconds_advances_for_the_calling_process_and_absent_pids_are_none() {
         let before = process_cpu_seconds(std::process::id()).expect("own /proc stat is readable");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(60);
+        // 150 ms = 15 USER_HZ ticks: a wide multiple of the counter's 10 ms
+        // granularity so even a heavily oversubscribed runner cannot
+        // schedule this thread for less than one tick (zero-flake policy).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(150);
         while std::time::Instant::now() < deadline {
             std::hint::spin_loop();
         }
         let after = process_cpu_seconds(std::process::id()).expect("own /proc stat is readable");
         assert!(
             after > before,
-            "60 ms of busy work must advance the process CPU counter, got {before} -> {after}"
+            "150 ms of busy work must advance the process CPU counter, got {before} -> {after}"
         );
         // A pid the kernel can never have assigned is unavailable, not zero.
         assert_eq!(process_cpu_seconds(u32::MAX), None);
