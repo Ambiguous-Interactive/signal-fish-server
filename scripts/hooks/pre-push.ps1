@@ -75,7 +75,10 @@ function Add-ChangedFilesFromPushedCommits {
     # tokens (with `--diff-merges=separate` carrying diff-tree `-m` semantics
     # and `--no-renames` keeping plumbing behavior — no porcelain rename
     # detection, so the output stays independent of the user's diff.* config).
-    # The parser below only adapts to `git log`'s newline placement.
+    # `-c log.showSignature=false` pins away the one porcelain log config
+    # that injects extra text between the commit token and the raw block
+    # (the old plumbing pair ignored user config entirely). The parser
+    # below only adapts to `git log`'s newline placement.
     param(
         [System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]$Map,
         [Parameter(Mandatory = $true)][string]$LocalSha,
@@ -86,6 +89,7 @@ function Add-ChangedFilesFromPushedCommits {
 
     $remoteArg = if ([string]::IsNullOrWhiteSpace($RemoteName)) { "--remotes" } else { "--remotes=$RemoteName" }
     $logArgs = @(
+        "-c", "log.showSignature=false",
         "log", "--format=%H", "--raw", "--no-abbrev", "-z", "--root",
         "--no-renames", "--diff-merges=separate", $LocalSha, "--not"
     )

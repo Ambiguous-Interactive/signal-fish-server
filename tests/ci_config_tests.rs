@@ -25922,7 +25922,7 @@ fn test_pre_push_existing_ref_excludes_commits_already_on_remote_when_pwsh_avail
 
                 $files = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]::new([System.StringComparer]::Ordinal)
                 Add-ChangedFilesFromPushedCommits -Map $files -LocalSha "local-tip" -RemoteSha "old-remote-tip" -AllZeroSha ("0" * 40) -RemoteName "origin"
-                $expected = @("log", "--format=%H", "--raw", "--no-abbrev", "-z", "--root", "--no-renames", "--diff-merges=separate", "local-tip", "--not", "old-remote-tip", "--remotes=origin")
+                $expected = @("-c", "log.showSignature=false", "log", "--format=%H", "--raw", "--no-abbrev", "-z", "--root", "--no-renames", "--diff-merges=separate", "local-tip", "--not", "old-remote-tip", "--remotes=origin")
                 Assert ($files.ContainsKey(".githooks/pre-push")) "the changed file should be attributed to the introduced commit"
                 Assert (@($files[".githooks/pre-push"])[0] -eq ("a" * 40)) "the introduced commit should own the changed file"
                 Assert ($script:CapturedArguments.Count -eq $expected.Count) "git log should receive the expected argument count"
