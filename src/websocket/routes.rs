@@ -19,7 +19,7 @@ use super::handler::{
     websocket_handler_v3_with_verified_certificate as websocket_handler_v3,
     websocket_handler_with_verified_certificate as websocket_handler,
 };
-use super::metrics::{metrics_handler, prometheus_metrics_handler};
+use super::metrics::{metrics_handler, prometheus_metrics_handler, sessions_metrics_handler};
 
 const LISTENER_BACKLOG: u32 = 1_024;
 
@@ -409,7 +409,8 @@ fn create_router_inner(
         .route("/health", get(health_check))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics_handler))
-        .route("/metrics/prom", get(prometheus_metrics_handler));
+        .route("/metrics/prom", get(prometheus_metrics_handler))
+        .route("/metrics/sessions", get(sessions_metrics_handler));
 
     let router = if include_v3_alias {
         router

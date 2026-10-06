@@ -54,6 +54,9 @@ pub mod retry;
 /// TLS and crypto utilities
 pub mod security;
 
+/// Per-session (per-room) records for the metrics surface.
+pub mod session_records;
+
 /// Feature-gated delivery-contract trace capture for formal replay.
 #[cfg(feature = "trace-validation")]
 pub mod trace_validation;

@@ -135,7 +135,9 @@ pub use handler::{
     WEBSOCKET_REQUEST_ID_HEADER, WEBSOCKET_UPGRADE_OUTCOME_HEADER,
 };
 pub(crate) use metrics::RejectionLogThrottle;
-pub use metrics::{metrics_handler, prometheus_metrics_handler, MetricsQuery};
+pub use metrics::{
+    metrics_handler, prometheus_metrics_handler, sessions_metrics_handler, MetricsQuery,
+};
 #[cfg(feature = "tls")]
 pub use routes::ConfiguredAcceptor;
 pub use routes::{

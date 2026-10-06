@@ -368,7 +368,15 @@ async fn main() -> anyhow::Result<()> {
             "/v1/metrics/prom",
             get(websocket::prometheus_metrics_handler),
         )
-        .route("/metrics/prom", get(websocket::prometheus_metrics_handler));
+        .route("/metrics/prom", get(websocket::prometheus_metrics_handler))
+        .route(
+            "/v1/metrics/sessions",
+            get(websocket::sessions_metrics_handler),
+        )
+        .route(
+            "/metrics/sessions",
+            get(websocket::sessions_metrics_handler),
+        );
 
     // Spawn legacy full-mesh signaling on a separate port if enabled.
     //
@@ -446,7 +454,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", websocket::health_route())
         .route("/readyz", websocket::readyz_route())
         .fallback(|| async {
-            "Signal Fish Server. Use /v2/ws (or /v3/ws) for WebSocket protocol, /v2/client-config (or /v3/client-config) for client limits, /v1/metrics for metrics, /metrics/prom for Prometheus, /readyz for readiness."
+            "Signal Fish Server. Use /v2/ws (or /v3/ws) for WebSocket protocol, /v2/client-config (or /v3/client-config) for client limits, /v1/metrics for metrics, /metrics/sessions for per-room session records, /metrics/prom for Prometheus, /readyz for readiness."
         })
         // Cloned, not moved: the original handle stays available for the
         // post-serve shutdown join, which must observe the drain state.

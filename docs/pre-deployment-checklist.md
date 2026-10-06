@@ -59,9 +59,10 @@ cargo run -- --print-config
 
 ## Metrics auth
 
-- [ ] `/metrics`, `/v1/metrics`, and `/metrics/prom` are not openly reachable —
-  either `security.require_metrics_auth=true` with a `security.metrics_auth_token`,
-  or the endpoints are restricted at the reverse proxy (IP allowlist).
+- [ ] `/metrics`, `/v1/metrics`, `/metrics/prom`, and `/metrics/sessions` are
+  not openly reachable — either `security.require_metrics_auth=true` with a
+  `security.metrics_auth_token`, or the endpoints are restricted at the
+  reverse proxy (IP allowlist).
 - [ ] The metrics token is at least 32 characters (the server warns below 16).
 - [ ] Prometheus is configured with the bearer token if auth is on (see the
   [metrics-auth recipe](configuration-recipes.md#metrics-auth)).

@@ -155,6 +155,13 @@ fn chrono_clock_allowlist() -> BTreeMap<&'static str, &'static str> {
              consumers.",
         ),
         (
+            "src/session_records.rs",
+            "durable stamps: session-record created/ended epoch-milliseconds on the \
+             /metrics/sessions observability surface (#708/#763). The created stamp \
+             derives from the room row's own durable stamp; the close stamp is the \
+             storage-removal time. No GC or deadline decision reads them.",
+        ),
+        (
             "src/protocol/room_state.rs",
             "durable stamps: Room::new/update_activity/enter_lobby/finalize_game \
              lifecycle stamps; is_expired is the thin documented embedder wrapper over \

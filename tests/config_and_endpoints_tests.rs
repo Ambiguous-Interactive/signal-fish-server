@@ -1790,6 +1790,70 @@ async fn test_metrics_endpoint_rejects_invalid_bearer_token() {
 }
 
 // ===========================================================================
+// Metrics sessions endpoint tests (issues #708, #763)
+// ===========================================================================
+
+#[tokio::test]
+async fn test_metrics_sessions_endpoint_returns_bounded_session_shape() {
+    let mut config = test_server_config();
+    config.require_metrics_auth = false;
+
+    let server = test_helpers::create_test_server_with_config(
+        config,
+        signal_fish_server::config::ProtocolConfig::default(),
+    )
+    .await;
+
+    let app = create_router("*").with_state(server);
+    let test_server = axum_test::TestServer::new(app);
+
+    let response = test_server.get("/metrics/sessions").await;
+    response.assert_status_ok();
+
+    let json: serde_json::Value = response.json();
+    assert_eq!(json["available"], serde_json::json!(true));
+    assert_eq!(json["activeCount"], 0);
+    assert_eq!(json["completedCount"], 0);
+    assert!(
+        json["completedCap"].as_u64().unwrap_or(0) > 0,
+        "the completed ring advertises its capacity"
+    );
+    assert_eq!(json["completedDroppedTotal"], 0);
+    assert_eq!(json["active"], serde_json::json!([]));
+    assert_eq!(json["completed"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn test_metrics_sessions_endpoint_requires_auth_when_configured() {
+    let mut config = test_server_config();
+    config.require_metrics_auth = true;
+    config.metrics_auth_token = Some("test-metrics-token".to_string());
+
+    let server = test_helpers::create_test_server_with_config(
+        config,
+        signal_fish_server::config::ProtocolConfig::default(),
+    )
+    .await;
+
+    let app = create_router("*").with_state(server);
+    let test_server = axum_test::TestServer::new(app);
+
+    let response = test_server.get("/metrics/sessions").await;
+    response.assert_status(axum::http::StatusCode::UNAUTHORIZED);
+
+    let authorized = test_server
+        .get("/metrics/sessions")
+        .add_header(
+            axum::http::header::AUTHORIZATION,
+            "Bearer test-metrics-token"
+                .parse::<axum::http::HeaderValue>()
+                .unwrap(),
+        )
+        .await;
+    authorized.assert_status_ok();
+}
+
+// ===========================================================================
 // Prometheus metrics endpoint tests
 // ===========================================================================
 
@@ -2242,6 +2306,12 @@ async fn unsupported_token_binding_offer_rejection_is_correlatable_and_accounted
     running.shutdown().await;
 }
 
+/// The required-binding negotiation rejection needs `token_binding.required`,
+/// and construction fail-closes without the compiled `tls` feature
+/// (`validate_token_binding`), so this pin exists only in TLS builds. The
+/// non-TLS rejection contract is pinned by
+/// `validate_config_rejects_tls_for_a_binary_without_tls_support`.
+#[cfg(feature = "tls")]
 #[tokio::test]
 async fn token_binding_negotiation_rejection_is_correlatable_and_accounted() {
     use tokio_tungstenite::tungstenite::Error;

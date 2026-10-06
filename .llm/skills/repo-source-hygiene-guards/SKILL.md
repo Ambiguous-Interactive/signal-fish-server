@@ -2,7 +2,10 @@
 name: repo-source-hygiene-guards
 description: >-
   Apply project guidance for repo source hygiene guards. Use when editing protocol docs,
-  integration tests, or bootstrap/CI shell scripts — or when one of the guard tests below fails.
+  integration tests, or bootstrap/CI shell scripts — or when one of the guard tests below
+  fails. Also use when ADDING a new src/ library module (Miri lane registration), a new
+  production clock read (chrono classification), panic-capable production code
+  (zero-panic policy), or a test that needs a compiled-in feature (feature gating).
 ---
 
 # Repo Source Hygiene Guards
@@ -72,6 +75,45 @@ unverified jar) `exit` from helpers on purpose and must NOT be flagged.
 operational scripts. A bare `pip` may target a different interpreter than the `python3` that
 imports the package, so the install can succeed yet the import fail. `python3 -m pip`
 installs into the interpreter that runs it.
+
+### 5. New `src/` modules and new clock reads must register with the repo-wide scanners
+
+Two scanners key on file inventory, so a change that only ADDS a module (or a clock read)
+passes every scoped, edit-test-loop check and still fails hosted CI:
+
+- **Miri lane coverage** (`test_ci_safety_miri_lane_filters_cover_every_library_module`,
+  `tests/ci_config_tests.rs`): every library module must be named by a Miri lane filter in
+  `.github/workflows/ci-safety.yml` (`core`: `websocket coordination server protocol`;
+  `remaining`: everything else). A module named by no lane "would silently never run under
+  Miri" — the guard names the missing module and the lane list. Register the new module in
+  the SAME change; the fix is one word in the `remaining` lane's `filters` string unless the
+  module is measured-heavy.
+- **Clock-source classification** (`tests/clock_source_scan.rs`): every `chrono::Utc::now()`
+  (and allowlisted `std` time type) in production `src/` needs its file in
+  `chrono_clock_allowlist()` with the class stated (`durable record` / `embedder
+  convenience` / `observability readout`) and a `Wall clock (...):` comment at the site;
+  deadline and GC decisions use monotonic `tokio::time` or an injected `*_at(.., now)` seam
+  instead. The allowlist entry must keep a live match (`allowlist_entries_stay_relevant`).
+- **Zero-panic policy** (`scripts/check-no-panics.sh`, hosted Lint): production code denies
+  `expect_used`/`unwrap_used`/`panic!` — test modules are exempt. A lock guard that must
+  survive poisoning recovers the data: `.lock().unwrap_or_else(|error| error.into_inner())`
+  (the `trace_validation.rs` pattern).
+
+**Rule**: any change that adds a `src/` module, a production clock read, or panic-capable
+code runs the scanners' owning targets locally in the same change
+(`cargo nextest run --test ci_config_tests --test clock_source_scan` plus
+`bash scripts/check-no-panics.sh`), or treats the hosted Lint/Nextest red as the
+first signal. A scoped `-E 'test(<name>)'` loop on the changed feature's own target never
+runs these guards.
+
+### 6. Tests that need a compiled-in capability are feature-gated
+
+Config that requires a compiled feature fail-closes at construction
+(`security.transport.token_binding.required=true` needs the `tls` Cargo feature). A test
+that builds such a config must carry `#[cfg(feature = "tls")]` (precedent:
+`mtls_token_binding_e2e.rs`, and the `#[cfg(not(feature = "tls"))]`
+`validate_config_rejects_tls_for_a_binary_without_tls_support` pin beside it), or the
+`--no-default-features` suite is red even though every default-features run is green.
 
 ---
 
