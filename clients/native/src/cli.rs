@@ -211,7 +211,8 @@ pub struct Cli {
 
     /// Game-data encoding negotiated in Authenticate and used for every
     /// `--relay-payload` send (issue #627). `json` (the default) keeps the
-    /// legacy text wire shape byte-identical; `rkyv`/`protobuf` are the
+    /// legacy text wire shape byte-identical; `message_pack` is the standard
+    /// v3 binary encoding (no server opt-in knob); `rkyv`/`protobuf` are the
     /// server's opt-in opaque encodings: the payload relays as untouched
     /// bytes and arrives in the strict protocol-v3 binary envelope, so the
     /// opaque modes require `--protocol-version 3` (v2 passthrough carries
@@ -318,6 +319,10 @@ impl From<TransportArg> for Transport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum GameDataFormatArg {
     Json,
+    /// The wire token is `message_pack`; CLI tokens stay identical to the
+    /// protocol's wire tokens instead of clap's kebab-case default.
+    #[value(name = "message_pack")]
+    MessagePack,
     Rkyv,
     Protobuf,
 }
@@ -326,6 +331,7 @@ impl From<GameDataFormatArg> for GameDataEncoding {
     fn from(value: GameDataFormatArg) -> Self {
         match value {
             GameDataFormatArg::Json => GameDataEncoding::Json,
+            GameDataFormatArg::MessagePack => GameDataEncoding::MessagePack,
             GameDataFormatArg::Rkyv => GameDataEncoding::Rkyv,
             GameDataFormatArg::Protobuf => GameDataEncoding::Protobuf,
         }
@@ -494,6 +500,33 @@ mod tests {
             cli.transports(),
             vec![Transport::Relay, Transport::Direct, Transport::WebRtc]
         );
+    }
+
+    /// Every CLI token maps onto its wire encoding, so the negotiation path
+    /// and the docs never drift from the parse surface.
+    #[test]
+    fn game_data_format_args_map_to_the_protocol_encodings() {
+        let cases = [
+            ("json", GameDataEncoding::Json),
+            ("message_pack", GameDataEncoding::MessagePack),
+            ("rkyv", GameDataEncoding::Rkyv),
+            ("protobuf", GameDataEncoding::Protobuf),
+        ];
+        for (token, expected) in cases {
+            let cli = Cli::parse_from([
+                "signal-fish-reference-native",
+                "--server-url",
+                "ws://127.0.0.1:9000/v3/ws",
+                "--create-room",
+                "--game-data-format",
+                token,
+            ]);
+            assert_eq!(
+                GameDataEncoding::from(cli.game_data_format),
+                expected,
+                "--game-data-format {token} must map onto {expected:?}"
+            );
+        }
     }
 
     #[test]

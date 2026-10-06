@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Native reference client: `--game-data-format message_pack` (#741). The
+  standard v3 binary encoding joins `json`, `rkyv`, and `protobuf` in the
+  reference client's negotiation surface. The CLI token matches the wire
+  token, the payload relays as untouched bytes in the strict v3 binary
+  envelope, and a deployment whose `ProtocolInfo` omits `message_pack` is
+  refused before any room is touched, without naming an opt-in knob (the
+  encoding has none).
+
 - Metrics: WebSocket egress bytes and outbound-queue posture gauges on the
   Prometheus endpoint (#648, #636 C2). `signal_fish_websocket_egress_bytes_total`
   counts the application payload bytes actually written to client sockets —
