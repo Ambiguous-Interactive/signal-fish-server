@@ -14,8 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference client's negotiation surface. The CLI token matches the wire
   token, the payload relays as untouched bytes in the strict v3 binary
   envelope, and a deployment whose `ProtocolInfo` omits `message_pack` is
-  refused before any room is touched, without naming an opt-in knob (the
-  encoding has none).
+  refused before any room is touched, with the refusal naming
+  `protocol.enable_message_pack_game_data` (the encoding ships enabled by
+  default; the knob is opt-out).
 
 - Metrics: WebSocket egress bytes and outbound-queue posture gauges on the
   Prometheus endpoint (#648, #636 C2). `signal_fish_websocket_egress_bytes_total`
