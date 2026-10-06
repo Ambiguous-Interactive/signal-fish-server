@@ -231,6 +231,19 @@ pub fn read_manifest(output_dir: &Path) -> Result<Manifest, String> {
     serde_json::from_slice(&raw).map_err(|error| format!("parse {}: {error}", path.display()))
 }
 
+/// Read the interval samples back from an output directory.
+pub fn read_intervals(output_dir: &Path) -> Result<Vec<IntervalSample>, String> {
+    let path = output_dir.join(INTERVALS_FILE);
+    let raw = fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    raw.split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            serde_json::from_slice(line)
+                .map_err(|error| format!("parse an {} line: {error}", path.display()))
+        })
+        .collect()
+}
+
 /// Read the deliveries event log back from an output directory.
 pub fn read_records(output_dir: &Path) -> Result<RunRecords, String> {
     let path = output_dir.join(DELIVERIES_FILE);

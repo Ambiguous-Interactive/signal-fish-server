@@ -426,6 +426,7 @@ pub(super) async fn send_queued(
                 receiver,
                 player_id,
                 max_outbound_message_size,
+                &server.metrics(),
             )
             .await?
         {
@@ -484,6 +485,7 @@ pub(super) async fn send_queued(
                     receiver,
                     player_id,
                     max_outbound_message_size,
+                    &server.metrics(),
                 )
                 .await?
                 {

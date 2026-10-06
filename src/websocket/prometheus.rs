@@ -1,8 +1,19 @@
 use crate::metrics::{MetricsSnapshot, OperationLatencyMetrics};
+use crate::server::OutboundQueueSample;
 use chrono::Utc;
 
 /// Render unified metrics snapshot into Prometheus text exposition format.
-pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
+///
+/// `queue_sample` is the scrape-time outbound-queue posture (total resident
+/// items, oldest resident item) and `now` the scrape instant the queue age
+/// is measured against: these gauges are sampled when the endpoint is hit
+/// and never maintained on the write path. Rendered for every caller so an
+/// endpoint cannot drop them.
+pub(crate) fn render_prometheus_metrics(
+    snapshot: &MetricsSnapshot,
+    queue_sample: &OutboundQueueSample,
+    now: tokio::time::Instant,
+) -> String {
     use std::fmt::{Display, Write};
 
     fn write_metric(
@@ -182,6 +193,21 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
         "signal_fish_websocket_backpressure_events_total",
         "Times a full outbound queue forced delivery to wait for capacity; the wait may still end in delivery or in a loss accounted by signal_fish_websocket_messages_dropped_total or signal_fish_websocket_deliveries_channel_closed_total",
         snapshot.connections.websocket_backpressure_events,
+    );
+    // Outbound-queue posture, sampled when this endpoint is scraped (never
+    // maintained on the write path): the capacity campaign's queue-depth and
+    // queue-age observables.
+    gauge(
+        &mut buf,
+        "signal_fish_websocket_queue_depth",
+        "Items currently resident across every live classified outbound queue, summed at scrape time",
+        queue_sample.total_depth,
+    );
+    gauge(
+        &mut buf,
+        "signal_fish_websocket_queue_oldest_age_milliseconds",
+        "Age in milliseconds of the oldest item resident in any live classified outbound queue at scrape time; 0 when nothing is queued",
+        queue_sample.oldest_age_millis(now),
     );
     counter(
         &mut buf,
@@ -380,6 +406,12 @@ pub(crate) fn render_prometheus_metrics(snapshot: &MetricsSnapshot) -> String {
         "signal_fish_relay_bytes_total",
         "Sender-side game-data payload bytes admitted onto the relay path",
         snapshot.players.relay_bytes_total,
+    );
+    counter(
+        &mut buf,
+        "signal_fish_websocket_egress_bytes_total",
+        "Recipient-side application payload bytes written to client sockets: the fan-out twin of signal_fish_relay_bytes_total, charged per successfully written application frame (control frames carry no application payload)",
+        snapshot.connections.websocket_egress_bytes,
     );
     // Per-application attribution (issue #530). Labeled series over a map
     // bounded by the configured allowlist (open-mode IDs are client-chosen
@@ -704,6 +736,25 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::sync::atomic::Ordering;
 
+    /// Test render over an empty queue sample: most tests assert snapshot
+    /// counters, not the scrape-time queue gauges. The queue-gauge render has
+    /// its own dedicated tests below.
+    fn render(snapshot: &MetricsSnapshot) -> String {
+        render_prometheus_metrics(
+            snapshot,
+            &OutboundQueueSample::default(),
+            tokio::time::Instant::now(),
+        )
+    }
+
+    fn render_with_queue_at(
+        snapshot: &MetricsSnapshot,
+        queue_sample: &OutboundQueueSample,
+        now: tokio::time::Instant,
+    ) -> String {
+        render_prometheus_metrics(snapshot, queue_sample, now)
+    }
+
     fn rendered_u64(rendered: &str, name: &str) -> u64 {
         rendered
             .lines()
@@ -721,7 +772,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
     async fn delivery_loss_help_lines_match_their_accounted_semantics() {
-        let rendered = render_prometheus_metrics(&ServerMetrics::new().snapshot().await);
+        let rendered = render(&ServerMetrics::new().snapshot().await);
         for (name, help) in [
             (
                 "signal_fish_websocket_messages_dropped_total",
@@ -759,7 +810,7 @@ mod tests {
 
         let metrics = ServerMetrics::new();
         let snapshot = metrics.snapshot().await;
-        let rendered = render_prometheus_metrics(&snapshot);
+        let rendered = render(&snapshot);
 
         let mut child = Command::new(promtool_path)
             .arg("check")
@@ -796,7 +847,7 @@ mod tests {
         metrics.increment_dashboard_cache_refresh_failures();
         metrics.increment_dashboard_cache_refresh_failures();
 
-        let failing = render_prometheus_metrics(&metrics.snapshot().await);
+        let failing = render(&metrics.snapshot().await);
         assert!(
             !failing.contains("signal_fish_dashboard_cache_age_seconds"),
             "persistent refresh failures must not render a fresh-looking age of 0"
@@ -804,12 +855,78 @@ mod tests {
         assert!(failing.contains("signal_fish_dashboard_cache_refresh_failures_total 2"));
 
         metrics.set_dashboard_cache_last_refresh(chrono::Utc::now());
-        let refreshed = render_prometheus_metrics(&metrics.snapshot().await);
+        let refreshed = render(&metrics.snapshot().await);
         assert!(
             refreshed.contains("signal_fish_dashboard_cache_age_seconds"),
             "a successful refresh must publish the age gauge"
         );
         assert!(refreshed.contains("signal_fish_dashboard_cache_refreshes_total 1"));
+    }
+
+    /// The egress counter renders beside its sender-side twin with the exact
+    /// recorded value: the capacity runner's amplification pair is read from
+    /// this exposition.
+    #[tokio::test]
+    async fn egress_bytes_render_beside_their_relay_ingress_twin() {
+        let metrics = ServerMetrics::new();
+        metrics.record_relay_bytes(96);
+        metrics.record_websocket_egress_bytes(192);
+
+        let rendered = render(&metrics.snapshot().await);
+        assert!(
+            rendered.contains("signal_fish_relay_bytes_total 96"),
+            "ingress twin line: {rendered}"
+        );
+        assert!(
+            rendered.contains("signal_fish_websocket_egress_bytes_total 192"),
+            "egress line: {rendered}"
+        );
+        assert!(
+            rendered.contains("# TYPE signal_fish_websocket_egress_bytes_total counter"),
+            "egress must be a counter: {rendered}"
+        );
+    }
+
+    /// The queue gauges are the scrape-time posture exactly: an empty sample
+    /// renders zeros (a gauge must exist so a scrape gap is distinguishable
+    /// from a missing series), and a populated sample renders its depth plus
+    /// an age measured against the passed scrape instant.
+    #[tokio::test]
+    async fn queue_gauges_render_scrape_time_depth_and_age() {
+        let empty = render(&ServerMetrics::new().snapshot().await);
+        assert!(
+            empty.contains("signal_fish_websocket_queue_depth 0"),
+            "empty queue depth renders zero: {empty}"
+        );
+        assert!(
+            empty.contains("signal_fish_websocket_queue_oldest_age_milliseconds 0"),
+            "empty queue age renders zero: {empty}"
+        );
+        assert!(
+            empty.contains("# TYPE signal_fish_websocket_queue_depth gauge")
+                && empty
+                    .contains("# TYPE signal_fish_websocket_queue_oldest_age_milliseconds gauge"),
+            "both queue series must be gauges: {empty}"
+        );
+
+        let now = tokio::time::Instant::now();
+        let sample = OutboundQueueSample {
+            total_depth: 7,
+            oldest_enqueued_at: Some(now - std::time::Duration::from_millis(250)),
+        };
+        let populated = render_with_queue_at(&ServerMetrics::new().snapshot().await, &sample, now);
+        assert!(
+            populated.contains("signal_fish_websocket_queue_depth 7"),
+            "depth line: {populated}"
+        );
+        let age = rendered_u64(
+            &populated,
+            "signal_fish_websocket_queue_oldest_age_milliseconds",
+        );
+        assert_eq!(
+            age, 250,
+            "age is the sample's enqueue-to-scrape span, measured against the passed instant"
+        );
     }
 
     #[tokio::test]
@@ -822,7 +939,7 @@ mod tests {
         metrics.record_rate_limit_rejection(RateLimitRejection::Auth);
 
         let snapshot = metrics.snapshot().await;
-        let rendered = render_prometheus_metrics(&snapshot);
+        let rendered = render(&snapshot);
 
         assert!(
             rendered.contains("signal_fish_connections_total 2"),
@@ -872,7 +989,7 @@ mod tests {
             .total_connections
             .store((1_u64 << 53) + 1, Ordering::Relaxed);
         metrics.disconnections.store(u64::MAX, Ordering::Relaxed);
-        let exact_integer_rendering = render_prometheus_metrics(&metrics.snapshot().await);
+        let exact_integer_rendering = render(&metrics.snapshot().await);
         assert_eq!(
             rendered_u64(&exact_integer_rendering, "signal_fish_connections_total"),
             (1_u64 << 53) + 1
@@ -955,7 +1072,7 @@ mod tests {
         metrics.record_slow_consumer_eviction(&sender_a);
         metrics.record_slow_consumer_eviction(&sender_b);
 
-        let rendered = render_prometheus_metrics(&metrics.snapshot().await);
+        let rendered = render(&metrics.snapshot().await);
 
         let app_lines: Vec<&str> = rendered
             .lines()
@@ -998,7 +1115,7 @@ mod tests {
     async fn test_render_prometheus_metrics_pins_distributed_lock_shape() {
         let metrics = ServerMetrics::new();
         let snapshot = metrics.snapshot().await;
-        let rendered = render_prometheus_metrics(&snapshot);
+        let rendered = render(&snapshot);
 
         for (name, help) in [
             (
@@ -1071,7 +1188,7 @@ mod tests {
         metrics.increment_delivery_class_dropped(DeliveryClass::Volatile);
 
         let snapshot = metrics.snapshot().await;
-        let rendered = render_prometheus_metrics(&snapshot);
+        let rendered = render(&snapshot);
 
         // Exact HELP assertions keep operator semantics from drifting: these
         // four counters (plus the drop counter) carry the delivery
@@ -1143,7 +1260,7 @@ mod tests {
         metrics.add_reconnection_events_evicted(2);
 
         let snapshot = metrics.snapshot().await;
-        let rendered = render_prometheus_metrics(&snapshot);
+        let rendered = render(&snapshot);
 
         // Exact HELP assertions keep operator semantics from drifting: the
         // eviction counter is the capacity alarm for `event_buffer_size`, so
@@ -1214,7 +1331,7 @@ mod tests {
         metrics.add_mixed_path_members_observed(8);
 
         let snapshot = metrics.snapshot().await;
-        let rendered = render_prometheus_metrics(&snapshot);
+        let rendered = render(&snapshot);
 
         // Each new metric name must be present with its exact HELP, a TYPE
         // counter line, and its value. Exact HELP assertions keep operator

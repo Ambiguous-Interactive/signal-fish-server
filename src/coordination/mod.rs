@@ -711,6 +711,16 @@ impl From<tokio::sync::mpsc::Sender<Arc<ServerMessage>>> for DeliverySender {
 }
 
 impl DeliverySender {
+    /// The live classified outbound queue behind this sender, if any.
+    /// Legacy senders have no queue to inspect; the metrics scrape uses
+    /// this to sample queue depth and age without touching the write path.
+    pub fn classified_queue(&self) -> Option<&OutboundSender> {
+        match &self.0 {
+            DeliverySenderKind::Classified { sender, .. } => Some(sender),
+            DeliverySenderKind::Legacy(_) => None,
+        }
+    }
+
     #[cfg(feature = "trace-validation")]
     fn trace_projection_supported(&self) -> bool {
         match &self.0 {

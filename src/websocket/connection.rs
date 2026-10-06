@@ -96,6 +96,7 @@ async fn refuse_websocket_registration(
     addr: SocketAddr,
     refusal_message: String,
     max_outbound_message_size: usize,
+    metrics: &crate::metrics::ServerMetrics,
 ) {
     if !send_token_binding_challenge(sender, token_binding, addr, max_outbound_message_size).await {
         return;
@@ -106,7 +107,7 @@ async fn refuse_websocket_registration(
     };
     match tokio::time::timeout(
         CLOSE_WRITE_TIMEOUT,
-        send_immediate_server_message(sender, &error_message, max_outbound_message_size),
+        send_immediate_server_message(sender, &error_message, max_outbound_message_size, metrics),
     )
     .await
     {
@@ -753,6 +754,7 @@ async fn flush_pending_unsupported_report(
     rx: &OutboundReceiver,
     player_id: &PlayerId,
     max_outbound_message_size: usize,
+    metrics: &crate::metrics::ServerMetrics,
 ) -> bool {
     // `DeliveryReport` is v3-only and `send_immediate_server_message` carries
     // no recipient version, so this final flush fail-closes like the live
@@ -777,6 +779,7 @@ async fn flush_pending_unsupported_report(
             sender,
             &ServerMessage::DeliveryReport(Box::new(report.clone())),
             max_outbound_message_size,
+            metrics,
         ),
     )
     .await
@@ -854,6 +857,7 @@ async fn finalize_closed_connection(
                 rx,
                 player_id,
                 server.config().max_outbound_message_size,
+                &server.metrics(),
             )
             .await;
             // `send_batch` pops messages one at a time, so a cancelled
@@ -886,6 +890,7 @@ async fn finalize_closed_connection(
                     sender,
                     &farewell,
                     server.config().max_outbound_message_size,
+                    &server.metrics(),
                 ),
             )
             .await
@@ -923,6 +928,7 @@ async fn finalize_closed_connection(
                 rx,
                 player_id,
                 server.config().max_outbound_message_size,
+                &server.metrics(),
             )
             .await;
         }
@@ -966,6 +972,7 @@ async fn finalize_closed_connection(
                 rx,
                 player_id,
                 server.config().max_outbound_message_size,
+                &server.metrics(),
             )
             .await;
         }
@@ -1068,6 +1075,7 @@ async fn finalize_closed_connection(
                 rx,
                 player_id,
                 server.config().max_outbound_message_size,
+                &server.metrics(),
             )
             .await
             {
@@ -1318,6 +1326,7 @@ pub(super) async fn handle_socket(
                 addr,
                 err.to_string(),
                 server.config().max_outbound_message_size,
+                &server.metrics(),
             )
             .await;
             return;
@@ -1405,6 +1414,7 @@ pub(super) async fn handle_socket(
                 &mut sender,
                 &error,
                 server.config().max_outbound_message_size,
+                &server.metrics(),
             ),
         )
         .await;
@@ -1846,6 +1856,7 @@ pub(super) async fn handle_socket(
                             &rx,
                             &current_player_id,
                             server_clone.config().max_outbound_message_size,
+                            &server_clone.metrics(),
                         )
                         .await
                         {
@@ -4292,6 +4303,76 @@ mod tests {
             );
             pair.shutdown().await;
         }
+    }
+
+    /// Every application frame that reaches the wire charges its exact
+    /// payload length to the server-wide egress counter: the recipient-side
+    /// twin of the sender-side relay-bytes admission counter, and the
+    /// capacity runner's egress sample. The oracle is the bytes the client
+    /// actually received on a real upgraded socket — not the frames the
+    /// server materialized.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
+    async fn every_written_application_frame_charges_its_exact_egress_bytes() {
+        const QUEUED: u64 = 3;
+        let server = test_server().await;
+        let player_id = PlayerId::from_u128(9);
+        let (tx, mut rx) = crate::coordination::outbound_queue::channel(16, 16);
+        for seq in 1..=QUEUED {
+            tx.try_enqueue_data(ledger_data(seq))
+                .unwrap_or_else(|_| panic!("queue seq {seq}"));
+        }
+
+        let (close_signal, _close_listener) = ConnectionCloseSignal::channel();
+        let (probe_state, _probe_updates) = watch::channel(PingProbeState::default());
+
+        let mut pair = UpgradedSocketPair::connect().await;
+        let mut batcher = MessageBatcher::new(1, 1);
+        finalize_closed_connection(
+            &mut pair.server_sink,
+            &mut rx,
+            &mut batcher,
+            None,
+            &player_id,
+            &server,
+            &close_signal,
+            &probe_state,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        // Sum every application payload byte the client observed, so the
+        // counter must equal the wire, not the queue.
+        let mut observed = 0u64;
+        let mut observed_frames = 0u64;
+        while let Some(frame) = pair.client.next().await {
+            match frame.expect("client frame") {
+                TungsteniteMessage::Text(text) => {
+                    observed += text.len() as u64;
+                    observed_frames += 1;
+                }
+                TungsteniteMessage::Binary(bytes) => {
+                    observed += bytes.len() as u64;
+                    observed_frames += 1;
+                }
+                TungsteniteMessage::Close(_) => break,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            observed_frames, QUEUED,
+            "the drain must observe every queued data frame"
+        );
+        assert_eq!(
+            server
+                .metrics()
+                .websocket_egress_bytes_total
+                .load(Ordering::Relaxed),
+            observed,
+            "egress bytes must equal the application payload bytes the client received"
+        );
+        assert!(observed > 0, "the fixture must carry non-empty payloads");
+        pair.shutdown().await;
     }
 
     /// Issue #396 sweep pin: on a v3 connection the writer re-checks the

@@ -2434,10 +2434,33 @@ codes — base-36 values at and past 36² can be all-decimal, so
 letter-first encoding replaced it, and the uniqueness control now sweeps
 every room 0..999 × generation 0..=26 instead of sampled rooms.
 
-**C2 next runner PR: richer resource counters (#648).** Record queue
-depth/age plus ingress/egress bytes in the interval samples before any
-C3 capacity claim (the ingress side exists as
-`signal_fish_relay_app_bytes_total`; egress and queue depth/age need
-production metrics kept out of timed hot paths). The unsupported-format
-cells (validate permitted outcomes and reports per the delivery contract
-as separately labeled contract experiments) remain after that.
+**C2 next runner PR: richer resource counters — LANDED** (fifth runner PR,
+2026-10-05). Every interval sample now carries the resource counters the C3
+capacity claims are read from, beside the delivery counters: the
+ingress/egress byte pair and the queue-posture gauges.
+`signal_fish_websocket_egress_bytes_total` counts the application payload
+length of every successfully written frame — charged at the write leaf after
+the sink accepted the frame, so an egress byte is a byte that reached the
+connection; ping/pong/close carry no application payload and are not counted,
+mirroring the sender-side `signal_fish_relay_bytes_total` admission counter.
+`signal_fish_websocket_queue_depth` (items resident across every live
+classified outbound queue) and
+`signal_fish_websocket_queue_oldest_age_milliseconds` (age of the oldest
+resident item against the scrape instant) are walked over live connections
+at scrape time — the runner samples them exactly when the endpoint is hit,
+and nothing on the write path maintains them. Unavailable counters stay
+recorded-as-null; the spawned binary exposes all four, so the acceptance
+scenario now pins per-sample presence, byte-counter progress, and fan-out
+amplification (egress strictly above ingress for the four-peer room). Red
+proofs: neutering the write-path increment failed the exact-egress socket
+test (counter must equal the payload bytes the client observed); neutering
+the queue walk failed the connection-manager sample test (depth, oldest-item
+stamp, and scrape-instant age); renaming the rendered series failed the
+gauge render test.
+
+**C2 next runner PR: unsupported-format cells (#648).** Validate the
+permitted outcomes and reports of intentionally unsupported conversions per
+the delivery contract instead of reliable semantics, as separately labeled
+contract experiments. Reuse the existing WebSocket clients and the shared
+multiprocess harness (`tests/websocket_test_helpers/`); the runner already
+runs the release server as a separate process.

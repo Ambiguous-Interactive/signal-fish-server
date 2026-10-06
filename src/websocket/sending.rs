@@ -729,6 +729,7 @@ pub(super) async fn send_immediate_server_message(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     message: &ServerMessage,
     max_outbound_message_size: usize,
+    metrics: &crate::metrics::ServerMetrics,
 ) -> Result<(), ImmediateSendError> {
     let payload = serialize_json_text_limited(message, max_outbound_message_size, 256, "JSON")
         .map_err(|error| match error {
@@ -742,10 +743,17 @@ pub(super) async fn send_immediate_server_message(
             }
         })?;
 
+    let payload_len = payload.len();
     sender
         .send(Message::Text(payload.into()))
         .await
-        .map_err(ImmediateSendError::Socket)
+        .map_err(ImmediateSendError::Socket)?;
+    // The immediate path bypasses the queue write leaf, so it charges the
+    // egress counter itself: this is an application frame on the wire, and
+    // the teardown farewell/report flushes must count like their live-path
+    // siblings do.
+    metrics.record_websocket_egress_bytes(payload_len as u64);
+    Ok(())
 }
 
 pub(super) async fn send_single_message(
@@ -785,6 +793,7 @@ pub(super) async fn send_single_message_ref(
     accounting: &mut SendAccounting<'_>,
 ) -> Result<SendDisposition, SendMessageError> {
     let max_outbound_message_size = accounting.server.config().max_outbound_message_size;
+    let metrics = accounting.server.metrics();
     let mut disposition = SendDisposition::Written;
     match message {
         ServerMessage::GameDataBinary {
@@ -817,6 +826,7 @@ pub(super) async fn send_single_message_ref(
                         materialized.frame,
                         player_id,
                         max_outbound_message_size,
+                        &metrics,
                     )
                     .await?;
                 }
@@ -913,6 +923,7 @@ pub(super) async fn send_single_message_ref(
                 materialized.frame,
                 player_id,
                 max_outbound_message_size,
+                &metrics,
             )
             .await?;
         }
@@ -931,6 +942,7 @@ pub(super) async fn send_single_message_ref(
                 &ServerMessage::PlayerJoined { player },
                 player_id,
                 max_outbound_message_size,
+                &metrics,
             )
             .await?;
         }
@@ -953,6 +965,7 @@ pub(super) async fn send_single_message_ref(
                 &ServerMessage::PlayerJoined { player },
                 player_id,
                 max_outbound_message_size,
+                &metrics,
             )
             .await?;
         }
@@ -973,6 +986,7 @@ pub(super) async fn send_single_message_ref(
                 &ServerMessage::RoomJoined(Box::new(payload)),
                 player_id,
                 max_outbound_message_size,
+                &metrics,
             )
             .await?;
         }
@@ -1002,6 +1016,7 @@ pub(super) async fn send_single_message_ref(
                 &ServerMessage::Reconnected(Box::new(payload)),
                 player_id,
                 max_outbound_message_size,
+                &metrics,
             )
             .await?;
         }
@@ -1022,6 +1037,7 @@ pub(super) async fn send_single_message_ref(
                 &ServerMessage::SpectatorJoined(Box::new(payload)),
                 player_id,
                 max_outbound_message_size,
+                &metrics,
             )
             .await?;
         }
@@ -1042,6 +1058,7 @@ pub(super) async fn send_single_message_ref(
                 &ServerMessage::SpectatorJoined(Box::new(payload)),
                 player_id,
                 max_outbound_message_size,
+                &metrics,
             )
             .await?;
         }
@@ -1053,7 +1070,14 @@ pub(super) async fn send_single_message_ref(
                 player_id: *reconnected,
                 epoch: None,
             };
-            send_text_message(sender, &stripped, player_id, max_outbound_message_size).await?;
+            send_text_message(
+                sender,
+                &stripped,
+                player_id,
+                max_outbound_message_size,
+                &metrics,
+            )
+            .await?;
         }
         ServerMessage::PlayerLeft {
             player_id: departed,
@@ -1065,7 +1089,14 @@ pub(super) async fn send_single_message_ref(
                 epoch: None,
                 final_seq: None,
             };
-            send_text_message(sender, &stripped, player_id, max_outbound_message_size).await?;
+            send_text_message(
+                sender,
+                &stripped,
+                player_id,
+                max_outbound_message_size,
+                &metrics,
+            )
+            .await?;
         }
         // Issue #525: on v3 connections the room-uniform spectator fan-outs
         // are delta+count events — the roster clears (the field stays present
@@ -1102,7 +1133,14 @@ pub(super) async fn send_single_message_ref(
                 spectator_count: *spectator_count,
                 reason: reason.clone(),
             };
-            send_text_message(sender, &slim, player_id, max_outbound_message_size).await?;
+            send_text_message(
+                sender,
+                &slim,
+                player_id,
+                max_outbound_message_size,
+                &metrics,
+            )
+            .await?;
         }
         // Fail-open full-roster projection: a count-less constructor keeps
         // the parseable full-roster shape for v3 recipients, minus the
@@ -1132,6 +1170,7 @@ pub(super) async fn send_single_message_ref(
                 },
                 player_id,
                 max_outbound_message_size,
+                &metrics,
             )
             .await?;
         }
@@ -1150,7 +1189,14 @@ pub(super) async fn send_single_message_ref(
                 current_spectators: Vec::new(),
                 spectator_count: *spectator_count,
             };
-            send_text_message(sender, &slim, player_id, max_outbound_message_size).await?;
+            send_text_message(
+                sender,
+                &slim,
+                player_id,
+                max_outbound_message_size,
+                &metrics,
+            )
+            .await?;
         }
         // Fail-open full-roster projection: a count-less constructor keeps
         // the parseable full-roster shape for v3 recipients, minus the
@@ -1177,6 +1223,7 @@ pub(super) async fn send_single_message_ref(
                 },
                 player_id,
                 max_outbound_message_size,
+                &metrics,
             )
             .await?;
         }
@@ -1204,6 +1251,7 @@ pub(super) async fn send_single_message_ref(
                 },
                 player_id,
                 max_outbound_message_size,
+                &metrics,
             )
             .await?;
         }
@@ -1229,7 +1277,14 @@ pub(super) async fn send_single_message_ref(
             {
                 *count = None;
             }
-            send_text_message(sender, &message, player_id, max_outbound_message_size).await?;
+            send_text_message(
+                sender,
+                &message,
+                player_id,
+                max_outbound_message_size,
+                &metrics,
+            )
+            .await?;
         }
         // Issues #529 and #539: a correlated operation result (v3-only
         // capability) NESTS the same snapshot payloads (`RoomJoined`,
@@ -1253,6 +1308,7 @@ pub(super) async fn send_single_message_ref(
                 },
                 player_id,
                 max_outbound_message_size,
+                &metrics,
             )
             .await?;
         }
@@ -1292,7 +1348,14 @@ pub(super) async fn send_single_message_ref(
             disposition = SendDisposition::AccountedDrop;
         }
         other => {
-            send_text_message(sender, other, player_id, max_outbound_message_size).await?;
+            send_text_message(
+                sender,
+                other,
+                player_id,
+                max_outbound_message_size,
+                &metrics,
+            )
+            .await?;
         }
     }
 
@@ -1569,8 +1632,10 @@ async fn send_materialized_frame(
     frame: Message,
     player_id: &PlayerId,
     max_outbound_message_size: usize,
+    metrics: &crate::metrics::ServerMetrics,
 ) -> Result<(), SendMessageError> {
-    if let Some(size) = application_payload_len(&frame) {
+    let payload_len = application_payload_len(&frame);
+    if let Some(size) = payload_len {
         enforce_outbound_payload_size(size, max_outbound_message_size).map_err(|error| {
             tracing::warn!(
                 %player_id,
@@ -1587,7 +1652,15 @@ async fn send_materialized_frame(
     sender.send(frame).await.map_err(|error| {
         tracing::warn!(%player_id, %error, "Failed to send message, connection closed");
         SendMessageError::SocketClosed
-    })
+    })?;
+    // Charged after the sink accepted the frame: an egress byte is a byte
+    // that reached the connection. Ping/pong/close carry no application
+    // payload (`payload_len` is None) and are not counted, mirroring the
+    // sender-side `relay_bytes_total` admission counter.
+    if let Some(size) = payload_len {
+        metrics.record_websocket_egress_bytes(size as u64);
+    }
+    Ok(())
 }
 
 /// Cancellation-safe terminal accounting for the one queue item actively
@@ -1759,6 +1832,7 @@ async fn notify_on_undeliverable(
     accounting: &mut SendAccounting<'_>,
 ) -> Result<SendDisposition, SendMessageError> {
     let coalesced = accounting.complete_unsupported(metadata);
+    let metrics = accounting.server.metrics();
     if recipient_supports_v3 && metadata.is_none() {
         tracing::error!(
             %player_id,
@@ -1779,6 +1853,7 @@ async fn notify_on_undeliverable(
             accounting.receiver,
             player_id,
             accounting.server.config().max_outbound_message_size,
+            &metrics,
         )
         .await?
         {
@@ -1807,6 +1882,7 @@ async fn notify_on_undeliverable(
             accounting.receiver,
             player_id,
             accounting.server.config().max_outbound_message_size,
+            &metrics,
         )
         .await?
         {
@@ -1830,6 +1906,7 @@ async fn notify_on_undeliverable(
             &notice,
             player_id,
             accounting.server.config().max_outbound_message_size,
+            &metrics,
         )
         .await?;
         accounting.record_outbound_progress();
@@ -1850,6 +1927,7 @@ pub(super) async fn write_pending_unsupported_report(
     receiver: &OutboundReceiver,
     player_id: &PlayerId,
     max_outbound_message_size: usize,
+    metrics: &crate::metrics::ServerMetrics,
 ) -> Result<bool, SendMessageError> {
     // `DeliveryReport` is a v3-only server-to-client variant, so this write
     // path — which bypasses the fail-closed v3-only arm of
@@ -1876,6 +1954,7 @@ pub(super) async fn write_pending_unsupported_report(
         &ServerMessage::DeliveryReport(Box::new(report.clone())),
         player_id,
         max_outbound_message_size,
+        metrics,
     )
     .await?;
     receiver.commit_pending_unsupported_report(&report);
@@ -1887,8 +1966,16 @@ pub(super) async fn send_text_message(
     message: &ServerMessage,
     player_id: &PlayerId,
     max_outbound_message_size: usize,
+    metrics: &crate::metrics::ServerMetrics,
 ) -> Result<(), SendMessageError> {
-    send_serialized_text(sender, message, player_id, max_outbound_message_size).await
+    send_serialized_text(
+        sender,
+        message,
+        player_id,
+        max_outbound_message_size,
+        metrics,
+    )
+    .await
 }
 
 /// Serialize any wire-shaped value to a JSON text frame and send it. Shared by
@@ -1900,6 +1987,7 @@ async fn send_serialized_text<T: Serialize>(
     message: &T,
     player_id: &PlayerId,
     max_outbound_message_size: usize,
+    metrics: &crate::metrics::ServerMetrics,
 ) -> Result<(), SendMessageError> {
     let json_message =
         match serialize_json_text_limited(message, max_outbound_message_size, 256, "JSON") {
@@ -1917,6 +2005,7 @@ async fn send_serialized_text<T: Serialize>(
         Message::Text(json_message.into()),
         player_id,
         max_outbound_message_size,
+        metrics,
     )
     .await
 }

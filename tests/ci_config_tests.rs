@@ -32809,6 +32809,16 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // 417 (was 414): the generation-conditional transport-status delivery path
 // adds three mutable sites. With 42 shards, ceil(417/42) remains 10 and the
 // 29s budget remains 290s per shard (#647).
+// 424 (was 422): the C2 resource-counter slice (#648) adds two mutable
+// sites in the queue-scrape path — `OutboundQueueSample::oldest_age_millis`'s
+// saturating age conversion and `ConnectionManager::outbound_queue_sample`'s
+// oldest-item min/sum — covered by
+// `outbound_queue_sample_walks_live_classified_queues_only` (min selection
+// and scrape-instant age) and
+// `queue_gauges_render_scrape_time_depth_and_age` (exact rendered age).
+// With 42 shards, ceil(424/42) remains 11 and the 29s budget remains 319s
+// per shard. (422 came in with #696's lifecycle-capture fencing, past the
+// 418 of #691/#662; the older notes below predate those jumps.)
 // 414 (was 413): the drain-gated reconnect commit check in
 // `src/coordination/mod.rs` (#654) adds one mutable site. With 42 shards,
 // ceil(414/42) remains 10 and the 29s budget remains 290s per shard.
@@ -32817,7 +32827,7 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // attribution tests (`reliable_slow_consumer_eviction_is_attributed_to_the_
 // triggering_sender` + `reliable_class_sender_classifies_the_attribution_
 // surface`).
-const MUTATION_TOTAL_MUTANTS: u32 = 422;
+const MUTATION_TOTAL_MUTANTS: u32 = 424;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.

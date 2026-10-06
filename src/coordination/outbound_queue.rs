@@ -592,6 +592,32 @@ impl PendingUnsupported {
 }
 
 impl QueueState {
+    /// Resident item count and oldest enqueue instant in ONE pass. The
+    /// control lane is not timestamp-FIFO because fresh control is inserted
+    /// ahead of a trailing causal delivery report, so inspect every resident
+    /// item rather than only each lane's front. The receiver reads the age
+    /// for the slow-consumer sojourn decision (a parked report's age stays
+    /// observability only there) and the sender half reads both for the
+    /// scrape-time queue gauges; both are reads, never mutations.
+    fn depth_and_oldest(&self) -> (usize, Option<Instant>) {
+        let mut depth: usize = 0;
+        let mut oldest = None;
+        for queued in self
+            .legacy
+            .iter()
+            .chain(self.control.iter())
+            .chain(self.data.iter())
+            .chain(self.barriers.iter())
+        {
+            depth = depth.saturating_add(1);
+            oldest = Some(match oldest {
+                Some(existing) if existing < queued.enqueued_at => existing,
+                _ => queued.enqueued_at,
+            });
+        }
+        (depth, oldest)
+    }
+
     fn new(data_capacity: usize, control_capacity: usize) -> Self {
         let now = Instant::now();
         Self {
@@ -893,6 +919,14 @@ impl OutboundSender {
     #[doc(hidden)]
     pub fn clone_operations_for_allocation_benchmark(&self) -> usize {
         self.shared.state().sender_clone_operations
+    }
+
+    /// Resident item count and oldest enqueue instant across every lane,
+    /// read in one pass under the shared state lock — the connection's
+    /// sender-half view for the scrape-time queue-depth/age gauges.
+    /// Observability only; never a deadline input.
+    pub(crate) fn depth_and_oldest(&self) -> (usize, Option<Instant>) {
+        self.shared.state().depth_and_oldest()
     }
 }
 
@@ -2175,18 +2209,11 @@ impl OutboundReceiver {
     /// each lane's front. Reliable-lane age (among the writer's per-class
     /// deadline policies) drives the slow-consumer sojourn close; a parked
     /// report's age stays observability only — its own write expires by write
-    /// progress, not queue age.
+    /// progress, not queue age. Test-only: the production scrape reads the
+    /// same walk through the connection's sender half.
     #[cfg(test)]
-    pub fn oldest_enqueued_at(&self) -> Option<Instant> {
-        let state = self.shared.state();
-        state
-            .legacy
-            .iter()
-            .chain(state.control.iter())
-            .chain(state.data.iter())
-            .chain(state.barriers.iter())
-            .map(|queued| queued.enqueued_at)
-            .min()
+    pub(crate) fn oldest_enqueued_at(&self) -> Option<Instant> {
+        self.shared.state().depth_and_oldest().1
     }
 
     /// Oldest reliable item still resident in any queue lane.

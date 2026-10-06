@@ -332,8 +332,7 @@ co-room checks and per-incarnation stream machinery validate unchanged,
 the multi-wave shift composes on the original timeline, and two
 real-socket cells plus deterministic controls (plan shape, composed
 shift, code uniqueness, missing rejoin half, stale-generation misroute)
-carry red proofs. Remaining below: unsupported-format cells, and richer
-resource counters.
+carry red proofs. Remaining below: unsupported-format cells.
 
 - [x] Churn/reconnect schedules: reconnect-burst and room-replacement
   shapes per the C3 cells, with red-first controls for each new permitted
@@ -384,11 +383,15 @@ resource counters.
   delivery counters, slow-consumer disconnects, active connections, server
   RSS, cgroup memory, generator RSS, disconnect reasons (recorded as
   events), and — on lossy-class runs — the run class's seven accountable
-  per-class outcomes, with
-  scrape failures recorded as explicit samples. Remaining:
-  server CPU time, generator CPU, socket-memory accounting, ingress/egress
-  bytes, queue depth/age, live objects, cleanup backlog, and maintenance
-  duration. Keep instrumentation out of timed hot paths.
+  per-class outcomes, and the byte pair (ingress
+  `signal_fish_relay_bytes_total`, egress
+  `signal_fish_websocket_egress_bytes_total`, maintained on the write path)
+  plus the queue posture (`signal_fish_websocket_queue_depth`,
+  `signal_fish_websocket_queue_oldest_age_milliseconds`, computed at
+  scrape time), with scrape failures recorded as explicit samples.
+  Remaining: server CPU time, generator CPU, socket-memory accounting,
+  live objects, cleanup backlog, and maintenance duration. Keep
+  instrumentation out of timed hot paths.
 - [x] Runner negative controls: deliberately missing/duplicate/misrouted
   deliveries, delayed sends (pause appears in scheduled-send latency instead
   of reducing offered load), slow readers, generator saturation, and server
