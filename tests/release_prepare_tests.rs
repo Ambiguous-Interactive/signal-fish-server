@@ -378,7 +378,11 @@ fn prepare_release_applies_every_semver_bump_and_synchronizes_release_files() {
         // The canonical v3 sample must disclose the new release exactly where
         // the contract requires it (tests/protocol_samples.rs pins it to
         // CARGO_PKG_VERSION), while the unrelated decoy version survives.
-        let v3_sample = read(fixture.root.join(".llm/code-samples/protocol/v3-server-messages.jsonl"));
+        let v3_sample = read(
+            fixture
+                .root
+                .join(".llm/code-samples/protocol/v3-server-messages.jsonl"),
+        );
         assert!(
             v3_sample.contains(&format!("\"implementation_version\": \"{expected}\"")),
             "v3 sample did not disclose {expected}:\n{v3_sample}"
@@ -533,7 +537,9 @@ fn prepare_release_fails_closed_on_stale_v3_sample_implementation_version() {
     // previous refresh was skipped or hand-edited; the release must not paper
     // over the drift (tests/protocol_samples.rs would reject it afterwards).
     let fixture = Fixture::new("1.2.3");
-    let sample = fixture.root.join(".llm/code-samples/protocol/v3-server-messages.jsonl");
+    let sample = fixture
+        .root
+        .join(".llm/code-samples/protocol/v3-server-messages.jsonl");
     write(
         &sample,
         "{\"type\": \"ProtocolInfo\", \"data\": {\
@@ -547,9 +553,8 @@ fn prepare_release_fails_closed_on_stale_v3_sample_implementation_version() {
         "stale v3 sample version unexpectedly passed"
     );
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains(
-            "Expected at least one ProtocolInfo implementation_version at 1.2.3"
-        ),
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Expected at least one ProtocolInfo implementation_version at 1.2.3"),
         "unexpected stale-sample diagnostic:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
