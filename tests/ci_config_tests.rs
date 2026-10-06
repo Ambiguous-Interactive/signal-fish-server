@@ -7040,6 +7040,8 @@ fn test_prepare_release_script_updates_every_canonical_release_input() {
         "docs/getting-started.md",
         "replace_release_config_url",
         ".llm/context.md",
+        "replace_v3_sample_implementation_version",
+        ".llm/code-samples/protocol/v3-server-messages.jsonl",
         "Unreleased",
         "cut_changelog_release CHANGELOG.md \"$NEXT_VERSION\" \"$RELEASE_DATE\" \"$CURRENT_VERSION\"",
         "metadata --locked --format-version 1",
