@@ -67,68 +67,65 @@ function Add-ChangedFile {
     [void]$Map[$File].Add($Commit)
 }
 
-function Get-RevList {
+function Add-ChangedFilesFromPushedCommits {
+    # One git spawn produces the pushed commit list and every changed path.
+    # The former rev-list + diff-tree --stdin pair cost two process spawns on
+    # every push; `git log --raw` walks the same excluded commit set and emits
+    # the same NUL-delimited `commit hash` / `:mode mode sha sha ST` / `path`
+    # tokens (with `--diff-merges=separate` carrying diff-tree `-m` semantics),
+    # so the parser below is unchanged apart from trimming the `git log`
+    # commit token's trailing newline.
     param(
+        [System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]$Map,
         [Parameter(Mandatory = $true)][string]$LocalSha,
         [Parameter(Mandatory = $true)][string]$RemoteSha,
         [Parameter(Mandatory = $true)][string]$AllZeroSha,
         [AllowEmptyString()][string]$RemoteName = ""
     )
 
+    $remoteArg = if ([string]::IsNullOrWhiteSpace($RemoteName)) { "--remotes" } else { "--remotes=$RemoteName" }
+    $logArgs = @(
+        "log", "--format=%H", "--raw", "--no-abbrev", "-z", "--root",
+        "--diff-merges=separate", $LocalSha, "--not"
+    )
     if ($RemoteSha -eq $AllZeroSha) {
-        $remoteArg = if ([string]::IsNullOrWhiteSpace($RemoteName)) { "--remotes" } else { "--remotes=$RemoteName" }
-        $result = Invoke-Native -FileName "git" -Arguments @("rev-list", $LocalSha, "--not", $remoteArg)
+        # A new-branch push excludes every remote ref.
+        $result = Invoke-Native -FileName "git" -Arguments ($logArgs + $remoteArg)
     } else {
         # A force-push after rebasing can place commits from another remote branch
         # outside RemoteSha..LocalSha. Those commits are already present on the
         # target remote, so only inspect commits the push would newly introduce.
-        $remoteArg = if ([string]::IsNullOrWhiteSpace($RemoteName)) { "--remotes" } else { "--remotes=$RemoteName" }
-        $result = Invoke-Native -FileName "git" -Arguments @("rev-list", $LocalSha, "--not", $RemoteSha, $remoteArg)
+        $result = Invoke-Native -FileName "git" -Arguments ($logArgs + $RemoteSha + $remoteArg)
     }
 
     if ($result.ExitCode -ne 0 -and $RemoteSha -ne $AllZeroSha) {
-        $remoteArg = if ([string]::IsNullOrWhiteSpace($RemoteName)) { "--remotes" } else { "--remotes=$RemoteName" }
-        $result = Invoke-Native -FileName "git" -Arguments @("rev-list", $LocalSha, "--not", $remoteArg)
+        $result = Invoke-Native -FileName "git" -Arguments ($logArgs + $remoteArg)
     }
 
     if ($result.ExitCode -ne 0) {
-        throw "git rev-list failed:`n$($result.Output)"
+        throw "git log --raw failed:`n$($result.Output)"
     }
 
-    @($result.Stdout -split "`n" |
-        ForEach-Object { $_.Trim() } |
-        Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-}
-
-function Add-ChangedFilesFromCommits {
-    param(
-        [System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]$Map,
-        [string[]]$Commits
-    )
-
-    if ($Commits.Count -eq 0) {
-        return
-    }
-
-    $diffInput = ($Commits -join "`n") + "`n"
-    $diff = Invoke-NativeWithInput -FileName "git" -Arguments @("diff-tree", "--stdin", "--root", "--raw", "-r", "-m", "-z") -InputText $diffInput
-    if ($diff.ExitCode -ne 0) {
-        throw "git diff-tree --stdin failed:`n$($diff.Output)"
-    }
-
-    $entries = @(Split-NulOutput -Text $diff.Stdout)
+    $entries = @(Split-NulOutput -Text $result.Stdout)
     $currentCommit = $null
     for ($index = 0; $index -lt $entries.Count; $index++) {
         $entry = $entries[$index]
-        if ($entry -match "^[0-9a-fA-F]{40}$") {
-            $currentCommit = $entry.ToLowerInvariant()
+        # `git log` NUL-terminates its commit token and the raw format adds a
+        # newline after it (`hash\0\n`), so trim before the exact-shape match;
+        # a stored trailing newline would miss every blob-cache key.
+        $candidate = $entry.Trim()
+        if ($candidate -match "^[0-9a-fA-F]{40}$") {
+            $currentCommit = $candidate.ToLowerInvariant()
             continue
         }
 
-        if ($null -eq $currentCommit -or -not $entry.StartsWith(":")) {
+        if ($null -eq $currentCommit -or -not $entry.TrimStart().StartsWith(":")) {
             continue
         }
 
+        # `git log --raw -z` starts the meta token with the pretty format's
+        # trailing newline (`hash\0\n:meta`); split fields off the trimmed form.
+        $entry = $entry.TrimStart()
         $fields = @($entry -split "\s+" | Where-Object { $_ -ne "" })
         if ($fields.Count -lt 5) {
             continue
@@ -183,8 +180,7 @@ function Get-ChangedFilesForPush {
             continue
         }
 
-        $commits = @(Get-RevList -LocalSha $localSha -RemoteSha $remoteSha -AllZeroSha $allZeroSha -RemoteName $script:RemoteName)
-        Add-ChangedFilesFromCommits -Map $files -Commits $commits
+        Add-ChangedFilesFromPushedCommits -Map $files -LocalSha $localSha -RemoteSha $remoteSha -AllZeroSha $allZeroSha -RemoteName $script:RemoteName
     }
 
     $files
