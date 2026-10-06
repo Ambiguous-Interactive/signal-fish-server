@@ -72,9 +72,10 @@ function Add-ChangedFilesFromPushedCommits {
     # The former rev-list + diff-tree --stdin pair cost two process spawns on
     # every push; `git log --raw` walks the same excluded commit set and emits
     # the same NUL-delimited `commit hash` / `:mode mode sha sha ST` / `path`
-    # tokens (with `--diff-merges=separate` carrying diff-tree `-m` semantics),
-    # so the parser below is unchanged apart from trimming the `git log`
-    # commit token's trailing newline.
+    # tokens (with `--diff-merges=separate` carrying diff-tree `-m` semantics
+    # and `--no-renames` keeping plumbing behavior — no porcelain rename
+    # detection, so the output stays independent of the user's diff.* config).
+    # The parser below only adapts to `git log`'s newline placement.
     param(
         [System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]$Map,
         [Parameter(Mandatory = $true)][string]$LocalSha,
@@ -86,7 +87,7 @@ function Add-ChangedFilesFromPushedCommits {
     $remoteArg = if ([string]::IsNullOrWhiteSpace($RemoteName)) { "--remotes" } else { "--remotes=$RemoteName" }
     $logArgs = @(
         "log", "--format=%H", "--raw", "--no-abbrev", "-z", "--root",
-        "--diff-merges=separate", $LocalSha, "--not"
+        "--no-renames", "--diff-merges=separate", $LocalSha, "--not"
     )
     if ($RemoteSha -eq $AllZeroSha) {
         # A new-branch push excludes every remote ref.
