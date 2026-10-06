@@ -19,6 +19,11 @@
 //! - the room-replacement cell: whole rooms cycling into fresh room-code
 //!   generations per wave while other rooms keep serving, with the same
 //!   exactly-once stream contract across the replacements' incarnations,
+//! - the unsupported-format contract experiment: the room's opaque `rkyv`
+//!   sender reaches no cross-format recipient — every omission arrives as
+//!   an exact `unsupported_format` gap report plus the rate-limited
+//!   advisory, with no payload leak and the server counter in exact
+//!   agreement,
 //! - the negative controls: missing, duplicate, misrouted, and out-of-order
 //!   deliveries, unreported lossy-class holes, gap-report violations,
 //!   stale-epoch and below-tail deliveries across a storm, an unperformed
@@ -43,12 +48,13 @@ mod schedule;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
-use config::{ChurnSchedule, DeliveryClass, Encoding, RunConfig};
+use config::{ChurnSchedule, DeliveryClass, Encoding, Experiment, RunConfig};
 use records::{EventLog, GapEvent, ReceiptEvent, RunRecords, SentEvent};
 use schedule::{build_run_shape, ChurnPlan, SenderPlan};
-use signal_fish_server::protocol::DeliveryGapReason;
+use signal_fish_server::protocol::{DeliveryGapReason, ServerMessage};
 
 /// The small scenario at the heart of the C2 acceptance gate: one room, four
 /// v3 clients, reliable relay traffic over real sockets, artifacts written,
@@ -607,6 +613,97 @@ async fn latest_with_distinct_keys_delivers_every_message_without_policy_loss() 
     assert_eq!(outcome.summary.totals.receipts, expected_receipts);
 }
 
+/// The unsupported-format contract experiment over real sockets: peer 0 of
+/// the room negotiates opaque `rkyv` and sends binary frames; the three
+/// JSON observers receive NO payload from it — every omitted sequence
+/// arrives as an exact `unsupported_format` gap report plus the
+/// rate-limited advisory — while the text streams stay exactly-once for
+/// every recipient, the opaque sender included. The server's
+/// `unsupported_format` outcome counter must agree with the validated
+/// coverage exactly, and the labeled artifacts must replay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unsupported_format_experiment_reports_cross_format_omissions_over_real_sockets() {
+    let output = tempfile::tempdir().expect("create output tempdir");
+    let mut config = scenario_config(Encoding::V3Json);
+    config.output_dir = output.path().to_path_buf();
+    config.experiment = Some(Experiment::UnsupportedFormat);
+    config.server_overlay = RunConfig::unsupported_format_overlay();
+    config.drain_grace = Duration::from_secs(2);
+
+    let sends_per_sender = config.warmup_sends_per_sender() + config.measured_sends_per_sender();
+    let observers = u64::from(config.players_per_room - 1);
+    // Text receipts: the three JSON senders reach every co-room peer (the
+    // text relay lane is format-blind); the opaque stream reaches nobody.
+    let text_receipts = sends_per_sender
+        * u64::from(config.players_per_room - 1)
+        * u64::from(config.players_per_room - 1);
+
+    let outcome = runner::run(config).await.expect("experiment run completes");
+    let summary = &outcome.summary;
+    assert!(
+        summary.valid,
+        "the refusal path with exact reports is contract-legal: {:?}",
+        summary.reasons
+    );
+    assert_eq!(
+        summary.experiment.as_deref(),
+        Some("unsupported-format"),
+        "the summary carries its contract-experiment label"
+    );
+    assert_eq!(
+        summary.totals.gap_covered,
+        observers * sends_per_sender,
+        "every opaque-stream omission must be gap-covered exactly: {:?}",
+        summary.totals
+    );
+    assert_eq!(
+        summary.totals.receipts, text_receipts,
+        "the opaque stream must reach no cross-format recipient: {:?}",
+        summary.totals
+    );
+    assert!(
+        summary.unsupported_notices >= 1,
+        "the rate-limited advisory path must be observable evidence"
+    );
+    for recipient in &summary.per_recipient {
+        let expected = if recipient.recipient == "r0p0" {
+            0
+        } else {
+            sends_per_sender
+        };
+        assert_eq!(
+            recipient.gap_covered, expected,
+            "each observer absorbs the opaque stream as exact reports: {recipient:?}"
+        );
+        assert_eq!(
+            recipient.missing, 0,
+            "no silent omissions anywhere: {recipient:?}"
+        );
+    }
+
+    // Server-side accounting agrees exactly: every refused cross-format
+    // fan-out lands in the reliable class's unsupported_format outcome.
+    let counters = outcome
+        .final_counters
+        .as_ref()
+        .expect("the run recorded at least one server scrape");
+    let unsupported = counters
+        .get("class_outcome_unsupported_format")
+        .and_then(serde_json::Value::as_u64)
+        .expect("class outcomes are recorded for an experiment run");
+    assert_eq!(
+        unsupported,
+        observers * sends_per_sender,
+        "the server's unsupported_format counter must equal the validated coverage"
+    );
+
+    let replayed = artifacts::replay(output.path()).expect("replay artifacts");
+    assert_eq!(
+        serde_json::to_value(&replayed).expect("serialize replay"),
+        serde_json::to_value(summary).expect("serialize summary"),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Oracle negative controls (deterministic, no server): the detector must
 // catch each contract violation with its exact, named reason.
@@ -625,6 +722,7 @@ fn a_missing_delivery_invalidates_the_run_with_the_exact_first_gap() {
         1_000,
         context.delivery_class,
         &ChurnPlan::default(),
+        context.experiment,
     );
     assert!(!summary.valid);
     assert!(
@@ -650,6 +748,7 @@ fn a_missing_delivery_invalidates_the_run_with_the_exact_first_gap() {
         1_000,
         context.delivery_class,
         &ChurnPlan::default(),
+        context.experiment,
     );
     assert!(
         baseline.valid,
@@ -679,6 +778,7 @@ fn a_duplicate_delivery_invalidates_the_run_naming_the_duplicate() {
         1_000,
         context.delivery_class,
         &ChurnPlan::default(),
+        context.experiment,
     );
     assert!(!summary.valid);
     assert!(
@@ -718,6 +818,7 @@ fn a_misrouted_cross_room_delivery_invalidates_the_run() {
         1_000,
         context.delivery_class,
         &ChurnPlan::default(),
+        context.experiment,
     );
     assert!(!summary.valid);
     assert!(
@@ -774,6 +875,7 @@ fn an_out_of_order_stream_invalidates_the_run() {
         1_000,
         context.delivery_class,
         &ChurnPlan::default(),
+        context.experiment,
     );
     assert!(!summary.valid);
     assert!(
@@ -824,6 +926,7 @@ fn a_latest_omission_without_a_gap_report_is_missing_work() {
         1_000,
         context.delivery_class,
         &ChurnPlan::default(),
+        context.experiment,
     );
     assert!(!summary.valid);
     assert!(
@@ -863,6 +966,7 @@ fn a_gap_reported_latest_omission_is_valid_and_accounted() {
         1_000,
         context.delivery_class,
         &ChurnPlan::default(),
+        context.experiment,
     );
     assert!(
         summary.valid,
@@ -898,6 +1002,7 @@ fn a_gap_overlapping_a_delivery_is_invalid() {
         1_000,
         context.delivery_class,
         &ChurnPlan::default(),
+        context.experiment,
     );
     assert!(!summary.valid);
     assert!(
@@ -924,6 +1029,7 @@ fn a_gap_overlapping_a_delivery_is_invalid() {
         1_000,
         context.delivery_class,
         &ChurnPlan::default(),
+        context.experiment,
     );
     assert!(!summary.valid);
     assert_eq!(summary.totals.gap_covered, 0);
@@ -965,6 +1071,7 @@ fn a_gap_reason_the_class_cannot_produce_is_invalid() {
         1_000,
         context.delivery_class,
         &ChurnPlan::default(),
+        context.experiment,
     );
     assert!(!summary.valid);
     assert!(
@@ -992,6 +1099,7 @@ fn a_gap_beyond_the_sent_stream_is_invalid() {
         1_000,
         context.delivery_class,
         &ChurnPlan::default(),
+        context.experiment,
     );
     assert!(!summary.valid);
     assert!(
@@ -1023,6 +1131,7 @@ fn any_gap_in_a_reliable_run_is_invalid() {
         1_000,
         context.delivery_class,
         &ChurnPlan::default(),
+        context.experiment,
     );
     assert!(!summary.valid);
     assert!(
@@ -1050,6 +1159,7 @@ fn a_disconnected_recipient_may_lose_only_the_uncovered_tail() {
             1_000,
             context.delivery_class,
             &ChurnPlan::default(),
+            context.experiment,
         )
     };
     let mut records = complete_records(&context.plans);
@@ -1155,6 +1265,7 @@ fn a_self_referential_gap_is_invalid() {
         1_000,
         context.delivery_class,
         &ChurnPlan::default(),
+        context.experiment,
     );
     assert!(!summary.valid);
     assert!(
@@ -1164,6 +1275,519 @@ fn a_self_referential_gap_is_invalid() {
             .any(|reason| matches!(reason, oracle::InvalidReason::InvalidGapReports { .. })),
         "expected the invalid-gap reason, got {:?}",
         summary.reasons
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Unsupported-format experiment controls (deterministic, no server): the
+// cross-format refusal contract — exact `unsupported_format` coverage, no
+// payload leak, a bounded advisory cadence — with its scope pinned shut.
+// ---------------------------------------------------------------------------
+
+/// The contract-legal event set for the experiment baseline: the opaque
+/// sender's (`r0p0`) stream reaches nobody — every sequence is covered by
+/// an exact `unsupported_format` gap at every co-room peer — every text
+/// stream delivers exactly once, and each observer records one advisory.
+fn experiment_complete_records(plans: &[SenderPlan]) -> RunRecords {
+    let log = EventLog::new();
+    let opaque = plans
+        .iter()
+        .find(|plan| plan.player == 0)
+        .expect("peer 0 is the opaque sender");
+    for plan in plans {
+        for send in &plan.sends {
+            log.push_sent(SentEvent {
+                sender: plan.name.clone(),
+                room: plan.room,
+                seq: send.seq,
+                epoch: 1,
+                intended_us: send.intended_us,
+                sent_us: send.intended_us + 5,
+                phase: send.phase,
+            });
+        }
+    }
+    for plan in plans {
+        for other in plans {
+            if other.room != plan.room || other.name == plan.name || other.player == 0 {
+                continue;
+            }
+            for send in &other.sends {
+                log.push_receipt(ReceiptEvent {
+                    recipient: plan.name.clone(),
+                    sender: other.name.clone(),
+                    seq: send.seq,
+                    epoch: 1,
+                    server_seq: send.seq + 1,
+                    received_us: send.intended_us + 8,
+                });
+            }
+        }
+    }
+    for plan in plans {
+        if plan.name == opaque.name {
+            continue;
+        }
+        for send in &opaque.sends {
+            log.push_gap(GapEvent {
+                recipient: plan.name.clone(),
+                sender: opaque.name.clone(),
+                epoch: 1,
+                from_seq: send.seq + 1,
+                to_seq: send.seq + 1,
+                reason: DeliveryGapReason::UnsupportedFormat,
+            });
+        }
+        log.push_unsupported_notice(records::UnsupportedNoticeEvent {
+            recipient: plan.name.clone(),
+            at_us: 0,
+        });
+    }
+    log.snapshot()
+}
+
+/// The advisory cadence bound the oracle enforces (see
+/// `oracle::summarize`'s notice-cadence check — keep the two formulas in
+/// lockstep): one immediate notice per opaque sender, the span's per-second
+/// cadence ceiling, one boundary slot, one drain slot.
+fn notice_bound(records: &RunRecords) -> u64 {
+    let span_us = records
+        .sent
+        .iter()
+        .map(|sent| sent.sent_us)
+        .max()
+        .unwrap_or(0);
+    1 + span_us.div_ceil(1_000_000) + 1 + 1
+}
+
+/// The experiment's valid baseline: full gap coverage, zero receipts from
+/// the opaque sender, the labeled summary, and the accounted notices.
+#[test]
+fn the_unsupported_format_experiment_baseline_is_valid() {
+    let context = unit_context_with_experiment();
+    let records = experiment_complete_records(&context.plans);
+    let summary = oracle::summarize(
+        &context.plans,
+        &context.roster,
+        &records,
+        1_000,
+        context.delivery_class,
+        &ChurnPlan::default(),
+        context.experiment,
+    );
+    assert!(
+        summary.valid,
+        "exact reports for the opaque stream are contract-legal: {:?}",
+        summary.reasons
+    );
+    assert_eq!(
+        summary.experiment.as_deref(),
+        Some("unsupported-format"),
+        "the summary carries its contract-experiment label"
+    );
+    let opaque_sends = u64::try_from(
+        context
+            .plans
+            .iter()
+            .find(|plan| plan.player == 0)
+            .expect("peer 0")
+            .sends
+            .len(),
+    )
+    .expect("send count fits u64");
+    let observers = u64::try_from(context.roster.len() - 1).expect("count fits u64");
+    assert_eq!(
+        summary.totals.gap_covered,
+        observers * opaque_sends,
+        "every opaque-stream omission is accounted: {:?}",
+        summary.totals
+    );
+    assert_eq!(summary.unsupported_notices, observers);
+}
+
+/// One opaque-stream omission without its report is a hole, named exactly.
+#[test]
+fn an_unreported_opaque_omission_is_a_hole() {
+    let context = unit_context_with_experiment();
+    let mut records = experiment_complete_records(&context.plans);
+    records
+        .gaps
+        .retain(|gap| !(gap.recipient == "r0p1" && gap.sender == "r0p0" && gap.from_seq == 3));
+    let summary = oracle::summarize(
+        &context.plans,
+        &context.roster,
+        &records,
+        1_000,
+        context.delivery_class,
+        &ChurnPlan::default(),
+        context.experiment,
+    );
+    assert!(!summary.valid);
+    assert!(
+        summary
+            .reasons
+            .contains(&oracle::InvalidReason::MissingDeliveries {
+                count: 1,
+                first: oracle::DeliveryKey {
+                    recipient: "r0p1".to_string(),
+                    sender: "r0p0".to_string(),
+                    epoch: 1,
+                    seq: 3,
+                },
+            }),
+        "the unreported opaque omission must be a named hole, got {:?}",
+        summary.reasons
+    );
+}
+
+/// A payload from the opaque sender that DID reach a cross-format recipient
+/// is the leak class — the one outcome the cell exists to catch.
+#[test]
+fn a_payload_from_the_opaque_sender_is_the_leak_class() {
+    let context = unit_context_with_experiment();
+    let mut records = experiment_complete_records(&context.plans);
+    // Sequence 3 was reported AND delivered: the contract is broken twice —
+    // the report covers what must not have been omitted, and the payload
+    // crossed formats. Remove the report so the leak is the isolated fault.
+    records
+        .gaps
+        .retain(|gap| !(gap.recipient == "r0p1" && gap.sender == "r0p0" && gap.from_seq == 3));
+    records.receipts.push(ReceiptEvent {
+        recipient: "r0p1".to_string(),
+        sender: "r0p0".to_string(),
+        seq: 2,
+        epoch: 1,
+        server_seq: 3,
+        received_us: 10,
+    });
+    let summary = oracle::summarize(
+        &context.plans,
+        &context.roster,
+        &records,
+        1_000,
+        context.delivery_class,
+        &ChurnPlan::default(),
+        context.experiment,
+    );
+    assert!(!summary.valid);
+    assert!(
+        summary
+            .reasons
+            .contains(&oracle::InvalidReason::UnsupportedFormatLeak {
+                count: 1,
+                first: oracle::DeliveryKey {
+                    recipient: "r0p1".to_string(),
+                    sender: "r0p0".to_string(),
+                    epoch: 1,
+                    seq: 3,
+                },
+            }),
+        "the payload crossing formats must be named as the leak, got {:?}",
+        summary.reasons
+    );
+}
+
+/// An opaque-stream omission covered with a foreign reason is a violation:
+/// the refusal family has exactly one reason.
+#[test]
+fn an_opaque_gap_with_a_foreign_reason_is_invalid() {
+    let context = unit_context_with_experiment();
+    let mut records = experiment_complete_records(&context.plans);
+    for gap in &mut records.gaps {
+        if gap.recipient == "r0p1" && gap.sender == "r0p0" && gap.from_seq == 3 {
+            gap.reason = DeliveryGapReason::VolatileDropped;
+        }
+    }
+    let summary = oracle::summarize(
+        &context.plans,
+        &context.roster,
+        &records,
+        1_000,
+        context.delivery_class,
+        &ChurnPlan::default(),
+        context.experiment,
+    );
+    assert!(!summary.valid);
+    assert!(
+        summary
+            .reasons
+            .iter()
+            .any(|reason| matches!(reason, oracle::InvalidReason::InvalidGapReports { .. })),
+        "a foreign reason on the opaque stream must be an invalid gap, got {:?}",
+        summary.reasons
+    );
+}
+
+/// The experiment widens the gap contract ONLY on the opaque streams: a
+/// gap report on a text stream (JSON sender -> observer) is still the
+/// reliable-run violation it always was.
+#[test]
+fn an_unsupported_format_gap_on_a_text_stream_stays_invalid() {
+    let context = unit_context_with_experiment();
+    let mut records = experiment_complete_records(&context.plans);
+    drop_receipt(&mut records, "r0p2", "r0p1", 2);
+    records.gaps.push(gap_for(
+        "r0p2",
+        "r0p1",
+        2,
+        DeliveryGapReason::UnsupportedFormat,
+    ));
+    let summary = oracle::summarize(
+        &context.plans,
+        &context.roster,
+        &records,
+        1_000,
+        context.delivery_class,
+        &ChurnPlan::default(),
+        context.experiment,
+    );
+    assert!(!summary.valid);
+    assert!(
+        summary
+            .reasons
+            .iter()
+            .any(|reason| matches!(reason, oracle::InvalidReason::InvalidGapReports { .. })),
+        "the reliable text streams keep their no-gaps contract, got {:?}",
+        summary.reasons
+    );
+}
+
+/// The advisory cadence is bounded: the boundary count is valid, one more
+/// notice is the flood class with the exact count and bound.
+#[test]
+fn the_notice_cadence_bound_is_exact() {
+    let context = unit_context_with_experiment();
+    let records = experiment_complete_records(&context.plans);
+    let bound = notice_bound(&records);
+    assert!(
+        bound >= 1,
+        "the unit run's span bounds at least one notice per observer"
+    );
+
+    // At the bound: valid.
+    let mut at_bound = records.clone();
+    while u64::try_from(
+        at_bound
+            .unsupported_notices
+            .iter()
+            .filter(|notice| notice.recipient == "r0p1")
+            .count(),
+    )
+    .unwrap_or(0)
+        < bound
+    {
+        at_bound
+            .unsupported_notices
+            .push(records::UnsupportedNoticeEvent {
+                recipient: "r0p1".to_string(),
+                at_us: 0,
+            });
+    }
+    let summary = oracle::summarize(
+        &context.plans,
+        &context.roster,
+        &at_bound,
+        1_000,
+        context.delivery_class,
+        &ChurnPlan::default(),
+        context.experiment,
+    );
+    assert!(
+        summary.valid,
+        "notices at the cadence bound are legal: {:?}",
+        summary.reasons
+    );
+
+    // One past the bound at one observer: the flood reason, naming the
+    // recipient with its exact per-recipient count and bound.
+    let mut flooded = records.clone();
+    let r0p1_notices = |records: &RunRecords| -> u64 {
+        u64::try_from(
+            records
+                .unsupported_notices
+                .iter()
+                .filter(|notice| notice.recipient == "r0p1")
+                .count(),
+        )
+        .expect("notice count fits u64")
+    };
+    while r0p1_notices(&flooded) <= bound {
+        flooded
+            .unsupported_notices
+            .push(records::UnsupportedNoticeEvent {
+                recipient: "r0p1".to_string(),
+                at_us: 0,
+            });
+    }
+    let count = r0p1_notices(&flooded);
+    assert_eq!(count, bound + 1, "the flood is one notice past its bound");
+    let summary = oracle::summarize(
+        &context.plans,
+        &context.roster,
+        &flooded,
+        1_000,
+        context.delivery_class,
+        &ChurnPlan::default(),
+        context.experiment,
+    );
+    assert!(!summary.valid);
+    assert!(
+        summary
+            .reasons
+            .contains(&oracle::InvalidReason::UnsupportedNoticeFlood {
+                recipient: "r0p1".to_string(),
+                count,
+                bound,
+            }),
+        "the flood must be named with its exact count and bound, got {:?}",
+        summary.reasons
+    );
+}
+
+/// The inbound classification under the experiment: a binary frame is the
+/// leak class, an advisory at a cross-format observer is a recorded notice,
+/// the same advisory at the opaque sender is a rejection, and any other
+/// error code stays a rejection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn experiment_inbound_classification_is_exact() {
+    use signal_fish_server::protocol::ErrorCode;
+    let registry: runner::SenderRegistry = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+    let epoch = tokio::time::Instant::now();
+    let observer = runner::ExperimentContext {
+        active: true,
+        opaque_sender: false,
+    };
+    let opaque = runner::ExperimentContext {
+        active: true,
+        opaque_sender: true,
+    };
+    let advisory = |code: ErrorCode| {
+        let frame = serde_json::to_string(&ServerMessage::Error {
+            message: "Undeliverable game data from player 1 (rkyv payload cannot be converted \
+                      for this connection)"
+                .to_string(),
+            error_code: Some(code),
+        })
+        .expect("serialize the advisory");
+        Ok(tokio_tungstenite::tungstenite::Message::Text(frame.into()))
+    };
+
+    // A binary frame at an observer: the leak class, recorded as evidence.
+    let log = Arc::new(EventLog::new());
+    let survived = runner::handle_inbound(
+        "r0p1",
+        Ok(tokio_tungstenite::tungstenite::Message::Binary(
+            Vec::new().into(),
+        )),
+        &registry,
+        epoch,
+        &log,
+        observer,
+    )
+    .await;
+    assert!(survived, "the leak is evidence; the session keeps reading");
+    let records = log.snapshot();
+    assert!(
+        records
+            .faults
+            .iter()
+            .any(|reason| matches!(reason, oracle::InvalidReason::UnsupportedFormatLeak { .. })),
+        "a binary frame under the experiment is the leak class, got {:?}",
+        records.faults
+    );
+
+    // The advisory at a cross-format observer: a permitted notice.
+    let log = Arc::new(EventLog::new());
+    let survived = runner::handle_inbound(
+        "r0p1",
+        advisory(ErrorCode::UnsupportedGameDataFormat),
+        &registry,
+        epoch,
+        &log,
+        observer,
+    )
+    .await;
+    assert!(survived);
+    let records = log.snapshot();
+    assert!(
+        records.faults.is_empty(),
+        "the advisory is not a rejection: {:?}",
+        records.faults
+    );
+    assert_eq!(records.unsupported_notices.len(), 1);
+
+    // The same advisory at the opaque sender: a rejection (it converts for
+    // nobody; nobody sends opaque TO it).
+    let log = Arc::new(EventLog::new());
+    let survived = runner::handle_inbound(
+        "r0p0",
+        advisory(ErrorCode::UnsupportedGameDataFormat),
+        &registry,
+        epoch,
+        &log,
+        opaque,
+    )
+    .await;
+    assert!(survived);
+    let records = log.snapshot();
+    assert!(
+        records.unsupported_notices.is_empty()
+            && records
+                .faults
+                .iter()
+                .any(|reason| matches!(reason, oracle::InvalidReason::ServerRejected { .. })),
+        "an advisory at the opaque sender stays a fault, got {:?}",
+        records.faults
+    );
+
+    // Any other error code at an observer stays a rejection.
+    let log = Arc::new(EventLog::new());
+    let survived = runner::handle_inbound(
+        "r0p1",
+        advisory(ErrorCode::InvalidInput),
+        &registry,
+        epoch,
+        &log,
+        observer,
+    )
+    .await;
+    assert!(survived);
+    let records = log.snapshot();
+    assert!(
+        records.unsupported_notices.is_empty()
+            && records
+                .faults
+                .iter()
+                .any(|reason| matches!(reason, oracle::InvalidReason::ServerRejected { .. })),
+        "a non-advisory error stays a fault, got {:?}",
+        records.faults
+    );
+
+    // Outside the experiment, the same frame is the plain rejection it
+    // always was (the scope stays pinned shut).
+    let log = Arc::new(EventLog::new());
+    let survived = runner::handle_inbound(
+        "r0p1",
+        advisory(ErrorCode::UnsupportedGameDataFormat),
+        &registry,
+        epoch,
+        &log,
+        runner::ExperimentContext {
+            active: false,
+            opaque_sender: false,
+        },
+    )
+    .await;
+    assert!(survived);
+    let records = log.snapshot();
+    assert!(
+        records.unsupported_notices.is_empty()
+            && records
+                .faults
+                .iter()
+                .any(|reason| matches!(reason, oracle::InvalidReason::ServerRejected { .. })),
+        "outside the experiment an advisory is a rejection, got {:?}",
+        records.faults
     );
 }
 
@@ -1234,6 +1858,22 @@ fn the_environment_parser_shapes_a_run_and_rejects_unknown_values() {
     std::env::remove_var("CAPACITY_RUNNER_CHURN_INTERVAL_MS");
     let config = RunConfig::from_env().expect("cleared churn env parses");
     assert_eq!(config.churn, ChurnSchedule::None);
+
+    // The experiment label parses and selects its overlay; an unknown value
+    // fails loudly.
+    std::env::set_var("CAPACITY_RUNNER_EXPERIMENT", "teleport");
+    assert!(RunConfig::from_env().is_err());
+    std::env::set_var("CAPACITY_RUNNER_EXPERIMENT", "unsupported-format");
+    let config = RunConfig::from_env().expect("experiment env config parses");
+    assert_eq!(config.experiment, Some(Experiment::UnsupportedFormat));
+    assert_eq!(
+        config.server_overlay["protocol"]["enable_rkyv_game_data"],
+        serde_json::Value::Bool(true),
+        "the experiment env config carries its overlay knob"
+    );
+    std::env::remove_var("CAPACITY_RUNNER_EXPERIMENT");
+    let config = RunConfig::from_env().expect("cleared experiment env parses");
+    assert_eq!(config.experiment, None);
 }
 
 /// Hook/class mismatches are refused before anything is spawned or written:
@@ -1370,6 +2010,45 @@ async fn hook_and_class_mismatches_are_refused_before_any_spawn() {
     assert!(
         runner::run(mismatch).await.is_err(),
         "the storm must complete inside the scheduled-send span"
+    );
+
+    // The unsupported-format experiment is a v3, reliable, churn-free cell
+    // whose overlay must enable the opaque knob it negotiates — anything
+    // else would measure a different (or empty) contract.
+    let mut mismatch = scenario_config(Encoding::V2Json);
+    mismatch.output_dir = probe.clone();
+    mismatch.experiment = Some(Experiment::UnsupportedFormat);
+    assert!(
+        runner::run(mismatch).await.is_err(),
+        "the experiment requires the v3 wire's DeliveryReports"
+    );
+
+    let mut mismatch = scenario_config(Encoding::V3Json);
+    mismatch.output_dir = probe.clone();
+    mismatch.experiment = Some(Experiment::UnsupportedFormat);
+    mismatch.delivery_class = DeliveryClass::Latest;
+    assert!(
+        runner::run(mismatch).await.is_err(),
+        "binary frames carry no delivery class; the opaque lane is the reliable lane"
+    );
+
+    let mut mismatch = scenario_config(Encoding::V3Json);
+    mismatch.output_dir = probe.clone();
+    mismatch.experiment = Some(Experiment::UnsupportedFormat);
+    mismatch.churn = churn;
+    assert!(
+        runner::run(mismatch).await.is_err(),
+        "the experiment does not compose with churn"
+    );
+
+    let mut mismatch = scenario_config(Encoding::V3Json);
+    mismatch.output_dir = probe.clone();
+    mismatch.experiment = Some(Experiment::UnsupportedFormat);
+    // The overlay keeps its default shape (no rkyv knob): the negotiation
+    // would silently downgrade to JSON and the cell would measure nothing.
+    assert!(
+        runner::run(mismatch).await.is_err(),
+        "the experiment requires the overlay to enable rkyv game data"
     );
 
     assert!(
@@ -1869,6 +2548,7 @@ fn churn_context(delivery_class: DeliveryClass) -> (UnitContext, ChurnPlan) {
             plans,
             roster,
             delivery_class,
+            experiment: None,
         },
         churn,
     )
@@ -1953,6 +2633,7 @@ fn a_reconnect_run_completes_every_stream_exactly_once_across_epochs() {
         1_000,
         context.delivery_class,
         &churn,
+        context.experiment,
     );
     assert!(
         summary.valid,
@@ -1993,6 +2674,7 @@ fn a_stale_epoch_delivery_after_the_senders_rejoin_is_a_misroute() {
         1_000,
         context.delivery_class,
         &churn,
+        context.experiment,
     );
     assert!(!summary.valid);
     assert!(
@@ -2045,6 +2727,7 @@ fn a_rejoining_recipient_owes_nothing_below_its_tail_and_all_above_it() {
         1_000,
         context.delivery_class,
         &churn,
+        context.experiment,
     );
     assert!(
         summary.valid,
@@ -2092,6 +2775,7 @@ fn a_rejoining_recipient_owes_nothing_below_its_tail_and_all_above_it() {
         1_000,
         context.delivery_class,
         &churn,
+        context.experiment,
     );
     assert!(!summary.valid);
     assert!(
@@ -2152,6 +2836,7 @@ fn a_below_tail_delivery_after_the_recipients_rejoin_is_a_misroute() {
         1_000,
         context.delivery_class,
         &churn,
+        context.experiment,
     );
     assert!(!summary.valid);
     assert!(
@@ -2179,6 +2864,7 @@ fn a_churn_run_whose_storm_never_fires_is_invalid() {
         1_000,
         context.delivery_class,
         &churn,
+        context.experiment,
     );
     assert!(!summary.valid);
     assert!(
@@ -2227,6 +2913,7 @@ fn replacement_context() -> (UnitContext, ChurnPlan) {
             plans,
             roster,
             delivery_class: DeliveryClass::Reliable,
+            experiment: None,
         },
         churn,
     )
@@ -2360,6 +3047,7 @@ fn a_room_replacement_completes_every_stream_across_the_generation() {
         1_000,
         context.delivery_class,
         &churn,
+        context.experiment,
     );
     assert!(
         summary.valid,
@@ -2451,6 +3139,7 @@ fn a_replacement_wave_whose_rejoin_never_fires_is_invalid() {
         1_000,
         DeliveryClass::Reliable,
         &churn,
+        None,
     );
     assert!(!summary.valid);
     for peer in ["r0p0", "r0p1"] {
@@ -2496,6 +3185,7 @@ fn a_stale_generation_delivery_after_the_replacement_is_a_misroute() {
         1_000,
         context.delivery_class,
         &churn,
+        context.experiment,
     );
     assert!(
         !summary.valid,
@@ -2796,6 +3486,7 @@ fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
         1_000,
         DeliveryClass::Reliable,
         &ChurnPlan::default(),
+        None,
     );
     assert!(
         summary.valid,
@@ -2888,6 +3579,7 @@ fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
         1_000,
         DeliveryClass::Reliable,
         &ChurnPlan::default(),
+        None,
     );
     assert!(!summary.valid);
     assert!(
@@ -2995,6 +3687,7 @@ fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
         1_000,
         DeliveryClass::Reliable,
         &ChurnPlan::default(),
+        None,
     );
     assert!(
         summary.valid,
@@ -3016,6 +3709,7 @@ fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
         1_000,
         DeliveryClass::Reliable,
         &ChurnPlan::default(),
+        None,
     );
     assert!(
         !summary.valid,
@@ -3051,6 +3745,7 @@ fn an_unresolvable_snapshot_identity_is_a_loud_fault() {
         1_000,
         DeliveryClass::Reliable,
         &ChurnPlan::default(),
+        None,
     );
     assert!(!summary.valid);
     assert!(
@@ -3080,6 +3775,7 @@ fn scenario_config(encoding: Encoding) -> RunConfig {
         payload_bytes: 96,
         send_rate_per_sender: 20.0,
         delivery_class: DeliveryClass::Reliable,
+        experiment: None,
         warmup: Duration::from_millis(200),
         duration: Duration::from_millis(1_200),
         churn: ChurnSchedule::None,
@@ -3104,6 +3800,7 @@ struct UnitContext {
     plans: Vec<SenderPlan>,
     roster: Vec<(String, u32)>,
     delivery_class: DeliveryClass,
+    experiment: Option<Experiment>,
 }
 
 fn unit_context() -> UnitContext {
@@ -3125,6 +3822,28 @@ fn unit_context_with_class(delivery_class: DeliveryClass) -> UnitContext {
         plans,
         roster,
         delivery_class,
+        experiment: None,
+    }
+}
+
+/// The unsupported-format experiment's unit baseline: one room of four v3
+/// peers, peer 0 the opaque sender.
+fn unit_context_with_experiment() -> UnitContext {
+    let mut config = scenario_config(Encoding::V3Json);
+    config.warmup = Duration::ZERO;
+    config.duration = Duration::from_millis(400);
+    config.send_rate_per_sender = 10.0;
+    config.experiment = Some(Experiment::UnsupportedFormat);
+    let (plans, _churn) = build_run_shape(&config).expect("unit shape");
+    let roster = plans
+        .iter()
+        .map(|plan| (plan.name.clone(), plan.room))
+        .collect();
+    UnitContext {
+        plans,
+        roster,
+        delivery_class: config.delivery_class,
+        experiment: config.experiment,
     }
 }
 

@@ -1,7 +1,8 @@
 //! Raw run events — the artifact-level truth a run replays from.
 //!
 //! Everything the oracle consumes is recorded as append-only event lists
-//! (sends, receipts, gap reports, disconnects) plus join failures. The
+//! (sends, receipts, gap reports, unsupported-format notices, disconnects)
+//! plus join failures. The
 //! summary is a pure function of these events plus the plans and the run's
 //! delivery class, so "replay the artifacts" and "summarize the run" are
 //! literally the same code path.
@@ -99,6 +100,17 @@ pub struct GapEvent {
     pub reason: signal_fish_server::protocol::DeliveryGapReason,
 }
 
+/// A rate-limited unsupported-format advisory a cross-format recipient read
+/// off an `Error` frame (`UnsupportedGameDataFormat`): the prose companion
+/// of the exact `unsupported_format` gap reports. Recorded as evidence —
+/// the oracle bounds its cadence (at most one per opaque sender per second)
+/// instead of treating it as a rejection.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UnsupportedNoticeEvent {
+    pub recipient: String,
+    pub at_us: u64,
+}
+
 /// A recipient that stopped being a delivery target before quiescence.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DisconnectEvent {
@@ -118,6 +130,7 @@ struct EventState {
     sent: Vec<SentEvent>,
     receipts: Vec<ReceiptEvent>,
     gaps: Vec<GapEvent>,
+    unsupported_notices: Vec<UnsupportedNoticeEvent>,
     disconnects: Vec<DisconnectEvent>,
     churn: Vec<ChurnEvent>,
     join_failures: Vec<String>,
@@ -159,6 +172,14 @@ impl EventLog {
             .lock()
             .expect("event log poisoned")
             .gaps
+            .push(event);
+    }
+
+    pub fn push_unsupported_notice(&self, event: UnsupportedNoticeEvent) {
+        self.state
+            .lock()
+            .expect("event log poisoned")
+            .unsupported_notices
             .push(event);
     }
 
@@ -254,6 +275,7 @@ impl EventLog {
             sent: std::mem::take(&mut state.sent),
             receipts: std::mem::take(&mut state.receipts),
             gaps: std::mem::take(&mut state.gaps),
+            unsupported_notices: std::mem::take(&mut state.unsupported_notices),
             disconnects: std::mem::take(&mut state.disconnects),
             churn: std::mem::take(&mut state.churn),
             join_failures: std::mem::take(&mut state.join_failures),
@@ -274,6 +296,8 @@ pub struct RunRecords {
     pub sent: Vec<SentEvent>,
     pub receipts: Vec<ReceiptEvent>,
     pub gaps: Vec<GapEvent>,
+    #[serde(default)]
+    pub unsupported_notices: Vec<UnsupportedNoticeEvent>,
     pub disconnects: Vec<DisconnectEvent>,
     pub churn: Vec<ChurnEvent>,
     pub join_failures: Vec<String>,
@@ -295,6 +319,7 @@ pub enum DeliveryEvent {
     Sent(SentEvent),
     Receipt(ReceiptEvent),
     Gap(GapEvent),
+    UnsupportedNotice(UnsupportedNoticeEvent),
     Disconnect(DisconnectEvent),
     Churn(ChurnEvent),
     JoinFailure {
@@ -310,8 +335,8 @@ pub enum DeliveryEvent {
 
 impl RunRecords {
     /// Every event as a tagged JSONL line, in the canonical order
-    /// (sends, receipts, gaps, disconnects, churn, join failures, faults,
-    /// the registry).
+    /// (sends, receipts, gaps, unsupported notices, disconnects, churn,
+    /// join failures, faults, the registry).
     pub fn events(&self) -> impl Iterator<Item = DeliveryEvent> + '_ {
         self.sent
             .iter()
@@ -319,6 +344,12 @@ impl RunRecords {
             .map(DeliveryEvent::Sent)
             .chain(self.receipts.iter().cloned().map(DeliveryEvent::Receipt))
             .chain(self.gaps.iter().cloned().map(DeliveryEvent::Gap))
+            .chain(
+                self.unsupported_notices
+                    .iter()
+                    .cloned()
+                    .map(DeliveryEvent::UnsupportedNotice),
+            )
             .chain(
                 self.disconnects
                     .iter()

@@ -11,8 +11,9 @@
 //! Slice boundary: [`ChurnSchedule`] carries the reconnect-burst storm (the
 //! C3 reconnect cell) and the room-replacement schedule (the C3 churn
 //! cell) as of the fourth runner PR; [`DeliveryClass`] carries the full
-//! latest/volatile contract. The input surface exists so later slices
-//! extend the enums instead of reshaping every call site.
+//! latest/volatile contract; [`Experiment`] carries the unsupported-format
+//! contract experiment (the seventh runner PR). The input surface exists so
+//! later slices extend the enums instead of reshaping every call site.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -75,6 +76,42 @@ impl DeliveryClass {
             other => Err(format!(
                 "unsupported delivery class {other:?} (expected \"reliable\", \"latest\", \
                  or \"volatile\")"
+            )),
+        }
+    }
+}
+
+/// A labeled contract experiment: a run whose validation contract differs
+/// from the plain delivery-class semantics. Experiments are separate,
+/// labeled contract cells — their numbers are never read as capacity
+/// measurements of the default contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Experiment {
+    /// The unsupported-conversion contract experiment: peer 0 of every room
+    /// negotiates the opaque `rkyv` game-data format and sends binary
+    /// frames; every other peer stays JSON. The opaque sender's stream must
+    /// reach NO cross-format recipient as a payload — every omitted
+    /// sequence arrives as an exact `unsupported_format` gap report plus
+    /// the per-sender rate-limited advisory — while the JSON peers' text
+    /// streams stay exactly-once reliable for every recipient, the opaque
+    /// sender included (the text relay lane is format-blind).
+    UnsupportedFormat,
+}
+
+impl Experiment {
+    /// The label written into the manifest and summary, so an experiment's
+    /// artifacts can never be mistaken for a default-contract run.
+    pub fn label(self) -> &'static str {
+        match self {
+            Experiment::UnsupportedFormat => "unsupported-format",
+        }
+    }
+
+    fn parse(raw: &str) -> Result<Self, String> {
+        match raw {
+            "unsupported-format" => Ok(Experiment::UnsupportedFormat),
+            other => Err(format!(
+                "unsupported experiment {other:?} (expected \"unsupported-format\")"
             )),
         }
     }
@@ -210,6 +247,11 @@ pub struct RunConfig {
     /// Messages per second per sender.
     pub send_rate_per_sender: f64,
     pub delivery_class: DeliveryClass,
+    /// The labeled contract experiment this run executes (`None` is a
+    /// default-contract run). Serialized into the manifest and echoed into
+    /// the summary, so an experiment's artifacts are always identifiable.
+    #[serde(default)]
+    pub experiment: Option<Experiment>,
     /// Traffic sent before the measurement window. Warm-up deliveries are
     /// completeness-checked but excluded from the latency histogram.
     #[serde(with = "duration_micros")]
@@ -351,6 +393,16 @@ impl RunConfig {
         })
     }
 
+    /// The experiment cell's spawned-server posture: [`Self::default_server_overlay`]
+    /// plus the opt-in `rkyv` game-data knob the opaque sender negotiates.
+    /// The runner refuses an unsupported-format experiment whose overlay does
+    /// not enable it, so the cell can never silently negotiate down to JSON.
+    pub fn unsupported_format_overlay() -> Value {
+        let mut overlay = Self::default_server_overlay();
+        overlay["protocol"]["enable_rkyv_game_data"] = Value::Bool(true);
+        overlay
+    }
+
     /// Six-character room code for one run's room (the server pins
     /// `room_code_length` to 6). The prefix is run-scoped, so concurrent
     /// runs against one shared external server start from distinct room
@@ -422,7 +474,8 @@ impl RunConfig {
     ///
     /// `ENDPOINT` (optional), `SEED`, `ROOMS`, `PLAYERS`, `ENCODING`
     /// (`v2-json` | `v3-json`), `PAYLOAD_BYTES`, `RATE_PER_SENDER`, `CLASS`
-    /// (`reliable` | `latest` | `volatile`), `LATEST_KEYS`, `WARMUP_SECS`,
+    /// (`reliable` | `latest` | `volatile`), `EXPERIMENT`
+    /// (`unsupported-format`), `LATEST_KEYS`, `WARMUP_SECS`,
     /// `DURATION_SECS`, `CHURN` (`none` | `reconnect-burst` |
     /// `room-replacement`) with `CHURN_FRACTION_PERCENT`,
     /// `CHURN_START_MS`, `CHURN_WINDOW_MS`, `CHURN_INTERVAL_MS`,
@@ -466,6 +519,10 @@ impl RunConfig {
         };
         let delivery_class = match var("CLASS")? {
             Some(raw) => Some(DeliveryClass::parse(&raw)?),
+            None => None,
+        };
+        let experiment = match var("EXPERIMENT")? {
+            Some(raw) => Some(Experiment::parse(&raw)?),
             None => None,
         };
         let churn_fraction = var("CHURN_FRACTION_PERCENT")?
@@ -562,6 +619,7 @@ impl RunConfig {
             payload_bytes: payload.unwrap_or(96),
             send_rate_per_sender: rate.unwrap_or(20.0),
             delivery_class: delivery_class.unwrap_or(DeliveryClass::Reliable),
+            experiment,
             warmup: Duration::from_secs_f64(warmup_secs.unwrap_or(0.2)),
             duration: Duration::from_secs_f64(duration_secs.unwrap_or(1.2)),
             churn,
@@ -571,7 +629,11 @@ impl RunConfig {
             generator_lag_bound: Duration::from_millis(lag_bound_ms.unwrap_or(250)),
             drain_grace: Duration::from_secs(2),
             sample_interval: Duration::from_millis(sample_ms.unwrap_or(250)),
-            server_overlay: Self::default_server_overlay(),
+            server_overlay: if experiment.is_some() {
+                Self::unsupported_format_overlay()
+            } else {
+                Self::default_server_overlay()
+            },
             pause_sends: None,
             pause_reads: None,
             latest_keys_per_sender: latest_keys.unwrap_or_else(default_latest_keys),
