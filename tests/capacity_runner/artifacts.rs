@@ -8,8 +8,8 @@
 //! - `deliveries.jsonl` — every send, receipt, gap report, disconnect, and
 //!   join failure.
 //! - `intervals.jsonl` — periodic server resource samples (delivery
-//!   counters, RSS, cgroup memory) with unavailable counters recorded as
-//!   null, never omitted.
+//!   counters, RSS, CPU time, cgroup memory) with unavailable counters
+//!   recorded as null, never omitted.
 //! - `summary.json` — the oracle outcome (the run's verdict).
 //! - `latency-histogram-v2.hdr` — HdrHistogram V2 encoding of the measured
 //!   one-way latency samples.
@@ -38,8 +38,9 @@ use crate::schedule::build_run_shape;
 /// every stored run to name its schema). Version 3 makes streams
 /// epoch-aware: receipts carry the server's `(epoch, server_seq)` stamps,
 /// sends carry the sender's incarnation epoch, and churn runs record their
-/// disconnect/rejoin events with rejoin snapshot tails.
-pub const SCHEMA_VERSION: u64 = 3;
+/// disconnect/rejoin events with rejoin snapshot tails. Version 4 adds the
+/// server and generator CPU-time pair to every interval sample.
+pub const SCHEMA_VERSION: u64 = 4;
 
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const DELIVERIES_FILE: &str = "deliveries.jsonl";
@@ -117,10 +118,16 @@ pub struct IntervalSample {
     pub counters: Value,
     /// Resident set size of the server process.
     pub server_rss_bytes: Option<u64>,
+    /// Cumulative CPU seconds (user + system) the server process consumed.
+    pub server_cpu_seconds: Option<f64>,
     /// Cgroup memory usage of the server process.
     pub cgroup_memory_bytes: Option<u64>,
     /// Resident set size of the generator (this runner process).
     pub generator_rss_bytes: Option<u64>,
+    /// Cumulative CPU seconds (user + system) the generator consumed — the
+    /// load generator's own cost must be distinguishable from server
+    /// saturation.
+    pub generator_cpu_seconds: Option<f64>,
     /// Scrape failure detail — a sample that could not be taken is recorded
     /// as an explicit event, not skipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]

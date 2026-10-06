@@ -2458,6 +2458,22 @@ the queue walk failed the connection-manager sample test (depth, oldest-item
 stamp, and scrape-instant age); renaming the rendered series failed the
 gauge render test.
 
+**C2 next runner PR: server and generator CPU-time accounting — LANDED**
+(sixth runner PR, 2026-10-06). Every interval sample now carries
+`server_cpu_seconds` and `generator_cpu_seconds` beside the RSS pair:
+cumulative `utime + stime` from `/proc/<pid>/stat` at the kernel's fixed
+`USER_HZ = 100` stub, read off-path at scrape time for the spawned server
+PID and the runner process itself. This is the C2 resource-collection
+remainder's CPU pair — the C3 comparison of generator cost against server
+saturation needs both processes' consumed CPU, and the runner's own cost
+must be distinguishable from the server's. Unavailable values stay recorded
+as null (off-Linux hosts). Artifacts bumped to schema 4 (additive interval
+fields; a manifest naming schema 3 or older is refused by the validator).
+Red proof: neutering the sampler wiring failed the acceptance scenario's
+per-sample presence pin; the fixture parser test pins the spaced-comm field
+positions, and the live-sampler test pins strict advancement under real CPU
+work with absent PIDs recorded as null.
+
 **C2 next runner PR: unsupported-format cells (#648).** Validate the
 permitted outcomes and reports of intentionally unsupported conversions per
 the delivery contract instead of reliable semantics, as separately labeled
