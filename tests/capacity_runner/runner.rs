@@ -24,7 +24,9 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
-use signal_fish_server::protocol::{ClientMessage, ServerMessage, Topology, Transport};
+use signal_fish_server::protocol::{
+    ClientMessage, GameDataEncoding, ServerMessage, Topology, Transport,
+};
 // The runner's config delivery class and the wire enum share the token set;
 // the alias keeps the mapping at the one boundary where they meet.
 use signal_fish_server::protocol::DeliveryClass as WireDeliveryClass;
@@ -34,13 +36,13 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::artifacts::{self, BuildIdentity, IntervalSample, ServerIdentity, WorkloadShape};
 use crate::config::{
     count_u64, count_usize, default_latest_keys, micros, ChurnSchedule, DeliveryClass, Encoding,
-    RunConfig, SendPause,
+    Experiment, RunConfig, SendPause,
 };
 use crate::diagnostics;
 use crate::oracle::{self, InvalidReason, OutcomeSummary};
 use crate::records::{
     ChurnEvent, ChurnPhase, DisconnectEvent, DisconnectObservation, EventLog, GapEvent,
-    ReceiptEvent, SentEvent,
+    ReceiptEvent, SentEvent, UnsupportedNoticeEvent,
 };
 use crate::schedule::{build_run_shape, Phase, SenderPlan};
 use crate::websocket_test_helpers;
@@ -68,7 +70,8 @@ pub type WsReceiver = futures_util::stream::SplitStream<WsStream>;
 /// own incarnation index. Each peer task registers its id at every join;
 /// receiving tasks resolve every inbound frame's `from_player` through
 /// here, which classifies deliveries exactly even across a rejoin storm.
-type SenderRegistry = Arc<std::sync::Mutex<BTreeMap<String, (String, u32)>>>;
+/// `pub(crate)` for the deterministic inbound-classification controls.
+pub(crate) type SenderRegistry = Arc<std::sync::Mutex<BTreeMap<String, (String, u32)>>>;
 
 /// The result of one completed run.
 #[derive(Debug)]
@@ -154,6 +157,50 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
              on the frozen v2 wire"
                 .to_string(),
         );
+    }
+    // The unsupported-format experiment is a single-fault, v3, reliable cell:
+    // binary frames carry no delivery class (the opaque lane is the reliable
+    // lane), v2 recipients have no DeliveryReports to validate (advisories
+    // only, by contract), and the churn storms compose with their own stream
+    // contract in a later cell rather than half-measured here.
+    if config.experiment == Some(Experiment::UnsupportedFormat) {
+        if config.encoding != Encoding::V3Json {
+            return Err(
+                "the unsupported-format experiment requires encoding \"v3-json\": only v3 \
+                 recipients receive the exact unsupported_format DeliveryReports the oracle \
+                 validates"
+                    .to_string(),
+            );
+        }
+        if config.delivery_class != DeliveryClass::Reliable {
+            return Err(
+                "the unsupported-format experiment requires delivery class \"reliable\": \
+                 binary frames carry no class, so the opaque lane is the reliable lane"
+                    .to_string(),
+            );
+        }
+        if config.churn != ChurnSchedule::None {
+            return Err(
+                "the unsupported-format experiment does not compose with churn; run them as \
+                 separate cells"
+                    .to_string(),
+            );
+        }
+        let rkyv_enabled = config
+            .server_overlay
+            .get("protocol")
+            .and_then(|protocol| protocol.get("enable_rkyv_game_data"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        if !rkyv_enabled {
+            return Err(
+                "the unsupported-format experiment requires the server overlay to enable \
+                 protocol.enable_rkyv_game_data (RunConfig::unsupported_format_overlay); \
+                 otherwise the opaque negotiation silently downgrades to JSON and the cell \
+                 measures nothing"
+                    .to_string(),
+            );
+        }
     }
     // Churn cells run on the v3 wire alone: receipts validate against the
     // server's per-`(sender, epoch)` relay stamps, which the frozen v2 wire
@@ -313,6 +360,10 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
                 == Some(RunConfig::peer_name(plan.room, plan.player).as_str())
                 || paused_reader_name(config).as_deref()
                     == Some(RunConfig::peer_name(plan.room, plan.player).as_str());
+            // The experiment's opaque sender: peer 0 negotiates rkyv (the
+            // overlay enables it; the negotiation verifies the server
+            // advertised it).
+            let game_data_format = opaque_sender_format(config, plan.player);
             async move {
                 connect_and_join(
                     ws_url,
@@ -321,6 +372,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
                     config.players_per_room,
                     plan,
                     designated,
+                    game_data_format,
                 )
                 .await
             }
@@ -430,7 +482,12 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
             config.sample_interval,
             metrics_url(&endpoint_base),
             pid,
-            (config.delivery_class != DeliveryClass::Reliable).then_some(config.delivery_class),
+            // Class outcomes are evidence for the lossy classes AND for the
+            // unsupported-format experiment (whose refused cross-format
+            // fan-outs land in the reliable class's `unsupported_format`
+            // outcome).
+            (config.delivery_class != DeliveryClass::Reliable || config.experiment.is_some())
+                .then_some(config.delivery_class),
             samples,
         ));
     }
@@ -506,6 +563,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
             })
             .collect();
         let is_slow_reader = slow_reader_name.as_deref() == Some(name.as_str());
+        let game_data_format = opaque_sender_format(&config, plan.player);
         handles.push(tokio::spawn(peer_task(
             name,
             plan,
@@ -519,6 +577,11 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
                 generator_lag_bound_us: micros(config.generator_lag_bound),
                 pause_sends: config.pause_sends,
                 stall_senders: config.stall_senders,
+                experiment: ExperimentContext {
+                    active: config.experiment == Some(Experiment::UnsupportedFormat),
+                    opaque_sender: game_data_format.is_some(),
+                },
+                game_data_format,
             },
             churn_cycles,
             epoch,
@@ -553,6 +616,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         bound_us,
         config.delivery_class,
         &churn_plan,
+        config.experiment,
     );
 
     artifacts::write_deliveries(&config.output_dir, &records)?;
@@ -587,6 +651,16 @@ fn overlay_sha256(config: &RunConfig) -> Result<String, String> {
     Ok(diagnostics::sha256_bytes(&bytes))
 }
 
+/// The negotiated game-data format for a peer in an unsupported-format
+/// experiment run: peer 0 of every room is the opaque sender, everyone else
+/// stays JSON. `None` outside the experiment.
+fn opaque_sender_format(config: &RunConfig, player: u32) -> Option<GameDataEncoding> {
+    match config.experiment {
+        Some(Experiment::UnsupportedFormat) if player == 0 => Some(GameDataEncoding::Rkyv),
+        _ => None,
+    }
+}
+
 /// One peer: connect (clamped for the designated reader hooks), negotiate
 /// (v3), join. Returns the sink, the receive half, the peer's own
 /// `PlayerId`, and the snapshot's per-member `(id, seq tail)` stamps for
@@ -602,6 +676,7 @@ async fn connect_and_join(
     players_per_room: u32,
     plan: &SenderPlan,
     designated: bool,
+    game_data_format: Option<GameDataEncoding>,
 ) -> Result<
     (
         WsSink,
@@ -619,7 +694,7 @@ async fn connect_and_join(
     };
     let (mut sink, mut rx) = stream.split();
     if encoding == Encoding::V3Json {
-        authenticate_v3(&mut sink, &mut rx).await?;
+        authenticate_v3(&mut sink, &mut rx, game_data_format).await?;
     }
     let joined = join_room(&mut sink, &mut rx, &room_code, &name, players_per_room).await?;
     // Snapshot tails: per member, the id whose registry entry names its
@@ -693,13 +768,21 @@ async fn connect_clamped(url: &str, recv_buffer_bytes: u32) -> Result<WsStream, 
 }
 
 /// v3 negotiation: `Authenticate` then await `Authenticated` + `ProtocolInfo`.
-async fn authenticate_v3(sink: &mut WsSink, rx: &mut WsReceiver) -> Result<(), String> {
+/// A requested `game_data_format` must be advertised by the server's
+/// `ProtocolInfo` — the negotiation refusing it would silently downgrade the
+/// session to JSON and the run would measure a different cell than its
+/// manifest claims, so that refusal is loud here.
+async fn authenticate_v3(
+    sink: &mut WsSink,
+    rx: &mut WsReceiver,
+    game_data_format: Option<GameDataEncoding>,
+) -> Result<(), String> {
     let authenticate = ClientMessage::Authenticate {
         app_id: GAME_NAME.to_string(),
         connect_token: None,
         sdk_version: None,
         platform: Some("capacity-runner".to_string()),
-        game_data_format: None,
+        game_data_format,
         protocol_version: Some(3),
         supported_transports: Some(vec![Transport::Relay]),
         supported_topologies: Some(vec![Topology::Relay]),
@@ -707,9 +790,9 @@ async fn authenticate_v3(sink: &mut WsSink, rx: &mut WsReceiver) -> Result<(), S
     };
     send_client(sink, &authenticate).await?;
     let mut authenticated = false;
-    let mut negotiated = false;
+    let mut advertised_formats: Option<Vec<GameDataEncoding>> = None;
     let deadline = tokio::time::Instant::now() + STEP_TIMEOUT;
-    while !(authenticated && negotiated) {
+    while !(authenticated && advertised_formats.is_some()) {
         let frame = match tokio::time::timeout_at(deadline, rx.next()).await {
             Ok(Some(frame)) => frame,
             Ok(None) => return Err("connection closed during v3 authentication".to_string()),
@@ -718,11 +801,22 @@ async fn authenticate_v3(sink: &mut WsSink, rx: &mut WsReceiver) -> Result<(), S
         let message = decode_server_frame(frame)?;
         match message {
             ServerMessage::Authenticated { .. } => authenticated = true,
-            ServerMessage::ProtocolInfo(_) => negotiated = true,
+            ServerMessage::ProtocolInfo(payload) => {
+                advertised_formats = Some(payload.game_data_formats);
+            }
             ServerMessage::AuthenticationError { error, .. } => {
                 return Err(format!("v3 authentication refused: {error}"))
             }
             _ => {}
+        }
+    }
+    if let Some(requested) = game_data_format {
+        let advertised = advertised_formats.unwrap_or_default();
+        if !advertised.contains(&requested) {
+            return Err(format!(
+                "the server did not advertise the requested game-data format {requested:?} \
+                 (advertised: {advertised:?}); the run would silently negotiate down to JSON"
+            ));
         }
     }
     Ok(())
@@ -797,6 +891,23 @@ struct PeerFacts {
     generator_lag_bound_us: u64,
     pause_sends: Option<SendPause>,
     stall_senders: Option<Duration>,
+    /// The unsupported-format experiment context: peer 0 of every room is
+    /// the room's opaque sender (it sends binary frames), every other peer
+    /// is a cross-format observer.
+    experiment: ExperimentContext,
+    game_data_format: Option<GameDataEncoding>,
+}
+
+/// The unsupported-format experiment context one peer's sends and inbound
+/// frames are classified under.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ExperimentContext {
+    /// The run executes the unsupported-format contract experiment.
+    pub(crate) active: bool,
+    /// This peer is the room's opaque sender: its own stream is binary, and
+    /// it must never observe an unsupported-format advisory (it converts for
+    /// nobody, and text reaches it format-blind).
+    pub(crate) opaque_sender: bool,
 }
 
 /// One churn cycle for one peer: the peer disconnects at `disconnect_us`,
@@ -879,6 +990,7 @@ async fn peer_task(
                     facts.players_per_room,
                     &plan,
                     false,
+                    facts.game_data_format,
                 )
                 .await
                 {
@@ -982,44 +1094,64 @@ async fn peer_task(
                         "seq": send.seq,
                         "padding": padding.as_ref(),
                     });
-                    let (class, key) = match facts.delivery_class {
-                        DeliveryClass::Reliable => (None, None),
-                        DeliveryClass::Latest => {
-                            // The coalescing key is a sender-scoped u32; a
-                            // sender round-robins its keys so a run can hold
-                            // newest-value semantics (one key) or key
-                            // isolation (many keys).
-                            let key_index =
-                                send.seq % u64::from(facts.latest_keys_per_sender);
-                            match u32::try_from(key_index) {
-                                Ok(index) => {
-                                    (Some(WireDeliveryClass::Latest), Some(index))
-                                }
-                                Err(error) => {
-                                    log.push_fault(InvalidReason::SendFailed {
-                                        sender: plan.name.clone(),
-                                        detail: error.to_string(),
-                                    });
-                                    return;
-                                }
+                    let frame = if facts.experiment.opaque_sender {
+                        // The opaque lane: a raw binary frame the server
+                        // never parses. Its bytes carry the same ledger
+                        // document the text lane sends, so a debug dump
+                        // stays self-describing; the padding keeps the
+                        // payload in the configured size class. Binary
+                        // frames carry no delivery class — the opaque lane
+                        // IS the reliable lane.
+                        match serde_json::to_vec(&data) {
+                            Ok(payload) => Message::Binary(payload.into()),
+                            Err(error) => {
+                                log.push_fault(InvalidReason::SendFailed {
+                                    sender: plan.name.clone(),
+                                    detail: format!("serialize: {error}"),
+                                });
+                                return;
                             }
                         }
-                        DeliveryClass::Volatile => {
-                            (Some(WireDeliveryClass::Volatile), None)
+                    } else {
+                        let (class, key) = match facts.delivery_class {
+                            DeliveryClass::Reliable => (None, None),
+                            DeliveryClass::Latest => {
+                                // The coalescing key is a sender-scoped u32; a
+                                // sender round-robins its keys so a run can hold
+                                // newest-value semantics (one key) or key
+                                // isolation (many keys).
+                                let key_index =
+                                    send.seq % u64::from(facts.latest_keys_per_sender);
+                                match u32::try_from(key_index) {
+                                    Ok(index) => {
+                                        (Some(WireDeliveryClass::Latest), Some(index))
+                                    }
+                                    Err(error) => {
+                                        log.push_fault(InvalidReason::SendFailed {
+                                            sender: plan.name.clone(),
+                                            detail: error.to_string(),
+                                        });
+                                        return;
+                                    }
+                                }
+                            }
+                            DeliveryClass::Volatile => {
+                                (Some(WireDeliveryClass::Volatile), None)
+                            }
+                        };
+                        let message = ClientMessage::GameData { class, key, data };
+                        match serde_json::to_string(&message) {
+                            Ok(frame) => Message::Text(frame.into()),
+                            Err(error) => {
+                                log.push_fault(InvalidReason::SendFailed {
+                                    sender: plan.name.clone(),
+                                    detail: format!("serialize: {error}"),
+                                });
+                                return;
+                            }
                         }
                     };
-                    let message = ClientMessage::GameData { class, key, data };
-                    let frame = match serde_json::to_string(&message) {
-                        Ok(frame) => frame,
-                        Err(error) => {
-                            log.push_fault(InvalidReason::SendFailed {
-                                sender: plan.name.clone(),
-                                detail: format!("serialize: {error}"),
-                            });
-                            return;
-                        }
-                    };
-                    if let Err(error) = sink.send(Message::Text(frame.into())).await {
+                    if let Err(error) = sink.send(frame).await {
                         // After a declared termination, socket errors are the
                         // expected consequence — the peer stops, and its
                         // remainder is unsent work, not an independent fault.
@@ -1054,7 +1186,16 @@ async fn peer_task(
                         });
                         return;
                     };
-                    if !handle_inbound(&recipient, frame, &registry, epoch, &log).await {
+                    if !handle_inbound(
+                        &recipient,
+                        frame,
+                        &registry,
+                        epoch,
+                        &log,
+                        facts.experiment,
+                    )
+                    .await
+                    {
                         return;
                     }
                 }
@@ -1068,14 +1209,19 @@ async fn peer_task(
 
 /// Handle one inbound server frame: record the delivery with its same-clock
 /// receipt time and the sending incarnation resolved through the registry,
-/// resolve gap reports the same way, and account server rejections. Returns
-/// `false` when the session ended.
-async fn handle_inbound(
+/// resolve gap reports the same way, and account server rejections. Under
+/// the unsupported-format experiment, the rate-limited advisories at
+/// cross-format observers are permitted evidence (recorded, bounded by the
+/// oracle) and any binary frame is the leak class. Returns `false` when the
+/// session ended. `pub(crate)` for the deterministic inbound-classification
+/// controls in the runner's suite.
+pub(crate) async fn handle_inbound(
     recipient: &str,
     frame: Result<Message, tokio_tungstenite::tungstenite::Error>,
     registry: &SenderRegistry,
     epoch: Instant,
     log: &Arc<EventLog>,
+    experiment: ExperimentContext,
 ) -> bool {
     match frame {
         Ok(Message::Text(text)) => match serde_json::from_str::<ServerMessage>(&text) {
@@ -1168,6 +1314,22 @@ async fn handle_inbound(
                 message,
                 error_code,
             }) => {
+                // The experiment's rate-limited advisory at a cross-format
+                // observer is the permitted prose companion of the exact
+                // unsupported_format reports — evidence, not a rejection.
+                // Every other error (and any error at the opaque sender,
+                // who converts for nobody) stays a fault.
+                if experiment.active
+                    && !experiment.opaque_sender
+                    && error_code
+                        == Some(signal_fish_server::protocol::ErrorCode::UnsupportedGameDataFormat)
+                {
+                    log.push_unsupported_notice(UnsupportedNoticeEvent {
+                        recipient: recipient.to_string(),
+                        at_us: micros(epoch.elapsed()),
+                    });
+                    return true;
+                }
                 // A mid-run server rejection (bad class, payload cap, rate
                 // limit) must not decay into an unexplained delivery
                 // deficit: record it and keep reading.
@@ -1197,6 +1359,21 @@ async fn handle_inbound(
             });
             return false;
         }
+        Ok(Message::Binary(_)) if experiment.active => {
+            // The experiment permits no binary frame at any peer: the opaque
+            // sender is the room's only binary producer, and the server must
+            // refuse its payload to every cross-format recipient. A binary
+            // frame here is the leak class — the payload crossed formats.
+            log.push_fault(InvalidReason::UnsupportedFormatLeak {
+                count: 1,
+                first: crate::oracle::DeliveryKey {
+                    recipient: recipient.to_string(),
+                    sender: "<binary frame>".to_string(),
+                    epoch: 0,
+                    seq: 0,
+                },
+            });
+        }
         Ok(_) => {}
         Err(_) => {
             log.push_disconnect(DisconnectEvent {
@@ -1211,7 +1388,8 @@ async fn handle_inbound(
 
 /// Periodic server resource sampling until `until`. A failed scrape is
 /// recorded as an explicit sample with `scrape_error` — never skipped. A
-/// lossy-class run also samples its class's accountable outcomes.
+/// lossy-class run or an unsupported-format experiment also samples its
+/// class's accountable outcomes.
 #[allow(clippy::too_many_arguments)]
 async fn sample_loop(
     epoch: Instant,

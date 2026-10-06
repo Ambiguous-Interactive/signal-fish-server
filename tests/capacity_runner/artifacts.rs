@@ -39,8 +39,11 @@ use crate::schedule::build_run_shape;
 /// epoch-aware: receipts carry the server's `(epoch, server_seq)` stamps,
 /// sends carry the sender's incarnation epoch, and churn runs record their
 /// disconnect/rejoin events with rejoin snapshot tails. Version 4 adds the
-/// server and generator CPU-time pair to every interval sample.
-pub const SCHEMA_VERSION: u64 = 4;
+/// server and generator CPU-time pair to every interval sample. Version 5
+/// adds the unsupported-format contract experiment: the config, summary,
+/// and event log gain the experiment label, its advisory events, and its
+/// verdict reasons.
+pub const SCHEMA_VERSION: u64 = 5;
 
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const DELIVERIES_FILE: &str = "deliveries.jsonl";
@@ -280,6 +283,10 @@ pub fn read_records(output_dir: &Path) -> Result<RunRecords, String> {
                 serde_json::from_value(value)
                     .map_err(|error| format!("parse gap event: {error}"))?,
             ),
+            "unsupported_notice" => records.unsupported_notices.push(
+                serde_json::from_value(value)
+                    .map_err(|error| format!("parse unsupported_notice event: {error}"))?,
+            ),
             "disconnect" => records.disconnects.push(
                 serde_json::from_value(value)
                     .map_err(|error| format!("parse disconnect event: {error}"))?,
@@ -336,5 +343,6 @@ pub fn replay(output_dir: &Path) -> Result<OutcomeSummary, String> {
         micros(manifest.config.generator_lag_bound),
         manifest.config.delivery_class,
         &churn,
+        manifest.config.experiment,
     ))
 }

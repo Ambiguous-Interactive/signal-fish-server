@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use hdrhistogram::Histogram;
 
-use crate::config::{count_u64, DeliveryClass};
+use crate::config::{count_u64, DeliveryClass, Experiment};
 use crate::records::{ChurnPhase, GapEvent, RunRecords, SentEvent};
 use crate::schedule::{ChurnPlan, Phase, SenderPlan};
 
@@ -105,6 +105,19 @@ pub enum InvalidReason {
     /// limit) — recorded from the `Error` frame so the deficit is never
     /// unexplained.
     ServerRejected { recipient: String, detail: String },
+    /// The unsupported-conversion contract was broken: a payload the server
+    /// must refuse to convert reached a cross-format recipient as a
+    /// delivery (or any binary frame arrived where the experiment permits
+    /// none). The exact-report path was bypassed — the leak class.
+    UnsupportedFormatLeak { count: u64, first: DeliveryKey },
+    /// The rate-limited unsupported-format advisory cadence was exceeded at
+    /// a recipient (at most one notice per opaque sender per second): the
+    /// advisory path is flooding, which is its own contract violation.
+    UnsupportedNoticeFlood {
+        recipient: String,
+        count: u64,
+        bound: u64,
+    },
 }
 
 /// Per-recipient accounting, in roster order.
@@ -121,7 +134,8 @@ pub struct RecipientOutcome {
     /// Tail a disconnected recipient never saw (permitted with a disconnect).
     pub undelivered_at_disconnect: u64,
     /// Omissions the server accounted with exact gap reports
-    /// (latest/volatile classes; always 0 for reliable).
+    /// (latest/volatile classes and the unsupported-format experiment;
+    /// always 0 for a plain reliable run).
     pub gap_covered: u64,
     pub duplicates: u64,
     pub misrouted: u64,
@@ -164,7 +178,8 @@ pub struct Totals {
     /// Sends connected-through recipients were still owed at the end.
     pub outstanding: u64,
     /// Omissions accounted by exact gap reports across all recipients
-    /// (latest/volatile classes; always 0 for reliable).
+    /// (latest/volatile classes and the unsupported-format experiment;
+    /// always 0 for a plain reliable run).
     pub gap_covered: u64,
 }
 
@@ -177,6 +192,15 @@ pub struct OutcomeSummary {
     pub per_recipient: Vec<RecipientOutcome>,
     pub latency_us: LatencyStats,
     pub generator_lag_us: LagStats,
+    /// The run's contract-experiment label (`None` for a default-contract
+    /// run), echoed from the config so an experiment's summary can never be
+    /// read as a default-contract measurement.
+    #[serde(default)]
+    pub experiment: Option<String>,
+    /// Rate-limited unsupported-format advisories observed across all
+    /// recipients (always 0 outside the unsupported-format experiment).
+    #[serde(default)]
+    pub unsupported_notices: u64,
 }
 
 /// Category accumulator: total count plus the first offending key.
@@ -478,6 +502,13 @@ fn churn_views(
 /// covered by exactly one exact gap report with a reason the class can
 /// produce — a hole without its report is `MissingDeliveries`, and any
 /// overlap or out-of-range coverage is an `InvalidGapReports` violation.
+///
+/// The unsupported-format experiment overlays the reliable contract with
+/// the cross-format refusal family: every stream FROM the room's opaque
+/// sender expects no payload at any recipient — every omitted sequence
+/// must arrive as an exact `unsupported_format` gap report — while every
+/// text stream stays exactly-once. Advisory notices are permitted evidence
+/// at the per-sender rate the server enforces.
 pub fn summarize(
     plans: &[SenderPlan],
     roster: &[(String, u32)],
@@ -485,6 +516,7 @@ pub fn summarize(
     generator_lag_bound_us: u64,
     delivery_class: DeliveryClass,
     churn: &ChurnPlan,
+    experiment: Option<Experiment>,
 ) -> OutcomeSummary {
     let mut reasons = records.faults.clone();
     if !records.join_failures.is_empty() {
@@ -612,6 +644,21 @@ pub fn summarize(
             .push(name.as_str());
     }
 
+    // The experiment's opaque senders: peer 0 of every room (a pure
+    // function of the deterministic shape). Its binary stream is the
+    // unsupported-conversion family's source; every co-room peer is a
+    // cross-format recipient of it, and every other stream is text.
+    let opaque_senders: BTreeSet<&str> = match experiment {
+        Some(Experiment::UnsupportedFormat) => plans
+            .iter()
+            .filter(|plan| plan.player == 0)
+            .map(|plan| plan.name.as_str())
+            .collect(),
+        // A new experiment variant opts in here explicitly; until it does,
+        // it has no opaque senders.
+        None => BTreeSet::new(),
+    };
+
     // Per-recipient churn view: how each co-room member's relay stream
     // evolved across the storm. Every member starts in epoch 1 (the initial
     // join); a member's rejoin adopts its new epoch, and the recipient's own
@@ -628,9 +675,15 @@ pub fn summarize(
     // Server-stamped sequences are 1-based within one `(sender, epoch)`
     // stream; the runner's ledger sequences are 0-based over that same
     // stream's sends, so the block built above maps between them.
-    let reasons_permitted =
-        |class: DeliveryClass, reason: signal_fish_server::protocol::DeliveryGapReason| match class
-        {
+    let reasons_permitted = |class: DeliveryClass,
+                             reason: signal_fish_server::protocol::DeliveryGapReason,
+                             opaque_pair: bool| {
+        if opaque_pair {
+            // The cross-format refusal family's one reason: an opaque
+            // payload was withheld from this recipient and accounted.
+            return reason == signal_fish_server::protocol::DeliveryGapReason::UnsupportedFormat;
+        }
+        match class {
             DeliveryClass::Reliable => false,
             DeliveryClass::Latest => matches!(
                 reason,
@@ -641,7 +694,8 @@ pub fn summarize(
                 reason,
                 signal_fish_server::protocol::DeliveryGapReason::VolatileDropped
             ),
-        };
+        }
+    };
     let member_names: BTreeSet<&str> = roster.iter().map(|(name, _)| name.as_str()).collect();
     let room_of: BTreeMap<&str, u32> = roster
         .iter()
@@ -651,6 +705,9 @@ pub fn summarize(
     let mut gaps_by_stream: BTreeMap<(&str, &str, u32), Vec<&GapEvent>> = BTreeMap::new();
     for gap in &records.gaps {
         let mut detail: Option<String> = None;
+        // The experiment's cross-format pair (opaque sender -> any co-room
+        // peer): gap reports are the contract, not a violation.
+        let opaque_pair = opaque_senders.contains(gap.sender.as_str());
         if !member_names.contains(gap.recipient.as_str())
             || !member_names.contains(gap.sender.as_str())
         {
@@ -659,7 +716,7 @@ pub fn summarize(
             detail = Some("gap names the recipient as its own sender".to_string());
         } else if room_of.get(gap.recipient.as_str()) != room_of.get(gap.sender.as_str()) {
             detail = Some("gap names a sender from another room".to_string());
-        } else if delivery_class == DeliveryClass::Reliable {
+        } else if delivery_class == DeliveryClass::Reliable && !opaque_pair {
             detail =
                 Some("reliable delivery permits no loss, yet a gap report arrived".to_string());
         } else if !sender_epochs
@@ -670,16 +727,24 @@ pub fn summarize(
                 "gap names epoch {} but the sender never sent in it",
                 gap.epoch
             ));
-        } else if !reasons_permitted(delivery_class, gap.reason) {
-            detail = Some(format!(
-                "reason {reason:?} is not a {class} loss reason",
-                reason = gap.reason,
-                class = match delivery_class {
-                    DeliveryClass::Latest => "latest",
-                    DeliveryClass::Volatile => "volatile",
-                    DeliveryClass::Reliable => "reliable",
-                }
-            ));
+        } else if !reasons_permitted(delivery_class, gap.reason, opaque_pair) {
+            detail = Some(if opaque_pair {
+                format!(
+                    "an opaque stream's omission must carry the unsupported_format reason, \
+                     got {reason:?}",
+                    reason = gap.reason
+                )
+            } else {
+                format!(
+                    "reason {reason:?} is not a {class} loss reason",
+                    reason = gap.reason,
+                    class = match delivery_class {
+                        DeliveryClass::Latest => "latest",
+                        DeliveryClass::Volatile => "volatile",
+                        DeliveryClass::Reliable => "reliable",
+                    }
+                )
+            });
         } else if gap.from_seq == 0 {
             detail = Some("gap range reaches below the first server sequence".to_string());
         } else if gap.from_seq > gap.to_seq {
@@ -702,6 +767,7 @@ pub fn summarize(
     let mut misrouted = Category::default();
     let mut out_of_order = Category::default();
     let mut missing = Category::default();
+    let mut leaked = Category::default();
 
     let mut per_recipient = Vec::new();
     for (recipient, room) in roster {
@@ -742,6 +808,22 @@ pub fn summarize(
         let mut received_by_sender: BTreeMap<&str, u64> = BTreeMap::new();
         for ((arrival_recipient, sender, epoch), stream) in arrivals.iter() {
             if *arrival_recipient != recipient.as_str() {
+                continue;
+            }
+            if opaque_senders.contains(sender) {
+                // The unsupported-conversion contract: the opaque sender's
+                // payload reaches NO recipient as a delivery. An arrival is
+                // the leak class — a conversion (lossy or lucky) happened
+                // that the server must refuse. Counted only in the leak
+                // category: its verdict names the recipient and stream
+                // exactly, and a leak already invalidates the run.
+                let (seq, _, _) = stream.first().copied().unwrap_or((0, 0, 0));
+                leaked.record(DeliveryKey {
+                    recipient: recipient.clone(),
+                    sender: (*sender).to_string(),
+                    epoch: *epoch,
+                    seq,
+                });
                 continue;
             }
             if !expected_senders.contains(sender) {
@@ -870,7 +952,7 @@ pub fn summarize(
                 // permits no gap report at all (validated globally above) —
                 // so its coverage is receipts alone.
                 let stream_gaps = match delivery_class {
-                    DeliveryClass::Reliable => &[][..],
+                    DeliveryClass::Reliable if !opaque_senders.contains(sender) => &[][..],
                     _ => gaps_by_stream
                         .get(&(recipient.as_str(), sender, *epoch))
                         .map_or(&[][..], Vec::as_slice),
@@ -1028,6 +1110,54 @@ pub fn summarize(
     {
         reasons.push(reason);
     }
+    if let Some(reason) =
+        leaked.into_reason(|count, first| InvalidReason::UnsupportedFormatLeak { count, first })
+    {
+        reasons.push(reason);
+    }
+
+    // Unsupported-format advisory cadence: the server emits at most one
+    // notice per (recipient, opaque sender) per second, so the run's span
+    // bounds how many can legitimately appear at one recipient. The margin
+    // is the limiter's shape made explicit: the FIRST notice for a sender
+    // is immediate (1), subsequent notices are >= 1 s apart (span/1s upper
+    // bound), plus one boundary slot and one drain slot for a final notice
+    // flushed while the recipient drains (the drain grace the config
+    // carries). Anything above the bound is the flood class, not evidence.
+    if !opaque_senders.is_empty() {
+        let span_us = records
+            .sent
+            .iter()
+            .map(|sent| sent.sent_us)
+            .max()
+            .unwrap_or(0);
+        // 1 (the immediate first notice) + the span's per-second cadence
+        // ceiling + 1 boundary slot + 1 drain slot.
+        let bound_per_opaque = 1 + span_us.div_ceil(1_000_000) + 1 + 1;
+        let mut opaque_per_room: BTreeMap<u32, u64> = BTreeMap::new();
+        for plan in plans {
+            if opaque_senders.contains(plan.name.as_str()) {
+                *opaque_per_room.entry(plan.room).or_default() += 1;
+            }
+        }
+        for (recipient, room) in roster {
+            let count = count_u64(
+                records
+                    .unsupported_notices
+                    .iter()
+                    .filter(|notice| notice.recipient == *recipient)
+                    .count(),
+            );
+            let bound = opaque_per_room.get(room).copied().unwrap_or(0) * bound_per_opaque;
+            if count > bound {
+                reasons.push(InvalidReason::UnsupportedNoticeFlood {
+                    recipient: recipient.clone(),
+                    count,
+                    bound,
+                });
+            }
+        }
+    }
 
     // Unsent work with no explanatory fault is a generator bookkeeping bug:
     // every sender exit path must record why it stopped.
@@ -1110,6 +1240,8 @@ pub fn summarize(
             p99_us: lag_p99,
             bound_us: generator_lag_bound_us,
         },
+        experiment: experiment.map(Experiment::label).map(str::to_string),
+        unsupported_notices: count_u64(records.unsupported_notices.len()),
     }
 }
 

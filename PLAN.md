@@ -332,7 +332,13 @@ co-room checks and per-incarnation stream machinery validate unchanged,
 the multi-wave shift composes on the original timeline, and two
 real-socket cells plus deterministic controls (plan shape, composed
 shift, code uniqueness, missing rejoin half, stale-generation misroute)
-carry red proofs. Remaining below: unsupported-format cells.
+carry red proofs. The unsupported-format slice is landed (seventh runner
+PR, 2026-10-06, see the ledger's contract record): a labeled
+`unsupported-format` contract experiment where the room's opaque `rkyv`
+sender reaches no cross-format recipient — exact `unsupported_format`
+coverage, zero payload leaks, bounded advisories, exact server-counter
+agreement — with six red-proven controls. Remaining below: the
+resource-collection remainder.
 
 - [x] Churn/reconnect schedules: reconnect-burst and room-replacement
   shapes per the C3 cells, with red-first controls for each new permitted
@@ -341,12 +347,18 @@ carry red proofs. Remaining below: unsupported-format cells.
   incarnation stream validation, and the storm cell plus controls. The
   room-replacement shape is landed (fourth runner PR, 2026-10-05): whole
   rooms cycle into fresh generations per wave while others keep serving.
-- [ ] Unsupported-format cells: validate permitted
+- [x] Unsupported-format cells: validate permitted
   outcomes and reports per the delivery contract instead of reliable
-  semantics; label them as separate contract experiments. Reuse existing
-  WebSocket clients and the shared multiprocess harness
-  (`tests/websocket_test_helpers/`); the runner already runs the release
-  server as a separate process.
+  semantics; label them as separate contract experiments. Landed (seventh
+  runner PR, 2026-10-06): the labeled `unsupported-format` experiment —
+  the room's opaque `rkyv` sender must reach no cross-format recipient,
+  every omission covered by an exact `unsupported_format` gap report, the
+  rate-limited advisory cadence bounded, no payload leak, the gap contract
+  closed on text streams, the server's `unsupported_format` counter in
+  exact agreement, and the labeled artifacts replaying (schema 5). The
+  remaining unsupported-format ground (v2 observer cohorts, same-format
+  opaque twins, churn × experiment composition) is recorded in the ledger
+  for the C3 encoding-mix cells rather than silently skipped.
 - [ ] Extend runner inputs where a new cell needs them (encoding mix cohorts,
   churn schedule shapes). Current inputs: endpoint, seed, room/player count,
   encoding (v2/v3 JSON), payload bytes, per-sender rate, delivery class

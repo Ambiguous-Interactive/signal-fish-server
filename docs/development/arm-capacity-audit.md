@@ -2475,9 +2475,36 @@ per-sample presence pin; the fixture parser test pins the spaced-comm field
 positions, and the live-sampler test pins strict advancement under real CPU
 work with absent PIDs recorded as null.
 
-**C2 next runner PR: unsupported-format cells (#648).** Validate the
-permitted outcomes and reports of intentionally unsupported conversions per
-the delivery contract instead of reliable semantics, as separately labeled
-contract experiments. Reuse the existing WebSocket clients and the shared
-multiprocess harness (`tests/websocket_test_helpers/`); the runner already
-runs the release server as a separate process.
+**C2 next runner PR: unsupported-format contract-experiment cells — LANDED**
+(seventh runner PR, 2026-10-06). The runner gains a labeled `Experiment`
+input (`unsupported-format`): peer 0 of every room negotiates opaque `rkyv`
+(overlay knob `protocol.enable_rkyv_game_data`, refused at config time if
+absent and re-verified against the server's advertised `ProtocolInfo` list
+so a silent downgrade cannot hollow the cell) and sends raw binary frames;
+every other peer stays JSON. The oracle validates the cross-format refusal
+family per the delivery contract instead of reliable semantics: the opaque
+stream must reach NO recipient as a payload (any arrival, or any binary
+frame anywhere, is the `unsupported_format_leak` class), every omission must
+be covered by exactly one exact `unsupported_format` gap report (a hole
+without its report is `missing_deliveries`), a foreign reason on the opaque
+stream is invalid, the gap contract stays closed on the text streams, and
+the rate-limited advisories are recorded evidence bounded at one per opaque
+sender per second (`unsupported_notice_flood` names the exact count and
+bound). Inbound classification is exact: advisories at cross-format
+observers are notices, the same advisory at the opaque sender (and any other
+error code) stays a rejection. The run is refused outside v3/reliable/
+churn-free shapes; binary frames carry no delivery class. Summary and
+manifest carry the experiment label, notices are summed in the summary, and
+artifacts bump to schema 5 (new event kind `unsupported_notice`, additive
+summary fields; older schemas refused by the validator). The real-socket
+cell (1 room, 1 opaque + 3 JSON observers) pins contract legality, exact
+coverage (`gap_covered == observers × sends`), zero opaque receipts, the
+labeled replay, and exact server-counter agreement
+(`class_outcome_unsupported_format == observers × sends`, now sampled for
+experiment runs too). Six deterministic controls carry red proofs: the
+leak rule, the opaque-stream coverage rule, the foreign-reason scope, the
+text-stream scope, the notice-cadence bound, and the inbound
+classification each fail their control when neutered. Remaining
+unsupported-format ground (tracked for later cells, not silently skipped):
+v2 observer cohorts (advisory-only, no reports to validate), same-format
+opaque twins (binary-envelope decoding), and churn × experiment composition.
