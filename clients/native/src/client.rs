@@ -450,7 +450,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
     // consume — v2 passthrough relays raw payload with no attribution.
     if cli.game_data_format != GameDataFormatArg::Json && !cli.is_v3() {
         return Err(FatalError::protocol(
-            "--game-data-format rkyv|protobuf requires --protocol-version 3",
+            "non-json game data requires --protocol-version 3",
         ));
     }
 
@@ -666,20 +666,18 @@ fn negotiated_version_from(
                 if requested_format != GameDataEncoding::Json
                     && !info.game_data_formats.contains(&requested_format)
                 {
+                    // Every refused encoding names the knob that advertises
+                    // it. `message_pack` ships enabled by default (opt-out),
+                    // but a deployment that disabled it owes the operator the
+                    // same pointer as the opt-in encodings.
                     let knob = match requested_format {
                         GameDataEncoding::Rkyv => "protocol.enable_rkyv_game_data",
                         GameDataEncoding::Protobuf => "protocol.enable_protobuf_game_data",
-                        // `message_pack` is a standard v3 encoding with no
-                        // opt-in knob; the CLI cannot request it today. Json
-                        // never reaches this branch (guarded above). Refuse
-                        // instead of panicking: the no-panic policy forbids
-                        // panic-prone macros in production code.
-                        GameDataEncoding::MessagePack | GameDataEncoding::Json => {
-                            return Err(FatalError::protocol(format!(
-                                "{} game data is not negotiable by the reference client",
-                                requested_format.as_wire_str()
-                            )));
-                        }
+                        GameDataEncoding::MessagePack => "protocol.enable_message_pack_game_data",
+                        // Unreachable: Json requests skip this guard above.
+                        // Refuse instead of panicking: the no-panic policy
+                        // forbids panic-prone macros in production code.
+                        GameDataEncoding::Json => "",
                     };
                     return Err(FatalError::protocol(format!(
                         "server does not advertise {} game data \
@@ -4497,6 +4495,15 @@ mod tests {
             (vec!["json"], GameDataEncoding::Rkyv, false),
             (vec!["json", "rkyv"], GameDataEncoding::Rkyv, true),
             (vec!["json", "rkyv"], GameDataEncoding::Protobuf, false),
+            // `message_pack` is a standard v3 encoding (default-on knob):
+            // negotiable when advertised, and its refusal names the same
+            // deployment knob as the opt-in encodings.
+            (
+                vec!["json", "message_pack"],
+                GameDataEncoding::MessagePack,
+                true,
+            ),
+            (vec!["json"], GameDataEncoding::MessagePack, false),
             (
                 vec!["json", "message_pack", "rkyv", "protobuf"],
                 GameDataEncoding::Protobuf,
@@ -4514,6 +4521,7 @@ mod tests {
                 let knob = match requested {
                     GameDataEncoding::Rkyv => "protocol.enable_rkyv_game_data",
                     GameDataEncoding::Protobuf => "protocol.enable_protobuf_game_data",
+                    GameDataEncoding::MessagePack => "protocol.enable_message_pack_game_data",
                     other => panic!("json requests must skip validation, got {other:?}"),
                 };
                 assert!(

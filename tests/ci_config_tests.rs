@@ -25808,13 +25808,16 @@ fn test_git_hook_runners_use_null_delimited_git_paths() {
     );
 
     assert!(
-        pre_push.contains("\"--raw\", \"-r\", \"-m\", \"-z\"")
+        pre_push.contains("\"--raw\"")
+            && pre_push.contains("\"-z\"")
             && pre_push.contains("\"--root\"")
-            && pre_push.contains("\"-m\"")
+            && pre_push.contains("\"--no-renames\"")
+            && pre_push.contains("\"--diff-merges=separate\"")
             && pre_push.contains("Split-NulOutput")
-            && pre_push.contains("diff-tree\", \"--stdin\""),
+            && !pre_push.contains("diff-tree\", \"--stdin\""),
         "pre-push runner must parse pushed commit/file changes from NUL-delimited \
-         git output, including merge commits, without per-commit process fanout."
+         git output in ONE git log --raw spawn, including merge commits and \
+         plumbing rename semantics, without per-commit process fanout."
     );
 }
 
@@ -25876,10 +25879,10 @@ fn test_pre_push_hook_exists_and_runs_workflow_policy_checks() {
 
     assert!(
         runner.contains("Get-ChangedFilesForPush")
-            && runner.contains("\"--not\", $remoteArg")
+            && runner.contains("\"log\", \"--format=%H\", \"--raw\"")
             && runner.contains("--remotes=$RemoteName")
-            && runner.contains("\"rev-list\", $LocalSha, \"--not\", $RemoteSha, $remoteArg")
-            && runner.contains("Add-ChangedFilesFromCommits")
+            && runner.contains("$logArgs + $RemoteSha + $remoteArg")
+            && runner.contains("Add-ChangedFilesFromPushedCommits")
             && runner.contains("[switch]$Worktree")
             && runner.contains("Get-ChangedFilesForWorktreePreflight")
             && runner.contains("Test-WorkflowDirectScriptInvocations"),
@@ -25911,18 +25914,20 @@ fn test_pre_push_existing_ref_excludes_commits_already_on_remote_when_pwsh_avail
                     $script:CapturedArguments = [string[]]$Arguments
                     [pscustomobject]@{
                         ExitCode = 0
-                        Stdout = "introduced-commit`n"
+                        Stdout = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`0`n:100644 100644 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb cccccccccccccccccccccccccccccccccccccccc M`0.githooks/pre-push`0"
                         Stderr = ""
-                        Output = "introduced-commit`n"
+                        Output = ""
                     }
                 }
 
-                $commits = @(Get-RevList -LocalSha "local-tip" -RemoteSha "old-remote-tip" -AllZeroSha ("0" * 40) -RemoteName "origin")
-                $expected = @("rev-list", "local-tip", "--not", "old-remote-tip", "--remotes=origin")
-                Assert ($commits.Count -eq 1 -and $commits[0] -eq "introduced-commit") "revision output should be preserved"
-                Assert ($script:CapturedArguments.Count -eq $expected.Count) "rev-list should receive the expected argument count"
+                $files = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]::new([System.StringComparer]::Ordinal)
+                Add-ChangedFilesFromPushedCommits -Map $files -LocalSha "local-tip" -RemoteSha "old-remote-tip" -AllZeroSha ("0" * 40) -RemoteName "origin"
+                $expected = @("-c", "log.showSignature=false", "log", "--format=%H", "--raw", "--no-abbrev", "-z", "--root", "--no-renames", "--diff-merges=separate", "local-tip", "--not", "old-remote-tip", "--remotes=origin")
+                Assert ($files.ContainsKey(".githooks/pre-push")) "the changed file should be attributed to the introduced commit"
+                Assert (@($files[".githooks/pre-push"])[0] -eq ("a" * 40)) "the introduced commit should own the changed file"
+                Assert ($script:CapturedArguments.Count -eq $expected.Count) "git log should receive the expected argument count"
                 for ($index = 0; $index -lt $expected.Count; $index++) {
-                    Assert ($script:CapturedArguments[$index] -eq $expected[$index]) "unexpected rev-list argument at index $index"
+                    Assert ($script:CapturedArguments[$index] -eq $expected[$index]) "unexpected git log argument at index $index"
                 }
             "#,
         ])
