@@ -45,6 +45,22 @@ ROOT_ALLOWED_ADVISORIES=(
     # patterns, not untrusted input. Tracked upstream: micromatch/braces#70.
     # Revisit by 2026-12-01.
     "GHSA-vfj7-8cjw-p6xm"
+    # GHSA-r4xh-jqrq-34v2 (smol-toml <= 1.8.0, quadratic-time parse() DoS):
+    # markdownlint-cli2 0.23.3 (latest) pins smol-toml at exactly 1.8.0, so the
+    # patched 1.9.0 is unreachable without an upstream release, and npm's only
+    # "fix" is downgrading markdownlint-cli2 a major version. The chain is dev
+    # tooling only (markdownlint-cli2 -> smol-toml) parsing maintainer-owned
+    # config files, not untrusted input. Revisit by 2026-12-01 together with
+    # the braces entry (one upstream chain: markdownlint-cli2).
+    "GHSA-r4xh-jqrq-34v2"
+    # GHSA-238p-pmpm-9mq7 (katex 0.11.0-0.18.1, prototype pollution can bypass
+    # trust restrictions): the chain markdownlint-cli2 -> markdownlint ->
+    # micromark-extension-math 3.1.0 (latest) pins katex ^0.16.0, and every
+    # patched katex (0.18.2+) is outside that range, so the fix is unreachable
+    # without an upstream release. Dev tooling only: markdownlint lints
+    # maintainer-controlled repository markdown and never renders katex output
+    # to a consumer. Revisit by 2026-12-01 together with the braces entry.
+    "GHSA-238p-pmpm-9mq7"
 )
 BROWSER_ALLOWED_ADVISORIES=()
 
