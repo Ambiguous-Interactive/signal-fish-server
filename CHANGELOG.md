@@ -16,10 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`empty`, `expired`, or `deleted`), publication state, and player and
   spectator join/leave counts. The endpoint reuses the `/metrics`
   bearer-token gate (`security.require_metrics_auth` /
-  `security.metrics_auth_token`), caps completed history at 1024 records
-  (oldest dropped, drops counted), and bounds the response at 128 KiB with
-  visible truncation markers. Application-owned room directories can use it
-  to discover where a room lives and when it closes.
+  `security.metrics_auth_token`). Completed history is capped at 1024
+  records (oldest dropped, drops counted, pre-publication removals counted
+  separately); responses cap the active list at 512 records and the whole
+  body at 1 MiB, with explicit `*Truncated` flags and dropped counts — the
+  counters always report true values. Application-owned room directories
+  can use it to discover where a room lives and when it closes.
 
 ## [0.10.0] - 2026-10-06
 

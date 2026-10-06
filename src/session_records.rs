@@ -27,6 +27,27 @@ use crate::protocol::{Room, RoomId};
 /// megabyte. Evicted entries are counted, never silently forgotten.
 pub const SESSION_RECORDS_COMPLETED_CAP: usize = 1024;
 
+/// Maximum number of active records one `/metrics/sessions` response lists.
+///
+/// Live rooms are admission-capped far above any single scrape's usefulness
+/// (the server-wide ceiling is 10 000 at defaults), and the records are
+/// room-cardinality data. The oldest records survive (the snapshot's
+/// deterministic order), the omission is flagged `activeTruncated` with the
+/// dropped count in `activeOmitted`, and every envelope counter keeps its
+/// pre-truncation value.
+pub const SESSION_RECORDS_ACTIVE_RESPONSE_CAP: usize = 512;
+
+/// Whole-response byte budget for the `/metrics/sessions` JSON response.
+///
+/// Sized like the `/metrics` whole-response budget so the structural caps
+/// compose: a full completed ring
+/// ([`SESSION_RECORDS_COMPLETED_CAP`]) plus a full active response cap
+/// ([`SESSION_RECORDS_ACTIVE_RESPONSE_CAP`]) of worst-case-sized records
+/// stays inside the budget — pinned by
+/// `full_caps_of_worst_case_records_fit_the_response_budget` — and
+/// truncation stays a rare fail-visible backstop instead of a steady state.
+pub const SESSIONS_RESPONSE_MAX_BYTES: usize = 1024 * 1024;
+
 /// Why a room closed. Coarse by design: the storage seam knows the deleting
 /// path, not the caller's intent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -68,7 +89,7 @@ pub struct SessionRecord {
 }
 
 impl SessionRecord {
-    fn from_room(room: &Room, created_at_ms: u64, published: bool) -> Self {
+    fn from_room(room: &Room, published: bool) -> Self {
         Self {
             room_id: room.id,
             room_code: room.code.clone(),
@@ -76,7 +97,8 @@ impl SessionRecord {
             application_id: room.application_id,
             region_id: room.region_id.clone(),
             max_players: room.max_players,
-            created_at_ms,
+            // The room row's own stamp is the single source of truth.
+            created_at_ms: u64::try_from(room.created_at.timestamp_millis()).unwrap_or(0),
             ended_at_ms: None,
             close_reason: None,
             published,
@@ -97,6 +119,10 @@ pub struct SessionRecords {
     active: DashMap<RoomId, SessionRecord>,
     completed: Mutex<VecDeque<SessionRecord>>,
     completed_dropped_total: AtomicU64,
+    /// Rooms removed before their first publication. No directory ever saw
+    /// them, so they leave no completed record; the counter keeps the drop
+    /// visible to operators.
+    unpublished_dropped_total: AtomicU64,
 }
 
 /// Point-in-time copy of the registry for one scrape.
@@ -117,6 +143,9 @@ pub struct SessionsSnapshot {
     pub completed_cap: usize,
     /// Total completed records dropped by the ring over the process lifetime.
     pub completed_dropped_total: u64,
+    /// Total rooms removed before their first publication. They leave no
+    /// completed record because no directory ever saw them.
+    pub unpublished_dropped_total: u64,
 }
 
 impl SessionRecords {
@@ -131,10 +160,8 @@ impl SessionRecords {
     /// Record a committed room row. `published` is false for hidden pending
     /// creations that become visible through [`Self::record_published`].
     pub(crate) fn record_created(&self, room: &Room, published: bool) {
-        self.active.insert(
-            room.id,
-            SessionRecord::from_room(room, Self::now_ms(), published),
-        );
+        self.active
+            .insert(room.id, SessionRecord::from_room(room, published));
     }
 
     /// Mark a pending room visible.
@@ -177,11 +204,13 @@ impl SessionRecords {
     }
 
     /// Finalize a removed room. Published rooms move to the completed ring;
-    /// rooms that were never visible are dropped without a record, because no
-    /// directory ever saw them.
+    /// rooms that were never visible are dropped without a record (no
+    /// directory ever saw them), with the drop counted.
     pub(crate) fn record_closed(&self, room_id: &RoomId, reason: SessionCloseReason) {
         if let Some((_, mut record)) = self.active.remove(room_id) {
             if !record.published {
+                self.unpublished_dropped_total
+                    .fetch_add(1, Ordering::Relaxed);
                 return;
             }
             record.ended_at_ms = Some(Self::now_ms());
@@ -231,6 +260,7 @@ impl SessionRecords {
             completed_count,
             completed_cap: SESSION_RECORDS_COMPLETED_CAP,
             completed_dropped_total: self.completed_dropped_total.load(Ordering::Relaxed),
+            unpublished_dropped_total: self.unpublished_dropped_total.load(Ordering::Relaxed),
         }
     }
 }
@@ -371,6 +401,58 @@ mod tests {
         let snapshot = records.snapshot();
         assert_eq!(snapshot.active_count, 0);
         assert_eq!(snapshot.completed_count, 0);
+        assert_eq!(
+            snapshot.unpublished_dropped_total, 1,
+            "the invisible drop must stay operator-visible as a counter"
+        );
+    }
+
+    /// The wire shape is part of the contract: consumers scrape camelCase
+    /// keys, so a field rename here would silently break the surface.
+    #[test]
+    fn record_and_snapshot_serialize_camel_case_keys() {
+        let records = SessionRecords::new();
+        let room_id = Uuid::new_v4();
+        let mut room = room_fixture(room_id, "ABC");
+        room.created_at = chrono::Utc::now();
+        records.record_created(&room, true);
+        records.record_closed(&room_id, SessionCloseReason::Empty);
+
+        let value = serde_json::to_value(records.snapshot()).expect("snapshot serializes");
+        let record = &value["completed"][0];
+        for key in [
+            "roomId",
+            "roomCode",
+            "gameName",
+            "applicationId",
+            "regionId",
+            "maxPlayers",
+            "createdAtMs",
+            "endedAtMs",
+            "closeReason",
+            "published",
+            "playersJoined",
+            "playersLeft",
+            "spectatorsJoined",
+            "spectatorsLeft",
+        ] {
+            assert!(
+                record.get(key).is_some(),
+                "missing camelCase wire key `{key}` in {record}"
+            );
+        }
+        let envelope_keys = [
+            "active",
+            "completed",
+            "activeCount",
+            "completedCount",
+            "completedCap",
+            "completedDroppedTotal",
+            "unpublishedDroppedTotal",
+        ];
+        for key in envelope_keys {
+            assert!(value.get(key).is_some(), "missing envelope key `{key}`");
+        }
     }
 
     #[test]
@@ -390,6 +472,39 @@ mod tests {
         let newest = &snapshot.completed[0];
         let oldest = &snapshot.completed[SESSION_RECORDS_COMPLETED_CAP - 1];
         assert!(newest.ended_at_ms >= oldest.ended_at_ms);
+    }
+
+    /// The structural caps must compose inside the response byte budget: a
+    /// full completed ring plus a full active response cap of
+    /// worst-case-sized records serializes within the `/metrics/sessions`
+    /// budget. Without this pin, raising either cap independently silently
+    /// turns every scrape into the truncation marker.
+    #[test]
+    fn full_caps_of_worst_case_records_fit_the_response_budget() {
+        let records = SessionRecords::new();
+        let worst_case_room = || {
+            let mut room = room_fixture(Uuid::new_v4(), &"C".repeat(64));
+            room.game_name = "G".repeat(64);
+            room.region_id = "R".repeat(64);
+            room
+        };
+
+        for _ in 0..SESSION_RECORDS_COMPLETED_CAP {
+            let room = worst_case_room();
+            records.record_created(&room, true);
+            records.record_closed(&room.id, SessionCloseReason::Deleted);
+        }
+        for _ in 0..SESSION_RECORDS_ACTIVE_RESPONSE_CAP {
+            records.record_created(&worst_case_room(), true);
+        }
+
+        let bytes = serde_json::to_vec(&records.snapshot()).expect("snapshot serializes");
+        let serialized = bytes.len();
+        assert!(
+            serialized <= SESSIONS_RESPONSE_MAX_BYTES,
+            "full caps of worst-case records must fit the response budget: \
+             {serialized} bytes > {SESSIONS_RESPONSE_MAX_BYTES}"
+        );
     }
 
     #[test]
