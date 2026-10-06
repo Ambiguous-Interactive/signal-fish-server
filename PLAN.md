@@ -617,6 +617,13 @@ correctness evidence appears.
   `cargo publish`) and workspace-mode mutation inventory. Sequential
   domain fragmentation or accepting the floor until `-Zthreads` matures
   on stable are the remaining options.
+  Session 343 re-measured on the same box: stable 1.98.1 is ~25% slower
+  than the pinned 1.91.0 on the warm per-touch `--lib` build (8.2 s vs
+  6.4 s), nightly `-Zthreads=4` loses to the same nightly without it
+  (9.8 s vs 8.5 s, one target dir; 16 threads already lost in session
+  267), the #642 named remainder test already runs on the paused clock
+  (0.026 s), and the pre-push discovery walk is single-spawn (#653).
+  The floor data still favors accepting the floor.
 - #207 — pursue the next optimization only from current allocation and latency
   profiles, with exact wire and delivery semantics held constant. The
   2026-09-01 profile found the fan-out core at its floor (0–1 allocation ops
