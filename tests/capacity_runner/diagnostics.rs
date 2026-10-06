@@ -131,6 +131,41 @@ pub fn cgroup_memory_bytes(_pid: u32) -> Option<u64> {
     None
 }
 
+/// Cumulative CPU seconds (user + system) a process has consumed
+/// (`utime + stime` from `/proc/<pid>/stat`, normalized by the kernel's
+/// fixed `USER_HZ = 100` stub — Linux has reported these fields in 100
+/// ticks-per-second units on every proc(5) release since 2.6). `None`
+/// elsewhere or when the process is gone — recorded as unavailable, never
+/// guessed.
+#[cfg(target_os = "linux")]
+pub fn process_cpu_seconds(pid: u32) -> Option<f64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    cpu_seconds_from_stat(&stat)
+}
+
+/// Parse `utime + stime` (CPU seconds at the kernel's fixed `USER_HZ = 100`
+/// stub) out of a `/proc/<pid>/stat` body.
+#[cfg(target_os = "linux")]
+fn cpu_seconds_from_stat(stat: &str) -> Option<f64> {
+    const USER_HZ: f64 = 100.0;
+    // The second field (comm) is parenthesized and may contain spaces, so
+    // scan past its closing parenthesis before splitting on whitespace.
+    let after_comm = stat.rsplit_once(')').map(|(_, rest)| rest)?;
+    let fields = after_comm.split_whitespace().collect::<Vec<_>>();
+    // Fields after comm are 1-based in proc(5); utime is 14, stime is 15, so
+    // the 0-based positions in this slice are 11 and 12.
+    let utime = fields.get(11)?.parse::<u64>().ok()?;
+    let stime = fields.get(12)?.parse::<u64>().ok()?;
+    Some((utime + stime) as f64 / USER_HZ)
+}
+
+/// Cumulative CPU seconds of a process (`None` off-Linux — recorded as
+/// unavailable).
+#[cfg(not(target_os = "linux"))]
+pub fn process_cpu_seconds(_pid: u32) -> Option<f64> {
+    None
+}
+
 /// Lenient Prometheus sample parse: `Some(value)` when the named
 /// un-labelled sample exists, `None` when absent — the sampler records
 /// unavailable counters instead of failing the way the strict delivery-suite
@@ -264,5 +299,49 @@ mod tests {
             parse_labeled_counter("no labels here 1", "no labels here", &[]),
             None
         );
+    }
+
+    // A realistic `/proc/<pid>/stat` body: the comm field is a quoted name
+    // that may contain spaces and parentheses, and the two CPU fields ride
+    // the fixed proc(5) positions past it. 52 user ticks + 7 system ticks at
+    // the USER_HZ=100 stub is exactly 0.59 CPU seconds.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cpu_seconds_from_stat_sums_utime_and_stime_past_a_spaced_comm_name() {
+        let stat = "4242 (signal-fish-serve) S 1 4242 4242 0 -1 4194560 \
+                    12345 0 0 0 52 7 0 0 20 0 8 0 1234567 123456789 9999 \
+                    18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 3 0 0 0\n";
+        assert_eq!(cpu_seconds_from_stat(stat), Some(0.59));
+        // A body missing the CPU fields (truncated read) is unavailable.
+        assert_eq!(cpu_seconds_from_stat("1 (x) S 1 1 1 0 -1 0"), None);
+        // Non-numeric CPU fields are unavailable, never guessed.
+        assert_eq!(
+            cpu_seconds_from_stat(
+                "1 (x) S 1 1 1 0 -1 0 0 0 0 0 x y 0 0 20 0 1 0 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+            ),
+            None
+        );
+    }
+
+    // The live sampler reads the calling process and only ever moves
+    // forward; real CPU work advances the counter.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_cpu_seconds_advances_for_the_calling_process_and_absent_pids_are_none() {
+        let before = process_cpu_seconds(std::process::id()).expect("own /proc stat is readable");
+        // 150 ms = 15 USER_HZ ticks: a wide multiple of the counter's 10 ms
+        // granularity so even a heavily oversubscribed runner cannot
+        // schedule this thread for less than one tick (zero-flake policy).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(150);
+        while std::time::Instant::now() < deadline {
+            std::hint::spin_loop();
+        }
+        let after = process_cpu_seconds(std::process::id()).expect("own /proc stat is readable");
+        assert!(
+            after > before,
+            "150 ms of busy work must advance the process CPU counter, got {before} -> {after}"
+        );
+        // A pid the kernel can never have assigned is unavailable, not zero.
+        assert_eq!(process_cpu_seconds(u32::MAX), None);
     }
 }

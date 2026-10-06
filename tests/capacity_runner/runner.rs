@@ -1308,8 +1308,10 @@ async fn sample_loop(
             t_us: micros(epoch.elapsed()),
             counters,
             server_rss_bytes: pid.and_then(diagnostics::resident_memory_bytes),
+            server_cpu_seconds: pid.and_then(diagnostics::process_cpu_seconds),
             cgroup_memory_bytes: pid.and_then(diagnostics::cgroup_memory_bytes),
             generator_rss_bytes: diagnostics::resident_memory_bytes(std::process::id()),
+            generator_cpu_seconds: diagnostics::process_cpu_seconds(std::process::id()),
             scrape_error,
         };
         out.lock().expect("interval samples poisoned").push(sample);

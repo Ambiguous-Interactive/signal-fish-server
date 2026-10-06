@@ -381,7 +381,8 @@ carry red proofs. Remaining below: unsupported-format cells.
   ingress/egress bytes, queue depth/age, disconnect reasons, live objects,
   cleanup backlog, maintenance duration, and generator CPU. Landed: server
   delivery counters, slow-consumer disconnects, active connections, server
-  RSS, cgroup memory, generator RSS, disconnect reasons (recorded as
+  RSS, server and generator CPU time (the schema-4 interval CPU pair),
+  cgroup memory, generator RSS, disconnect reasons (recorded as
   events), and — on lossy-class runs — the run class's seven accountable
   per-class outcomes, and the byte pair (ingress
   `signal_fish_relay_bytes_total`, egress
@@ -389,7 +390,7 @@ carry red proofs. Remaining below: unsupported-format cells.
   plus the queue posture (`signal_fish_websocket_queue_depth`,
   `signal_fish_websocket_queue_oldest_age_milliseconds`, computed at
   scrape time), with scrape failures recorded as explicit samples.
-  Remaining: server CPU time, generator CPU, socket-memory accounting,
+  Remaining: socket-memory accounting,
   live objects, cleanup backlog, and maintenance duration. Keep
   instrumentation out of timed hot paths.
 - [x] Runner negative controls: deliberately missing/duplicate/misrouted
@@ -623,7 +624,18 @@ correctness evidence appears.
   (9.8 s vs 8.5 s, one target dir; 16 threads already lost in session
   267), the #642 named remainder test already runs on the paused clock
   (0.026 s), and the pre-push discovery walk is single-spawn (#653).
-  The floor data still favors accepting the floor.
+  Session 344 decomposed the per-touch floor: a production-only touch
+  rebuilds in 4.5 s while the scoped `--lib` test loop costs 11.1 s — the
+  ~6.6 s delta (60%) is the lib's test-cfg unit re-expanding and
+  re-typechecking the ~45k lines of inline `#[cfg(test)]` modules on every
+  touch. This sharpens the crate-split calculus: because inline tests ride
+  their owning crate's test unit, a workspace split shrinks each domain's
+  per-touch cost by production AND test mass together (the
+  WebSocket+coordination domains total ~31k lines, ~3 s at this crate's
+  per-line rate), roughly double the production-only estimate. The floor
+  data still favors a split as the only drastic lever; the visibility
+  sweep (pub(crate) across future crate boundaries) remains the cost
+  driver.
 - #207 — pursue the next optimization only from current allocation and latency
   profiles, with exact wire and delivery semantics held constant. The
   2026-09-01 profile found the fan-out core at its floor (0–1 allocation ops
