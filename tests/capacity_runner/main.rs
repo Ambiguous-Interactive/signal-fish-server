@@ -175,43 +175,54 @@ async fn small_reliable_relay_scenario_passes_and_artifacts_replay_to_the_same_s
 
     // The CPU-time pair rides every interval sample beside RSS: the C3
     // capacity claims separate the generator's own cost from server
-    // saturation, which needs both processes' consumed CPU. The spawned
-    // binary exposes both, so this run's samples must carry real values,
-    // and a run that relayed traffic must have advanced both processes'
-    // CPU between the first and last sample.
+    // saturation, which needs both processes' consumed CPU. The sampler
+    // reads `/proc/<pid>/stat`, so Linux records both counters and any
+    // other host honestly records null (unavailable, never guessed):
+    // every platform asserts present-implies-finite, and Linux — the
+    // capacity host — additionally asserts the spawned binary's pair is
+    // recorded in every sample and advanced by the relay run.
     for sample in &intervals {
         for (name, value) in [
             ("server_cpu_seconds", sample.server_cpu_seconds),
             ("generator_cpu_seconds", sample.generator_cpu_seconds),
         ] {
+            #[cfg(target_os = "linux")]
             assert!(
                 value.is_some_and(|seconds| seconds.is_finite() && seconds >= 0.0),
                 "{name} must be a recorded finite value in every interval sample, got {value:?}"
             );
+            #[cfg(not(target_os = "linux"))]
+            assert!(
+                value.is_none_or(|seconds| seconds.is_finite() && seconds >= 0.0),
+                "{name} must be finite whenever recorded, got {value:?}"
+            );
         }
     }
-    let first = intervals.first().expect("at least one interval sample");
-    for (name, first_value, last_value) in [
-        (
-            "server_cpu_seconds",
-            first.server_cpu_seconds,
-            last.server_cpu_seconds,
-        ),
-        (
-            "generator_cpu_seconds",
-            first.generator_cpu_seconds,
-            last.generator_cpu_seconds,
-        ),
-    ] {
-        let (first_value, last_value) = (
-            first_value.expect("first sample carries the CPU pair"),
-            last_value.expect("last sample carries the CPU pair"),
-        );
-        assert!(
-            last_value > first_value,
-            "a relay run must burn CPU in both processes: {name} \
-             first {first_value}, last {last_value}"
-        );
+    #[cfg(target_os = "linux")]
+    {
+        let first = intervals.first().expect("at least one interval sample");
+        for (name, first_value, last_value) in [
+            (
+                "server_cpu_seconds",
+                first.server_cpu_seconds,
+                last.server_cpu_seconds,
+            ),
+            (
+                "generator_cpu_seconds",
+                first.generator_cpu_seconds,
+                last.generator_cpu_seconds,
+            ),
+        ] {
+            let (first_value, last_value) = (
+                first_value.expect("first sample carries the CPU pair"),
+                last_value.expect("last sample carries the CPU pair"),
+            );
+            assert!(
+                last_value > first_value,
+                "a relay run must burn CPU in both processes: {name} \
+                 first {first_value}, last {last_value}"
+            );
+        }
     }
 }
 
