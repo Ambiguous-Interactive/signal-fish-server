@@ -121,7 +121,12 @@ impl Fixture {
         );
         write(
             &root.join(".llm/code-samples/protocol/v3-server-messages.jsonl"),
-            "{\"type\":\"SessionPlan\",\"data\":{}}\n",
+            &format!(
+                "{{\"type\": \"ProtocolInfo\", \"data\": {{\
+                 \"implementation_version\": \"{version}\",\
+                 \"recommended_version\": \"1.2.3\"}}}}\n\
+                 {{\"type\": \"SessionPlan\", \"data\": {{}}}}\n"
+            ),
         );
         write(
             &root.join("docs/guides/rust-client.md"),
@@ -285,7 +290,8 @@ fn release_scope_helpers_guard_empty_arrays_for_macos_bash_3_2() {
     );
 }
 
-const RELEASE_FILES: [&str; 9] = [
+const RELEASE_FILES: [&str; 10] = [
+    ".llm/code-samples/protocol/v3-server-messages.jsonl",
     "Cargo.toml",
     "Cargo.lock",
     "fuzz/Cargo.toml",
@@ -368,6 +374,16 @@ fn prepare_release_applies_every_semver_bump_and_synchronizes_release_files() {
                  [v3 server sample](code-samples/protocol/v3-server-messages.jsonl)\n"
             )
         );
+
+        // The canonical v3 sample must disclose the new release exactly where
+        // the contract requires it (tests/protocol_samples.rs pins it to
+        // CARGO_PKG_VERSION), while the unrelated decoy version survives.
+        let v3_sample = read(fixture.root.join(".llm/code-samples/protocol/v3-server-messages.jsonl"));
+        assert!(
+            v3_sample.contains(&format!("\"implementation_version\": \"{expected}\"")),
+            "v3 sample did not disclose {expected}:\n{v3_sample}"
+        );
+        assert!(v3_sample.contains("\"recommended_version\": \"1.2.3\""));
 
         let changelog = read(fixture.root.join("CHANGELOG.md"));
         assert!(changelog.contains(&format!(
@@ -512,6 +528,35 @@ fn prepare_release_fails_closed_on_empty_notes_existing_version_or_lock_drift() 
 }
 
 #[test]
+fn prepare_release_fails_closed_on_stale_v3_sample_implementation_version() {
+    // A sample that does not disclose the current package version means a
+    // previous refresh was skipped or hand-edited; the release must not paper
+    // over the drift (tests/protocol_samples.rs would reject it afterwards).
+    let fixture = Fixture::new("1.2.3");
+    let sample = fixture.root.join(".llm/code-samples/protocol/v3-server-messages.jsonl");
+    write(
+        &sample,
+        "{\"type\": \"ProtocolInfo\", \"data\": {\
+         \"implementation_version\": \"0.9.2\"}}\n\
+         {\"type\": \"SessionPlan\", \"data\": {}}\n",
+    );
+    let before = release_file_snapshot(&fixture);
+    let output = fixture.run(&["--bump", "patch", "--date", RELEASE_DATE]);
+    assert!(
+        !output.status.success(),
+        "stale v3 sample version unexpectedly passed"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(
+            "Expected at least one ProtocolInfo implementation_version at 1.2.3"
+        ),
+        "unexpected stale-sample diagnostic:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_release_files_unchanged(&fixture, &before);
+}
+
+#[test]
 fn prepare_release_discovers_future_tracked_standalone_lockfiles() {
     let fixture = Fixture::new("1.2.3");
     let package_name = "-future replay-client";
@@ -569,6 +614,7 @@ fn canonical_release_inventory_includes_fixed_files_and_future_lockfiles() {
 
     let paths = release_inventory_paths(&fixture.root);
     for required in [
+        ".llm/code-samples/protocol/v3-server-messages.jsonl",
         ".llm/context.md",
         "CHANGELOG.md",
         "Cargo.toml",

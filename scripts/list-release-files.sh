@@ -10,7 +10,11 @@ REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
 }
 cd "$REPO_ROOT"
 
+# The canonical v3 sample advertises `implementation_version`, which
+# tests/protocol_samples.rs pins to CARGO_PKG_VERSION, so the release
+# preparation must rewrite it in the same commit (issue #631 contract).
 release_files=(
+    .llm/code-samples/protocol/v3-server-messages.jsonl
     .llm/context.md
     CHANGELOG.md
     Cargo.toml

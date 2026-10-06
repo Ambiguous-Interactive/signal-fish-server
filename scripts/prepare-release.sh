@@ -503,6 +503,40 @@ replace_context_version() {
     rm -f "$count_file"
 }
 
+replace_v3_sample_implementation_version() {
+    local file="$1"
+    local current_version="$2"
+    local next_version="$3"
+    local output count_file
+    output=$(mktemp)
+    count_file=$(mktemp)
+    # Anchor on the exact JSON key so unrelated version strings in the
+    # canonical samples (for example a recommended SDK version) survive.
+    awk \
+        -v current="\"implementation_version\": \"$current_version\"" \
+        -v replacement="\"implementation_version\": \"$next_version\"" \
+        -v count_file="$count_file" '
+        BEGIN { changed = 0 }
+        {
+            position = index($0, current)
+            while (position != 0) {
+                $0 = substr($0, 1, position - 1) replacement substr($0, position + length(current))
+                changed++
+                position = index($0, current)
+            }
+            print
+        }
+        END { print changed > count_file }
+    ' "$file" > "$output"
+    if [ "$(cat "$count_file")" -lt 1 ]; then
+        echo "ERROR: Expected at least one ProtocolInfo implementation_version at $current_version in $file." >&2
+        rm -f "$output" "$count_file"
+        exit 1
+    fi
+    mv "$output" "$file"
+    rm -f "$count_file"
+}
+
 replace_release_config_url() {
     local file="$1"
     local current_version="$2"
@@ -601,6 +635,8 @@ done
 replace_documented_version docs/library-usage.md "$CURRENT_VERSION" "$NEXT_VERSION"
 replace_release_config_url docs/getting-started.md "$CURRENT_VERSION" "$NEXT_VERSION"
 replace_context_version .llm/context.md "$CURRENT_VERSION" "$NEXT_VERSION"
+replace_v3_sample_implementation_version \
+    .llm/code-samples/protocol/v3-server-messages.jsonl "$CURRENT_VERSION" "$NEXT_VERSION"
 cut_changelog_release CHANGELOG.md "$NEXT_VERSION" "$RELEASE_DATE" "$CURRENT_VERSION"
 
 if [ "$(read_package_version)" != "$NEXT_VERSION" ]; then
