@@ -83,7 +83,7 @@ passes every scoped, edit-test-loop check and still fails hosted CI:
 
 - **Miri lane coverage** (`test_ci_safety_miri_lane_filters_cover_every_library_module`,
   `tests/ci_config_tests.rs`): every library module must be named by a Miri lane filter in
-  `.github/workflows/ci-safety.yml` (`core`: websocket/coordination/server/protocol;
+  `.github/workflows/ci-safety.yml` (`core`: `websocket coordination server protocol`;
   `remaining`: everything else). A module named by no lane "would silently never run under
   Miri" — the guard names the missing module and the lane list. Register the new module in
   the SAME change; the fix is one word in the `remaining` lane's `filters` string unless the
