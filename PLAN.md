@@ -446,8 +446,9 @@ Before large capacity runs, close the measurement prerequisites found in the
 2026-10-07 audit:
 
 - [#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775):
-  bound retained events, sender schedules, and validation indexes while
-  preserving exact validation across long runs.
+  bound retained events and validation indexes while preserving exact
+  validation across long runs. Schedules now derive each send on demand;
+  the audit records memory measurements and exact timeline controls.
 - [#776](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/776):
   require external-host config and binary evidence before accepting points.
 - Extend the runner for the required encoding cohorts and idle-lobby cells.

@@ -2724,3 +2724,54 @@ Pressure and unsupported-format controls retain their delivery contracts.
 External-host configuration and binary evidence intake remains in #776.
 Generator memory, encoding cohorts, resource constraints, and the long capacity
 cells remain separate prerequisites. No server capacity point is claimed here.
+
+### C3 generator schedule memory — registered experiment
+
+Issue #775 remains open. This experiment isolates schedule construction. It
+compares main `735734ca` with compact schedules using the same ignored
+`generator_schedule_memory_profile` probe. Each size runs in three fresh Linux
+processes. Python `os.wait4` records peak child RSS in KiB. Record every attempt,
+exit status, raw output, and wall time. Do not retry failed trials silently.
+
+Use seed 1, two rooms, 16 players per room, 60 sends/s, 120 seconds of warm-up,
+and measured durations of 60, 600, and 3,600 seconds. The workload uses the
+runner's integer-microsecond period. Compare full schedule counts, a checksum
+of every scheduled event, and exact first, phase-boundary, and final events for
+every sender. Require identical output between baseline and candidate.
+
+Then build the candidate's 999-room, 16-player shape with 120 seconds of
+warm-up and 600 seconds of measurement. Sample the same event positions and
+record its count and RSS. This constructs a ten-minute schedule; it does not
+send traffic or prove a ten-minute live capacity cell. Event retention, oracle
+indexes, replay inputs, and churn plans require separate memory controls.
+
+The experiment ran on ARM64 Linux under WSL2 with rustc 1.91.0 in the debug
+test profile. All 21 processes exited successfully. Each paired size produced
+identical probe output in all six baseline/candidate runs.
+
+| Scheduled sends | Baseline median KiB (range) | Compact median KiB (range) | Reduction |
+| --- | --- | --- | --- |
+| 345,632 | 16,608 (16,352–16,608) | 8,904 (8,848–8,904) | 46.4% |
+| 1,382,464 | 40,916 (40,912–40,928) | 9,272 (9,068–9,480) | 77.3% |
+| 7,142,688 | 175,840 (175,840–175,840) | 9,868 (9,676–10,148) | 94.4% |
+
+The larger candidate shape contains 690,540,768 scheduled sends. Three fresh
+processes had median peak RSS of 201,916 KiB (range 201,872–201,924). The probe
+retains and serializes four sampled events per sender. Peak RSS includes this
+artifact buffer and process overhead; it is not a count of schedule bytes.
+The integer-microsecond period produces 43,202 sends per sender for this shape.
+Raw outputs, resource records, and binary hashes remain under
+`/tmp/signal-fish-c3-schedule-memory-20261007/`.
+
+Each sender now stores scalar schedule inputs and its churn windows. Indexed
+SplitMix access preserves the original timestamp and phase at every sequence.
+Churn shifts compare against the original timestamp. Payload-size validation
+and first-measured-send lookup use direct indexed access. Invalid clock and
+peer inputs fail before plans are built. Impossible replacement-wave shapes
+fail before wave allocation.
+
+An independent frozen eager reference covers seeded jitter, warm-up boundaries,
+partial periods, indexed access, and churn. It rejected an intentional PRNG
+index mutation. Fifteen focused controls passed, including real-socket pressure,
+reconnect, replacement, exact payload sizes, and artifact replay. Retained events,
+oracle indexes, replay memory, and the ten-minute live cell remain open in #775.

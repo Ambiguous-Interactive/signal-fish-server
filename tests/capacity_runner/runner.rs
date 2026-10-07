@@ -46,7 +46,7 @@ use crate::records::{
     ChurnEvent, ChurnPhase, DisconnectEvent, DisconnectObservation, EventLog, GapEvent,
     ReceiptEvent, SentEvent, UnsupportedNoticeEvent,
 };
-use crate::schedule::{build_run_shape, Phase, SenderPlan};
+use crate::schedule::{build_run_shape, SenderPlan};
 use crate::websocket_test_helpers;
 use crate::websocket_test_helpers::server_process::{
     effective_server_config, spawn_server, ServerProcess,
@@ -960,7 +960,7 @@ pub(crate) fn validate_payload_size(
     payload_bytes: u32,
 ) -> Result<(), String> {
     for plan in plans {
-        if let Some(seq) = plan.sends.iter().map(|send| send.seq).max() {
+        if let Some(seq) = plan.sends.last().map(|send| send.seq) {
             let data = json!({"ledger_sender": plan.name, "seq": seq, "padding": ""});
             let metadata_bytes = serde_json::to_vec(&data)
                 .map_err(|error| format!("serialize ledger metadata: {error}"))?
@@ -1047,11 +1047,7 @@ async fn peer_task(
     hold_reads_for: Option<Duration>,
     never_read: bool,
 ) {
-    let first_measured = plan
-        .sends
-        .iter()
-        .find(|send| send.phase == Phase::Measured)
-        .map(|send| send.seq);
+    let first_measured = plan.sends.first_measured_seq();
     // This peer's incarnation index: 1 on the first connection, +1 on every
     // rejoin. It — not the server's per-connection epoch — is the stream
     // identity the sends are stamped with.

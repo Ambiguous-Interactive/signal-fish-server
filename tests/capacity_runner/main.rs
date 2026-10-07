@@ -4916,3 +4916,58 @@ fn drop_receipt(records: &mut RunRecords, recipient: &str, sender: &str, seq: u6
         .expect("receipt to drop exists");
     records.receipts.remove(index);
 }
+
+/// Isolated schedule-memory experiment; invoke in a fresh process per size.
+#[test]
+#[ignore = "generator schedule memory experiment; run explicitly"]
+fn generator_schedule_memory_profile() {
+    let mut config = scenario_config(Encoding::V3Json);
+    config.rooms = std::env::var("CAPACITY_SCHEDULE_PROFILE_ROOMS")
+        .unwrap_or_else(|_| "2".into())
+        .parse()
+        .expect("profile rooms");
+    config.players_per_room = 16;
+    config.send_rate_per_sender = 60.0;
+    config.warmup = Duration::from_secs(120);
+    config.duration = Duration::from_secs(
+        std::env::var("CAPACITY_SCHEDULE_PROFILE_SECONDS")
+            .expect("profile seconds")
+            .parse()
+            .expect("seconds integer"),
+    );
+    let (plans, churn) = build_run_shape(&config).expect("profile schedule");
+    let sample_only = std::env::var_os("CAPACITY_SCHEDULE_PROFILE_SAMPLE_ONLY").is_some();
+    let mut checksum = 0_u64;
+    let mut scheduled = 0_u64;
+    let mut samples = Vec::new();
+    for plan in &plans {
+        scheduled += u64::try_from(plan.sends.len()).expect("count");
+        if !sample_only {
+            for send in plan.sends.iter() {
+                checksum = checksum
+                    .rotate_left(7)
+                    .wrapping_add(send.seq)
+                    .wrapping_add(send.intended_us)
+                    .wrapping_add(u64::from(send.phase == schedule::Phase::Measured));
+            }
+        }
+        for index in [
+            0,
+            usize::try_from(config.warmup_sends_per_sender()).expect("warmup count") - 1,
+            usize::try_from(config.warmup_sends_per_sender()).expect("warmup count"),
+            plan.sends.len() - 1,
+        ] {
+            let send = plan.sends.get(index).expect("sample slot");
+            samples.push(serde_json::json!({"sender":plan.name,"send":send}));
+        }
+    }
+    println!(
+        "SCHEDULE_MEMORY {}",
+        serde_json::json!({"rooms":config.rooms,
+        "players":config.players_per_room,"seconds":config.duration.as_secs(),
+        "warmup_seconds":config.warmup.as_secs(),"scheduled":scheduled,
+        "checksum":checksum,"sample_only":sample_only,"samples":samples,
+        "churn_cycles":churn.cycles.len()})
+    );
+    std::hint::black_box(&plans);
+}
