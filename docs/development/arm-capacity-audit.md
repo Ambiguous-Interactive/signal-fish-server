@@ -2648,3 +2648,47 @@ It pins defaults, harness overrides, legacy keys, and the reserved port.
 Additional controls reject malformed overlays, conflicting aliases, file-backed
 sources, altered hashes or layers, and old schema 7 artifacts. The manifest
 presence check failed against the previous runner before acceptance.
+
+## C3 exact application and encoded frame-body sizes — 2026-10-07
+
+The payload part of
+[#776](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/776)
+now uses exact application byte counts. `payload_bytes` includes the compact
+JSON bytes of the complete ledger document: sender, sequence, JSON keys, and
+padding. Padding shrinks as sequence numbers gain digits. A run is refused
+before artifacts, connections, or child processes when its target cannot hold
+the largest scheduled metadata document.
+
+Schema 9 records application bytes and actual encoded WebSocket message-body
+bytes on every completed send and observed ledger receipt. Encoded bytes include
+protocol envelopes, class/key fields, sender IDs, and server stamps. They exclude
+WebSocket headers and masking, TCP, and TLS. The opaque experiment sends the
+ledger document directly, so its ingress application and body sizes are equal.
+
+The summary separates warm-up and measured ingress/egress. Unknown keys and
+unidentified GameData remain in unmatched egress. Each population records count,
+total bytes, and minimum/maximum sizes. Duplicate arrivals still contribute
+bytes. Missing or forged ledger identities produce structured faults with their
+observed sizes. Every observed application size must match the configured target;
+invalid body sizes and total overflow invalidate the run. Overflow totals saturate
+with an explicit fault so JSON serialization remains exact.
+
+Receipt time is captured when the runner receives the frame, before decoding and
+byte measurement. Scheduled-send latency still includes generator and socket
+wait. Schema 9 identifies this receipt-boundary change and the byte evidence;
+replay rejects earlier schemas and reconstructs the same summary from raw events.
+Hashes and counters do not replace the recorded per-frame sizes.
+
+The baseline real-socket control observed 141 application bytes in a declared
+96-byte cell and failed the exact-size assertion. The corrected eight-cell
+control covers 96 and 1,024 bytes for v2 reliable JSON and v3 reliable/latest/
+volatile JSON. It verifies exact application sizes, encoded ingress/egress
+lengths including metadata, phase totals, and replay equality. Deterministic
+controls cover decimal sequence boundaries, escaped sender names, maximum ledger
+sequence, an initial sequence that fits but later metadata that does not, wrong
+warm-up sizes, duplicate and unknown arrivals, unidentified frames, and overflow.
+Pressure and unsupported-format controls retain their delivery contracts.
+
+External-host configuration and binary evidence intake remains in #776.
+Generator memory, encoding cohorts, resource constraints, and the long capacity
+cells remain separate prerequisites. No server capacity point is claimed here.

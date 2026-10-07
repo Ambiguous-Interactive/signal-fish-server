@@ -28,6 +28,10 @@ pub struct SentEvent {
     pub epoch: u32,
     pub intended_us: u64,
     pub sent_us: u64,
+    /// Serialized application value size, excluding the protocol envelope.
+    pub application_bytes: u64,
+    /// Actual encoded WebSocket message body size, excluding WebSocket headers.
+    pub encoded_frame_body_bytes: u64,
     pub phase: Phase,
 }
 
@@ -45,6 +49,10 @@ pub struct ReceiptEvent {
     pub epoch: u32,
     pub server_seq: u64,
     pub received_us: u64,
+    /// Serialized application value size, excluding the protocol envelope.
+    pub application_bytes: u64,
+    /// Actual encoded WebSocket message body size, excluding WebSocket headers.
+    pub encoded_frame_body_bytes: u64,
 }
 
 /// One declared churn action a peer task performed: its socket closed for

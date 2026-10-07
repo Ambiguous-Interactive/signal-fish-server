@@ -242,7 +242,7 @@ pub struct RunConfig {
     pub rooms: u32,
     pub players_per_room: u32,
     pub encoding: Encoding,
-    /// Application payload bytes per relayed message (the ledger padding).
+    /// Exact compact JSON bytes of GameData.data, including ledger metadata.
     pub payload_bytes: u32,
     /// Messages per second per sender.
     pub send_rate_per_sender: f64,
