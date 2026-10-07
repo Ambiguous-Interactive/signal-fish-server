@@ -158,7 +158,7 @@ try {
       mkdirSync(artifactDirectory, { recursive: true });
       startServer();
       await waitForServer();
-      assert(server.exitCode === null && server.signalCode === null, "restarted server exited during bind");
+      assertServerLive(server, "restarted server exited during bind");
     }
     await runPhase(pageUrl);
   }
@@ -228,7 +228,7 @@ async function runPhase(pageUrl) {
       assert(peer.logs.filter((line) => line.includes("FORTRESS_WASM_ACTIVE ")).length === 1, `${peer.role}: one active checkpoint`);
       writeFileSync(join(artifactDirectory, `${peer.role}-active.json`), `${JSON.stringify(checkpoint, null, 2)}\n`);
     }
-    assert(server.exitCode === null && server.signalCode === null, "server must be live before drain");
+    assertServerLive(server, "server must be live before drain");
     serverExit = serverExitObserved;
     assert(server.kill("SIGTERM"), "deliver actual server drain");
   }
@@ -284,6 +284,7 @@ async function runPhase(pageUrl) {
       drainedServerPid = server.pid;
     }
   } else {
+    assertServerLive(server, "server exited before gameplay completion");
     const peerHealth = [
       ["creator", creatorReport, healthViolations("creator", creatorReport)],
       ["joiner", joinerReport, healthViolations("joiner", joinerReport)],
@@ -873,6 +874,10 @@ async function waitForServer() {
   ]);
 }
 
+function assertServerLive(child, message) {
+  assert(child.exitCode === null && child.signalCode === null, message);
+}
+
 function observeServer(child) {
   // Each spawn owns its output even if exit precedes the final pipe data.
   const chunks = [];
@@ -912,20 +917,35 @@ async function runServerLifecycleSelfTests() {
   const script = `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(tail)}], { stdio: [3, 1, 2] }); process.stdout.write('old-head', () => process.exit(7))`;
   const oldChild = spawn(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "pipe", "pipe"] });
   const old = observeServer(oldChild);
-  let closed = false;
-  oldChild.once("close", () => { closed = true; });
-  const status = await withDeadline(old.exit, 5_000, "lifecycle control exit deadline expired");
-  assert(status.code === 7 && status.signal === null, "lifecycle control lost actual exit status");
-  const fresh = observeServer(spawn(process.execPath, ["-e", "process.stdout.write('new-output')"], { stdio: ["ignore", "pipe", "pipe"] }));
-  const closedAtExit = closed;
-  oldChild.stdio[3].end();
-  assert(!closedAtExit, "lifecycle control did not exercise exit before close");
-  const finalStatus = await withDeadline(old.closed, 5_000, "lifecycle control close deadline expired");
-  assert(closed, "server logs finalized before stdio close");
-  await withDeadline(fresh.closed, 5_000, "lifecycle control fresh close deadline expired");
-  assert(finalStatus === status, "stdio close replaced actual exit status");
-  assert(Buffer.concat(old.chunks).toString() === "old-headold-tail", "old server lost late output");
-  assert(Buffer.concat(fresh.chunks).toString() === "new-output", "old server output leaked into restarted server");
+  let fresh;
+  try {
+    assertServerLive(oldChild, "lifecycle control rejects live child");
+    let closed = false;
+    oldChild.once("close", () => { closed = true; });
+    const status = await withDeadline(old.exit, 5_000, "lifecycle control exit deadline expired");
+    assert(status.code === 7 && status.signal === null, "lifecycle control lost actual exit status");
+    let rejectedExit = false;
+    try {
+      assertServerLive(oldChild, "exited child");
+    } catch {
+      rejectedExit = true;
+    }
+    assert(rejectedExit, "gameplay completion accepted exited child");
+    fresh = observeServer(spawn(process.execPath, ["-e", "process.stdout.write('new-output')"], { stdio: ["ignore", "pipe", "pipe"] }));
+    const closedAtExit = closed;
+    oldChild.stdio[3].end();
+    assert(!closedAtExit, "lifecycle control did not exercise exit before close");
+    const finalStatus = await withDeadline(old.closed, 5_000, "lifecycle control close deadline expired");
+    assert(closed, "server logs finalized before stdio close");
+    await withDeadline(fresh.closed, 5_000, "lifecycle control fresh close deadline expired");
+    assert(finalStatus === status, "stdio close replaced actual exit status");
+    assert(Buffer.concat(old.chunks).toString() === "old-headold-tail", "old server lost late output");
+    assert(Buffer.concat(fresh.chunks).toString() === "new-output", "old server output leaked into restarted server");
+  } finally {
+    if (!oldChild.stdio[3].writableEnded) oldChild.stdio[3].end();
+    if (oldChild.exitCode === null && oldChild.signalCode === null) oldChild.kill("SIGKILL");
+    await withDeadline(Promise.all([old.closed, fresh?.closed]), 5_000, "lifecycle control cleanup deadline expired");
+  }
 }
 
 async function withDeadline(promise, milliseconds, message) {
