@@ -806,6 +806,200 @@ async fn unsupported_format_experiment_reports_cross_format_omissions_over_real_
 // catch each contract violation with its exact, named reason.
 // ---------------------------------------------------------------------------
 
+/// Profile real event collection and oracle scratch in a fresh process.
+/// This synthetic complete workload measures the generator, not the server.
+/// Capture child peak RSS with the host profiler; set
+/// CAPACITY_MEMORY_PROBE_SENDS to 100, 1000, or 5000 for increasing fan-out.
+#[test]
+#[ignore = "generator memory profile; run in a fresh process"]
+fn generator_memory_profile_on_complete_fanout() {
+    let sends = std::env::var("CAPACITY_MEMORY_PROBE_SENDS")
+        .unwrap_or_else(|_| "1000".to_string())
+        .parse::<u64>()
+        .expect("probe send count is a u64");
+    assert!(
+        (1..=5000).contains(&sends),
+        "probe is capped at 5000 sends per peer"
+    );
+    let mut config = scenario_config(Encoding::V3Json);
+    config.players_per_room = 16;
+    config.warmup = Duration::ZERO;
+    config.duration = Duration::from_micros(sends);
+    config.send_rate_per_sender = 1_000_000.0;
+    let (plans, churn) = build_run_shape(&config).expect("probe shape");
+    let roster = plans
+        .iter()
+        .map(|plan| (plan.name.clone(), plan.room))
+        .collect::<Vec<_>>();
+    let records = complete_records(&plans);
+    assert_eq!(config::count_u64(records.sent.len()), 16 * sends);
+    assert_eq!(config::count_u64(records.receipts.len()), 240 * sends);
+    let collected_rss = diagnostics::resident_memory_bytes(std::process::id());
+    let started = std::time::Instant::now();
+    let summary = oracle::summarize(
+        &plans,
+        &roster,
+        &records,
+        1000,
+        DeliveryClass::Reliable,
+        &churn,
+        None,
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        summary.valid,
+        "probe must retain exact delivery checks: {:?}",
+        summary.reasons
+    );
+    assert_eq!(summary.totals.outstanding, 0);
+    assert_eq!(summary.latency_us.samples, 240 * sends);
+    println!(
+        "{}",
+        serde_json::json!({
+            "sends_per_peer": sends,
+            "receipts": records.receipts.len(),
+            "collected_rss_bytes": collected_rss,
+            "after_oracle_rss_bytes": diagnostics::resident_memory_bytes(std::process::id()),
+            "oracle_elapsed_us": elapsed.as_micros(),
+            "summary": summary,
+        })
+    );
+}
+
+/// Each recipient keeps its own tail; the aggregate includes observed
+/// duplicates even though the delivery verdict rejects them.
+#[test]
+fn latency_statistics_keep_recipient_tails_and_invalid_arrivals_distinct() {
+    for duplicate in [false, true] {
+        let context = unit_context();
+        let mut records = complete_records(&context.plans);
+        let expected = [
+            ("r0p0", 8),
+            ("r0p1", 80_008),
+            ("r0p2", 400_008),
+            ("r0p3", 70_000_008),
+        ];
+        for receipt in &mut records.receipts {
+            let latency = expected
+                .iter()
+                .find(|(name, _)| *name == receipt.recipient)
+                .expect("known recipient")
+                .1;
+            receipt.received_us += latency - 8;
+        }
+        if duplicate {
+            let mut extra = records
+                .receipts
+                .iter()
+                .find(|receipt| receipt.recipient == "r0p0")
+                .expect("first recipient frame")
+                .clone();
+            extra.received_us = 180_000_008
+                + records
+                    .sent
+                    .iter()
+                    .find(|sent| sent.sender == extra.sender && sent.seq == extra.seq)
+                    .expect("matching send")
+                    .intended_us;
+            records.receipts.push(extra);
+        }
+        let summary = oracle::summarize(
+            &context.plans,
+            &context.roster,
+            &records,
+            1000,
+            DeliveryClass::Reliable,
+            &ChurnPlan::default(),
+            None,
+        );
+        assert_eq!(summary.valid, !duplicate);
+        if duplicate {
+            assert!(summary
+                .reasons
+                .iter()
+                .any(|reason| matches!(reason, oracle::InvalidReason::DuplicateDeliveries { .. })));
+        }
+        let mut aggregate = hdrhistogram::Histogram::<u64>::new_with_bounds(1, 180_000_008, 3)
+            .expect("expected histogram");
+        for (name, latency) in expected {
+            let mut histogram = hdrhistogram::Histogram::<u64>::new_with_bounds(1, 180_000_008, 3)
+                .expect("expected recipient histogram");
+            for _ in 0..12 {
+                histogram.record(latency).expect("expected latency");
+                aggregate
+                    .record(latency)
+                    .expect("expected aggregate latency");
+            }
+            let has_duplicate = duplicate && name == "r0p0";
+            if has_duplicate {
+                histogram.record(180_000_008).expect("duplicate latency");
+                aggregate
+                    .record(180_000_008)
+                    .expect("aggregate duplicate latency");
+            }
+            let actual = &summary
+                .per_recipient
+                .iter()
+                .find(|peer| peer.recipient == name)
+                .expect("recipient outcome")
+                .latency_us;
+            assert_eq!(actual.samples, if has_duplicate { 13 } else { 12 });
+            assert_eq!(
+                actual.max_us,
+                if has_duplicate { 180_000_008 } else { latency }
+            );
+            assert_eq!(actual.p50_us, histogram.value_at_quantile(0.5));
+            assert_eq!(actual.p95_us, histogram.value_at_quantile(0.95));
+            assert_eq!(actual.p99_us, histogram.value_at_quantile(0.99));
+        }
+        assert_eq!(summary.latency_us.samples, if duplicate { 49 } else { 48 });
+        assert_eq!(
+            summary.latency_us.max_us,
+            if duplicate { 180_000_008 } else { 70_000_008 }
+        );
+        assert_eq!(summary.latency_us.p50_us, aggregate.value_at_quantile(0.5));
+        assert_eq!(summary.latency_us.p95_us, aggregate.value_at_quantile(0.95));
+        assert_eq!(summary.latency_us.p99_us, aggregate.value_at_quantile(0.99));
+    }
+}
+
+#[test]
+fn warmup_only_deliveries_have_empty_latency_statistics() {
+    let context = unit_context();
+    let mut records = complete_records(&context.plans);
+    for sent in &mut records.sent {
+        sent.phase = schedule::Phase::Warmup;
+    }
+    let summary = oracle::summarize(
+        &context.plans,
+        &context.roster,
+        &records,
+        1000,
+        DeliveryClass::Reliable,
+        &ChurnPlan::default(),
+        None,
+    );
+    assert!(
+        summary.valid,
+        "warmup delivery checks still apply: {:?}",
+        summary.reasons
+    );
+    assert_eq!(summary.totals.receipts, 48);
+    let empty = serde_json::to_value(oracle::LatencyStats::default()).expect("empty statistics");
+    for actual in std::iter::once(&summary.latency_us)
+        .chain(summary.per_recipient.iter().map(|peer| &peer.latency_us))
+    {
+        assert_eq!(serde_json::to_value(actual).expect("statistics"), empty);
+    }
+    let output = tempfile::tempdir().expect("histogram directory");
+    artifacts::write_histogram(output.path(), &records).expect("write empty histogram");
+    let raw = std::fs::read(output.path().join(artifacts::HISTOGRAM_FILE)).expect("read histogram");
+    let histogram: hdrhistogram::Histogram<u64> = hdrhistogram::serialization::Deserializer::new()
+        .deserialize(&mut std::io::Cursor::new(raw))
+        .expect("decode histogram");
+    assert_eq!(histogram.len(), 0);
+}
+
 /// Generator delay belongs in every latency view, including delays beyond
 /// the old histogram ceiling. The actual send may finish after receipt.
 #[test]
@@ -858,7 +1052,7 @@ fn scheduled_latency_includes_generator_delay_in_every_view() {
                 assert_eq!(recipient.latency_us.samples, expected, "{recipient:?}");
             }
             let output = tempfile::tempdir().expect("histogram directory");
-            artifacts::write_histogram(output.path(), &samples).expect("write histogram");
+            artifacts::write_histogram(output.path(), &records).expect("write histogram");
             let raw = std::fs::read(output.path().join(artifacts::HISTOGRAM_FILE))
                 .expect("read histogram");
             let histogram: hdrhistogram::Histogram<u64> =

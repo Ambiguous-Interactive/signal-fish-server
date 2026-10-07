@@ -226,9 +226,11 @@ pub fn write_intervals(output_dir: &Path, samples: &[IntervalSample]) -> Result<
 }
 
 /// Write the HdrHistogram V2 artifact for the measured latency samples.
-pub fn write_histogram(output_dir: &Path, samples: &[u64]) -> Result<(), String> {
+pub fn write_histogram(output_dir: &Path, records: &RunRecords) -> Result<(), String> {
     let path = output_dir.join(HISTOGRAM_FILE);
-    let histogram = crate::oracle::latency_histogram(samples);
+    let histogram = crate::oracle::latency_histogram(
+        crate::oracle::latency_pairs(records).map(|(_recipient, sample)| sample),
+    );
     let mut encoded = Vec::new();
     hdrhistogram::serialization::V2Serializer::new()
         .serialize(&histogram, &mut encoded)

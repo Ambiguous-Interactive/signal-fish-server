@@ -624,7 +624,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         &config.output_dir,
         &samples.lock().expect("interval samples"),
     )?;
-    artifacts::write_histogram(&config.output_dir, &oracle::latency_samples(&records))?;
+    artifacts::write_histogram(&config.output_dir, &records)?;
     artifacts::write_json(config.output_dir.join(artifacts::SUMMARY_FILE), &summary)?;
 
     let final_counters = samples

@@ -433,7 +433,8 @@ Before large capacity runs, close the measurement prerequisites found in the
 2026-10-07 audit:
 
 - [#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775):
-  bound generator memory and preserve exact validation across long runs.
+  bound retained events, sender schedules, and validation indexes while
+  preserving exact validation across long runs.
 - [#776](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/776):
   record effective server configuration and exact application/wire sizes.
 - Extend the runner for the required encoding cohorts and idle-lobby cells.

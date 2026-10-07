@@ -258,60 +258,73 @@ impl GapViolations {
 /// `(sender, seq)` delivery. Single source for the summary percentiles (run
 /// total and per recipient) and the histogram artifact, so they can never
 /// disagree.
-fn latency_pairs(records: &RunRecords) -> Vec<(String, u64)> {
+pub fn latency_pairs(records: &RunRecords) -> impl Iterator<Item = (&str, u64)> {
     let sent_by_key: BTreeMap<(&str, u64), &SentEvent> = records
         .sent
         .iter()
         .map(|event| ((event.sender.as_str(), event.seq), event))
         .collect();
-    let mut pairs = Vec::with_capacity(records.receipts.len());
-    for receipt in &records.receipts {
-        if let Some(sent) = sent_by_key.get(&(receipt.sender.as_str(), receipt.seq)) {
-            if sent.phase == Phase::Measured {
-                pairs.push((
-                    receipt.recipient.clone(),
-                    receipt.received_us.saturating_sub(sent.intended_us),
-                ));
-            }
-        }
-    }
-    pairs
+    records.receipts.iter().filter_map(move |receipt| {
+        let sent = sent_by_key.get(&(receipt.sender.as_str(), receipt.seq))?;
+        (sent.phase == Phase::Measured).then(|| {
+            (
+                receipt.recipient.as_str(),
+                receipt.received_us.saturating_sub(sent.intended_us),
+            )
+        })
+    })
 }
 
 /// One-way latency samples over the measured window (all recipients).
+/// Only deterministic test callers need to collect these samples.
 pub fn latency_samples(records: &RunRecords) -> Vec<u64> {
     latency_pairs(records)
-        .into_iter()
         .map(|(_recipient, sample)| sample)
         .collect()
 }
 
-/// The shared histogram for summary percentiles and the artifact. Size the
-/// range from the observations so long stalls remain visible.
-pub fn latency_histogram(samples: &[u64]) -> Histogram<u64> {
-    let highest = samples.iter().copied().max().unwrap_or(0).max(2);
-    let mut histogram =
-        Histogram::<u64>::new_with_bounds(1, highest, 3).expect("latency histogram range");
-    for sample in samples {
-        histogram
-            .record(*sample)
-            .expect("sample fits observed range");
-    }
-    histogram
+/// Streaming latency statistics retain HDR buckets and the exact raw maximum.
+struct LatencyAccumulator {
+    histogram: Histogram<u64>,
+    max_us: u64,
 }
 
-/// Percentile helper over microsecond samples (histogram-backed).
-fn percentiles(samples: &[u64]) -> (u64, u64, u64, u64) {
-    if samples.is_empty() {
-        return (0, 0, 0, 0);
+impl Default for LatencyAccumulator {
+    fn default() -> Self {
+        Self {
+            histogram: Histogram::<u64>::new(3).expect("latency histogram precision"),
+            max_us: 0,
+        }
     }
-    let histogram = latency_histogram(samples);
-    (
-        histogram.value_at_quantile(0.5),
-        histogram.value_at_quantile(0.95),
-        histogram.value_at_quantile(0.99),
-        samples.iter().copied().max().unwrap_or(0),
-    )
+}
+
+impl LatencyAccumulator {
+    fn record(&mut self, sample: u64) {
+        self.histogram
+            .record(sample)
+            .expect("latency histogram auto-resizes to fit sample");
+        self.max_us = self.max_us.max(sample);
+    }
+
+    fn stats(&self) -> LatencyStats {
+        LatencyStats {
+            samples: self.histogram.len(),
+            p50_us: self.histogram.value_at_quantile(0.5),
+            p95_us: self.histogram.value_at_quantile(0.95),
+            p99_us: self.histogram.value_at_quantile(0.99),
+            max_us: self.max_us,
+        }
+    }
+}
+
+/// The shared histogram for summary percentiles and the artifact. Grow the
+/// range as observations arrive so long stalls remain visible.
+pub fn latency_histogram(samples: impl IntoIterator<Item = u64>) -> Histogram<u64> {
+    let mut latency = LatencyAccumulator::default();
+    for sample in samples {
+        latency.record(sample);
+    }
+    latency.histogram
 }
 
 /// How one recipient's co-room relay streams evolved across the storm.
@@ -1071,26 +1084,24 @@ pub fn summarize(
 
     // Per-recipient latency tails: one starved room must be visible in the
     // summary, not smoothed away by the run aggregate.
-    let mut latency_by_recipient: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut latency = LatencyAccumulator::default();
+    let mut latency_by_recipient: BTreeMap<&str, LatencyAccumulator> = BTreeMap::new();
     for (recipient, sample) in latency_pairs(records) {
-        latency_by_recipient
-            .entry(recipient)
-            .or_default()
-            .push(sample);
+        latency.record(sample);
+        // Misrouted receipts remain in the aggregate. Allocate recipient
+        // buckets only for roster peers with measured receipts.
+        if let Some(&recipient) = member_names.get(recipient) {
+            latency_by_recipient
+                .entry(recipient)
+                .or_default()
+                .record(sample);
+        }
     }
     for outcome in &mut per_recipient {
-        let samples = latency_by_recipient
-            .get(&outcome.recipient)
-            .map(Vec::as_slice)
+        outcome.latency_us = latency_by_recipient
+            .get(outcome.recipient.as_str())
+            .map(LatencyAccumulator::stats)
             .unwrap_or_default();
-        let (p50, p95, p99, max) = percentiles(samples);
-        outcome.latency_us = LatencyStats {
-            samples: count_u64(samples.len()),
-            p50_us: p50,
-            p95_us: p95,
-            p99_us: p99,
-            max_us: max,
-        };
     }
 
     if let Some(reason) =
@@ -1220,8 +1231,6 @@ pub fn summarize(
         });
     }
 
-    let latency = latency_samples(records);
-    let (p50, p95, p99, max) = percentiles(&latency);
     OutcomeSummary {
         valid: reasons.is_empty(),
         reasons,
@@ -1234,13 +1243,7 @@ pub fn summarize(
             gap_covered: total_gap_covered,
         },
         per_recipient,
-        latency_us: LatencyStats {
-            samples: count_u64(latency.len()),
-            p50_us: p50,
-            p95_us: p95,
-            p99_us: p99,
-            max_us: max,
-        },
+        latency_us: latency.stats(),
         generator_lag_us: LagStats {
             max_us: max_lag,
             p99_us: lag_p99,
