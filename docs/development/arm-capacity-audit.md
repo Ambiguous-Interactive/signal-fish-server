@@ -1834,12 +1834,24 @@ carries a disposition.
   ARM-C033 unit controls to the handshake, format adoption, relay, and
   process completion paths. A temporary mutation that retained the refused
   encoding failed before room creation. The restored client passed both
-  cells. Restore and cross-format accountability remain open in #741.
+  cells. Restore exercisability remains open in #741.
   The staged changelog check rejected this test-only work (#797). The checker,
   hook, and CI dependency detector now exempt the test directories under the
   four known client roots. Literal roots keep nested runtime `src/tests`
   paths outside the exemption. Data-driven controls cover both classes and
   mixed test/runtime changes. No runtime change or changelog entry is needed.
+- **Native cross-format accountability live cell (session 364, #741 item 2).**
+  The opted-in rkyv interop scenario keeps its native-to-native relay wave,
+  then starts a native JSON recipient and a raw rkyv WebSocket peer on the
+  same server. The peer sends one opaque payload and a valid JSON continuation.
+  The recipient must consume the exact `UnsupportedFormat` gap report before
+  its advisory, receive only the continuation with the sender UUID and v3
+  stamps, meet its normal success criteria, and exit successfully. This
+  exercises the shared native accountability path for opaque refusals. It
+  does not add a protobuf cross-format cell. The follow-up wave has one
+  absolute deadline and leaves the existing healthy wave's deadlines intact.
+  Removing native report validation made the process reject the advisory
+  for lacking a prior causal report. The restored source passed the live cell.
 - **Opaque over a v2 negotiation (fixed with the same sweep).** The native
   client validated an opaque request against the requested version only;
   the `ProtocolInfo` `None`-version (v2) arm skipped every format check,
@@ -2231,7 +2243,7 @@ neither is a deployed capacity preset.
 | Metrics and logging: `src/metrics.rs`, `src/logging.rs`, `src/websocket/metrics.rs`, `prometheus.rs` | Counters report outcomes; labels and logs stay bounded and safe | `tests/config_and_endpoints_tests.rs`, `tests/websocket_test_helpers/prometheus_scrape.rs`; C1 metrics label cardinality and error/logging pressure reviews above (ARM-C031/ARM-C032 fixed the rejected-ID log forgery and the unthrottled undeliverable-relay warning) | Cardinality is bounded with pinned lifecycles; hot-path log content, amplification, and throttle cadences are reviewed and pinned or dispositioned | Reviewed |
 | Admin and shutdown: `src/server/admin.rs`, `shutdown.rs`, `connection_manager.rs` | Drain closes all owned tasks and reports queued work accurately | `tests/close_code_semantics_e2e.rs`, `formal/tla/ConnectionTeardown.tla`; C1 drain/shutdown review above | The drain choreography, the reconnect-commit fence, close ordering with queued data, and the drain reservation accounting are reviewed, fixed where defective, and pinned; a distinct 4000-close counter remains follow-up observability | Partially reviewed |
 | Browser client: `clients/browser/src/**` | Reconnect, delivery reports, fallback, and negotiation match server | `clients/browser/src/page/*.test.ts`; C1 client and deployment boundaries review above | Reports, fallback, and negotiation verified and pinned (plus the ARM-C033 downgrade fix and its pin); reconnect initiation absent by documented scope with inbound arms unit-pinned; a live browser accountability cell, loss→recovery transitions, and browser-as-host remain | Partially reviewed |
-| Native client: `clients/native/src/**` | Same client contract across native sockets | `clients/native/tests/interop_e2e.rs`; C1 client and deployment boundaries review above | Accountability model, fallback (cripple/TURN/host-star/Direct rejection), and negotiation verified and pinned (plus the ARM-C033 downgrade fix, the v2-opaque guard, and their pins); restore/reconnect end-to-end, cross-format advisory consumption, and the MessagePack cohort remain | Partially reviewed |
+| Native client: `clients/native/src/**` | Same client contract across native sockets | `clients/native/tests/interop_e2e.rs`; C1 client and deployment boundaries review above | Accountability model, fallback (cripple/TURN/host-star/Direct rejection), and negotiation verified and pinned (plus the ARM-C033 downgrade fix, the v2-opaque guard, and their pins); native downgrade and cross-format advisory consumption now have live cells; the MessagePack cohort is pinned; restore/reconnect end-to-end remains | Partially reviewed |
 | Fortress clients: `clients/fortress/src/**`, `clients/fortress-wasm/src/**` | Reference peers handle relay without silent loss | `clients/fortress/tests/multiprocess.rs`, `clients/fortress-wasm/harness.mjs`, both interop workflows; C1 client and deployment boundaries review above | Silent-loss detection substantiated by executable CI gates on both stacks (contiguity, cross-peer ledger equality, queue-age/checksum gating; WASM adds an asserted expected-`BUSTED` control); fixtures are WebSocket-only and evidence no ICE-fallback claim; drain/restart and reconnect cells and a native negative control remain (issue opened with this change) | Partially reviewed |
 
 `src/server.rs` owns shared server state across the server rows. `src/websocket/routes.rs`

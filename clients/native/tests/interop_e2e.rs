@@ -90,7 +90,10 @@
 //!     as raw binary frames, and receive the peer's payload in the strict v3
 //!     envelope (surfaced base64-rendered with its encoding token). The relay
 //!     floor carries the whole proof and both processes meet the standard
-//!     success criteria, so opaque receipts count exactly as JSON ones.
+//!     success criteria, so opaque receipts count exactly as JSON ones. On the
+//!     same server, a bounded follow-up wave proves a native JSON recipient
+//!     consumes an exact unsupported-format report and advisory, then resumes
+//!     on the opaque peer's universal JSON text carrier without leaked bytes.
 //!
 //! 11. `unsupported_opaque_requests_downgrade_to_json_and_relay_between_reference_clients`
 //!     — default-server refusal of rkyv and protobuf requests. Each encoding
@@ -136,6 +139,8 @@ const LATE_JOIN_SCENARIO_CEILING_SECS: u64 = 45 + 90 + 90;
 /// plus one 90 s client watchdog; the departure regression uses 30 s clients.
 const STANDARD_SCENARIO_CEILING_SECS: u64 = 45 + 90;
 const DEPARTURE_SCENARIO_CEILING_SECS: u64 = 45 + 30;
+// The opaque cell reuses its server for one additional bounded relay-only wave.
+const UNSUPPORTED_FORMAT_WAVE_SECS: u64 = 30;
 /// A test may queue behind every other test. Bounding that wait by the entire
 /// suite's real composition remains conservative while keeping a degraded run
 /// within the workflow's 30-minute job policy (unlike multiplying the unique
@@ -143,7 +148,8 @@ const DEPARTURE_SCENARIO_CEILING_SECS: u64 = 45 + 30;
 const SERIAL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(
     2 * LATE_JOIN_SCENARIO_CEILING_SECS
         + 9 * STANDARD_SCENARIO_CEILING_SECS
-        + DEPARTURE_SCENARIO_CEILING_SECS,
+        + DEPARTURE_SCENARIO_CEILING_SECS
+        + UNSUPPORTED_FORMAT_WAVE_SECS,
 );
 
 const RELIABLE: &str = "reliable";
@@ -2806,4 +2812,289 @@ async fn opaque_rkyv_negotiation_relays_end_to_end_between_reference_clients() {
             clients[index].diagnostics()
         );
     }
+    tokio::time::timeout(
+        Duration::from_secs(UNSUPPORTED_FORMAT_WAVE_SECS),
+        unsupported_format_advisory_wave(&url, workdir.path()),
+    )
+    .await
+    .expect("all native/raw-peer operations share the 30-second follow-up deadline");
+}
+
+/// A raw opaque peer provides controlled mixed-format traffic; the production
+/// native process must validate it and complete its ordinary relay criteria.
+async fn unsupported_format_advisory_wave(url: &str, workdir: &std::path::Path) {
+    use signal_fish_reference_native::wire;
+    use signal_fish_server::protocol::{
+        ClientMessage, DeliveryCountersByClass, DeliveryGap, DeliveryGapReason,
+        DeliveryReportPayload, GameDataEncoding, ServerMessage, Topology, Transport,
+    };
+    let window = Duration::from_secs(UNSUPPORTED_FORMAT_WAVE_SECS);
+    let release = workdir.join("release-unsupported-format-observer");
+    let release_path = release.to_str().expect("release path UTF-8");
+    let native_payload = "native JSON retour 🐟";
+    let continuation = json!({"relay_msg": "after opaque omission: 続行 🐠"});
+    let mut native = spawn_client_with_windows(
+        &ClientSpec {
+            name: "json-observer",
+            server_url: url,
+            game_name: "interop-unsupported-rkyv",
+            join_code: None,
+            peers: 2,
+            exchange: false,
+            relay_payload: Some(native_payload),
+            extra_args: &[
+                "--supported-topologies",
+                "relay",
+                "--supported-transports",
+                "relay",
+                "--success-release-file",
+                release_path,
+            ],
+        },
+        workdir,
+        UNSUPPORTED_FORMAT_WAVE_SECS,
+        UNSUPPORTED_FORMAT_WAVE_SECS,
+    );
+    let created = native.await_event("room_created", window).await;
+    let room_code = str_field(&created, "room_code").to_string();
+    let mut peer = wire::connect(url)
+        .await
+        .expect("connect opted-in opaque peer");
+    wire::send_client_message(
+        &mut peer,
+        &ClientMessage::Authenticate {
+            app_id: harness::INTEROP_APP_ID.to_string(),
+            connect_token: None,
+            sdk_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            platform: Some("interop-test".to_string()),
+            game_data_format: Some(GameDataEncoding::Rkyv),
+            protocol_version: Some(3),
+            supported_transports: Some(vec![Transport::Relay]),
+            supported_topologies: Some(vec![Topology::Relay]),
+            requested_capabilities: None,
+        },
+    )
+    .await
+    .expect("authenticate opaque peer");
+    assert!(matches!(
+        wire::next_server_message(&mut peer, window)
+            .await
+            .expect("authenticated"),
+        ServerMessage::Authenticated { .. }
+    ));
+    let ServerMessage::ProtocolInfo(info) = wire::next_server_message(&mut peer, window)
+        .await
+        .expect("protocol info")
+    else {
+        panic!("opaque peer must receive ProtocolInfo after Authenticated")
+    };
+    assert_eq!(info.protocol_version, Some(3));
+    assert!(info.game_data_formats.contains(&GameDataEncoding::Rkyv));
+    wire::send_client_message(
+        &mut peer,
+        &ClientMessage::JoinRoom {
+            game_name: "interop-unsupported-rkyv".to_string(),
+            room_code: Some(room_code),
+            player_name: "opaque-rkyv-peer".to_string(),
+            max_players: Some(2),
+            supports_authority: Some(false),
+            relay_transport: None,
+            password: None,
+            join_only: Some(true),
+        },
+    )
+    .await
+    .expect("join observer's room");
+    let sender = loop {
+        match wire::next_server_message(&mut peer, window)
+            .await
+            .expect("join response")
+        {
+            ServerMessage::RoomJoined(room) => break room.player_id,
+            ServerMessage::DeliveryReport(report) => assert!(report.gaps.is_empty()),
+            ServerMessage::RelayStats { .. } => {}
+            other => panic!("unexpected opaque join preface: {other:?}"),
+        }
+    };
+    wire::send_client_message(&mut peer, &ClientMessage::PlayerReady)
+        .await
+        .expect("ready opaque peer");
+    let mut started = false;
+    let mut planned = false;
+    let mut native_return = None;
+    while !(started && planned) {
+        match wire::next_server_message(&mut peer, window)
+            .await
+            .expect("finalize room")
+        {
+            ServerMessage::GameStarting { .. } => started = true,
+            ServerMessage::SessionPlan(plan) => {
+                assert_eq!(plan.topology, Topology::Relay);
+                assert_eq!(plan.transport, Transport::Relay);
+                assert!(plan.peers.is_empty());
+                planned = true;
+            }
+            message @ ServerMessage::GameData { .. } => {
+                assert!(
+                    native_return.replace(message).is_none(),
+                    "only one native return payload"
+                );
+            }
+            ServerMessage::DeliveryReport(report) => assert!(report.gaps.is_empty()),
+            ServerMessage::LobbyStateChanged { .. }
+            | ServerMessage::RelayStats { .. }
+            | ServerMessage::PlayerJoined { .. } => {}
+            other => panic!("unexpected opaque finalization message: {other:?}"),
+        }
+    }
+    // Binary seq1 is deliberately unrepresentable at the JSON recipient.
+    // Text remains the universal control/JSON carrier after opaque negotiation.
+    wire::send_game_data_binary(&mut peer, vec![0xff, 0, 0x80, b'{', b'}'])
+        .await
+        .expect("opaque omission");
+    wire::send_game_data(&mut peer, continuation.clone())
+        .await
+        .expect("JSON continuation");
+    native.await_event("success_criteria_met", window).await;
+    native.assert_running("after validating the unsupported report and JSON continuation");
+    let native_id = player_id_of(&native.events, "json-observer");
+    loop {
+        let message = match native_return.take() {
+            Some(message) => message,
+            None => wire::next_server_message(&mut peer, window)
+                .await
+                .expect("native return payload"),
+        };
+        match message {
+            ServerMessage::GameData {
+                from_player,
+                data,
+                seq,
+                epoch,
+                class,
+                key,
+            } => {
+                assert_eq!(from_player.to_string(), native_id);
+                assert_eq!(data, json!({"relay_msg": native_payload}));
+                assert_eq!((seq, epoch, class, key), (Some(1), Some(1), None, None));
+                break;
+            }
+            ServerMessage::DeliveryReport(report) => assert!(report.gaps.is_empty()),
+            ServerMessage::LobbyStateChanged { .. }
+            | ServerMessage::RelayStats { .. }
+            | ServerMessage::PlayerJoined { .. } => {}
+            other => panic!("unexpected JSON return message: {other:?}"),
+        }
+    }
+    std::fs::write(release, b"release").expect("release validated JSON observer");
+    drain_expect_success(&mut native).await;
+    let log = &native.events;
+    single_event(log, "authenticated", "json-observer");
+    assert_eq!(
+        single_event(log, "protocol_info", "json-observer")["negotiated_version"],
+        3
+    );
+    single_event(log, "game_starting", "json-observer");
+    single_event(log, "success_criteria_met", "json-observer");
+    relay_session_plan(log, "json-observer");
+    let sender_name = sender.to_string();
+    let expected = BTreeMap::from([(
+        sender_name.as_str(),
+        continuation["relay_msg"].as_str().expect("text"),
+    )]);
+    assert_relay_floor_traffic(log, "json-observer", &expected);
+    let received = single_event(log, "game_data_received", "json-observer");
+    assert_eq!(
+        received["payload"], continuation,
+        "only exact JSON continuation reaches the native application"
+    );
+    assert_eq!(
+        (received["seq"].as_u64(), received["epoch"].as_u64()),
+        (Some(2), Some(1))
+    );
+    let expected_gap = DeliveryGap {
+        from_player: sender,
+        epoch: 1,
+        from_seq: 1,
+        to_seq: 1,
+        reason: DeliveryGapReason::UnsupportedFormat,
+    };
+    let mut gap_indices = Vec::new();
+    let mut unsupported = 0;
+    for (index, event) in log
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event["event"] == "delivery_report")
+    {
+        let report: DeliveryReportPayload =
+            serde_json::from_value(event["report"].clone()).expect("typed report");
+        let counters = report.per_class;
+        assert_eq!(counters.latest, DeliveryCountersByClass::default().latest);
+        assert_eq!(
+            counters.volatile,
+            DeliveryCountersByClass::default().volatile
+        );
+        assert_eq!(counters.reliable.abandoned, 0);
+        assert!(counters.reliable.delivered <= 1);
+        assert!(
+            counters.reliable.unsupported_format >= unsupported
+                && counters.reliable.unsupported_format <= 1
+        );
+        assert_eq!(
+            counters.reliable.unsupported_format - unsupported,
+            u64::try_from(report.gaps.len()).expect("single-sequence gap count"),
+            "every unsupported counter increment has its exact new range",
+        );
+        unsupported = counters.reliable.unsupported_format;
+        for gap in report.gaps {
+            assert_eq!(
+                gap, expected_gap,
+                "no unrelated, duplicate, or widened omission"
+            );
+            gap_indices.push(index);
+        }
+    }
+    assert_eq!(unsupported, 1);
+    assert_eq!(gap_indices.len(), 1);
+    let notice = single_event(log, "error", "json-observer");
+    let message = str_field(notice, "message");
+    for required in [
+        "UnsupportedGameDataFormat",
+        "rkyv payload",
+        &sender.to_string(),
+    ] {
+        assert!(
+            message.contains(required),
+            "exact nonfatal unsupported-format advisory: {message}"
+        );
+    }
+    let notice_index = log
+        .iter()
+        .position(|event| event["event"] == "error")
+        .expect("notice index");
+    let received_index = log
+        .iter()
+        .position(|event| event["event"] == "game_data_received")
+        .expect("receipt index");
+    assert!(
+        gap_indices[0] < notice_index && notice_index < received_index,
+        "exact report precedes advisory and resumed delivery"
+    );
+    for tag in [
+        "new_peer",
+        "signal_sent",
+        "signal_received",
+        "channel_open",
+        "channel_message",
+        "p2p_pair_connected",
+        "fallback_engaged",
+    ] {
+        assert!(
+            events_named(log, tag).is_empty(),
+            "relay-only observer must not emit {tag}"
+        );
+    }
+    assert!(!native
+        .diagnostics()
+        .contains("delivery accountability violation"));
 }

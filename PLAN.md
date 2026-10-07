@@ -282,7 +282,9 @@ complete.
   restore-contract exercisability and fault-injection cells tracked as
   follow-ups (#741). Session 362 adds the real native downgrade cells:
   disabled rkyv and protobuf requests must adopt JSON, relay exact payloads,
-  and complete on both peers. Other #741 cells remain open.
+  and complete on both peers. Session 364 adds a real cross-format report
+  and advisory cell with exact gap accounting and a valid JSON continuation.
+  Restore exercisability and Fortress cells remain open in #741.
 
 For each finding:
 
