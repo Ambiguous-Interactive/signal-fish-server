@@ -284,7 +284,9 @@ complete.
   disabled rkyv and protobuf requests must adopt JSON, relay exact payloads,
   and complete on both peers. Session 364 adds a real cross-format report
   and advisory cell with exact gap accounting and a valid JSON continuation.
-  Restore exercisability and Fortress cells remain open in #741.
+  Session 366 adds a native capped-admission control that must fail the
+  healthy throughput gates while both peers drain outbound work and exit successfully.
+  Restore exercisability and Fortress fault-injection cells remain open in #741.
 
 For each finding:
 

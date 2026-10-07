@@ -53,6 +53,8 @@ $script:ChangelogInternalPathGlobs = [string[]]@(
     # Dev/build/agent directories
     "scripts/*", "tests/*", "test-fixtures/*", "formal/*", ".llm/*", "target/*", "progress/*",
     "clients/browser/tests/*", "clients/native/tests/*", "clients/fortress/tests/*", "clients/fortress-wasm/tests/*",
+    # Standalone compatibility fixture sources (both packages publish = false)
+    "clients/fortress/src/*", "clients/fortress-wasm/src/*",
     # Test-only Rust sources
     "src/*_tests.rs", "src/*_test.rs", "src/*/tests.rs",
     # CI/infrastructure docs

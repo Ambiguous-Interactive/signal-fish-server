@@ -24469,6 +24469,8 @@ fn test_pre_commit_changelog_gate_classification_and_verdicts_when_pwsh_availabl
                     ".config/cargo-deny.toml", ".vscode/settings.json", ".claude/settings.json",
                     "scripts/check-foo.sh", "tests/unit_test.rs", "test-fixtures/data.json",
                     "formal/model.tla", ".llm/skills/foo.md", "target/debug/binary", "progress/notes.md",
+                    "clients/fortress/src/main.rs", "clients/fortress/src/nested/peer.rs",
+                    "clients/fortress-wasm/src/lib.rs", "clients/fortress-wasm/src/nested/peer.rs",
                     "src/server_tests.rs", "src/main_test.rs", "src/server/tests.rs",
                     "docs/ci-cd-testing.md", "docs/test-analysis.md", "docs/git-hooks-guide.md",
                     "docs/hooks-quick-reference.md", "docs/pre-commit-hooks-summary.md",
@@ -24487,6 +24489,11 @@ fn test_pre_commit_changelog_gate_classification_and_verdicts_when_pwsh_availabl
                 # 2) Non-internal classification.
                 $nonInternal = @(
                     "src/main.rs", "src/server.rs", "build.rs", "benches/benchmark.rs",
+                    "clients/native/src/client.rs", "clients/browser/src/client.js", "clients/other/src/main.rs",
+                    "clients/fortress/Cargo.toml", "clients/fortress-wasm/Cargo.toml",
+                    "clients/fortress-other/src/main.rs", "clients/fortress-wasm-extra/src/lib.rs",
+                    "clients/fortress/src_like/main.rs", "clients/fortress-wasm/src_like/lib.rs",
+                    "clients/fortress/Src/main.rs", "clients/fortress-wasm/Src/lib.rs",
                     "Cargo.toml", "README.md", "docs/guide.md", "docs/library-usage.md",
                     "Dockerfile", "docker-compose.yml", "config.example.json", "LICENSE"
                 )
@@ -24506,6 +24513,15 @@ fn test_pre_commit_changelog_gate_classification_and_verdicts_when_pwsh_availabl
                 Reset-Counters
                 Test-ChangelogGate -ChangedFiles @("scripts/check-foo.sh", "src/main.rs", ".github/workflows/ci.yml")
                 Assert ($script:Failed -eq 1 -and $script:Passed -eq 0 -and $script:Skipped -eq 0) "non-internal changes without CHANGELOG.md must fail"
+
+                foreach ($runtime in @("src/main.rs", "clients/native/src/client.rs", "clients/browser/src/client.js", "clients/fortress/Cargo.toml")) {
+                    Reset-Counters
+                    Test-ChangelogGate -ChangedFiles @("clients/fortress/src/main.rs", "clients/fortress-wasm/src/lib.rs", $runtime)
+                    Assert ($script:Failed -eq 1 -and $script:Passed -eq 0 -and $script:Skipped -eq 0) "fixture plus $runtime without CHANGELOG.md must fail"
+                }
+                Reset-Counters
+                Test-ChangelogGate -ChangedFiles @("clients/fortress/src/main.rs", "clients/fortress-wasm/src/lib.rs")
+                Assert ($script:Skipped -eq 1 -and $script:Failed -eq 0) "compatibility fixture sources alone must skip the gate"
 
                 # 4) CHANGELOG.md never requires itself.
                 Reset-Counters
