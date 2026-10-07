@@ -64,6 +64,7 @@ struct Shared {
     outbound: VecDeque<OutboundRelayFrame>,
     admitted: VecDeque<Instant>,
     inbound: VecDeque<(Uuid, Message)>,
+    hold_gameplay_inputs: bool,
     counters: RelayCounters,
     observed_client_sent: u64,
     peak_queue_depth: usize,
@@ -95,6 +96,22 @@ pub struct RelaySocket {
 }
 
 impl RelaySocket {
+    /// Withhold gameplay inputs until frames 0..3 were locally predicted. Sync
+    /// controls still flow, including when startup already contains input backlog.
+    pub fn hold_inputs_until_prediction(&self) {
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.hold_gameplay_inputs = true;
+        }
+    }
+
+    pub fn observe_local_frame(&self, current_frame: i32) {
+        if current_frame >= 4 {
+            if let Ok(mut shared) = self.shared.lock() {
+                shared.hold_gameplay_inputs = false;
+            }
+        }
+    }
+
     pub fn configure_identity(
         &self,
         local_instance_nonce: Uuid,
@@ -501,7 +518,21 @@ impl NonBlockingSocket<Uuid> for RelaySocket {
             return Vec::new();
         };
         let count = shared.inbound.len().min(MAX_INBOUND_PER_POLL);
-        shared.inbound.drain(..count).collect()
+        let mut received = Vec::with_capacity(count);
+        for _ in 0..count {
+            let Some((from, message)) = shared.inbound.pop_front() else {
+                break;
+            };
+            if shared.hold_gameplay_inputs
+                && fortress_rollback::__internal::message_metadata(&message).1
+                    == fortress_rollback::MessageKind::Input
+            {
+                shared.inbound.push_back((from, message));
+            } else {
+                received.push((from, message));
+            }
+        }
+        received
     }
 }
 
@@ -544,6 +575,66 @@ fn record_sequence(ledger: &mut RelayLedger, sequence: u64) {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_input_backlog_waits_for_prediction_while_sync_controls_flow() {
+        let message = |body| {
+            serde_json::from_value::<Message>(serde_json::json!({
+                "header": {"sentinel": [0, 0], "protocol_version": 2,
+                    "flags": 0, "conn_id": 1},
+                "body": body,
+            }))
+            .expect("pinned Fortress message shape")
+        };
+        let input = |start| {
+            message(serde_json::json!({"Input": {
+                "peer_connect_status": [], "start_frame": start,
+                "ack_frame": -1, "bytes": [31],
+            }}))
+        };
+        let sync = message(serde_json::json!({"SyncReply": {
+            "random_reply": 1, "min_compat_version": 2, "features": 0,
+            "config": {"num_players": 2, "input_bytes_per_player": 8,
+                "fps": 60, "max_prediction": 8, "desync_interval": 0},
+            "config_digest": 0,
+        }}));
+        let peer = Uuid::new_v4();
+        let first = input(0);
+        let second = input(1);
+        let mut socket = RelaySocket::default();
+        socket.hold_inputs_until_prediction();
+        socket.shared.lock().expect("shared").inbound.extend([
+            (peer, first.clone()),
+            (peer, sync.clone()),
+            (peer, second.clone()),
+        ]);
+        assert_eq!(socket.receive_all_messages(), vec![(peer, sync)]);
+        for cursor in [0, 1, 3] {
+            socket.observe_local_frame(cursor);
+            assert!(socket.receive_all_messages().is_empty(), "cursor {cursor}");
+        }
+        socket.observe_local_frame(4);
+        assert_eq!(
+            socket.receive_all_messages(),
+            vec![(peer, first.clone()), (peer, second)]
+        );
+        socket.observe_local_frame(0);
+        socket
+            .shared
+            .lock()
+            .expect("shared")
+            .inbound
+            .push_back((peer, first.clone()));
+        assert_eq!(socket.receive_all_messages(), vec![(peer, first.clone())]);
+        let mut normal = RelaySocket::default();
+        normal
+            .shared
+            .lock()
+            .expect("shared")
+            .inbound
+            .push_back((peer, first.clone()));
+        assert_eq!(normal.receive_all_messages(), vec![(peer, first)]);
+    }
 
     fn outbound(payload: Vec<u8>, enqueued_at: Instant, sequence: u64) -> OutboundRelayFrame {
         OutboundRelayFrame {

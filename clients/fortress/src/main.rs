@@ -35,10 +35,6 @@ fn admission_budget(mode: RunMode, active: bool) -> usize {
     }
 }
 
-fn hold_initial_rollback_inputs(mode: RunMode, active_callbacks: Option<u64>) -> bool {
-    mode == RunMode::Healthy && active_callbacks.is_some_and(|callbacks| callbacks < 4)
-}
-
 struct PendingInbound {
     from_player: Uuid,
     encoding: GameDataEncoding,
@@ -200,6 +196,9 @@ async fn main() -> Result<(), String> {
     config.command_channel_capacity = 64;
     let mut client = SignalFishPollingClient::new(transport, config);
     let relay = RelaySocket::default();
+    if run_mode == RunMode::Healthy {
+        relay.hold_inputs_until_prediction();
+    }
 
     let deadline = Instant::now() + PROCESS_DEADLINE;
     let mut local = None;
@@ -312,16 +311,7 @@ async fn main() -> Result<(), String> {
             session = Some(build_session(local_id, remote, relay.clone())?);
         }
 
-        /*
-            Delay early inputs within the prediction window so loopback transport
-            reliably exercises rollback.
-        */
-        if session.is_some()
-            && !hold_initial_rollback_inputs(
-                run_mode,
-                running_since.map(|_| polling_callbacks_during_run),
-            )
-        {
+        if session.is_some() {
             let local_id = local.ok_or("session exists without local id")?;
             let remote = roster
                 .iter()
@@ -345,6 +335,7 @@ async fn main() -> Result<(), String> {
             && (run_mode == RunMode::NegativeOneAdmissionPerCallback || relay.target_received());
         if let Some(fortress) = session.as_mut() {
             if !workload_finished {
+                relay.observe_local_frame(fortress.current_frame().as_i32());
                 fortress.poll_remote_clients();
                 for event in fortress.events() {
                     match event {
@@ -636,28 +627,6 @@ mod tests {
                 expected,
                 "{mode:?}/{active}"
             );
-        }
-    }
-
-    #[test]
-    fn rollback_probe_holds_only_the_first_four_active_healthy_callbacks() {
-        for (callbacks, held) in [
-            (None, false),
-            (Some(0), true),
-            (Some(1), true),
-            (Some(3), true),
-            (Some(4), false),
-            (Some(600), false),
-        ] {
-            assert_eq!(
-                super::hold_initial_rollback_inputs(super::RunMode::Healthy, callbacks),
-                held,
-                "{callbacks:?}"
-            );
-            assert!(!super::hold_initial_rollback_inputs(
-                super::RunMode::NegativeOneAdmissionPerCallback,
-                callbacks,
-            ));
         }
     }
 

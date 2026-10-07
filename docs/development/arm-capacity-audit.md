@@ -1864,9 +1864,11 @@ carries a disposition.
   The restored validator passed both live cells. A mutex isolates their timed
   workloads under the hosted runner's normal parallel test settings.
   The final healthy run exposed zero rollback on one peer despite clean
-  delivery and checksum gates (#804). The healthy workload now holds early
-  inbound frames until four active callbacks finish, then releases them in order.
-  This forces prediction repair within the existing eight-frame window.
+  delivery and checksum gates (#804). The healthy socket holds gameplay inputs
+  from startup until the local game reaches frame four. Synchronization controls
+  still flow. This prevents a startup backlog from bypassing prediction and
+  forces repair within the existing eight-frame window. The socket releases
+  retained inputs in order, then returns to its normal delivery path.
   Fortress source is private compatibility-fixture code. The changelog gate
   now classifies the two literal Fortress source roots as internal (#803).
   Native and browser reference-client runtime changes still need release notes.
