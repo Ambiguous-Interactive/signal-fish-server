@@ -643,6 +643,10 @@ outside this plan's architecture scope.
 These items remain live but are not active phases. Re-rank them whenever new
 correctness evidence appears.
 
+- #801 — Pages deployment now has an explicit ten-minute polling limit
+  inside a fifteen-minute job. A workflow policy control checks the
+  polling allowance and five-minute setup and cleanup margin.
+
 - #733 — the scheduled ASan lane went red on 2026-10-03 (`54feb610`, exit
   101). Root-caused via the run artifact: crates.io transport flakiness
   tripped the zero-diagnostics packaging pin — zero sanitizer findings.

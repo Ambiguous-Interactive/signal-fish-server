@@ -66,7 +66,8 @@ jobs:
     name: Deploy to GitHub Pages
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Keep five minutes beyond the action polling budget for setup and final status.
+    timeout-minutes: 15
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -76,3 +77,6 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5.0.1
+        with:
+          # Milliseconds: retain the full ten-minute deployment polling allowance.
+          timeout: 600000
