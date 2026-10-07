@@ -359,6 +359,10 @@ Deterministic controls exclude preparation from send lag and retain
 invalidation for delay after arming that exceeds the unchanged bound.
 The exact causes of earlier hosted stalls remain unproven.
 
+Investigate [#795](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/795)
+before further capacity measurements. Use sender and write-stage evidence
+to identify the macOS payload-cell delay, then fix and verify its cause.
+
 - [x] Churn/reconnect schedules: reconnect-burst and room-replacement
   shapes per the C3 cells, with red-first controls for each new permitted
   outcome. The reconnect-burst slice is landed (third runner PR,

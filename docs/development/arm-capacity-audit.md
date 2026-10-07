@@ -2824,3 +2824,61 @@ control showed both writers returning success before the fix. Both now flush
 explicitly and report errors with the artifact path. The repository sweep found
 two other Rust buffered writers, both already flushing. The failure control and
 real-socket artifact/interval replay control passed after the fix.
+
+### C2 generator delay investigation — #795
+
+The scheduled main run
+[37619144139](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/37619144139)
+failed the macOS payload-cell test on commit `5414c7fe`. The
+`V3Json / Volatile / 1024` cell recorded 417,628 microseconds of generator lag
+against a 250,000-microsecond limit. The test rejected the run. Its temporary
+artifacts did not survive the test failure.
+
+The full PR run
+[37621168700](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/37621168700)
+and the main run for commit `38b76ee8`
+[37623685271](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/37623685271)
+passed the same test on macOS. These passes do not explain or fix the earlier
+delay. [#795](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/795)
+remains open.
+
+Two independent source reviews found no confirmed cause. The task readiness
+gate precedes the shared epoch. Read and write polling alternates, and lifecycle
+deadlines take precedence. The nextest process group already isolates capacity
+tests. On macOS, in-run CPU and RSS probes return unavailable values; manifest
+subprocesses and binary hashing finish before the epoch.
+
+The old failure message cannot distinguish the runner's rejection before a
+write from the oracle's rejection after a completed send. Both report
+`GeneratorSaturated`. The runner now emits structured stderr evidence at both
+paths. It records sender, sequence, phase, intended time, observed time, and
+bound. Completed writes also record preparation and write elapsed times. Write
+elapsed time includes task scheduling; it does not prove socket backpressure.
+
+Before artifact I/O, an invalid result emits the run identity, workload, runtime
+worker count, declared fault hooks, fault and reason counts, and bounded context. It keeps the first,
+last, and worst completed send for every configured peer, including peers with
+no completed sends. It keeps the largest sampler gap and three recent samples.
+Unavailable CPU and RSS values stay null. Fault and reason previews contain at
+most 16 entries each, with total counts to make truncation explicit. Endpoint,
+server config overlay, and full counter maps are excluded. Free-form error
+details are omitted from diagnostic previews. Join errors keep their count,
+and samples report scrape failure as a flag. The artifacts retain full errors.
+
+The lag limit, offered schedule, invalid-run checks, payload assertions, replay
+results, and schema remain unchanged. This evidence supports investigation;
+it does not establish a cause.
+
+Six data-driven controls cover both timing paths, every configured peer,
+empty peers, unavailable resources, sampler gaps, preview bounds, and declared
+hooks. A mutation that read only the final eight sent records failed the
+all-peer control. The old binary passed the stall and replay control but emitted
+no timing evidence; the new binary captured all three stalled peers.
+
+A temporary 600-ms delay before the final socket write captured four completed
+write observations. No raw runner fault was recorded; the oracle rejected the
+completed-send lag against the unchanged 250-ms limit. The source was restored
+byte for byte. All eight healthy payload and replay cells passed and emitted no
+failure diagnostics. These controls prove capture and validation, not the
+cause of the earlier macOS delay. Raw proof files remain under
+`/tmp/session361-*.log` and `/tmp/session361-*-proof.json`.
