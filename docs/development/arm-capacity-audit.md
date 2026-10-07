@@ -1823,6 +1823,23 @@ carries a disposition.
   `handshake_downgrade_error_adopts_json_and_continues`,
   `handshake_stays_fatal_for_other_frames_and_repeat_notices`. Browser pin:
   the `advanceAuthenticateHandshake` block in `orchestrator.test.ts`.
+- **Native downgrade live cells (session 362, #741 item 1).**
+  `unsupported_opaque_requests_downgrade_to_json_and_relay_between_reference_clients`
+  runs rkyv and protobuf requests against a real server with default encoding
+  knobs. Each cell runs two native client processes. Both must consume one
+  downgrade notice
+  before `Authenticated`, negotiate v3, reach the shared success barrier,
+  and exit successfully. Each peer must receive exactly the other's JSON
+  payload with the sender UUID and v3 delivery stamps. This extends the
+  ARM-C033 unit controls to the handshake, format adoption, relay, and
+  process completion paths. A temporary mutation that retained the refused
+  encoding failed before room creation. The restored client passed both
+  cells. Restore and cross-format accountability remain open in #741.
+  The staged changelog check rejected this test-only work (#797). The checker,
+  hook, and CI dependency detector now exempt the test directories under the
+  four known client roots. Literal roots keep nested runtime `src/tests`
+  paths outside the exemption. Data-driven controls cover both classes and
+  mixed test/runtime changes. No runtime change or changelog entry is needed.
 - **Opaque over a v2 negotiation (fixed with the same sweep).** The native
   client validated an opaque request against the requested version only;
   the `ProtocolInfo` `None`-version (v2) arm skipped every format check,
@@ -2353,6 +2370,20 @@ wake independently of a pending write. Churn drops the old write and both
 socket halves before rejoining. The runner cancels and awaits its owned
 tasks before artifact capture. One immutable interval snapshot supplies
 both the published samples and the returned final counters (#783).
+
+Windows CI exposed a failed-write termination race (#799) in session 362.
+After the declared server kill, a socket write could fail before read EOF.
+The runner stopped without disconnect evidence, so the oracle classified
+one cutoff-tail delivery as missing. Transport write failures now stop
+outbound work and drain buffered receipts with the existing read hooks and
+quiescence deadline. Only EOF, close, or read error records a disconnect.
+A pending drain produces a deadline fault. Ordinary write failures keep
+`SendFailed`; the declared kill keeps `ServerTerminated`. Generator stops
+retain their existing outcome. A deterministic failed-write control was
+red when queued receipts were discarded. The fixed control covers terminal
+and deadline paths, exact disconnected prefixes, interior holes, and
+serialized evidence. The live termination cell checks artifact replay.
+No oracle rule, artifact schema, or workload limit changed.
 
 The runner builds its metrics client and prepares every peer before arming.
 Each peer registers its initial identity and reports readiness. Only then

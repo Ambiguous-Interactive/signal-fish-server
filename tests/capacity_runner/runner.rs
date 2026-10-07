@@ -1351,7 +1351,7 @@ async fn peer_task(
                 let next_send = plan.sends.get(send_cursor);
                 let mut writer = std::pin::pin!(async {
                     let Some(send) = next_send else {
-                        return std::future::pending::<bool>().await;
+                        return std::future::pending::<SendOutcome>().await;
                     };
                     tokio::time::sleep_until(epoch + Duration::from_micros(send.intended_us)).await;
                     // Fault hooks: a pause shifts this and every later send
@@ -1389,7 +1389,7 @@ async fn peer_task(
                             max_lag_us: lag,
                             bound_us: facts.generator_lag_bound_us,
                         });
-                        return false;
+                        return SendOutcome::Stopped;
                     }
                     let data =
                         match ledger_application_data(&plan.name, send.seq, facts.payload_bytes) {
@@ -1399,7 +1399,7 @@ async fn peer_task(
                                     sender: plan.name.clone(),
                                     detail,
                                 });
-                                return false;
+                                return SendOutcome::Stopped;
                             }
                         };
                     let application_payload = match serde_json::to_vec(&data) {
@@ -1409,7 +1409,7 @@ async fn peer_task(
                                 sender: plan.name.clone(),
                                 detail: format!("serialize: {error}"),
                             });
-                            return false;
+                            return SendOutcome::Stopped;
                         }
                     };
                     let application_bytes = count_u64(application_payload.len());
@@ -1433,7 +1433,7 @@ async fn peer_task(
                                             sender: plan.name.clone(),
                                             detail: error.to_string(),
                                         });
-                                        return false;
+                                        return SendOutcome::Stopped;
                                     }
                                 }
                             }
@@ -1447,7 +1447,7 @@ async fn peer_task(
                                     sender: plan.name.clone(),
                                     detail: format!("serialize: {error}"),
                                 });
-                                return false;
+                                return SendOutcome::Stopped;
                             }
                         }
                     };
@@ -1457,13 +1457,7 @@ async fn peer_task(
                         // After a declared termination, socket errors are the
                         // expected consequence — the peer stops, and its
                         // remainder is unsent work, not an independent fault.
-                        if !log.was_server_terminated() {
-                            log.push_fault(InvalidReason::SendFailed {
-                                sender: plan.name.clone(),
-                                detail: error.to_string(),
-                            });
-                        }
-                        return false;
+                        return failed_transport_write(&log, &plan.name, error.to_string());
                     }
                     let sent_us = micros(epoch.elapsed());
                     if sent_us.saturating_sub(send.intended_us) > facts.generator_lag_bound_us {
@@ -1486,7 +1480,7 @@ async fn peer_task(
                         application_bytes,
                         encoded_frame_body_bytes,
                     });
-                    true
+                    SendOutcome::Sent
                 });
                 loop {
                     let event = next_session_event(
@@ -1529,8 +1523,23 @@ async fn peer_task(
                 }
             };
             match event {
-                SessionEvent::Send(true) => send_cursor += 1,
-                SessionEvent::Send(false) | SessionEvent::Quiescence => return,
+                SessionEvent::Send(SendOutcome::Sent) => send_cursor += 1,
+                SessionEvent::Send(SendOutcome::Stopped) | SessionEvent::Quiescence => return,
+                SessionEvent::Send(SendOutcome::TransportFailed) => {
+                    drain_after_failed_write(
+                        &recipient,
+                        &mut rx,
+                        &registry,
+                        epoch,
+                        until,
+                        hold_reads_until,
+                        never_read,
+                        &log,
+                        facts.experiment,
+                    )
+                    .await;
+                    return;
+                }
                 SessionEvent::Churn => {
                     log.push_churn(ChurnEvent {
                         recipient: recipient.clone(),
@@ -1547,6 +1556,73 @@ async fn peer_task(
                     continue 'sessions;
                 }
                 SessionEvent::Frame(_) | SessionEvent::Resume => {}
+            }
+        }
+    }
+}
+
+fn failed_transport_write(log: &EventLog, sender: &str, detail: String) -> SendOutcome {
+    if !log.was_server_terminated() {
+        log.push_fault(InvalidReason::SendFailed {
+            sender: sender.to_string(),
+            detail,
+        });
+    }
+    SendOutcome::TransportFailed
+}
+
+// A failed write stops outbound work; inbound evidence still belongs to this run.
+#[allow(clippy::too_many_arguments)]
+async fn drain_after_failed_write<R>(
+    recipient: &str,
+    reader: &mut R,
+    registry: &SenderRegistry,
+    epoch: Instant,
+    until: Instant,
+    hold_reads_until: Option<Instant>,
+    never_read: bool,
+    log: &Arc<EventLog>,
+    experiment: ExperimentContext,
+) where
+    R: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    let mut writer = std::pin::pin!(std::future::pending::<SendOutcome>());
+    let mut prefer_read = true;
+    loop {
+        match next_session_event(
+            writer.as_mut(),
+            reader,
+            until,
+            None,
+            hold_reads_until,
+            never_read,
+            &mut prefer_read,
+        )
+        .await
+        {
+            SessionEvent::Frame(Some(frame)) => {
+                if !handle_inbound(recipient, frame, registry, epoch, log, experiment).await {
+                    return;
+                }
+            }
+            SessionEvent::Frame(None) => {
+                log.push_disconnect(DisconnectEvent {
+                    recipient: recipient.to_string(),
+                    observation: DisconnectObservation::StreamEnded,
+                });
+                return;
+            }
+            SessionEvent::Quiescence => {
+                log.push_fault(InvalidReason::RunnerDeadlineExceeded {
+                    detail: format!(
+                        "{recipient}: failed write receiver did not terminate before quiescence"
+                    ),
+                });
+                return;
+            }
+            SessionEvent::Resume => {}
+            SessionEvent::Send(_) | SessionEvent::Churn => {
+                unreachable!("drain has no writes or churn")
             }
         }
     }
@@ -1923,8 +1999,15 @@ fn parse_endpoint_port(endpoint: &str) -> Result<u16, String> {
 }
 
 #[derive(Debug)]
+enum SendOutcome {
+    Sent,
+    Stopped,
+    TransportFailed,
+}
+
+#[derive(Debug)]
 enum SessionEvent {
-    Send(bool),
+    Send(SendOutcome),
     Frame(Option<Result<Message, tokio_tungstenite::tungstenite::Error>>),
     Resume,
     Churn,
@@ -1944,7 +2027,7 @@ async fn next_session_event<W, R>(
     prefer_read: &mut bool,
 ) -> SessionEvent
 where
-    W: std::future::Future<Output = bool>,
+    W: std::future::Future<Output = SendOutcome>,
     R: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
     let reads_held = resume_at.is_some_and(|at| Instant::now() < at);
@@ -2537,6 +2620,190 @@ mod session_poll_tests {
         }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn failed_write_drains_buffered_receipts_before_observing_disconnect() {
+        use signal_fish_server::protocol::PlayerId;
+        for (terminal, declared_kill) in [
+            ("eof", true),
+            ("close", true),
+            ("error", true),
+            ("deadline", true),
+            ("eof", false),
+            ("error", false),
+        ] {
+            let player = PlayerId::new_v4();
+            let registry = Arc::new(std::sync::Mutex::new(BTreeMap::from([(
+                player.to_string(),
+                ("r0p1".to_string(), 1),
+            )])));
+            let log = Arc::new(EventLog::new());
+            if declared_kill {
+                log.push_fault(InvalidReason::ServerTerminated);
+            }
+            let expected_fault = if declared_kill {
+                InvalidReason::ServerTerminated
+            } else {
+                InvalidReason::SendFailed {
+                    sender: "r0p0".to_string(),
+                    detail: "scripted transport error".to_string(),
+                }
+            };
+            let failure =
+                failed_transport_write(&log, "r0p0", "scripted transport error".to_string());
+            let frames = (0..3)
+                .map(|seq| {
+                    Ok(Message::Text(
+                        serde_json::to_string(&ServerMessage::GameData {
+                            from_player: player,
+                            data: ledger_application_data("r0p1", seq, 96).expect("ledger"),
+                            seq: Some(seq + 1),
+                            epoch: Some(1),
+                            class: None,
+                            key: None,
+                        })
+                        .expect("frame")
+                        .into(),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            let tail: std::pin::Pin<
+                Box<
+                    dyn futures_util::Stream<
+                            Item = Result<Message, tokio_tungstenite::tungstenite::Error>,
+                        > + Send,
+                >,
+            > = match terminal {
+                "eof" => Box::pin(futures_util::stream::empty()),
+                "close" => Box::pin(futures_util::stream::iter([Ok(Message::Close(None))])),
+                "error" => Box::pin(futures_util::stream::iter([Err(
+                    tokio_tungstenite::tungstenite::Error::ConnectionClosed,
+                )])),
+                "deadline" => Box::pin(futures_util::stream::pending()),
+                _ => unreachable!(),
+            };
+            let mut reader = futures_util::stream::iter(frames).chain(tail);
+            let epoch = Instant::now();
+            let until = epoch + Duration::from_secs(1);
+            let mut writer = std::pin::pin!(std::future::ready(failure));
+            let mut prefer_read = false;
+            assert!(matches!(
+                next_session_event(
+                    writer.as_mut(),
+                    &mut reader,
+                    until,
+                    None,
+                    None,
+                    false,
+                    &mut prefer_read
+                )
+                .await,
+                SessionEvent::Send(SendOutcome::TransportFailed)
+            ));
+            drain_after_failed_write(
+                "r0p0",
+                &mut reader,
+                &registry,
+                epoch,
+                until,
+                None,
+                false,
+                &log,
+                ExperimentContext {
+                    active: false,
+                    opaque_sender: false,
+                },
+            )
+            .await;
+            let records = log.snapshot();
+            assert_eq!(
+                records
+                    .receipts
+                    .iter()
+                    .map(|receipt| receipt.seq)
+                    .collect::<Vec<_>>(),
+                vec![0, 1, 2],
+                "{terminal}: preserve queued receipts"
+            );
+            if terminal == "deadline" {
+                assert!(
+                    records.disconnects.is_empty(),
+                    "deadline is not an observed disconnect"
+                );
+                assert!(records
+                    .faults
+                    .iter()
+                    .any(|reason| matches!(reason, InvalidReason::RunnerDeadlineExceeded { .. })));
+            } else {
+                assert_eq!(
+                    records.disconnects.len(),
+                    1,
+                    "{terminal}: observe terminal after receipts"
+                );
+                assert_eq!(records.disconnects[0].recipient, "r0p0");
+                assert_eq!(records.faults, vec![expected_fault]);
+                if declared_kill && terminal == "eof" {
+                    let context = crate::unit_context();
+                    let mut evidence = crate::complete_records(&context.plans);
+                    evidence
+                        .receipts
+                        .retain(|receipt| receipt.recipient != "r0p0" || receipt.sender != "r0p1");
+                    evidence.receipts.extend(records.receipts.clone());
+                    evidence.disconnects = records.disconnects.clone();
+                    evidence.faults = records.faults.clone();
+                    let summarize = |evidence: &crate::records::RunRecords| {
+                        oracle::summarize(
+                            &context.plans,
+                            &context.roster,
+                            evidence,
+                            500_000,
+                            96,
+                            context.delivery_class,
+                            &crate::schedule::ChurnPlan::default(),
+                            None,
+                        )
+                    };
+                    let prefix = summarize(&evidence);
+                    assert_eq!(prefix.reasons, vec![InvalidReason::ServerTerminated]);
+                    let recipient = prefix
+                        .per_recipient
+                        .iter()
+                        .find(|entry| entry.recipient == "r0p0")
+                        .expect("recipient");
+                    assert!(!recipient.connected_through);
+                    assert_eq!(recipient.missing, 0);
+                    assert_eq!(recipient.undelivered_at_disconnect, 1);
+                    evidence.receipts.retain(|receipt| {
+                        !(receipt.recipient == "r0p0"
+                            && receipt.sender == "r0p1"
+                            && receipt.seq == 1)
+                    });
+                    let holed = summarize(&evidence);
+                    assert!(
+                        holed.reasons.contains(&InvalidReason::MissingDeliveries {
+                            count: 1,
+                            first: crate::oracle::DeliveryKey {
+                                recipient: "r0p0".to_string(),
+                                sender: "r0p1".to_string(),
+                                epoch: 1,
+                                seq: 2
+                            },
+                        }),
+                        "an interior hole remains invalid after a transport disconnect: {:?}",
+                        holed.reasons
+                    );
+                    let decoded = serde_json::from_value(
+                        serde_json::to_value(&evidence).expect("serialized evidence"),
+                    )
+                    .expect("decoded evidence");
+                    assert_eq!(
+                        serde_json::to_value(summarize(&decoded)).expect("decoded verdict"),
+                        serde_json::to_value(&holed).expect("original verdict")
+                    );
+                }
+            }
+        }
+    }
+
     struct DropCount(Arc<AtomicUsize>);
     impl Drop for DropCount {
         fn drop(&mut self) {
@@ -2558,7 +2825,7 @@ mod session_poll_tests {
 
     #[tokio::test(start_paused = true)]
     async fn pending_write_does_not_block_ready_inbound() {
-        let mut writer = std::pin::pin!(std::future::pending::<bool>());
+        let mut writer = std::pin::pin!(std::future::pending::<SendOutcome>());
         let mut reader = futures_util::stream::iter([Ok(Message::Ping(vec![1].into()))]);
         let event = tokio::time::timeout(
             Duration::from_millis(50),
@@ -2596,7 +2863,7 @@ mod session_poll_tests {
                 started.fetch_add(1, Ordering::SeqCst);
                 wait.await.expect("release the pending write");
                 completed.fetch_add(1, Ordering::SeqCst);
-                true
+                SendOutcome::Sent
             }
         });
         assert!(futures_util::poll!(writer.as_mut()).is_pending());
@@ -2669,7 +2936,7 @@ mod session_poll_tests {
                 &mut prefer_read
             )
             .await,
-            SessionEvent::Send(true)
+            SessionEvent::Send(SendOutcome::Sent)
         ));
         assert_eq!(completed.load(Ordering::SeqCst), 1);
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
@@ -2681,7 +2948,7 @@ mod session_poll_tests {
         let mut prefer_read = true;
         let until = Instant::now() + Duration::from_secs(1);
         for _ in 0..4 {
-            let mut writer = std::pin::pin!(std::future::ready(true));
+            let mut writer = std::pin::pin!(std::future::ready(SendOutcome::Sent));
             assert!(matches!(
                 next_session_event(
                     writer.as_mut(),
@@ -2706,7 +2973,7 @@ mod session_poll_tests {
                     &mut prefer_read
                 )
                 .await,
-                SessionEvent::Send(true)
+                SessionEvent::Send(SendOutcome::Sent)
             ));
         }
     }
@@ -2716,7 +2983,7 @@ mod session_poll_tests {
         let epoch = Instant::now();
         let until = epoch + Duration::from_secs(2);
         let resume = epoch + Duration::from_millis(600);
-        let mut writer = std::pin::pin!(std::future::pending::<bool>());
+        let mut writer = std::pin::pin!(std::future::pending::<SendOutcome>());
         let mut reader = futures_util::stream::repeat_with(|| Ok(Message::Ping(Vec::new().into())));
         let mut prefer_read = true;
         assert!(matches!(
@@ -2768,7 +3035,7 @@ mod session_poll_tests {
             let guard = DropCount(Arc::clone(&dropped));
             let mut writer = Box::pin(async move {
                 let _guard = guard;
-                std::future::pending::<bool>().await
+                std::future::pending::<SendOutcome>().await
             });
             let mut reader = PendingReader(DropCount(Arc::clone(&dropped)));
             let now = Instant::now();

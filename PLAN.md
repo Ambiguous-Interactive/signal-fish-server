@@ -280,7 +280,9 @@ complete.
   ARM-C035/ARM-C036, issue #740). Client rows are partially reviewed:
   reconnect initiation stays out of scope by documentation, with the
   restore-contract exercisability and fault-injection cells tracked as
-  follow-ups (#741).
+  follow-ups (#741). Session 362 adds the real native downgrade cells:
+  disabled rkyv and protobuf requests must adopt JSON, relay exact payloads,
+  and complete on both peers. Other #741 cells remain open.
 
 For each finding:
 
@@ -358,6 +360,9 @@ All owned tasks finish initial setup before one shared epoch starts.
 Deterministic controls exclude preparation from send lag and retain
 invalidation for delay after arming that exceeds the unchanged bound.
 The exact causes of earlier hosted stalls remain unproven.
+Session 362 adds failed-write receive draining (#799). Socket EOF, close,
+and errors record disconnects; pending drains reach a loud deadline.
+Disconnected tails stay distinct from missing deliveries inside a prefix.
 
 Investigate [#795](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/795)
 before further capacity measurements. Use sender and write-stage evidence

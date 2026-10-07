@@ -886,6 +886,9 @@ is_internal_path() {
         scripts/*|tests/*|test-fixtures/*|formal/*|.llm/*|target/*|progress/*)
             return 0
             ;;
+        clients/browser/tests/*|clients/native/tests/*|clients/fortress/tests/*|clients/fortress-wasm/tests/*)
+            return 0
+            ;;
         src/*_tests.rs|src/*_test.rs|src/*/tests.rs)
             return 0
             ;;
