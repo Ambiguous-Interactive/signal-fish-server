@@ -360,6 +360,9 @@ All owned tasks finish initial setup before one shared epoch starts.
 Deterministic controls exclude preparation from send lag and retain
 invalidation for delay after arming that exceeds the unchanged bound.
 The exact causes of earlier hosted stalls remain unproven.
+Session 362 adds failed-write receive draining (#799). Socket EOF, close,
+and errors record disconnects; pending drains reach a loud deadline.
+Disconnected tails stay distinct from missing deliveries inside a prefix.
 
 Investigate [#795](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/795)
 before further capacity measurements. Use sender and write-stage evidence

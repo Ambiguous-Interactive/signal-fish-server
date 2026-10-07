@@ -2371,6 +2371,20 @@ socket halves before rejoining. The runner cancels and awaits its owned
 tasks before artifact capture. One immutable interval snapshot supplies
 both the published samples and the returned final counters (#783).
 
+Windows CI exposed a failed-write termination race (#799) in session 362.
+After the declared server kill, a socket write could fail before read EOF.
+The runner stopped without disconnect evidence, so the oracle classified
+one cutoff-tail delivery as missing. Transport write failures now stop
+outbound work and drain buffered receipts with the existing read hooks and
+quiescence deadline. Only EOF, close, or read error records a disconnect.
+A pending drain produces a deadline fault. Ordinary write failures keep
+`SendFailed`; the declared kill keeps `ServerTerminated`. Generator stops
+retain their existing outcome. A deterministic failed-write control was
+red when queued receipts were discarded. The fixed control covers terminal
+and deadline paths, exact disconnected prefixes, interior holes, and
+serialized evidence. The live termination cell checks artifact replay.
+No oracle rule, artifact schema, or workload limit changed.
+
 The runner builds its metrics client and prepares every peer before arming.
 Each peer registers its initial identity and reports readiness. Only then
 does the runner publish one shared measurement epoch. Setup consumes no
