@@ -42,8 +42,10 @@ use crate::schedule::build_run_shape;
 /// server and generator CPU-time pair to every interval sample. Version 5
 /// adds the unsupported-format contract experiment: the config, summary,
 /// and event log gain the experiment label, its advisory events, and its
-/// verdict reasons.
-pub const SCHEMA_VERSION: u64 = 5;
+/// verdict reasons. Version 6 adds the server's socket-memory page pair
+/// (TCP and UDP `mem` pages from `/proc/<pid>/net/sockstat`) to every
+/// interval sample.
+pub const SCHEMA_VERSION: u64 = 6;
 
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const DELIVERIES_FILE: &str = "deliveries.jsonl";
@@ -131,6 +133,12 @@ pub struct IntervalSample {
     /// load generator's own cost must be distinguishable from server
     /// saturation.
     pub generator_cpu_seconds: Option<f64>,
+    /// Kernel TCP socket-buffer memory of the server process, in pages
+    /// (TCP + TCP6 `mem` from `/proc/<pid>/net/sockstat`).
+    pub server_socket_tcp_mem_pages: Option<u64>,
+    /// Kernel UDP socket-buffer memory of the server process, in pages
+    /// (UDP + UDP6 `mem` from `/proc/<pid>/net/sockstat`).
+    pub server_socket_udp_mem_pages: Option<u64>,
     /// Scrape failure detail — a sample that could not be taken is recorded
     /// as an explicit event, not skipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]

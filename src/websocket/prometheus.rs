@@ -1,17 +1,20 @@
 use crate::metrics::{MetricsSnapshot, OperationLatencyMetrics};
-use crate::server::OutboundQueueSample;
+use crate::server::{LiveStateSample, OutboundQueueSample};
 use chrono::Utc;
 
 /// Render unified metrics snapshot into Prometheus text exposition format.
 ///
 /// `queue_sample` is the scrape-time outbound-queue posture (total resident
-/// items, oldest resident item) and `now` the scrape instant the queue age
-/// is measured against: these gauges are sampled when the endpoint is hit
-/// and never maintained on the write path. Rendered for every caller so an
-/// endpoint cannot drop them.
+/// items, oldest resident item), `live` the scrape-time live-state counts
+/// (rooms, occupants, pending publications, pending reconnections, replay
+/// rings), and `now` the scrape instant the queue age is measured against:
+/// these gauges are sampled when the endpoint is hit and never maintained
+/// on the write path. Rendered for every caller so an endpoint cannot drop
+/// them.
 pub(crate) fn render_prometheus_metrics(
     snapshot: &MetricsSnapshot,
     queue_sample: &OutboundQueueSample,
+    live: &LiveStateSample,
     now: tokio::time::Instant,
 ) -> String {
     use std::fmt::{Display, Write};
@@ -208,6 +211,45 @@ pub(crate) fn render_prometheus_metrics(
         "signal_fish_websocket_queue_oldest_age_milliseconds",
         "Age in milliseconds of the oldest item resident in any live classified outbound queue at scrape time; 0 when nothing is queued",
         queue_sample.oldest_age_millis(now),
+    );
+    // Live-state posture, sampled when this endpoint is scraped (never
+    // maintained on the write path): the capacity campaign's live-object
+    // observables. `None` (backend cannot answer cheaply) renders as an
+    // explicit absence, never a fabricated zero.
+    let mut live_gauge = |name: &'static str, help: &'static str, value: Option<u64>| {
+        if let Some(value) = value {
+            gauge(&mut buf, name, help, value);
+        }
+    };
+    live_gauge(
+        "signal_fish_rooms_live",
+        "Rooms live in storage at scrape time (occupied or empty)",
+        live.rooms,
+    );
+    live_gauge(
+        "signal_fish_room_occupants_live",
+        "Seated occupants (players and spectators) across all live rooms at scrape time",
+        live.occupants,
+    );
+    live_gauge(
+        "signal_fish_cleanup_pending_publications",
+        "Rooms in the pending-publication lifecycle (creating or awaiting repair) at scrape time — the creation/repair backlog maintenance must drain",
+        live.pending_publications,
+    );
+    live_gauge(
+        "signal_fish_reconnection_pending",
+        "Players holding a pending reconnection record (disconnected, inside the reconnect window) at scrape time",
+        live.pending_reconnections,
+    );
+    live_gauge(
+        "signal_fish_replay_rooms_retained",
+        "Rooms holding a reconnection replay ring at scrape time",
+        live.replay_rooms,
+    );
+    live_gauge(
+        "signal_fish_replay_events_retained",
+        "Replayable control events buffered across all replay rings at scrape time",
+        live.replay_events,
     );
     counter(
         &mut buf,
@@ -558,6 +600,18 @@ pub(crate) fn render_prometheus_metrics(
         "Total players disconnected by the cleanup task after missing heartbeats",
         snapshot.cleanup.expired_players_cleaned,
     );
+    counter(
+        &mut buf,
+        "signal_fish_maintenance_sweeps_total",
+        "Completed maintenance (cleanup) sweeps since startup; a sustained zero means the cleanup task is not running",
+        snapshot.cleanup.maintenance_sweeps_total,
+    );
+    gauge(
+        &mut buf,
+        "signal_fish_maintenance_last_duration_milliseconds",
+        "Wall duration in milliseconds of the most recent completed maintenance sweep; growth with occupancy is the maintenance-complexity signal",
+        snapshot.cleanup.maintenance_last_duration_millis,
+    );
 
     counter(
         &mut buf,
@@ -736,13 +790,14 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::sync::atomic::Ordering;
 
-    /// Test render over an empty queue sample: most tests assert snapshot
-    /// counters, not the scrape-time queue gauges. The queue-gauge render has
-    /// its own dedicated tests below.
+    /// Test render over an empty queue sample and an empty live-state
+    /// sample: most tests assert snapshot counters, not the scrape-time
+    /// gauges. Those have their own dedicated tests below.
     fn render(snapshot: &MetricsSnapshot) -> String {
         render_prometheus_metrics(
             snapshot,
             &OutboundQueueSample::default(),
+            &LiveStateSample::default(),
             tokio::time::Instant::now(),
         )
     }
@@ -752,7 +807,7 @@ mod tests {
         queue_sample: &OutboundQueueSample,
         now: tokio::time::Instant,
     ) -> String {
-        render_prometheus_metrics(snapshot, queue_sample, now)
+        render_prometheus_metrics(snapshot, queue_sample, &LiveStateSample::default(), now)
     }
 
     fn rendered_u64(rendered: &str, name: &str) -> u64 {
@@ -926,6 +981,86 @@ mod tests {
         assert_eq!(
             age, 250,
             "age is the sample's enqueue-to-scrape span, measured against the passed instant"
+        );
+    }
+
+    /// The live-state gauges are scrape-time counts: a populated sample
+    /// renders exact values as gauges, and an unavailable field renders NO
+    /// series at all (an absence must stay distinguishable from a
+    /// fabricated zero — the opposite contract of the queue gauges, which
+    /// the spawned binary can always answer).
+    #[tokio::test]
+    async fn live_state_gauges_render_sampled_values_and_stay_absent_when_unavailable() {
+        let empty_live = render(&ServerMetrics::new().snapshot().await);
+        assert!(
+            !empty_live.contains("signal_fish_rooms_live"),
+            "an unavailable live-room count must not fabricate a series: {empty_live}"
+        );
+        assert!(
+            !empty_live.contains("signal_fish_reconnection_pending"),
+            "an unavailable pending-reconnection count must not fabricate a series"
+        );
+
+        let populated_live = LiveStateSample {
+            rooms: Some(3),
+            occupants: Some(9),
+            pending_publications: Some(1),
+            pending_reconnections: Some(2),
+            replay_rooms: Some(1),
+            replay_events: Some(12),
+        };
+        let rendered = render_prometheus_metrics(
+            &ServerMetrics::new().snapshot().await,
+            &OutboundQueueSample::default(),
+            &populated_live,
+            tokio::time::Instant::now(),
+        );
+        for (name, value) in [
+            ("signal_fish_rooms_live", 3),
+            ("signal_fish_room_occupants_live", 9),
+            ("signal_fish_cleanup_pending_publications", 1),
+            ("signal_fish_reconnection_pending", 2),
+            ("signal_fish_replay_rooms_retained", 1),
+            ("signal_fish_replay_events_retained", 12),
+        ] {
+            assert!(
+                rendered.contains(&format!("{name} {value}")),
+                "{name} must render its sampled value {value}: {rendered}"
+            );
+            assert!(
+                rendered.contains(&format!("# TYPE {name} gauge")),
+                "{name} must be a gauge: {rendered}"
+            );
+        }
+    }
+
+    /// The maintenance sweep pair is snapshot-carried: the sweep counter is
+    /// a counter, the last duration a gauge.
+    #[tokio::test]
+    async fn maintenance_sweep_series_render_from_the_snapshot() {
+        let metrics = ServerMetrics::new();
+        metrics.record_maintenance_sweep(std::time::Duration::from_millis(42));
+        metrics.record_maintenance_sweep(std::time::Duration::from_millis(5));
+        let rendered = render(&metrics.snapshot().await);
+        assert!(
+            rendered.contains("signal_fish_maintenance_sweeps_total 2"),
+            "sweep counter renders its count: {rendered}"
+        );
+        assert!(
+            rendered.contains("# TYPE signal_fish_maintenance_sweeps_total counter"),
+            "sweep count must be a counter: {rendered}"
+        );
+        assert_eq!(
+            rendered_u64(
+                &rendered,
+                "signal_fish_maintenance_last_duration_milliseconds"
+            ),
+            5,
+            "the duration gauge carries the MOST RECENT completed sweep, not the total"
+        );
+        assert!(
+            rendered.contains("# TYPE signal_fish_maintenance_last_duration_milliseconds gauge"),
+            "duration must be a gauge: {rendered}"
         );
     }
 

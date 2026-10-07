@@ -281,6 +281,14 @@ pub struct ServerMetrics {
     pub empty_rooms_cleaned: AtomicU64,
     pub inactive_rooms_cleaned: AtomicU64,
     pub expired_players_cleaned: AtomicU64,
+    /// Maintenance (cleanup) sweeps started since startup. One sweep is one
+    /// interval tick's expired-client and room-reclaim pass, so a sustained
+    /// zero means the cleanup task is not running.
+    pub maintenance_sweeps_total: AtomicU64,
+    /// Wall duration in milliseconds of the most recent completed
+    /// maintenance sweep. A value that grows with occupancy is the C3
+    /// maintenance-complexity signal (scan cost versus room count).
+    pub maintenance_last_duration_millis: AtomicU64,
 
     // Transport / session-plan metrics (Protocol v3)
     /// Finalization-time v3 `SessionPlan` publication events. Counted once per
@@ -651,6 +659,8 @@ pub struct CleanupMetrics {
     pub empty_rooms_cleaned: u64,
     pub inactive_rooms_cleaned: u64,
     pub expired_players_cleaned: u64,
+    pub maintenance_sweeps_total: u64,
+    pub maintenance_last_duration_millis: u64,
 }
 
 impl Default for ServerMetrics {
@@ -749,6 +759,8 @@ impl ServerMetrics {
             empty_rooms_cleaned: AtomicU64::new(0),
             inactive_rooms_cleaned: AtomicU64::new(0),
             expired_players_cleaned: AtomicU64::new(0),
+            maintenance_sweeps_total: AtomicU64::new(0),
+            maintenance_last_duration_millis: AtomicU64::new(0),
             session_plans_emitted: AtomicU64::new(0),
             session_replans_emitted: AtomicU64::new(0),
             session_plans_late_join: AtomicU64::new(0),
@@ -1425,6 +1437,17 @@ impl ServerMetrics {
             .fetch_add(count, Ordering::Relaxed);
     }
 
+    /// Record one completed maintenance sweep and its wall duration.
+    /// Off the hot path: one monotonic read pair per cleanup interval.
+    pub fn record_maintenance_sweep(&self, duration: std::time::Duration) {
+        self.maintenance_sweeps_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.maintenance_last_duration_millis.store(
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+
     // Transport / session-plan metrics (Protocol v3)
 
     /// Record the topology chosen for one finalized room. Called once per
@@ -1748,6 +1771,10 @@ impl ServerMetrics {
                 empty_rooms_cleaned: self.empty_rooms_cleaned.load(Ordering::Relaxed),
                 inactive_rooms_cleaned: self.inactive_rooms_cleaned.load(Ordering::Relaxed),
                 expired_players_cleaned: self.expired_players_cleaned.load(Ordering::Relaxed),
+                maintenance_sweeps_total: self.maintenance_sweeps_total.load(Ordering::Relaxed),
+                maintenance_last_duration_millis: self
+                    .maintenance_last_duration_millis
+                    .load(Ordering::Relaxed),
             },
             reconnection: ReconnectionMetrics {
                 tokens_issued: self.reconnection_tokens_issued.load(Ordering::Relaxed),

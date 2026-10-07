@@ -474,6 +474,12 @@ impl EnhancedGameServer {
                 break 'cleanup;
             }
 
+            // The sweep is timed as one unit so the export shows what a
+            // maintenance pass costs at the current occupancy (the C3
+            // maintenance-complexity signal). Drain exits above skip the
+            // stamp: an aborted pass is not a completed sweep.
+            let sweep_started = tokio::time::Instant::now();
+
             // Cleanup expired clients
             let expired_clients = if self.config.ping_timeout.is_zero() {
                 Vec::new()
@@ -786,6 +792,9 @@ impl EnhancedGameServer {
                     tracing::error!("Failed to cleanup old room cleanup events: {}", e);
                 }
             }
+
+            self.metrics
+                .record_maintenance_sweep(sweep_started.elapsed());
         }
     }
 }

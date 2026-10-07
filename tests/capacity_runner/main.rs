@@ -224,6 +224,63 @@ async fn small_reliable_relay_scenario_passes_and_artifacts_replay_to_the_same_s
             );
         }
     }
+
+    // The live-state gauges and the maintenance-sweep pair ride every
+    // interval sample beside the delivery counters: the C3 capacity claims
+    // read occupancy and maintenance cost off these series. The spawned
+    // binary renders them unconditionally (the in-memory backend always
+    // answers, the sweep pair always exists), so every platform asserts
+    // presence.
+    for sample in &intervals {
+        for name in [
+            "signal_fish_rooms_live",
+            "signal_fish_room_occupants_live",
+            "signal_fish_cleanup_pending_publications",
+            "signal_fish_reconnection_pending",
+            "signal_fish_replay_rooms_retained",
+            "signal_fish_replay_events_retained",
+            "signal_fish_maintenance_sweeps_total",
+            "signal_fish_maintenance_last_duration_milliseconds",
+        ] {
+            assert!(
+                sample
+                    .counters
+                    .get(name)
+                    .is_some_and(serde_json::Value::is_u64),
+                "{name} must be a recorded u64 in every interval sample, got {}",
+                sample.counters
+            );
+        }
+    }
+
+    // The socket-memory pair rides every interval sample beside RSS and
+    // CPU: kernel socket-buffer accounting (`mem` pages from
+    // `/proc/<pid>/net/sockstat`, TCP+TCP6 and UDP+UDP6) is the C3
+    // socket-memory observable. The sampler reads procfs, so Linux records
+    // both and any other host honestly records null (unavailable, never
+    // guessed).
+    for sample in &intervals {
+        #[cfg(target_os = "linux")]
+        {
+            assert!(
+                sample.server_socket_tcp_mem_pages.is_some(),
+                "server_socket_tcp_mem_pages must be recorded on Linux in every \
+                 interval sample, got {:?}",
+                sample.server_socket_tcp_mem_pages
+            );
+            assert!(
+                sample.server_socket_udp_mem_pages.is_some(),
+                "server_socket_udp_mem_pages must be recorded on Linux in every \
+                 interval sample, got {:?}",
+                sample.server_socket_udp_mem_pages
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert!(sample.server_socket_tcp_mem_pages.is_none());
+            assert!(sample.server_socket_udp_mem_pages.is_none());
+        }
+    }
 }
 
 /// A paused generator shows up as scheduled-send latency — the pause lands

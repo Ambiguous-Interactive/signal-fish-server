@@ -12,8 +12,11 @@ use sha2::{Digest, Sha256};
 
 /// The server counters and gauges the interval sampler records: the
 /// delivery-contract counters, the ingress/egress byte pair (the fan-out
-/// amplification pair), and the scrape-time outbound-queue posture gauges
-/// (same names the strict delivery suites assert on, parsed leniently here).
+/// amplification pair), the scrape-time outbound-queue posture gauges, the
+/// scrape-time live-state gauges (rooms, occupants, pending publications,
+/// pending reconnections, replay rings), and the maintenance-sweep pair
+/// (same names the strict delivery suites assert on, parsed leniently
+/// here).
 pub const TRACKED_COUNTERS: &[&str] = &[
     "signal_fish_websocket_delivery_attempts_total",
     "signal_fish_websocket_deliveries_enqueued_total",
@@ -27,6 +30,14 @@ pub const TRACKED_COUNTERS: &[&str] = &[
     "signal_fish_websocket_egress_bytes_total",
     "signal_fish_websocket_queue_depth",
     "signal_fish_websocket_queue_oldest_age_milliseconds",
+    "signal_fish_rooms_live",
+    "signal_fish_room_occupants_live",
+    "signal_fish_cleanup_pending_publications",
+    "signal_fish_reconnection_pending",
+    "signal_fish_replay_rooms_retained",
+    "signal_fish_replay_events_retained",
+    "signal_fish_maintenance_sweeps_total",
+    "signal_fish_maintenance_last_duration_milliseconds",
 ];
 
 /// SHA-256 of a file, hex-encoded (server binary and config overlay hashes).
@@ -164,6 +175,67 @@ fn cpu_seconds_from_stat(stat: &str) -> Option<f64> {
 #[cfg(not(target_os = "linux"))]
 pub fn process_cpu_seconds(_pid: u32) -> Option<f64> {
     None
+}
+
+/// Kernel socket-memory accounting for a process's network namespace
+/// ([`SocketMemoryPages`], from `/proc/<pid>/net/sockstat`), summed across
+/// IPv4 and IPv6. Units are kernel memory pages — the kernel's own
+/// accounting unit for socket-buffer memory; the capacity host records the
+/// page size as an environment fact beside the run. `None` off-Linux or
+/// when the file is unreadable — recorded as unavailable, never guessed.
+#[cfg(target_os = "linux")]
+pub fn socket_memory_pages(pid: u32) -> Option<SocketMemoryPages> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/net/sockstat")).ok()?;
+    parse_socket_memory_pages(&text)
+}
+
+/// Socket-memory accounting of a process (`None` off-Linux — recorded as
+/// unavailable).
+#[cfg(not(target_os = "linux"))]
+pub fn socket_memory_pages(_pid: u32) -> Option<SocketMemoryPages> {
+    None
+}
+
+/// TCP and UDP socket-buffer memory of a process's network namespace, in
+/// kernel memory pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SocketMemoryPages {
+    /// `mem` pages summed over the `TCP:` and `TCP6:` sockstat lines.
+    pub tcp: u64,
+    /// `mem` pages summed over the `UDP:` and `UDP6:` sockstat lines.
+    pub udp: u64,
+}
+
+/// Parse the TCP and UDP `mem` page totals out of a `sockstat` body. Each
+/// protocol family line carries `mem <pages>`; the `FRAG:` line uses
+/// `memory` (fragmentation queues, not socket buffers) and a bare `mem` key
+/// never matches it.
+#[cfg(target_os = "linux")]
+pub fn parse_socket_memory_pages(text: &str) -> Option<SocketMemoryPages> {
+    let mut tcp: Option<u64> = None;
+    let mut udp: Option<u64> = None;
+    for line in text.lines() {
+        let family = if line.starts_with("TCP:") || line.starts_with("TCP6:") {
+            &mut tcp
+        } else if line.starts_with("UDP:") || line.starts_with("UDP6:") {
+            &mut udp
+        } else {
+            continue;
+        };
+        let mut fields = line.split_whitespace();
+        while let Some(field) = fields.next() {
+            if field == "mem" {
+                if let Some(pages) = fields.next().and_then(|raw| raw.parse::<u64>().ok()) {
+                    *family = Some(family.unwrap_or(0).saturating_add(pages));
+                }
+                break;
+            }
+        }
+    }
+    Some(SocketMemoryPages {
+        tcp: tcp?,
+        udp: udp?,
+    })
 }
 
 /// Lenient Prometheus sample parse: `Some(value)` when the named
@@ -343,5 +415,43 @@ mod tests {
         );
         // A pid the kernel can never have assigned is unavailable, not zero.
         assert_eq!(process_cpu_seconds(u32::MAX), None);
+    }
+
+    // A realistic `/proc/<pid>/net/sockstat` body: IPv4 and IPv6 lines each
+    // carry `mem <pages>`; the `FRAG:` line uses `memory` (fragmentation
+    // queues, not socket buffers) and must not be swept into the totals.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_socket_memory_pages_sums_both_families_and_skips_frag_memory() {
+        let text = "sockets: used 351\n\
+                    TCP: inuse 9 orphan 0 tw 2 alloc 11 mem 3\n\
+                    UDP: inuse 5 mem 2\n\
+                    UDPLITE: inuse 0\n\
+                    RAW: inuse 0\n\
+                    FRAG: inuse 0 memory 7\n\
+                    TCP6: inuse 2 mem 4\n\
+                    UDP6: inuse 4 mem 1\n";
+        let parsed = parse_socket_memory_pages(text).expect("both families present");
+        assert_eq!(parsed.tcp, 7, "TCP 3 + TCP6 4");
+        assert_eq!(parsed.udp, 3, "UDP 2 + UDP6 1");
+        // A truncated body without a family line is unavailable, never zero.
+        assert_eq!(parse_socket_memory_pages("sockets: used 1\n"), None);
+        assert_eq!(
+            parse_socket_memory_pages("TCP: inuse 1 alloc 1 mem x\n"),
+            None
+        );
+        // The live sampler reads the calling process's namespace; a pid the
+        // kernel can never have assigned is unavailable.
+        assert_eq!(socket_memory_pages(u32::MAX), None);
+    }
+
+    // The calling process always has a network namespace on Linux, so the
+    // live read answers with both families recorded (values may be zero).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn socket_memory_pages_answers_for_the_calling_process() {
+        let parsed = socket_memory_pages(std::process::id()).expect("own sockstat is readable");
+        let _ = parsed.tcp;
+        let _ = parsed.udp;
     }
 }

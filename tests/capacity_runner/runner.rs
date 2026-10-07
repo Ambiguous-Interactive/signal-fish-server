@@ -1490,6 +1490,10 @@ async fn sample_loop(
             cgroup_memory_bytes: pid.and_then(diagnostics::cgroup_memory_bytes),
             generator_rss_bytes: diagnostics::resident_memory_bytes(std::process::id()),
             generator_cpu_seconds: diagnostics::process_cpu_seconds(std::process::id()),
+            server_socket_tcp_mem_pages: pid
+                .and_then(|pid| diagnostics::socket_memory_pages(pid).map(|sockets| sockets.tcp)),
+            server_socket_udp_mem_pages: pid
+                .and_then(|pid| diagnostics::socket_memory_pages(pid).map(|sockets| sockets.udp)),
             scrape_error,
         };
         out.lock().expect("interval samples poisoned").push(sample);

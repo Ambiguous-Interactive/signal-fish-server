@@ -9909,6 +9909,147 @@ async fn empty_room_sweep_counts_rooms_deleted() {
         .expect("cleanup task should not panic");
 }
 
+/// Every completed maintenance sweep must be counted with its wall
+/// duration: a silent sweep is invisible occupancy cost (the C3
+/// maintenance-complexity signal has no input). Red-proofs the
+/// `record_maintenance_sweep` seam — deleting the recording call fails the
+/// counter-advance wait.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn maintenance_sweep_accounting_records_every_completed_sweep() {
+    let server = create_test_server_with_config(ServerConfig {
+        room_cleanup_interval: Duration::from_secs(1),
+        ..ServerConfig::default()
+    })
+    .await;
+
+    let shutdown = Arc::new(Notify::new());
+    let cleanup_task = tokio::spawn({
+        let server = Arc::clone(&server);
+        let shutdown = Arc::clone(&shutdown);
+        async move {
+            server.cleanup_task_until(shutdown.notified()).await;
+        }
+    });
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if server
+                .metrics
+                .maintenance_sweeps_total
+                .load(Ordering::Relaxed)
+                >= 2
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("completed sweeps must advance the sweep counter");
+
+    shutdown.notify_one();
+    timeout(Duration::from_secs(1), cleanup_task)
+        .await
+        .expect("cleanup task should observe shutdown")
+        .expect("cleanup task should not panic");
+
+    // The duration stamp exists and flows through the snapshot the
+    // Prometheus renderer reads (monotonic elapsed, so any non-negative
+    // value is honest; the advance itself is the pinned behavior).
+    let cleanup = server.metrics.snapshot().await.cleanup;
+    assert!(
+        cleanup.maintenance_sweeps_total >= 2,
+        "snapshot must carry the sweep count, got {}",
+        cleanup.maintenance_sweeps_total
+    );
+}
+
+/// The live-state gauges must answer exact counts off the same state the
+/// players see: rooms, seated occupants, the pending-publication backlog,
+/// and pending reconnections. These are the capacity campaign's live-object
+/// observables.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn live_state_sample_counts_rooms_occupants_and_pending_reconnections() {
+    let server = create_test_server_with_config(ServerConfig {
+        enable_reconnection: true,
+        ..ServerConfig::default()
+    })
+    .await;
+
+    let empty = server.live_state_sample().await;
+    assert_eq!(empty.rooms, Some(0), "no rooms yet");
+    assert_eq!(empty.occupants, Some(0), "no occupants yet");
+    assert_eq!(empty.pending_publications, Some(0), "no backlog yet");
+    assert_eq!(empty.pending_reconnections, Some(0), "no pending yet");
+
+    let (player, mut player_rx) =
+        register_client(&server, "127.0.0.1:48171".parse().unwrap()).await;
+    server.set_client_protocol(
+        &player,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![crate::protocol::Transport::Relay],
+            topologies: vec![crate::protocol::Topology::Relay],
+        },
+    );
+    server
+        .handle_join_room(
+            &player,
+            "live-state".to_string(),
+            Some("LVST01".to_string()),
+            "creator".to_string(),
+            Some(4),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await;
+    let _ = drain_queued_messages(&mut player_rx);
+    let room_id = server
+        .get_client_room(&player)
+        .await
+        .expect("the join seated the creator");
+
+    let occupied = server.live_state_sample().await;
+    assert_eq!(occupied.rooms, Some(1), "one live room");
+    assert_eq!(occupied.occupants, Some(1), "the seated creator");
+    assert_eq!(
+        occupied.pending_publications,
+        Some(0),
+        "a published room is not backlog"
+    );
+
+    // Arming a reconnection record (the disconnect window's pending claim)
+    // must be visible to the scrape.
+    let manager = server
+        .reconnection_manager()
+        .expect("reconnection is enabled");
+    let player_info = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("room lookup succeeds")
+        .expect("room exists")
+        .players
+        .get(&player)
+        .cloned()
+        .expect("seated player info");
+    manager
+        .register_disconnection(player, room_id, false, Some(player_info), 0)
+        .await;
+
+    let pending = server.live_state_sample().await;
+    assert_eq!(
+        pending.pending_reconnections,
+        Some(1),
+        "the armed reconnection record is live state"
+    );
+    assert_eq!(pending.rooms, Some(1), "rooms unchanged");
+}
+
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn draining_room_creation_rejection_does_not_wait_on_full_queue() {

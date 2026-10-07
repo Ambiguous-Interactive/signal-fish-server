@@ -631,6 +631,17 @@ pub trait GameDatabase: Send + Sync {
     /// Cleanup old room cleanup events (called periodically)
     async fn cleanup_old_room_cleanup_events(&self) -> Result<u64>;
 
+    /// Scrape-time live-object counts for the metrics endpoint: live rooms,
+    /// seated occupants (players + spectators), and pending room
+    /// publications (the creation/repair backlog). Sampled when the
+    /// endpoint is hit, never maintained on the write path. The default
+    /// reports unavailable (`None`) so embedders' backends are never
+    /// guessed at; the shipped in-memory backend answers under short read
+    /// locks.
+    async fn live_room_counts(&self) -> Option<LiveRoomCounts> {
+        None
+    }
+
     /// Downcast helper to access backend-specific implementations
     fn as_any(&self) -> &(dyn Any + Send + Sync);
 }
@@ -675,6 +686,20 @@ pub async fn create_database(config: DatabaseConfig) -> Result<Box<dyn GameDatab
             Ok(Box::new(db))
         }
     }
+}
+
+/// Scrape-time live-object counts behind the metrics endpoint (the capacity
+/// campaign's live-state observables). All values are exact counts of live
+/// server state at the scrape instant.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LiveRoomCounts {
+    /// Rooms live in storage (players and/or spectators, or freshly created).
+    pub rooms: u64,
+    /// Seated occupants across all live rooms (players + spectators).
+    pub occupants: u64,
+    /// Rooms in the pending-publication lifecycle (creating or awaiting
+    /// repair) — the creation/repair backlog maintenance must drain.
+    pub pending_publications: u64,
 }
 
 /// How long after a claimed cleanup a room may be re-claimed for the same
@@ -2850,6 +2875,22 @@ impl GameDatabase for InMemoryDatabase {
         let deleted_count = initial_count.saturating_sub(cleanup_events.len());
 
         Ok(u64::try_from(deleted_count).unwrap_or(u64::MAX))
+    }
+
+    async fn live_room_counts(&self) -> Option<LiveRoomCounts> {
+        let rooms = self.rooms.read().await;
+        let publications = self.room_publication.read().await;
+        Some(LiveRoomCounts {
+            rooms: u64::try_from(rooms.len()).unwrap_or(u64::MAX),
+            occupants: u64::try_from(
+                rooms
+                    .values()
+                    .map(|room| room.players.len() + room.spectators.len())
+                    .sum::<usize>(),
+            )
+            .unwrap_or(u64::MAX),
+            pending_publications: u64::try_from(publications.len()).unwrap_or(u64::MAX),
+        })
     }
 
     fn as_any(&self) -> &(dyn Any + Send + Sync) {

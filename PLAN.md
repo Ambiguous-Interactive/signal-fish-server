@@ -337,8 +337,14 @@ PR, 2026-10-06, see the ledger's contract record): a labeled
 `unsupported-format` contract experiment where the room's opaque `rkyv`
 sender reaches no cross-format recipient — exact `unsupported_format`
 coverage, zero payload leaks, bounded advisories, exact server-counter
-agreement — with six red-proven controls. Remaining below: the
-resource-collection remainder.
+agreement — with six red-proven controls. The
+resource-collection remainder (live objects, cleanup backlog, maintenance
+cost, socket memory) is landed (eighth runner PR, 2026-10-07, see the
+ledger's contract record): schema 6 interval samples carry the live-state
+gauges, the pending-publication backlog, the maintenance sweep pair, and
+the socket-memory page pair, with presence pins in the acceptance scenario.
+C2 is complete: every registered runner input, artifact family, negative
+control, and resource observable is landed and pinned.
 
 - [x] Churn/reconnect schedules: reconnect-burst and room-replacement
   shapes per the C3 cells, with red-first controls for each new permitted
@@ -389,7 +395,7 @@ resource-collection remainder.
   (outstanding/unsent, with unsent invalidating when no declared fault
   explains it), not an omitted latency sample. Latest/volatile permitted
   outcomes are pinned (exact gap coverage; the class slice above).
-- [ ] Collect CPU, RSS, cgroup memory, available socket-memory accounting,
+- [x] Collect CPU, RSS, cgroup memory, available socket-memory accounting,
   ingress/egress bytes, queue depth/age, disconnect reasons, live objects,
   cleanup backlog, maintenance duration, and generator CPU. Landed: server
   delivery counters, slow-consumer disconnects, active connections, server
@@ -401,10 +407,13 @@ resource-collection remainder.
   `signal_fish_websocket_egress_bytes_total`, maintained on the write path)
   plus the queue posture (`signal_fish_websocket_queue_depth`,
   `signal_fish_websocket_queue_oldest_age_milliseconds`, computed at
-  scrape time), with scrape failures recorded as explicit samples.
-  Remaining: socket-memory accounting,
-  live objects, cleanup backlog, and maintenance duration. Keep
-  instrumentation out of timed hot paths.
+  scrape time), with scrape failures recorded as explicit samples. The
+  resource-collection remainder is landed (schema 6, eighth runner PR,
+  2026-10-07): the live-state gauges (rooms, occupants, pending
+  reconnections, replay rings), the pending-publication backlog, the
+  maintenance sweep count and last duration, and the socket-memory page
+  pair (`/proc/<pid>/net/sockstat` TCP/UDP `mem`, `null` off-Linux).
+  Keep instrumentation out of timed hot paths.
 - [x] Runner negative controls: deliberately missing/duplicate/misrouted
   deliveries, delayed sends (pause appears in scheduled-send latency instead
   of reducing offered load), slow readers, generator saturation, and server
