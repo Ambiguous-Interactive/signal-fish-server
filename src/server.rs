@@ -386,6 +386,22 @@ use connection_manager::{ClientLifecycle, ConnectionManager};
 pub(crate) use connection_manager::{
     NegotiatedProtocol, OutboundQueueSample, TransportStatusUpdate,
 };
+
+/// Scrape-time live-state posture sampled when the metrics endpoint is hit:
+/// the capacity campaign's live-object observables (rooms, occupants,
+/// pending publications, pending reconnections, retained replay state).
+/// `None` means unavailable (the backend cannot answer cheaply) and renders
+/// as an explicit absence — never a fabricated zero.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LiveStateSample {
+    pub rooms: Option<u64>,
+    pub occupants: Option<u64>,
+    pub pending_publications: Option<u64>,
+    pub pending_reconnections: Option<u64>,
+    pub replay_rooms: Option<u64>,
+    pub replay_events: Option<u64>,
+}
+
 use dashboard_cache::{DashboardMetricsCache, DashboardMetricsView};
 pub use shutdown::{run_drain_choreography, ShutdownDrain};
 use spectator_service::SpectatorService;
@@ -1941,6 +1957,30 @@ impl EnhancedGameServer {
     /// path).
     pub fn outbound_queue_sample(&self) -> connection_manager::OutboundQueueSample {
         self.connection_manager.outbound_queue_sample()
+    }
+
+    /// Scrape-time live-state counts for the metrics endpoint: live rooms,
+    /// occupants, the pending-publication lifecycle, pending reconnections,
+    /// and retained replay state. `None` fields mean the backend cannot
+    /// answer cheaply (recorded as an explicit absence, never a zero).
+    /// Contention contract: the scrape takes short storage read locks and
+    /// awaits nothing under them, so a burst of writers can delay one
+    /// scrape by one lock hand-off, never the reverse.
+    pub async fn live_state_sample(&self) -> LiveStateSample {
+        let (rooms, replay) = tokio::join!(self.database.live_room_counts(), async {
+            match &self.reconnection_manager {
+                Some(manager) => Some(manager.replay_sample().await),
+                None => None,
+            }
+        });
+        LiveStateSample {
+            rooms: rooms.as_ref().map(|counts| counts.rooms),
+            occupants: rooms.as_ref().map(|counts| counts.occupants),
+            pending_publications: rooms.map(|counts| counts.pending_publications),
+            pending_reconnections: replay.as_ref().map(|sample| sample.pending_reconnections),
+            replay_rooms: replay.as_ref().map(|sample| sample.replay_rooms),
+            replay_events: replay.as_ref().map(|sample| sample.replay_events),
+        }
     }
 
     /// Access the reconnection manager for integration tests or admin tooling.
@@ -5591,6 +5631,7 @@ mod relay_projection_cache_tests {
         let rendered = crate::websocket::prometheus::render_prometheus_metrics(
             &snapshot,
             &crate::server::OutboundQueueSample::default(),
+            &crate::server::LiveStateSample::default(),
             tokio::time::Instant::now(),
         );
         for expected in [
@@ -5681,6 +5722,7 @@ mod relay_projection_cache_tests {
         let rendered = crate::websocket::prometheus::render_prometheus_metrics(
             &server.metrics.snapshot().await,
             &crate::server::OutboundQueueSample::default(),
+            &crate::server::LiveStateSample::default(),
             tokio::time::Instant::now(),
         );
         assert!(

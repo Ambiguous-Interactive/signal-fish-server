@@ -406,6 +406,19 @@ pub struct ClaimedReconnection {
     claim_id: Uuid,
 }
 
+/// Scrape-time live-state counts from [`ReconnectionManager::replay_sample`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReplaySample {
+    /// Players with a pending reconnection record (disconnected, inside the
+    /// reconnect window, not yet claimed).
+    pub pending_reconnections: u64,
+    /// Rooms holding a replay ring.
+    pub replay_rooms: u64,
+    /// Buffered replayable events across all rings (bounded by
+    /// `event_buffer_size` per room).
+    pub replay_events: u64,
+}
+
 /// Missed-event lookup result for a reconnecting player.
 ///
 /// `truncated` is true when the room's bounded replay ring evicted an event
@@ -541,6 +554,27 @@ impl ReconnectionManager {
     #[cfg(signal_fish_repository_tests)]
     pub(crate) fn release_record_room_event_for_test(&self) {
         self.release_record_room_event.notify_one();
+    }
+
+    /// Scrape-time live-state counts for the metrics endpoint: pending
+    /// reconnection records and the retained replay rings. Sampled when the
+    /// endpoint is hit under one short read lock, never maintained on the
+    /// write path.
+    pub async fn replay_sample(&self) -> ReplaySample {
+        let state = self.replay_state.read().await;
+        ReplaySample {
+            pending_reconnections: u64::try_from(state.disconnected_players.len())
+                .unwrap_or(u64::MAX),
+            replay_rooms: u64::try_from(state.event_buffers.len()).unwrap_or(u64::MAX),
+            replay_events: u64::try_from(
+                state
+                    .event_buffers
+                    .values()
+                    .map(|buffer| buffer.events.len())
+                    .sum::<usize>(),
+            )
+            .unwrap_or(u64::MAX),
+        }
     }
 
     /// Mint (or rotate) the reconnection token for a player joining `room_id`

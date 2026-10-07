@@ -216,6 +216,11 @@ direct, and extremely brief. The canonical scope list (which texts this
 covers) lives in `.llm/context.md` under "Writing Style for User-Facing Text".
 
 - Extremely short. A few sentences is the maximum. No fluff, no verbosity.
+- PR descriptions: a FEW SHORT SENTENCES total — why (the problem), what
+  (one-line bullets), how (what to do next). No coverage notes, no
+  implementation narratives; detail belongs in the linked issue.
+- CHANGELOG entries: ONE sentence (two maximum) — the change and its
+  externally visible effect.
 - Answer "how": what changed and what to do next. For PR descriptions, also
   answer "why" and "what", in a few sentences.
 - Short sentences. One idea per sentence. Active voice. Common words.

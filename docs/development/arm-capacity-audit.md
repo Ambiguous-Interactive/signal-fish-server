@@ -2508,3 +2508,37 @@ classification each fail their control when neutered. Remaining
 unsupported-format ground (tracked for later cells, not silently skipped):
 v2 observer cohorts (advisory-only, no reports to validate), same-format
 opaque twins (binary-envelope decoding), and churn × experiment composition.
+
+**C2 next runner PR: live-state, backlog, maintenance, and socket-memory
+resources — LANDED** (eighth runner PR, 2026-10-07). The resource-collection
+remainder is closed; every interval sample now carries the four missing
+resource families beside the delivery counters and the RSS/CPU/cgroup set:
+
+- **Live objects** (scrape-time, never write-path): `signal_fish_rooms_live`,
+  `signal_fish_room_occupants_live`, `signal_fish_reconnection_pending`,
+  `signal_fish_replay_rooms_retained`, and
+  `signal_fish_replay_events_retained`, read under short read locks when
+  the endpoint is hit (`GameDatabase::live_room_counts`, default `None` for
+  embedder backends that cannot answer cheaply, and
+  `ReconnectionManager::replay_sample`). An unavailable count renders no
+  series — absence stays distinguishable from a fabricated zero.
+- **Cleanup backlog**: `signal_fish_cleanup_pending_publications`, the
+  rooms in the pending-publication lifecycle at scrape time (in-flight
+  creation or awaiting repair; maintenance drains the abandoned ones).
+- **Maintenance cost**: `signal_fish_maintenance_sweeps_total` (completed
+  sweeps) and `signal_fish_maintenance_last_duration_milliseconds` (the
+  most recent completed sweep's monotonic wall duration) — the C3
+  maintenance-complexity signal. Drain-aborted passes are not counted.
+- **Socket memory**: `server_socket_tcp_mem_pages` and
+  `server_socket_udp_mem_pages` in every interval sample — TCP+TCP6 and
+  UDP+UDP6 `mem` from `/proc/<pid>/net/sockstat`, in kernel memory pages
+  (the page size is a capacity-host environment fact), `null` off-Linux.
+  A `FRAG:` line's `memory` field is never swept into the totals.
+
+Artifacts bumped to schema 6 (additive interval fields). Red proof:
+neutering the sweep recording call fails
+`maintenance_sweep_accounting_records_every_completed_sweep` (the counter
+never advances). Presence pins: the spawned binary's run asserts all eight
+new series as u64 in every interval sample on every platform, and the
+socket-memory pair as recorded on Linux (null elsewhere, mirroring the
+CPU-pair contract); renaming any rendered series fails the render pins.
