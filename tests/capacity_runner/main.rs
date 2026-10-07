@@ -659,6 +659,25 @@ async fn lossy_pressure_preserves_exact_gap_accounting_and_replay() {
             "class={delivery_class:?}, totals={:?}, payload_bytes={:?}",
             summary.totals, summary.payload_bytes
         );
+        if !summary.valid {
+            let records = artifacts::read_records(output.path()).expect("read failed-run records");
+            let recent_sends: Vec<_> = records
+                .sent
+                .iter()
+                .rev()
+                .take(8)
+                .map(|send| (&send.sender, send.seq, send.intended_us, send.sent_us))
+                .collect();
+            let intervals =
+                artifacts::read_intervals(output.path()).expect("read failed-run interval samples");
+            let recent_samples: Vec<_> = intervals
+                .iter()
+                .rev()
+                .take(3)
+                .map(|sample| (sample.t_us, &sample.scrape_error, &sample.counters))
+                .collect();
+            eprintln!("pressure failure timing: recent_sends={recent_sends:?}, recent_samples={recent_samples:?}");
+        }
         assert!(
             summary.valid,
             "exact gap accounting must remain valid: {diagnostic}, reasons={:?}",

@@ -343,8 +343,8 @@ cost, socket memory) is landed (eighth runner PR, 2026-10-07, see the
 ledger's contract record): schema 6 interval samples carry the live-state
 gauges, the pending-publication backlog, the maintenance sweep pair, and
 the socket-memory page pair, with presence pins in the acceptance scenario.
-The C2 input and artifact surface is landed and pinned. The Windows
-pressure result in #783 still requires fresh main verification. The latest/volatile
+The C2 input and artifact surface is landed and pinned. Cross-platform
+pressure controls in #783 still require fresh main verification. The latest/volatile
 pressure control uses declared 16-KiB payloads (#783) to exceed OS socket
 buffering while retaining exact gap, counter, and replay checks. Live
 runner cells share a plain-cargo test lock to prevent generator contention.
@@ -361,6 +361,16 @@ read resumption and lifecycle deadlines. It cancels and awaits owned tasks
 before artifact capture. Deterministic controls cover pending writes,
 overdue traffic, read pauses, and cancellation. Fresh cross-platform main
 verification remains required (#783).
+
+PR #786 passed all branch checks, but fresh main `7387ca1b` failed the macOS
+Latest pressure control. Only ten warmup sends completed; measured traffic
+was absent, and both senders exceeded the unchanged 500-ms lag bound.
+Source review found setup work after the epoch: metrics-client construction,
+peer preparation, and initial task registration. The runner now waits for
+prepared peers before publishing one shared epoch. Delayed setup does not
+consume the send-lag budget; delay after arming still invalidates the run.
+Failure output includes recent send and sample timestamps. The exact hosted
+cause remains unproven. Fresh main controls must pass before C3 proceeds.
 
 - [x] Churn/reconnect schedules: reconnect-burst and room-replacement
   shapes per the C3 cells, with red-first controls for each new permitted

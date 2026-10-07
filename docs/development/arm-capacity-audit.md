@@ -2354,6 +2354,13 @@ socket halves before rejoining. The runner cancels and awaits its owned
 tasks before artifact capture. One immutable interval snapshot supplies
 both the published samples and the returned final counters (#783).
 
+The runner builds its metrics client and prepares every peer before arming.
+Each peer registers its initial identity and reports readiness. Only then
+does the runner publish one shared measurement epoch. Setup consumes no
+send-lag budget. Scheduling delays after arming still count against the
+declared bound. Deterministic controls cover delayed setup and delayed
+traffic. Invalid pressure runs print recent send and sample timestamps.
+
 **C2 next runner PR: churn/reconnect schedules — LANDED** (third runner
 PR, 2026-10-05). `ChurnSchedule` carries the reconnect-burst storm (the C3
 reconnect cell): at `start`, the seed-chosen `fraction_percent` of peers
