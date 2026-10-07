@@ -110,6 +110,17 @@ assert!(
 );
 ```
 
+#### Full CI verification on demand
+
+Run the `CI` workflow from the Actions page with `Run workflow` and select
+`main`. A manual run checks Linux, macOS, and Windows lint and tests. It also
+runs the coverage gate, the full MSRV suite, and the live dependency audit.
+The scheduled duplicate-head guard does not skip manual verification.
+
+Pull requests keep the Linux-only cohort. The daily schedule keeps the macOS
+and Windows cohort, coverage, and the full MSRV suite. Manual documentation
+checks validate the current tree with no historical change set.
+
 #### Release Gating
 
 The release workflow (`release.yml`) includes a `preflight` job that runs

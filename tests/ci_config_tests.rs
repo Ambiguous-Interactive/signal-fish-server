@@ -1166,11 +1166,11 @@ fn validate_workflow_has_required_jobs(
 //
 // Current stable validation checks (Phase 1-2):
 //   - CI / Lint (ubuntu-latest)
-//   - CI / Lint (windows-latest)     — daily cron cohort only (issues #513, #512)
-//   - CI / Lint (macos-latest)       — daily cron cohort only (issues #513, #512)
+//   - CI / Lint (windows-latest)     — cron/manual cohort (issues #513, #512)
+//   - CI / Lint (macos-latest)       — cron/manual cohort (issues #513, #512)
 //   - CI / Nextest (ubuntu-latest)
-//   - CI / Nextest (windows-latest)  — daily cron cohort only (issues #513, #512)
-//   - CI / Nextest (macos-latest)    — daily cron cohort only (issues #513, #512)
+//   - CI / Nextest (windows-latest)  — cron/manual cohort (issues #513, #512)
+//   - CI / Nextest (macos-latest)    — cron/manual cohort (issues #513, #512)
 //   - CI / Dependency Audit
 //   - CI / MSRV Verification
 //   - CI / Docker Build
@@ -1284,8 +1284,8 @@ const MATRIX_OS_PLACEHOLDER: &str = "${{ matrix.os }}";
 /// names keep existing (produced by the cron).
 const MATRIX_OS_VALUES: &[&str] = &["ubuntu-latest", "windows-latest", "macos-latest"];
 
-/// CI jobs whose macOS and Windows matrix legs run only on the daily schedule
-/// cohort (issue #513: macOS bills at 10x Linux per minute; issue #512:
+/// CI jobs whose macOS and Windows matrix legs run on the daily schedule
+/// and manual verification cohort (issue #513: macOS bills at 10x Linux per minute; issue #512:
 /// Windows bills at 2x Linux per minute — the server deploys on Linux, so
 /// cross-OS lint/nextest signal moves from every push/PR to the daily cron
 /// against main).
@@ -1310,13 +1310,13 @@ const CI_MATRIX_OUTPUT_OS: &str = "${{ fromJSON(needs.ci-matrix.outputs.os) }}";
 /// per-leg guard.)
 const CI_MATRIX_GUARD: &str = "${{ !cancelled() && needs.ci-matrix.result == 'success' && needs.verified-head-guard.outputs.duplicate != 'true' }}";
 
-/// The exact job-level `if` clause the schedule-only full-suite lanes (msrv
+/// The exact job-level `if` clause the cron/manual full-suite lanes (msrv
 /// full suite, coverage) must append: skip only through the verified-head
 /// guard, fail open otherwise (issue #702).
 const VERIFIED_HEAD_GUARD_CLAUSE: &str = "needs.verified-head-guard.outputs.duplicate != 'true'";
 
 /// The anchor step the ci.yml verified-head guard pins (issue #702).
-/// Schedule-only and inside a gated job, so a tick skipped by the guard never
+/// Inside the cron/manual coverage job, so a tick skipped by the guard never
 /// executes it and cannot sustain its own skip.
 const CI_VERIFIED_HEAD_ANCHOR_STEP: &str = "Generate coverage report";
 
@@ -1945,13 +1945,13 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
     // in the first few lines of a job block, so a bounded window after the header
     // is sufficient and avoids brittle full-block parsing.
     //
-    // Event cohorts (issues #513/#512): the macOS/Windows legs are cron-only via
-    // the `ci-matrix` cohort job; coverage is cron-only (the instrumented run
-    // duplicates the per-event nextest suite); msrv verifies compilation on
-    // every event and runs its full test suite on the cron only. The
+    // Event cohorts (issues #513/#512): macOS/Windows and coverage run on
+    // cron and manual verification via their event guards. Coverage duplicates
+    // the per-event nextest suite; msrv checks compilation on pull requests
+    // and runs its full test suite on cron and manual verification. The
     // panic-policy and relay-allocation checks are steps of the lint and
     // nextest jobs (#558), so the jobs pinned here cover them transitively.
-    // The cron-only lanes (lint/nextest cron legs, msrv, coverage) also wait
+    // The cron/manual lanes (lint, nextest, msrv, coverage) also wait
     // on the verified-head guard (issue #702): it is their one permitted
     // scheduled skip path. `docker` never runs on schedule, so it needs no
     // guard edge.
@@ -1968,7 +1968,7 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
         ),
         (
             "coverage",
-            "${{ !cancelled() && github.event_name == 'schedule' && needs.verified-head-guard.outputs.duplicate != 'true' }}",
+            "${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.verified-head-guard.outputs.duplicate != 'true' }}",
         ),
     ] {
         let header = format!("\n  {job}:");
@@ -1976,7 +1976,7 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
             .find(&header)
             .unwrap_or_else(|| panic!("ci.yml must define the `{job}` job"));
         let block_end = (start + 300).min(workflow.len());
-        // lint/nextest also wait on the cohort job (issue #513); the cron-only
+        // lint/nextest also wait on the cohort job (issue #513); the cron/manual
         // lanes need the fail-fast gate plus the verified-head guard (issue
         // #702); docker needs only the fail-fast gate.
         let expected_needs = if matches!(job, "lint" | "nextest") {
@@ -1996,7 +1996,7 @@ fn test_ci_quick_check_gate_guards_expensive_jobs() {
         if matches!(job, "lint" | "nextest") {
             // Issue #513: these two wait on the event-dependent cohort job
             // instead of a blanket schedule exclusion (pinned in full by
-            // test_ci_windows_and_macos_lanes_run_only_on_the_daily_cron).
+            // test_ci_windows_and_macos_lanes_run_on_cron_and_manual_verification).
             assert!(
                 block.contains("!cancelled() && needs.ci-matrix.result == 'success'"),
                 "ci.yml `{job}` must run after quick-check failure but not workflow \
@@ -23670,7 +23670,7 @@ fn test_ci_safety_shared_nightly_cache_prefix() {
 fn test_msrv_job_verification_steps_are_cohort_disjoint() {
     // Issue #512 cohort: the MSRV job verifies COMPILATION on every
     // push/PR (`cargo check` across all targets and features) and runs its
-    // full test suite on the daily cron only. Each event must run exactly
+    // full test suite on cron and manual verification. Each event must run exactly
     // one of the two steps: the suite step subsumes the compilation, so a
     // check on the cron would double the compile, and a suite run per event
     // would re-triple the per-event full-suite executions the cohort
@@ -23733,8 +23733,10 @@ fn test_msrv_job_verification_steps_are_cohort_disjoint() {
         ci_yml.display()
     );
     assert!(
-        check_step.contains("if: github.event_name != 'schedule'"),
-        "the MSRV check step must be excluded from the schedule: the full-suite \
+        check_step.contains(
+            "if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'"
+        ),
+        "the MSRV check step must be excluded from cron and manual verification: the full-suite \
          step subsumes the compilation, and running both would double the cron's \
          MSRV compile.\nFile: {}",
         ci_yml.display()
@@ -23745,8 +23747,10 @@ fn test_msrv_job_verification_steps_are_cohort_disjoint() {
         ci_yml.display()
     );
     assert!(
-        suite_step.contains("if: github.event_name == 'schedule'"),
-        "the MSRV full-suite step must run on the daily cron only (issue #512): \
+        suite_step.contains(
+            "if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+        ),
+        "the MSRV full-suite step must run on cron and manual verification: \
          the suite itself is already covered per-event by ubuntu nextest.\n\
          File: {}",
         ci_yml.display()
@@ -28068,7 +28072,7 @@ fn test_ci_schedule_only_runs_security_jobs() {
     //   1. Every job in `SCHEDULE_EXCLUDED_CI_JOBS` has a schedule-exclusion guard
     //   2. The `deny` job does NOT have a schedule exclusion guard
     //   3. The macOS + Windows lint/nextest per-leg cohort guard is pinned
-    //      separately (test_ci_windows_and_macos_lanes_run_only_on_the_daily_cron)
+    //      separately (test_ci_windows_and_macos_lanes_run_on_cron_and_manual_verification)
 
     let root = repo_root();
     let ci_content = read_file(&root.join(".github/workflows/ci.yml"));
@@ -28136,7 +28140,211 @@ fn test_ci_schedule_only_runs_security_jobs() {
 }
 
 #[test]
-fn test_ci_windows_and_macos_lanes_run_only_on_the_daily_cron() {
+fn test_ci_supports_manual_full_verification() {
+    let workflow = read_live_file(&repo_root().join(".github/workflows/ci.yml"));
+    let documents = Yaml::load_from_str(&workflow).expect("ci.yml must parse");
+    let triggers = documents[0]
+        .as_mapping_get("on")
+        .expect("ci.yml must declare triggers");
+    assert!(
+        triggers.as_mapping_get("workflow_dispatch").is_some(),
+        "CI must support manual verification of the current main head"
+    );
+    assert_eq!(
+        extract_job_if_condition(&workflow, "verified-head-guard").as_deref(),
+        Some("github.event_name == 'schedule'"),
+        "manual verification must bypass the duplicate scheduled-head guard"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_ci_matrix_emits_exact_event_cohorts() {
+    let workflow = read_live_file(&repo_root().join(".github/workflows/ci.yml"));
+    let documents = Yaml::load_from_str(&workflow).expect("ci.yml must parse");
+    let steps = documents[0]
+        .as_mapping_get("jobs")
+        .and_then(|jobs| jobs.as_mapping_get(CI_MATRIX_JOB))
+        .and_then(|job| job.as_mapping_get("steps"))
+        .and_then(Yaml::as_sequence)
+        .expect("CI matrix must declare steps");
+    let cohort = steps
+        .iter()
+        .find(|step| step.as_mapping_get("id").and_then(Yaml::as_str) == Some("cohort"))
+        .expect("CI matrix must define its cohort step");
+    let script = cohort
+        .as_mapping_get("run")
+        .and_then(Yaml::as_str)
+        .expect("cohort must contain its actual runner script");
+    assert_eq!(
+        cohort
+            .as_mapping_get("env")
+            .and_then(|env| env.as_mapping_get("EVENT"))
+            .and_then(Yaml::as_str),
+        Some("${{ github.event_name }}"),
+        "the cohort must consume the actual GitHub event"
+    );
+    for (event, expected) in [
+        ("pull_request", vec!["ubuntu-latest"]),
+        ("schedule", vec!["macos-latest", "windows-latest"]),
+        (
+            "workflow_dispatch",
+            vec!["ubuntu-latest", "macos-latest", "windows-latest"],
+        ),
+    ] {
+        let temp = unique_temp_dir("ci-matrix-cohort");
+        let output_path = temp.path().join("output.txt");
+        let output = bash_command()
+            .args(["-c", script])
+            .env("EVENT", event)
+            .env("GITHUB_OUTPUT", &output_path)
+            .output()
+            .expect("run actual CI matrix cohort script");
+        assert!(
+            output.status.success(),
+            "{event}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let recorded = fs::read_to_string(&output_path).expect("read cohort output");
+        let json = recorded
+            .trim()
+            .strip_prefix("os=")
+            .expect("cohort must emit exactly one os output");
+        let actual: Vec<String> = serde_json::from_str(json).expect("cohort must emit valid JSON");
+        assert_eq!(actual, expected, "wrong OS cohort for {event}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_ci_manual_doc_consistency_checks_current_tree_without_historical_diff() {
+    let workflow = read_live_file(&repo_root().join(".github/workflows/ci.yml"));
+    let documents = Yaml::load_from_str(&workflow).expect("ci.yml must parse");
+    let steps = documents[0]
+        .as_mapping_get("jobs")
+        .and_then(|jobs| jobs.as_mapping_get("doc-consistency"))
+        .and_then(|job| job.as_mapping_get("steps"))
+        .and_then(Yaml::as_sequence)
+        .expect("doc-consistency must declare steps");
+    let script = steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str) == Some("Collect changed files")
+        })
+        .and_then(|step| step.as_mapping_get("run"))
+        .and_then(Yaml::as_str)
+        .expect("doc-consistency must collect changed files");
+    let temp = unique_temp_dir("ci-doc-dispatch");
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(temp.path())
+            .output()
+            .expect("run fixture git");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git output is UTF-8")
+            .trim()
+            .to_string()
+    };
+    git(&["init", "--quiet"]);
+    git(&["config", "user.name", "CI fixture"]);
+    git(&["config", "user.email", "ci-fixture@example.test"]);
+    fs::write(temp.path().join("README.md"), "initial\n").expect("write initial file");
+    git(&["add", "."]);
+    git(&[
+        "-c",
+        "core.hooksPath=/dev/null",
+        "commit",
+        "--quiet",
+        "-m",
+        "initial",
+    ]);
+    let initial = git(&["rev-parse", "HEAD"]);
+    fs::create_dir(temp.path().join("src")).expect("create historical production directory");
+    fs::write(
+        temp.path().join("src/state.rs"),
+        "historical production change\n",
+    )
+    .expect("write historical production file");
+    git(&["add", "."]);
+    git(&[
+        "-c",
+        "core.hooksPath=/dev/null",
+        "commit",
+        "--quiet",
+        "-m",
+        "production",
+    ]);
+    let base = git(&["rev-parse", "HEAD"]);
+    fs::write(temp.path().join("README.md"), "current\n").expect("write current change");
+    git(&["add", "."]);
+    git(&[
+        "-c",
+        "core.hooksPath=/dev/null",
+        "commit",
+        "--quiet",
+        "-m",
+        "current",
+    ]);
+    let head = git(&["rev-parse", "HEAD"]);
+    for (event, pr_base, before, expected_base, expected_files) in [
+        (
+            "pull_request",
+            base.as_str(),
+            "",
+            base.as_str(),
+            "README.md\n",
+        ),
+        ("push", "", base.as_str(), base.as_str(), "README.md\n"),
+        (
+            "push",
+            "",
+            "0000000000000000000000000000000000000000",
+            initial.as_str(),
+            "README.md\nsrc/state.rs\n",
+        ),
+        ("workflow_dispatch", "", "", head.as_str(), ""),
+    ] {
+        let rendered = script
+            .replace("${{ github.event_name }}", event)
+            .replace("${{ github.event.pull_request.base.sha }}", pr_base)
+            .replace("${{ github.event.before }}", before)
+            .replace("${{ github.sha }}", &head);
+        let output_path = temp.path().join(format!("{event}-output.txt"));
+        fs::write(&output_path, "").expect("reset step output");
+        let output = bash_command()
+            .args(["-c", &rendered])
+            .current_dir(temp.path())
+            .env("GITHUB_OUTPUT", &output_path)
+            .output()
+            .expect("run actual changed-files collector");
+        assert!(
+            output.status.success(),
+            "{event}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join("changed-files.txt")).expect("read changed files"),
+            expected_files,
+            "{event} must select its real change scope"
+        );
+        assert_eq!(
+            fs::read_to_string(output_path)
+                .expect("read step output")
+                .trim(),
+            format!("diff_base={expected_base}...{head}"),
+            "{event} must expose the correct base for changelog classification"
+        );
+    }
+}
+
+#[test]
+fn test_ci_windows_and_macos_lanes_run_on_cron_and_manual_verification() {
     // Issue #513 cost cohort, extended by #512: macOS and Windows
     // Lint/Nextest moved out of the per-PR/per-push hot path into the daily
     // cron. macOS bills at 10x and Windows at 2x Linux per minute and the
@@ -28150,7 +28358,8 @@ fn test_ci_windows_and_macos_lanes_run_only_on_the_daily_cron() {
     //
     // Pins:
     //   1. `ci-matrix` runs on every event (no schedule exclusion), emits
-    //      ubuntu-only per push/PR and macOS + Windows on the schedule, and
+    //      ubuntu-only per push/PR, macOS + Windows on the schedule, and
+    //      all three OS legs on manual verification. It
     //      exposes exactly the `os` output the matrices consume.
     //   2. Per gated job: `needs: [quick-check, ci-matrix]`, the exact
     //      cohort guard, the verbatim matrix expression, and the intact
@@ -28168,7 +28377,7 @@ fn test_ci_windows_and_macos_lanes_run_only_on_the_daily_cron() {
         .and_then(|document| document.as_mapping_get("jobs"))
         .expect("ci.yml jobs");
 
-    // The cohort job runs on all events and emits the two cohort lists.
+    // The cohort job runs on all events; its actual event behavior is tested above.
     let cohort = jobs
         .as_mapping_get(CI_MATRIX_JOB)
         .unwrap_or_else(|| panic!("parsed ci.yml must define `{CI_MATRIX_JOB}`"));
@@ -28268,15 +28477,15 @@ fn test_ci_windows_and_macos_lanes_run_only_on_the_daily_cron() {
 }
 
 #[test]
-fn test_ci_msrv_and_coverage_suite_lanes_run_on_the_daily_cron() {
+fn test_ci_msrv_and_coverage_suite_lanes_run_on_cron_and_manual_verification() {
     // Issue #512 cohort, extending the #513 trade-off: each per-event full
     // suite execution costs ~10-12 Linux minutes, and before this cohort the
     // suite ran THREE times per push/PR (nextest, instrumented llvm-cov, and
     // the MSRV full-suite run). The suite's pass/fail signal is already
     // covered per-event by ubuntu nextest, so:
-    //   1. coverage (instrumented, 2-4x slower) is cron-only;
-    //   2. msrv verifies COMPILATION on every event (the actual MSRV-breakage
-    //      class) and runs its full test suite on the cron only.
+    //   1. coverage (instrumented, 2-4x slower) runs on cron and manual verification;
+    //   2. msrv verifies COMPILATION on pull requests (the actual MSRV-breakage
+    //      class) and runs its full test suite on cron and manual verification.
     // Pins the cohort placement so a refactor cannot silently re-triple the
     // per-event suite executions or silently drop the nightly verification.
     use saphyr::LoadableYamlNode;
@@ -28289,19 +28498,19 @@ fn test_ci_msrv_and_coverage_suite_lanes_run_on_the_daily_cron() {
         .and_then(|document| document.as_mapping_get("jobs"))
         .expect("ci.yml jobs");
 
-    // Coverage is cron-only, and skips a duplicate scheduled tick only
+    // Coverage runs on cron and manual verification, and skips a duplicate tick only
     // through the verified-head guard (issue #702).
     let coverage = jobs
         .as_mapping_get("coverage")
         .unwrap_or_else(|| panic!("parsed ci.yml must define `coverage`"));
     assert_eq!(
         coverage.as_mapping_get("if").and_then(Yaml::as_str),
-        Some("${{ !cancelled() && github.event_name == 'schedule' && needs.verified-head-guard.outputs.duplicate != 'true' }}"),
-        "coverage must run on the daily cron only — skipping a duplicate tick \
+        Some("${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.verified-head-guard.outputs.duplicate != 'true' }}"),
+        "coverage must run on cron and manual verification — skipping a duplicate tick \
          only through the verified-head guard (issues #512 and #702)"
     );
 
-    // MSRV runs on every event but runs its test suite on the cron only,
+    // MSRV runs on every event and its full suite on cron and manual verification,
     // and skips a duplicate scheduled tick only through the verified-head
     // guard (issue #702).
     let msrv = jobs
@@ -28329,8 +28538,10 @@ fn test_ci_msrv_and_coverage_suite_lanes_run_on_the_daily_cron() {
         .next()
         .expect("msrv suite step delimited");
     assert!(
-        suite_step.contains("if: github.event_name == 'schedule'"),
-        "the MSRV full-suite step must be cron-only (issue #512): the suite \
+        suite_step.contains(
+            "if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+        ),
+        "the MSRV full-suite step must run on cron and manual verification: the suite \
          itself is already covered per-event by ubuntu nextest"
     );
     assert!(
@@ -28435,7 +28646,7 @@ fn test_ci_schedule_lanes_skip_only_through_verified_head_guard() {
             .and_then(Yaml::as_str),
         Some(CI_VERIFIED_HEAD_ANCHOR_STEP),
         "the guard must anchor on `{CI_VERIFIED_HEAD_ANCHOR_STEP}` — \
-         schedule-only executed work inside a gated job, so a run skipped by \
+         executed work inside a gated job, so a run skipped by \
          this very guard never shows an executed anchor and cannot sustain \
          its own skip (PR #703 round 2)"
     );
