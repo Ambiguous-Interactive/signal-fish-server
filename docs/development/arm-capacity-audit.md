@@ -1929,7 +1929,9 @@ carries a disposition.
   rollback, matching checksums, and completed bidirectional relay traffic.
   It then sends SIGTERM to the real server. Both runtimes must stop within
   ten seconds with the shutdown advisory and coded 4000 `server_shutdown`
-  close. Final reports retain the same identities and unfinished gameplay;
+  close. The advisory stops new gameplay while transport polling continues
+  until each peer receives its own close. Final reports retain the same
+  identities and unfinished gameplay;
   healthy completion, unrelated failures, panic, and deadline expiry refuse
   acceptance. The server must exit normally. Existing healthy and capped
   admission cells retain their exact delivery-ledger checks. Interrupted

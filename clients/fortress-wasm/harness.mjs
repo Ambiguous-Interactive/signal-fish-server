@@ -212,12 +212,20 @@ try {
       assert(report.player_id === before.player_id && report.instance_nonce === before.instance_nonce, `${report.role}: identity changed at shutdown`);
       assert(report.frames_advanced >= before.frames_advanced, `${report.role}: progress moved backwards`);
       const violations = drainFailureViolations(report);
-      assert(violations.length === 0, `${report.role}: shutdown ${violations.join(", ")}`);
+      assert(violations.length === 0, `${report.role}: shutdown ${violations.join(", ")}; runtime_error=${report.runtime_error}`);
     }
-    const exit = await Promise.race([
-      serverExit,
-      new Promise((_, reject) => setTimeout(() => reject(new Error("server drain deadline expired")), 5_000)),
-    ]);
+    let drainTimer;
+    let exit;
+    try {
+      exit = await Promise.race([
+        serverExit,
+        new Promise((_, reject) => {
+          drainTimer = setTimeout(() => reject(new Error("server drain deadline expired")), 5_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(drainTimer);
+    }
     assert(exit.code === 0 && exit.signal === null, `server did not drain cleanly: ${JSON.stringify(exit)}`);
     process.stdout.write("HEALTHY fortress-wasm causal server-drain failures\n");
   } else {

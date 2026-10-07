@@ -548,12 +548,10 @@ impl Runtime {
                     epoch,
                 });
             }
-            SignalFishEvent::PlayerLeft { player_id, .. } => {
+            SignalFishEvent::PlayerLeft { player_id, .. } if self.shutdown_notice.is_none() => {
                 // Other peers can close first during a server drain. The
                 // local close still supplies this peer's terminal outcome.
-                if self.shutdown_notice.is_none() {
-                    return Err(format!("Signal Fish peer left: {player_id}"));
-                }
+                return Err(format!("Signal Fish peer left: {player_id}"));
             }
             SignalFishEvent::GoingAway {
                 deadline_ms,
