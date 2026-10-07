@@ -48,7 +48,10 @@ use crate::schedule::build_run_shape;
 /// interval sample. Version 7 measures latency from the scheduled send,
 /// includes stalls above 60 seconds, and records an exact maximum. Version 8
 /// records full controlled config evidence and labels unknown external config.
-pub const SCHEMA_VERSION: u64 = 8;
+/// Version 9 records exact application and encoded message body sizes on
+/// sends and receipts, validates the configured application size, and reports
+/// byte totals by phase and direction. Receipt timestamps precede decoding.
+pub const SCHEMA_VERSION: u64 = 9;
 
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const DELIVERIES_FILE: &str = "deliveries.jsonl";
@@ -459,6 +462,7 @@ pub fn replay(output_dir: &Path) -> Result<OutcomeSummary, String> {
     }
     manifest.validate_config_provenance()?;
     let (plans, churn) = build_run_shape(&manifest.config)?;
+    crate::runner::validate_payload_size(&plans, manifest.config.payload_bytes)?;
     let roster = plans
         .iter()
         .map(|plan| (plan.name.clone(), plan.room))
@@ -469,6 +473,7 @@ pub fn replay(output_dir: &Path) -> Result<OutcomeSummary, String> {
         &roster,
         &records,
         micros(manifest.config.generator_lag_bound),
+        manifest.config.payload_bytes,
         manifest.config.delivery_class,
         &churn,
         manifest.config.experiment,

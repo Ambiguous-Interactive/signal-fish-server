@@ -397,8 +397,8 @@ async fn injected_send_pause_lands_in_scheduled_send_latency_without_reducing_of
     );
     let manifest_path = output.path().join(artifacts::MANIFEST_FILE);
     let mut manifest = artifacts::read_manifest(output.path()).expect("read pause manifest");
-    assert_eq!(manifest.schema_version, 8);
-    manifest.schema_version = 7;
+    assert_eq!(manifest.schema_version, 9);
+    manifest.schema_version = 8;
     std::fs::write(
         manifest_path,
         serde_json::to_vec(&manifest).expect("serialize old-schema manifest"),
@@ -406,7 +406,7 @@ async fn injected_send_pause_lands_in_scheduled_send_latency_without_reducing_of
     .expect("write old-schema manifest");
     assert_eq!(
         artifacts::replay(output.path()).expect_err("reject old latency semantics"),
-        "unsupported artifact schema 7 (expected 8)"
+        "unsupported artifact schema 8 (expected 9)"
     );
 }
 
@@ -800,6 +800,22 @@ async fn unsupported_format_experiment_reports_cross_format_omissions_over_real_
         * u64::from(config.players_per_room - 1);
 
     let outcome = runner::run(config).await.expect("experiment run completes");
+    let raw = artifacts::read_records(output.path()).expect("experiment byte records");
+    for sent in &raw.sent {
+        assert_eq!(sent.application_bytes, 96);
+        if sent.sender == "r0p0" {
+            assert_eq!(
+                sent.encoded_frame_body_bytes, 96,
+                "opaque ingress has no JSON envelope"
+            );
+        } else {
+            assert!(sent.encoded_frame_body_bytes > 96);
+        }
+    }
+    assert!(raw
+        .receipts
+        .iter()
+        .all(|receipt| receipt.application_bytes == 96 && receipt.encoded_frame_body_bytes > 96));
     let summary = &outcome.summary;
     assert!(
         summary.valid,
@@ -986,6 +1002,374 @@ fn config_provenance_rejects_malformed_and_conflicting_overlays() {
     }
 }
 
+#[test]
+fn exact_application_payload_includes_metadata_at_sequence_boundaries() {
+    for bytes in [96, 1024] {
+        for sender in ["r0p0", "r998p15", "r\"鱼\\"] {
+            for seq in [0, 9, 10, 99, 100, 43_201, u64::MAX] {
+                let data =
+                    runner::ledger_application_data(sender, seq, bytes).expect("exact payload");
+                assert_eq!(
+                    serde_json::to_vec(&data).expect("application JSON").len(),
+                    config::count_usize(bytes)
+                );
+                assert_eq!(data["ledger_sender"], sender);
+                assert_eq!(data["seq"], seq);
+            }
+        }
+    }
+    let nine = runner::ledger_application_data("r0p0", 9, 96).expect("seq 9");
+    let ten = runner::ledger_application_data("r0p0", 10, 96).expect("seq 10");
+    assert_eq!(
+        nine["padding"].as_str().expect("padding").len(),
+        ten["padding"].as_str().expect("padding").len() + 1
+    );
+}
+
+#[tokio::test]
+async fn undersized_application_payload_is_refused_before_run_effects() {
+    let output = tempfile::tempdir().expect("refused output");
+    let mut config = scenario_config(Encoding::V3Json);
+    config.payload_bytes = 45;
+    runner::ledger_application_data("r0p0", 0, 45).expect("the initial sequence fits");
+    config.output_dir = output.path().join("not-created");
+    let error = runner::run(config.clone())
+        .await
+        .expect_err("metadata cannot fit");
+    assert!(error.contains("ledger metadata size"), "{error}");
+    assert!(!config.output_dir.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn exact_payload_cells_record_actual_ingress_and_egress_sizes_and_replay() {
+    use signal_fish_server::protocol::{ClientMessage, DeliveryClass as WireClass, PlayerId};
+    for (encoding, delivery_class) in [
+        (Encoding::V2Json, DeliveryClass::Reliable),
+        (Encoding::V3Json, DeliveryClass::Reliable),
+        (Encoding::V3Json, DeliveryClass::Latest),
+        (Encoding::V3Json, DeliveryClass::Volatile),
+    ] {
+        for bytes in [96, 1024] {
+            let output = tempfile::tempdir().expect("exact cell output");
+            let mut config = scenario_config(encoding);
+            config.payload_bytes = bytes;
+            config.delivery_class = delivery_class;
+            config.output_dir = output.path().to_path_buf();
+            let outcome = runner::run(config).await.expect("exact cell");
+            assert!(
+                outcome.summary.valid,
+                "{encoding:?}/{delivery_class:?}/{bytes}: {:?}",
+                outcome.summary.reasons
+            );
+            let records = artifacts::read_records(output.path()).expect("raw events");
+            let (class, key) = match delivery_class {
+                DeliveryClass::Reliable => (None, None),
+                DeliveryClass::Latest => (Some(WireClass::Latest), Some(0)),
+                DeliveryClass::Volatile => (Some(WireClass::Volatile), None),
+            };
+            for sent in &records.sent {
+                assert_eq!(sent.application_bytes, u64::from(bytes));
+                let data = runner::ledger_application_data(&sent.sender, sent.seq, bytes)
+                    .expect("sent data");
+                let expected = serde_json::to_vec(&ClientMessage::GameData { data, class, key })
+                    .expect("ingress body");
+                assert_eq!(
+                    sent.encoded_frame_body_bytes,
+                    config::count_u64(expected.len())
+                );
+            }
+            for receipt in &records.receipts {
+                assert_eq!(receipt.application_bytes, u64::from(bytes));
+                let (id, _) = records
+                    .registry
+                    .iter()
+                    .find(|(_, (name, epoch))| name == &receipt.sender && *epoch == receipt.epoch)
+                    .expect("sender identity");
+                let data = runner::ledger_application_data(&receipt.sender, receipt.seq, bytes)
+                    .expect("received data");
+                let v3 = encoding == Encoding::V3Json;
+                let expected = serde_json::to_vec(&ServerMessage::GameData {
+                    from_player: id.parse::<PlayerId>().expect("player ID"),
+                    data,
+                    seq: v3.then_some(receipt.server_seq),
+                    epoch: v3.then_some(1),
+                    class,
+                    key,
+                })
+                .expect("egress body");
+                assert_eq!(
+                    receipt.encoded_frame_body_bytes,
+                    config::count_u64(expected.len())
+                );
+            }
+            let evidence = &outcome.summary.payload_bytes;
+            for (phase, actual) in [
+                (schedule::Phase::Warmup, &evidence.warmup),
+                (schedule::Phase::Measured, &evidence.measured),
+            ] {
+                let sends = records
+                    .sent
+                    .iter()
+                    .filter(|sent| sent.phase == phase)
+                    .collect::<Vec<_>>();
+                let receipts = records
+                    .receipts
+                    .iter()
+                    .filter(|receipt| {
+                        records.sent.iter().any(|sent| {
+                            sent.sender == receipt.sender
+                                && sent.seq == receipt.seq
+                                && sent.phase == phase
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                assert!(!sends.is_empty());
+                assert!(!receipts.is_empty());
+                assert_eq!(
+                    actual.ingress.application.samples,
+                    config::count_u64(sends.len())
+                );
+                assert_eq!(
+                    actual.ingress.application.total_bytes,
+                    config::count_u64(sends.len()) * u64::from(bytes)
+                );
+                assert_eq!(
+                    actual.egress.application.total_bytes,
+                    config::count_u64(receipts.len()) * u64::from(bytes)
+                );
+                assert_eq!(
+                    actual.ingress.encoded_frame_body.total_bytes,
+                    sends
+                        .iter()
+                        .map(|event| event.encoded_frame_body_bytes)
+                        .sum::<u64>()
+                );
+                assert_eq!(
+                    actual.egress.encoded_frame_body.total_bytes,
+                    receipts
+                        .iter()
+                        .map(|event| event.encoded_frame_body_bytes)
+                        .sum::<u64>()
+                );
+            }
+            assert_eq!(evidence.unmatched_egress.application.samples, 0);
+            let manifest_path = output.path().join(artifacts::MANIFEST_FILE);
+            let manifest = artifacts::read_manifest(output.path()).expect("exact-size manifest");
+            let mut impossible = manifest.clone();
+            impossible.config.payload_bytes = 45;
+            artifacts::write_json(&manifest_path, &impossible).expect("alter target size");
+            assert!(artifacts::replay(output.path())
+                .expect_err("reject impossible archived target")
+                .contains("ledger metadata size"));
+            artifacts::write_json(&manifest_path, &manifest).expect("restore target size");
+            let replay = artifacts::replay(output.path()).expect("exact-size replay");
+            assert_eq!(
+                serde_json::to_value(replay).expect("replay JSON"),
+                serde_json::to_value(outcome.summary).expect("summary JSON")
+            );
+        }
+    }
+}
+
+#[test]
+fn payload_size_validation_retains_wrong_warmup_duplicate_and_unknown_arrivals() {
+    let context = unit_context();
+    for case in ["send", "warmup", "duplicate", "unknown", "body", "overflow"] {
+        let mut records = complete_records(&context.plans);
+        match case {
+            "send" => records.sent[0].application_bytes = 97,
+            "warmup" => {
+                records.sent[0].phase = schedule::Phase::Warmup;
+                records.sent[0].application_bytes = 97;
+            }
+            "duplicate" => {
+                let mut extra = records.receipts[0].clone();
+                extra.application_bytes = 97;
+                records.receipts.push(extra);
+            }
+            "unknown" => {
+                let mut extra = records.receipts[0].clone();
+                extra.sender = "unknown".into();
+                extra.application_bytes = 97;
+                records.receipts.push(extra);
+            }
+            "body" => records.receipts[0].encoded_frame_body_bytes = 0,
+            "overflow" => {
+                records.receipts[0].encoded_frame_body_bytes = u64::MAX;
+                records.receipts[1].encoded_frame_body_bytes = u64::MAX;
+            }
+            _ => unreachable!(),
+        }
+        let summary = oracle::summarize(
+            &context.plans,
+            &context.roster,
+            &records,
+            1000,
+            96,
+            DeliveryClass::Reliable,
+            &ChurnPlan::default(),
+            None,
+        );
+        assert!(!summary.valid, "invalidate {case}");
+        assert!(
+            summary.reasons.iter().any(|reason| match case {
+                "body" => matches!(
+                    reason,
+                    oracle::InvalidReason::InvalidEncodedFrameBodySize { .. }
+                ),
+                "overflow" => matches!(
+                    reason,
+                    oracle::InvalidReason::PayloadByteTotalOverflow { .. }
+                ),
+                _ => matches!(reason, oracle::InvalidReason::PayloadSizeMismatch { .. }),
+            }),
+            "name {case}: {:?}",
+            summary.reasons
+        );
+        let expected_receipts = if matches!(case, "duplicate" | "unknown") {
+            49
+        } else {
+            48
+        };
+        assert_eq!(
+            summary.payload_bytes.warmup.egress.application.samples
+                + summary.payload_bytes.measured.egress.application.samples
+                + summary.payload_bytes.unmatched_egress.application.samples,
+            expected_receipts
+        );
+        let json = serde_json::to_value(&summary).expect("lossless summary JSON");
+        let decoded: oracle::OutcomeSummary =
+            serde_json::from_value(json.clone()).expect("summary round trip");
+        assert_eq!(serde_json::to_value(decoded).expect("decoded JSON"), json);
+    }
+}
+
+#[tokio::test]
+async fn unidentified_game_data_keeps_byte_evidence_without_invented_receipts() {
+    use signal_fish_server::protocol::PlayerId;
+    use tokio_tungstenite::tungstenite::Message;
+    let player = PlayerId::new_v4();
+    let registry: runner::SenderRegistry = Arc::new(std::sync::Mutex::new(BTreeMap::from([(
+        player.to_string(),
+        ("r0p0".into(), 1),
+    )])));
+    let epoch = tokio::time::Instant::now();
+    for (case, data, from_player, seq) in [
+        (
+            "missing ledger",
+            serde_json::json!({"padding": "invalid"}),
+            player,
+            Some(1),
+        ),
+        (
+            "unknown player",
+            runner::ledger_application_data("r0p0", 0, 96).expect("data"),
+            PlayerId::new_v4(),
+            Some(1),
+        ),
+        (
+            "forged sender",
+            runner::ledger_application_data("r0p1", 0, 96).expect("data"),
+            player,
+            Some(1),
+        ),
+        (
+            "v2 overflow",
+            runner::ledger_application_data("r0p0", u64::MAX, 96).expect("data"),
+            player,
+            None,
+        ),
+    ] {
+        let application = config::count_u64(serde_json::to_vec(&data).expect("application").len());
+        let frame = serde_json::to_string(&ServerMessage::GameData {
+            from_player,
+            data,
+            seq,
+            epoch: Some(1),
+            class: None,
+            key: None,
+        })
+        .expect("frame");
+        let encoded = config::count_u64(frame.len());
+        let log = Arc::new(EventLog::new());
+        assert!(
+            runner::handle_inbound(
+                "r0p1",
+                Ok(Message::Text(frame.into())),
+                &registry,
+                epoch,
+                &log,
+                runner::ExperimentContext {
+                    active: false,
+                    opaque_sender: false
+                }
+            )
+            .await
+        );
+        let records = log.snapshot();
+        assert!(records.receipts.is_empty(), "{case}");
+        assert!(records.faults.iter().any(|fault| matches!(fault, oracle::InvalidReason::UnidentifiedGameData { application_bytes, encoded_frame_body_bytes, .. } if *application_bytes == application && *encoded_frame_body_bytes == encoded)), "{case}: {:?}", records.faults);
+        let context = unit_context();
+        let summary = oracle::summarize(
+            &context.plans,
+            &context.roster,
+            &records,
+            1000,
+            96,
+            DeliveryClass::Reliable,
+            &ChurnPlan::default(),
+            None,
+        );
+        assert!(!summary.valid);
+        assert_eq!(
+            summary
+                .payload_bytes
+                .unmatched_egress
+                .application
+                .total_bytes,
+            application
+        );
+        assert_eq!(
+            summary
+                .payload_bytes
+                .unmatched_egress
+                .encoded_frame_body
+                .total_bytes,
+            encoded
+        );
+    }
+    let data = runner::ledger_application_data("r0p0", u64::MAX, 96).expect("max ledger");
+    let frame = serde_json::to_string(&ServerMessage::GameData {
+        from_player: player,
+        data,
+        seq: Some(1),
+        epoch: Some(1),
+        class: None,
+        key: None,
+    })
+    .expect("v3 frame");
+    let log = Arc::new(EventLog::new());
+    assert!(
+        runner::handle_inbound(
+            "r0p1",
+            Ok(Message::Text(frame.into())),
+            &registry,
+            epoch,
+            &log,
+            runner::ExperimentContext {
+                active: false,
+                opaque_sender: false
+            }
+        )
+        .await
+    );
+    assert_eq!(
+        log.snapshot().receipts[0].seq,
+        u64::MAX,
+        "a v3 stamp avoids the v2 fallback overflow"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Oracle negative controls (deterministic, no server): the detector must
 // catch each contract violation with its exact, named reason.
@@ -1026,6 +1410,7 @@ fn generator_memory_profile_on_complete_fanout() {
         &roster,
         &records,
         1000,
+        96,
         DeliveryClass::Reliable,
         &churn,
         None,
@@ -1093,6 +1478,7 @@ fn latency_statistics_keep_recipient_tails_and_invalid_arrivals_distinct() {
             &context.roster,
             &records,
             1000,
+            96,
             DeliveryClass::Reliable,
             &ChurnPlan::default(),
             None,
@@ -1160,6 +1546,7 @@ fn warmup_only_deliveries_have_empty_latency_statistics() {
         &context.roster,
         &records,
         1000,
+        96,
         DeliveryClass::Reliable,
         &ChurnPlan::default(),
         None,
@@ -1224,6 +1611,7 @@ fn scheduled_latency_includes_generator_delay_in_every_view() {
                 &context.roster,
                 &records,
                 100_000_000,
+                96,
                 class,
                 &ChurnPlan::default(),
                 None,
@@ -1269,6 +1657,7 @@ fn a_missing_delivery_invalidates_the_run_with_the_exact_first_gap() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &ChurnPlan::default(),
         context.experiment,
@@ -1295,6 +1684,7 @@ fn a_missing_delivery_invalidates_the_run_with_the_exact_first_gap() {
         &context.roster,
         &complete_records(&context.plans),
         1_000,
+        96,
         context.delivery_class,
         &ChurnPlan::default(),
         context.experiment,
@@ -1312,6 +1702,8 @@ fn a_duplicate_delivery_invalidates_the_run_naming_the_duplicate() {
     let context = unit_context();
     let mut records = complete_records(&context.plans);
     let duplicate = ReceiptEvent {
+        application_bytes: 96,
+        encoded_frame_body_bytes: 250,
         recipient: "r0p0".to_string(),
         sender: "r0p1".to_string(),
         seq: 1,
@@ -1325,6 +1717,7 @@ fn a_duplicate_delivery_invalidates_the_run_naming_the_duplicate() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &ChurnPlan::default(),
         context.experiment,
@@ -1353,6 +1746,8 @@ fn a_misrouted_cross_room_delivery_invalidates_the_run() {
     let context = unit_context();
     let mut records = complete_records(&context.plans);
     records.receipts.push(ReceiptEvent {
+        application_bytes: 96,
+        encoded_frame_body_bytes: 250,
         recipient: "r0p0".to_string(),
         sender: "r9p9".to_string(),
         seq: 0,
@@ -1365,6 +1760,7 @@ fn a_misrouted_cross_room_delivery_invalidates_the_run() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &ChurnPlan::default(),
         context.experiment,
@@ -1422,6 +1818,7 @@ fn an_out_of_order_stream_invalidates_the_run() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &ChurnPlan::default(),
         context.experiment,
@@ -1473,6 +1870,7 @@ fn a_latest_omission_without_a_gap_report_is_missing_work() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &ChurnPlan::default(),
         context.experiment,
@@ -1513,6 +1911,7 @@ fn a_gap_reported_latest_omission_is_valid_and_accounted() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &ChurnPlan::default(),
         context.experiment,
@@ -1549,6 +1948,7 @@ fn a_gap_overlapping_a_delivery_is_invalid() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &ChurnPlan::default(),
         context.experiment,
@@ -1576,6 +1976,7 @@ fn a_gap_overlapping_a_delivery_is_invalid() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &ChurnPlan::default(),
         context.experiment,
@@ -1618,6 +2019,7 @@ fn a_gap_reason_the_class_cannot_produce_is_invalid() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &ChurnPlan::default(),
         context.experiment,
@@ -1646,6 +2048,7 @@ fn a_gap_beyond_the_sent_stream_is_invalid() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &ChurnPlan::default(),
         context.experiment,
@@ -1678,6 +2081,7 @@ fn any_gap_in_a_reliable_run_is_invalid() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &ChurnPlan::default(),
         context.experiment,
@@ -1706,6 +2110,7 @@ fn a_disconnected_recipient_may_lose_only_the_uncovered_tail() {
             &context.roster,
             records,
             1_000,
+            96,
             context.delivery_class,
             &ChurnPlan::default(),
             context.experiment,
@@ -1812,6 +2217,7 @@ fn a_self_referential_gap_is_invalid() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &ChurnPlan::default(),
         context.experiment,
@@ -1846,6 +2252,8 @@ fn experiment_complete_records(plans: &[SenderPlan]) -> RunRecords {
     for plan in plans {
         for send in &plan.sends {
             log.push_sent(SentEvent {
+                application_bytes: 96,
+                encoded_frame_body_bytes: 150,
                 sender: plan.name.clone(),
                 room: plan.room,
                 seq: send.seq,
@@ -1863,6 +2271,8 @@ fn experiment_complete_records(plans: &[SenderPlan]) -> RunRecords {
             }
             for send in &other.sends {
                 log.push_receipt(ReceiptEvent {
+                    application_bytes: 96,
+                    encoded_frame_body_bytes: 250,
                     recipient: plan.name.clone(),
                     sender: other.name.clone(),
                     seq: send.seq,
@@ -1920,6 +2330,7 @@ fn the_unsupported_format_experiment_baseline_is_valid() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &ChurnPlan::default(),
         context.experiment,
@@ -1967,6 +2378,7 @@ fn an_unreported_opaque_omission_is_a_hole() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &ChurnPlan::default(),
         context.experiment,
@@ -2002,6 +2414,8 @@ fn a_payload_from_the_opaque_sender_is_the_leak_class() {
         .gaps
         .retain(|gap| !(gap.recipient == "r0p1" && gap.sender == "r0p0" && gap.from_seq == 3));
     records.receipts.push(ReceiptEvent {
+        application_bytes: 96,
+        encoded_frame_body_bytes: 250,
         recipient: "r0p1".to_string(),
         sender: "r0p0".to_string(),
         seq: 2,
@@ -2014,6 +2428,7 @@ fn a_payload_from_the_opaque_sender_is_the_leak_class() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &ChurnPlan::default(),
         context.experiment,
@@ -2052,6 +2467,7 @@ fn an_opaque_gap_with_a_foreign_reason_is_invalid() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &ChurnPlan::default(),
         context.experiment,
@@ -2086,6 +2502,7 @@ fn an_unsupported_format_gap_on_a_text_stream_stays_invalid() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &ChurnPlan::default(),
         context.experiment,
@@ -2137,6 +2554,7 @@ fn the_notice_cadence_bound_is_exact() {
         &context.roster,
         &at_bound,
         1_000,
+        96,
         context.delivery_class,
         &ChurnPlan::default(),
         context.experiment,
@@ -2175,6 +2593,7 @@ fn the_notice_cadence_bound_is_exact() {
         &context.roster,
         &flooded,
         1_000,
+        96,
         context.delivery_class,
         &ChurnPlan::default(),
         context.experiment,
@@ -3137,6 +3556,8 @@ fn churned_records(context: &UnitContext, churn: &ChurnPlan) -> RunRecords {
         let epoch_ledger = *epoch_positions.get(&epoch).unwrap_or(&0);
         *epoch_positions.entry(epoch).or_insert(0) += 1;
         log.push_sent(SentEvent {
+            application_bytes: 96,
+            encoded_frame_body_bytes: 150,
             sender: plan.name.clone(),
             room: plan.room,
             seq: send.seq,
@@ -3149,6 +3570,8 @@ fn churned_records(context: &UnitContext, churn: &ChurnPlan) -> RunRecords {
         // next, stamped with the sender's per-epoch stream coordinates.
         for recipient in ["r0p0", "r0p2", "r0p3"] {
             log.push_receipt(ReceiptEvent {
+                application_bytes: 96,
+                encoded_frame_body_bytes: 250,
                 recipient: recipient.to_string(),
                 sender: plan.name.clone(),
                 seq: send.seq,
@@ -3180,6 +3603,7 @@ fn a_reconnect_run_completes_every_stream_exactly_once_across_epochs() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &churn,
         context.experiment,
@@ -3209,6 +3633,8 @@ fn a_stale_epoch_delivery_after_the_senders_rejoin_is_a_misroute() {
     let mut records = churned_records(&context, &churn);
     let reconnect_us = churn.cycles[0].reconnects_us["r0p1"];
     records.receipts.push(ReceiptEvent {
+        application_bytes: 96,
+        encoded_frame_body_bytes: 250,
         recipient: "r0p0".to_string(),
         sender: "r0p1".to_string(),
         seq: 0,
@@ -3221,6 +3647,7 @@ fn a_stale_epoch_delivery_after_the_senders_rejoin_is_a_misroute() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &churn,
         context.experiment,
@@ -3274,6 +3701,7 @@ fn a_rejoining_recipient_owes_nothing_below_its_tail_and_all_above_it() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &churn,
         context.experiment,
@@ -3322,6 +3750,7 @@ fn a_rejoining_recipient_owes_nothing_below_its_tail_and_all_above_it() {
         &context.roster,
         &holed,
         1_000,
+        96,
         context.delivery_class,
         &churn,
         context.experiment,
@@ -3371,6 +3800,8 @@ fn a_below_tail_delivery_after_the_recipients_rejoin_is_a_misroute() {
     });
     // The server replays an already-accounted sequence to the new seat.
     records.receipts.push(ReceiptEvent {
+        application_bytes: 96,
+        encoded_frame_body_bytes: 250,
         recipient: "r0p0".to_string(),
         sender: "r0p1".to_string(),
         seq: 1,
@@ -3383,6 +3814,7 @@ fn a_below_tail_delivery_after_the_recipients_rejoin_is_a_misroute() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &churn,
         context.experiment,
@@ -3411,6 +3843,7 @@ fn a_churn_run_whose_storm_never_fires_is_invalid() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &churn,
         context.experiment,
@@ -3545,6 +3978,8 @@ fn replacement_records(plans: &[SenderPlan], churn: &ChurnPlan) -> RunRecords {
             .find(|send| send.intended_us == *intended_us)
             .expect("send belongs to its plan");
         log.push_sent(SentEvent {
+            application_bytes: 96,
+            encoded_frame_body_bytes: 150,
             sender: plan.name.clone(),
             room: plan.room,
             seq: scheduled.seq,
@@ -3563,6 +3998,8 @@ fn replacement_records(plans: &[SenderPlan], churn: &ChurnPlan) -> RunRecords {
                 continue;
             }
             log.push_receipt(ReceiptEvent {
+                application_bytes: 96,
+                encoded_frame_body_bytes: 250,
                 recipient: recipient.name.clone(),
                 sender: plan.name.clone(),
                 seq: scheduled.seq,
@@ -3594,6 +4031,7 @@ fn a_room_replacement_completes_every_stream_across_the_generation() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &churn,
         context.experiment,
@@ -3686,6 +4124,7 @@ fn a_replacement_wave_whose_rejoin_never_fires_is_invalid() {
         &roster,
         &records,
         1_000,
+        96,
         DeliveryClass::Reliable,
         &churn,
         None,
@@ -3732,6 +4171,7 @@ fn a_stale_generation_delivery_after_the_replacement_is_a_misroute() {
         &context.roster,
         &records,
         1_000,
+        96,
         context.delivery_class,
         &churn,
         context.experiment,
@@ -3974,6 +4414,8 @@ fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
     });
     for send in &plan.sends {
         log.push_sent(SentEvent {
+            application_bytes: 96,
+            encoded_frame_body_bytes: 150,
             sender: plan.name.clone(),
             room: plan.room,
             seq: send.seq,
@@ -3996,6 +4438,8 @@ fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
         .flatten()
         {
             log.push_receipt(ReceiptEvent {
+                application_bytes: 96,
+                encoded_frame_body_bytes: 250,
                 recipient: recipient.to_string(),
                 sender: plan.name.clone(),
                 seq: send.seq,
@@ -4012,6 +4456,8 @@ fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
         // strictness belongs to snapshot tails alone).
         if send.seq == 1 {
             log.push_receipt(ReceiptEvent {
+                application_bytes: 96,
+                encoded_frame_body_bytes: 250,
                 recipient: "r0p0".to_string(),
                 sender: plan.name.clone(),
                 seq: 1,
@@ -4033,6 +4479,7 @@ fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
         &roster,
         &records,
         1_000,
+        96,
         DeliveryClass::Reliable,
         &ChurnPlan::default(),
         None,
@@ -4068,6 +4515,8 @@ fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
     });
     for send in &plan.sends {
         log.push_sent(SentEvent {
+            application_bytes: 96,
+            encoded_frame_body_bytes: 150,
             sender: plan.name.clone(),
             room: plan.room,
             seq: send.seq,
@@ -4089,6 +4538,8 @@ fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
         .flatten()
         {
             log.push_receipt(ReceiptEvent {
+                application_bytes: 96,
+                encoded_frame_body_bytes: 250,
                 recipient: recipient.to_string(),
                 sender: plan.name.clone(),
                 seq: send.seq,
@@ -4105,6 +4556,8 @@ fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
         // strictness belongs to snapshot tails alone).
         if send.seq == 1 {
             log.push_receipt(ReceiptEvent {
+                application_bytes: 96,
+                encoded_frame_body_bytes: 250,
                 recipient: "r0p0".to_string(),
                 sender: plan.name.clone(),
                 seq: 1,
@@ -4126,6 +4579,7 @@ fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
         &roster,
         &records,
         1_000,
+        96,
         DeliveryClass::Reliable,
         &ChurnPlan::default(),
         None,
@@ -4191,6 +4645,8 @@ fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
             next
         };
         log.push_sent(SentEvent {
+            application_bytes: 96,
+            encoded_frame_body_bytes: 150,
             sender: plan.name.clone(),
             room: plan.room,
             seq: send.seq,
@@ -4201,6 +4657,8 @@ fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
         });
         // r0p2 stayed seated through the storm: it receives every send.
         log.push_receipt(ReceiptEvent {
+            application_bytes: 96,
+            encoded_frame_body_bytes: 250,
             recipient: "r0p2".to_string(),
             sender: plan.name.clone(),
             seq: send.seq,
@@ -4212,6 +4670,8 @@ fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
         // after it (server 2 and 3); server 1 is behind the snapshot tail.
         if epoch == 2 && server_seq >= 2 {
             log.push_receipt(ReceiptEvent {
+                application_bytes: 96,
+                encoded_frame_body_bytes: 250,
                 recipient: "r0p0".to_string(),
                 sender: plan.name.clone(),
                 seq: send.seq,
@@ -4234,6 +4694,7 @@ fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
         &roster,
         &records,
         1_000,
+        96,
         DeliveryClass::Reliable,
         &ChurnPlan::default(),
         None,
@@ -4256,6 +4717,7 @@ fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
         &roster,
         &records,
         1_000,
+        96,
         DeliveryClass::Reliable,
         &ChurnPlan::default(),
         None,
@@ -4292,6 +4754,7 @@ fn an_unresolvable_snapshot_identity_is_a_loud_fault() {
         &roster,
         &records,
         1_000,
+        96,
         DeliveryClass::Reliable,
         &ChurnPlan::default(),
         None,
@@ -4403,6 +4866,8 @@ fn complete_records(plans: &[SenderPlan]) -> RunRecords {
     for plan in plans {
         for send in &plan.sends {
             log.push_sent(SentEvent {
+                application_bytes: 96,
+                encoded_frame_body_bytes: 150,
                 sender: plan.name.clone(),
                 room: plan.room,
                 seq: send.seq,
@@ -4420,6 +4885,8 @@ fn complete_records(plans: &[SenderPlan]) -> RunRecords {
             }
             for send in &other.sends {
                 log.push_receipt(ReceiptEvent {
+                    application_bytes: 96,
+                    encoded_frame_body_bytes: 250,
                     recipient: plan.name.clone(),
                     sender: other.name.clone(),
                     seq: send.seq,

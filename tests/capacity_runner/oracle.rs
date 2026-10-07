@@ -46,6 +46,30 @@ pub struct GapViolation {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InvalidReason {
+    /// A GameData frame lacked a usable ledger or registered sender identity.
+    /// Its observed bytes remain raw evidence even though delivery pairing failed.
+    UnidentifiedGameData {
+        recipient: String,
+        received_us: u64,
+        application_bytes: u64,
+        encoded_frame_body_bytes: u64,
+        detail: String,
+    },
+    /// Recorded application sizes disagree with the configured target.
+    PayloadSizeMismatch {
+        count: u64,
+        first: PayloadSizeViolation,
+    },
+    /// An encoded message body cannot contain its recorded application value.
+    InvalidEncodedFrameBodySize {
+        count: u64,
+        first: PayloadSizeViolation,
+    },
+    /// A raw byte total exceeded the summary integer range.
+    PayloadByteTotalOverflow {
+        count: u64,
+        first: PayloadSizeViolation,
+    },
     /// A client failed to join its room; the run never measured the roster.
     JoinFailed { failures: Vec<String> },
     /// A recipient missed deliveries it was owed (a hole mid-stream or, for
@@ -184,6 +208,76 @@ pub struct Totals {
     pub gap_covered: u64,
 }
 
+/// The first raw size violation, including its direction and event identity.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PayloadSizeViolation {
+    /// `ingress` for a completed send; `egress` for a received delivery.
+    pub direction: String,
+    pub sender: Option<String>,
+    pub recipient: Option<String>,
+    pub seq: Option<u64>,
+    pub application_bytes: u64,
+    pub encoded_frame_body_bytes: u64,
+    pub expected_application_bytes: u32,
+}
+
+/// Observed byte sizes. Empty populations have zero minimum and maximum.
+/// Totals saturate only when the verdict records `PayloadByteTotalOverflow`.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub struct ByteStats {
+    pub samples: u64,
+    pub total_bytes: u64,
+    pub min_bytes: u64,
+    pub max_bytes: u64,
+}
+
+impl ByteStats {
+    fn record(&mut self, bytes: u64) -> bool {
+        if self.samples == 0 {
+            self.min_bytes = bytes;
+        } else {
+            self.min_bytes = self.min_bytes.min(bytes);
+        }
+        self.samples += 1;
+        let overflow = self.total_bytes.checked_add(bytes).is_none();
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
+        self.max_bytes = self.max_bytes.max(bytes);
+        overflow
+    }
+}
+
+/// Application bytes and encoded message body bytes for one direction.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub struct DirectionBytes {
+    pub application: ByteStats,
+    pub encoded_frame_body: ByteStats,
+}
+
+impl DirectionBytes {
+    fn record(&mut self, application: u64, encoded: u64) -> bool {
+        let application_overflow = self.application.record(application);
+        let encoded_overflow = self.encoded_frame_body.record(encoded);
+        application_overflow || encoded_overflow
+    }
+}
+
+/// Raw observed traffic for one scheduled phase, including duplicate receipts.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub struct PhaseBytes {
+    pub ingress: DirectionBytes,
+    pub egress: DirectionBytes,
+}
+
+/// Raw GameData size evidence. Receipt phases follow their sender-ledger key.
+/// Unknown receipt keys remain visible separately; they cannot be assigned a phase.
+/// These bytes exclude control frames, WebSocket headers, TLS, and TCP overhead.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub struct PayloadBytes {
+    pub warmup: PhaseBytes,
+    pub measured: PhaseBytes,
+    pub unmatched_egress: DirectionBytes,
+}
+
 /// The exact outcome of one run.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OutcomeSummary {
@@ -193,6 +287,7 @@ pub struct OutcomeSummary {
     pub per_recipient: Vec<RecipientOutcome>,
     pub latency_us: LatencyStats,
     pub generator_lag_us: LagStats,
+    pub payload_bytes: PayloadBytes,
     /// The run's contract-experiment label (`None` for a default-contract
     /// run), echoed from the config so an experiment's summary can never be
     /// read as a default-contract measurement.
@@ -506,6 +601,134 @@ fn churn_views(
     (views, unresolved)
 }
 
+/// Validate every raw event before delivery filtering, including duplicates,
+/// misroutes, warm-up records, and receipt keys absent from the send ledger.
+fn payload_size_evidence(
+    records: &RunRecords,
+    expected_application_bytes: u32,
+    reasons: &mut Vec<InvalidReason>,
+) -> PayloadBytes {
+    let phases: BTreeMap<(&str, u64), Phase> = records
+        .sent
+        .iter()
+        .map(|sent| ((sent.sender.as_str(), sent.seq), sent.phase))
+        .collect();
+    let mut evidence = PayloadBytes::default();
+    let mut mismatches = (0_u64, None);
+    let mut invalid_bodies = (0_u64, None);
+    let mut overflows = (0_u64, None);
+    let mut check = |direction: &str,
+                     sender: Option<&str>,
+                     recipient: Option<&str>,
+                     seq: Option<u64>,
+                     application: u64,
+                     encoded: u64,
+                     overflow: bool| {
+        let violation = || PayloadSizeViolation {
+            direction: direction.to_string(),
+            sender: sender.map(str::to_string),
+            recipient: recipient.map(str::to_string),
+            seq,
+            application_bytes: application,
+            encoded_frame_body_bytes: encoded,
+            expected_application_bytes,
+        };
+        if overflow {
+            overflows.0 += 1;
+            overflows.1.get_or_insert_with(violation);
+        }
+        if application != u64::from(expected_application_bytes) {
+            mismatches.0 += 1;
+            mismatches.1.get_or_insert_with(violation);
+        }
+        // Current formats contain the full application value in their body.
+        // Do not infer an envelope size: actual encoded sizes are raw evidence.
+        if encoded < application || encoded == 0 {
+            invalid_bodies.0 += 1;
+            invalid_bodies.1.get_or_insert_with(violation);
+        }
+    };
+    for sent in &records.sent {
+        let phase = match sent.phase {
+            Phase::Warmup => &mut evidence.warmup,
+            Phase::Measured => &mut evidence.measured,
+        };
+        let overflow = phase
+            .ingress
+            .record(sent.application_bytes, sent.encoded_frame_body_bytes);
+        check(
+            "ingress",
+            Some(&sent.sender),
+            None,
+            Some(sent.seq),
+            sent.application_bytes,
+            sent.encoded_frame_body_bytes,
+            overflow,
+        );
+    }
+    for receipt in &records.receipts {
+        let direction = match phases.get(&(receipt.sender.as_str(), receipt.seq)) {
+            Some(Phase::Warmup) => &mut evidence.warmup.egress,
+            Some(Phase::Measured) => &mut evidence.measured.egress,
+            None => &mut evidence.unmatched_egress,
+        };
+        let overflow =
+            direction.record(receipt.application_bytes, receipt.encoded_frame_body_bytes);
+        check(
+            "egress",
+            Some(&receipt.sender),
+            Some(&receipt.recipient),
+            Some(receipt.seq),
+            receipt.application_bytes,
+            receipt.encoded_frame_body_bytes,
+            overflow,
+        );
+    }
+    // Unidentified deliveries are structured raw faults rather than fabricated
+    // receipt keys. They still contribute observed bytes and size validation.
+    for fault in &records.faults {
+        if let InvalidReason::UnidentifiedGameData {
+            recipient,
+            application_bytes,
+            encoded_frame_body_bytes,
+            ..
+        } = fault
+        {
+            let overflow = evidence
+                .unmatched_egress
+                .record(*application_bytes, *encoded_frame_body_bytes);
+            check(
+                "egress",
+                None,
+                Some(recipient),
+                None,
+                *application_bytes,
+                *encoded_frame_body_bytes,
+                overflow,
+            );
+        }
+    }
+    if let Some(first) = overflows.1 {
+        reasons.push(InvalidReason::PayloadByteTotalOverflow {
+            count: overflows.0,
+            first,
+        });
+    }
+    if let Some(first) = mismatches.1 {
+        reasons.push(InvalidReason::PayloadSizeMismatch {
+            count: mismatches.0,
+            first,
+        });
+    }
+    if let Some(first) = invalid_bodies.1 {
+        reasons.push(InvalidReason::InvalidEncodedFrameBodySize {
+            count: invalid_bodies.0,
+            first,
+        });
+    }
+    evidence
+}
+
 /// Summarize one run: the single source of the outcome summary.
 ///
 /// Every input comes from the recorded events: faults the runner observed
@@ -528,16 +751,19 @@ fn churn_views(
 /// must arrive as an exact `unsupported_format` gap report — while every
 /// text stream stays exactly-once. Advisory notices are permitted evidence
 /// at the per-sender rate the server enforces.
+#[allow(clippy::too_many_arguments)] // Replay inputs remain explicit and independent.
 pub fn summarize(
     plans: &[SenderPlan],
     roster: &[(String, u32)],
     records: &RunRecords,
     generator_lag_bound_us: u64,
+    expected_application_bytes: u32,
     delivery_class: DeliveryClass,
     churn: &ChurnPlan,
     experiment: Option<Experiment>,
 ) -> OutcomeSummary {
     let mut reasons = records.faults.clone();
+    let payload_bytes = payload_size_evidence(records, expected_application_bytes, &mut reasons);
     if !records.join_failures.is_empty() {
         reasons.push(InvalidReason::JoinFailed {
             failures: records.join_failures.clone(),
@@ -1249,6 +1475,7 @@ pub fn summarize(
             p99_us: lag_p99,
             bound_us: generator_lag_bound_us,
         },
+        payload_bytes,
         experiment: experiment.map(Experiment::label).map(str::to_string),
         unsupported_notices: count_u64(records.unsupported_notices.len()),
     }

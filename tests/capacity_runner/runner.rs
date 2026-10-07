@@ -269,6 +269,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     // cross-talk).
     config.room_code_prefix = Some(room_code_prefix(&run_id));
     let (plans, churn_plan) = build_run_shape(&config)?;
+    validate_payload_size(&plans, config.payload_bytes)?;
     let roster: Vec<(String, u32)> = plans
         .iter()
         .map(|plan| (plan.name.clone(), plan.room))
@@ -641,6 +642,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         &roster,
         &records,
         bound_us,
+        config.payload_bytes,
         config.delivery_class,
         &churn_plan,
         config.experiment,
@@ -903,6 +905,43 @@ fn decode_server_frame(
     serde_json::from_str(&text).map_err(|error| format!("malformed server frame: {error}"))
 }
 
+/// Construct one exact-size application ledger document. ASCII padding does
+/// not escape in JSON, so each padding character adds exactly one byte.
+pub(crate) fn ledger_application_data(
+    sender: &str,
+    seq: u64,
+    payload_bytes: u32,
+) -> Result<serde_json::Value, String> {
+    let mut data = json!({"ledger_sender": sender, "seq": seq, "padding": ""});
+    let metadata_bytes = serde_json::to_vec(&data)
+        .map_err(|error| format!("serialize ledger metadata: {error}"))?
+        .len();
+    let padding_bytes = count_usize(payload_bytes).checked_sub(metadata_bytes).ok_or_else(|| {
+        format!("payload_bytes ({payload_bytes}) is below ledger metadata size ({metadata_bytes}) for {sender} seq {seq}")
+    })?;
+    data["padding"] = serde_json::Value::String("x".repeat(padding_bytes));
+    Ok(data)
+}
+
+/// Reject an undersized target for any scheduled sequence before run effects.
+pub(crate) fn validate_payload_size(
+    plans: &[SenderPlan],
+    payload_bytes: u32,
+) -> Result<(), String> {
+    for plan in plans {
+        if let Some(seq) = plan.sends.iter().map(|send| send.seq).max() {
+            let data = json!({"ledger_sender": plan.name, "seq": seq, "padding": ""});
+            let metadata_bytes = serde_json::to_vec(&data)
+                .map_err(|error| format!("serialize ledger metadata: {error}"))?
+                .len();
+            if count_usize(payload_bytes) < metadata_bytes {
+                return Err(format!("payload_bytes ({payload_bytes}) is below maximum scheduled ledger metadata size ({metadata_bytes}) for {} seq {seq}", plan.name));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The owned config facts one peer task needs (it is spawned, so it cannot
 /// borrow the run config). Room codes are not here: the first join happens
 /// before the task spawns, and every rejoin carries its cycle's code.
@@ -976,7 +1015,6 @@ async fn peer_task(
     hold_reads_until: Option<Instant>,
     never_read: bool,
 ) {
-    let padding: Arc<str> = "x".repeat(count_usize(facts.payload_bytes)).into();
     let first_measured = plan
         .sends
         .iter()
@@ -1115,29 +1153,31 @@ async fn peer_task(
                         });
                         return;
                     }
-                    let data = json!({
-                        "ledger_sender": plan.name,
-                        "seq": send.seq,
-                        "padding": padding.as_ref(),
-                    });
-                    let frame = if facts.experiment.opaque_sender {
-                        // The opaque lane: a raw binary frame the server
-                        // never parses. Its bytes carry the same ledger
-                        // document the text lane sends, so a debug dump
-                        // stays self-describing; the padding keeps the
-                        // payload in the configured size class. Binary
-                        // frames carry no delivery class — the opaque lane
-                        // IS the reliable lane.
-                        match serde_json::to_vec(&data) {
-                            Ok(payload) => Message::Binary(payload.into()),
-                            Err(error) => {
-                                log.push_fault(InvalidReason::SendFailed {
-                                    sender: plan.name.clone(),
-                                    detail: format!("serialize: {error}"),
-                                });
-                                return;
-                            }
+                    let data = match ledger_application_data(&plan.name, send.seq, facts.payload_bytes) {
+                        Ok(data) => data,
+                        Err(detail) => {
+                            log.push_fault(InvalidReason::SendFailed {
+                                sender: plan.name.clone(),
+                                detail,
+                            });
+                            return;
                         }
+                    };
+                    let application_payload = match serde_json::to_vec(&data) {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            log.push_fault(InvalidReason::SendFailed {
+                                sender: plan.name.clone(),
+                                detail: format!("serialize: {error}"),
+                            });
+                            return;
+                        }
+                    };
+                    let application_bytes = count_u64(application_payload.len());
+                    let frame = if facts.experiment.opaque_sender {
+                        // Opaque frames carry the same exact ledger document as
+                        // JSON GameData.data. They have no protocol envelope.
+                        Message::Binary(application_payload.into())
                     } else {
                         let (class, key) = match facts.delivery_class {
                             DeliveryClass::Reliable => (None, None),
@@ -1177,6 +1217,7 @@ async fn peer_task(
                             }
                         }
                     };
+                    let encoded_frame_body_bytes = count_u64(frame.len());
                     if let Err(error) = sink.send(frame).await {
                         // After a declared termination, socket errors are the
                         // expected consequence — the peer stops, and its
@@ -1197,6 +1238,8 @@ async fn peer_task(
                         intended_us: send.intended_us,
                         sent_us: micros(epoch.elapsed()),
                         phase: send.phase,
+                        application_bytes,
+                        encoded_frame_body_bytes,
                     });
                     send_cursor += 1;
                 }
@@ -1249,6 +1292,7 @@ pub(crate) async fn handle_inbound(
     log: &Arc<EventLog>,
     experiment: ExperimentContext,
 ) -> bool {
+    let received_us = micros(epoch.elapsed());
     match frame {
         Ok(Message::Text(text)) => match serde_json::from_str::<ServerMessage>(&text) {
             Ok(ServerMessage::GameData {
@@ -1257,6 +1301,12 @@ pub(crate) async fn handle_inbound(
                 seq,
                 ..
             }) => {
+                let application_bytes = count_u64(
+                    serde_json::to_vec(&data)
+                        .expect("received JSON value serializes")
+                        .len(),
+                );
+                let encoded_frame_body_bytes = count_u64(text.len());
                 if let Some((ledger_sender, ledger_seq)) =
                     websocket_test_helpers::delivery_ledger::extract(&data)
                 {
@@ -1274,29 +1324,57 @@ pub(crate) async fn handle_inbound(
                         .get(&from_player.to_string())
                         .cloned();
                     if let Some((sender, sender_incarnation)) = resolved {
-                        debug_assert_eq!(sender, ledger_sender, "registry and ledger agree");
+                        if sender != ledger_sender {
+                            log.push_fault(InvalidReason::UnidentifiedGameData {
+                                recipient: recipient.to_string(),
+                                received_us,
+                                application_bytes,
+                                encoded_frame_body_bytes,
+                                detail: "ledger sender disagrees with the registered player"
+                                    .to_string(),
+                            });
+                            return true;
+                        }
+                        let Some(server_seq) = seq.or_else(|| ledger_seq.checked_add(1)) else {
+                            log.push_fault(InvalidReason::UnidentifiedGameData {
+                                recipient: recipient.to_string(),
+                                received_us,
+                                application_bytes,
+                                encoded_frame_body_bytes,
+                                detail: "ledger sequence cannot produce a v2 stream sequence"
+                                    .to_string(),
+                            });
+                            return true;
+                        };
                         log.push_receipt(ReceiptEvent {
                             recipient: recipient.to_string(),
                             sender,
                             seq: ledger_seq,
                             epoch: sender_incarnation,
-                            server_seq: seq.unwrap_or(ledger_seq + 1),
-                            received_us: micros(epoch.elapsed()),
+                            server_seq,
+                            received_us,
+                            application_bytes,
+                            encoded_frame_body_bytes,
                         });
                     } else {
-                        // A delivery from a player this run never seated:
-                        // misrouted, and the verdict is already invalid —
-                        // keep reading for the evidence.
-                        log.push_fault(InvalidReason::MisroutedDeliveries {
-                            count: 1,
-                            first: crate::oracle::DeliveryKey {
-                                recipient: recipient.to_string(),
-                                sender: from_player.to_string(),
-                                epoch: 0,
-                                seq: 0,
-                            },
+                        log.push_fault(InvalidReason::UnidentifiedGameData {
+                            recipient: recipient.to_string(),
+                            received_us,
+                            application_bytes,
+                            encoded_frame_body_bytes,
+                            detail: format!(
+                                "player {from_player} is absent from the sender registry"
+                            ),
                         });
                     }
+                } else {
+                    log.push_fault(InvalidReason::UnidentifiedGameData {
+                        recipient: recipient.to_string(),
+                        received_us,
+                        application_bytes,
+                        encoded_frame_body_bytes,
+                        detail: "application data has no valid ledger identity".to_string(),
+                    });
                 }
             }
             Ok(ServerMessage::PlayerJoined { .. }) | Ok(ServerMessage::PlayerLeft { .. }) => {}
