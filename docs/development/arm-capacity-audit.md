@@ -2569,3 +2569,48 @@ Large C3 runs remain gated on
 (effective configuration and payload-size provenance). Required encoding and
 idle-lobby cohorts, constrained-host setup, and external-host resource collection
 also remain. No capacity point or deployment claim is accepted by this review.
+
+## C3 generator latency memory experiment — 2026-10-07
+
+The first part of [#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775)
+removes per-delivery recipient clones and latency vectors. The oracle now feeds
+aggregate and recipient HDR buckets in one pass. The artifact writer also
+streams samples. Recipient buckets are allocated only when measured receipts
+arrive. Schema 7, exact maximum latency, delivery verdicts, and replay stay the
+same.
+
+The registered experiment compared main after
+[PR #777](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/777)
+with this change. Both debug test binaries used the same synthetic complete
+reliable fan-out: 16 peers, with 100, 1,000, or 5,000 sends per peer. Each cell
+ran three times in a fresh process, baseline first, then candidate. Linux
+`os.wait4` supplied peak child RSS in KiB. The initial GNU time method was
+replaced before measurements because that tool was absent. All attempts were
+retained. Full summary JSON matched the baseline for every candidate run.
+
+| Receipts | Baseline median KiB (range) | Candidate median KiB (range) | Reduction |
+| --- | --- | --- | --- |
+| 24,000 | 15,364 (15,360–16,676) | 14,052 (14,048–14,052) | 8.5% |
+| 240,000 | 68,692 (68,560–68,764) | 52,276 (52,020–52,336) | 23.9% |
+| 1,200,000 | 312,756 (312,756–312,824) | 223,852 (223,832–223,960) | 28.4% |
+
+The host used ARM64 Linux under WSL2 and rustc 1.91.0. These numbers measure
+synthetic generator memory in the debug profile. They establish no server
+capacity point. The generator had no CPU or memory constraint.
+
+To repeat, build `cargo test --test capacity_runner --no-run` and run its
+executable in a fresh process under a peak-RSS profiler:
+
+```sh
+CAPACITY_MEMORY_PROBE_SENDS=5000 <test-executable> \
+  generator_memory_profile_on_complete_fanout --exact --ignored --nocapture
+```
+
+Use send counts 100, 1000, and 5000. The ignored probe prints the complete
+summary, collection RSS, and oracle time. Registrations, raw outputs, resource
+records, and comparisons are retained locally in
+`/tmp/signal-fish-c3-generator-memory-20261007/`.
+
+Raw event storage, sender schedules, and delivery-validation indexes still
+grow with the workload. Issue #775 still requires those structures to stream
+or stay bounded before the required long C3 cells can run.
