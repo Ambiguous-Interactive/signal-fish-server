@@ -2545,8 +2545,10 @@ CPU-pair contract); renaming any rendered series fails the render pins.
 
 ## C3 measurement prerequisite review — 2026-10-07
 
-At `f51ede93`, the latency oracle subtracted completed socket-send time from
-receipt time. This excluded generator lag and socket-send wait from the
+In the runner shipped by
+[PR #768](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/768),
+the latency oracle subtracted completed socket-send time from receipt time.
+This excluded generator lag and socket-send wait from the
 scheduled-send SLO. Both histogram paths also clipped samples above 60 seconds.
 [#774](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/774)
 fixes this measurement defect. No server runtime defect is claimed.
