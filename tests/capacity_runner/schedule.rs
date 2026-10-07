@@ -30,14 +30,112 @@ pub struct ScheduledSend {
 }
 
 /// The full send plan for one sender.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SenderPlan {
     /// Peer name (`r{room}p{player}`) — the ledger sender key.
     pub name: String,
     pub room: u32,
     pub player: u32,
-    pub sends: Vec<ScheduledSend>,
+    pub sends: SendSchedule,
 }
+
+/// A deterministic timeline retained as fixed scalar inputs and churn windows.
+/// Indexed access advances SplitMix algebraically; it never walks earlier sends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendSchedule {
+    warmup_count: u64,
+    count: usize,
+    warmup_us: u64,
+    period_us: u64,
+    initial_state: u64,
+    shifts: Vec<(u64, u64)>,
+}
+
+impl SendSchedule {
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn first_measured_seq(&self) -> Option<u64> {
+        (self.warmup_count < u64::try_from(self.count).expect("validated count"))
+            .then_some(self.warmup_count)
+    }
+
+    pub fn last(&self) -> Option<ScheduledSend> {
+        self.count.checked_sub(1).and_then(|index| self.get(index))
+    }
+
+    pub fn get(&self, index: usize) -> Option<ScheduledSend> {
+        if index >= self.count {
+            return None;
+        }
+        let seq = u64::try_from(index).expect("validated schedule index");
+        let mut state = self
+            .initial_state
+            .wrapping_add(0x9E37_79B9_7F4A_7C15u64.wrapping_mul(seq));
+        let jitter = splitmix64(&mut state) % jitter_bound_micros(self.period_us);
+        let (base, phase) = if seq < self.warmup_count {
+            (
+                (self.warmup_us / (self.warmup_count + 1)) * (seq + 1),
+                Phase::Warmup,
+            )
+        } else {
+            (
+                self.warmup_us + self.period_us * (seq - self.warmup_count + 1),
+                Phase::Measured,
+            )
+        };
+        let original_us = base + jitter;
+        let shift = self
+            .shifts
+            .iter()
+            .filter(|(at, _)| original_us >= *at)
+            .map(|(at, rejoin)| rejoin.saturating_sub(*at))
+            .sum::<u64>();
+        Some(ScheduledSend {
+            seq,
+            intended_us: original_us.saturating_add(shift),
+            phase,
+        })
+    }
+
+    pub fn iter(&self) -> ScheduleIter<'_> {
+        ScheduleIter {
+            schedule: self,
+            next: 0,
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a SendSchedule {
+    type Item = ScheduledSend;
+    type IntoIter = ScheduleIter<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+pub struct ScheduleIter<'a> {
+    schedule: &'a SendSchedule,
+    next: usize,
+}
+impl Iterator for ScheduleIter<'_> {
+    type Item = ScheduledSend;
+    fn next(&mut self) -> Option<Self::Item> {
+        let send = self.schedule.get(self.next)?;
+        self.next += 1;
+        Some(send)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.schedule.len() - self.next;
+        (remaining, Some(remaining))
+    }
+}
+impl ExactSizeIterator for ScheduleIter<'_> {}
 
 impl SenderPlan {
     /// The last intended send, in microseconds (0 when a sender has no
@@ -96,7 +194,7 @@ impl ChurnPlan {
 /// is applied: the whole storm (disconnects and reconnects) must complete
 /// inside the scheduled-send span, so quiescence always covers every rejoin.
 pub fn build_run_shape(config: &RunConfig) -> Result<(Vec<SenderPlan>, ChurnPlan), String> {
-    let plans = build_plans(config);
+    let plans = build_plans(config)?;
     let churn = build_churn(config, &plans)?;
     apply_churn_shifts(plans, &churn)
 }
@@ -147,8 +245,8 @@ fn validate_churn_fraction(fraction_percent: u32) -> Result<(), String> {
 
 /// Validate that a churn wave's stagger window fits a span boundary.
 fn validate_window_positive(window: Duration) -> Result<(), String> {
-    if window.is_zero() {
-        return Err("churn window must be positive".to_string());
+    if micros(window) == 0 {
+        return Err("churn window must be at least one microsecond".to_string());
     }
     Ok(())
 }
@@ -248,6 +346,14 @@ fn build_replacement_churn(
              inside the scheduled-send span ({span_us} µs)"
         ));
     }
+    let room_count =
+        usize::try_from(config.rooms).map_err(|_| "room count exceeds this host".to_string())?;
+    let count = victim_count(room_count, fraction_percent);
+    let wave_count = (span_us - first_wave_end) / micros(interval) + 1;
+    let replacement_budget = u64::from(config.rooms) * u64::from(RunConfig::MAX_ROOM_GENERATION);
+    if wave_count > replacement_budget / u64::try_from(count).expect("victim count fits") {
+        return Err("replacement waves exceed the room generation budget".to_string());
+    }
     // Every wave fits the span: waves fire while start + k*interval + window
     // stays inside it, so quiescence always covers every rejoin.
     let mut wave_instants = Vec::new();
@@ -269,8 +375,6 @@ fn build_replacement_churn(
             .or_default()
             .push(plan.name.clone());
     }
-    let room_count = members_of_room.len();
-    let count = victim_count(room_count, fraction_percent);
     let mut state = config.seed ^ REPLACEMENT_SALT;
     let mut cycles = Vec::with_capacity(wave_instants.len());
     let mut replacements_per_room: BTreeMap<u32, u32> = BTreeMap::new();
@@ -339,15 +443,12 @@ fn apply_churn_shifts(
         if instants.is_empty() {
             continue;
         }
-        for send in &mut plan.sends {
-            let original_us = send.intended_us;
-            let total_shift: u64 = instants
-                .iter()
-                .filter(|(disconnect_us, _)| original_us >= *disconnect_us)
-                .map(|(disconnect_us, reconnect_us)| reconnect_us.saturating_sub(*disconnect_us))
-                .sum();
-            send.intended_us = original_us.saturating_add(total_shift);
-        }
+        instants.iter().try_fold(0_u64, |total, (at, rejoin)| {
+            total
+                .checked_add(rejoin.saturating_sub(*at))
+                .ok_or_else(|| "churn shift overflows the run clock".to_string())
+        })?;
+        plan.sends.shifts = instants;
     }
     Ok((plans, churn.clone()))
 }
@@ -375,14 +476,49 @@ fn jitter_bound_micros(period_micros: u64) -> u64 {
 /// exactly at the window boundary plus one period (plus jitter) and then
 /// advance by the period. Jitter is derived per sender from the seed, so the
 /// stream each sender sees is stable across replays and hosts.
-pub fn build_plans(config: &RunConfig) -> Vec<SenderPlan> {
+pub fn build_plans(config: &RunConfig) -> Result<Vec<SenderPlan>, String> {
+    if !config.send_rate_per_sender.is_finite() || config.send_rate_per_sender <= 0.0 {
+        return Err("send rate must be finite and positive".to_string());
+    }
+    std::time::Duration::try_from_secs_f64(1.0 / config.send_rate_per_sender)
+        .map_err(|_| "send period exceeds the run clock".to_string())?;
+    if !(1..=999).contains(&config.rooms) {
+        return Err("schedule rooms must be in 1..=999".to_string());
+    }
+    if config.players_per_room < 2 {
+        return Err("schedule needs at least two players per room".to_string());
+    }
+    if config.warmup.as_micros() > u128::from(u64::MAX)
+        || config.duration.as_micros() > u128::from(u64::MAX)
+    {
+        return Err("schedule duration exceeds the run clock".to_string());
+    }
     let period = config.period_micros();
     let warmup_sends = config.warmup_sends_per_sender();
     let measured_sends = config.measured_sends_per_sender();
     let warmup_micros = micros(config.warmup);
     let jitter_bound = jitter_bound_micros(period);
-    let capacity =
-        usize::try_from(u64::from(config.rooms) * u64::from(config.players_per_room)).unwrap_or(0);
+    let total = warmup_sends
+        .checked_add(measured_sends)
+        .ok_or_else(|| "scheduled send count overflows".to_string())?;
+    let count =
+        usize::try_from(total).map_err(|_| "scheduled send count exceeds this host".to_string())?;
+    warmup_sends
+        .checked_add(1)
+        .ok_or_else(|| "warmup send count overflows".to_string())?;
+    if measured_sends > 0 {
+        period
+            .checked_mul(measured_sends)
+            .and_then(|span| warmup_micros.checked_add(span))
+            .and_then(|last| last.checked_add(jitter_bound - 1))
+            .ok_or_else(|| "scheduled send time overflows the run clock".to_string())?;
+    } else {
+        warmup_micros
+            .checked_add(jitter_bound - 1)
+            .ok_or_else(|| "warmup send time overflows the run clock".to_string())?;
+    }
+    let capacity = usize::try_from(u64::from(config.rooms) * u64::from(config.players_per_room))
+        .map_err(|_| "peer count exceeds this host".to_string())?;
 
     let mut plans = Vec::with_capacity(capacity);
     for room in 0..config.rooms {
@@ -391,7 +527,7 @@ pub fn build_plans(config: &RunConfig) -> Vec<SenderPlan> {
             // Seed the per-sender stream from the name so renaming a sender
             // (a workload change) re-derives jitter rather than silently
             // reusing another sender's stream.
-            let mut state = config
+            let state = config
                 .seed
                 .wrapping_mul(0x100_0000_01B2)
                 .wrapping_add(name.len() as u64)
@@ -400,26 +536,14 @@ pub fn build_plans(config: &RunConfig) -> Vec<SenderPlan> {
                     .enumerate()
                     .map(|(index, byte)| (byte as u64).wrapping_mul(1 + index as u64))
                     .fold(config.seed, u64::wrapping_add);
-            let mut sends =
-                Vec::with_capacity(usize::try_from(warmup_sends + measured_sends).unwrap_or(0));
-            for index in 0..warmup_sends {
-                let slot = warmup_micros / (warmup_sends + 1);
-                let intended = slot * (index + 1) + splitmix64(&mut state) % jitter_bound;
-                sends.push(ScheduledSend {
-                    seq: index,
-                    intended_us: intended,
-                    phase: Phase::Warmup,
-                });
-            }
-            for index in 0..measured_sends {
-                let intended =
-                    warmup_micros + period * (index + 1) + splitmix64(&mut state) % jitter_bound;
-                sends.push(ScheduledSend {
-                    seq: warmup_sends + index,
-                    intended_us: intended,
-                    phase: Phase::Measured,
-                });
-            }
+            let sends = SendSchedule {
+                warmup_count: warmup_sends,
+                count,
+                warmup_us: warmup_micros,
+                period_us: period,
+                initial_state: state,
+                shifts: Vec::new(),
+            };
             plans.push(SenderPlan {
                 name,
                 room,
@@ -428,5 +552,204 @@ pub fn build_plans(config: &RunConfig) -> Vec<SenderPlan> {
             });
         }
     }
-    plans
+    Ok(plans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn frozen_eager_sends(config: &RunConfig) -> Vec<Vec<ScheduledSend>> {
+        let period = config.period_micros();
+        let warmup_sends = config.warmup_sends_per_sender();
+        let measured_sends = config.measured_sends_per_sender();
+        let warmup_micros = micros(config.warmup);
+        let jitter_bound = jitter_bound_micros(period);
+        let capacity =
+            usize::try_from(u64::from(config.rooms) * u64::from(config.players_per_room))
+                .unwrap_or(0);
+
+        let mut plans = Vec::with_capacity(capacity);
+        for room in 0..config.rooms {
+            for player in 0..config.players_per_room {
+                let name = RunConfig::peer_name(room, player);
+                // Seed the per-sender stream from the name so renaming a sender
+                // (a workload change) re-derives jitter rather than silently
+                // reusing another sender's stream.
+                let mut state = config
+                    .seed
+                    .wrapping_mul(0x100_0000_01B2)
+                    .wrapping_add(name.len() as u64)
+                    ^ name
+                        .bytes()
+                        .enumerate()
+                        .map(|(index, byte)| (byte as u64).wrapping_mul(1 + index as u64))
+                        .fold(config.seed, u64::wrapping_add);
+                let mut sends =
+                    Vec::with_capacity(usize::try_from(warmup_sends + measured_sends).unwrap_or(0));
+                for index in 0..warmup_sends {
+                    let slot = warmup_micros / (warmup_sends + 1);
+                    let intended = slot * (index + 1) + splitmix64(&mut state) % jitter_bound;
+                    sends.push(ScheduledSend {
+                        seq: index,
+                        intended_us: intended,
+                        phase: Phase::Warmup,
+                    });
+                }
+                for index in 0..measured_sends {
+                    let intended = warmup_micros
+                        + period * (index + 1)
+                        + splitmix64(&mut state) % jitter_bound;
+                    sends.push(ScheduledSend {
+                        seq: warmup_sends + index,
+                        intended_us: intended,
+                        phase: Phase::Measured,
+                    });
+                }
+                plans.push(sends);
+            }
+        }
+        plans
+    }
+
+    #[test]
+    fn indexed_schedule_matches_frozen_eager_timeline_and_churn() {
+        for seed in [0, 1, u64::MAX] {
+            for (warmup_us, duration_us, rate) in [
+                (0, 0, 20.0),
+                (1, 49999, 20.0),
+                (123456, 234567, 30.0),
+                (20, 13, 1_000_000.0),
+                (200000, 1000000, 20.0),
+            ] {
+                let mut config = crate::scenario_config(crate::config::Encoding::V3Json);
+                config.seed = seed;
+                config.rooms = 2;
+                config.players_per_room = 3;
+                config.warmup = Duration::from_micros(warmup_us);
+                config.duration = Duration::from_micros(duration_us);
+                config.send_rate_per_sender = rate;
+                let mut shapes = vec![ChurnSchedule::None];
+                if duration_us == 1000000 {
+                    shapes.push(ChurnSchedule::ReconnectBurst {
+                        fraction_percent: 50,
+                        start: Duration::from_millis(400),
+                        window: Duration::from_millis(150),
+                    });
+                    shapes.push(ChurnSchedule::RoomReplacement {
+                        fraction_percent: 100,
+                        start: Duration::from_millis(400),
+                        window: Duration::from_millis(150),
+                        interval: Duration::from_millis(300),
+                    });
+                }
+                for shape in shapes {
+                    config.churn = shape;
+                    let expected = frozen_eager_sends(&config);
+                    let (plans, churn) = build_run_shape(&config).expect("valid shape");
+                    for (plan, mut expected) in plans.iter().zip(expected) {
+                        let shifts = churn.victim_instants(&plan.name);
+                        for send in &mut expected {
+                            let original = send.intended_us;
+                            send.intended_us = original.saturating_add(
+                                shifts
+                                    .iter()
+                                    .filter(|(at, _)| original >= *at)
+                                    .map(|(at, reconnect)| reconnect.saturating_sub(*at))
+                                    .sum(),
+                            );
+                        }
+                        assert_eq!(plan.sends.iter().collect::<Vec<_>>(), expected);
+                        assert_eq!(plan.sends.last(), expected.last().copied());
+                        assert_eq!(
+                            plan.sends.first_measured_seq(),
+                            expected
+                                .iter()
+                                .find(|send| send.phase == Phase::Measured)
+                                .map(|send| send.seq)
+                        );
+                        for index in (0..expected.len()).rev() {
+                            assert_eq!(plan.sends.get(index), Some(expected[index]));
+                        }
+                        assert_eq!(plan.sends.get(expected.len()), None);
+                        assert_eq!(plan.sends.get(usize::MAX), None);
+                        assert_eq!(plan.sends.clone().iter().collect::<Vec<_>>(), expected);
+                        let mut one = plan.sends.iter();
+                        let mut two = plan.sends.iter();
+                        assert_eq!(one.next(), two.next());
+                        one.next();
+                        assert_eq!(two.next(), expected.get(1).copied());
+                        assert_eq!(one.len(), expected.len().saturating_sub(2));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn upper_c3_schedule_retains_no_per_send_storage() {
+        let mut config = crate::scenario_config(crate::config::Encoding::V3Json);
+        config.rooms = 999;
+        config.players_per_room = 16;
+        config.warmup = Duration::from_secs(120);
+        config.duration = Duration::from_secs(600);
+        config.send_rate_per_sender = 60.0;
+        let (plans, _) = build_run_shape(&config).expect("upper shape without eager sends");
+        assert_eq!(plans.len(), 15984);
+        let count = config.warmup_sends_per_sender() + config.measured_sends_per_sender();
+        for plan in plans {
+            assert_eq!(u64::try_from(plan.sends.len()).expect("count"), count);
+            assert_eq!(plan.sends.shifts.capacity(), 0);
+            assert_eq!(plan.sends.last().expect("last").seq, count - 1);
+        }
+    }
+
+    #[test]
+    fn unrepresentable_schedules_and_impossible_wave_counts_are_refused() {
+        let mut config = crate::scenario_config(crate::config::Encoding::V3Json);
+        for rate in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MIN_POSITIVE] {
+            config.send_rate_per_sender = rate;
+            assert!(build_run_shape(&config).is_err());
+        }
+        config.send_rate_per_sender = 20.0;
+        for (rooms, players) in [(0, 2), (1000, 2), (1, 0), (1, 1)] {
+            config.rooms = rooms;
+            config.players_per_room = players;
+            assert!(build_run_shape(&config).is_err());
+        }
+        config.rooms = 1;
+        config.players_per_room = 2;
+        for shape in [
+            ChurnSchedule::ReconnectBurst {
+                fraction_percent: 100,
+                start: Duration::from_millis(300),
+                window: Duration::from_nanos(1),
+            },
+            ChurnSchedule::RoomReplacement {
+                fraction_percent: 100,
+                start: Duration::from_millis(300),
+                window: Duration::from_nanos(1),
+                interval: Duration::from_millis(100),
+            },
+        ] {
+            config.churn = shape;
+            assert!(build_run_shape(&config).is_err());
+        }
+        config.churn = ChurnSchedule::None;
+        config.duration = Duration::from_secs(u64::MAX);
+        assert!(build_run_shape(&config).is_err());
+        config.duration = Duration::from_secs(1);
+        config.send_rate_per_sender = 1_000_000.0;
+        config.warmup = Duration::from_micros(u64::MAX);
+        config.duration = Duration::from_micros(1);
+        assert!(build_run_shape(&config).is_err());
+        config.warmup = Duration::ZERO;
+        config.duration = Duration::from_micros(u64::MAX);
+        config.churn = ChurnSchedule::RoomReplacement {
+            fraction_percent: 100,
+            start: Duration::from_micros(1),
+            window: Duration::from_micros(1),
+            interval: Duration::from_micros(2),
+        };
+        assert!(build_run_shape(&config).is_err());
+    }
 }
