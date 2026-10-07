@@ -721,6 +721,69 @@ fn assert_drain_ready(value: &serde_json::Value, role: &str) -> String {
 }
 
 #[cfg(unix)]
+fn assert_partial_sync(value: &serde_json::Value, role: &str) -> String {
+    assert_eq!(value["role"].as_str(), Some(role));
+    let id = value["player_id"]
+        .as_str()
+        .expect("synchronizing player identity");
+    assert!(uuid::Uuid::parse_str(id).is_ok());
+    assert_eq!(
+        value["phase"].as_str(),
+        Some("Synchronizing"),
+        "actual partial handshake: {value}"
+    );
+    for key in ["current_frame", "game_frame", "frames_advanced"] {
+        assert_eq!(
+            value[key].as_u64(),
+            Some(0),
+            "no gameplay before fault: {value}"
+        );
+    }
+    let progress = value["sync_progress"]
+        .as_array()
+        .expect("actual Synchronizing event");
+    assert_eq!(progress.len(), 3);
+    let count = progress[0].as_u64().expect("successful sync steps");
+    let total = progress[1].as_u64().expect("required sync steps");
+    assert!(
+        count > 0 && count < total,
+        "actual unfinished synchronization: {value}"
+    );
+    assert!(progress[2].as_u64().is_some_and(|requests| requests > 0));
+    for key in ["sent", "received"] {
+        assert!(
+            value[key].as_u64().is_some_and(|count| count > 0),
+            "bidirectional handshake transport: {value}"
+        );
+    }
+    id.to_string()
+}
+
+#[cfg(unix)]
+fn assert_sync_ready(value: &serde_json::Value, role: &str) -> String {
+    let id = assert_partial_sync(value, role);
+    for key in ["sent_ledger", "received_ledger"] {
+        assert!(value[key].as_u64().is_some_and(|count| count > 0));
+    }
+    for key in [
+        "malformed",
+        "wrong_destination",
+        "unknown_sender",
+        "inbound_overflow",
+        "outbound_overflow",
+        "encode_failures",
+        "completion_underflow",
+    ] {
+        assert_eq!(
+            value[key].as_u64(),
+            Some(0),
+            "clean pre-fault {key}: {value}"
+        );
+    }
+    id
+}
+
+#[cfg(unix)]
 fn shutdown_failure(output: &Output) -> Result<(), &'static str> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     if output.status.success() {
@@ -787,6 +850,17 @@ fn shutdown_outcome_requires_the_advisory_and_authoritative_close() {
 #[cfg(unix)]
 #[test]
 fn graceful_server_drain_fails_active_games_and_same_port_restart_completes_new_games() {
+    run_shutdown_probe("drain-probe", true);
+}
+
+#[cfg(unix)]
+#[test]
+fn websocket_close_during_partial_fortress_synchronization_fails_causally() {
+    run_shutdown_probe("sync-close-probe", false);
+}
+
+#[cfg(unix)]
+fn run_shutdown_probe(mode: &str, restart: bool) {
     let _serial = LIVE_CELLS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -801,7 +875,7 @@ fn graceful_server_drain_fails_active_games_and_same_port_restart_completes_new_
         Command::new(peer_bin)
             .args([&url, "creator"])
             .arg(&room)
-            .arg("drain-probe")
+            .arg(mode)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -820,7 +894,7 @@ fn graceful_server_drain_fails_active_games_and_same_port_restart_completes_new_
             .args([&url, "joiner"])
             .arg(&room)
             .arg(code.trim())
-            .arg("drain-probe")
+            .arg(mode)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -844,7 +918,11 @@ fn graceful_server_drain_fails_active_games_and_same_port_restart_completes_new_
             let value = serde_json::from_slice(&fs::read(path).expect("barrier bytes"))
                 .expect("atomic barrier JSON");
             println!("pre-drain {role}: {value}");
-            assert_drain_ready(&value, role)
+            if mode == "drain-probe" {
+                assert_drain_ready(&value, role)
+            } else {
+                assert_sync_ready(&value, role)
+            }
         })
         .collect();
     assert_ne!(old_ids[0], old_ids[1]);
@@ -873,6 +951,27 @@ fn graceful_server_drain_fails_active_games_and_same_port_restart_completes_new_
     let joiner_output = joiner.output().expect("joiner output");
     assert_shutdown_failure("creator", &creator_output);
     assert_shutdown_failure("joiner", &joiner_output);
+    if mode == "sync-close-probe" {
+        for ((role, output), old_id) in [("creator", &creator_output), ("joiner", &joiner_output)]
+            .into_iter()
+            .zip(&old_ids)
+        {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let evidence: Vec<_> = stderr
+                .lines()
+                .filter_map(|line| line.strip_prefix("sync shutdown evidence: "))
+                .collect();
+            assert_eq!(evidence.len(), 1, "one close-time phase observation");
+            let value = serde_json::from_str(evidence[0]).expect("close-time synchronization JSON");
+            assert_eq!(
+                &assert_partial_sync(&value, role),
+                old_id,
+                "same peer at actual close"
+            );
+            println!("close-time {role}: {value}");
+        }
+    }
+
     assert!(
         wait_for(
             || server.0.try_wait().expect("server drain status").is_some(),
@@ -884,6 +983,10 @@ fn graceful_server_drain_fails_active_games_and_same_port_restart_completes_new_
         server.0.wait().expect("reap drained server").success(),
         "graceful server exits successfully"
     );
+    if !restart {
+        println!("MID_SYNC_CLOSE fortress-native: both partially synchronized peers observed close4000/server_shutdown and exited1");
+        return;
+    }
     let mut restarted = server_command(&server_bin, port)
         .spawn()
         .expect("restart exact same port");

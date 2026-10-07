@@ -288,8 +288,9 @@ complete.
   healthy throughput gates while both peers drain outbound work and exit successfully.
   Session 367 adds a real graceful drain during active native Fortress games,
   followed by fresh healthy games after a restart on the same port.
-  Restore exercisability, handshake-close, and inbound-overflow cells remain
-  open in #741.
+  Session 368 adds a coded WebSocket close during partial native Fortress
+  synchronization, with the phase verified again at the close.
+  Restore exercisability and inbound-overflow cells remain open in #741.
 
 For each finding:
 

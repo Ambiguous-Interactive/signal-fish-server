@@ -65,6 +65,8 @@ struct Shared {
     admitted: VecDeque<Instant>,
     inbound: VecDeque<(Uuid, Message)>,
     hold_gameplay_inputs: bool,
+    hold_sync_replies_after_first: bool,
+    sync_reply_released: bool,
     counters: RelayCounters,
     observed_client_sent: u64,
     peak_queue_depth: usize,
@@ -96,6 +98,14 @@ pub struct RelaySocket {
 }
 
 impl RelaySocket {
+    /// Keep synchronization incomplete while requests and controls still flow.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn allow_first_sync_reply_only(&self) {
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.hold_sync_replies_after_first = true;
+        }
+    }
+
     /// Withhold gameplay inputs until frames 0..3 were locally predicted. Sync
     /// controls still flow, including when startup already contains input backlog.
     #[cfg(not(target_arch = "wasm32"))]
@@ -525,10 +535,17 @@ impl NonBlockingSocket<Uuid> for RelaySocket {
             let Some((from, message)) = shared.inbound.pop_front() else {
                 break;
             };
-            if shared.hold_gameplay_inputs
-                && fortress_rollback::__internal::message_metadata(&message).1
-                    == fortress_rollback::MessageKind::Input
+            let kind = fortress_rollback::__internal::message_metadata(&message).1;
+            if shared.hold_sync_replies_after_first
+                && kind == fortress_rollback::MessageKind::SyncReply
             {
+                if shared.sync_reply_released {
+                    shared.inbound.push_back((from, message));
+                    continue;
+                }
+                shared.sync_reply_released = true;
+            }
+            if shared.hold_gameplay_inputs && kind == fortress_rollback::MessageKind::Input {
                 shared.inbound.push_back((from, message));
             } else {
                 received.push((from, message));
@@ -578,29 +595,104 @@ fn record_sequence(ledger: &mut RelayLedger, sequence: u64) {
 mod tests {
     use super::*;
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_message(body: serde_json::Value) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "header": {"sentinel": [0, 0], "protocol_version": 2, "flags": 0, "conn_id": 1},
+            "body": body,
+        }))
+        .expect("pinned Fortress message shape")
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn sync_message(reply: bool, nonce: u32) -> Message {
+        let kind = if reply { "SyncReply" } else { "SyncRequest" };
+        let token = if reply {
+            "random_reply"
+        } else {
+            "random_request"
+        };
+        test_message(serde_json::json!({(kind): {
+            (token): nonce, "min_compat_version": 2, "features": 0,
+            "config": {"num_players": 2, "input_bytes_per_player": 8,
+                "fps": 60, "max_prediction": 8, "desync_interval": 0},
+            "config_digest": 0,
+        }}))
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn synchronization_gate_releases_one_reply_and_preserves_requests_and_bounded_fifo() {
+        let peer = Uuid::new_v4();
+        let first = sync_message(true, 1);
+        let second = sync_message(true, 2);
+        let request = sync_message(false, 3);
+        let initial = [
+            (peer, first.clone()),
+            (peer, second.clone()),
+            (peer, request.clone()),
+        ];
+        let mut normal = RelaySocket::default();
+        normal
+            .shared
+            .lock()
+            .expect("normal")
+            .inbound
+            .extend(initial.clone());
+        assert_eq!(normal.receive_all_messages(), initial.to_vec());
+        let mut gated = RelaySocket::default();
+        gated.allow_first_sync_reply_only();
+        gated.shared.lock().expect("gated").inbound.extend(initial);
+        assert_eq!(
+            gated.receive_all_messages(),
+            vec![(peer, first), (peer, request.clone())]
+        );
+        gated.allow_first_sync_reply_only();
+        assert!(
+            gated.receive_all_messages().is_empty(),
+            "one reply across callbacks and reactivation"
+        );
+        gated
+            .shared
+            .lock()
+            .expect("gated")
+            .inbound
+            .push_back((peer, request.clone()));
+        assert_eq!(gated.receive_all_messages(), vec![(peer, request)]);
+        let held: Vec<_> = std::iter::once((peer, second))
+            .chain(
+                (3..=u32::try_from(MAX_INBOUND_FRAMES + 1).expect("test bound"))
+                    .map(|nonce| (peer, sync_message(true, nonce))),
+            )
+            .collect();
+        gated.shared.lock().expect("gated").inbound = held.clone().into();
+        for _ in 0..2 {
+            assert!(gated.receive_all_messages().is_empty());
+            assert_eq!(
+                gated
+                    .shared
+                    .lock()
+                    .expect("gated")
+                    .inbound
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                held
+            );
+        }
+        assert_eq!(held.len(), MAX_INBOUND_FRAMES);
+    }
+
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn startup_input_backlog_waits_for_prediction_while_sync_controls_flow() {
-        let message = |body| {
-            serde_json::from_value::<Message>(serde_json::json!({
-                "header": {"sentinel": [0, 0], "protocol_version": 2,
-                    "flags": 0, "conn_id": 1},
-                "body": body,
-            }))
-            .expect("pinned Fortress message shape")
-        };
         let input = |start| {
-            message(serde_json::json!({"Input": {
+            test_message(serde_json::json!({"Input": {
                 "peer_connect_status": [], "start_frame": start,
                 "ack_frame": -1, "bytes": [31],
             }}))
         };
-        let sync = message(serde_json::json!({"SyncReply": {
-            "random_reply": 1, "min_compat_version": 2, "features": 0,
-            "config": {"num_players": 2, "input_bytes_per_player": 8,
-                "fps": 60, "max_prediction": 8, "desync_interval": 0},
-            "config_digest": 0,
-        }}));
+        let sync = sync_message(true, 1);
         let peer = Uuid::new_v4();
         let first = input(0);
         let second = input(1);
