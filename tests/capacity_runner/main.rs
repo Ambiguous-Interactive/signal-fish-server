@@ -623,9 +623,9 @@ fn pressure_overlay() -> serde_json::Value {
 }
 
 /// Regression for issue #783: the 96-byte control failed the
-/// minimum-100-omission check on macOS. Use the slow-reader fixture's
-/// 16 KiB application payload
-/// for both lossy classes, with the same read pause and offered rate.
+/// minimum-100-omission check on macOS. Both lossy classes use 16 KiB
+/// application payloads. Pace about 600 offered frames across a three-second pause.
+/// The slower declared rate reduces generator work during this pressure control.
 /// Every omission must carry its exact gap report, the run must stay valid,
 /// and the server counter must equal the oracle's gap coverage.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -643,10 +643,10 @@ async fn lossy_pressure_preserves_exact_gap_accounting_and_replay() {
         config.delivery_class = delivery_class;
         config.latest_keys_per_sender = 1;
         config.payload_bytes = PAYLOAD_BYTES;
-        config.send_rate_per_sender = 1_000.0;
+        config.send_rate_per_sender = 200.0;
         config.warmup = Duration::from_millis(50);
-        config.duration = Duration::from_millis(800);
-        config.pause_reads = Some(Duration::from_millis(600));
+        config.duration = Duration::from_millis(3_500);
+        config.pause_reads = Some(Duration::from_secs(3));
         config.generator_lag_bound = Duration::from_millis(500);
         config.drain_grace = Duration::from_secs(2);
         config.server_overlay = pressure_overlay();
@@ -666,7 +666,7 @@ async fn lossy_pressure_preserves_exact_gap_accounting_and_replay() {
         );
         assert!(
             summary.totals.gap_covered >= 100,
-            "the 600 ms read pause must produce at least 100 policy omissions: {diagnostic}"
+            "the three-second read pause must produce at least 100 policy omissions: {diagnostic}"
         );
         assert!(
             summary.totals.receipts < summary.totals.scheduled,

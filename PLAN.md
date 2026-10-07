@@ -351,7 +351,11 @@ runner cells share a plain-cargo test lock to prevent generator contention.
 
 Fresh main CI on `ff55fed3` failed the Windows Latest pressure control: the
 generator exceeded its 500-ms lag bound and received no measured frames.
-The larger payload and test lock did not resolve this failure. The runner
+The larger payload and test lock did not resolve this failure. PR CI on
+`c7ec7c66` then recorded read/gap progress but saturated the generator on
+Linux and coverage at 1,000 sends/s. The fault control now uses 200 sends/s
+with a three-second pause and 3.5-second measurement. It retains about 600
+offered paused frames, 16-KiB payloads, and the 500-ms lag bound. The runner
 now polls reads alongside a persistent write and wakes independently for
 read resumption and lifecycle deadlines. It cancels and awaits owned tasks
 before artifact capture. Deterministic controls cover pending writes,
