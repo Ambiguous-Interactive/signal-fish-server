@@ -2542,3 +2542,30 @@ never advances). Presence pins: the spawned binary's run asserts all eight
 new series as u64 in every interval sample on every platform, and the
 socket-memory pair as recorded on Linux (null elsewhere, mirroring the
 CPU-pair contract); renaming any rendered series fails the render pins.
+
+## C3 measurement prerequisite review — 2026-10-07
+
+In the runner shipped by
+[PR #768](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/768),
+the latency oracle subtracted completed socket-send time from receipt time.
+This excluded generator lag and socket-send wait from the
+scheduled-send SLO. Both histogram paths also clipped samples above 60 seconds.
+[#774](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/774)
+fixes this measurement defect. No server runtime defect is claimed.
+
+Schema 7 uses intended send time for aggregate, per-recipient, and histogram
+latency. Histogram bounds cover the observed range; the summary maximum is
+exact. Replay rejects earlier schemas so historical results cannot silently
+acquire corrected semantics. The deterministic control covers all three delivery
+classes, warm-up exclusion, delayed sends, receipt before completed send, and
+70-second stalls. The real-socket pause control requires the delay in each
+recipient's latency and verifies replay equality. The deterministic test failed
+on the old calculation before the fix.
+
+Large C3 runs remain gated on
+[#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775)
+(generator memory) and
+[#776](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/776)
+(effective configuration and payload-size provenance). Required encoding and
+idle-lobby cohorts, constrained-host setup, and external-host resource collection
+also remain. No capacity point or deployment claim is accepted by this review.

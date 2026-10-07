@@ -145,7 +145,8 @@ pub struct RecipientOutcome {
     pub latency_us: LatencyStats,
 }
 
-/// One-way latency stats over the measured window (microseconds).
+/// Scheduled application send to receipt latency over the measured window
+/// (microseconds). Percentiles use HDR buckets; max is the exact sample.
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct LatencyStats {
     pub samples: u64,
@@ -253,7 +254,7 @@ impl GapViolations {
 }
 
 /// One-way latency samples over the measured window, per recipient: for
-/// every receipt, the receipt time minus the send time of the same
+/// every receipt, the receipt time minus the intended send time of the same
 /// `(sender, seq)` delivery. Single source for the summary percentiles (run
 /// total and per recipient) and the histogram artifact, so they can never
 /// disagree.
@@ -269,7 +270,7 @@ fn latency_pairs(records: &RunRecords) -> Vec<(String, u64)> {
             if sent.phase == Phase::Measured {
                 pairs.push((
                     receipt.recipient.clone(),
-                    receipt.received_us.saturating_sub(sent.sent_us),
+                    receipt.received_us.saturating_sub(sent.intended_us),
                 ));
             }
         }
@@ -285,26 +286,31 @@ pub fn latency_samples(records: &RunRecords) -> Vec<u64> {
         .collect()
 }
 
+/// The shared histogram for summary percentiles and the artifact. Size the
+/// range from the observations so long stalls remain visible.
+pub fn latency_histogram(samples: &[u64]) -> Histogram<u64> {
+    let highest = samples.iter().copied().max().unwrap_or(0).max(2);
+    let mut histogram =
+        Histogram::<u64>::new_with_bounds(1, highest, 3).expect("latency histogram range");
+    for sample in samples {
+        histogram
+            .record(*sample)
+            .expect("sample fits observed range");
+    }
+    histogram
+}
+
 /// Percentile helper over microsecond samples (histogram-backed).
 fn percentiles(samples: &[u64]) -> (u64, u64, u64, u64) {
     if samples.is_empty() {
         return (0, 0, 0, 0);
     }
-    // One-way latencies below 60 s fit every capacity cell; sigfig 3 keeps
-    // the histogram small while staying well inside run-to-run noise.
-    // Saturate (never fail) on a sample beyond the ceiling: the summary
-    // carries the same values via max/percentiles, and a >60 s stall lands
-    // at the ceiling instead of aborting the verdict.
-    let mut histogram =
-        Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).expect("fixed latency histogram");
-    for sample in samples {
-        histogram.saturating_record(*sample);
-    }
+    let histogram = latency_histogram(samples);
     (
         histogram.value_at_quantile(0.5),
         histogram.value_at_quantile(0.95),
         histogram.value_at_quantile(0.99),
-        histogram.max(),
+        samples.iter().copied().max().unwrap_or(0),
     )
 }
 

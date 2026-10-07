@@ -429,6 +429,22 @@ target.
 
 ### C3 — Measure capacity curves and resource costs
 
+Before large capacity runs, close the measurement prerequisites found in the
+2026-10-07 audit:
+
+- [#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775):
+  bound generator memory and preserve exact validation across long runs.
+- [#776](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/776):
+  record effective server configuration and exact application/wire sizes.
+- Extend the runner for the required encoding cohorts and idle-lobby cells.
+  The current runner supports v2/v3 JSON relay rooms only.
+- Set and verify the server's two-CPU affinity/quota and 4-GiB limit. Collect
+  host-side resources for external endpoints; keep the generator outside
+  those limits.
+
+Schema-7 latency starts at the scheduled send (#774). Earlier schemas omit
+generator delay and clip long stalls; do not use them for the 50-ms gate.
+
 - [ ] Use 2-, 8-, and 16-player rooms, 96-byte and 1-KiB application payloads,
   and 30/60 messages per player per second for relay cells. Record encoded
   sizes and recipient deliveries, not just ingress message counts.

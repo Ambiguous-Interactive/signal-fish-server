@@ -315,6 +315,35 @@ async fn injected_send_pause_lands_in_scheduled_send_latency_without_reducing_of
         "the pause must appear in scheduled-send lag, got max {:?}",
         outcome.summary.generator_lag_us
     );
+    assert!(
+        outcome.summary.latency_us.max_us >= 250_000,
+        "the pause must appear in scheduled-send latency: {:?}",
+        outcome.summary.latency_us
+    );
+    for recipient in &outcome.summary.per_recipient {
+        assert!(
+            recipient.latency_us.max_us >= 250_000,
+            "every recipient must observe the scheduled delay: {recipient:?}"
+        );
+    }
+    let replayed = artifacts::replay(output.path()).expect("replay pause run");
+    assert_eq!(
+        serde_json::to_value(&replayed).expect("serialize replay"),
+        serde_json::to_value(&outcome.summary).expect("serialize summary")
+    );
+    let manifest_path = output.path().join(artifacts::MANIFEST_FILE);
+    let mut manifest = artifacts::read_manifest(output.path()).expect("read pause manifest");
+    assert_eq!(manifest.schema_version, 7);
+    manifest.schema_version = 6;
+    std::fs::write(
+        manifest_path,
+        serde_json::to_vec(&manifest).expect("serialize old-schema manifest"),
+    )
+    .expect("write old-schema manifest");
+    assert_eq!(
+        artifacts::replay(output.path()).expect_err("reject old latency semantics"),
+        "unsupported artifact schema 6 (expected 7)"
+    );
 }
 
 /// A generator that falls past its schedule invalidates the run with the
@@ -776,6 +805,79 @@ async fn unsupported_format_experiment_reports_cross_format_omissions_over_real_
 // Oracle negative controls (deterministic, no server): the detector must
 // catch each contract violation with its exact, named reason.
 // ---------------------------------------------------------------------------
+
+/// Generator delay belongs in every latency view, including delays beyond
+/// the old histogram ceiling. The actual send may finish after receipt.
+#[test]
+fn scheduled_latency_includes_generator_delay_in_every_view() {
+    for class in [
+        DeliveryClass::Reliable,
+        DeliveryClass::Latest,
+        DeliveryClass::Volatile,
+    ] {
+        for delay in [0, 40_000, 80_000, 70_000_000] {
+            let context = unit_context_with_class(class);
+            let mut records = complete_records(&context.plans);
+            for sent in &mut records.sent {
+                sent.sent_us += delay + 20;
+            }
+            for receipt in &mut records.receipts {
+                receipt.received_us += delay;
+                if receipt.sender == "r0p0" {
+                    receipt.received_us += 1_000;
+                }
+            }
+            // Exclude one sender's warm-up frames from all latency views.
+            for sent in &mut records.sent {
+                if sent.sender == "r0p0" {
+                    sent.phase = schedule::Phase::Warmup;
+                }
+            }
+            let samples = oracle::latency_samples(&records);
+            // Three measured senders each send four frames to three peers.
+            assert_eq!(samples.len(), 36);
+            assert!(
+                samples.iter().all(|sample| *sample == delay + 8),
+                "class={class:?}, delay={delay}, samples={samples:?}"
+            );
+            let summary = oracle::summarize(
+                &context.plans,
+                &context.roster,
+                &records,
+                100_000_000,
+                class,
+                &ChurnPlan::default(),
+                None,
+            );
+            assert!(summary.valid, "{class:?}: {:?}", summary.reasons);
+            assert_eq!(summary.latency_us.samples, 36);
+            for recipient in &summary.per_recipient {
+                // Peer 0 receives all three measured streams; the others
+                // receive two measured streams and one excluded warmup stream.
+                let expected = if recipient.recipient == "r0p0" { 12 } else { 8 };
+                assert_eq!(recipient.latency_us.samples, expected, "{recipient:?}");
+            }
+            let output = tempfile::tempdir().expect("histogram directory");
+            artifacts::write_histogram(output.path(), &samples).expect("write histogram");
+            let raw = std::fs::read(output.path().join(artifacts::HISTOGRAM_FILE))
+                .expect("read histogram");
+            let histogram: hdrhistogram::Histogram<u64> =
+                hdrhistogram::serialization::Deserializer::new()
+                    .deserialize(&mut std::io::Cursor::new(raw))
+                    .expect("decode histogram");
+            for stats in std::iter::once(&summary.latency_us)
+                .chain(summary.per_recipient.iter().map(|peer| &peer.latency_us))
+            {
+                assert_eq!(stats.max_us, delay + 8);
+                assert_eq!(stats.p50_us, histogram.value_at_quantile(0.5));
+                assert_eq!(stats.p95_us, histogram.value_at_quantile(0.95));
+                assert_eq!(stats.p99_us, histogram.value_at_quantile(0.99));
+            }
+            assert_eq!(histogram.len(), 36);
+            assert!(histogram.equivalent(histogram.max(), delay + 8));
+        }
+    }
+}
 
 /// A missing delivery invalidates the run naming the exact first gap.
 #[test]
