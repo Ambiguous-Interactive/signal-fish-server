@@ -33,7 +33,9 @@ use signal_fish_server::protocol::DeliveryClass as WireDeliveryClass;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::artifacts::{self, BuildIdentity, IntervalSample, ServerIdentity, WorkloadShape};
+use crate::artifacts::{
+    self, BuildIdentity, ConfigProvenance, IntervalSample, ServerIdentity, WorkloadShape,
+};
 use crate::config::{
     count_u64, count_usize, default_latest_keys, micros, ChurnSchedule, DeliveryClass, Encoding,
     Experiment, RunConfig, SendPause,
@@ -46,7 +48,9 @@ use crate::records::{
 };
 use crate::schedule::{build_run_shape, Phase, SenderPlan};
 use crate::websocket_test_helpers;
-use crate::websocket_test_helpers::server_process::{spawn_server, ServerProcess};
+use crate::websocket_test_helpers::server_process::{
+    effective_server_config, spawn_server, ServerProcess,
+};
 use crate::websocket_test_helpers::WsStream;
 
 /// Timeout for one client connect or handshake step (saturation-tolerant
@@ -281,6 +285,18 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     // requires a spawned server: an external endpoint is outside this
     // process's control, and claiming "server terminated" over a live
     // endpoint would write a false fact into the artifacts.
+    if config.endpoint.is_none() {
+        let effective = effective_server_config(0, &config.server_overlay)?;
+        if !effective["security"]["app_auth_path"].is_null()
+            || !effective["security"]["connect_token"]["public_key_path"].is_null()
+        {
+            return Err(
+                "capacity provenance does not support file-backed app_auth_path or \
+                 connect_token.public_key_path; use inline values"
+                    .to_string(),
+            );
+        }
+    }
     if let Some(kill_after) = config.kill_server_after {
         if config.endpoint.is_some() {
             return Err(
@@ -414,16 +430,27 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
             binary_sha256: None,
             binary_bytes: None,
             config_overlay_sha256: overlay_sha256(&config)?,
+            config_provenance: ConfigProvenance::UnknownExternal,
         },
         None => {
-            let (binary_sha256, binary_bytes) =
-                diagnostics::sha256_file(env!("CARGO_BIN_EXE_signal-fish-server"))?;
+            let (pid, binary_sha256, binary_bytes, config_provenance) = {
+                let slot = server_slot.lock().await;
+                let server = slot.as_ref().expect("spawned server exists during setup");
+                let (binary_sha256, binary_bytes) = diagnostics::sha256_file(server.binary_path())?;
+                (
+                    server.pid(),
+                    binary_sha256,
+                    binary_bytes,
+                    ConfigProvenance::spawned(server.port, server.effective_config().clone())?,
+                )
+            };
             ServerIdentity {
                 endpoint: endpoint_base.clone(),
-                pid: server_slot.lock().await.as_ref().map(|server| server.pid()),
+                pid: Some(pid),
                 binary_sha256: Some(binary_sha256),
                 binary_bytes: Some(binary_bytes),
                 config_overlay_sha256: overlay_sha256(&config)?,
+                config_provenance,
             }
         }
     };
@@ -643,8 +670,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
 }
 
 /// SHA-256 of the server config overlay bytes (the overlay itself is part of
-/// the manifest's recorded config, hashed so the effective server posture of
-/// a run is pinned).
+/// the manifest's recorded config). This does not identify an external server.
 fn overlay_sha256(config: &RunConfig) -> Result<String, String> {
     let bytes = serde_json::to_vec(&config.server_overlay)
         .map_err(|error| format!("serialize server overlay: {error}"))?;
