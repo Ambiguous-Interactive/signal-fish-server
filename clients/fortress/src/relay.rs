@@ -98,12 +98,14 @@ pub struct RelaySocket {
 impl RelaySocket {
     /// Withhold gameplay inputs until frames 0..3 were locally predicted. Sync
     /// controls still flow, including when startup already contains input backlog.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn hold_inputs_until_prediction(&self) {
         if let Ok(mut shared) = self.shared.lock() {
             shared.hold_gameplay_inputs = true;
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn observe_local_frame(&self, current_frame: i32) {
         if current_frame >= 4 {
             if let Ok(mut shared) = self.shared.lock() {
@@ -577,6 +579,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(not(target_arch = "wasm32"))]
     fn startup_input_backlog_waits_for_prediction_while_sync_controls_flow() {
         let message = |body| {
             serde_json::from_value::<Message>(serde_json::json!({
