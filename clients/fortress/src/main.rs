@@ -18,6 +18,27 @@ use workload::{apply_requests, input_for_frame, GameConfig, GameState, TARGET_CO
 const PROCESS_DEADLINE: Duration = Duration::from_secs(30);
 const FRAME_TIME: Duration = Duration::from_nanos(1_000_000_000 / 60);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RunMode {
+    Healthy,
+    NegativeOneAdmissionPerCallback,
+}
+
+const NEGATIVE_ACTIVE_CALLBACKS: u64 = 600;
+
+fn admission_budget(mode: RunMode, active: bool) -> usize {
+    if mode == RunMode::NegativeOneAdmissionPerCallback && active {
+        1
+    } else {
+        usize::MAX
+    }
+}
+
+fn hold_initial_rollback_inputs(mode: RunMode, active_callbacks: Option<u64>) -> bool {
+    mode == RunMode::Healthy && active_callbacks.is_some_and(|callbacks| callbacks < 4)
+}
+
 struct PendingInbound {
     from_player: Uuid,
     encoding: GameDataEncoding,
@@ -29,6 +50,8 @@ struct PendingInbound {
 #[derive(Debug, Serialize)]
 struct Report {
     player_id: Uuid,
+    run_mode: RunMode,
+    max_active_admissions_per_callback: u64,
     current_frame: i32,
     confirmed_frame: i32,
     game_frame: i32,
@@ -125,10 +148,19 @@ fn drain_relay(
     client: &mut SignalFishPollingClient<WebSocketTransport>,
     relay: &RelaySocket,
     retries: &mut u64,
-) -> Result<(), String> {
-    while let Some(frame) = relay.take_outbound() {
+    remaining: &mut usize,
+) -> Result<u64, String> {
+    let mut admitted = 0;
+    while *remaining > 0 {
+        let Some(frame) = relay.take_outbound() else {
+            break;
+        };
         match client.send_binary_game_data(frame.payload.clone()) {
-            Ok(()) => relay.mark_admitted(frame),
+            Ok(()) => {
+                relay.mark_admitted(frame);
+                *remaining -= 1;
+                admitted += 1;
+            }
             Err(SignalFishError::SendBufferFull { .. }) => {
                 *retries = retries.saturating_add(1);
                 relay.return_outbound_front(frame);
@@ -137,7 +169,7 @@ fn drain_relay(
             Err(error) => return Err(format!("relay send failed: {error}")),
         }
     }
-    Ok(())
+    Ok(admitted)
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -146,7 +178,19 @@ async fn main() -> Result<(), String> {
     let url = args.next().ok_or("missing server URL")?;
     let role = args.next().ok_or("missing role")?;
     let room_file = args.next().ok_or("missing room-file path")?;
-    let room_code = args.next();
+    let room_code = match role.as_str() {
+        "creator" => None,
+        "joiner" => Some(args.next().ok_or("missing joiner room code")?),
+        _ => return Err("role must be creator or joiner".to_string()),
+    };
+    let run_mode = match args.next().as_deref() {
+        None | Some("healthy") => RunMode::Healthy,
+        Some("negative-one-admission-per-callback") => RunMode::NegativeOneAdmissionPerCallback,
+        _ => return Err("unknown run mode".to_string()),
+    };
+    if args.next().is_some() {
+        return Err("unexpected trailing arguments".to_string());
+    }
 
     let transport = WebSocketTransport::connect_with_timeout(&url, Duration::from_secs(5))
         .await
@@ -170,6 +214,9 @@ async fn main() -> Result<(), String> {
     let mut polling_callbacks_during_run = 0u64;
     let mut running_client_sent_baseline = 0u64;
     let mut running_relay_enqueued_baseline = 0u64;
+    let mut running_client_sent_at_end = None;
+    let mut running_relay_enqueued_at_end = None;
+    let mut max_active_admissions_per_callback = 0;
     let mut local_target_reached = false;
     let mut workload_finished = false;
     let mut peer_left_after_ack = false;
@@ -178,6 +225,12 @@ async fn main() -> Result<(), String> {
     while Instant::now() < deadline {
         let events = client.poll();
         relay.record_client_sent(client.stats().game_data_sent);
+        if local_target_reached && running_client_sent_at_end.is_none() {
+            running_client_sent_at_end = Some(client.stats().game_data_sent);
+        }
+        let cap_active = !local_target_reached;
+        let mut remaining_admissions = admission_budget(run_mode, cap_active);
+        let mut callback_admissions = 0;
         for event in events {
             match event {
                 SignalFishEvent::Authenticated { .. } => {
@@ -259,7 +312,16 @@ async fn main() -> Result<(), String> {
             session = Some(build_session(local_id, remote, relay.clone())?);
         }
 
-        if session.is_some() {
+        /*
+            Delay early inputs within the prediction window so loopback transport
+            reliably exercises rollback.
+        */
+        if session.is_some()
+            && !hold_initial_rollback_inputs(
+                run_mode,
+                running_since.map(|_| polling_callbacks_during_run),
+            )
+        {
             let local_id = local.ok_or("session exists without local id")?;
             let remote = roster
                 .iter()
@@ -279,7 +341,8 @@ async fn main() -> Result<(), String> {
             }
         }
 
-        workload_finished |= local_target_reached && relay.target_received();
+        workload_finished |= local_target_reached
+            && (run_mode == RunMode::NegativeOneAdmissionPerCallback || relay.target_received());
         if let Some(fortress) = session.as_mut() {
             if !workload_finished {
                 fortress.poll_remote_clients();
@@ -305,8 +368,8 @@ async fn main() -> Result<(), String> {
                         running_client_sent_baseline = client.stats().game_data_sent;
                         running_relay_enqueued_baseline = relay.counters().enqueued_outbound;
                     }
-                    let target_reached =
-                        fortress.confirmed_frame().as_i32() >= TARGET_CONFIRMED_FRAMES;
+                    let target_reached = run_mode == RunMode::Healthy
+                        && fortress.confirmed_frame().as_i32() >= TARGET_CONFIRMED_FRAMES;
                     observe_running_phase(
                         target_reached,
                         &mut polling_callbacks_during_run,
@@ -332,7 +395,19 @@ async fn main() -> Result<(), String> {
                 }
             }
 
-            if local_target_reached && !relay.target_enqueued() {
+            if run_mode == RunMode::NegativeOneAdmissionPerCallback
+                && polling_callbacks_during_run >= NEGATIVE_ACTIVE_CALLBACKS
+            {
+                local_target_reached = true;
+                running_finished_at.get_or_insert_with(Instant::now);
+            }
+            if local_target_reached && running_relay_enqueued_at_end.is_none() {
+                running_relay_enqueued_at_end = Some(relay.counters().enqueued_outbound);
+                if run_mode == RunMode::Healthy {
+                    running_client_sent_at_end = Some(client.stats().game_data_sent);
+                }
+            }
+            if run_mode == RunMode::Healthy && local_target_reached && !relay.target_enqueued() {
                 let local_id = local.ok_or("local id disappeared")?;
                 let remote = roster
                     .iter()
@@ -344,9 +419,16 @@ async fn main() -> Result<(), String> {
                     .map_err(|error| format!("enqueue relay target marker: {error}"))?;
             }
 
-            drain_relay(&mut client, &relay, &mut relay_retries)?;
+            callback_admissions += drain_relay(
+                &mut client,
+                &relay,
+                &mut relay_retries,
+                &mut remaining_admissions,
+            )?;
             relay.sample_queue();
-            workload_finished |= local_target_reached && relay.target_received();
+            workload_finished |= local_target_reached
+                && (run_mode == RunMode::NegativeOneAdmissionPerCallback
+                    || relay.target_received());
             if workload_finished
                 && !relay.completion_enqueued()
                 && outbound_is_drained(
@@ -364,7 +446,12 @@ async fn main() -> Result<(), String> {
                 relay
                     .enqueue_completion(&remote)
                     .map_err(|error| format!("enqueue relay completion: {error}"))?;
-                drain_relay(&mut client, &relay, &mut relay_retries)?;
+                callback_admissions += drain_relay(
+                    &mut client,
+                    &relay,
+                    &mut relay_retries,
+                    &mut remaining_admissions,
+                )?;
                 relay.sample_queue();
             }
             let completion_exchange_done = relay.completion_enqueued()
@@ -384,7 +471,12 @@ async fn main() -> Result<(), String> {
                 relay
                     .enqueue_creator_final(&remote)
                     .map_err(|error| format!("enqueue creator final marker: {error}"))?;
-                drain_relay(&mut client, &relay, &mut relay_retries)?;
+                callback_admissions += drain_relay(
+                    &mut client,
+                    &relay,
+                    &mut relay_retries,
+                    &mut remaining_admissions,
+                )?;
                 relay.sample_queue();
             }
             if role == "joiner"
@@ -401,8 +493,17 @@ async fn main() -> Result<(), String> {
                 relay
                     .enqueue_joiner_ack(&remote)
                     .map_err(|error| format!("enqueue joiner final ack: {error}"))?;
-                drain_relay(&mut client, &relay, &mut relay_retries)?;
+                callback_admissions += drain_relay(
+                    &mut client,
+                    &relay,
+                    &mut relay_retries,
+                    &mut remaining_admissions,
+                )?;
                 relay.sample_queue();
+            }
+            if cap_active && running_since.is_some() {
+                max_active_admissions_per_callback =
+                    max_active_admissions_per_callback.max(callback_admissions);
             }
             let relay_stats = relay.counters();
             let client_stats = client.stats();
@@ -420,6 +521,8 @@ async fn main() -> Result<(), String> {
                 let received_ledger = relay.received_ledger();
                 let report = Report {
                     player_id: local.ok_or("local id disappeared")?,
+                    run_mode,
+                    max_active_admissions_per_callback,
                     current_frame: fortress.current_frame().as_i32(),
                     confirmed_frame: fortress.confirmed_frame().as_i32(),
                     game_frame: state.frame,
@@ -436,8 +539,8 @@ async fn main() -> Result<(), String> {
                     checksums_matched: metrics.checksums_matched,
                     events_discarded_total: metrics.events_discarded_total,
                     client_game_data_sent: client_stats.game_data_sent,
-                    client_game_data_sent_during_run: client_stats
-                        .game_data_sent
+                    client_game_data_sent_during_run: running_client_sent_at_end
+                        .ok_or("missing active send boundary")?
                         .saturating_sub(running_client_sent_baseline),
                     client_game_data_received: client_stats.game_data_received,
                     client_messages_undecodable: client_stats.messages_undecodable,
@@ -445,8 +548,8 @@ async fn main() -> Result<(), String> {
                     peak_pipeline_queue_depth: relay.peak_queue_depth(),
                     peak_oldest_queue_age_us: relay.peak_oldest_queue_age().as_micros(),
                     relay_frames_enqueued: relay_stats.enqueued_outbound,
-                    relay_frames_enqueued_during_run: relay_stats
-                        .enqueued_outbound
+                    relay_frames_enqueued_during_run: running_relay_enqueued_at_end
+                        .ok_or("missing active enqueue boundary")?
                         .saturating_sub(running_relay_enqueued_baseline),
                     relay_frames_received: relay_stats.accepted_inbound,
                     relay_malformed: relay_stats.malformed_inbound,
@@ -516,6 +619,47 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{observe_running_phase, outbound_is_drained, running_elapsed};
+
+    #[test]
+    fn callback_admission_budget_caps_active_negative_work_and_releases_final_drain() {
+        for (mode, active, expected) in [
+            (super::RunMode::Healthy, true, usize::MAX),
+            (super::RunMode::NegativeOneAdmissionPerCallback, true, 1),
+            (
+                super::RunMode::NegativeOneAdmissionPerCallback,
+                false,
+                usize::MAX,
+            ),
+        ] {
+            assert_eq!(
+                super::admission_budget(mode, active),
+                expected,
+                "{mode:?}/{active}"
+            );
+        }
+    }
+
+    #[test]
+    fn rollback_probe_holds_only_the_first_four_active_healthy_callbacks() {
+        for (callbacks, held) in [
+            (None, false),
+            (Some(0), true),
+            (Some(1), true),
+            (Some(3), true),
+            (Some(4), false),
+            (Some(600), false),
+        ] {
+            assert_eq!(
+                super::hold_initial_rollback_inputs(super::RunMode::Healthy, callbacks),
+                held,
+                "{callbacks:?}"
+            );
+            assert!(!super::hold_initial_rollback_inputs(
+                super::RunMode::NegativeOneAdmissionPerCallback,
+                callbacks,
+            ));
+        }
+    }
 
     #[test]
     fn drain_gate_waits_for_transport_accepted_frame_to_finish() {

@@ -1852,6 +1852,24 @@ carries a disposition.
   absolute deadline and leaves the existing healthy wave's deadlines intact.
   Removing native report validation made the process reject the advisory
   for lacking a prior causal report. The restored source passed the live cell.
+- **Native Fortress negative control (session 366, #741 item 6).**
+  Two native game processes drive 600 active callbacks with at most one
+  admission per callback. They then drain their outbound queues and complete the
+  existing final acknowledgement exchange. The healthy validator must reject
+  both reports for completed-send rate and sends per callback. The control
+  also requires a substantial workload, matching delivery ledgers, zero relay
+  faults, and successful process exits. Active traffic metrics freeze before
+  final drain so drain writes cannot inflate the measured rate.
+  Disabling the shared throughput checks made the live negative cell fail.
+  The restored validator passed both live cells. A mutex isolates their timed
+  workloads under the hosted runner's normal parallel test settings.
+  The final healthy run exposed zero rollback on one peer despite clean
+  delivery and checksum gates (#804). The healthy workload now holds early
+  inbound frames until four active callbacks finish, then releases them in order.
+  This forces prediction repair within the existing eight-frame window.
+  Fortress source is private compatibility-fixture code. The changelog gate
+  now classifies the two literal Fortress source roots as internal (#803).
+  Native and browser reference-client runtime changes still need release notes.
 - **Opaque over a v2 negotiation (fixed with the same sweep).** The native
   client validated an opaque request against the requested version only;
   the `ProtocolInfo` `None`-version (v2) arm skipped every format check,
@@ -1880,8 +1898,8 @@ carries a disposition.
   restore contract has zero native exercisability. Fortress fixtures: the
   "without silent loss" invariant is substantiated by executable CI gates
   on both stacks (cross-peer ledger equality, contiguity, queue-age and
-  checksum gating; the WASM family adds an asserted expected-`BUSTED`
-  negative control); they are WebSocket-only, so they evidence no
+  checksum gating; both families add an asserted expected-negative
+  control); they are WebSocket-only, so they evidence no
   ICE-fallback claim.
 - **Deployment boundaries (verified, gaps filed).** The listener cannot
   half-start: every fallible startup step precedes the bind, the listener
@@ -2244,7 +2262,7 @@ neither is a deployed capacity preset.
 | Admin and shutdown: `src/server/admin.rs`, `shutdown.rs`, `connection_manager.rs` | Drain closes all owned tasks and reports queued work accurately | `tests/close_code_semantics_e2e.rs`, `formal/tla/ConnectionTeardown.tla`; C1 drain/shutdown review above | The drain choreography, the reconnect-commit fence, close ordering with queued data, and the drain reservation accounting are reviewed, fixed where defective, and pinned; a distinct 4000-close counter remains follow-up observability | Partially reviewed |
 | Browser client: `clients/browser/src/**` | Reconnect, delivery reports, fallback, and negotiation match server | `clients/browser/src/page/*.test.ts`; C1 client and deployment boundaries review above | Reports, fallback, and negotiation verified and pinned (plus the ARM-C033 downgrade fix and its pin); reconnect initiation absent by documented scope with inbound arms unit-pinned; a live browser accountability cell, loss→recovery transitions, and browser-as-host remain | Partially reviewed |
 | Native client: `clients/native/src/**` | Same client contract across native sockets | `clients/native/tests/interop_e2e.rs`; C1 client and deployment boundaries review above | Accountability model, fallback (cripple/TURN/host-star/Direct rejection), and negotiation verified and pinned (plus the ARM-C033 downgrade fix, the v2-opaque guard, and their pins); native downgrade and cross-format advisory consumption now have live cells; the MessagePack cohort is pinned; restore/reconnect end-to-end remains | Partially reviewed |
-| Fortress clients: `clients/fortress/src/**`, `clients/fortress-wasm/src/**` | Reference peers handle relay without silent loss | `clients/fortress/tests/multiprocess.rs`, `clients/fortress-wasm/harness.mjs`, both interop workflows; C1 client and deployment boundaries review above | Silent-loss detection substantiated by executable CI gates on both stacks (contiguity, cross-peer ledger equality, queue-age/checksum gating; WASM adds an asserted expected-`BUSTED` control); fixtures are WebSocket-only and evidence no ICE-fallback claim; drain/restart and reconnect cells and a native negative control remain (issue opened with this change) | Partially reviewed |
+| Fortress clients: `clients/fortress/src/**`, `clients/fortress-wasm/src/**` | Reference peers handle relay without silent loss | `clients/fortress/tests/multiprocess.rs`, `clients/fortress-wasm/harness.mjs`, both interop workflows; C1 client and deployment boundaries review above | Silent-loss detection substantiated by executable CI gates on both stacks (contiguity, cross-peer ledger equality, queue-age/checksum gating; both families add an asserted expected-negative control); fixtures are WebSocket-only and evidence no ICE-fallback claim; drain/restart and reconnect cells remain (#741) | Partially reviewed |
 
 `src/server.rs` owns shared server state across the server rows. `src/websocket/routes.rs`
 and `src/main.rs` own the plain/TLS listener boundary. `src/config/coordination.rs`

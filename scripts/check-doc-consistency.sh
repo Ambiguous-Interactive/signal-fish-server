@@ -889,6 +889,10 @@ is_internal_path() {
         clients/browser/tests/*|clients/native/tests/*|clients/fortress/tests/*|clients/fortress-wasm/tests/*)
             return 0
             ;;
+        # Standalone compatibility fixture sources (both packages publish = false).
+        clients/fortress/src/*|clients/fortress-wasm/src/*)
+            return 0
+            ;;
         src/*_tests.rs|src/*_test.rs|src/*/tests.rs)
             return 0
             ;;
