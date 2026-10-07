@@ -2361,6 +2361,11 @@ send-lag budget. Scheduling delays after arming still count against the
 declared bound. Deterministic controls cover delayed setup and delayed
 traffic. Invalid pressure runs print recent send and sample timestamps.
 
+[PR #789](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/789)
+landed the readiness gate. [Fresh main CI](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/37610558591)
+on `af9616a8` passed Linux, macOS, Windows, MSRV, and coverage verification.
+C3 capacity measurements remain pending.
+
 **C2 next runner PR: churn/reconnect schedules — LANDED** (third runner
 PR, 2026-10-05). `ChurnSchedule` carries the reconnect-burst storm (the C3
 reconnect cell): at `start`, the seed-chosen `fraction_percent` of peers

@@ -343,34 +343,21 @@ cost, socket memory) is landed (eighth runner PR, 2026-10-07, see the
 ledger's contract record): schema 6 interval samples carry the live-state
 gauges, the pending-publication backlog, the maintenance sweep pair, and
 the socket-memory page pair, with presence pins in the acceptance scenario.
-The C2 input and artifact surface is landed and pinned. Cross-platform
-pressure controls in #783 still require fresh main verification. The latest/volatile
-pressure control uses declared 16-KiB payloads (#783) to exceed OS socket
-buffering while retaining exact gap, counter, and replay checks. Live
-runner cells share a plain-cargo test lock to prevent generator contention.
+The landed C2 runner inputs and artifacts are pinned. The #783 pressure
+controls passed fresh [main CI](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/37610558591)
+on `af9616a8` after [PR #789](https://github.com/Ambiguous-Interactive/signal-fish-server/pull/789).
+The fault recipe uses 16-KiB payloads at 200 sends/s, a three-second read
+pause, and a 3.5-second measurement. The 500-ms lag bound and exact gap,
+server-counter, and replay checks remain unchanged.
 
-Fresh main CI on `ff55fed3` failed the Windows Latest pressure control: the
-generator exceeded its 500-ms lag bound and received no measured frames.
-The larger payload and test lock did not resolve this failure. PR CI on
-`c7ec7c66` then recorded read/gap progress but saturated the generator on
-Linux and coverage at 1,000 sends/s. The fault control now uses 200 sends/s
-with a three-second pause and 3.5-second measurement. It retains about 600
-offered paused frames, 16-KiB payloads, and the 500-ms lag bound. The runner
-now polls reads alongside a persistent write and wakes independently for
-read resumption and lifecycle deadlines. It cancels and awaits owned tasks
-before artifact capture. Deterministic controls cover pending writes,
-overdue traffic, read pauses, and cancellation. Fresh cross-platform main
-verification remains required (#783).
+Live cells share a test lock. Reads progress alongside a persistent write;
+read resumption and lifecycle deadlines wake independently. The runner
+cancels and awaits owned tasks before artifact capture.
 
-PR #786 passed all branch checks, but fresh main `7387ca1b` failed the macOS
-Latest pressure control. Only ten warmup sends completed; measured traffic
-was absent, and both senders exceeded the unchanged 500-ms lag bound.
-Source review found setup work after the epoch: metrics-client construction,
-peer preparation, and initial task registration. The runner now waits for
-prepared peers before publishing one shared epoch. Delayed setup does not
-consume the send-lag budget; delay after arming still invalidates the run.
-Failure output includes recent send and sample timestamps. The exact hosted
-cause remains unproven. Fresh main controls must pass before C3 proceeds.
+All owned tasks finish initial setup before one shared epoch starts.
+Deterministic controls exclude preparation from send lag and retain
+invalidation for delay after arming that exceeds the unchanged bound.
+The exact causes of earlier hosted stalls remain unproven.
 
 - [x] Churn/reconnect schedules: reconnect-burst and room-replacement
   shapes per the C3 cells, with red-first controls for each new permitted
