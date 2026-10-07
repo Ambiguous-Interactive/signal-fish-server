@@ -52,6 +52,7 @@ $script:ChangelogInternalPathGlobs = [string[]]@(
     ".github/*", ".githooks/*", ".devcontainer/*", ".config/*", ".vscode/*", ".claude/*",
     # Dev/build/agent directories
     "scripts/*", "tests/*", "test-fixtures/*", "formal/*", ".llm/*", "target/*", "progress/*",
+    "clients/browser/tests/*", "clients/native/tests/*", "clients/fortress/tests/*", "clients/fortress-wasm/tests/*",
     # Test-only Rust sources
     "src/*_tests.rs", "src/*_test.rs", "src/*/tests.rs",
     # CI/infrastructure docs

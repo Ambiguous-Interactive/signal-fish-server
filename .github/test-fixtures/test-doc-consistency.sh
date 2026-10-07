@@ -125,6 +125,10 @@ INTERNAL_PATHS=(
     # Source-adjacent directories
     "scripts/check-foo.sh"
     "tests/unit_test.rs"
+    "clients/browser/tests/nested/control.js"
+    "clients/native/tests/interop_e2e.rs"
+    "clients/fortress/tests/multiprocess.rs"
+    "clients/fortress-wasm/tests/deep/fixtures/control.json"
     "test-fixtures/data.json"
     ".llm/skills/foo.md"
     "target/debug/binary"
@@ -188,6 +192,13 @@ echo -e "${YELLOW}--- Non-internal path classification ---${NC}"
 NON_INTERNAL_PATHS=(
     # Production source code
     "src/main.rs"
+    "clients/native/src/client.rs"
+    "clients/native/src/tests/runtime.rs"
+    "clients/native/src/nested/tests/runtime.rs"
+    "clients/native/tests_like/runtime.rs"
+    "clients/native/Tests/control.rs"
+    "clients/native/Cargo.toml"
+    "clients/fortress/src/main.rs"
     "src/server.rs"
     "build.rs"
     "benches/benchmark.rs"
@@ -220,6 +231,8 @@ echo -e "${YELLOW}--- Changelog gate behavior ---${NC}"
 # Format: "expected_result|test_name|file1 file2 ..."
 #   expected_result: pass | fail
 GATE_TESTS=(
+    "fail|Client tests plus runtime without CHANGELOG|clients/native/tests/interop_e2e.rs clients/native/src/client.rs"
+    "pass|Client tests plus runtime with CHANGELOG|clients/native/tests/interop_e2e.rs clients/native/src/client.rs CHANGELOG.md"
     "pass|Only internal files changed|scripts/check-foo.sh .github/workflows/ci.yml tests/unit_test.rs"
     "fail|Non-internal file without CHANGELOG|src/main.rs"
     "pass|Non-internal file with CHANGELOG|src/main.rs CHANGELOG.md"

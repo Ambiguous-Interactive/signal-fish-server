@@ -280,7 +280,9 @@ complete.
   ARM-C035/ARM-C036, issue #740). Client rows are partially reviewed:
   reconnect initiation stays out of scope by documentation, with the
   restore-contract exercisability and fault-injection cells tracked as
-  follow-ups (#741).
+  follow-ups (#741). Session 362 adds the real native downgrade cells:
+  disabled rkyv and protobuf requests must adopt JSON, relay exact payloads,
+  and complete on both peers. Other #741 cells remain open.
 
 For each finding:
 

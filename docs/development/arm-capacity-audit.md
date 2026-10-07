@@ -1823,6 +1823,23 @@ carries a disposition.
   `handshake_downgrade_error_adopts_json_and_continues`,
   `handshake_stays_fatal_for_other_frames_and_repeat_notices`. Browser pin:
   the `advanceAuthenticateHandshake` block in `orchestrator.test.ts`.
+- **Native downgrade live cells (session 362, #741 item 1).**
+  `unsupported_opaque_requests_downgrade_to_json_and_relay_between_reference_clients`
+  runs rkyv and protobuf requests against a real server with default encoding
+  knobs. Each cell runs two native client processes. Both must consume one
+  downgrade notice
+  before `Authenticated`, negotiate v3, reach the shared success barrier,
+  and exit successfully. Each peer must receive exactly the other's JSON
+  payload with the sender UUID and v3 delivery stamps. This extends the
+  ARM-C033 unit controls to the handshake, format adoption, relay, and
+  process completion paths. A temporary mutation that retained the refused
+  encoding failed before room creation. The restored client passed both
+  cells. Restore and cross-format accountability remain open in #741.
+  The staged changelog check rejected this test-only work (#797). The checker,
+  hook, and CI dependency detector now exempt the test directories under the
+  four known client roots. Literal roots keep nested runtime `src/tests`
+  paths outside the exemption. Data-driven controls cover both classes and
+  mixed test/runtime changes. No runtime change or changelog entry is needed.
 - **Opaque over a v2 negotiation (fixed with the same sweep).** The native
   client validated an opaque request against the requested version only;
   the `ProtocolInfo` `None`-version (v2) arm skipped every format check,

@@ -92,6 +92,11 @@
 //!     floor carries the whole proof and both processes meet the standard
 //!     success criteria, so opaque receipts count exactly as JSON ones.
 //!
+//! 11. `unsupported_opaque_requests_downgrade_to_json_and_relay_between_reference_clients`
+//!     — default-server refusal of rkyv and protobuf requests. Each encoding
+//!     runs two clients that consume one handshake notice, adopt JSON, and
+//!     complete the exact relay exchange with v3 stamps.
+//!
 //! Scenarios are serialized behind a mutex (each spawns 3+ OS processes and
 //! up to three concurrent WebRTC stacks; running them in parallel on small CI
 //! runners invites scheduling flakes for zero extra coverage). Ports are
@@ -127,17 +132,17 @@ static SCENARIO_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new((
 ///    `--max-runtime-secs 90` watchdog (see `spawn_client`) = 90 s;
 ///  - joiner wave: bounded by its own 90 s watchdog = 90 s.
 const LATE_JOIN_SCENARIO_CEILING_SECS: u64 = 45 + 90 + 90;
-/// Each of the seven ordinary one-wave scenarios is bounded by server startup
+/// Each of the nine ordinary one-wave scenarios is bounded by server startup
 /// plus one 90 s client watchdog; the departure regression uses 30 s clients.
 const STANDARD_SCENARIO_CEILING_SECS: u64 = 45 + 90;
 const DEPARTURE_SCENARIO_CEILING_SECS: u64 = 45 + 30;
 /// A test may queue behind every other test. Bounding that wait by the entire
 /// suite's real composition remains conservative while keeping a degraded run
 /// within the workflow's 30-minute job policy (unlike multiplying the unique
-/// two-wave ceiling by all ten scenarios).
+/// two-wave ceiling by every scenario).
 const SERIAL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(
     2 * LATE_JOIN_SCENARIO_CEILING_SECS
-        + 7 * STANDARD_SCENARIO_CEILING_SECS
+        + 9 * STANDARD_SCENARIO_CEILING_SECS
         + DEPARTURE_SCENARIO_CEILING_SECS,
 );
 
@@ -2521,6 +2526,148 @@ async fn ipv6_only_mesh_pair_exchanges_on_a_host_ipv6_path() {
         assert_no_ipv4_candidate_advertised(window, who);
         assert_exchange_sent_to(&run.logs[index], who, &peers);
         assert_exchange_received_from(&run.logs[index], who, &peers);
+    }
+}
+
+/// Unsupported opaque requests remain viable JSON relay sessions on the
+/// default server. Both clients must consume the notice before the
+/// Authenticated acknowledgement.
+#[tokio::test(flavor = "multi_thread")]
+async fn unsupported_opaque_requests_downgrade_to_json_and_relay_between_reference_clients() {
+    let _serial = acquire_serial().await;
+    for requested in ["rkyv", "protobuf"] {
+        let mut server = spawn_server("relay").await;
+        let workdir = tempfile::tempdir().expect("downgrade client workdir");
+        let url = server.v3_ws_url();
+        let release_file = workdir.path().join("release-successful-clients");
+        let release_path = release_file.to_str().expect("release path UTF-8");
+        let args = [
+            "--supported-topologies",
+            "relay",
+            "--supported-transports",
+            "relay",
+            "--game-data-format",
+            requested,
+            "--success-release-file",
+            release_path,
+        ];
+        let payloads = [
+            format!("{requested}: créateur 🐟"),
+            format!("{requested}: 加入者 🐠"),
+        ];
+        let game_name = format!("interop-downgrade-{requested}");
+        let mut creator = spawn_client(
+            &ClientSpec {
+                name: TWO_CLIENT_NAMES[0],
+                server_url: &url,
+                game_name: &game_name,
+                join_code: None,
+                peers: 2,
+                exchange: false,
+                relay_payload: Some(&payloads[0]),
+                extra_args: &args,
+            },
+            workdir.path(),
+        );
+        let created = creator.await_event("room_created", EVENT_TIMEOUT).await;
+        let room_code = str_field(&created, "room_code").to_string();
+        let mut joiner = spawn_client(
+            &ClientSpec {
+                name: TWO_CLIENT_NAMES[1],
+                server_url: &url,
+                game_name: &game_name,
+                join_code: Some(&room_code),
+                peers: 2,
+                exchange: false,
+                relay_payload: Some(&payloads[1]),
+                extra_args: &args,
+            },
+            workdir.path(),
+        );
+        joiner
+            .await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)
+            .await;
+        creator
+            .await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)
+            .await;
+        let mut clients = [creator, joiner];
+        for client in &mut clients {
+            client.assert_running("at the shared downgrade success barrier");
+        }
+        std::fs::write(&release_file, b"release").expect("release both downgraded clients");
+        for client in &mut clients {
+            drain_expect_success(client).await;
+        }
+
+        for (index, who) in TWO_CLIENT_NAMES.iter().enumerate() {
+            let log = &clients[index].events;
+            let diagnostic = clients[index].diagnostics();
+            let notice = single_event(log, "error", who);
+            let message = str_field(notice, "message");
+            assert!(message.contains(&format!("'{requested}'"))
+                && message.contains("downgraded the session to JSON"),
+                "{who}/{requested}: exactly one expected nonfatal downgrade notice: {notice};\n{diagnostic}");
+            let position = |name| {
+                log.iter()
+                    .position(|event| event["event"] == name)
+                    .unwrap_or_else(|| panic!("{who}/{requested}: missing {name};\n{diagnostic}"))
+            };
+            assert!(position("error") < position("authenticated")
+                && position("authenticated") < position("protocol_info")
+                && position("protocol_info") < position("room_joined"),
+                "{who}/{requested}: downgrade must precede Authenticated and room entry;\n{diagnostic}");
+            single_event(log, "authenticated", who);
+            assert_eq!(
+                single_event(log, "protocol_info", who)["negotiated_version"],
+                3
+            );
+            single_event(log, "success_criteria_met", who);
+            single_event(log, "game_starting", who);
+            relay_session_plan(log, who);
+            let sender_id = player_id_of(&clients[1 - index].events, TWO_CLIENT_NAMES[1 - index]);
+            let expected = BTreeMap::from([(sender_id.as_str(), payloads[1 - index].as_str())]);
+            assert_relay_floor_traffic(log, who, &expected);
+            let received = single_event(log, "game_data_received", who);
+            assert_eq!(
+                received["payload"],
+                json!({"relay_msg":payloads[1-index]}),
+                "{who}/{requested}: exact JSON payload proves JSON adoption;\n{diagnostic}"
+            );
+            assert!(
+                received["seq"].as_u64().is_some_and(|seq| seq > 0)
+                    && received["epoch"].as_u64().is_some_and(|epoch| epoch > 0),
+                "{who}/{requested}: positive v3 delivery stamps: {received}"
+            );
+            for report in events_named(log, "delivery_report") {
+                let payload: signal_fish_server::protocol::DeliveryReportPayload =
+                    serde_json::from_value(report["report"].clone())
+                        .expect("delivery report payload");
+                assert!(
+                    payload.gaps.is_empty(),
+                    "{who}/{requested}: JSON relay must not report omitted deliveries: {report}"
+                );
+            }
+            for tag in [
+                "new_peer",
+                "signal_sent",
+                "signal_received",
+                "p2p_pair_connected",
+                "pc_state",
+                "local_candidate",
+                "channel_open",
+                "channel_message",
+                "channel_message_sent",
+                "transport_status_sent",
+                "peer_transport_status",
+                "fallback_engaged",
+            ] {
+                assert!(
+                    events_named(log, tag).is_empty(),
+                    "{who}/{requested}: relay-only session must not emit {tag};\n{diagnostic}"
+                );
+            }
+        }
+        server.shutdown().await;
     }
 }
 
