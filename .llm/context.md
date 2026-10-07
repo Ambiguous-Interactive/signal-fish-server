@@ -157,7 +157,7 @@ per sentence. Use common words; no idioms, jokes, marketing language, or
 hype.
 
 PR descriptions follow `.github/pull_request_template.md` (short Why/What
-shape): 1-2 "why" sentences, 2-5 one-line "what" bullets; detail belongs in
+shape): 1 "why" sentence, 2-4 one-line "what" bullets; detail belongs in
 the linked issue. Answer "why", "what", and "how" in a FEW SHORT SENTENCES
 total — never coverage notes or narratives. CHANGELOG entries: ONE sentence
 (TWO maximum), mechanics out. The audience includes non-native English

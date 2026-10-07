@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Metrics: new Prometheus gauges expose live rooms, seated occupants, the
-  pending-publication backlog, pending reconnections, retained replay state,
-  and the maintenance-sweep count and last duration (#648).
+- Metrics: new Prometheus gauges expose live rooms, seated occupants,
+  pending publications, pending reconnections, retained replay state, and
+  the maintenance-sweep count and last duration (#648).
 
 - Metrics: `GET /metrics/sessions` (and `/v1/metrics/sessions`) exposes one
   bounded, bearer-gated record per room — identity, lifecycle counts, close

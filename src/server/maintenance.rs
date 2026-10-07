@@ -476,7 +476,7 @@ impl EnhancedGameServer {
 
             // The sweep is timed as one unit so the export shows what a
             // maintenance pass costs at the current occupancy (the C3
-            // maintenance-complexity signal). Drain exits above skip the
+            // maintenance-complexity signal). Drain exits skip the
             // stamp: an aborted pass is not a completed sweep.
             let sweep_started = tokio::time::Instant::now();
 

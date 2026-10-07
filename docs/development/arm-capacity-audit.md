@@ -2523,8 +2523,8 @@ resource families beside the delivery counters and the RSS/CPU/cgroup set:
   `ReconnectionManager::replay_sample`). An unavailable count renders no
   series — absence stays distinguishable from a fabricated zero.
 - **Cleanup backlog**: `signal_fish_cleanup_pending_publications`, the
-  rooms in the pending-publication lifecycle (creating or awaiting repair)
-  that maintenance must drain.
+  rooms in the pending-publication lifecycle at scrape time (in-flight
+  creation or awaiting repair; maintenance drains the abandoned ones).
 - **Maintenance cost**: `signal_fish_maintenance_sweeps_total` (completed
   sweeps) and `signal_fish_maintenance_last_duration_milliseconds` (the
   most recent completed sweep's monotonic wall duration) — the C3

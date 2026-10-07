@@ -633,7 +633,7 @@ pub trait GameDatabase: Send + Sync {
 
     /// Scrape-time live-object counts for the metrics endpoint: live rooms,
     /// seated occupants (players + spectators), and pending room
-    /// publications (the creation/repair backlog). Sampled when the
+    /// publications (in-flight creation or awaiting repair). Sampled when the
     /// endpoint is hit, never maintained on the write path. The default
     /// reports unavailable (`None`) so embedders' backends are never
     /// guessed at; the shipped in-memory backend answers under short read
@@ -697,8 +697,8 @@ pub struct LiveRoomCounts {
     pub rooms: u64,
     /// Seated occupants across all live rooms (players + spectators).
     pub occupants: u64,
-    /// Rooms in the pending-publication lifecycle (creating or awaiting
-    /// repair) — the creation/repair backlog maintenance must drain.
+    /// Rooms in the pending-publication lifecycle (in-flight creation or
+    /// awaiting repair).
     pub pending_publications: u64,
 }
 
@@ -2886,7 +2886,7 @@ impl GameDatabase for InMemoryDatabase {
                 rooms
                     .values()
                     .map(|room| room.players.len() + room.spectators.len())
-                    .sum::<usize>(),
+                    .fold(0usize, |total, occupants| total.saturating_add(occupants)),
             )
             .unwrap_or(u64::MAX),
             pending_publications: u64::try_from(publications.len()).unwrap_or(u64::MAX),

@@ -1960,9 +1960,12 @@ impl EnhancedGameServer {
     }
 
     /// Scrape-time live-state counts for the metrics endpoint: live rooms,
-    /// occupants, the pending-publication backlog, pending reconnections,
+    /// occupants, the pending-publication lifecycle, pending reconnections,
     /// and retained replay state. `None` fields mean the backend cannot
     /// answer cheaply (recorded as an explicit absence, never a zero).
+    /// Contention contract: the scrape takes short storage read locks and
+    /// awaits nothing under them, so a burst of writers can delay one
+    /// scrape by one lock hand-off, never the reverse.
     pub async fn live_state_sample(&self) -> LiveStateSample {
         let (rooms, replay) = tokio::join!(self.database.live_room_counts(), async {
             match &self.reconnection_manager {

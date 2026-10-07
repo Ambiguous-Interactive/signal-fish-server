@@ -233,12 +233,12 @@ pub(crate) fn render_prometheus_metrics(
     );
     live_gauge(
         "signal_fish_cleanup_pending_publications",
-        "Rooms in the pending-publication lifecycle (creating or awaiting repair) at scrape time — the creation/repair backlog maintenance must drain",
+        "Rooms in the pending-publication lifecycle (in-flight creation or awaiting repair) at scrape time",
         live.pending_publications,
     );
     live_gauge(
         "signal_fish_reconnection_pending",
-        "Players holding a pending reconnection record (disconnected, inside the reconnect window) at scrape time",
+        "Players holding a pending reconnection record (disconnected, awaiting claim or cleanup) at scrape time",
         live.pending_reconnections,
     );
     live_gauge(
@@ -603,7 +603,7 @@ pub(crate) fn render_prometheus_metrics(
     counter(
         &mut buf,
         "signal_fish_maintenance_sweeps_total",
-        "Completed maintenance (cleanup) sweeps since startup; a sustained zero means the cleanup task is not running",
+        "Completed maintenance (cleanup) sweeps since startup; a counter that stops advancing means the cleanup task is not running",
         snapshot.cleanup.maintenance_sweeps_total,
     );
     gauge(
