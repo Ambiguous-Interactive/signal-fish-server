@@ -23,6 +23,7 @@ const FRAME_TIME: Duration = Duration::from_nanos(1_000_000_000 / 60);
 enum RunMode {
     Healthy,
     DrainProbe,
+    SyncCloseProbe,
     NegativeOneAdmissionPerCallback,
 }
 
@@ -49,6 +50,20 @@ fn drain_probe_ready(
         && checksums.0 > 0
         && checksums.0 == checksums.1
         && checksums.2 == 0
+        && traffic.0 > 0
+        && traffic.1 > 0
+}
+
+fn sync_probe_ready(
+    phase: SessionState,
+    progress: Option<(u32, u32, u32)>,
+    frames: (i32, u64),
+    traffic: (u64, u64),
+) -> bool {
+    phase == SessionState::Synchronizing
+        && progress
+            .is_some_and(|(count, total, requests)| count > 0 && count < total && requests > 0)
+        && frames == (0, 0)
         && traffic.0 > 0
         && traffic.1 > 0
 }
@@ -200,6 +215,7 @@ async fn main() -> Result<(), String> {
     let run_mode = match args.next().as_deref() {
         None | Some("healthy") => RunMode::Healthy,
         Some("drain-probe") => RunMode::DrainProbe,
+        Some("sync-close-probe") => RunMode::SyncCloseProbe,
         Some("negative-one-admission-per-callback") => RunMode::NegativeOneAdmissionPerCallback,
         _ => return Err("unknown run mode".to_string()),
     };
@@ -217,6 +233,10 @@ async fn main() -> Result<(), String> {
     let relay = RelaySocket::default();
     if run_mode != RunMode::NegativeOneAdmissionPerCallback {
         relay.hold_inputs_until_prediction();
+    }
+
+    if run_mode == RunMode::SyncCloseProbe {
+        relay.allow_first_sync_reply_only();
     }
 
     let deadline = Instant::now() + PROCESS_DEADLINE;
@@ -240,6 +260,7 @@ async fn main() -> Result<(), String> {
     let mut peer_left_after_ack = false;
     let mut pending_inbound = Vec::new();
     let mut drain_probe_published = false;
+    let mut sync_progress = None;
 
     while Instant::now() < deadline {
         let events = client.poll();
@@ -305,6 +326,18 @@ async fn main() -> Result<(), String> {
                     eprintln!("server going away: deadline_ms={deadline_ms}, retry_after_secs={retry_after_secs:?}");
                 }
                 SignalFishEvent::Disconnected { reason, .. } => {
+                    if run_mode == RunMode::SyncCloseProbe {
+                        let evidence = serde_json::json!({
+                            "role": role, "player_id": local,
+                            "phase": session.as_ref().map(|fortress: &P2PSession<GameConfig>| fortress.current_state().to_string()),
+                            "current_frame": session.as_ref().map(|fortress| fortress.current_frame().as_i32()),
+                            "frames_advanced": session.as_ref().map(|fortress| fortress.metrics().frames_advanced),
+                            "game_frame": state.frame, "sync_progress": sync_progress,
+                            "sent": client.stats().game_data_sent, "received": client.stats().game_data_received,
+                        });
+                        eprintln!("sync shutdown evidence: {evidence}");
+                    }
+
                     return Err(format!("server disconnected peer: {reason:?}"));
                 }
                 SignalFishEvent::PlayerLeft { player_id, .. } => {
@@ -365,6 +398,14 @@ async fn main() -> Result<(), String> {
                 fortress.poll_remote_clients();
                 for event in fortress.events() {
                     match event {
+                        FortressEvent::Synchronizing {
+                            total,
+                            count,
+                            total_requests_sent,
+                            ..
+                        } if run_mode == RunMode::SyncCloseProbe => {
+                            sync_progress = Some((count, total, total_requests_sent));
+                        }
                         FortressEvent::WaitRecommendation { skip_frames } => {
                             recommended_skips = skip_frames;
                         }
@@ -527,8 +568,7 @@ async fn main() -> Result<(), String> {
             }
             let relay_stats = relay.counters();
             let client_stats = client.stats();
-            if run_mode == RunMode::DrainProbe
-                && !drain_probe_published
+            let active_ready = run_mode == RunMode::DrainProbe
                 && drain_probe_ready(
                     fortress.confirmed_frame().as_i32(),
                     fortress.metrics().frames_advanced,
@@ -539,11 +579,23 @@ async fn main() -> Result<(), String> {
                         fortress.metrics().checksums_mismatched,
                     ),
                     (client_stats.game_data_sent, client_stats.game_data_received),
-                )
-            {
+                );
+            let synchronizing_ready = run_mode == RunMode::SyncCloseProbe
+                && sync_probe_ready(
+                    fortress.current_state(),
+                    sync_progress,
+                    (
+                        fortress.current_frame().as_i32(),
+                        fortress.metrics().frames_advanced,
+                    ),
+                    (client_stats.game_data_sent, client_stats.game_data_received),
+                );
+            if !drain_probe_published && (active_ready || synchronizing_ready) {
                 let metrics = fortress.metrics();
                 let evidence = serde_json::json!({
                     "role": role, "player_id": local, "confirmed_frame": fortress.confirmed_frame().as_i32(),
+                    "phase": fortress.current_state().to_string(), "current_frame": fortress.current_frame().as_i32(),
+                    "game_frame": state.frame, "sync_progress": sync_progress,
                     "frames_advanced": metrics.frames_advanced, "rollback_count": metrics.rollback_count,
                     "checksums_compared": metrics.checksums_compared,
                     "checksums_matched": metrics.checksums_matched,
@@ -678,6 +730,92 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{observe_running_phase, outbound_is_drained, running_elapsed};
+
+    #[test]
+    fn synchronization_readiness_requires_partial_progress_without_gameplay() {
+        use super::SessionState::{Running, Synchronizing};
+        for (name, phase, progress, frames, traffic, ready) in [
+            (
+                "partial",
+                Synchronizing,
+                Some((1, 5, 1)),
+                (0, 0),
+                (1, 1),
+                true,
+            ),
+            ("not started", Synchronizing, None, (0, 0), (1, 1), false),
+            (
+                "zero count",
+                Synchronizing,
+                Some((0, 5, 1)),
+                (0, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "completed count",
+                Synchronizing,
+                Some((5, 5, 5)),
+                (0, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "no requests",
+                Synchronizing,
+                Some((1, 5, 0)),
+                (0, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "already running",
+                Running,
+                Some((1, 5, 1)),
+                (0, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "game cursor advanced",
+                Synchronizing,
+                Some((1, 5, 1)),
+                (1, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "game advanced",
+                Synchronizing,
+                Some((1, 5, 1)),
+                (0, 1),
+                (1, 1),
+                false,
+            ),
+            (
+                "no send",
+                Synchronizing,
+                Some((1, 5, 1)),
+                (0, 0),
+                (0, 1),
+                false,
+            ),
+            (
+                "no receipt",
+                Synchronizing,
+                Some((1, 5, 1)),
+                (0, 0),
+                (1, 0),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                super::sync_probe_ready(phase, progress, frames, traffic),
+                ready,
+                "{name}"
+            );
+        }
+    }
 
     #[test]
     fn drain_readiness_requires_unfinished_game_progress_and_matching_traffic() {
