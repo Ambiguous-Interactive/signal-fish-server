@@ -55,6 +55,7 @@ $script:ChangelogInternalPathGlobs = [string[]]@(
     "clients/browser/tests/*", "clients/native/tests/*", "clients/fortress/tests/*", "clients/fortress-wasm/tests/*",
     # Standalone compatibility fixture sources (both packages publish = false)
     "clients/fortress/src/*", "clients/fortress-wasm/src/*",
+    "clients/fortress-wasm/harness.mjs", "clients/fortress-wasm/project/main.gd",
     # Test-only Rust sources
     "src/*_tests.rs", "src/*_test.rs", "src/*/tests.rs",
     # CI/infrastructure docs
@@ -90,6 +91,7 @@ $script:WorktreePolicyPathspecs = @(
 $script:PendingWorktreeStatus = $null
 $script:PendingWorktreeUntracked = $null
 $script:PendingWorktreeRustDiff = $null
+$script:PendingChangelogBlob = $null
 $script:WorktreeDiscoveryTimer = $null
 $script:RustPanicGrepPattern = "((^|[^[:alnum:]_])(panic|todo|unimplemented|unreachable)[[:space:]]*(/\*[^*]*\*+([^/*][^*]*\*+)*/[[:space:]]*)*!)|(#\[[[:space:]]*(cfg[[:space:]]*\(|test|tokio::test|async_std::test|rstest))"
 
@@ -115,14 +117,15 @@ function Start-PendingGit {
 function Wait-PendingGit {
     param(
         [Parameter(Mandatory = $true)][pscustomobject]$Pending,
-        [Parameter(Mandatory = $true)][string[]]$GitArguments
+        [Parameter(Mandatory = $true)][string[]]$GitArguments,
+        [switch]$AllowFailure
     )
 
     try {
         $Pending.Process.WaitForExit()
         $stdout = $Pending.StdoutTask.GetAwaiter().GetResult()
         $stderr = $Pending.StderrTask.GetAwaiter().GetResult()
-        if ($Pending.Process.ExitCode -ne 0) {
+        if ($Pending.Process.ExitCode -ne 0 -and -not $AllowFailure) {
             throw "git $($GitArguments -join ' ') failed:`n$stdout$stderr"
         }
         [pscustomobject]@{
@@ -136,11 +139,42 @@ function Wait-PendingGit {
     }
 }
 
-if (-not $SourceOnly) {
-    $script:RepoRoot = (Invoke-Git -Arguments @("rev-parse", "--show-toplevel")).Stdout.Trim()
-    Set-Location $script:RepoRoot
-    $script:InspectWorktree = [bool]$Worktree
-    if ($script:InspectWorktree) {
+function Remove-PendingGit {
+    param([Parameter(Mandatory = $true)][pscustomobject]$Pending)
+
+    try {
+        $Pending.Process.WaitForExit()
+        [void]$Pending.StdoutTask.GetAwaiter().GetResult()
+        [void]$Pending.StderrTask.GetAwaiter().GetResult()
+    } finally {
+        $Pending.Process.Dispose()
+    }
+}
+
+function Remove-PreCommitPendingGit {
+    $pendingQueries = @(
+        $script:PendingWorktreeStatus,
+        $script:PendingWorktreeUntracked,
+        $script:PendingWorktreeRustDiff,
+        $script:PendingChangelogBlob
+    )
+    $script:PendingWorktreeStatus = $null
+    $script:PendingWorktreeUntracked = $null
+    $script:PendingWorktreeRustDiff = $null
+    $script:PendingChangelogBlob = $null
+    $firstError = $null
+    foreach ($pending in $pendingQueries) {
+        if ($null -ne $pending) {
+            try { Remove-PendingGit -Pending $pending } catch {
+                if ($null -eq $firstError) { $firstError = $_ }
+            }
+        }
+    }
+    if ($null -ne $firstError) { throw $firstError }
+}
+
+function Start-WorktreePolicyQueries {
+    try {
         $script:WorktreeDiscoveryTimer = [System.Diagnostics.Stopwatch]::StartNew()
         # The tracked and untracked walks are independent filesystem scans;
         # starting them as sibling processes lets the two walks overlap instead
@@ -158,6 +192,22 @@ if (-not $SourceOnly) {
             "diff", "HEAD", "--unified=0", "--no-color", "-G", $script:RustPanicGrepPattern, "--", "src"
         )
         $script:PendingWorktreeRustDiff = Start-PendingGit -GitArguments $rustDiffArguments
+        # The content policy always reads the index, including on clean trees.
+        # Overlap that read with discovery without changing its verdict.
+        $script:PendingChangelogBlob = Start-PendingGit -GitArguments @("show", ":CHANGELOG.md")
+    } catch {
+        $startupError = $_
+        try { Remove-PreCommitPendingGit } catch { }
+        throw $startupError
+    }
+}
+
+if (-not $SourceOnly) {
+    $script:RepoRoot = (Invoke-Git -Arguments @("rev-parse", "--show-toplevel")).Stdout.Trim()
+    Set-Location $script:RepoRoot
+    $script:InspectWorktree = [bool]$Worktree
+    if ($script:InspectWorktree) {
+        Start-WorktreePolicyQueries
     }
 }
 
@@ -187,6 +237,12 @@ function Invoke-Check {
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         & $Check
+    } catch {
+        # Exceptions bypass Complete-PreCommit. Drain the content read when a
+        # check throws before the changelog policy consumes it.
+        $checkError = $_
+        try { Remove-PreCommitPendingGit } catch { }
+        throw $checkError
     } finally {
         $timer.Stop()
         [void]$script:CheckTimings.Add([pscustomobject]@{
@@ -1830,9 +1886,15 @@ function Test-FileDiffIsTestOnly {
 }
 
 function Test-ChangelogContentVisibility {
-    # Lint the staged blob so the verdict matches what is being committed;
-    # nothing to lint when CHANGELOG.md is not part of the commit.
-    $blob = Invoke-Native -FileName "git" -Arguments @("show", ":CHANGELOG.md")
+    # Always lint the index blob, even when CHANGELOG.md has no changed path.
+    # Only an absent blob skips the content policy.
+    $pending = $script:PendingChangelogBlob
+    $script:PendingChangelogBlob = $null
+    $blob = if ($null -eq $pending) {
+        Invoke-Native -FileName "git" -Arguments @("show", ":CHANGELOG.md")
+    } else {
+        Wait-PendingGit -Pending $pending -GitArguments @("show", ":CHANGELOG.md") -AllowFailure
+    }
     if ($blob.ExitCode -ne 0) {
         Skip "Changelog content" "CHANGELOG.md not staged"
         return
@@ -2007,33 +2069,10 @@ if ($SourceOnly) {
     return
 }
 
-function Remove-PendingGit {
-    param([Parameter(Mandatory = $true)][pscustomobject]$Pending)
-
-    try {
-        $Pending.Process.WaitForExit()
-        [void]$Pending.StdoutTask.GetAwaiter().GetResult()
-        [void]$Pending.StderrTask.GetAwaiter().GetResult()
-    } finally {
-        $Pending.Process.Dispose()
-    }
-}
-
 function Complete-PreCommit {
     # Drain any discovery process the run never consumed (an early failure can
     # skip Get-WorktreeChangedFiles / the rust-diff wait) so nothing is orphaned.
-    foreach ($pending in @(
-            $script:PendingWorktreeStatus,
-            $script:PendingWorktreeUntracked,
-            $script:PendingWorktreeRustDiff
-        )) {
-        $script:PendingWorktreeStatus = $null
-        $script:PendingWorktreeUntracked = $null
-        $script:PendingWorktreeRustDiff = $null
-        if ($null -ne $pending) {
-            Remove-PendingGit -Pending $pending
-        }
-    }
+    Remove-PreCommitPendingGit
     $script:PreCommitTimer.Stop()
     Write-Host "[pre-commit] Completed in $($script:PreCommitTimer.ElapsedMilliseconds)ms"
 
@@ -2080,14 +2119,10 @@ try {
 } catch {
     # A discovery-stage throw aborts before Complete-PreCommit's sweep can run.
     # Get-WorktreeChangedFiles already drained the status/untracked pair, so
-    # the only pendency left is the panic-prefilter diff; dispose it before
-    # failing the hook.
-    $pendingRustDiff = $script:PendingWorktreeRustDiff
-    $script:PendingWorktreeRustDiff = $null
-    if ($null -ne $pendingRustDiff) {
-        Remove-PendingGit -Pending $pendingRustDiff
-    }
-    throw
+    # drain the remaining diff and content read before failing the hook.
+    $discoveryError = $_
+    try { Remove-PreCommitPendingGit } catch { }
+    throw $discoveryError
 }
 $changedFilesTimer.Stop()
 Write-Profile -Name "Changed file discovery" -ElapsedMilliseconds $changedFilesTimer.ElapsedMilliseconds

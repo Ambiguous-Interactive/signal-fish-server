@@ -24238,6 +24238,77 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_pwsh_av
                 if ($bytes.StdoutBytes.Length -le 0) {
                     throw "Invoke-NativeBytesWithInput returned no stdout bytes"
                 }
+
+                . ./scripts/hooks/pre-commit.ps1 -SourceOnly
+                $pending = Start-PendingGit -GitArguments @("--version")
+                $script:PendingChangelogBlob = $pending
+                $caught = $false
+                try {
+                    Invoke-Check "throwing policy" { throw "policy probe" } | Out-Null
+                } catch {
+                    $caught = $_.Exception.Message -eq "policy probe"
+                }
+                if (-not $caught -or $null -ne $script:PendingChangelogBlob) {
+                    throw "a throwing check must preserve its error and clear the pending content read"
+                }
+                if (-not $pending.StdoutTask.IsCompleted -or -not $pending.StderrTask.IsCompleted) {
+                    throw "a throwing check must drain both pending streams"
+                }
+                $disposed = $false
+                try { $pending.Process.WaitForExit() } catch { $disposed = $true }
+                if (-not $disposed) { throw "a throwing check must dispose the pending process" }
+
+                $script:RealStartPendingGit = ${function:Start-PendingGit}
+                $script:StartedPending = [System.Collections.Generic.List[object]]::new()
+                function Start-PendingGit {
+                    param([string[]]$GitArguments)
+                    if ($script:StartedPending.Count -eq 3) { throw "startup probe" }
+                    $started = & $script:RealStartPendingGit -GitArguments @("--version")
+                    [void]$script:StartedPending.Add($started)
+                    $started
+                }
+                $caught = $false
+                try { Start-WorktreePolicyQueries } catch {
+                    $caught = $_.Exception.Message -eq "startup probe"
+                }
+                if (-not $caught -or $null -ne $script:PendingWorktreeStatus -or
+                    $null -ne $script:PendingWorktreeUntracked -or
+                    $null -ne $script:PendingWorktreeRustDiff -or
+                    $null -ne $script:PendingChangelogBlob) {
+                    throw "a startup failure must preserve its error and clear all pending queries"
+                }
+                foreach ($started in $script:StartedPending) {
+                    if (-not $started.StdoutTask.IsCompleted -or -not $started.StderrTask.IsCompleted) {
+                        throw "a startup failure must drain sibling streams"
+                    }
+                    $disposed = $false
+                    try { $started.Process.WaitForExit() } catch { $disposed = $true }
+                    if (-not $disposed) { throw "a startup failure must dispose sibling processes" }
+                }
+
+                # A broken first cleanup must not leave the final content
+                # process undrained, and later errors must not replace it.
+                $script:CleanupCalls = [System.Collections.Generic.List[int]]::new()
+                function Remove-PendingGit {
+                    param($Pending)
+                    [void]$script:CleanupCalls.Add($Pending.Id)
+                    if ($Pending.Id -le 2) { throw "cleanup probe $($Pending.Id)" }
+                }
+                $script:PendingWorktreeStatus = [pscustomobject]@{ Id = 1 }
+                $script:PendingWorktreeUntracked = [pscustomobject]@{ Id = 2 }
+                $script:PendingWorktreeRustDiff = [pscustomobject]@{ Id = 3 }
+                $script:PendingChangelogBlob = [pscustomobject]@{ Id = 4 }
+                $caught = $false
+                try { Remove-PreCommitPendingGit } catch {
+                    $caught = $_.Exception.Message -eq "cleanup probe 1"
+                }
+                if (-not $caught -or ($script:CleanupCalls -join ',') -ne '1,2,3,4' -or
+                    $null -ne $script:PendingWorktreeStatus -or
+                    $null -ne $script:PendingWorktreeUntracked -or
+                    $null -ne $script:PendingWorktreeRustDiff -or
+                    $null -ne $script:PendingChangelogBlob) {
+                    throw "cleanup must attempt every query, clear its fields, and preserve the first error"
+                }
             "#,
         ])
         .current_dir(&root)
@@ -24471,6 +24542,7 @@ fn test_pre_commit_changelog_gate_classification_and_verdicts_when_pwsh_availabl
                     "formal/model.tla", ".llm/skills/foo.md", "target/debug/binary", "progress/notes.md",
                     "clients/fortress/src/main.rs", "clients/fortress/src/nested/peer.rs",
                     "clients/fortress-wasm/src/lib.rs", "clients/fortress-wasm/src/nested/peer.rs",
+                    "clients/fortress-wasm/harness.mjs", "clients/fortress-wasm/project/main.gd",
                     "src/server_tests.rs", "src/main_test.rs", "src/server/tests.rs",
                     "docs/ci-cd-testing.md", "docs/test-analysis.md", "docs/git-hooks-guide.md",
                     "docs/hooks-quick-reference.md", "docs/pre-commit-hooks-summary.md",
@@ -24488,6 +24560,8 @@ fn test_pre_commit_changelog_gate_classification_and_verdicts_when_pwsh_availabl
 
                 # 2) Non-internal classification.
                 $nonInternal = @(
+                    "clients/fortress-wasm/project/other.gd", "clients/fortress-wasm/harness.mjs.bak",
+                    "clients/fortress-wasm/project/main.gd.bak",
                     "src/main.rs", "src/server.rs", "build.rs", "benches/benchmark.rs",
                     "clients/native/src/client.rs", "clients/browser/src/client.js", "clients/other/src/main.rs",
                     "clients/fortress/Cargo.toml", "clients/fortress-wasm/Cargo.toml",
@@ -24597,6 +24671,21 @@ fn test_pre_commit_changelog_gate_blocks_src_changes_without_changelog_when_pwsh
             .output()
     };
 
+    let run_worktree_hook = || -> std::io::Result<std::process::Output> {
+        Command::new("pwsh")
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
+            .arg(&hook)
+            .arg("-Worktree")
+            .current_dir(dir)
+            .output()
+    };
+    let output = run_worktree_hook().expect("pwsh run");
+    assert!(
+        output.status.success(),
+        "a missing index changelog must still skip"
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("SKIP: Changelog content"));
+
     // RED: a staged src/ change without a staged CHANGELOG.md change must fail
     // the hook, name the gate and the fix, and stay inside the hook budget.
     let src = dir.join("src");
@@ -24625,6 +24714,9 @@ fn test_pre_commit_changelog_gate_blocks_src_changes_without_changelog_when_pwsh
         stdout.contains("## [Unreleased]"),
         "the failure must name the fix.\nstdout: {stdout}"
     );
+    let output = run_worktree_hook().expect("pwsh run");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("FAIL: Changelog gate"));
     // Deliberately no wall-clock budget assertion here: the baselines
     // workflow owns hook-runtime evidence because wall-clock totals must not
     // gate correctness, and a cold hosted runner can exceed the 1 s budget
@@ -24819,6 +24911,24 @@ fn test_pre_commit_changelog_gate_blocks_src_changes_without_changelog_when_pwsh
          stdout: {stdout}\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+
+    // The async worktree read must enforce content even when CHANGELOG.md is
+    // unchanged. Commit each fixture so discovery cannot supply a trigger.
+    for (text, passes) in [
+        ("## [Unreleased]\n\n### Fixed\n\n- Fix a close signal.\n", true),
+        ("## [Unreleased]\n\n### Fixed\n\n- Tests: add a probe.\n", false),
+        ("## [Unreleased]\n\n### Fixed\n\n- Fix a close signal.\n\n### Fixed\n\n- Fix another close.\n", false),
+    ] {
+        write_file(&dir.join("CHANGELOG.md"), text);
+        assert!(git(&["add", "-A"]).unwrap().status.success());
+        assert!(git(&["commit", "-q", "-m", "content fixture", "--no-verify"])
+            .unwrap().status.success());
+        let output = run_worktree_hook().expect("pwsh run");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.success(), passes, "stdout: {stdout}");
+        let verdict = if passes { "PASS" } else { "FAIL" };
+        assert!(stdout.contains(&format!("{verdict}: Changelog content")), "stdout: {stdout}");
+    }
 }
 
 #[test]
@@ -32262,12 +32372,12 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     }
     assert_eq!(
         runner.matches("timeout --foreground 180s").count(),
-        2,
-        "P13 runner must preserve diagnostics for both released and negative browser cells"
+        3,
+        "P13 runner must preserve diagnostics for released, negative, and drain browser cells"
     );
     for required in [
-        "waitForGlobal(creator, \"__FORTRESS_RESULT\", 105_000)",
-        "waitForGlobal(joiner, \"__FORTRESS_RESULT\", 105_000)",
+        "waitForGlobal(creator, \"__FORTRESS_RESULT\", mode === \"drain\" ? 10_000 : 105_000)",
+        "waitForGlobal(joiner, \"__FORTRESS_RESULT\", mode === \"drain\" ? 10_000 : 105_000)",
     ] {
         assert!(
             harness.contains(required),

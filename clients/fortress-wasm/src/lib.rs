@@ -39,6 +39,7 @@ type Client = SignalFishPollingClient<GodotWebSocketTransport>;
 #[serde(rename_all = "snake_case")]
 enum RunMode {
     Healthy,
+    DrainProbe,
     NegativeOneAdmissionPerCallback,
 }
 
@@ -184,6 +185,12 @@ struct Report {
     relay_received_sequence_hash: String,
 }
 
+#[derive(Serialize)]
+struct ActiveCheckpoint {
+    phase: String,
+    report: Report,
+}
+
 struct Runtime {
     config: BrowserConfig,
     client: Client,
@@ -210,6 +217,7 @@ struct Runtime {
     local_target_reached: bool,
     workload_finished: bool,
     pending_inbound: Vec<PendingInbound>,
+    shutdown_notice: Option<String>,
 }
 
 impl Runtime {
@@ -286,6 +294,7 @@ impl Runtime {
             local_target_reached: false,
             workload_finished: false,
             pending_inbound: Vec::new(),
+            shutdown_notice: None,
         })
     }
 
@@ -301,6 +310,11 @@ impl Runtime {
             .record_client_sent(self.client.stats().game_data_sent);
         for event in events {
             self.handle_event(event)?;
+        }
+        // Stop producing gameplay after the server's drain advisory. Keep
+        // polling the real transport until its authoritative close arrives.
+        if self.shutdown_notice.is_some() {
+            return Ok(false);
         }
         self.ensure_session()?;
         self.admit_pending_inbound()?;
@@ -398,7 +412,7 @@ impl Runtime {
                 || self.relay.target_received());
 
         let admission_cap = match self.config.run_mode {
-            RunMode::Healthy => usize::MAX,
+            RunMode::Healthy | RunMode::DrainProbe => usize::MAX,
             RunMode::NegativeOneAdmissionPerCallback => 1,
         };
         let admitted = drain_relay(
@@ -534,11 +548,25 @@ impl Runtime {
                     epoch,
                 });
             }
-            SignalFishEvent::PlayerLeft { player_id, .. } => {
+            SignalFishEvent::PlayerLeft { player_id, .. } if self.shutdown_notice.is_none() => {
+                // Other peers can close first during a server drain. The
+                // local close still supplies this peer's terminal outcome.
                 return Err(format!("Signal Fish peer left: {player_id}"));
             }
+            SignalFishEvent::GoingAway {
+                deadline_ms,
+                retry_after_secs,
+            } => {
+                self.shutdown_notice = Some(format!(
+                    "server going away: deadline_ms={deadline_ms}, retry_after_secs={retry_after_secs:?}"
+                ));
+            }
             SignalFishEvent::Disconnected { reason, .. } => {
-                return Err(format!("Signal Fish disconnected: {reason:?}"));
+                let notice = self
+                    .shutdown_notice
+                    .as_deref()
+                    .unwrap_or("no shutdown advisory");
+                return Err(format!("Signal Fish disconnected: {reason:?}; {notice}"));
             }
             SignalFishEvent::Error { message, .. }
             | SignalFishEvent::AuthenticationError { error: message, .. } => {
@@ -823,6 +851,7 @@ struct FortressWasmPeer {
     runtime: Option<Runtime>,
     report_json: Option<String>,
     completed: bool,
+    active_published: bool,
 }
 
 #[godot_api]
@@ -854,6 +883,47 @@ impl FortressWasmPeer {
     }
 
     #[func]
+    fn take_active_json(&mut self) -> GString {
+        if self.completed || self.active_published {
+            return GString::new();
+        }
+        let Some(runtime) = self.runtime.as_ref() else {
+            return GString::new();
+        };
+        let Some(session) = runtime.session.as_ref() else {
+            return GString::new();
+        };
+        let metrics = session.metrics();
+        if runtime.config.run_mode != RunMode::DrainProbe
+            || session.current_state() != SessionState::Running
+            || !(120..TARGET_CONFIRMED_FRAMES).contains(&session.confirmed_frame().as_i32())
+            || metrics.frames_advanced == 0
+            || metrics.rollback_count == 0
+            || metrics.checksums_compared == 0
+            || metrics.checksums_compared != metrics.checksums_matched
+            || metrics.checksums_mismatched != 0
+            || runtime.client.stats().game_data_sent == 0
+            || runtime.client.stats().game_data_received == 0
+        {
+            return GString::new();
+        }
+        let checkpoint = ActiveCheckpoint {
+            phase: session.current_state().to_string(),
+            report: runtime.report(None),
+        };
+        match serde_json::to_string(&checkpoint) {
+            Ok(json) => {
+                self.active_published = true;
+                GString::from(json.as_str())
+            }
+            Err(error) => {
+                godot_error!("FORTRESS_WASM checkpoint serialization error: {error}");
+                GString::new()
+            }
+        }
+    }
+
+    #[func]
     fn take_report_json(&mut self) -> GString {
         if self.report_json.is_some() {
             self.completed = true;
@@ -872,6 +942,7 @@ impl INode for FortressWasmPeer {
             runtime: None,
             report_json: None,
             completed: false,
+            active_published: false,
         }
     }
 
