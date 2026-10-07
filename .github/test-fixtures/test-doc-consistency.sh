@@ -134,6 +134,8 @@ INTERNAL_PATHS=(
     "clients/fortress/src/nested/peer.rs"
     "clients/fortress-wasm/src/lib.rs"
     "clients/fortress-wasm/src/nested/peer.rs"
+    "clients/fortress-wasm/harness.mjs"
+    "clients/fortress-wasm/project/main.gd"
     "test-fixtures/data.json"
     ".llm/skills/foo.md"
     "target/debug/binary"
@@ -195,6 +197,9 @@ echo -e "${YELLOW}--- Non-internal path classification ---${NC}"
 # Data-driven table: each entry is a non-internal path that should
 # trigger a changelog gate failure when CHANGELOG.md is absent.
 NON_INTERNAL_PATHS=(
+    "clients/fortress-wasm/project/other.gd"
+    "clients/fortress-wasm/harness.mjs.bak"
+    "clients/fortress-wasm/project/main.gd.bak"
     # Production source code
     "src/main.rs"
     "clients/native/src/client.rs"

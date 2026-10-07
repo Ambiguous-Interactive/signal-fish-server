@@ -24471,6 +24471,7 @@ fn test_pre_commit_changelog_gate_classification_and_verdicts_when_pwsh_availabl
                     "formal/model.tla", ".llm/skills/foo.md", "target/debug/binary", "progress/notes.md",
                     "clients/fortress/src/main.rs", "clients/fortress/src/nested/peer.rs",
                     "clients/fortress-wasm/src/lib.rs", "clients/fortress-wasm/src/nested/peer.rs",
+                    "clients/fortress-wasm/harness.mjs", "clients/fortress-wasm/project/main.gd",
                     "src/server_tests.rs", "src/main_test.rs", "src/server/tests.rs",
                     "docs/ci-cd-testing.md", "docs/test-analysis.md", "docs/git-hooks-guide.md",
                     "docs/hooks-quick-reference.md", "docs/pre-commit-hooks-summary.md",
@@ -24488,6 +24489,8 @@ fn test_pre_commit_changelog_gate_classification_and_verdicts_when_pwsh_availabl
 
                 # 2) Non-internal classification.
                 $nonInternal = @(
+                    "clients/fortress-wasm/project/other.gd", "clients/fortress-wasm/harness.mjs.bak",
+                    "clients/fortress-wasm/project/main.gd.bak",
                     "src/main.rs", "src/server.rs", "build.rs", "benches/benchmark.rs",
                     "clients/native/src/client.rs", "clients/browser/src/client.js", "clients/other/src/main.rs",
                     "clients/fortress/Cargo.toml", "clients/fortress-wasm/Cargo.toml",
@@ -32262,12 +32265,12 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     }
     assert_eq!(
         runner.matches("timeout --foreground 180s").count(),
-        2,
-        "P13 runner must preserve diagnostics for both released and negative browser cells"
+        3,
+        "P13 runner must preserve diagnostics for released, negative, and drain browser cells"
     );
     for required in [
-        "waitForGlobal(creator, \"__FORTRESS_RESULT\", 105_000)",
-        "waitForGlobal(joiner, \"__FORTRESS_RESULT\", 105_000)",
+        "waitForGlobal(creator, \"__FORTRESS_RESULT\", mode === \"drain\" ? 10_000 : 105_000)",
+        "waitForGlobal(joiner, \"__FORTRESS_RESULT\", mode === \"drain\" ? 10_000 : 105_000)",
     ] {
         assert!(
             harness.contains(required),

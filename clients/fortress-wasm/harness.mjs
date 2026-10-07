@@ -43,15 +43,16 @@ const [mode, exportDirectoryArg, serverBinaryArg, artifactDirectoryArg, buildSha
   process.argv.slice(2);
 if (mode === "self-test") {
   runHealthGateSelfTests();
+  runDrainGateSelfTests();
   process.stdout.write("HEALTHY fortress-wasm health-gate self-test\n");
   process.exit(0);
 }
 if (!mode || !exportDirectoryArg || !serverBinaryArg || !artifactDirectoryArg || !buildSha) {
   throw new Error(
-    "usage: node harness.mjs <released|negative> <export-dir> <server-bin> <artifacts-dir> <build-sha>",
+    "usage: node harness.mjs <released|negative|drain> <export-dir> <server-bin> <artifacts-dir> <build-sha>",
   );
 }
-if (!new Set(["released", "negative"]).has(mode)) {
+if (!new Set(["released", "negative", "drain"]).has(mode)) {
   throw new Error(`unsupported run mode: ${mode}`);
 }
 if (!isAbsolute(serverBinaryArg) || !existsSync(serverBinaryArg)) {
@@ -60,6 +61,12 @@ if (!isAbsolute(serverBinaryArg) || !existsSync(serverBinaryArg)) {
 if (!/^[0-9a-f]{40}$/.test(buildSha)) {
   throw new Error("build SHA must be a full lowercase Git object id");
 }
+
+const expectedRunMode = {
+  released: "healthy",
+  negative: "negative_one_admission_per_callback",
+  drain: "drain_probe",
+}[mode];
 
 const fixtureDirectory = resolve(import.meta.dirname);
 const exportDirectory = resolve(exportDirectoryArg);
@@ -121,6 +128,8 @@ let creator;
 let joiner;
 let creatorReport;
 let joinerReport;
+let activeCheckpoints;
+let serverExit;
 try {
   await waitForTcp(serverPort, 10_000);
   await new Promise((accept, reject) => {
@@ -152,9 +161,31 @@ try {
     pageUrl,
   });
 
+  if (mode === "drain") {
+    activeCheckpoints = await Promise.all([
+      waitForGlobal(creator, "__FORTRESS_ACTIVE", 20_000),
+      waitForGlobal(joiner, "__FORTRESS_ACTIVE", 20_000),
+    ]);
+    for (const [index, peer] of [creator, joiner].entries()) {
+      const checkpoint = activeCheckpoints[index];
+      assertExactKeys(checkpoint, ["phase", "report"], `${peer.role} checkpoint`);
+      assert(checkpoint.phase === "Running", `${peer.role}: fault before Running`);
+      assertExactKeys(checkpoint.report, reportKeys, `${peer.role} checkpoint report`);
+      assert(checkpoint.report.origin === "rust-gdextension", `${peer.role}: checkpoint origin`);
+      assert(checkpoint.report.runtime_error === null, `${peer.role}: unhealthy checkpoint`);
+      const violations = activeGameViolations(checkpoint.report);
+      assert(violations.length === 0, `${peer.role}: pre-drain ${violations.join(", ")}`);
+      assert(peer.logs.filter((line) => line.includes("FORTRESS_WASM_ACTIVE ")).length === 1, `${peer.role}: one active checkpoint`);
+      writeFileSync(join(artifactDirectory, `${peer.role}-active.json`), `${JSON.stringify(checkpoint, null, 2)}\n`);
+    }
+    assert(server.exitCode === null && server.signalCode === null, "server must be live before drain");
+    serverExit = new Promise((accept) => server.once("exit", (code, signal) => accept({ code, signal })));
+    assert(server.kill("SIGTERM"), "deliver actual server drain");
+  }
+
   [creatorReport, joinerReport] = await Promise.all([
-    waitForGlobal(creator, "__FORTRESS_RESULT", 105_000),
-    waitForGlobal(joiner, "__FORTRESS_RESULT", 105_000),
+    waitForGlobal(creator, "__FORTRESS_RESULT", mode === "drain" ? 10_000 : 105_000),
+    waitForGlobal(joiner, "__FORTRESS_RESULT", mode === "drain" ? 10_000 : 105_000),
   ]);
   await new Promise((accept) => setTimeout(accept, 250));
   const creatorBrowser = await browserAttestation(creator);
@@ -175,76 +206,92 @@ try {
     joinerBrowser,
     room.room_code,
   );
-  const peerHealth = [
-    ["creator", creatorReport, healthViolations("creator", creatorReport)],
-    ["joiner", joinerReport, healthViolations("joiner", joinerReport)],
-  ];
-  const healthyViolations = peerHealth.flatMap(([, , violations]) => violations);
-  if (mode === "released") {
-    for (const [name, report, violations] of peerHealth) {
-      assert(
-        report.max_admissions_per_callback > 1,
-        `${name}: released graph never attempted multi-send admission`,
-      );
-      assert(
-        report.callback_intervals.mean_us >= 8_000,
-        `${name}: released graph observed a synthetic/too-fast callback mean`,
-      );
-      assert(
-        violations.length === 0,
-        `${name}: released graph failed P13 healthy gates:\n${violations.join("\n")}`,
-      );
+  if (mode === "drain") {
+    for (const [index, report] of [creatorReport, joinerReport].entries()) {
+      const before = activeCheckpoints[index].report;
+      assert(report.player_id === before.player_id && report.instance_nonce === before.instance_nonce, `${report.role}: identity changed at shutdown`);
+      assert(report.frames_advanced >= before.frames_advanced, `${report.role}: progress moved backwards`);
+      const violations = drainFailureViolations(report);
+      assert(violations.length === 0, `${report.role}: shutdown ${violations.join(", ")}`);
     }
-    process.stdout.write(
-      "HEALTHY fortress-wasm released-client interoperability\n",
-    );
+    const exit = await Promise.race([
+      serverExit,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("server drain deadline expired")), 5_000)),
+    ]);
+    assert(exit.code === 0 && exit.signal === null, `server did not drain cleanly: ${JSON.stringify(exit)}`);
+    process.stdout.write("HEALTHY fortress-wasm causal server-drain failures\n");
   } else {
-    for (const [name, report, violations] of peerHealth) {
-      assert(
-        report.active_callback_count >= 600,
-        `${name}: negative control did not run the healthy control's 600-callback active budget`,
+    const peerHealth = [
+      ["creator", creatorReport, healthViolations("creator", creatorReport)],
+      ["joiner", joinerReport, healthViolations("joiner", joinerReport)],
+    ];
+    const healthyViolations = peerHealth.flatMap(([, , violations]) => violations);
+    if (mode === "released") {
+      for (const [name, report, violations] of peerHealth) {
+        assert(
+          report.max_admissions_per_callback > 1,
+          `${name}: released graph never attempted multi-send admission`,
+        );
+        assert(
+          report.callback_intervals.mean_us >= 8_000,
+          `${name}: released graph observed a synthetic/too-fast callback mean`,
+        );
+        assert(
+          violations.length === 0,
+          `${name}: released graph failed P13 healthy gates:\n${violations.join("\n")}`,
+        );
+      }
+      process.stdout.write(
+        "HEALTHY fortress-wasm released-client interoperability\n",
       );
-      assert(
-        report.max_admissions_per_callback === 1,
-        `${name}: negative control did not exercise exactly one maximum admission per callback`,
-      );
-      assert(
-        report.callback_intervals.mean_us >= 8_000,
-        `${name}: negative control observed a synthetic/too-fast callback mean`,
-      );
-      assert(violations.length > 0, `${name}: negative control unexpectedly satisfied every healthy gate`);
-      assert(
-        negativeControlDrainedItsDrivenBudget(report),
-        `${name}: negative control did not exercise a non-vacuous capped workload`,
-      );
-      assert(
-        report.checksums_matched === report.checksums_compared,
-        `${name}: negative control checksum accounting disagreed`,
-      );
-      assert(
-        report.client_game_data_sent_during_run <= report.active_callback_count * 2,
-        `${name}: negative control did not break the per-callback completion gate`,
-      );
-      assert(
-        report.client_game_data_sent_during_run * 1_000 < report.running_elapsed_ms * 120,
-        `${name}: negative control did not break the completed-rate gate`,
-      );
-      assert(
-        violations.every((violation) =>
-          new RegExp(
-            "current_frame=|confirmed_frame=|insufficient Fortress advancement|" +
-              "fewer than 1200|non-nominal callback mean|oldest queue age|" +
-              "stall_count|wait_recommendations|checksum agreement gate failed|" +
-              "confirmation lag exceeded|rollback depth=|active wall time|" +
-              "completed rate|sends per callback",
-          ).test(violation),
-        ),
-        `${name}: negative control developed an unrelated healthy-gate failure:\n${violations.join("\n")}`,
+    } else {
+      for (const [name, report, violations] of peerHealth) {
+        assert(
+          report.active_callback_count >= 600,
+          `${name}: negative control did not run the healthy control's 600-callback active budget`,
+        );
+        assert(
+          report.max_admissions_per_callback === 1,
+          `${name}: negative control did not exercise exactly one maximum admission per callback`,
+        );
+        assert(
+          report.callback_intervals.mean_us >= 8_000,
+          `${name}: negative control observed a synthetic/too-fast callback mean`,
+        );
+        assert(violations.length > 0, `${name}: negative control unexpectedly satisfied every healthy gate`);
+        assert(
+          negativeControlDrainedItsDrivenBudget(report),
+          `${name}: negative control did not exercise a non-vacuous capped workload`,
+        );
+        assert(
+          report.checksums_matched === report.checksums_compared,
+          `${name}: negative control checksum accounting disagreed`,
+        );
+        assert(
+          report.client_game_data_sent_during_run <= report.active_callback_count * 2,
+          `${name}: negative control did not break the per-callback completion gate`,
+        );
+        assert(
+          report.client_game_data_sent_during_run * 1_000 < report.running_elapsed_ms * 120,
+          `${name}: negative control did not break the completed-rate gate`,
+        );
+        assert(
+          violations.every((violation) =>
+            new RegExp(
+              "current_frame=|confirmed_frame=|insufficient Fortress advancement|" +
+                "fewer than 1200|non-nominal callback mean|oldest queue age|" +
+                "stall_count|wait_recommendations|checksum agreement gate failed|" +
+                "confirmation lag exceeded|rollback depth=|active wall time|" +
+                "completed rate|sends per callback",
+            ).test(violation),
+          ),
+          `${name}: negative control developed an unrelated healthy-gate failure:\n${violations.join("\n")}`,
+        );
+      }
+      process.stdout.write(
+        `BUSTED fortress-wasm expected negative control (${healthyViolations.length} healthy-gate violations)\n`,
       );
     }
-    process.stdout.write(
-      `BUSTED fortress-wasm expected negative control (${healthyViolations.length} healthy-gate violations)\n`,
-    );
   }
 } catch (error) {
   process.stderr.write(`BUSTED fortress-wasm ${mode}: ${error.stack ?? error}\n`);
@@ -256,7 +303,7 @@ try {
   await closePeer(creator);
   httpServer.close();
   server.kill("SIGTERM");
-  await Promise.race([
+  if (server.exitCode === null && server.signalCode === null) await Promise.race([
     new Promise((accept) => server.once("exit", accept)),
     new Promise((accept) => setTimeout(accept, 2_000)),
   ]);
@@ -357,7 +404,7 @@ async function launchPeer({ role, roomCode, instanceNonce, expectedRemoteNonce, 
         room_code: roomCode,
         instance_nonce: instanceNonce,
         expected_remote_nonce: expectedRemoteNonce,
-        run_mode: mode === "released" ? "healthy" : "negative_one_admission_per_callback",
+        run_mode: expectedRunMode,
         build_sha: buildSha,
         browser_process_id: pid,
         browser_artifact: `${browserArtifact}:${browserArtifactSha256}`,
@@ -444,7 +491,7 @@ function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser,
     assertExactKeys(report, reportKeys, `${name} report`);
     assert(report.schema_version === 3 && report.status === "complete", `${name}: incomplete schema`);
     assert(report.origin === "rust-gdextension", `${name}: report did not originate in Rust`);
-    assert(report.runtime_error === null, `${name}: ${report.runtime_error}`);
+    if (mode !== "drain") assert(report.runtime_error === null, `${name}: ${report.runtime_error}`);
     assert(report.role === name, `${name}: role mismatch`);
     assert(report.room_code === roomCode, `${name}: room mismatch`);
     assert(report.build_sha === buildSha, `${name}: current-checkout identity mismatch`);
@@ -485,7 +532,7 @@ function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser,
     assert(browser.sharedArrayBufferType === "undefined", `${name}: SharedArrayBuffer is exposed`);
     assert(browser.workerConstructions === 0 && browser.serviceWorkerRegistrations === 0, `${name}: worker use detected`);
   }
-  assert(creatorReport.run_mode === (mode === "released" ? "healthy" : "negative_one_admission_per_callback"), "creator run-mode mismatch");
+  assert(creatorReport.run_mode === expectedRunMode, "creator run-mode mismatch");
   assert(joinerReport.run_mode === creatorReport.run_mode, "peer run-mode mismatch");
   assert(creatorReport.instance_nonce !== joinerReport.instance_nonce, "duplicate instance nonces");
   assert(creatorReport.player_id !== joinerReport.player_id, "duplicate Signal Fish player ids");
@@ -494,18 +541,63 @@ function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser,
   assert(joinerReport.expected_remote_nonce === creatorReport.instance_nonce, "joiner expected-remote nonce mismatch");
   assert(creatorReport.remote_player_id === joinerReport.player_id, "creator remote player mismatch");
   assert(joinerReport.remote_player_id === creatorReport.player_id, "joiner remote player mismatch");
-  assert(creatorReport.relay_sent_sequence_count === joinerReport.relay_received_sequence_count, "creator->joiner sequence count mismatch");
-  assert(creatorReport.relay_sent_first_sequence === joinerReport.relay_received_first_sequence, "creator->joiner first sequence mismatch");
-  assert(creatorReport.relay_sent_last_sequence === joinerReport.relay_received_last_sequence, "creator->joiner last sequence mismatch");
-  assert(creatorReport.relay_sent_sequence_hash === joinerReport.relay_received_sequence_hash, "creator->joiner sequence ledger mismatch");
-  assert(joinerReport.relay_sent_sequence_count === creatorReport.relay_received_sequence_count, "joiner->creator sequence count mismatch");
-  assert(joinerReport.relay_sent_first_sequence === creatorReport.relay_received_first_sequence, "joiner->creator first sequence mismatch");
-  assert(joinerReport.relay_sent_last_sequence === creatorReport.relay_received_last_sequence, "joiner->creator last sequence mismatch");
-  assert(joinerReport.relay_sent_sequence_hash === creatorReport.relay_received_sequence_hash, "joiner->creator sequence ledger mismatch");
+  if (mode !== "drain") {
+    assert(creatorReport.relay_sent_sequence_count === joinerReport.relay_received_sequence_count, "creator->joiner sequence count mismatch");
+    assert(creatorReport.relay_sent_first_sequence === joinerReport.relay_received_first_sequence, "creator->joiner first sequence mismatch");
+    assert(creatorReport.relay_sent_last_sequence === joinerReport.relay_received_last_sequence, "creator->joiner last sequence mismatch");
+    assert(creatorReport.relay_sent_sequence_hash === joinerReport.relay_received_sequence_hash, "creator->joiner sequence ledger mismatch");
+    assert(joinerReport.relay_sent_sequence_count === creatorReport.relay_received_sequence_count, "joiner->creator sequence count mismatch");
+    assert(joinerReport.relay_sent_first_sequence === creatorReport.relay_received_first_sequence, "joiner->creator first sequence mismatch");
+    assert(joinerReport.relay_sent_last_sequence === creatorReport.relay_received_last_sequence, "joiner->creator last sequence mismatch");
+    assert(joinerReport.relay_sent_sequence_hash === creatorReport.relay_received_sequence_hash, "joiner->creator sequence ledger mismatch");
+  }
   for (const peer of [creator, joiner]) {
     assert(peer.errors.length === 0, `${peer.role}: browser errors:\n${peer.errors.join("\n")}`);
     assert(peer.logs.filter((line) => line.includes("FORTRESS_WASM_RESULT ")).length === 1, `${peer.role}: expected exactly one report log`);
   }
+}
+
+function activeGameViolations(report) {
+  const failures = [];
+  if (!Number.isInteger(report.confirmed_frame) || report.confirmed_frame < 120 || report.confirmed_frame >= 600) failures.push("not an unfinished active game");
+  for (const key of ["frames_advanced", "game_frame", "current_frame", "rollback_count", "checksums_compared", "client_game_data_sent", "client_game_data_received", "relay_sent_sequence_count", "relay_received_sequence_count"]) {
+    if (!(report[key] > 0)) failures.push(`missing ${key}`);
+  }
+  if (report.checksums_compared !== report.checksums_matched) failures.push("checksum disagreement");
+  for (const key of ["checksums_mismatched", "relay_malformed", "relay_wrong_destination", "relay_unknown_sender", "relay_outbound_overflow", "relay_inbound_overflow", "relay_encode_failures", "relay_completion_underflow", "client_messages_undecodable"]) {
+    if (report[key] !== 0) failures.push(`unclean ${key}`);
+  }
+  return failures;
+}
+
+function drainFailureViolations(report) {
+  const failures = activeGameViolations(report);
+  const reason = report.runtime_error;
+  if (typeof reason !== "string" || !reason.includes("Signal Fish disconnected:") || !reason.includes("code=Some(4000)") || !reason.includes("server_shutdown")) failures.push("missing authoritative shutdown close");
+  if (typeof reason !== "string" || !reason.includes("server going away: deadline_ms=")) failures.push("missing shutdown advisory");
+  if (typeof reason === "string" && /deadline expired|panicked/.test(reason)) failures.push("deadline or panic");
+  return failures;
+}
+
+function runDrainGateSelfTests() {
+  const active = { confirmed_frame: 120, checksums_matched: 1 };
+  for (const key of ["frames_advanced", "game_frame", "current_frame", "rollback_count", "checksums_compared", "client_game_data_sent", "client_game_data_received", "relay_sent_sequence_count", "relay_received_sequence_count"]) active[key] = 1;
+  for (const key of ["checksums_mismatched", "relay_malformed", "relay_wrong_destination", "relay_unknown_sender", "relay_outbound_overflow", "relay_inbound_overflow", "relay_encode_failures", "relay_completion_underflow", "client_messages_undecodable"]) active[key] = 0;
+  const close = "Signal Fish disconnected: code=Some(4000), server_shutdown; server going away: deadline_ms=123";
+  for (const [name, patch, accepted] of [
+    ["causal failure", { runtime_error: close }, true],
+    ["healthy completion", { runtime_error: null }, false],
+    ["close without advisory", { runtime_error: "Signal Fish disconnected: code=Some(4000), server_shutdown" }, false],
+    ["advisory without close", { runtime_error: "server going away: deadline_ms=123" }, false],
+    ["wrong code", { runtime_error: close.replace("4000", "1001") }, false],
+    ["wrong cause", { runtime_error: close.replace("server_shutdown", "protocol_error") }, false],
+    ["deadline", { runtime_error: `${close}; deadline expired` }, false],
+    ["panic", { runtime_error: `${close}; panicked` }, false],
+    ["no gameplay", { runtime_error: close, confirmed_frame: 0 }, false],
+    ["finished gameplay", { runtime_error: close, confirmed_frame: 600 }, false],
+    ["no checksum evidence", { runtime_error: close, checksums_compared: 0, checksums_matched: 0 }, false],
+    ["unrelated overflow", { runtime_error: close, relay_inbound_overflow: 1 }, false],
+  ]) assert((drainFailureViolations({ ...active, ...patch }).length === 0) === accepted, `drain gate: ${name}`);
 }
 
 function healthViolations(name, report) {
@@ -704,6 +796,7 @@ function cleanServerEnvironment(port, browserOriginPort) {
   return {
     ...environment,
     SIGNAL_FISH__PORT: String(port),
+    SIGNAL_FISH__SERVER__DRAIN_GRACE_SECS: "1",
     SIGNAL_FISH__LOGGING__LEVEL: "warn",
     SIGNAL_FISH__LOGGING__ENABLE_FILE_LOGGING: "false",
     SIGNAL_FISH__TURN__ENABLED: "false",

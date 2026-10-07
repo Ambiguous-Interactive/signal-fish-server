@@ -2,11 +2,13 @@ extends Node
 
 const CONFIG_KEY := "__FORTRESS_CONFIG"
 const ROOM_KEY := "__FORTRESS_ROOM_READY"
+const ACTIVE_KEY := "__FORTRESS_ACTIVE"
 const RESULT_KEY := "__FORTRESS_RESULT"
 
 @onready var peer: Node = $FortressWasmPeer
 var room_published := false
 var result_published := false
+var active_published := false
 
 
 func _ready() -> void:
@@ -54,6 +56,12 @@ func _process(_delta: float) -> void:
 			room_published = true
 			JavaScriptBridge.eval("globalThis.%s = %s" % [ROOM_KEY, room_json], true)
 			print("FORTRESS_WASM_ROOM ", room_json)
+	if not active_published:
+		var active_json: String = peer.take_active_json()
+		if not active_json.is_empty():
+			active_published = true
+			JavaScriptBridge.eval("globalThis.%s = %s" % [ACTIVE_KEY, active_json], true)
+			print("FORTRESS_WASM_ACTIVE ", active_json)
 	if not result_published:
 		var result_json: String = peer.take_report_json()
 		if not result_json.is_empty():

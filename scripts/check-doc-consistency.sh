@@ -890,7 +890,7 @@ is_internal_path() {
             return 0
             ;;
         # Standalone compatibility fixture sources (both packages publish = false).
-        clients/fortress/src/*|clients/fortress-wasm/src/*)
+        clients/fortress/src/*|clients/fortress-wasm/src/*|clients/fortress-wasm/harness.mjs|clients/fortress-wasm/project/main.gd)
             return 0
             ;;
         src/*_tests.rs|src/*_test.rs|src/*/tests.rs)
