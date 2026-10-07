@@ -464,12 +464,6 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         BuildIdentity::current(),
     )?;
 
-    // Measurement epoch: all intended/send/receive timestamps are micros
-    // since this instant on the monotonic clock. Set only after every piece
-    // of setup work, so the first intended send is measured from a cold
-    // generator.
-    let epoch = Instant::now();
-
     let max_intended_us = plans
         .iter()
         .map(SenderPlan::last_intended_us)
@@ -483,10 +477,8 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     // drain after that send — never one at the expense of the other.
     let quiescence_us =
         max_intended_us + micros(config.generator_lag_bound) + micros(config.drain_grace);
-    let quiescence = epoch + Duration::from_micros(quiescence_us);
-    // Belt over the schedule plus hooks: senders self-terminate well inside
-    // this; a lapse means the generator itself wedged.
-    let hard_deadline = epoch + Duration::from_micros(quiescence_us + hook_extra_us + 5_000_000);
+    let (mut start_tx, start_rx) = tokio::sync::watch::channel(None);
+    let mut readiness = Vec::new();
 
     // Declared slow-reader hook: the designated peer stops reading after its
     // join; the fault is declared at arm time so a replay sees it.
@@ -497,40 +489,65 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         });
     }
 
-    // Sampler: periodic server and generator resource diagnostics until
-    // quiescence (plus hook time, so late hook effects stay sampled).
+    // Build the sampler client and collect its process facts before arming.
+    let sampler_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|error| format!("build capacity metrics scrape client: {error}"))?;
+    let sampler_pid = server_slot.lock().await.as_ref().map(ServerProcess::pid);
+    let sampler_url = metrics_url(&endpoint_base);
     let samples: Arc<std::sync::Mutex<Vec<IntervalSample>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut auxiliary_handles = Vec::new();
     {
         let samples = Arc::clone(&samples);
-        let pid = server_slot.lock().await.as_ref().map(ServerProcess::pid);
-        auxiliary_handles.push(tokio::spawn(sample_loop(
-            epoch,
-            epoch + Duration::from_micros(quiescence_us + hook_extra_us),
-            config.sample_interval,
-            metrics_url(&endpoint_base),
-            pid,
-            // Class outcomes are evidence for the lossy classes AND for the
-            // unsupported-format experiment (whose refused cross-format
-            // fan-outs land in the reliable class's `unsupported_format`
-            // outcome).
-            (config.delivery_class != DeliveryClass::Reliable || config.experiment.is_some())
-                .then_some(config.delivery_class),
-            samples,
-        )));
+        let log = Arc::clone(&log);
+        let mut start = start_rx.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        readiness.push(ready_rx);
+        let interval = config.sample_interval;
+        let class = (config.delivery_class != DeliveryClass::Reliable
+            || config.experiment.is_some())
+        .then_some(config.delivery_class);
+        auxiliary_handles.push(tokio::spawn(async move {
+            match ready_for_epoch(ready_tx, &mut start).await {
+                Ok(epoch) => {
+                    sample_loop(
+                        sampler_client,
+                        epoch,
+                        epoch + Duration::from_micros(quiescence_us + hook_extra_us),
+                        interval,
+                        sampler_url,
+                        sampler_pid,
+                        class,
+                        samples,
+                    )
+                    .await
+                }
+                Err(error) => {
+                    log.push_fault(InvalidReason::RunnerDeadlineExceeded { detail: error })
+                }
+            }
+        }));
     }
 
-    // Kill hook: declared server termination.
-    if config.kill_server_after.is_some() {
+    // Prepare the kill hook before arming; its timer uses the shared epoch.
+    if let Some(kill_after) = config.kill_server_after {
         let slot = Arc::clone(&server_slot);
         let log = Arc::clone(&log);
-        let at = epoch + config.kill_server_after.expect("checked is_some above");
+        let mut start = start_rx.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        readiness.push(ready_rx);
         auxiliary_handles.push(tokio::spawn(async move {
-            tokio::time::sleep_until(at).await;
-            // Declare the fault BEFORE acting on it: sender tasks that
-            // observe the socket die must never race the declaration into a
-            // spurious SendFailed reason.
+            let epoch = match ready_for_epoch(ready_tx, &mut start).await {
+                Ok(epoch) => epoch,
+                Err(error) => {
+                    log.push_fault(InvalidReason::RunnerDeadlineExceeded { detail: error });
+                    return;
+                }
+            };
+            tokio::time::sleep_until(epoch + kill_after).await;
+            // Declare the fault before socket errors can observe the action.
             log.push_fault(InvalidReason::ServerTerminated);
             let process = slot.lock().await.take();
             if let Some(mut process) = process {
@@ -561,10 +578,10 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
             .find(|plan| plan.name == name && plan.room == room)
             .cloned()
             .expect("peer has a schedule");
-        let hold_reads_until = paused_reader
+        let hold_reads_for = paused_reader
             .as_deref()
             .filter(|designated| *designated == name.as_str())
-            .map(|_| epoch + config.pause_reads.expect("paused reader carries its pause"));
+            .map(|_| config.pause_reads.expect("paused reader carries its pause"));
         let churn_cycles: Vec<PeerChurnCycle> = churn_plan
             .victim_instants(&name)
             .into_iter()
@@ -593,6 +610,8 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
             .collect();
         let is_slow_reader = slow_reader_name.as_deref() == Some(name.as_str());
         let game_data_format = opaque_sender_format(&config, plan.player);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        readiness.push(ready_rx);
         handles.push(tokio::spawn(peer_task(
             name,
             plan,
@@ -613,15 +632,30 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
                 game_data_format,
             },
             churn_cycles,
-            epoch,
+            start_rx.clone(),
+            ready_tx,
             Arc::clone(&registry),
             (sink, rx, player_id, tails),
             Arc::clone(&log),
-            quiescence,
-            hold_reads_until,
+            quiescence_us,
+            hold_reads_for,
             is_slow_reader,
         )));
     }
+
+    // Only the owned tasks retain epoch receivers during arming.
+    drop(start_rx);
+    // Every task has finished initial setup before one immutable clock starts.
+    let epoch = arm_tasks(
+        readiness,
+        &mut start_tx,
+        Instant::now() + STEP_TIMEOUT,
+        &mut handles,
+        &mut auxiliary_handles,
+    )
+    .await?;
+    // This covers schedule, declared hooks, lag allowance, and delivery drain.
+    let hard_deadline = epoch + Duration::from_micros(quiescence_us + hook_extra_us + 5_000_000);
 
     // Stop every evidence producer before either snapshot or error propagation.
     let peer_result = await_peers(handles, hard_deadline).await;
@@ -1004,12 +1038,13 @@ async fn peer_task(
     plan: SenderPlan,
     facts: PeerFacts,
     churn_instants: Vec<PeerChurnCycle>,
-    epoch: Instant,
+    mut start: tokio::sync::watch::Receiver<Option<Instant>>,
+    ready: tokio::sync::oneshot::Sender<()>,
     registry: SenderRegistry,
     initial: (WsSink, WsReceiver, String, BTreeMap<String, (String, u64)>),
     log: Arc<EventLog>,
-    until: Instant,
-    hold_reads_until: Option<Instant>,
+    quiescence_us: u64,
+    hold_reads_for: Option<Duration>,
     never_read: bool,
 ) {
     let first_measured = plan
@@ -1034,6 +1069,15 @@ async fn peer_task(
     let mut session: Option<(WsSink, WsReceiver)> = Some((initial.0, initial.1));
     let mut send_cursor = 0usize;
     let mut churn_cursor = 0usize;
+    let epoch = match ready_for_epoch(ready, &mut start).await {
+        Ok(epoch) => epoch,
+        Err(error) => {
+            log.push_fault(InvalidReason::RunnerDeadlineExceeded { detail: error });
+            return;
+        }
+    };
+    let until = epoch + Duration::from_micros(quiescence_us);
+    let hold_reads_until = hold_reads_for.map(|pause| epoch + pause);
 
     'sessions: loop {
         let (mut sink, mut rx) = match session.take() {
@@ -1496,6 +1540,7 @@ pub(crate) async fn handle_inbound(
 /// class's accountable outcomes.
 #[allow(clippy::too_many_arguments)]
 async fn sample_loop(
+    client: reqwest::Client,
     epoch: Instant,
     until: Instant,
     interval: Duration,
@@ -1504,11 +1549,7 @@ async fn sample_loop(
     delivery_class: Option<DeliveryClass>,
     out: Arc<std::sync::Mutex<Vec<IntervalSample>>>,
 ) {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .expect("build capacity metrics scrape client");
-    let mut slot = Instant::now() + interval;
+    let mut slot = epoch + interval;
     loop {
         if Instant::now() >= until {
             return;
@@ -1704,6 +1745,56 @@ where
     event
 }
 
+async fn ready_for_epoch(
+    ready: tokio::sync::oneshot::Sender<()>,
+    start: &mut tokio::sync::watch::Receiver<Option<Instant>>,
+) -> Result<Instant, String> {
+    ready
+        .send(())
+        .map_err(|()| "run readiness receiver closed before arming".to_string())?;
+    loop {
+        if let Some(epoch) = *start.borrow_and_update() {
+            return Ok(epoch);
+        }
+        start
+            .changed()
+            .await
+            .map_err(|_| "run epoch channel closed before arming".to_string())?;
+    }
+}
+
+async fn arm_tasks(
+    readiness: Vec<tokio::sync::oneshot::Receiver<()>>,
+    start: &mut tokio::sync::watch::Sender<Option<Instant>>,
+    deadline: Instant,
+    peers: &mut Vec<tokio::task::JoinHandle<()>>,
+    auxiliaries: &mut Vec<tokio::task::JoinHandle<()>>,
+) -> Result<Instant, String> {
+    let result = async {
+        if start.borrow().is_some() {
+            return Err("run epoch was already armed".to_string());
+        }
+        tokio::time::timeout_at(deadline, futures_util::future::try_join_all(readiness))
+            .await
+            .map_err(|_| "run preparation readiness deadline exceeded".to_string())?
+            .map_err(|_| "run preparation task ended before readiness".to_string())?;
+        let epoch = Instant::now();
+        start
+            .send(Some(epoch))
+            .map_err(|_| "run epoch has no task receivers".to_string())?;
+        Ok(epoch)
+    }
+    .await;
+    if result.is_err() {
+        // Readiness failures must stop and await every task before returning.
+        let peer_cleanup = abort_and_join(std::mem::take(peers)).await;
+        let auxiliary_cleanup = abort_and_join(std::mem::take(auxiliaries)).await;
+        peer_cleanup?;
+        auxiliary_cleanup?;
+    }
+    result
+}
+
 async fn await_peers(
     handles: Vec<tokio::task::JoinHandle<()>>,
     deadline: Instant,
@@ -1749,7 +1840,7 @@ async fn abort_and_join(handles: Vec<tokio::task::JoinHandle<()>>) -> Result<(),
     for result in futures_util::future::join_all(handles).await {
         if let Err(error) = result {
             if !error.is_cancelled() {
-                return Err(format!("capacity auxiliary task failed: {error}"));
+                return Err(format!("capacity task failed during cleanup: {error}"));
             }
         }
     }
@@ -2108,7 +2199,225 @@ mod session_poll_tests {
         let error = abort_and_join(vec![failed, blocked])
             .await
             .expect_err("auxiliary panic refuses capture");
-        assert!(error.contains("capacity auxiliary task failed"), "{error}");
+        assert!(
+            error.contains("capacity task failed during cleanup"),
+            "{error}"
+        );
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn arm_waits_for_preparation_and_post_arm_delay_still_invalidates() {
+        let before_setup = Instant::now();
+        let (mut start, mut receiver) = tokio::sync::watch::channel(None);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
+        let mut peers = vec![tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            let epoch = ready_for_epoch(ready_tx, &mut receiver)
+                .await
+                .expect("run arms");
+            observed_tx.send(epoch).expect("observe epoch");
+        })];
+        let epoch = arm_tasks(
+            vec![ready_rx],
+            &mut start,
+            before_setup + Duration::from_secs(2),
+            &mut peers,
+            &mut Vec::new(),
+        )
+        .await
+        .expect("prepared tasks arm");
+        assert_eq!(
+            epoch.duration_since(before_setup),
+            Duration::from_millis(600)
+        );
+        assert_eq!(
+            micros(epoch.elapsed()),
+            0,
+            "setup must not consume generator lag"
+        );
+        assert_eq!(observed_rx.await.expect("peer observed epoch"), epoch);
+        let context = crate::unit_context();
+        let mut records = crate::complete_records(&context.plans);
+        let summary = oracle::summarize(
+            &context.plans,
+            &context.roster,
+            &records,
+            500_000,
+            96,
+            context.delivery_class,
+            &crate::schedule::ChurnPlan::default(),
+            None,
+        );
+        assert!(
+            summary.valid,
+            "ready generator control must pass: {:?}",
+            summary.reasons
+        );
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let measured_delay = micros(epoch.elapsed());
+        for sent in &mut records.sent {
+            sent.sent_us += measured_delay;
+        }
+        for receipt in &mut records.receipts {
+            receipt.received_us += measured_delay;
+        }
+        let delayed = oracle::summarize(
+            &context.plans,
+            &context.roster,
+            &records,
+            500_000,
+            96,
+            context.delivery_class,
+            &crate::schedule::ChurnPlan::default(),
+            None,
+        );
+        assert!(!delayed.valid);
+        assert!(delayed.reasons.iter().any(|reason| matches!(reason, InvalidReason::GeneratorSaturated { max_lag_us, bound_us: 500_000 } if *max_lag_us >= measured_delay)));
+        assert!(await_peers(peers, Instant::now() + Duration::from_secs(1))
+            .await
+            .expect("prepared peer completes"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn all_prepared_tasks_receive_one_immutable_epoch() {
+        let (mut start, receiver) = tokio::sync::watch::channel(None);
+        let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut readiness = Vec::new();
+        let mut peers = Vec::new();
+        for delay in [0, 200, 600] {
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            readiness.push(ready_rx);
+            let mut receiver = receiver.clone();
+            let observed = observed_tx.clone();
+            peers.push(tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                observed
+                    .send(
+                        ready_for_epoch(ready_tx, &mut receiver)
+                            .await
+                            .expect("all peers arm"),
+                    )
+                    .expect("observe shared epoch");
+            }));
+        }
+        drop(receiver);
+        drop(observed_tx);
+        let epoch = arm_tasks(
+            readiness,
+            &mut start,
+            Instant::now() + Duration::from_secs(2),
+            &mut peers,
+            &mut Vec::new(),
+        )
+        .await
+        .expect("all tasks prepared");
+        for _ in 0..3 {
+            assert_eq!(observed_rx.recv().await.expect("peer epoch"), epoch);
+        }
+        assert!(await_peers(peers, Instant::now() + Duration::from_secs(1))
+            .await
+            .expect("all peers finish"));
+        let error = arm_tasks(
+            Vec::new(),
+            &mut start,
+            Instant::now() + Duration::from_secs(1),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .await
+        .expect_err("epoch cannot be reset");
+        assert!(error.contains("already armed"), "{error}");
+        assert_eq!(*start.borrow(), Some(epoch));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn readiness_failure_and_timeout_cancel_all_preparation_tasks() {
+        for timeout in [false, true] {
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let (mut start, _receiver) = tokio::sync::watch::channel(None);
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let guard = DropCount(Arc::clone(&dropped));
+            let mut peers = vec![tokio::spawn(async move {
+                let _guard = guard;
+                let _ready = if timeout {
+                    Some(ready_tx)
+                } else {
+                    drop(ready_tx);
+                    None
+                };
+                std::future::pending::<()>().await;
+            })];
+            let guard = DropCount(Arc::clone(&dropped));
+            let mut auxiliaries = vec![tokio::spawn(async move {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+            })];
+            let error = arm_tasks(
+                vec![ready_rx],
+                &mut start,
+                Instant::now() + Duration::from_secs(1),
+                &mut peers,
+                &mut auxiliaries,
+            )
+            .await
+            .expect_err("incomplete preparation refuses arming");
+            assert!(
+                error.contains(if timeout {
+                    "readiness deadline"
+                } else {
+                    "before readiness"
+                }),
+                "{error}"
+            );
+            assert_eq!(*start.borrow(), None);
+            assert!(peers.is_empty() && auxiliaries.is_empty());
+            assert_eq!(
+                dropped.load(Ordering::SeqCst),
+                2,
+                "cleanup must complete before returning"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn preparation_panic_is_loud_and_cleans_auxiliary_tasks() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let (mut start, _receiver) = tokio::sync::watch::channel(None);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let mut peers = vec![tokio::spawn(async move {
+            let _ready = ready_tx;
+            panic!("injected preparation panic");
+        })];
+        let guard = DropCount(Arc::clone(&dropped));
+        let mut auxiliaries = vec![tokio::spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        })];
+        let error = arm_tasks(
+            vec![ready_rx],
+            &mut start,
+            Instant::now() + Duration::from_secs(1),
+            &mut peers,
+            &mut auxiliaries,
+        )
+        .await
+        .expect_err("preparation panic refuses arming");
+        assert!(error.contains("injected preparation panic"), "{error}");
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(*start.borrow(), None);
+        assert!(peers.is_empty() && auxiliaries.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closed_start_channel_cannot_supply_a_fallback_epoch() {
+        let (start, mut receiver) = tokio::sync::watch::channel(None);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        drop(start);
+        let error = ready_for_epoch(ready_tx, &mut receiver)
+            .await
+            .expect_err("missing epoch is a preparation failure");
+        assert!(error.contains("epoch channel closed"), "{error}");
+        ready_rx.await.expect("readiness was reported");
     }
 }
