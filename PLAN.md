@@ -447,8 +447,10 @@ Before large capacity runs, close the measurement prerequisites found in the
 
 - [#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775):
   bound retained events and validation indexes while preserving exact
-  validation across long runs. Schedules now derive each send on demand;
-  the audit records memory measurements and exact timeline controls.
+  validation across long runs. Schedules derive each send on demand.
+  Replay reads one JSONL line at a time. The audit records memory measurements
+  and exact timeline and replay controls. Retained records and oracle state
+  still grow with the workload.
 - [#776](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/776):
   require external-host config and binary evidence before accepting points.
 - Extend the runner for the required encoding cohorts and idle-lobby cells.

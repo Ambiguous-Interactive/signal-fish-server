@@ -1380,6 +1380,8 @@ async fn unidentified_game_data_keeps_byte_evidence_without_invented_receipts() 
 
 /// Profile real event collection and oracle scratch in a fresh process.
 /// This synthetic complete workload measures the generator, not the server.
+/// CAPACITY_MEMORY_PROBE_WRITE_DIR writes fixtures outside measured replay processes.
+/// CAPACITY_MEMORY_PROBE_REPLAY_DIR loads those fixtures before oracle evaluation.
 /// Capture child peak RSS with the host profiler; set
 /// CAPACITY_MEMORY_PROBE_SENDS to 100, 1000, or 5000 for increasing fan-out.
 #[test]
@@ -1403,7 +1405,15 @@ fn generator_memory_profile_on_complete_fanout() {
         .iter()
         .map(|plan| (plan.name.clone(), plan.room))
         .collect::<Vec<_>>();
-    let records = complete_records(&plans);
+    let records = match std::env::var_os("CAPACITY_MEMORY_PROBE_REPLAY_DIR") {
+        Some(path) => artifacts::read_records(std::path::Path::new(&path))
+            .expect("read memory probe artifact"),
+        None => complete_records(&plans),
+    };
+    if let Some(path) = std::env::var_os("CAPACITY_MEMORY_PROBE_WRITE_DIR") {
+        artifacts::write_deliveries(std::path::Path::new(&path), &records)
+            .expect("write memory probe artifact");
+    }
     assert_eq!(config::count_u64(records.sent.len()), 16 * sends);
     assert_eq!(config::count_u64(records.receipts.len()), 240 * sends);
     let collected_rss = diagnostics::resident_memory_bytes(std::process::id());

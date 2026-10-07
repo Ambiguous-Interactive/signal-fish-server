@@ -2775,3 +2775,52 @@ partial periods, indexed access, and churn. It rejected an intentional PRNG
 index mutation. Fifteen focused controls passed, including real-socket pressure,
 reconnect, replacement, exact payload sizes, and artifact replay. Retained events,
 oracle indexes, replay memory, and the ten-minute live cell remain open in #775.
+
+### C3 replay input memory — registered experiment
+
+Issue #775 remains open. This experiment isolates JSONL input buffering. Compare
+main `5414c7fe` with streaming readers using the same ignored
+`generator_memory_profile_on_complete_fanout` probe. Generate each input artifact
+once, outside the measured reader processes, from 16 peers with 100, 1,000, and
+5,000 sends each. The files contain 24,000, 240,000, and 1,200,000 receipts plus
+the corresponding sent events. Record file sizes and SHA-256 hashes.
+
+For each input, run three fresh baseline readers, then three candidate readers.
+Use Python `os.wait4` to record peak child RSS in KiB. Each reader rebuilds the
+same compact plans, reads the same artifact, and runs the exact oracle. Require
+full summary JSON equality across all paired runs. Retain every attempt, exit
+status, raw output, and wall time. Do not retry failed trials silently.
+
+The input is synthetic reliable fan-out. No server traffic or capacity point is
+measured. Streaming removes the whole-file byte buffer; retained records, oracle
+indexes, and the largest JSONL line remain separate memory costs.
+
+The experiment ran on ARM64 Linux under WSL2 with rustc 1.91.0 in the debug
+test profile. All three fixture producers and all 18 measured readers exited
+successfully. Every reader reproduced the producer's full summary JSON.
+
+| Receipts | Input bytes | Baseline median KiB (range) | Streaming median KiB (range) | Reduction |
+| --- | --- | --- | --- | --- |
+| 24,000 | 4,270,383 | 16,712 (16,572–16,712) | 15,864 (15,736–15,864) | 5.1% |
+| 240,000 | 43,421,095 | 90,056 (89,928–90,312) | 57,400 (57,344–57,408) | 36.3% |
+| 1,200,000 | 220,485,095 | 419,912 (419,896–420,040) | 243,568 (243,552–243,956) | 42.0% |
+
+Input hashes, binary hashes, producer records, raw reader output, and every
+measured attempt remain under `/tmp/signal-fish-c3-replay-memory-20261007/`.
+Both JSONL readers now reuse one line buffer. The parsing rules, event order,
+arrival order, and schema remain unchanged. The buffer retains the capacity of
+the largest line; parsed records and oracle indexes still grow with workload.
+
+Controls cover all event kinds, empty lines, CRLF, a final line without a
+newline, repeated registry entries, duplicate JSON keys, malformed events,
+large Unicode lines, and late read errors. A mutation that reads the whole file
+failed the malformed-prefix control because it read the protected tail.
+Real-socket payload, churn, and replay controls also passed. No live ten-minute
+cell or accepted server capacity point is proved by this experiment.
+
+The same I/O review found [#793](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/793):
+both JSONL writers could hide a final buffered write failure. A Linux `/dev/full`
+control showed both writers returning success before the fix. Both now flush
+explicitly and report errors with the artifact path. The repository sweep found
+two other Rust buffered writers, both already flushing. The failure control and
+real-socket artifact/interval replay control passed after the fix.
