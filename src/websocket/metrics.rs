@@ -420,13 +420,35 @@ fn bounded_sessions_response(
     })
 }
 
-/// Session records endpoint (issues #708, #763) - one record per room, active
-/// and completed, so consumers can derive per-session views (room length,
-/// roster churn, where a room lived) without a packet capture or aggregate
-/// scrape. Bearer-token-gated and size-bounded like `/metrics`.
+/// Query parameters for `/metrics/sessions` (issue #766).
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct SessionsQuery {
+    /// Completed-record cursor: return only completed records whose
+    /// completion sequence exceeds this value, making scrape ingest gapless
+    /// within the ring's retention window. The active list is a live
+    /// snapshot and is unaffected.
+    #[serde(default, rename = "since")]
+    since: Option<u64>,
+    /// Restrict both lists to records attributed to this application id
+    /// (multi-tenant control planes pull per-app slices without widening
+    /// authz). A malformed value fails the request (extractor 400).
+    #[serde(default, rename = "applicationId")]
+    application_id: Option<uuid::Uuid>,
+}
+
+/// Session records endpoint (issues #708, #763, #766) - one record per room,
+/// active and completed, so consumers can derive per-session views (room
+/// length, roster churn, transport outcome, traffic, where a room lived)
+/// without a packet capture or aggregate scrape. Bearer-token-gated and
+/// size-bounded like `/metrics`.
+///
+/// With `?applicationId=`, both lists (and their counts) describe the
+/// filtered view; the process-lifetime drop counters stay global. With
+/// `?since=`, only the completed list is cursor-filtered.
 pub async fn sessions_metrics_handler(
     headers: axum::http::HeaderMap,
     State(server): State<Arc<EnhancedGameServer>>,
+    axum::extract::Query(query): axum::extract::Query<SessionsQuery>,
 ) -> axum::response::Result<axum::response::Json<serde_json::Value>> {
     // Check authentication if required (same posture as `/metrics`).
     if server.config().require_metrics_auth {
@@ -439,7 +461,8 @@ pub async fn sessions_metrics_handler(
                 "the configured database backend does not track session records",
         })));
     };
-    let mut value = serde_json::to_value(records.snapshot())
+    let snapshot = records.snapshot_view(query.since, query.application_id);
+    let mut value = serde_json::to_value(&snapshot)
         .unwrap_or_else(|_| serde_json::json!({ "truncated": true }));
     // Cap the active list deterministically (oldest survive, per the
     // snapshot's order); counters keep their pre-truncation values.
@@ -789,9 +812,13 @@ mod tests {
                 .parse()
                 .expect("static header value"),
         );
-        let response = sessions_metrics_handler(headers, State(Arc::clone(&server)))
-            .await
-            .expect("handler responds");
+        let response = sessions_metrics_handler(
+            headers,
+            State(Arc::clone(&server)),
+            axum::extract::Query(SessionsQuery::default()),
+        )
+        .await
+        .expect("handler responds");
         let value = response.0;
         assert_eq!(
             value["active"].as_array().map(Vec::len),

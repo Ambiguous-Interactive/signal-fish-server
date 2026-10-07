@@ -2714,6 +2714,15 @@ impl EnhancedGameServer {
         let guard = room_event_guard.ok_or_else(|| {
             anyhow::anyhow!("successful room admission lost its room publication guard")
         })?;
+        // Per-session protocol attribution (issue #766): record the joining
+        // member's negotiated protocol version into the session's add-only
+        // version set. Creator and joiner both commit through this admission,
+        // so this is the one player seam; a record for a room removed between
+        // admission and attribution simply no longer exists.
+        if let Some(records) = self.session_records() {
+            records
+                .record_member_protocol_version(&room.id, self.client_protocol(player_id).version);
+        }
         Ok((room, guard, admission_kind, creation_lock))
     }
 

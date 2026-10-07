@@ -623,6 +623,7 @@ impl EnhancedGameServer {
                         let is_replan = resolved.is_replan;
                         let active_session_plans = Arc::clone(&server.active_session_plans);
                         let metrics = Arc::clone(&server.metrics);
+                        let session_records = server.session_records();
                         let reconnection_manager = server.reconnection_manager.clone();
                         let replay_message = Arc::clone(&player_joined);
 
@@ -675,6 +676,15 @@ impl EnhancedGameServer {
                                         // reconnect and host-replan paths count
                                         // theirs unconditionally too.
                                         metrics.add_turn_credentials_issued(turn_credentials_issued);
+                                        // Per-session attribution (issue
+                                        // #766), mirroring the server-wide
+                                        // counter at the same commit hook.
+                                        if let Some(records) = session_records.as_deref() {
+                                            records.record_turn_credentials(
+                                                &room_id,
+                                                turn_credentials_issued,
+                                            );
+                                        }
                                         if let Some(reconnection_manager) = reconnection_manager {
                                             reconnection_manager
                                                 .record_room_event(

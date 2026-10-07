@@ -732,6 +732,11 @@ impl EnhancedGameServer {
         }
 
         self.metrics.increment_authority_transfers();
+        // Per-session attribution (issue #766): mirrors the server-wide
+        // counter into the room's session record.
+        if let Some(records) = self.session_records() {
+            records.record_authority_transfer(&room_id);
+        }
     }
 
     /// Handle an authority-initiated `RegenerateRoomCode` room operation

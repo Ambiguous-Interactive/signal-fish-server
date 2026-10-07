@@ -626,6 +626,22 @@ impl EnhancedGameServer {
             self.metrics.record_p2p_established();
         }
 
+        // Resolve the sender's room once: it scopes both the per-session
+        // attribution below (issue #766; a roomless report counts server-wide
+        // only, exactly as before) and the fan-out further down. No await
+        // intervenes until the fan-out's own resolution, and the sender's
+        // lifecycle gate held by the caller pins membership across both uses.
+        let room_id = self.get_client_room(player_id).await;
+        if let Some(records) = self.session_records() {
+            if let Some(room_id) = &room_id {
+                if !connected {
+                    records.record_relay_fallback(room_id);
+                } else if matches!(transport, Transport::Direct | Transport::WebRtc) {
+                    records.record_p2p_established(room_id);
+                }
+            }
+        }
+
         // Fan the accepted state change out to the sender's CURRENT room as
         // `PeerTransportStatus`, so peers learn e.g. that
         // the host's WebRTC path died and relay-path traffic should be
@@ -633,7 +649,7 @@ impl EnhancedGameServer {
         // once per real state change in the current membership generation
         // (including its first report). No room ⇒ nothing to fan out — the
         // generation-scoped state was still recorded above.
-        let room_id = self.get_client_room(player_id).await?;
+        let room_id = room_id?;
 
         // Keep membership and connection generations fixed while resolving
         // this room-wide status event's recipient snapshot. The sender

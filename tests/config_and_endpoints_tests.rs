@@ -1853,6 +1853,140 @@ async fn test_metrics_sessions_endpoint_requires_auth_when_configured() {
     authorized.assert_status_ok();
 }
 
+/// The per-session traffic and protocol fields (issue #766) must be wired to
+/// the production seams: two real joins attribute their negotiated protocol
+/// versions, one relayed JSON game-data frame attributes its sender-side
+/// message count, payload bytes, and encoding — and the query filters plumb
+/// through (`applicationId`, malformed values fail the request).
+#[tokio::test]
+async fn test_metrics_sessions_endpoint_reports_traffic_protocol_and_applies_filters() {
+    use signal_fish_server::protocol::ClientMessage;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    let mut config = test_server_config();
+    config.require_metrics_auth = false;
+
+    let server = test_helpers::create_test_server_with_config(
+        config,
+        signal_fish_server::config::ProtocolConfig::default(),
+    )
+    .await;
+
+    let (tx1, mut rx1) = tokio::sync::mpsc::channel(64);
+    let (tx2, _rx2) = tokio::sync::mpsc::channel(64);
+    let player1_id = server
+        .register_client(tx1, "127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let player2_id = server
+        .register_client(tx2, "127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    server
+        .handle_join_room(
+            &player1_id,
+            "traffic_game".to_string(),
+            Some("TRF123".to_string()),
+            "TrafficPlayer1".to_string(),
+            Some(2),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await;
+    server
+        .handle_join_room(
+            &player2_id,
+            "traffic_game".to_string(),
+            Some("TRF123".to_string()),
+            "TrafficPlayer2".to_string(),
+            Some(2),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await;
+    // The room exists once the creator sees its RoomJoined.
+    while !matches!(
+        rx1.try_recv(),
+        Ok(ref message) if matches!(message.as_ref(), signal_fish_server::protocol::ServerMessage::RoomJoined(_))
+    ) {
+        tokio::task::yield_now().await;
+    }
+
+    // One admitted JSON game-data frame.
+    let data = serde_json::json!({"action": "move", "x": 10, "y": 20});
+    server
+        .handle_client_message(
+            &player1_id,
+            ClientMessage::GameData {
+                class: None,
+                key: None,
+                data: data.clone(),
+            },
+        )
+        .await;
+
+    let app = create_router("*").with_state(Arc::clone(&server));
+    let test_server = axum_test::TestServer::new(app);
+
+    let response = test_server.get("/metrics/sessions").await;
+    response.assert_status_ok();
+    let json: serde_json::Value = response.json();
+    assert_eq!(json["activeCount"], 1);
+    let record = &json["active"][0];
+    assert_eq!(record["roomCode"], "TRF123");
+    assert_eq!(
+        record["gameDataMessages"], 1,
+        "the admitted frame must attribute exactly once"
+    );
+    assert_eq!(
+        record["relayBytes"],
+        serde_json::to_vec(&data).unwrap().len() as u64,
+        "sender-side bytes follow the canonical-JSON budget measure"
+    );
+    assert_eq!(
+        record["gameDataEncodings"],
+        serde_json::json!(["json"]),
+        "the text lane attributes the json encoding"
+    );
+    let versions = record["protocolVersions"].as_array().expect("version set");
+    assert!(
+        !versions.is_empty(),
+        "both joins attribute their negotiated protocol version"
+    );
+    assert!(
+        versions.iter().all(|version| version.as_u64().is_some()),
+        "versions are wire u16 values"
+    );
+    assert_eq!(
+        record["seq"],
+        serde_json::Value::Null,
+        "active records carry no cursor sequence yet"
+    );
+
+    // A different application's slice is empty; the unowned room does not
+    // leak into it.
+    let other_app = Uuid::new_v4();
+    let filtered = test_server
+        .get(&format!("/metrics/sessions?applicationId={other_app}"))
+        .await;
+    filtered.assert_status_ok();
+    let filtered_json: serde_json::Value = filtered.json();
+    assert_eq!(filtered_json["activeCount"], 0);
+    assert_eq!(filtered_json["active"], serde_json::json!([]));
+
+    // Malformed filter values fail the request instead of silently matching
+    // nothing.
+    let malformed = test_server
+        .get("/metrics/sessions?applicationId=not-a-uuid")
+        .await;
+    malformed.assert_status(axum::http::StatusCode::BAD_REQUEST);
+}
+
 // ===========================================================================
 // Prometheus metrics endpoint tests
 // ===========================================================================

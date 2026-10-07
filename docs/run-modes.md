@@ -149,13 +149,19 @@ see the [reverse proxy setup](deployment.md#reverse-proxy-setup). The
 
 Metrics are served at `/metrics` (and `/v1/metrics`) as JSON and at
 `/metrics/prom` for Prometheus. Per-room session records (one record per
-room, active and completed: identity, roster churn, close reason) are served
+room, active and completed: identity, roster churn, transport outcome,
+traffic, close reason) are served
 at `/metrics/sessions` (and `/v1/metrics/sessions`) as bounded JSON. Active
 records list oldest first; completed records list newest first; both lists
-carry explicit truncation flags when capped. Session records include room
+carry explicit truncation flags when capped. Completed records carry a
+monotonic `seq`; `?since=<seq>` cursor-filters the completed list so a
+scraper misses no completion that stayed inside the retention ring, and
+`?applicationId=<uuid>` restricts both lists to one application's rooms.
+Session records include room
 codes (join capabilities) and per-application attribution, so the metrics
 token is operator-level: share it only with principals that may see every
-app's rooms. Protect
+app's rooms — or hand each tenant its own slice with
+`?applicationId=` without widening the token. Protect
 them with a bearer token: when
 `security.require_metrics_auth=true`, requests must send
 `Authorization: Bearer <token>` matching `security.metrics_auth_token`:

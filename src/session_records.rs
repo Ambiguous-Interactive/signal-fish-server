@@ -11,7 +11,7 @@
 //! that drops the oldest entry. The surface is JSON-only; session cardinality
 //! makes Prometheus labels a poor fit.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -46,7 +46,9 @@ pub const SESSION_RECORDS_ACTIVE_RESPONSE_CAP: usize = 512;
 /// stays inside the budget — pinned by
 /// `full_caps_of_worst_case_records_fit_the_response_budget` — and
 /// truncation stays a rare fail-visible backstop instead of a steady state.
-pub const SESSIONS_RESPONSE_MAX_BYTES: usize = 1024 * 1024;
+/// 1.5 MiB: the per-session counters and encoding/version sets added with
+/// the #766 fields push the full-caps worst case just past 1 MiB.
+pub const SESSIONS_RESPONSE_MAX_BYTES: usize = 1536 * 1024;
 
 /// Why a room closed. Coarse by design: the storage seam knows the deleting
 /// path, not the caller's intent.
@@ -86,6 +88,38 @@ pub struct SessionRecord {
     pub players_left: u64,
     pub spectators_joined: u64,
     pub spectators_left: u64,
+    /// Distinct player protocol versions observed at membership add, sorted.
+    /// Membership is add-only: a version seen once stays listed for the
+    /// session's lifetime, so the set describes the session's client mix.
+    pub protocol_versions: BTreeSet<u16>,
+    /// Distinct game-data wire encodings observed on budget-admitted relayed
+    /// frames, sorted (`json`, `message_pack`, `rkyv`, `protobuf`).
+    pub game_data_encodings: BTreeSet<String>,
+    /// Sender-side budget-admitted game-data frames relayed in this room
+    /// (the per-session twin of the charge path behind
+    /// `players.relay_bytes_total`).
+    pub game_data_messages: u64,
+    /// Sender-side budget-admitted game-data payload bytes relayed in this
+    /// room (the per-session twin of `players.relay_bytes_total`).
+    pub relay_bytes: u64,
+    /// Authority switches inside this room (the per-session twin of
+    /// `players.authorityTransfers`).
+    pub authority_transfers: u64,
+    /// Accepted v3 transport reports that established a peer-to-peer path
+    /// (the per-session twin of `transport.p2pEstablished`; same definition).
+    pub p2p_established: u64,
+    /// Accepted v3 transport reports that fell back to the relay floor (the
+    /// per-session twin of `transport.relayFallback`; same definition).
+    pub relay_fallback: u64,
+    /// TURN credentials issued for this room's session plans and ICE
+    /// pre-gathers (the per-session twin of
+    /// `transport.turnCredentialsIssued`; same definition).
+    pub turn_credentials_issued: u64,
+    /// Monotonic completion sequence, stamped when the record enters the
+    /// completed ring; `null` while the room is active. The `?since=` cursor
+    /// compares against this, making completed-session ingest gapless within
+    /// the ring's retention window.
+    pub seq: Option<u64>,
 }
 
 impl SessionRecord {
@@ -109,12 +143,20 @@ impl SessionRecord {
             players_left: 0,
             spectators_joined: 0,
             spectators_left: 0,
+            protocol_versions: BTreeSet::new(),
+            game_data_encodings: BTreeSet::new(),
+            game_data_messages: 0,
+            relay_bytes: 0,
+            authority_transfers: 0,
+            p2p_established: 0,
+            relay_fallback: 0,
+            turn_credentials_issued: 0,
+            seq: None,
         }
     }
 }
 
 /// Bounded registry of active and completed session records.
-#[derive(Default)]
 pub struct SessionRecords {
     active: DashMap<RoomId, SessionRecord>,
     completed: Mutex<VecDeque<SessionRecord>>,
@@ -123,6 +165,23 @@ pub struct SessionRecords {
     /// them, so they leave no completed record; the counter keeps the drop
     /// visible to operators.
     unpublished_dropped_total: AtomicU64,
+    /// Source of the per-record completion sequence ([`SessionRecord::seq`]).
+    /// Stamped in ring-insertion order so a `?since=` cursor over the
+    /// completed list is gapless within the ring's retention window. Starts
+    /// at 1 so a `since=0` bootstrap cursor keeps every completed record.
+    next_completed_seq: AtomicU64,
+}
+
+impl Default for SessionRecords {
+    fn default() -> Self {
+        Self {
+            active: DashMap::default(),
+            completed: Mutex::default(),
+            completed_dropped_total: AtomicU64::default(),
+            unpublished_dropped_total: AtomicU64::default(),
+            next_completed_seq: AtomicU64::new(1),
+        }
+    }
 }
 
 /// Point-in-time copy of the registry for one scrape.
@@ -218,6 +277,66 @@ impl SessionRecords {
         }
     }
 
+    /// Attribute one budget-admitted game-data frame (sender-side payload
+    /// bytes and wire encoding) to its room's session.
+    pub(crate) fn record_game_data(&self, room_id: &RoomId, bytes: u64, encoding: &str) {
+        if let Some(mut record) = self.active.get_mut(room_id) {
+            record.game_data_messages = record.game_data_messages.saturating_add(1);
+            record.relay_bytes = record.relay_bytes.saturating_add(bytes);
+            // Probe before inserting: the owned insert would allocate on
+            // every frame, and the relay charge path stays allocation-free
+            // in steady state (one encoding per room in the common case).
+            if !record.game_data_encodings.contains(encoding) {
+                record.game_data_encodings.insert(encoding.to_string());
+            }
+        }
+    }
+
+    /// Attribute a member's negotiated protocol version to its room's
+    /// session. The set is add-only (see [`SessionRecord::protocol_versions`]).
+    pub(crate) fn record_member_protocol_version(&self, room_id: &RoomId, version: u16) {
+        if let Some(mut record) = self.active.get_mut(room_id) {
+            record.protocol_versions.insert(version);
+        }
+    }
+
+    /// Attribute one authority switch to the room's session.
+    pub(crate) fn record_authority_transfer(&self, room_id: &RoomId) {
+        if let Some(mut record) = self.active.get_mut(room_id) {
+            record.authority_transfers = record.authority_transfers.saturating_add(1);
+        }
+    }
+
+    /// Attribute one accepted P2P-establishing transport report to the
+    /// reporter's room's session (same definition as the server-wide
+    /// `transport.p2pEstablished` counter).
+    pub(crate) fn record_p2p_established(&self, room_id: &RoomId) {
+        if let Some(mut record) = self.active.get_mut(room_id) {
+            record.p2p_established = record.p2p_established.saturating_add(1);
+        }
+    }
+
+    /// Attribute one accepted relay-fallback transport report to the
+    /// reporter's room's session (same definition as the server-wide
+    /// `transport.relayFallback` counter).
+    pub(crate) fn record_relay_fallback(&self, room_id: &RoomId) {
+        if let Some(mut record) = self.active.get_mut(room_id) {
+            record.relay_fallback = record.relay_fallback.saturating_add(1);
+        }
+    }
+
+    /// Attribute TURN credential issuances to the room whose session plan (or
+    /// ICE pre-gather) minted them. Zero-count calls are no-ops so callers can
+    /// forward their totals unconditionally.
+    pub(crate) fn record_turn_credentials(&self, room_id: &RoomId, count: u64) {
+        if count == 0 {
+            return;
+        }
+        if let Some(mut record) = self.active.get_mut(room_id) {
+            record.turn_credentials_issued = record.turn_credentials_issued.saturating_add(count);
+        }
+    }
+
     /// Finalize a removed room. Published rooms move to the completed ring;
     /// rooms that were never visible are dropped without a record (no
     /// directory ever saw them), with the drop counted.
@@ -230,6 +349,7 @@ impl SessionRecords {
             }
             record.ended_at_ms = Some(Self::now_ms());
             record.close_reason = Some(reason);
+            record.seq = Some(self.next_completed_seq.fetch_add(1, Ordering::Relaxed));
             self.push_completed(record);
         }
     }
@@ -279,6 +399,37 @@ impl SessionRecords {
             completed_dropped_total: self.completed_dropped_total.load(Ordering::Relaxed),
             unpublished_dropped_total: self.unpublished_dropped_total.load(Ordering::Relaxed),
         }
+    }
+
+    /// Snapshot for one scrape with the `/metrics/sessions` query filters
+    /// applied (issue #766): `application_id` restricts both lists to one
+    /// application's rooms, `since` cursor-filters the completed list to
+    /// records whose completion sequence exceeds it (the active list is a
+    /// live snapshot and is unaffected). The envelope counts describe the
+    /// filtered view — they equal the returned list lengths before response
+    /// truncation — while the process-lifetime drop counters stay global.
+    pub fn snapshot_view(
+        &self,
+        since: Option<u64>,
+        application_id: Option<Uuid>,
+    ) -> SessionsSnapshot {
+        let mut snapshot = self.snapshot();
+        if application_id.is_some() {
+            snapshot
+                .active
+                .retain(|record| record.application_id == application_id);
+            snapshot
+                .completed
+                .retain(|record| record.application_id == application_id);
+        }
+        if let Some(since) = since {
+            snapshot
+                .completed
+                .retain(|record| record.seq.is_some_and(|seq| seq > since));
+        }
+        snapshot.active_count = snapshot.active.len();
+        snapshot.completed_count = snapshot.completed.len();
+        snapshot
     }
 }
 
@@ -452,6 +603,15 @@ mod tests {
             "playersLeft",
             "spectatorsJoined",
             "spectatorsLeft",
+            "protocolVersions",
+            "gameDataEncodings",
+            "gameDataMessages",
+            "relayBytes",
+            "authorityTransfers",
+            "p2pEstablished",
+            "relayFallback",
+            "turnCredentialsIssued",
+            "seq",
         ] {
             assert!(
                 record.get(key).is_some(),
@@ -548,5 +708,183 @@ mod tests {
             .map(|record| (record.created_at_ms, record.room_id))
             .collect();
         assert_eq!(listed, keys, "active records must be listed oldest-first");
+    }
+
+    #[test]
+    fn game_data_frames_accumulate_bytes_and_distinct_encodings() {
+        let records = SessionRecords::new();
+        let room_id = Uuid::new_v4();
+        records.record_created(&room_fixture(room_id, "ABC"), true);
+
+        records.record_game_data(&room_id, 96, "json");
+        records.record_game_data(&room_id, 128, "message_pack");
+        records.record_game_data(&room_id, 32, "json");
+        let record = active_record(&records, room_id);
+        assert_eq!(record.game_data_messages, 3);
+        assert_eq!(record.relay_bytes, 96 + 128 + 32);
+        assert_eq!(
+            record.game_data_encodings.into_iter().collect::<Vec<_>>(),
+            vec!["json".to_string(), "message_pack".to_string()],
+            "encodings must be a sorted distinct set"
+        );
+    }
+
+    #[test]
+    fn member_protocol_versions_form_a_sorted_distinct_add_only_set() {
+        let records = SessionRecords::new();
+        let room_id = Uuid::new_v4();
+        records.record_created(&room_fixture(room_id, "ABC"), true);
+
+        records.record_member_protocol_version(&room_id, 3);
+        records.record_member_protocol_version(&room_id, 2);
+        records.record_member_protocol_version(&room_id, 3);
+        let record = active_record(&records, room_id);
+        assert_eq!(
+            record.protocol_versions.into_iter().collect::<Vec<_>>(),
+            vec![2, 3],
+            "versions must be a sorted distinct set"
+        );
+    }
+
+    #[test]
+    fn authority_transport_and_turn_counters_accumulate_per_session() {
+        let records = SessionRecords::new();
+        let room_id = Uuid::new_v4();
+        records.record_created(&room_fixture(room_id, "ABC"), true);
+
+        records.record_authority_transfer(&room_id);
+        records.record_authority_transfer(&room_id);
+        records.record_p2p_established(&room_id);
+        records.record_relay_fallback(&room_id);
+        records.record_relay_fallback(&room_id);
+        // Zero-count issuance calls are no-ops (callers forward totals).
+        records.record_turn_credentials(&room_id, 0);
+        records.record_turn_credentials(&room_id, 5);
+        let record = active_record(&records, room_id);
+        assert_eq!(record.authority_transfers, 2);
+        assert_eq!(record.p2p_established, 1);
+        assert_eq!(record.relay_fallback, 2);
+        assert_eq!(record.turn_credentials_issued, 5);
+    }
+
+    #[test]
+    fn attribution_for_an_unknown_room_is_a_no_op() {
+        let records = SessionRecords::new();
+        let missing = Uuid::new_v4();
+        records.record_game_data(&missing, 10, "json");
+        records.record_member_protocol_version(&missing, 3);
+        records.record_authority_transfer(&missing);
+        records.record_p2p_established(&missing);
+        records.record_relay_fallback(&missing);
+        records.record_turn_credentials(&missing, 2);
+        assert_eq!(records.snapshot().active_count, 0);
+    }
+
+    /// The completion sequence is stamped in ring-insertion order so a
+    /// `?since=` cursor over the completed list is gapless within the ring's
+    /// retention window, and active records carry no sequence yet.
+    #[test]
+    fn completed_records_carry_monotonic_cursor_sequences() {
+        let records = SessionRecords::new();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        records.record_created(&room_fixture(first, "AAA"), true);
+        records.record_created(&room_fixture(second, "BBB"), true);
+
+        let active = records.snapshot();
+        assert!(active.active[0].seq.is_none(), "active records have no seq");
+
+        records.record_closed(&second, SessionCloseReason::Deleted);
+        records.record_closed(&first, SessionCloseReason::Empty);
+        let snapshot = records.snapshot();
+        let (second_seq, first_seq) = (snapshot.completed[0].seq, snapshot.completed[1].seq);
+        assert!(
+            second_seq > first_seq,
+            "sequences follow completion order, not creation order: \
+             second {second_seq:?} must exceed first {first_seq:?}"
+        );
+        assert!(first_seq.unwrap() < second_seq.unwrap());
+    }
+
+    /// The `?applicationId=` view restricts both lists to one application's
+    /// rooms and recomputes the envelope counts for the filtered view; the
+    /// process-lifetime drop counters stay global.
+    #[test]
+    fn application_view_restricts_both_lists_and_recomputes_counts() {
+        let records = SessionRecords::new();
+        let app_a = Uuid::new_v4();
+        let app_b = Uuid::new_v4();
+        let owned = Uuid::new_v4();
+        let mut owned_room = room_fixture(owned, "OWN");
+        owned_room.application_id = Some(app_a);
+        let unowned = Uuid::new_v4();
+        records.record_created(&owned_room, true);
+        records.record_created(&room_fixture(unowned, "UNO"), true);
+        // One completed record per application.
+        records.record_closed(&owned, SessionCloseReason::Deleted);
+        let closed_b = Uuid::new_v4();
+        let mut closed_room = room_fixture(closed_b, "CLB");
+        closed_room.application_id = Some(app_b);
+        records.record_created(&closed_room, true);
+        records.record_closed(&closed_b, SessionCloseReason::Deleted);
+
+        let view = records.snapshot_view(None, Some(app_a));
+        // Only the app-owned rooms match; the unowned room (and any other
+        // application's rooms) stay out of the view.
+        assert!(
+            view.active
+                .iter()
+                .all(|record| record.application_id == Some(app_a)),
+            "the active view must carry only the requested application's rooms"
+        );
+        assert!(view
+            .completed
+            .iter()
+            .all(|r| r.application_id == Some(app_a)));
+        assert_eq!(view.active_count, 0);
+        assert_eq!(view.completed_count, 1);
+        // Global counters are never filtered.
+        assert_eq!(view.completed_dropped_total, 0);
+
+        let empty_view = records.snapshot_view(None, Some(app_b));
+        assert_eq!(empty_view.active_count, 0);
+        assert_eq!(empty_view.completed_count, 1);
+    }
+
+    /// The `?since=` cursor filters only the completed list, keeps records
+    /// strictly above the cursor, and leaves the active snapshot untouched.
+    #[test]
+    fn since_cursor_filters_only_completed_records_above_the_cursor() {
+        let records = SessionRecords::new();
+        let active_id = Uuid::new_v4();
+        records.record_created(&room_fixture(active_id, "ACT"), true);
+        let mut seqs = Vec::new();
+        for code in ["C1", "C2", "C3"] {
+            let room_id = Uuid::new_v4();
+            records.record_created(&room_fixture(room_id, code), true);
+            records.record_closed(&room_id, SessionCloseReason::Deleted);
+            seqs.push(
+                records
+                    .snapshot()
+                    .completed
+                    .iter()
+                    .find(|record| record.room_code == code)
+                    .and_then(|record| record.seq)
+                    .expect("completed record carries its sequence"),
+            );
+        }
+        seqs.sort();
+
+        let view = records.snapshot_view(Some(seqs[1]), None);
+        // Completed keeps only the sequences strictly above the cursor;
+        // the active record is a live snapshot and is unaffected.
+        assert_eq!(view.completed_count, 1);
+        assert_eq!(view.completed[0].seq, Some(seqs[2]));
+        assert_eq!(
+            view.active.iter().map(|r| r.room_id).collect::<Vec<_>>(),
+            vec![active_id]
+        );
+        // Cursor zero keeps every completed record.
+        assert_eq!(records.snapshot_view(Some(0), None).completed_count, 3);
     }
 }
