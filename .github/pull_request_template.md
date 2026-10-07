@@ -1,12 +1,15 @@
-<!-- Keep this short. A reader should know why this exists after one sentence. -->
+<!-- A FEW SHORT SENTENCES is the hard limit, not the target.
+     A reader must see what/why/how in under 30 seconds.
+     Detail belongs in the linked issue. -->
 
 **Why:**
 
-<!-- One or two sentences: the problem a player, operator, or the project had. -->
+<!-- One sentence: the problem a player, operator, or the project had. -->
 
 **What:**
 
-<!-- Two to five one-line bullets, plain language. Detail belongs in the linked issue. -->
+<!-- Two to four one-line bullets, plain language.
+     No implementation walkthroughs, no coverage notes. -->
 
 -
 

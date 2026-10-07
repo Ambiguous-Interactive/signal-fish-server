@@ -158,10 +158,10 @@ hype.
 
 PR descriptions follow `.github/pull_request_template.md` (short Why/What
 shape): 1-2 "why" sentences, 2-5 one-line "what" bullets; detail belongs in
-the linked issue. Answer "why", "what", and "how": the reason, the visible
-effect, and what to do next. A few sentences is the maximum, not the target.
-The audience includes non-native English readers, operators under pressure,
-and automated tools.
+the linked issue. Answer "why", "what", and "how" in a FEW SHORT SENTENCES
+total — never coverage notes or narratives. CHANGELOG entries: ONE sentence
+(TWO maximum), mechanics out. The audience includes non-native English
+readers, operators under pressure, and automated tools.
 
 ### Hook Reliability Rules (Required)
 

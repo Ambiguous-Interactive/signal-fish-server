@@ -29,7 +29,9 @@ description: >-
 - `CRITICAL`: Wrong section, missing required entry, non-user-facing noise
   for internal-only changes, a `Tests:` or `CI:` bullet anywhere under
   `[Unreleased]`, or broken structure under `[Unreleased]`.
-- `WARNING`: Vague wording, missing breaking label, duplicate or conflicting bullets.
+- `WARNING`: Vague wording, missing breaking label, duplicate or conflicting
+  bullets, or an entry longer than two sentences (one is the target;
+  implementation detail belongs in docs, tests, and the ledger).
 - `SUGGESTION`: Clarity or concision improvements.
 
 ---
@@ -46,6 +48,8 @@ description: >-
 - [ ] Breaking changes use `**Breaking:**`
 - [ ] No accidental edits to previously released sections
 - [ ] Wording is concise, specific, and externally meaningful
+- [ ] Entry is ONE sentence (two maximum): change plus externally visible
+      effect; no implementation mechanics, no counter/seam inventories
 - [ ] Duplicate bullets for same unreleased feature were consolidated
 
 ---
