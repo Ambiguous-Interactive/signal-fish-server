@@ -44,8 +44,9 @@ use crate::schedule::build_run_shape;
 /// and event log gain the experiment label, its advisory events, and its
 /// verdict reasons. Version 6 adds the server's socket-memory page pair
 /// (TCP and UDP `mem` pages from `/proc/<pid>/net/sockstat`) to every
-/// interval sample.
-pub const SCHEMA_VERSION: u64 = 6;
+/// interval sample. Version 7 measures latency from the scheduled send,
+/// includes stalls above 60 seconds, and records an exact maximum.
+pub const SCHEMA_VERSION: u64 = 7;
 
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const DELIVERIES_FILE: &str = "deliveries.jsonl";
@@ -227,14 +228,7 @@ pub fn write_intervals(output_dir: &Path, samples: &[IntervalSample]) -> Result<
 /// Write the HdrHistogram V2 artifact for the measured latency samples.
 pub fn write_histogram(output_dir: &Path, samples: &[u64]) -> Result<(), String> {
     let path = output_dir.join(HISTOGRAM_FILE);
-    let mut histogram = hdrhistogram::Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)
-        .map_err(|error| format!("create latency histogram: {error}"))?;
-    for sample in samples {
-        // Saturate rather than fail: a sample beyond the ceiling (a >60 s
-        // stall) belongs in the shape at its ceiling, and the summary
-        // already carries max/percentiles over the same values.
-        histogram.saturating_record(*sample);
-    }
+    let histogram = crate::oracle::latency_histogram(samples);
     let mut encoded = Vec::new();
     hdrhistogram::serialization::V2Serializer::new()
         .serialize(&histogram, &mut encoded)
