@@ -32245,14 +32245,14 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         );
     }
     let released_start = harness
-        .find("if (mode === \"released\") {")
+        .find("if (phaseMode === \"released\") {")
         .expect("P13 harness must define released characterization");
     let negative_start = harness[released_start..]
         .find("  } else {")
         .map(|offset| released_start + offset)
         .expect("P13 harness must define negative characterization");
     let negative_end = harness[negative_start..]
-        .find("\n  }\n} catch (error)")
+        .find("\n  if (mode === \"restart\" && phaseMode === \"released\")")
         .map(|offset| negative_start + offset)
         .expect("P13 harness must bound negative characterization");
     let released_classification = &harness[released_start..negative_start];
@@ -32358,6 +32358,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "3.1.74",
         "released \"${EXPORT_DIR}\"",
         "negative \"${EXPORT_DIR}\"",
+        "restart \"${EXPORT_DIR}\"",
         "timeout --foreground 180s",
         "timeout --foreground",
         "signal-fish-client v0.13.0",
@@ -32373,11 +32374,11 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     assert_eq!(
         runner.matches("timeout --foreground 180s").count(),
         3,
-        "P13 runner must preserve diagnostics for released, negative, and drain browser cells"
+        "P13 runner must run released, negative, and drain/restart browser cells"
     );
     for required in [
-        "waitForGlobal(creator, \"__FORTRESS_RESULT\", mode === \"drain\" ? 10_000 : 105_000)",
-        "waitForGlobal(joiner, \"__FORTRESS_RESULT\", mode === \"drain\" ? 10_000 : 105_000)",
+        "waitForGlobal(creator, \"__FORTRESS_RESULT\", phaseMode === \"drain\" ? 10_000 : 105_000)",
+        "waitForGlobal(joiner, \"__FORTRESS_RESULT\", phaseMode === \"drain\" ? 10_000 : 105_000)",
     ] {
         assert!(
             harness.contains(required),
