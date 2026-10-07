@@ -501,10 +501,11 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     // quiescence (plus hook time, so late hook effects stay sampled).
     let samples: Arc<std::sync::Mutex<Vec<IntervalSample>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut auxiliary_handles = Vec::new();
     {
         let samples = Arc::clone(&samples);
         let pid = server_slot.lock().await.as_ref().map(ServerProcess::pid);
-        tokio::spawn(sample_loop(
+        auxiliary_handles.push(tokio::spawn(sample_loop(
             epoch,
             epoch + Duration::from_micros(quiescence_us + hook_extra_us),
             config.sample_interval,
@@ -517,7 +518,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
             (config.delivery_class != DeliveryClass::Reliable || config.experiment.is_some())
                 .then_some(config.delivery_class),
             samples,
-        ));
+        )));
     }
 
     // Kill hook: declared server termination.
@@ -525,7 +526,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         let slot = Arc::clone(&server_slot);
         let log = Arc::clone(&log);
         let at = epoch + config.kill_server_after.expect("checked is_some above");
-        tokio::spawn(async move {
+        auxiliary_handles.push(tokio::spawn(async move {
             tokio::time::sleep_until(at).await;
             // Declare the fault BEFORE acting on it: sender tasks that
             // observe the socket die must never race the declaration into a
@@ -535,7 +536,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
             if let Some(mut process) = process {
                 process.kill_and_wait().await;
             }
-        });
+        }));
     }
 
     // Slow-reader hook: the designated peer's receive half joins its task
@@ -622,15 +623,16 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         )));
     }
 
-    // Await the generator and receivers under the hard deadline.
-    if tokio::time::timeout_at(hard_deadline, futures_util::future::join_all(handles))
-        .await
-        .is_err()
-    {
+    // Stop every evidence producer before either snapshot or error propagation.
+    let peer_result = await_peers(handles, hard_deadline).await;
+    let auxiliary_result = abort_and_join(auxiliary_handles).await;
+    if !peer_result? {
         log.push_fault(InvalidReason::RunnerDeadlineExceeded {
             detail: "generator or receiver tasks outlived the quiescence margin".to_string(),
         });
     }
+    auxiliary_result?;
+    let interval_samples = samples.lock().expect("interval samples poisoned").clone();
 
     // The registry is complete only after every peer task is done: record
     // it once, before the snapshot the artifacts write.
@@ -649,16 +651,11 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     );
 
     artifacts::write_deliveries(&config.output_dir, &records)?;
-    artifacts::write_intervals(
-        &config.output_dir,
-        &samples.lock().expect("interval samples"),
-    )?;
+    artifacts::write_intervals(&config.output_dir, &interval_samples)?;
     artifacts::write_histogram(&config.output_dir, &records)?;
     artifacts::write_json(config.output_dir.join(artifacts::SUMMARY_FILE), &summary)?;
 
-    let final_counters = samples
-        .lock()
-        .expect("interval samples poisoned")
+    let final_counters = interval_samples
         .iter()
         .rev()
         .find(|sample| sample.scrape_error.is_none())
@@ -1089,41 +1086,17 @@ async fn peer_task(
             }
         };
 
+        let mut prefer_read = true;
         loop {
-            let next_send = plan.sends.get(send_cursor);
-            let next_churn = churn_instants.get(churn_cursor);
-            let reads_held = hold_reads_until.is_some_and(|at| tokio::time::Instant::now() < at);
-            tokio::select! {
-                biased;
-
-                // Declared churn disconnect: close the socket, record the
-                // action, and let the session loop sleep out the window.
-                _ = tokio::time::sleep_until(
-                    next_churn.map_or(until, |cycle| {
-                        epoch + Duration::from_micros(cycle.disconnect_us)
-                    }),
-                ), if next_churn.is_some() => {
-                    log.push_churn(ChurnEvent {
-                        recipient: recipient.clone(),
-                        phase: ChurnPhase::Disconnect,
-                        at_us: micros(epoch.elapsed()),
-                        epoch: None,
-                        tails: BTreeMap::new(),
-                    });
-                    churn_cursor += 1;
-                    drop(sink);
-                    drop(rx);
-                    continue 'sessions;
-                }
-
-                // Scheduled send: offered traffic follows the schedule
-                // independent of response completion.
-                _ = tokio::time::sleep_until(
-                    next_send.map_or(until, |send| {
-                        epoch + Duration::from_micros(send.intended_us)
-                    }),
-                ), if next_send.is_some() => {
-                    let send = next_send.expect("send guarded above");
+            // Keep one send future alive while handling any number of inbound
+            // frames. Recreating SinkExt::send after a read could resend a frame.
+            let event = {
+                let next_send = plan.sends.get(send_cursor);
+                let mut writer = std::pin::pin!(async {
+                    let Some(send) = next_send else {
+                        return std::future::pending::<bool>().await;
+                    };
+                    tokio::time::sleep_until(epoch + Duration::from_micros(send.intended_us)).await;
                     // Fault hooks: a pause shifts this and every later send
                     // (the pause must show up as scheduled-send lag, never as
                     // reduced offered load); a stall trips the lag bound
@@ -1151,18 +1124,19 @@ async fn peer_task(
                             max_lag_us: lag,
                             bound_us: facts.generator_lag_bound_us,
                         });
-                        return;
+                        return false;
                     }
-                    let data = match ledger_application_data(&plan.name, send.seq, facts.payload_bytes) {
-                        Ok(data) => data,
-                        Err(detail) => {
-                            log.push_fault(InvalidReason::SendFailed {
-                                sender: plan.name.clone(),
-                                detail,
-                            });
-                            return;
-                        }
-                    };
+                    let data =
+                        match ledger_application_data(&plan.name, send.seq, facts.payload_bytes) {
+                            Ok(data) => data,
+                            Err(detail) => {
+                                log.push_fault(InvalidReason::SendFailed {
+                                    sender: plan.name.clone(),
+                                    detail,
+                                });
+                                return false;
+                            }
+                        };
                     let application_payload = match serde_json::to_vec(&data) {
                         Ok(payload) => payload,
                         Err(error) => {
@@ -1170,7 +1144,7 @@ async fn peer_task(
                                 sender: plan.name.clone(),
                                 detail: format!("serialize: {error}"),
                             });
-                            return;
+                            return false;
                         }
                     };
                     let application_bytes = count_u64(application_payload.len());
@@ -1186,24 +1160,19 @@ async fn peer_task(
                                 // sender round-robins its keys so a run can hold
                                 // newest-value semantics (one key) or key
                                 // isolation (many keys).
-                                let key_index =
-                                    send.seq % u64::from(facts.latest_keys_per_sender);
+                                let key_index = send.seq % u64::from(facts.latest_keys_per_sender);
                                 match u32::try_from(key_index) {
-                                    Ok(index) => {
-                                        (Some(WireDeliveryClass::Latest), Some(index))
-                                    }
+                                    Ok(index) => (Some(WireDeliveryClass::Latest), Some(index)),
                                     Err(error) => {
                                         log.push_fault(InvalidReason::SendFailed {
                                             sender: plan.name.clone(),
                                             detail: error.to_string(),
                                         });
-                                        return;
+                                        return false;
                                     }
                                 }
                             }
-                            DeliveryClass::Volatile => {
-                                (Some(WireDeliveryClass::Volatile), None)
-                            }
+                            DeliveryClass::Volatile => (Some(WireDeliveryClass::Volatile), None),
                         };
                         let message = ClientMessage::GameData { class, key, data };
                         match serde_json::to_string(&message) {
@@ -1213,7 +1182,7 @@ async fn peer_task(
                                     sender: plan.name.clone(),
                                     detail: format!("serialize: {error}"),
                                 });
-                                return;
+                                return false;
                             }
                         }
                     };
@@ -1228,7 +1197,7 @@ async fn peer_task(
                                 detail: error.to_string(),
                             });
                         }
-                        return;
+                        return false;
                     }
                     log.push_sent(SentEvent {
                         sender: plan.name.clone(),
@@ -1241,36 +1210,67 @@ async fn peer_task(
                         application_bytes,
                         encoded_frame_body_bytes,
                     });
-                    send_cursor += 1;
-                }
-
-                // Inbound frame. A paused reader's stream is not polled
-                // until the resume instant (the wedge fills the server's
-                // bounded kernel handoff); a slow reader never polls at all.
-                frame = rx.next(), if !never_read && !reads_held => {
-                    let Some(frame) = frame else {
-                        log.push_disconnect(DisconnectEvent {
-                            recipient: recipient.clone(),
-                            observation: DisconnectObservation::StreamEnded,
-                        });
-                        return;
-                    };
-                    if !handle_inbound(
-                        &recipient,
-                        frame,
-                        &registry,
-                        epoch,
-                        &log,
-                        facts.experiment,
+                    true
+                });
+                loop {
+                    let event = next_session_event(
+                        writer.as_mut(),
+                        &mut rx,
+                        until,
+                        churn_instants
+                            .get(churn_cursor)
+                            .map(|cycle| epoch + Duration::from_micros(cycle.disconnect_us)),
+                        hold_reads_until,
+                        never_read,
+                        &mut prefer_read,
                     )
-                    .await
-                    {
-                        return;
+                    .await;
+                    match event {
+                        SessionEvent::Frame(Some(frame)) => {
+                            if !handle_inbound(
+                                &recipient,
+                                frame,
+                                &registry,
+                                epoch,
+                                &log,
+                                facts.experiment,
+                            )
+                            .await
+                            {
+                                return;
+                            }
+                        }
+                        SessionEvent::Frame(None) => {
+                            log.push_disconnect(DisconnectEvent {
+                                recipient: recipient.clone(),
+                                observation: DisconnectObservation::StreamEnded,
+                            });
+                            return;
+                        }
+                        SessionEvent::Resume => {}
+                        other => break other,
                     }
                 }
-
-                // Quiescence: this peer connected through.
-                _ = tokio::time::sleep_until(until) => return,
+            };
+            match event {
+                SessionEvent::Send(true) => send_cursor += 1,
+                SessionEvent::Send(false) | SessionEvent::Quiescence => return,
+                SessionEvent::Churn => {
+                    log.push_churn(ChurnEvent {
+                        recipient: recipient.clone(),
+                        phase: ChurnPhase::Disconnect,
+                        at_us: micros(epoch.elapsed()),
+                        epoch: None,
+                        tails: BTreeMap::new(),
+                    });
+                    churn_cursor += 1;
+                    // The pending writer has dropped before either socket half
+                    // or the next incarnation can proceed.
+                    drop(sink);
+                    drop(rx);
+                    continue 'sessions;
+                }
+                SessionEvent::Frame(_) | SessionEvent::Resume => {}
             }
         }
     }
@@ -1647,4 +1647,468 @@ fn parse_endpoint_port(endpoint: &str) -> Result<u16, String> {
         .and_then(|raw| raw.parse::<u16>().ok())
         .ok_or_else(|| format!("endpoint {endpoint} carries no parseable port"))?;
     Ok(port)
+}
+
+#[derive(Debug)]
+enum SessionEvent {
+    Send(bool),
+    Frame(Option<Result<Message, tokio_tungstenite::tungstenite::Error>>),
+    Resume,
+    Churn,
+    Quiescence,
+}
+
+// Alternate ready reads and writes, while lifecycle deadlines always win.
+// A pending write remains pinned by the caller across receive events.
+#[allow(clippy::too_many_arguments)]
+async fn next_session_event<W, R>(
+    mut writer: std::pin::Pin<&mut W>,
+    reader: &mut R,
+    until: Instant,
+    churn_at: Option<Instant>,
+    resume_at: Option<Instant>,
+    never_read: bool,
+    prefer_read: &mut bool,
+) -> SessionEvent
+where
+    W: std::future::Future<Output = bool>,
+    R: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    let reads_held = resume_at.is_some_and(|at| Instant::now() < at);
+    let event = tokio::select! {
+        biased;
+        _ = tokio::time::sleep_until(churn_at.unwrap_or(until)), if churn_at.is_some() => SessionEvent::Churn,
+        _ = tokio::time::sleep_until(until) => SessionEvent::Quiescence,
+        _ = tokio::time::sleep_until(resume_at.unwrap_or(until)), if reads_held => SessionEvent::Resume,
+        event = async {
+            if *prefer_read {
+                tokio::select! {
+                    biased;
+                    frame = reader.next(), if !never_read && !reads_held => SessionEvent::Frame(frame),
+                    sent = writer.as_mut() => SessionEvent::Send(sent),
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    sent = writer.as_mut() => SessionEvent::Send(sent),
+                    frame = reader.next(), if !never_read && !reads_held => SessionEvent::Frame(frame),
+                }
+            }
+        } => event,
+    };
+    match &event {
+        SessionEvent::Frame(_) => *prefer_read = false,
+        SessionEvent::Send(_) => *prefer_read = true,
+        _ => {}
+    }
+    event
+}
+
+async fn await_peers(
+    handles: Vec<tokio::task::JoinHandle<()>>,
+    deadline: Instant,
+) -> Result<bool, String> {
+    // Remove completed handles as they finish; a JoinHandle cannot be polled
+    // again after yielding its result, including during deadline cleanup.
+    let mut pending: futures_util::stream::FuturesUnordered<_> = handles.into_iter().collect();
+    let mut failure = None;
+    let completed = tokio::time::timeout_at(deadline, async {
+        while let Some(result) = pending.next().await {
+            if let Err(error) = result {
+                failure = Some(format!("capacity peer task failed: {error}"));
+                return false;
+            }
+        }
+        true
+    })
+    .await
+    .unwrap_or(false);
+    if !completed {
+        for handle in pending.iter() {
+            handle.abort();
+        }
+        while let Some(result) = pending.next().await {
+            if let Err(error) = result {
+                if !error.is_cancelled() && failure.is_none() {
+                    failure = Some(format!("capacity peer task failed during cleanup: {error}"));
+                }
+            }
+        }
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(completed),
+    }
+}
+
+async fn abort_and_join(handles: Vec<tokio::task::JoinHandle<()>>) -> Result<(), String> {
+    for handle in &handles {
+        handle.abort();
+    }
+    // Await cancellation before the caller snapshots any records or registry.
+    for result in futures_util::future::join_all(handles).await {
+        if let Err(error) = result {
+            if !error.is_cancelled() {
+                return Err(format!("capacity auxiliary task failed: {error}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod session_poll_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct DropCount(Arc<AtomicUsize>);
+    impl Drop for DropCount {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct PendingReader(DropCount);
+    impl futures_util::Stream for PendingReader {
+        type Item = Result<Message, tokio_tungstenite::tungstenite::Error>;
+        fn poll_next(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            let _ = &self.0;
+            std::task::Poll::Pending
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_write_does_not_block_ready_inbound() {
+        let mut writer = std::pin::pin!(std::future::pending::<bool>());
+        let mut reader = futures_util::stream::iter([Ok(Message::Ping(vec![1].into()))]);
+        let event = tokio::time::timeout(
+            Duration::from_millis(50),
+            next_session_event(
+                writer.as_mut(),
+                &mut reader,
+                Instant::now() + Duration::from_secs(1),
+                None,
+                None,
+                false,
+                &mut true,
+            ),
+        )
+        .await
+        .expect("ready inbound must progress while the write remains pending");
+        assert!(matches!(
+            event,
+            SessionEvent::Frame(Some(Ok(Message::Ping(_))))
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inbound_recording_keeps_one_pending_write_until_one_completion() {
+        use signal_fish_server::protocol::PlayerId;
+        let started = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        let mut writer = Box::pin({
+            let started = Arc::clone(&started);
+            let completed = Arc::clone(&completed);
+            let guard = DropCount(Arc::clone(&dropped));
+            async move {
+                let _guard = guard;
+                started.fetch_add(1, Ordering::SeqCst);
+                wait.await.expect("release the pending write");
+                completed.fetch_add(1, Ordering::SeqCst);
+                true
+            }
+        });
+        assert!(futures_util::poll!(writer.as_mut()).is_pending());
+        let player = PlayerId::new_v4();
+        let registry = Arc::new(std::sync::Mutex::new(BTreeMap::from([(
+            player.to_string(),
+            ("r0p0".to_string(), 1),
+        )])));
+        let log = Arc::new(EventLog::new());
+        let epoch = Instant::now();
+        let frames = (0..2).map(|seq| {
+            Ok(Message::Text(
+                serde_json::to_string(&ServerMessage::GameData {
+                    from_player: player,
+                    data: ledger_application_data("r0p0", seq, 96).expect("ledger"),
+                    seq: Some(seq + 1),
+                    epoch: Some(1),
+                    class: None,
+                    key: None,
+                })
+                .expect("inbound frame")
+                .into(),
+            ))
+        });
+        let mut reader = futures_util::stream::iter(frames).chain(futures_util::stream::pending());
+        let until = epoch + Duration::from_secs(1);
+        let mut prefer_read = true;
+        for _ in 0..2 {
+            let event = next_session_event(
+                writer.as_mut(),
+                &mut reader,
+                until,
+                None,
+                None,
+                false,
+                &mut prefer_read,
+            )
+            .await;
+            let SessionEvent::Frame(Some(frame)) = event else {
+                panic!("inbound must progress: {event:?}")
+            };
+            assert!(
+                handle_inbound(
+                    "r0p1",
+                    frame,
+                    &registry,
+                    epoch,
+                    &log,
+                    ExperimentContext {
+                        active: false,
+                        opaque_sender: false
+                    }
+                )
+                .await
+            );
+        }
+        assert_eq!(log.snapshot().receipts.len(), 2);
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        assert_eq!(completed.load(Ordering::SeqCst), 0);
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        release.send(()).expect("writer remains alive");
+        assert!(matches!(
+            next_session_event(
+                writer.as_mut(),
+                &mut reader,
+                until,
+                None,
+                None,
+                false,
+                &mut prefer_read
+            )
+            .await,
+            SessionEvent::Send(true)
+        ));
+        assert_eq!(completed.load(Ordering::SeqCst), 1);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn overdue_writes_and_continuous_inbound_alternate_without_starvation() {
+        let mut reader = futures_util::stream::repeat_with(|| Ok(Message::Ping(vec![1].into())));
+        let mut prefer_read = true;
+        let until = Instant::now() + Duration::from_secs(1);
+        for _ in 0..4 {
+            let mut writer = std::pin::pin!(std::future::ready(true));
+            assert!(matches!(
+                next_session_event(
+                    writer.as_mut(),
+                    &mut reader,
+                    until,
+                    None,
+                    None,
+                    false,
+                    &mut prefer_read
+                )
+                .await,
+                SessionEvent::Frame(Some(Ok(_)))
+            ));
+            assert!(matches!(
+                next_session_event(
+                    writer.as_mut(),
+                    &mut reader,
+                    until,
+                    None,
+                    None,
+                    false,
+                    &mut prefer_read
+                )
+                .await,
+                SessionEvent::Send(true)
+            ));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_pause_resumes_with_a_pending_write_and_never_read_stays_held() {
+        let epoch = Instant::now();
+        let until = epoch + Duration::from_secs(2);
+        let resume = epoch + Duration::from_millis(600);
+        let mut writer = std::pin::pin!(std::future::pending::<bool>());
+        let mut reader = futures_util::stream::repeat_with(|| Ok(Message::Ping(Vec::new().into())));
+        let mut prefer_read = true;
+        assert!(matches!(
+            next_session_event(
+                writer.as_mut(),
+                &mut reader,
+                until,
+                None,
+                Some(resume),
+                false,
+                &mut prefer_read
+            )
+            .await,
+            SessionEvent::Resume
+        ));
+        assert_eq!(Instant::now(), resume);
+        assert!(matches!(
+            next_session_event(
+                writer.as_mut(),
+                &mut reader,
+                until,
+                None,
+                Some(resume),
+                false,
+                &mut prefer_read
+            )
+            .await,
+            SessionEvent::Frame(Some(Ok(_)))
+        ));
+        assert!(matches!(
+            next_session_event(
+                writer.as_mut(),
+                &mut reader,
+                until,
+                None,
+                Some(resume),
+                true,
+                &mut prefer_read
+            )
+            .await,
+            SessionEvent::Quiescence
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lifecycle_deadlines_cancel_pending_resources_before_the_next_incarnation() {
+        for churn in [false, true] {
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let guard = DropCount(Arc::clone(&dropped));
+            let mut writer = Box::pin(async move {
+                let _guard = guard;
+                std::future::pending::<bool>().await
+            });
+            let mut reader = PendingReader(DropCount(Arc::clone(&dropped)));
+            let now = Instant::now();
+            let event = next_session_event(
+                writer.as_mut(),
+                &mut reader,
+                if churn {
+                    now + Duration::from_secs(1)
+                } else {
+                    now
+                },
+                churn.then_some(now),
+                None,
+                false,
+                &mut true,
+            )
+            .await;
+            assert!(matches!(
+                (churn, event),
+                (true, SessionEvent::Churn) | (false, SessionEvent::Quiescence)
+            ));
+            drop(writer);
+            drop(reader);
+            assert_eq!(
+                dropped.load(Ordering::SeqCst),
+                2,
+                "both halves must drop before rejoin"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hard_deadline_and_auxiliary_cleanup_await_task_cancellation() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let guard = DropCount(Arc::clone(&dropped));
+            let (started, ready) = tokio::sync::oneshot::channel();
+            handles.push(tokio::spawn(async move {
+                let _guard = guard;
+                started.send(()).expect("observe task start");
+                std::future::pending::<()>().await;
+            }));
+            ready.await.expect("task owns its resources");
+        }
+        handles.push(tokio::spawn(async {}));
+        assert!(
+            !await_peers(handles, Instant::now() + Duration::from_millis(10))
+                .await
+                .expect("deadline cancels pending tasks")
+        );
+        assert_eq!(dropped.load(Ordering::SeqCst), 2);
+        let guard = DropCount(Arc::clone(&dropped));
+        let task = tokio::spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        });
+        abort_and_join(vec![task])
+            .await
+            .expect("owned cancellation is expected");
+        assert_eq!(dropped.load(Ordering::SeqCst), 3);
+        assert!(await_peers(
+            vec![tokio::spawn(async {})],
+            Instant::now() + Duration::from_secs(1)
+        )
+        .await
+        .expect("completed peer succeeds"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn peer_panics_and_unexpected_cancellation_refuse_success_and_clean_up() {
+        for panic_task in [false, true] {
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let guard = DropCount(Arc::clone(&dropped));
+            let blocked = tokio::spawn(async move {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+            });
+            let failed = tokio::spawn(async move {
+                if panic_task {
+                    panic!("injected peer panic");
+                }
+                std::future::pending::<()>().await;
+            });
+            if !panic_task {
+                failed.abort();
+            }
+            let error = await_peers(
+                vec![blocked, failed],
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect_err("unexpected task termination cannot pass");
+            assert!(error.contains("capacity peer task failed"), "{error}");
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auxiliary_panics_refuse_artifact_capture_after_all_tasks_stop() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let guard = DropCount(Arc::clone(&dropped));
+        let blocked = tokio::spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        });
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let failed = tokio::spawn(async move {
+            started.send(()).expect("observe auxiliary start");
+            panic!("injected sampler panic");
+        });
+        ready.await.expect("auxiliary ran before cleanup");
+        let error = abort_and_join(vec![failed, blocked])
+            .await
+            .expect_err("auxiliary panic refuses capture");
+        assert!(error.contains("capacity auxiliary task failed"), "{error}");
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
 }

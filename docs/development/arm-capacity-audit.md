@@ -2324,9 +2324,13 @@ only the loud disconnect tail may stay uncovered) and the summary now
 carries per-recipient latency tails plus `gap_covered` totals, and records
 the run class's seven accountable server outcomes in every interval sample.
 The pressure control runs both classes over real sockets. Each cell offers
-16-KiB application payloads at 1,000 sends/s with a 600-ms read pause, a
-clamped receive buffer, and a tiny server send queue. This byte volume
-replaces the old 96-byte control's fixed frame-absorption estimate (#783).
+16-KiB application payloads at 200 sends/s with a three-second read pause,
+a 3.5-second measurement, a clamped receive buffer, and a tiny server send
+queue. The pause still spans about 600 offered frames per sender. The lower
+instantaneous rate reduces generator load while the longer pause retains
+the declared byte pressure. The generator lag bound stays at 500 ms.
+This byte volume replaces the old 96-byte control's fixed frame-absorption
+estimate (#783).
 Each run must stay valid, cover at least 100 omissions with exact gaps, and
 match the server's per-class counter. The artifacts must replay exactly.
 These large payloads are declared fault-control inputs. The C3 relay cells
@@ -2341,6 +2345,14 @@ Live runner cells share a test lock under plain `cargo test`. The coverage
 and MSRV suites can otherwise run many generators at once and exhaust a
 cell's lag bound. The lock matches nextest's process-spawning isolation;
 the workload and validation limits stay the same.
+
+Each connection polls reads alongside one persistent scheduled write. Ready
+reads and writes take turns, so overdue sends cannot starve receipts. Sender
+pauses hold only the write future. Reader resumption, churn, and quiescence
+wake independently of a pending write. Churn drops the old write and both
+socket halves before rejoining. The runner cancels and awaits its owned
+tasks before artifact capture. One immutable interval snapshot supplies
+both the published samples and the returned final counters (#783).
 
 **C2 next runner PR: churn/reconnect schedules — LANDED** (third runner
 PR, 2026-10-05). `ChurnSchedule` carries the reconnect-burst storm (the C3

@@ -343,11 +343,24 @@ cost, socket memory) is landed (eighth runner PR, 2026-10-07, see the
 ledger's contract record): schema 6 interval samples carry the live-state
 gauges, the pending-publication backlog, the maintenance sweep pair, and
 the socket-memory page pair, with presence pins in the acceptance scenario.
-C2 is complete: every registered runner input, artifact family, negative
-control, and resource observable is landed and pinned. The latest/volatile
+The C2 input and artifact surface is landed and pinned. The Windows
+pressure result in #783 still requires fresh main verification. The latest/volatile
 pressure control uses declared 16-KiB payloads (#783) to exceed OS socket
 buffering while retaining exact gap, counter, and replay checks. Live
 runner cells share a plain-cargo test lock to prevent generator contention.
+
+Fresh main CI on `ff55fed3` failed the Windows Latest pressure control: the
+generator exceeded its 500-ms lag bound and received no measured frames.
+The larger payload and test lock did not resolve this failure. PR CI on
+`c7ec7c66` then recorded read/gap progress but saturated the generator on
+Linux and coverage at 1,000 sends/s. The fault control now uses 200 sends/s
+with a three-second pause and 3.5-second measurement. It retains about 600
+offered paused frames, 16-KiB payloads, and the 500-ms lag bound. The runner
+now polls reads alongside a persistent write and wakes independently for
+read resumption and lifecycle deadlines. It cancels and awaits owned tasks
+before artifact capture. Deterministic controls cover pending writes,
+overdue traffic, read pauses, and cancellation. Fresh cross-platform main
+verification remains required (#783).
 
 - [x] Churn/reconnect schedules: reconnect-burst and room-replacement
   shapes per the C3 cells, with red-first controls for each new permitted
