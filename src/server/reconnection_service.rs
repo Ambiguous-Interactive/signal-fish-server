@@ -172,6 +172,11 @@ impl EnhancedGameServer {
         }
         self.metrics
             .add_turn_credentials_issued(turn_credentials_issued);
+        // Per-session attribution (issue #766), mirroring the server-wide
+        // counter at the same publication commit.
+        if let Some(records) = self.session_records() {
+            records.record_turn_credentials(&room_id, turn_credentials_issued);
+        }
         if let Some(reconnection_manager) = &self.reconnection_manager {
             reconnection_manager
                 .record_room_event(&room_id, replay_notification.as_ref())
@@ -1181,6 +1186,16 @@ impl EnhancedGameServer {
             match self.database.add_player_to_room(room_id, player_info).await {
                 Ok(true) => {
                     restore.restored_membership = true;
+                    // Per-session protocol attribution (issue #766): a
+                    // restored member may return on a different protocol
+                    // version than it left with; the record's version set is
+                    // add-only, so the session's client mix stays truthful.
+                    if let Some(records) = self.session_records() {
+                        records.record_member_protocol_version(
+                            room_id,
+                            self.client_protocol(current_player_id).version,
+                        );
+                    }
                     panic_recovery
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())

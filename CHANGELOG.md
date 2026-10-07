@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Metrics: `/metrics/sessions` records now carry the remaining #708
+  per-session fields (#766): transport outcome (`p2pEstablished`,
+  `relayFallback`, `turnCredentialsIssued` — same definitions as the
+  server-wide `transport.*` counters), negotiated protocol versions
+  observed among the session's players (`protocolVersions`, add-only sorted
+  set), per-session traffic (`gameDataMessages`, `relayBytes`,
+  `gameDataEncodings` — sender-side, budget-admitted frames only), and
+  authority switches (`authorityTransfers`). Completed records carry a
+  monotonic `seq` (stamped in completion order), and the endpoint accepts
+  `?since=<seq>` (cursor over the completed list, gapless within the
+  ring's retention window) and
+  `?applicationId=<uuid>` (restrict both lists to one application's rooms —
+  a response-scoped view filter, not access control; malformed values fail
+  the request). The whole-response byte budget grows
+  from 1 MiB to 1.5 MiB so the structural caps still compose.
+
 - Metrics: `GET /metrics/sessions` (and `/v1/metrics/sessions`) exposes
   per-room session records (#708, #763). One bounded JSON record per room,
   active and completed: room id, current room code, game name, owning
@@ -20,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `security.metrics_auth_token`). Completed history is capped at 1024
   records (oldest dropped, drops counted, pre-publication removals counted
   separately); responses cap the active list at 512 records and the whole
-  body at 1 MiB, with explicit `*Truncated` flags and dropped counts — the
+  body at 1.5 MiB, with explicit `*Truncated` flags and dropped counts — the
   counters always report true values. Application-owned room directories
   can use it to discover where a room lives and when it closes.
 

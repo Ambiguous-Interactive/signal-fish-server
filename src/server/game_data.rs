@@ -186,6 +186,7 @@ impl EnhancedGameServer {
         &self,
         player_id: &PlayerId,
         room_id: &crate::protocol::RoomId,
+        encoding: crate::protocol::GameDataEncoding,
         bytes: u64,
     ) -> Result<(), crate::rate_limit::RateLimitError> {
         // Resolved once per frame; reads are lock-guarded and project only
@@ -206,6 +207,14 @@ impl EnhancedGameServer {
         self.metrics.record_relay_bytes(bytes);
         if let Some(policy) = app_policy {
             self.metrics.record_app_relay_bytes(&policy.app_id, bytes);
+        }
+        // Per-session traffic attribution (issue #766): sender-side accepted
+        // frames, bytes, and the frame's wire encoding. A DashMap shard write
+        // guard (short sync critical section, no await) under the
+        // already-charged admission; unknown rooms (closed between admission
+        // and attribution) attribute nothing.
+        if let Some(records) = self.session_records() {
+            records.record_game_data(room_id, bytes, encoding.as_wire_str());
         }
         Ok(())
     }
@@ -314,7 +323,12 @@ impl EnhancedGameServer {
             // The sender-controlled JSON payload is the budget measure
             // (memoized above, shared with the per-encoding cap).
             if let Err(e) = self
-                .check_and_charge_relay_bytes(player_id, &room_id, payload_bytes() as u64)
+                .check_and_charge_relay_bytes(
+                    player_id,
+                    &room_id,
+                    crate::protocol::GameDataEncoding::Json,
+                    payload_bytes() as u64,
+                )
                 .await
             {
                 // The refusal reply locks the source gate itself; it is sent
@@ -475,7 +489,7 @@ impl EnhancedGameServer {
             // aggregate ceiling (issue #530): charge the binary payload
             // before the fan-out, mirroring the text lane.
             if let Err(e) = self
-                .check_and_charge_relay_bytes(player_id, &room_id, payload.len() as u64)
+                .check_and_charge_relay_bytes(player_id, &room_id, encoding, payload.len() as u64)
                 .await
             {
                 // The refusal reply locks the source gate itself; it is sent

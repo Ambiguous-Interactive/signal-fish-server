@@ -760,6 +760,7 @@ impl EnhancedGameServer {
         let turn_config = self.turn_config.clone();
         let active_session_plans = Arc::clone(&self.active_session_plans);
         let metrics = Arc::clone(&self.metrics);
+        let session_records = self.session_records();
 
         Box::new(move |finalized, game_starting| {
             let members: Vec<SessionMember> = finalized
@@ -847,6 +848,11 @@ impl EnhancedGameServer {
                     if emits_v3_plan {
                         metrics.increment_session_plans_emitted();
                         metrics.add_turn_credentials_issued(turn_credentials_issued);
+                        // Per-session attribution (issue #766), mirroring the
+                        // server-wide counter at the same seam.
+                        if let Some(records) = session_records.as_deref() {
+                            records.record_turn_credentials(&room_id, turn_credentials_issued);
+                        }
                         tracing::info!(
                             %room_id,
                             topology = ?active.topology,
@@ -916,6 +922,9 @@ impl EnhancedGameServer {
         let turn_credentials_issued = self.send_session_plans_to_members(room_id, &decision).await;
         self.metrics
             .add_turn_credentials_issued(turn_credentials_issued);
+        if let Some(records) = self.session_records() {
+            records.record_turn_credentials(room_id, turn_credentials_issued);
+        }
     }
 
     /// Copy a room's stored active session decision out of the map.
@@ -1229,6 +1238,7 @@ impl EnhancedGameServer {
         let active_session_plans = Arc::clone(&self.active_session_plans);
         let metrics_for_commit = Arc::clone(&self.metrics);
         let metrics_after_phase = Arc::clone(&self.metrics);
+        let session_records = self.session_records();
         let completion = self.message_coordinator.enqueue_room_event(
             room_event_guard,
             Box::new(move || {
@@ -1248,6 +1258,15 @@ impl EnhancedGameServer {
                             Box::new(move |_failed_phase_zero| {
                                 metrics_after_phase
                                     .add_turn_credentials_issued(turn_credentials_issued);
+                                // Per-session attribution (issue #766),
+                                // mirroring the server-wide counter at the
+                                // same publication-failure seam.
+                                if let Some(records) = session_records.as_deref() {
+                                    records.record_turn_credentials(
+                                        &room_id,
+                                        turn_credentials_issued,
+                                    );
+                                }
                                 true
                             }),
                         )
@@ -1491,6 +1510,11 @@ impl EnhancedGameServer {
 
         self.metrics.increment_ice_pregather_emitted();
         self.metrics.add_turn_credentials_issued(minted);
+        // Per-session attribution (issue #766), mirroring the server-wide
+        // counter at the same composition point.
+        if let Some(records) = self.session_records() {
+            records.record_turn_credentials(&room.id, minted);
+        }
         ice_servers
     }
 }
