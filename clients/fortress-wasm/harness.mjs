@@ -909,7 +909,7 @@ async function stopServer() {
 async function runServerLifecycleSelfTests() {
   // An inherited pipe forces a real exit-before-close transition with late data.
   const tail = "process.stdin.resume(); process.stdin.on('end', () => process.stdout.write('old-tail'))";
-  const script = `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(tail)}], { stdio: [3, 1, 2] }); process.stdout.write('old-head'); process.exit(7)`;
+  const script = `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(tail)}], { stdio: [3, 1, 2] }); process.stdout.write('old-head', () => process.exit(7))`;
   const oldChild = spawn(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "pipe", "pipe"] });
   const old = observeServer(oldChild);
   let closed = false;
