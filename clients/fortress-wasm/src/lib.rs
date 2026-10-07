@@ -311,6 +311,11 @@ impl Runtime {
         for event in events {
             self.handle_event(event)?;
         }
+        // Stop producing gameplay after the server's drain advisory. Keep
+        // polling the real transport until its authoritative close arrives.
+        if self.shutdown_notice.is_some() {
+            return Ok(false);
+        }
         self.ensure_session()?;
         self.admit_pending_inbound()?;
 
@@ -544,7 +549,11 @@ impl Runtime {
                 });
             }
             SignalFishEvent::PlayerLeft { player_id, .. } => {
-                return Err(format!("Signal Fish peer left: {player_id}"));
+                // Other peers can close first during a server drain. The
+                // local close still supplies this peer's terminal outcome.
+                if self.shutdown_notice.is_none() {
+                    return Err(format!("Signal Fish peer left: {player_id}"));
+                }
             }
             SignalFishEvent::GoingAway {
                 deadline_ms,
