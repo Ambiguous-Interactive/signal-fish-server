@@ -2614,3 +2614,37 @@ records, and comparisons are retained locally in
 Raw event storage, sender schedules, and delivery-validation indexes still
 grow with the workload. Issue #775 still requires those structures to stream
 or stay bounded before the required long C3 cells can run.
+
+## C3 spawned-server configuration provenance — 2026-10-07
+
+The configuration part of
+[#776](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/776)
+now records the full typed settings for each spawned server. Schema 8 retains
+compiled defaults, the harness base, the declared overlay, the final effective
+configuration, and its SHA-256 over compact JSON. The manifest also hashes the
+actual launched binary. The overlay hash remains a hash of declared input.
+
+The harness launches a hard-linked binary, or a copy when linking fails, in its
+isolated temporary directory. This prevents a `config.json` beside the build
+output from contributing unrecorded map entries. The child environment removes
+inherited `SIGNAL_FISH*` variables. The reserved port overrides any overlay
+port. Legacy app-access keys retain the production loader's meaning.
+
+Capacity runs reject file-backed app registries and connect-token public keys
+before starting. Those sources change configuration after JSON merging; their
+contents are not yet recorded. Use inline values for these runs. Replay checks
+config hashes, layer reconstruction, port agreement, and server identity. These
+checks detect inconsistent artifacts; they are not signatures.
+
+External endpoints are labeled `unknown_external`, with no binary or effective
+configuration evidence. Their delivery results can remain valid and replay
+exactly, but they cannot support an accepted capacity point. External-host
+evidence intake remains in #776, along with exact application payload sizing
+and encoded ingress/egress frame sizes.
+
+The real-binary regression compares the snapshot with the production
+`--print-config` loader under the same isolated configuration and environment.
+It pins defaults, harness overrides, legacy keys, and the reserved port.
+Additional controls reject malformed overlays, conflicting aliases, file-backed
+sources, altered hashes or layers, and old schema 7 artifacts. The manifest
+presence check failed against the previous runner before acceptance.

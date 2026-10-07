@@ -15,7 +15,10 @@
 //!   (`src/config/loader.rs`). Each spawn writes a per-test temp config file
 //!   (tempfile) and points the child at it via `SIGNAL_FISH_CONFIG_PATH`, with
 //!   the child's working directory set to the same temp dir so no stray
-//!   `config.json` in the repo can interfere. Because later config sources
+//!   `config.json` in the repo can interfere. The executable is hard-linked
+//!   (or copied) into that directory, so a build-directory config file cannot
+//!   contribute map entries. The written file includes typed defaults, the
+//!   harness base, and the suite overlay. Because later config sources
 //!   merge over earlier ones and `SIGNAL_FISH__*` env overrides always win,
 //!   the port is ALSO pinned via `SIGNAL_FISH__PORT` (belt and braces), and
 //!   every inherited `SIGNAL_FISH*` variable is scrubbed from the child env.
@@ -89,6 +92,8 @@ pub struct ServerProcess {
     /// The port the child is listening on (the reserved fresh port, or the
     /// fixed restart port).
     pub port: u16,
+    effective_config: Value,
+    binary_path: PathBuf,
     stdout_path: PathBuf,
     stderr_path: PathBuf,
     /// Owns the temp config file, the captured output files, and the child's
@@ -97,6 +102,16 @@ pub struct ServerProcess {
 }
 
 impl ServerProcess {
+    /// Complete typed configuration supplied to this child, including defaults.
+    pub fn effective_config(&self) -> &Value {
+        &self.effective_config
+    }
+
+    /// The isolated executable that was launched, retained for byte hashing.
+    pub fn binary_path(&self) -> &std::path::Path {
+        &self.binary_path
+    }
+
     /// OS process id of the live server child (for resource diagnostics).
     pub fn pid(&self) -> u32 {
         self.child
@@ -203,7 +218,7 @@ fn reserve_port() -> u16 {
 /// The suite-independent base config: in-memory, auth-off, zero-dependency. Each
 /// suite's per-scenario config is layered on top via a [`merge_config`] overlay
 /// (`session.default_topology`, `websocket.*`, `server.*`, …).
-fn base_config(port: u16) -> Value {
+pub fn base_config(port: u16) -> Value {
     json!({
         "port": port,
         "server": {
@@ -228,7 +243,7 @@ fn base_config(port: u16) -> Value {
 /// keys are merged (so an overlay can set a single nested key — e.g.
 /// `server.ping_timeout` — without dropping its base siblings); otherwise the
 /// overlay value replaces the base value.
-fn merge_config(base: &mut Value, overlay: &Value) {
+pub fn merge_config(base: &mut Value, overlay: &Value) {
     match (base, overlay) {
         (Value::Object(base_map), Value::Object(overlay_map)) => {
             for (key, overlay_value) in overlay_map {
@@ -242,6 +257,59 @@ fn merge_config(base: &mut Value, overlay: &Value) {
             *base_slot = overlay_value.clone();
         }
     }
+}
+
+/// The final port matches the child environment override. Launch isolation
+/// also prevents executable-adjacent config maps from adding unrecorded keys.
+pub fn effective_server_config(port: u16, overlay: &Value) -> Result<Value, String> {
+    let mut config = serde_json::to_value(signal_fish_server::config::Config::default())
+        .map_err(|error| format!("serialize server defaults: {error}"))?;
+    merge_config(&mut config, &base_config(port));
+    merge_config(&mut config, &normalize_server_overlay(overlay)?);
+    if !config.is_object() {
+        return Err("server config overlay must be an object".to_string());
+    }
+    config["port"] = Value::from(port);
+    let typed: signal_fish_server::config::Config = serde_json::from_value(config)
+        .map_err(|error| format!("parse effective server config: {error}"))?;
+    serde_json::to_value(typed)
+        .map_err(|error| format!("serialize effective server config: {error}"))
+}
+
+/// Match the loader's legacy app-access source normalization before defaults
+/// are merged. Keep these two aliases and discarded app_secret in sync with
+/// src/config/loader.rs::normalize_legacy_app_access_config.
+pub fn normalize_server_overlay(overlay: &Value) -> Result<Value, String> {
+    if !overlay.is_object() {
+        return Err("server config overlay must be an object".to_string());
+    }
+    let mut overlay = overlay.clone();
+    if let Some(security) = overlay.get_mut("security").and_then(Value::as_object_mut) {
+        for (legacy, canonical) in [
+            ("require_websocket_auth", "enforce_app_id_allowlist"),
+            ("authorized_apps", "allowed_apps"),
+        ] {
+            if let Some(value) = security.remove(legacy) {
+                if security.contains_key(canonical) {
+                    return Err(format!(
+                        "server overlay contains both security.{canonical} and deprecated security.{legacy}"
+                    ));
+                }
+                security.insert(canonical.to_string(), value);
+            }
+        }
+        if let Some(apps) = security
+            .get_mut("allowed_apps")
+            .and_then(Value::as_array_mut)
+        {
+            for app in apps {
+                if let Some(app) = app.as_object_mut() {
+                    app.remove("app_secret");
+                }
+            }
+        }
+    }
+    Ok(overlay)
 }
 
 /// Spawn the server binary on a fresh free port, retrying with a NEW port on
@@ -298,8 +366,7 @@ pub async fn spawn_server_on_fixed_port(port: u16, overlay: Value) -> ServerProc
 async fn try_spawn_server(port: u16, overlay: &Value) -> Result<ServerProcess, String> {
     let workdir = tempfile::tempdir().expect("create temp workdir");
     let config_path = workdir.path().join("server-config.json");
-    let mut config = base_config(port);
-    merge_config(&mut config, overlay);
+    let config = effective_server_config(port, overlay)?;
     std::fs::write(
         &config_path,
         serde_json::to_vec_pretty(&config).expect("serialize server config"),
@@ -311,7 +378,19 @@ async fn try_spawn_server(port: u16, overlay: &Value) -> Result<ServerProcess, S
     let stdout_file = std::fs::File::create(&stdout_path).expect("create stdout capture");
     let stderr_file = std::fs::File::create(&stderr_path).expect("create stderr capture");
 
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_signal-fish-server"));
+    // A symlink is insufficient: current_exe resolves it back to the build
+    // directory, where config.json can contribute hidden map entries.
+    let source_binary = std::path::Path::new(env!("CARGO_BIN_EXE_signal-fish-server"));
+    let isolated_binary = workdir.path().join(
+        source_binary
+            .file_name()
+            .expect("server binary has a file name"),
+    );
+    if std::fs::hard_link(source_binary, &isolated_binary).is_err() {
+        std::fs::copy(source_binary, &isolated_binary)
+            .map_err(|error| format!("copy server binary to isolated workdir: {error}"))?;
+    }
+    let mut command = tokio::process::Command::new(&isolated_binary);
     command
         .current_dir(workdir.path())
         .stdin(std::process::Stdio::null())
@@ -338,6 +417,8 @@ async fn try_spawn_server(port: u16, overlay: &Value) -> Result<ServerProcess, S
         child: Some(child),
         process_id,
         port,
+        effective_config: config,
+        binary_path: isolated_binary,
         stdout_path,
         stderr_path,
         _workdir: workdir,

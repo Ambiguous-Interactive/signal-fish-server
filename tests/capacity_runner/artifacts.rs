@@ -4,7 +4,8 @@
 //!
 //! - `manifest.json` — schema version, run ID, the full [`RunConfig`],
 //!   workload shape, server identity (endpoint, PID, binary hash, config
-//!   overlay hash), toolchain, host, features, and the clock method.
+//!   overlay hash, full controlled config evidence or unknown external
+//!   provenance), toolchain, host, features, and the clock method.
 //! - `deliveries.jsonl` — every send, receipt, gap report, disconnect, and
 //!   join failure.
 //! - `intervals.jsonl` — periodic server resource samples (delivery
@@ -45,8 +46,9 @@ use crate::schedule::build_run_shape;
 /// verdict reasons. Version 6 adds the server's socket-memory page pair
 /// (TCP and UDP `mem` pages from `/proc/<pid>/net/sockstat`) to every
 /// interval sample. Version 7 measures latency from the scheduled send,
-/// includes stalls above 60 seconds, and records an exact maximum.
-pub const SCHEMA_VERSION: u64 = 7;
+/// includes stalls above 60 seconds, and records an exact maximum. Version 8
+/// records full controlled config evidence and labels unknown external config.
+pub const SCHEMA_VERSION: u64 = 8;
 
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const DELIVERIES_FILE: &str = "deliveries.jsonl";
@@ -68,6 +70,127 @@ pub struct ServerIdentity {
     /// SHA-256 of the server config overlay deep-merged over the harness
     /// base config.
     pub config_overlay_sha256: String,
+    pub config_provenance: ConfigProvenance,
+}
+
+/// Config evidence is independent of the delivery oracle's verdict.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum ConfigProvenance {
+    SpawnedControlled {
+        defaults: Value,
+        harness_base: Value,
+        effective: Value,
+        effective_sha256: String,
+    },
+    /// An endpoint alone supplies no config or binary evidence.
+    UnknownExternal,
+}
+
+impl ConfigProvenance {
+    pub fn spawned(port: u16, effective: Value) -> Result<Self, String> {
+        let bytes = serde_json::to_vec(&effective)
+            .map_err(|error| format!("serialize effective server config: {error}"))?;
+        Ok(Self::SpawnedControlled {
+            defaults: serde_json::to_value(signal_fish_server::config::Config::default())
+                .map_err(|error| format!("serialize server defaults: {error}"))?,
+            harness_base: crate::websocket_test_helpers::server_process::base_config(port),
+            effective,
+            effective_sha256: diagnostics::sha256_bytes(&bytes),
+        })
+    }
+
+    /// Unknown external provenance cannot support a capacity point.
+    pub fn has_config_evidence(&self) -> bool {
+        matches!(self, Self::SpawnedControlled { .. })
+    }
+}
+
+impl Manifest {
+    /// Check internal evidence consistency. Hashes detect accidental changes;
+    /// they are not a signature or proof about a remote endpoint.
+    pub fn validate_config_provenance(&self) -> Result<(), String> {
+        let overlay_bytes = serde_json::to_vec(&self.config.server_overlay)
+            .map_err(|error| format!("serialize recorded overlay: {error}"))?;
+        if diagnostics::sha256_bytes(&overlay_bytes) != self.server.config_overlay_sha256 {
+            return Err("config overlay hash does not match recorded overlay".into());
+        }
+        match &self.server.config_provenance {
+            ConfigProvenance::UnknownExternal => {
+                if self.config.endpoint.as_deref() != Some(self.server.endpoint.as_str())
+                    || self.server.pid.is_some()
+                    || self.server.binary_sha256.is_some()
+                    || self.server.binary_bytes.is_some()
+                {
+                    return Err(
+                        "unknown external provenance has inconsistent server identity".into(),
+                    );
+                }
+            }
+            ConfigProvenance::SpawnedControlled {
+                defaults,
+                harness_base,
+                effective,
+                effective_sha256,
+            } => {
+                if self.config.endpoint.is_some()
+                    || self.server.pid.is_none()
+                    || self.server.binary_sha256.is_none()
+                    || self.server.binary_bytes.is_none()
+                {
+                    return Err(
+                        "controlled config provenance requires spawned binary identity".into(),
+                    );
+                }
+                let bytes = serde_json::to_vec(effective)
+                    .map_err(|error| format!("serialize effective config evidence: {error}"))?;
+                if diagnostics::sha256_bytes(&bytes) != *effective_sha256 {
+                    return Err("effective config hash does not match recorded config".into());
+                }
+                if !effective["security"]["app_auth_path"].is_null()
+                    || !effective["security"]["connect_token"]["public_key_path"].is_null()
+                {
+                    return Err(
+                        "controlled config provenance does not support file-backed auth sources"
+                            .into(),
+                    );
+                }
+                let port = effective["port"]
+                    .as_u64()
+                    .and_then(|port| u16::try_from(port).ok())
+                    .ok_or("effective config port is invalid")?;
+                if self.server.endpoint != format!("ws://127.0.0.1:{port}") {
+                    return Err("effective config port does not match server endpoint".into());
+                }
+                if !defaults.is_object() || !harness_base.is_object() {
+                    return Err("recorded config layers must be objects".into());
+                }
+                let overlay =
+                    crate::websocket_test_helpers::server_process::normalize_server_overlay(
+                        &self.config.server_overlay,
+                    )?;
+                let mut reconstructed = defaults.clone();
+                crate::websocket_test_helpers::server_process::merge_config(
+                    &mut reconstructed,
+                    harness_base,
+                );
+                crate::websocket_test_helpers::server_process::merge_config(
+                    &mut reconstructed,
+                    &overlay,
+                );
+                reconstructed["port"] = Value::from(port);
+                let typed: signal_fish_server::config::Config =
+                    serde_json::from_value(reconstructed)
+                        .map_err(|error| format!("parse recorded config layers: {error}"))?;
+                let reconstructed = serde_json::to_value(typed)
+                    .map_err(|error| format!("serialize recorded config layers: {error}"))?;
+                if reconstructed != *effective {
+                    return Err("effective config does not match declared config layers".into());
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Static identity of the generating host and build.
@@ -334,6 +457,7 @@ pub fn replay(output_dir: &Path) -> Result<OutcomeSummary, String> {
             manifest.schema_version
         ));
     }
+    manifest.validate_config_provenance()?;
     let (plans, churn) = build_run_shape(&manifest.config)?;
     let roster = plans
         .iter()

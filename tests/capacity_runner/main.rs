@@ -108,7 +108,68 @@ async fn small_reliable_relay_scenario_passes_and_artifacts_replay_to_the_same_s
     assert_eq!(manifest.config.seed, 1);
     assert_eq!(manifest.workload.senders, 4);
     assert!(manifest.server.binary_sha256.is_some());
+    let manifest_json = serde_json::to_value(&manifest).expect("manifest JSON");
+    assert!(
+        manifest_json["server"]["config_provenance"]["effective"].is_object(),
+        "the manifest must retain the full effective server configuration"
+    );
     assert!(manifest.build.toolchain.is_some());
+    assert!(manifest.server.config_provenance.has_config_evidence());
+    manifest
+        .validate_config_provenance()
+        .expect("consistent provenance");
+    let manifest_path = output.path().join(artifacts::MANIFEST_FILE);
+    for field in [
+        "effective",
+        "defaults",
+        "harness_base",
+        "overlay",
+        "endpoint",
+        "filebacked",
+    ] {
+        let mut altered = manifest_json.clone();
+        match field {
+            "effective" => {
+                altered["server"]["config_provenance"]["effective"]["server"]["ping_timeout"] =
+                    serde_json::json!(999)
+            }
+            "defaults" => {
+                altered["server"]["config_provenance"]["defaults"] = serde_json::json!([])
+            }
+            "harness_base" => {
+                altered["server"]["config_provenance"]["harness_base"]["server"]
+                    ["reconnection_window"] = serde_json::json!(999)
+            }
+            "overlay" => {
+                altered["config"]["server_overlay"]["server"]["ping_timeout"] =
+                    serde_json::json!(999)
+            }
+            "endpoint" => altered["server"]["endpoint"] = serde_json::json!("ws://127.0.0.1:1"),
+            "filebacked" => {
+                altered["config"]["server_overlay"]["security"]["app_auth_path"] =
+                    serde_json::json!("/missing/registry");
+                altered["server"]["config_provenance"]["effective"]["security"]["app_auth_path"] =
+                    serde_json::json!("/missing/registry");
+                altered["server"]["config_overlay_sha256"] =
+                    serde_json::json!(diagnostics::sha256_bytes(
+                        &serde_json::to_vec(&altered["config"]["server_overlay"])
+                            .expect("overlay bytes")
+                    ));
+                altered["server"]["config_provenance"]["effective_sha256"] =
+                    serde_json::json!(diagnostics::sha256_bytes(
+                        &serde_json::to_vec(&altered["server"]["config_provenance"]["effective"])
+                            .expect("effective bytes")
+                    ));
+            }
+            _ => unreachable!(),
+        }
+        artifacts::write_json(&manifest_path, &altered).expect("write altered manifest");
+        assert!(
+            artifacts::replay(output.path()).is_err(),
+            "reject altered {field} evidence"
+        );
+    }
+    artifacts::write_json(&manifest_path, &manifest).expect("restore manifest");
 
     // A replay of the raw events reproduces the recorded summary exactly.
     let replayed = artifacts::replay(output.path()).expect("replay artifacts");
@@ -333,8 +394,8 @@ async fn injected_send_pause_lands_in_scheduled_send_latency_without_reducing_of
     );
     let manifest_path = output.path().join(artifacts::MANIFEST_FILE);
     let mut manifest = artifacts::read_manifest(output.path()).expect("read pause manifest");
-    assert_eq!(manifest.schema_version, 7);
-    manifest.schema_version = 6;
+    assert_eq!(manifest.schema_version, 8);
+    manifest.schema_version = 7;
     std::fs::write(
         manifest_path,
         serde_json::to_vec(&manifest).expect("serialize old-schema manifest"),
@@ -342,7 +403,7 @@ async fn injected_send_pause_lands_in_scheduled_send_latency_without_reducing_of
     .expect("write old-schema manifest");
     assert_eq!(
         artifacts::replay(output.path()).expect_err("reject old latency semantics"),
-        "unsupported artifact schema 6 (expected 7)"
+        "unsupported artifact schema 7 (expected 8)"
     );
 }
 
@@ -799,6 +860,127 @@ async fn unsupported_format_experiment_reports_cross_format_omissions_over_real_
         serde_json::to_value(&replayed).expect("serialize replay"),
         serde_json::to_value(summary).expect("serialize summary"),
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn controlled_server_snapshot_matches_the_binary_loader() {
+    use websocket_test_helpers::server_process;
+    let overlay = serde_json::json!({
+        "port": 1,
+        "server": {"ping_timeout": 47},
+        "security": {"require_websocket_auth": false, "authorized_apps": [{"app_id": "fixture", "app_name": "Fixture", "app_secret": "discarded-legacy-value"}]},
+    });
+    let server = server_process::spawn_server(overlay).await;
+    assert_ne!(
+        server.port, 1,
+        "the reserved port overrides the declared port"
+    );
+    let snapshot = server.effective_config();
+    assert_eq!(snapshot["port"], server.port);
+    assert_eq!(snapshot["server"]["ping_timeout"], 47);
+    assert_eq!(snapshot["server"]["reconnection_window"], 300);
+    assert_eq!(snapshot["logging"]["enable_file_logging"], false);
+    assert_eq!(snapshot["protocol"]["sdk_compatibility"]["enforce"], false);
+    assert_ne!(
+        server.binary_path(),
+        std::path::Path::new(env!("CARGO_BIN_EXE_signal-fish-server"))
+    );
+    let directory = server
+        .binary_path()
+        .parent()
+        .expect("isolated binary directory");
+    assert!(!directory.join("config.json").exists());
+    let mut command = std::process::Command::new(server.binary_path());
+    for (key, _) in std::env::vars_os() {
+        if key
+            .to_str()
+            .is_some_and(|key| key.starts_with("SIGNAL_FISH"))
+        {
+            command.env_remove(key);
+        }
+    }
+    let printed = command
+        .arg("--print-config")
+        .current_dir(directory)
+        .env(
+            "SIGNAL_FISH_CONFIG_PATH",
+            directory.join("server-config.json"),
+        )
+        .env("SIGNAL_FISH__PORT", server.port.to_string())
+        .output()
+        .expect("run the production config loader");
+    assert!(
+        printed.status.success(),
+        "loader failed: {}",
+        String::from_utf8_lossy(&printed.stderr)
+    );
+    let actual: serde_json::Value =
+        serde_json::from_slice(&printed.stdout).expect("loaded config JSON");
+    assert_eq!(
+        &actual, snapshot,
+        "the production loader must use the recorded settings"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn external_capacity_runs_keep_unknown_provenance_and_exact_replay() {
+    let mut config = scenario_config(Encoding::V3Json);
+    let server =
+        websocket_test_helpers::server_process::spawn_server(config.server_overlay.clone()).await;
+    let output = tempfile::tempdir().expect("external output");
+    config.endpoint = Some(format!("ws://127.0.0.1:{}", server.port));
+    config.output_dir = output.path().to_path_buf();
+    let outcome = runner::run(config).await.expect("external correctness run");
+    assert!(outcome.summary.valid);
+    let manifest = artifacts::read_manifest(output.path()).expect("external manifest");
+    assert!(!manifest.server.config_provenance.has_config_evidence());
+    assert!(matches!(
+        manifest.server.config_provenance,
+        artifacts::ConfigProvenance::UnknownExternal
+    ));
+    assert!(manifest.server.binary_sha256.is_none());
+    let replay = artifacts::replay(output.path()).expect("external correctness replay");
+    assert_eq!(
+        serde_json::to_value(replay).expect("replay JSON"),
+        serde_json::to_value(outcome.summary).expect("summary JSON")
+    );
+}
+
+#[tokio::test]
+async fn capacity_provenance_refuses_file_backed_config_before_starting() {
+    for overlay in [
+        serde_json::json!({"security": {"app_auth_path": "/missing/registry"}}),
+        serde_json::json!({"security": {"connect_token": {"public_key_path": "/missing/key", "public_key": ""}}}),
+    ] {
+        let output = tempfile::tempdir().expect("refused run output");
+        let mut config = scenario_config(Encoding::V3Json);
+        config.server_overlay = overlay;
+        config.output_dir = output.path().join("not-created");
+        let error = runner::run(config.clone())
+            .await
+            .expect_err("unsupported provenance");
+        assert!(error.contains("file-backed"), "{error}");
+        assert!(
+            !config.output_dir.exists(),
+            "reject before creating run artifacts"
+        );
+    }
+}
+
+#[test]
+fn config_provenance_rejects_malformed_and_conflicting_overlays() {
+    use websocket_test_helpers::server_process::effective_server_config;
+    for overlay in [
+        serde_json::json!(null),
+        serde_json::json!([]),
+        serde_json::json!(1),
+        serde_json::json!({"security": {"require_websocket_auth": false, "enforce_app_id_allowlist": true}}),
+    ] {
+        assert!(
+            effective_server_config(3536, &overlay).is_err(),
+            "reject overlay {overlay}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
