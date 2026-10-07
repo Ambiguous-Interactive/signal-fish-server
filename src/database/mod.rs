@@ -2885,7 +2885,7 @@ impl GameDatabase for InMemoryDatabase {
             occupants: u64::try_from(
                 rooms
                     .values()
-                    .map(|room| room.players.len() + room.spectators.len())
+                    .map(|room| room.players.len().saturating_add(room.spectators.len()))
                     .fold(0usize, |total, occupants| total.saturating_add(occupants)),
             )
             .unwrap_or(u64::MAX),
