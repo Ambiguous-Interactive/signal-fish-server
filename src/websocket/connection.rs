@@ -3024,6 +3024,10 @@ mod tests {
     async fn old_socket_receive_frame_cannot_affect_restored_player() {
         use crate::protocol::ServerMessage;
 
+        // Real socket readiness must use the real clock before any I/O starts.
+        // A paused clock can expire the timeout before the OS finishes the handshake.
+        tokio::time::resume();
+
         let repeated_auth = ClientMessage::Authenticate {
             app_id: "public".to_string(),
             connect_token: None,

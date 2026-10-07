@@ -344,7 +344,10 @@ ledger's contract record): schema 6 interval samples carry the live-state
 gauges, the pending-publication backlog, the maintenance sweep pair, and
 the socket-memory page pair, with presence pins in the acceptance scenario.
 C2 is complete: every registered runner input, artifact family, negative
-control, and resource observable is landed and pinned.
+control, and resource observable is landed and pinned. The latest/volatile
+pressure control uses declared 16-KiB payloads (#783) to exceed OS socket
+buffering while retaining exact gap, counter, and replay checks. Live
+runner cells share a plain-cargo test lock to prevent generator contention.
 
 - [x] Churn/reconnect schedules: reconnect-burst and room-replacement
   shapes per the C3 cells, with red-first controls for each new permitted

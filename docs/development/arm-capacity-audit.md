@@ -2323,16 +2323,24 @@ validates coverage per recipient (uncovered holes are `MissingDeliveries`;
 only the loud disconnect tail may stay uncovered) and the summary now
 carries per-recipient latency tails plus `gap_covered` totals, and records
 the run class's seven accountable server outcomes in every interval sample.
-Two pressure cells pin the contract over real sockets: a 600 ms read pause
-on a clamped socket with a tiny send queue and a bounded kernel handoff
-makes supersession (latest) and oldest-eviction (volatile) deterministic;
-each run stays valid, and the server's per-class counter equals the
-validated gap coverage exactly. Key isolation is pinned: distinct keys
+The pressure control runs both classes over real sockets. Each cell offers
+16-KiB application payloads at 1,000 sends/s with a 600-ms read pause, a
+clamped receive buffer, and a tiny server send queue. This byte volume
+replaces the old 96-byte control's fixed frame-absorption estimate (#783).
+Each run must stay valid, cover at least 100 omissions with exact gaps, and
+match the server's per-class counter. The artifacts must replay exactly.
+These large payloads are declared fault-control inputs. The C3 relay cells
+still use 96-byte and 1-KiB payloads. Key isolation is pinned: distinct keys
 coalesce nothing. Artifacts bumped to schema 2 (gap-report event kind,
 class-aware summary). The e2e cells exposed one runner defect during the
 red run: a peer's join snapshot can miss the member that joined
 concurrently, so receivers now track `PlayerJoined`/`PlayerLeft` to resolve
 gap senders.
+
+Live runner cells share a test lock under plain `cargo test`. The coverage
+and MSRV suites can otherwise run many generators at once and exhaust a
+cell's lag bound. The lock matches nextest's process-spawning isolation;
+the workload and validation limits stay the same.
 
 **C2 next runner PR: churn/reconnect schedules — LANDED** (third runner
 PR, 2026-10-05). `ChurnSchedule` carries the reconnect-burst storm (the C3

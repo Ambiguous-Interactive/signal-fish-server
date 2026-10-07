@@ -34,6 +34,11 @@
 //! Standalone use on a capacity host (release profile, external server):
 //! `CAPACITY_RUNNER_*` environment variables shape a run — see
 //! `config::RunConfig::from_env`.
+//!
+//! Live socket cells share `serial_test`'s lock for plain `cargo test`,
+//! including coverage lanes. Nextest uses the `process-spawning` group.
+//! This keeps child servers and scheduled generators from competing with
+//! other live cells in this binary; oracle-only controls remain parallel.
 
 #[path = "../websocket_test_helpers/mod.rs"]
 mod websocket_test_helpers;
@@ -60,6 +65,7 @@ use signal_fish_server::protocol::{DeliveryGapReason, ServerMessage};
 /// v3 clients, reliable relay traffic over real sockets, artifacts written,
 /// and a replay of those artifacts reproducing the recorded summary exactly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn small_reliable_relay_scenario_passes_and_artifacts_replay_to_the_same_summary() {
     let output = tempfile::tempdir().expect("create output tempdir");
     let config = RunConfig {
@@ -351,6 +357,7 @@ async fn small_reliable_relay_scenario_passes_and_artifacts_replay_to_the_same_s
 /// in the send lag, not as reduced offered load: every scheduled message is
 /// still emitted, and the run stays valid.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn injected_send_pause_lands_in_scheduled_send_latency_without_reducing_offered_load() {
     let output = tempfile::tempdir().expect("create output tempdir");
     let mut config = scenario_config(Encoding::V2Json);
@@ -414,6 +421,7 @@ async fn injected_send_pause_lands_in_scheduled_send_latency_without_reducing_of
 /// recorded lag, bound, and unsent work — saturation is loud, never a
 /// silently stretched schedule.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn generator_saturation_invalidates_the_run_with_the_recorded_lag_and_unsent_work() {
     let output = tempfile::tempdir().expect("create output tempdir");
     let mut config = scenario_config(Encoding::V2Json);
@@ -449,6 +457,7 @@ async fn generator_saturation_invalidates_the_run_with_the_recorded_lag_and_unse
 /// every recipient keeps a gap-free in-order prefix (loss is only ever the
 /// loud tail cut off with the connection).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn server_termination_invalidates_the_run_and_preserves_gap_free_prefixes() {
     let output = tempfile::tempdir().expect("create output tempdir");
     let mut config = scenario_config(Encoding::V3Json);
@@ -514,6 +523,7 @@ async fn server_termination_invalidates_the_run_and_preserves_gap_free_prefixes(
 /// invalidated as a declared non-measurement rather than silently
 /// reporting partial delivery as capacity evidence.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn a_slow_reader_is_evicted_recorded_and_accounted_by_the_server_counter() {
     let output = tempfile::tempdir().expect("create output tempdir");
     let mut config = scenario_config(Encoding::V2Json);
@@ -593,10 +603,9 @@ async fn a_slow_reader_is_evicted_recorded_and_accounted_by_the_server_counter()
 // ---------------------------------------------------------------------------
 
 /// The server overlay for the lossy-class pressure cells: a tiny outbound
-/// queue and a bounded kernel handoff make the paused reader's pressure
-/// phase deterministic (the burst exceeds kernel absorption several times
-/// over), while the control lane grows to hold every gap report the pause
-/// produces. All overrides are recorded in the manifest and hashed.
+/// queue and a bounded kernel handoff limit the paused reader's outbound
+/// buffering. The control lane holds the gap reports produced during the
+/// pause. All overrides are recorded in the manifest and hashed.
 fn pressure_overlay() -> serde_json::Value {
     serde_json::json!({
         "session": { "default_topology": "relay" },
@@ -613,142 +622,113 @@ fn pressure_overlay() -> serde_json::Value {
     })
 }
 
-/// One sender at 1000 messages/second, one recipient that does not read for
-/// 600 ms on a clamped socket: the newest-value (`latest`, one key) cell.
-/// Supersession must be observable, every omitted sequence must carry its
-/// exact gap report, the run must stay valid, and the server's superseded
-/// counter must agree with the oracle's gap coverage exactly.
+/// Regression for issue #783: the 96-byte control failed the
+/// minimum-100-omission check on macOS. Use the slow-reader fixture's
+/// 16 KiB application payload
+/// for both lossy classes, with the same read pause and offered rate.
+/// Every omission must carry its exact gap report, the run must stay valid,
+/// and the server counter must equal the oracle's gap coverage.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn latest_pressure_supersedes_with_exact_gap_accounting_in_server_counter_agreement() {
-    let output = tempfile::tempdir().expect("create output tempdir");
-    let mut config = scenario_config(Encoding::V3Json);
-    config.output_dir = output.path().to_path_buf();
-    config.players_per_room = 2;
-    config.delivery_class = DeliveryClass::Latest;
-    config.latest_keys_per_sender = 1;
-    config.send_rate_per_sender = 1_000.0;
-    config.warmup = Duration::from_millis(50);
-    config.duration = Duration::from_millis(800);
-    config.pause_reads = Some(Duration::from_millis(600));
-    config.generator_lag_bound = Duration::from_millis(500);
-    config.drain_grace = Duration::from_secs(2);
-    config.server_overlay = pressure_overlay();
+#[serial_test::serial]
+async fn lossy_pressure_preserves_exact_gap_accounting_and_replay() {
+    const PAYLOAD_BYTES: u32 = 16 * 1_024;
+    for (delivery_class, counter_name) in [
+        (DeliveryClass::Latest, "class_outcome_superseded"),
+        (DeliveryClass::Volatile, "class_outcome_dropped"),
+    ] {
+        let output = tempfile::tempdir().expect("create output tempdir");
+        let mut config = scenario_config(Encoding::V3Json);
+        config.output_dir = output.path().to_path_buf();
+        config.players_per_room = 2;
+        config.delivery_class = delivery_class;
+        config.latest_keys_per_sender = 1;
+        config.payload_bytes = PAYLOAD_BYTES;
+        config.send_rate_per_sender = 1_000.0;
+        config.warmup = Duration::from_millis(50);
+        config.duration = Duration::from_millis(800);
+        config.pause_reads = Some(Duration::from_millis(600));
+        config.generator_lag_bound = Duration::from_millis(500);
+        config.drain_grace = Duration::from_secs(2);
+        config.server_overlay = pressure_overlay();
 
-    let outcome = runner::run(config).await.expect("latest run completes");
-    assert!(
-        outcome.summary.valid,
-        "supersession with exact gap accounting is contract-legal: {:?}",
-        outcome.summary.reasons
-    );
-    // The pressure phase happened and was loud: many omissions, each
-    // gap-covered.
-    assert!(
-        outcome.summary.totals.gap_covered >= 100,
-        "a 600 ms read pause at 1000/s must supersede far more than the \
-         ~130-frame kernel handoff, got {:?}",
-        outcome.summary.totals
-    );
-    assert!(
-        outcome.summary.totals.receipts < outcome.summary.totals.scheduled,
-        "policy loss must be visible in the totals: {:?}",
-        outcome.summary.totals
-    );
-    let reader = outcome
-        .summary
-        .per_recipient
-        .iter()
-        .find(|recipient| recipient.recipient == "r0p0")
-        .expect("the paused reader is on the roster");
-    assert!(
-        reader.gap_covered >= 100,
-        "the paused reader absorbs the policy loss, got {reader:?}"
-    );
-    assert_eq!(
-        reader.missing, 0,
-        "every omission must be gap-covered, not silent"
-    );
+        let outcome = runner::run(config)
+            .await
+            .unwrap_or_else(|error| panic!("{delivery_class:?} pressure run: {error}"));
+        let summary = &outcome.summary;
+        let diagnostic = format!(
+            "class={delivery_class:?}, totals={:?}, payload_bytes={:?}",
+            summary.totals, summary.payload_bytes
+        );
+        assert!(
+            summary.valid,
+            "exact gap accounting must remain valid: {diagnostic}, reasons={:?}",
+            summary.reasons
+        );
+        assert!(
+            summary.totals.gap_covered >= 100,
+            "the 600 ms read pause must produce at least 100 policy omissions: {diagnostic}"
+        );
+        assert!(
+            summary.totals.receipts < summary.totals.scheduled,
+            "policy loss must be visible in the totals: {diagnostic}"
+        );
+        let reader = summary
+            .per_recipient
+            .iter()
+            .find(|recipient| recipient.recipient == "r0p0")
+            .expect("the paused reader is on the roster");
+        assert!(
+            reader.gap_covered >= 100,
+            "the paused reader must account for the policy loss: {diagnostic}, reader={reader:?}"
+        );
+        assert_eq!(
+            reader.missing, 0,
+            "every omission must be gap-covered: {diagnostic}, reader={reader:?}"
+        );
 
-    // Server-side accounting agrees exactly: the spawned server serves only
-    // this run, and one supersession emits exactly one gap report.
-    let counters = outcome
-        .final_counters
-        .as_ref()
-        .expect("the run recorded at least one server scrape");
-    let superseded = counters
-        .get("class_outcome_superseded")
-        .and_then(serde_json::Value::as_u64)
-        .expect("class outcomes are recorded for a latest run");
-    assert_eq!(
-        superseded, outcome.summary.totals.gap_covered,
-        "the server's superseded counter must equal the validated gap coverage"
-    );
+        // Pin the observed application sizes, including ledger metadata.
+        // The summary comes from actual sends and arrivals in both phases.
+        for phase in [summary.payload_bytes.warmup, summary.payload_bytes.measured] {
+            for direction in [phase.ingress, phase.egress] {
+                let bytes = direction.application;
+                assert!(bytes.samples > 0, "missing byte evidence: {diagnostic}");
+                assert_eq!(bytes.min_bytes, u64::from(PAYLOAD_BYTES), "{diagnostic}");
+                assert_eq!(bytes.max_bytes, u64::from(PAYLOAD_BYTES), "{diagnostic}");
+                assert_eq!(
+                    bytes.total_bytes,
+                    bytes.samples * u64::from(PAYLOAD_BYTES),
+                    "{diagnostic}"
+                );
+            }
+        }
 
-    let replayed = artifacts::replay(output.path()).expect("replay artifacts");
-    assert_eq!(
-        serde_json::to_value(&replayed).expect("serialize replay"),
-        serde_json::to_value(&outcome.summary).expect("serialize summary"),
-    );
-}
+        let counters = outcome
+            .final_counters
+            .as_ref()
+            .expect("the run recorded at least one server scrape");
+        let policy_omissions = counters
+            .get(counter_name)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_else(|| panic!("missing {counter_name}: {diagnostic}, counters={counters}"));
+        assert_eq!(
+            policy_omissions, summary.totals.gap_covered,
+            "the server's {counter_name} counter must equal validated gap coverage: {diagnostic}"
+        );
 
-/// The same pressure cell over `volatile`: the oldest queued message is
-/// evicted, every eviction carries its `volatile_dropped` gap report, and
-/// the server's dropped counter agrees with the validated coverage.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn volatile_pressure_evicts_the_oldest_with_exact_gap_accounting_in_counter_agreement() {
-    let output = tempfile::tempdir().expect("create output tempdir");
-    let mut config = scenario_config(Encoding::V3Json);
-    config.output_dir = output.path().to_path_buf();
-    config.players_per_room = 2;
-    config.delivery_class = DeliveryClass::Volatile;
-    config.send_rate_per_sender = 1_000.0;
-    config.warmup = Duration::from_millis(50);
-    config.duration = Duration::from_millis(800);
-    config.pause_reads = Some(Duration::from_millis(600));
-    config.generator_lag_bound = Duration::from_millis(500);
-    config.drain_grace = Duration::from_secs(2);
-    config.server_overlay = pressure_overlay();
-
-    let outcome = runner::run(config).await.expect("volatile run completes");
-    assert!(
-        outcome.summary.valid,
-        "eviction with exact gap accounting is contract-legal: {:?}",
-        outcome.summary.reasons
-    );
-    assert!(outcome.summary.totals.gap_covered >= 100);
-    assert!(outcome.summary.totals.receipts < outcome.summary.totals.scheduled);
-    let reader = outcome
-        .summary
-        .per_recipient
-        .iter()
-        .find(|recipient| recipient.recipient == "r0p0")
-        .expect("the paused reader is on the roster");
-    assert!(reader.gap_covered >= 100);
-    assert_eq!(reader.missing, 0);
-
-    let counters = outcome
-        .final_counters
-        .as_ref()
-        .expect("the run recorded at least one server scrape");
-    let dropped = counters
-        .get("class_outcome_dropped")
-        .and_then(serde_json::Value::as_u64)
-        .expect("class outcomes are recorded for a volatile run");
-    assert_eq!(
-        dropped, outcome.summary.totals.gap_covered,
-        "the server's volatile dropped counter must equal the validated gap coverage"
-    );
-
-    let replayed = artifacts::replay(output.path()).expect("replay artifacts");
-    assert_eq!(
-        serde_json::to_value(&replayed).expect("serialize replay"),
-        serde_json::to_value(&outcome.summary).expect("serialize summary"),
-    );
+        let replayed = artifacts::replay(output.path()).expect("replay artifacts");
+        assert_eq!(
+            serde_json::to_value(&replayed).expect("serialize replay"),
+            serde_json::to_value(summary).expect("serialize summary"),
+            "{diagnostic}"
+        );
+    }
 }
 
 /// Distinct coalescing keys never coalesce: a latest run whose keys rotate
 /// past every send delivers the complete stream — the key-composition half
 /// of the latest contract, over real sockets.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn latest_with_distinct_keys_delivers_every_message_without_policy_loss() {
     let output = tempfile::tempdir().expect("create output tempdir");
     let mut config = scenario_config(Encoding::V3Json);
@@ -783,6 +763,7 @@ async fn latest_with_distinct_keys_delivers_every_message_without_policy_loss() 
 /// `unsupported_format` outcome counter must agree with the validated
 /// coverage exactly, and the labeled artifacts must replay.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn unsupported_format_experiment_reports_cross_format_omissions_over_real_sockets() {
     let output = tempfile::tempdir().expect("create output tempdir");
     let mut config = scenario_config(Encoding::V3Json);
@@ -882,6 +863,7 @@ async fn unsupported_format_experiment_reports_cross_format_omissions_over_real_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn controlled_server_snapshot_matches_the_binary_loader() {
     use websocket_test_helpers::server_process;
     let overlay = serde_json::json!({
@@ -942,6 +924,7 @@ async fn controlled_server_snapshot_matches_the_binary_loader() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn external_capacity_runs_keep_unknown_provenance_and_exact_replay() {
     let mut config = scenario_config(Encoding::V3Json);
     let server =
@@ -1041,6 +1024,7 @@ async fn undersized_application_payload_is_refused_before_run_effects() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn exact_payload_cells_record_actual_ingress_and_egress_sizes_and_replay() {
     use signal_fish_server::protocol::{ClientMessage, DeliveryClass as WireClass, PlayerId};
     for (encoding, delivery_class) in [
@@ -3038,6 +3022,7 @@ async fn hook_and_class_mismatches_are_refused_before_any_spawn() {
 /// In CI the default configuration runs the same small scenario as the
 /// acceptance gate; on a capacity host the variables shape the real cells.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 #[ignore = "standalone capacity-host entry point: shape via CAPACITY_RUNNER_*"]
 async fn a_standalone_env_configured_run_writes_artifacts_and_replays() {
     let config = RunConfig::from_env().expect("CAPACITY_RUNNER_* env is valid");
@@ -4202,6 +4187,7 @@ fn a_stale_generation_delivery_after_the_replacement_is_a_misroute() {
 /// rejoining peers' away windows are accounted by their rejoin snapshot
 /// tails. The artifacts must replay to the same summary.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn a_reconnect_burst_delivers_every_stream_exactly_once_across_the_storm() {
     let output = tempfile::tempdir().expect("create output tempdir");
     let mut config = scenario_config(Encoding::V3Json);
@@ -4282,6 +4268,7 @@ async fn a_reconnect_burst_delivers_every_stream_exactly_once_across_the_storm()
 /// generations must be real rooms (new incarnations with snapshot tails),
 /// and the artifacts must replay to the same summary.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn a_room_replacement_cycles_whole_rooms_while_others_keep_serving() {
     let output = tempfile::tempdir().expect("create output tempdir");
     let mut config = scenario_config(Encoding::V3Json);
