@@ -2337,6 +2337,11 @@ red run: a peer's join snapshot can miss the member that joined
 concurrently, so receivers now track `PlayerJoined`/`PlayerLeft` to resolve
 gap senders.
 
+Live runner cells share a test lock under plain `cargo test`. The coverage
+and MSRV suites can otherwise run many generators at once and exhaust a
+cell's lag bound. The lock matches nextest's process-spawning isolation;
+the workload and validation limits stay the same.
+
 **C2 next runner PR: churn/reconnect schedules — LANDED** (third runner
 PR, 2026-10-05). `ChurnSchedule` carries the reconnect-burst storm (the C3
 reconnect cell): at `start`, the seed-chosen `fraction_percent` of peers

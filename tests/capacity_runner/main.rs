@@ -34,6 +34,11 @@
 //! Standalone use on a capacity host (release profile, external server):
 //! `CAPACITY_RUNNER_*` environment variables shape a run — see
 //! `config::RunConfig::from_env`.
+//!
+//! Live socket cells share `serial_test`'s lock for plain `cargo test`,
+//! including coverage lanes. Nextest uses the `process-spawning` group.
+//! This keeps child servers and scheduled generators from competing with
+//! other live cells in this binary; oracle-only controls remain parallel.
 
 #[path = "../websocket_test_helpers/mod.rs"]
 mod websocket_test_helpers;
@@ -60,6 +65,7 @@ use signal_fish_server::protocol::{DeliveryGapReason, ServerMessage};
 /// v3 clients, reliable relay traffic over real sockets, artifacts written,
 /// and a replay of those artifacts reproducing the recorded summary exactly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn small_reliable_relay_scenario_passes_and_artifacts_replay_to_the_same_summary() {
     let output = tempfile::tempdir().expect("create output tempdir");
     let config = RunConfig {
@@ -351,6 +357,7 @@ async fn small_reliable_relay_scenario_passes_and_artifacts_replay_to_the_same_s
 /// in the send lag, not as reduced offered load: every scheduled message is
 /// still emitted, and the run stays valid.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn injected_send_pause_lands_in_scheduled_send_latency_without_reducing_offered_load() {
     let output = tempfile::tempdir().expect("create output tempdir");
     let mut config = scenario_config(Encoding::V2Json);
@@ -414,6 +421,7 @@ async fn injected_send_pause_lands_in_scheduled_send_latency_without_reducing_of
 /// recorded lag, bound, and unsent work — saturation is loud, never a
 /// silently stretched schedule.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn generator_saturation_invalidates_the_run_with_the_recorded_lag_and_unsent_work() {
     let output = tempfile::tempdir().expect("create output tempdir");
     let mut config = scenario_config(Encoding::V2Json);
@@ -449,6 +457,7 @@ async fn generator_saturation_invalidates_the_run_with_the_recorded_lag_and_unse
 /// every recipient keeps a gap-free in-order prefix (loss is only ever the
 /// loud tail cut off with the connection).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn server_termination_invalidates_the_run_and_preserves_gap_free_prefixes() {
     let output = tempfile::tempdir().expect("create output tempdir");
     let mut config = scenario_config(Encoding::V3Json);
@@ -514,6 +523,7 @@ async fn server_termination_invalidates_the_run_and_preserves_gap_free_prefixes(
 /// invalidated as a declared non-measurement rather than silently
 /// reporting partial delivery as capacity evidence.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn a_slow_reader_is_evicted_recorded_and_accounted_by_the_server_counter() {
     let output = tempfile::tempdir().expect("create output tempdir");
     let mut config = scenario_config(Encoding::V2Json);
@@ -619,6 +629,7 @@ fn pressure_overlay() -> serde_json::Value {
 /// Every omission must carry its exact gap report, the run must stay valid,
 /// and the server counter must equal the oracle's gap coverage.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn lossy_pressure_preserves_exact_gap_accounting_and_replay() {
     const PAYLOAD_BYTES: u32 = 16 * 1_024;
     for (delivery_class, counter_name) in [
@@ -717,6 +728,7 @@ async fn lossy_pressure_preserves_exact_gap_accounting_and_replay() {
 /// past every send delivers the complete stream — the key-composition half
 /// of the latest contract, over real sockets.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn latest_with_distinct_keys_delivers_every_message_without_policy_loss() {
     let output = tempfile::tempdir().expect("create output tempdir");
     let mut config = scenario_config(Encoding::V3Json);
@@ -751,6 +763,7 @@ async fn latest_with_distinct_keys_delivers_every_message_without_policy_loss() 
 /// `unsupported_format` outcome counter must agree with the validated
 /// coverage exactly, and the labeled artifacts must replay.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn unsupported_format_experiment_reports_cross_format_omissions_over_real_sockets() {
     let output = tempfile::tempdir().expect("create output tempdir");
     let mut config = scenario_config(Encoding::V3Json);
@@ -850,6 +863,7 @@ async fn unsupported_format_experiment_reports_cross_format_omissions_over_real_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn controlled_server_snapshot_matches_the_binary_loader() {
     use websocket_test_helpers::server_process;
     let overlay = serde_json::json!({
@@ -910,6 +924,7 @@ async fn controlled_server_snapshot_matches_the_binary_loader() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn external_capacity_runs_keep_unknown_provenance_and_exact_replay() {
     let mut config = scenario_config(Encoding::V3Json);
     let server =
@@ -1009,6 +1024,7 @@ async fn undersized_application_payload_is_refused_before_run_effects() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn exact_payload_cells_record_actual_ingress_and_egress_sizes_and_replay() {
     use signal_fish_server::protocol::{ClientMessage, DeliveryClass as WireClass, PlayerId};
     for (encoding, delivery_class) in [
@@ -3006,6 +3022,7 @@ async fn hook_and_class_mismatches_are_refused_before_any_spawn() {
 /// In CI the default configuration runs the same small scenario as the
 /// acceptance gate; on a capacity host the variables shape the real cells.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 #[ignore = "standalone capacity-host entry point: shape via CAPACITY_RUNNER_*"]
 async fn a_standalone_env_configured_run_writes_artifacts_and_replays() {
     let config = RunConfig::from_env().expect("CAPACITY_RUNNER_* env is valid");
@@ -4170,6 +4187,7 @@ fn a_stale_generation_delivery_after_the_replacement_is_a_misroute() {
 /// rejoining peers' away windows are accounted by their rejoin snapshot
 /// tails. The artifacts must replay to the same summary.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn a_reconnect_burst_delivers_every_stream_exactly_once_across_the_storm() {
     let output = tempfile::tempdir().expect("create output tempdir");
     let mut config = scenario_config(Encoding::V3Json);
@@ -4250,6 +4268,7 @@ async fn a_reconnect_burst_delivers_every_stream_exactly_once_across_the_storm()
 /// generations must be real rooms (new incarnations with snapshot tails),
 /// and the artifacts must replay to the same summary.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
 async fn a_room_replacement_cycles_whole_rooms_while_others_keep_serving() {
     let output = tempfile::tempdir().expect("create output tempdir");
     let mut config = scenario_config(Encoding::V3Json);
