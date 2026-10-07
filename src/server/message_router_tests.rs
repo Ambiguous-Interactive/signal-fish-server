@@ -217,6 +217,106 @@ async fn duplicate_transport_status_reports_do_not_inflate_metrics() {
     );
 }
 
+/// Per-session transport attribution (issue #766) must track the server-wide
+/// counters at the same seam: the same accepted report sequence yields
+/// identical session deltas, and "still on the floor"
+/// (`connected=true`, `transport=relay`) moves neither counter.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn transport_status_reports_attribute_the_session_record_with_the_counters() {
+    let server = create_test_server().await;
+    let (sender, _receiver) = mpsc::channel(64);
+    let addr: SocketAddr = "127.0.0.1:50064".parse().unwrap();
+    let player_id = server
+        .connection_manager
+        .register_client(
+            sender,
+            crate::coordination::ConnectionCloseSignal::detached(),
+            addr,
+            server.instance_id,
+        )
+        .await
+        .expect("client registration succeeds");
+    server.set_client_protocol(
+        &player_id,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![Transport::Relay, Transport::WebRtc],
+            topologies: vec![Topology::Relay, Topology::Mesh],
+        },
+    );
+    server
+        .handle_join_room(
+            &player_id,
+            "transport-attribution".to_string(),
+            Some("TSA001".to_string()),
+            "player".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    let room_id = server
+        .get_client_room(&player_id)
+        .await
+        .expect("join routes the client into a room");
+
+    let session_record = || {
+        let records = server
+            .session_records()
+            .expect("the in-memory backend tracks session records");
+        let snapshot = records.snapshot();
+        snapshot
+            .active
+            .iter()
+            .find(|record| record.room_id == room_id)
+            .cloned()
+            .expect("active session record for the joined room")
+    };
+
+    // "Still on the floor" is neither a P2P establishment nor a fallback.
+    server
+        .handle_client_message(
+            &player_id,
+            ClientMessage::TransportStatus {
+                transport: Transport::Relay,
+                connected: true,
+            },
+        )
+        .await;
+    let record = session_record();
+    assert_eq!(record.p2p_established, 0);
+    assert_eq!(record.relay_fallback, 0);
+
+    for connected in [true, true, false, false, true] {
+        server
+            .handle_client_message(
+                &player_id,
+                ClientMessage::TransportStatus {
+                    transport: Transport::WebRtc,
+                    connected,
+                },
+            )
+            .await;
+    }
+    let record = session_record();
+    // Identical deltas to the server-wide counters for the same sequence.
+    assert_eq!(
+        record.p2p_established,
+        server.metrics.p2p_established.load(Ordering::Relaxed),
+        "session and server-wide P2P counters must agree on this sequence"
+    );
+    assert_eq!(
+        record.relay_fallback,
+        server.metrics.relay_fallback.load(Ordering::Relaxed),
+        "session and server-wide fallback counters must agree on this sequence"
+    );
+    assert_eq!(record.p2p_established, 2);
+    assert_eq!(record.relay_fallback, 1);
+}
+
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn transport_status_for_unnegotiated_transport_is_ignored() {

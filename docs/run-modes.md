@@ -157,11 +157,12 @@ carry explicit truncation flags when capped. Completed records carry a
 monotonic `seq`; `?since=<seq>` cursor-filters the completed list so a
 scraper misses no completion that stayed inside the retention ring, and
 `?applicationId=<uuid>` restricts both lists to one application's rooms.
-Session records include room
+The `applicationId` parameter scopes the response only — it is caller-side
+view filtering, not access control: the bearer token still grants every
+application's records. Session records include room
 codes (join capabilities) and per-application attribution, so the metrics
 token is operator-level: share it only with principals that may see every
-app's rooms — or hand each tenant its own slice with
-`?applicationId=` without widening the token. Protect
+app's rooms. Protect
 them with a bearer token: when
 `security.require_metrics_auth=true`, requests must send
 `Authorization: Bearer <token>` matching `security.metrics_auth_token`:

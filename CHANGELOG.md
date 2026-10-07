@@ -17,10 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   set), per-session traffic (`gameDataMessages`, `relayBytes`,
   `gameDataEncodings` — sender-side, budget-admitted frames only), and
   authority switches (`authorityTransfers`). Completed records carry a
-  monotonic `seq`, and the endpoint accepts `?since=<seq>` (cursor over the
-  completed list, gapless within the ring's retention window) and
-  `?applicationId=<uuid>` (restrict both lists to one application's rooms);
-  malformed values fail the request. The whole-response byte budget grows
+  monotonic `seq` (stamped in completion order), and the endpoint accepts
+  `?since=<seq>` (cursor over the completed list, gapless within the
+  ring's retention window) and
+  `?applicationId=<uuid>` (restrict both lists to one application's rooms —
+  a response-scoped view filter, not access control; malformed values fail
+  the request). The whole-response byte budget grows
   from 1 MiB to 1.5 MiB so the structural caps still compose.
 
 - Metrics: `GET /metrics/sessions` (and `/v1/metrics/sessions`) exposes

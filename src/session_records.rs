@@ -349,16 +349,22 @@ impl SessionRecords {
             }
             record.ended_at_ms = Some(Self::now_ms());
             record.close_reason = Some(reason);
-            record.seq = Some(self.next_completed_seq.fetch_add(1, Ordering::Relaxed));
             self.push_completed(record);
         }
     }
 
-    fn push_completed(&self, record: SessionRecord) {
+    fn push_completed(&self, mut record: SessionRecord) {
         let mut completed = self
             .completed
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        // Stamp only after taking the ring mutex, so sequence order equals
+        // ring order by construction: a scrape takes the same mutex and can
+        // never observe a stamped-but-unpushed sequence that would let a
+        // `?since=` cursor skip a completion still inside the ring. (Closes
+        // are additionally serialized by the storage layer's rooms write
+        // lock; the invariant here must not depend on that.)
+        record.seq = Some(self.next_completed_seq.fetch_add(1, Ordering::Relaxed));
         completed.push_back(record);
         while completed.len() > SESSION_RECORDS_COMPLETED_CAP {
             completed.pop_front();
@@ -665,14 +671,28 @@ mod tests {
             room.region_id = "R".repeat(64);
             room
         };
+        // A worst-case record also carries full per-record sets (the
+        // encodings serialize as string arrays, the versions as a number
+        // array), not just the identity strings.
+        let stamp_worst_case_sets = |records: &SessionRecords, room_id: RoomId| {
+            let mut record = records.active.get_mut(&room_id).expect("active record");
+            for encoding in ["json", "message_pack", "rkyv", "protobuf"] {
+                record.game_data_encodings.insert(encoding.to_string());
+            }
+            record.protocol_versions.insert(u16::MIN);
+            record.protocol_versions.insert(u16::MAX);
+        };
 
         for _ in 0..SESSION_RECORDS_COMPLETED_CAP {
             let room = worst_case_room();
             records.record_created(&room, true);
+            stamp_worst_case_sets(&records, room.id);
             records.record_closed(&room.id, SessionCloseReason::Deleted);
         }
         for _ in 0..SESSION_RECORDS_ACTIVE_RESPONSE_CAP {
-            records.record_created(&worst_case_room(), true);
+            let room = worst_case_room();
+            records.record_created(&room, true);
+            stamp_worst_case_sets(&records, room.id);
         }
 
         let bytes = serde_json::to_vec(&records.snapshot()).expect("snapshot serializes");

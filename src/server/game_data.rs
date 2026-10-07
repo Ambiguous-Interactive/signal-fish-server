@@ -209,9 +209,10 @@ impl EnhancedGameServer {
             self.metrics.record_app_relay_bytes(&policy.app_id, bytes);
         }
         // Per-session traffic attribution (issue #766): sender-side accepted
-        // frames, bytes, and the frame's wire encoding. A DashMap read-guard
-        // under the already-charged admission; unknown rooms (closed between
-        // admission and attribution) attribute nothing.
+        // frames, bytes, and the frame's wire encoding. A DashMap shard write
+        // guard (short sync critical section, no await) under the
+        // already-charged admission; unknown rooms (closed between admission
+        // and attribution) attribute nothing.
         if let Some(records) = self.session_records() {
             records.record_game_data(room_id, bytes, encoding.as_wire_str());
         }

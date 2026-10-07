@@ -429,9 +429,10 @@ pub struct SessionsQuery {
     /// snapshot and is unaffected.
     #[serde(default, rename = "since")]
     since: Option<u64>,
-    /// Restrict both lists to records attributed to this application id
-    /// (multi-tenant control planes pull per-app slices without widening
-    /// authz). A malformed value fails the request (extractor 400).
+    /// Restrict both lists to records attributed to this application id.
+    /// This scopes the response only — it is caller-side view filtering, not
+    /// access control: the bearer token still grants every application's
+    /// records. A malformed value fails the request (extractor 400).
     #[serde(default, rename = "applicationId")]
     application_id: Option<uuid::Uuid>,
 }
