@@ -24,6 +24,7 @@ enum RunMode {
     Healthy,
     DrainProbe,
     SyncCloseProbe,
+    InboundOverflowProbe,
     NegativeOneAdmissionPerCallback,
 }
 
@@ -216,6 +217,7 @@ async fn main() -> Result<(), String> {
         None | Some("healthy") => RunMode::Healthy,
         Some("drain-probe") => RunMode::DrainProbe,
         Some("sync-close-probe") => RunMode::SyncCloseProbe,
+        Some("inbound-overflow-probe") => RunMode::InboundOverflowProbe,
         Some("negative-one-admission-per-callback") => RunMode::NegativeOneAdmissionPerCallback,
         _ => return Err("unknown run mode".to_string()),
     };
@@ -233,6 +235,10 @@ async fn main() -> Result<(), String> {
     let relay = RelaySocket::default();
     if run_mode != RunMode::NegativeOneAdmissionPerCallback {
         relay.hold_inputs_until_prediction();
+    }
+
+    if run_mode == RunMode::InboundOverflowProbe {
+        relay.capture_input_for_overflow_probe();
     }
 
     if run_mode == RunMode::SyncCloseProbe {
@@ -261,6 +267,8 @@ async fn main() -> Result<(), String> {
     let mut pending_inbound = Vec::new();
     let mut drain_probe_published = false;
     let mut sync_progress = None;
+    let mut overflow_frozen = false;
+    let mut overflow_inputs_sent = 0;
 
     while Instant::now() < deadline {
         let events = client.poll();
@@ -386,8 +394,59 @@ async fn main() -> Result<(), String> {
                     seq: frame.seq,
                     epoch: frame.epoch,
                     payload: &frame.payload,
-                });
+                }).map_err(|fault| {
+                    eprintln!("inbound overflow evidence: {}", serde_json::json!({
+                        "role": role, "player_id": local, "fault": fault,
+                        "counters": relay.counters(), "ledger": relay.received_ledger(),
+                        "sent": client.stats().game_data_sent, "received": client.stats().game_data_received,
+                    }));
+                    "relay inbound queue capacity exceeded".to_string()
+                })?;
             }
+        }
+
+        if run_mode == RunMode::InboundOverflowProbe
+            && std::path::Path::new(&room_file)
+                .with_extension("overflow-freeze")
+                .exists()
+        {
+            // Stop the game consumer while the real transport and relay keep polling.
+            if !overflow_frozen {
+                let path =
+                    std::path::Path::new(&room_file).with_extension(format!("frozen-{role}"));
+                let temporary = path.with_extension(format!("frozen-{role}-tmp"));
+                tokio::fs::write(&temporary, relay.inbound_depth().to_string())
+                    .await
+                    .map_err(|error| format!("write frozen queue: {error}"))?;
+                tokio::fs::rename(temporary, path)
+                    .await
+                    .map_err(|error| format!("publish frozen queue: {error}"))?;
+                overflow_frozen = true;
+            }
+            if role == "creator"
+                && std::path::Path::new(&room_file)
+                    .with_extension("overflow-send")
+                    .exists()
+                && overflow_inputs_sent <= relay::MAX_INBOUND_FRAMES
+            {
+                let remote = roster
+                    .iter()
+                    .copied()
+                    .find(|id| Some(*id) != local)
+                    .ok_or("missing overflow recipient")?;
+                relay
+                    .enqueue_captured_input(&remote)
+                    .map_err(str::to_string)?;
+                overflow_inputs_sent += 1;
+            }
+            drain_relay(
+                &mut client,
+                &relay,
+                &mut relay_retries,
+                &mut remaining_admissions,
+            )?;
+            tokio::time::sleep(FRAME_TIME).await;
+            continue;
         }
 
         workload_finished |= local_target_reached
@@ -568,18 +627,20 @@ async fn main() -> Result<(), String> {
             }
             let relay_stats = relay.counters();
             let client_stats = client.stats();
-            let active_ready = run_mode == RunMode::DrainProbe
-                && drain_probe_ready(
-                    fortress.confirmed_frame().as_i32(),
-                    fortress.metrics().frames_advanced,
-                    fortress.metrics().rollback_count,
-                    (
-                        fortress.metrics().checksums_compared,
-                        fortress.metrics().checksums_matched,
-                        fortress.metrics().checksums_mismatched,
-                    ),
-                    (client_stats.game_data_sent, client_stats.game_data_received),
-                );
+            let active_ready = matches!(
+                run_mode,
+                RunMode::DrainProbe | RunMode::InboundOverflowProbe
+            ) && drain_probe_ready(
+                fortress.confirmed_frame().as_i32(),
+                fortress.metrics().frames_advanced,
+                fortress.metrics().rollback_count,
+                (
+                    fortress.metrics().checksums_compared,
+                    fortress.metrics().checksums_matched,
+                    fortress.metrics().checksums_mismatched,
+                ),
+                (client_stats.game_data_sent, client_stats.game_data_received),
+            );
             let synchronizing_ready = run_mode == RunMode::SyncCloseProbe
                 && sync_probe_ready(
                     fortress.current_state(),

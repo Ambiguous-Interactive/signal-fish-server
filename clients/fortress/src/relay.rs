@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use fortress_rollback::network::codec;
 use fortress_rollback::{Message, NonBlockingSocket};
+use serde::Serialize;
 use signal_fish_client::protocol::GameDataEncoding;
 use uuid::Uuid;
 
@@ -18,10 +19,10 @@ const KIND_COMPLETION: u8 = 2;
 const KIND_CREATOR_FINAL: u8 = 3;
 const KIND_JOINER_ACK: u8 = 4;
 const MAX_OUTBOUND_FRAMES: usize = 256;
-const MAX_INBOUND_FRAMES: usize = 256;
+pub const MAX_INBOUND_FRAMES: usize = 256;
 const MAX_INBOUND_PER_POLL: usize = 256;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct RelayCounters {
     pub enqueued_outbound: u64,
     pub accepted_inbound: u64,
@@ -34,12 +35,23 @@ pub struct RelayCounters {
     pub completion_underflow: u64,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct RelayLedger {
     pub count: u64,
     pub first_sequence: u64,
     pub last_sequence: u64,
     pub sequence_hash: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InboundOverflow {
+    pub capacity: usize,
+    pub retained: usize,
+    pub sender: Uuid,
+    pub application_sequence: u64,
+    pub last_accepted_sequence: u64,
+    pub server_sequence: u64,
+    pub epoch: u32,
 }
 
 pub struct InboundRelayFrame<'a> {
@@ -67,6 +79,10 @@ struct Shared {
     hold_gameplay_inputs: bool,
     hold_sync_replies_after_first: bool,
     sync_reply_released: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    capture_input: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    captured_input: Option<Message>,
     counters: RelayCounters,
     observed_client_sent: u64,
     peak_queue_depth: usize,
@@ -98,6 +114,33 @@ pub struct RelaySocket {
 }
 
 impl RelaySocket {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn capture_input_for_overflow_probe(&self) {
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.capture_input = true;
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn enqueue_captured_input(&self, destination: &Uuid) -> Result<(), &'static str> {
+        let message = self
+            .shared
+            .lock()
+            .map_err(|_| "capture mutex poisoned")?
+            .captured_input
+            .clone()
+            .ok_or("no genuine Fortress input captured")?;
+        self.clone().send_to(&message, destination);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn inbound_depth(&self) -> usize {
+        self.shared
+            .lock()
+            .map_or(usize::MAX, |shared| shared.inbound.len())
+    }
+
     /// Keep synchronization incomplete while requests and controls still flow.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn allow_first_sync_reply_only(&self) {
@@ -346,7 +389,7 @@ impl RelaySocket {
         Ok(())
     }
 
-    pub fn admit_inbound(&self, frame: InboundRelayFrame<'_>) {
+    pub fn admit_inbound(&self, frame: InboundRelayFrame<'_>) -> Result<(), InboundOverflow> {
         let InboundRelayFrame {
             local,
             known_remote,
@@ -357,56 +400,60 @@ impl RelaySocket {
             payload,
         } = frame;
         let Ok(mut shared) = self.shared.lock() else {
-            return;
+            return Ok(());
+        };
+        let (Some(server_sequence), Some(epoch)) = (seq, epoch) else {
+            shared.counters.malformed_inbound = shared.counters.malformed_inbound.saturating_add(1);
+            return Ok(());
         };
         if encoding != GameDataEncoding::MessagePack
-            || seq.is_none_or(|value| value == 0)
-            || epoch.is_none_or(|value| value == 0)
+            || server_sequence == 0
+            || epoch == 0
             || payload.len() < ENVELOPE_BYTES
         {
             shared.counters.malformed_inbound = shared.counters.malformed_inbound.saturating_add(1);
-            return;
+            return Ok(());
         }
         if from != known_remote {
             shared.counters.unknown_sender = shared.counters.unknown_sender.saturating_add(1);
-            return;
+            return Ok(());
         }
 
         let Some(destination_bytes) = payload.get(..DESTINATION_BYTES) else {
             shared.counters.malformed_inbound = shared.counters.malformed_inbound.saturating_add(1);
-            return;
+            return Ok(());
         };
         let Ok(destination) = Uuid::from_slice(destination_bytes) else {
             shared.counters.malformed_inbound = shared.counters.malformed_inbound.saturating_add(1);
-            return;
+            return Ok(());
         };
         if destination != local {
             shared.counters.wrong_destination = shared.counters.wrong_destination.saturating_add(1);
-            return;
+            return Ok(());
         }
 
         let Some(nonce_bytes) = payload.get(DESTINATION_BYTES..DESTINATION_BYTES + NONCE_BYTES)
         else {
             shared.counters.malformed_inbound = shared.counters.malformed_inbound.saturating_add(1);
-            return;
+            return Ok(());
         };
         let Ok(sender_nonce) = Uuid::from_slice(nonce_bytes) else {
             shared.counters.malformed_inbound = shared.counters.malformed_inbound.saturating_add(1);
-            return;
+            return Ok(());
         };
         if shared.expected_remote_nonce != Some(sender_nonce) {
             shared.counters.unknown_sender = shared.counters.unknown_sender.saturating_add(1);
-            return;
+            return Ok(());
         }
         let Some(sequence_bytes) = payload
             .get(DESTINATION_BYTES + NONCE_BYTES..DESTINATION_BYTES + NONCE_BYTES + SEQUENCE_BYTES)
         else {
             shared.counters.malformed_inbound = shared.counters.malformed_inbound.saturating_add(1);
-            return;
+            return Ok(());
         };
         let Ok(sequence_array) = <[u8; SEQUENCE_BYTES]>::try_from(sequence_bytes) else {
             shared.counters.malformed_inbound = shared.counters.malformed_inbound.saturating_add(1);
-            return;
+            return Ok(());
         };
         let application_sequence = u64::from_be_bytes(sequence_array);
         if application_sequence == 0
@@ -414,47 +461,56 @@ impl RelaySocket {
                 && application_sequence != shared.received_ledger.last_sequence.saturating_add(1))
         {
             shared.counters.malformed_inbound = shared.counters.malformed_inbound.saturating_add(1);
-            return;
+            return Ok(());
         }
 
         let Some(kind) = payload.get(DESTINATION_BYTES + NONCE_BYTES + SEQUENCE_BYTES) else {
             shared.counters.malformed_inbound = shared.counters.malformed_inbound.saturating_add(1);
-            return;
+            return Ok(());
         };
         let message_bytes = &payload[ENVELOPE_BYTES..];
         if *kind == KIND_TARGET_REACHED && message_bytes.is_empty() {
             shared.counters.accepted_inbound = shared.counters.accepted_inbound.saturating_add(1);
             record_sequence(&mut shared.received_ledger, application_sequence);
             shared.target_received = true;
-            return;
+            return Ok(());
         }
         if *kind == KIND_COMPLETION && message_bytes.is_empty() {
             shared.counters.accepted_inbound = shared.counters.accepted_inbound.saturating_add(1);
             record_sequence(&mut shared.received_ledger, application_sequence);
             shared.completion_received = true;
-            return;
+            return Ok(());
         }
         if *kind == KIND_CREATOR_FINAL && message_bytes.is_empty() {
             shared.counters.accepted_inbound = shared.counters.accepted_inbound.saturating_add(1);
             record_sequence(&mut shared.received_ledger, application_sequence);
             shared.creator_final_received = true;
-            return;
+            return Ok(());
         }
         if *kind == KIND_JOINER_ACK && message_bytes.is_empty() {
             shared.counters.accepted_inbound = shared.counters.accepted_inbound.saturating_add(1);
             record_sequence(&mut shared.received_ledger, application_sequence);
             shared.joiner_ack_received = true;
-            return;
+            return Ok(());
         }
         if *kind != KIND_DATA {
             shared.counters.malformed_inbound = shared.counters.malformed_inbound.saturating_add(1);
-            return;
+            return Ok(());
         }
         match codec::decode_message(message_bytes) {
             Ok((message, consumed)) if consumed == message_bytes.len() => {
                 if shared.inbound.len() >= MAX_INBOUND_FRAMES {
                     shared.counters.inbound_overflow =
                         shared.counters.inbound_overflow.saturating_add(1);
+                    return Err(InboundOverflow {
+                        capacity: MAX_INBOUND_FRAMES,
+                        retained: shared.inbound.len(),
+                        sender: from,
+                        application_sequence,
+                        last_accepted_sequence: shared.received_ledger.last_sequence,
+                        server_sequence,
+                        epoch,
+                    });
                 } else {
                     shared.inbound.push_back((from, message));
                     shared.counters.accepted_inbound =
@@ -467,6 +523,7 @@ impl RelaySocket {
                     shared.counters.malformed_inbound.saturating_add(1);
             }
         }
+        Ok(())
     }
 
     fn enqueue_outbound(&self, destination: &Uuid, encoded: Vec<u8>) {
@@ -512,6 +569,15 @@ fn enqueue_frame(
 
 impl NonBlockingSocket<Uuid> for RelaySocket {
     fn send_to(&mut self, message: &Message, destination: &Uuid) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(mut shared) = self.shared.lock() {
+            if shared.capture_input
+                && fortress_rollback::__internal::message_metadata(message).1
+                    == fortress_rollback::MessageKind::Input
+            {
+                shared.captured_input = Some(message.clone());
+            }
+        }
         let encoded = match codec::encode(message) {
             Ok(encoded) => encoded,
             Err(_) => {
@@ -598,7 +664,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn test_message(body: serde_json::Value) -> Message {
         serde_json::from_value(serde_json::json!({
-            "header": {"sentinel": [0, 0], "protocol_version": 2, "flags": 0, "conn_id": 1},
+            "header": {"sentinel": [0xF5, 0x52], "protocol_version": 2, "flags": 0, "conn_id": 1},
             "body": body,
         }))
         .expect("pinned Fortress message shape")
@@ -618,6 +684,50 @@ mod tests {
                 "fps": 60, "max_prediction": 8, "desync_interval": 0},
             "config_digest": 0,
         }}))
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn inbound_capacity_returns_the_first_valid_rejected_sequence() {
+        let sender = Uuid::new_v4();
+        let recipient = Uuid::new_v4();
+        let mut source = RelaySocket::default();
+        let target = RelaySocket::default();
+        source
+            .configure_identity(sender, recipient)
+            .expect("source identity");
+        target
+            .configure_identity(recipient, sender)
+            .expect("target identity");
+        for sequence in 1..=MAX_INBOUND_FRAMES + 1 {
+            source.send_to(&sync_message(false, 1), &recipient);
+            let frame = source.take_outbound().expect("real fresh envelope");
+            let result = target.admit_inbound(InboundRelayFrame {
+                local: recipient,
+                known_remote: sender,
+                from: sender,
+                encoding: GameDataEncoding::MessagePack,
+                seq: Some(u64::try_from(sequence).expect("sequence")),
+                epoch: Some(1),
+                payload: &frame.payload,
+            });
+            if sequence <= MAX_INBOUND_FRAMES {
+                result.expect("within actual capacity");
+            } else {
+                let fault = result.expect_err("first full-queue admission must fail");
+                assert_eq!((fault.capacity, fault.retained), (256, 256));
+                assert_eq!(fault.sender, sender);
+                assert_eq!(
+                    (fault.last_accepted_sequence, fault.application_sequence),
+                    (256, 257)
+                );
+                assert_eq!((fault.server_sequence, fault.epoch), (257, 1));
+            }
+        }
+        assert_eq!(target.received_ledger().count, 256);
+        assert_eq!(target.counters().inbound_overflow, 1);
+        assert_eq!(target.counters().malformed_inbound, 0);
+        assert_eq!(target.shared.lock().expect("target").inbound.len(), 256);
     }
 
     #[test]
@@ -824,15 +934,17 @@ mod tests {
 
         for server_sequence in 1..=4 {
             let frame = creator.take_outbound().expect("ordered marker");
-            joiner.admit_inbound(InboundRelayFrame {
-                local: joiner_id,
-                known_remote: creator_id,
-                from: creator_id,
-                encoding: GameDataEncoding::MessagePack,
-                seq: Some(server_sequence),
-                epoch: Some(1),
-                payload: &frame.payload,
-            });
+            joiner
+                .admit_inbound(InboundRelayFrame {
+                    local: joiner_id,
+                    known_remote: creator_id,
+                    from: creator_id,
+                    encoding: GameDataEncoding::MessagePack,
+                    seq: Some(server_sequence),
+                    epoch: Some(1),
+                    payload: &frame.payload,
+                })
+                .expect("valid marker admission");
             creator.mark_admitted(frame);
         }
 

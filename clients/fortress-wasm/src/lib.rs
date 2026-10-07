@@ -580,15 +580,17 @@ impl Runtime {
             return Ok(());
         };
         for frame in self.pending_inbound.drain(..) {
-            self.relay.admit_inbound(InboundRelayFrame {
-                local,
-                known_remote: remote,
-                from: frame.from_player,
-                encoding: frame.encoding,
-                seq: frame.seq,
-                epoch: frame.epoch,
-                payload: &frame.payload,
-            });
+            self.relay
+                .admit_inbound(InboundRelayFrame {
+                    local,
+                    known_remote: remote,
+                    from: frame.from_player,
+                    encoding: frame.encoding,
+                    seq: frame.seq,
+                    epoch: frame.epoch,
+                    payload: &frame.payload,
+                })
+                .map_err(|fault| format!("relay inbound queue capacity exceeded: {fault:?}"))?;
         }
         Ok(())
     }

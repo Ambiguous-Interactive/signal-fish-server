@@ -78,14 +78,14 @@ relevant source, test, documentation, issue, or pull request.
 
 ### Session Time-Box (Required)
 
-- Time-box each working session to roughly **one hour** of active work
-  (earlier sessions ran much longer and churned context).
-- Scope each session to **one milestone and one PR**. Stop new work at about
-  45 minutes and use the last 15 for validation and handoff. At one hour,
-  record pending CI or review in `progress/` and resume that PR next session.
-  Carry other work into `PLAN.md`; do not wait for hours or begin a new milestone.
-- Budget roughly: 10 min assessment, 25-35 min implementation, and 15 min
-  validation and delivery. Pick smaller work if it cannot fit that budget.
+- Limit each working session to **two hours** of active work and one PR. Prioritize correctness,
+  then usability, then measured performance. Stop starting new work at
+  90 minutes and reserve the last 30 minutes for validation and delivery.
+- Budget roughly: 15 minutes assessment, 75 minutes implementation, and
+  30 minutes validation and delivery. At two hours, record pending CI or
+  review in `progress/` and resume the same PR next session.
+- Keep `PLAN.md` local and gitignored. Durable decisions belong in source,
+  documentation, issues, and PRs.
 
 ```bash
 # Rust changes: run in order. Full local gate — once before publication;

@@ -103,6 +103,12 @@ impl Drop for RoomFiles {
             self.0.with_extension("active-joiner"),
             self.0.with_extension("active-creator-tmp"),
             self.0.with_extension("active-joiner-tmp"),
+            self.0.with_extension("overflow-freeze"),
+            self.0.with_extension("overflow-send"),
+            self.0.with_extension("frozen-creator"),
+            self.0.with_extension("frozen-joiner"),
+            self.0.with_extension("frozen-creator-tmp"),
+            self.0.with_extension("frozen-joiner-tmp"),
         ] {
             let _ = fs::remove_file(path);
         }
@@ -1004,4 +1010,150 @@ fn run_shutdown_probe(mode: &str, restart: bool) {
         "new sessions after restart"
     );
     println!("DRAIN_RESTART fortress-native: active peers failed with server_shutdown; fresh games completed on the same port");
+}
+
+#[cfg(unix)]
+#[test]
+fn real_inbound_capacity_fails_promptly_with_the_first_rejected_frame() {
+    let _serial = LIVE_CELLS.lock().unwrap_or_else(|p| p.into_inner());
+    let server_bin = std::env::var("SIGNAL_FISH_SERVER_BIN").expect("fresh real server binary");
+    let (mut server, port) = spawn_server(&server_bin);
+    let room = temp_room_file();
+    let _files = RoomFiles(room.clone());
+    let url = format!("ws://127.0.0.1:{port}/v2/ws");
+    let peer_bin = env!("CARGO_BIN_EXE_fortress-relay-peer");
+    let mode = "inbound-overflow-probe";
+    let mut creator = Peer(Some(
+        Command::new(peer_bin)
+            .args([&url, "creator"])
+            .arg(&room)
+            .arg(mode)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("creator"),
+    ));
+    assert!(wait_for(
+        || fs::metadata(&room).is_ok_and(|m| m.len() > 0),
+        Duration::from_secs(10)
+    ));
+    let code = fs::read_to_string(&room).expect("room");
+    let mut joiner = Peer(Some(
+        Command::new(peer_bin)
+            .args([&url, "joiner"])
+            .arg(&room)
+            .arg(code.trim())
+            .arg(mode)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("joiner"),
+    ));
+    let paths = [
+        room.with_extension("active-creator"),
+        room.with_extension("active-joiner"),
+    ];
+    assert!(
+        wait_for(|| paths.iter().all(|p| p.exists()), Duration::from_secs(10)),
+        "healthy game barriers"
+    );
+    let ids: Vec<_> = paths
+        .iter()
+        .zip(["creator", "joiner"])
+        .map(|(p, role)| {
+            let value = serde_json::from_slice(&fs::read(p).expect("barrier")).expect("JSON");
+            assert_drain_ready(&value, role)
+        })
+        .collect();
+    fs::write(room.with_extension("overflow-freeze"), "").expect("freeze consumers");
+    let frozen = [
+        room.with_extension("frozen-creator"),
+        room.with_extension("frozen-joiner"),
+    ];
+    assert!(
+        wait_for(|| frozen.iter().all(|p| p.exists()), Duration::from_secs(3)),
+        "both consumers frozen before traffic"
+    );
+    for path in frozen {
+        let depth: usize = fs::read_to_string(path)
+            .expect("depth")
+            .parse()
+            .expect("queue depth");
+        assert!(depth < 256, "queue below actual capacity before burst");
+    }
+    assert!(creator.child().try_wait().expect("creator live").is_none());
+    assert!(joiner.child().try_wait().expect("joiner live").is_none());
+    assert!(server.0.try_wait().expect("server live").is_none());
+    fs::write(room.with_extension("overflow-send"), "")
+        .expect("send fresh envelopes with genuine captured input");
+    assert!(
+        wait_for(
+            || joiner.child().try_wait().expect("joiner status").is_some(),
+            Duration::from_secs(10)
+        ),
+        "bounded overflow exit"
+    );
+    let output = joiner.output().expect("joiner output");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(output.stdout.is_empty(), "no healthy report");
+    assert!(
+        stderr.contains("relay inbound queue capacity exceeded"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked") && !stderr.contains("deadline expired"),
+        "{stderr}"
+    );
+    let evidence: Vec<_> = stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix("inbound overflow evidence: "))
+        .collect();
+    assert_eq!(evidence.len(), 1);
+    let value: serde_json::Value = serde_json::from_str(evidence[0]).expect("fault evidence");
+    assert_eq!(value["role"], "joiner");
+    assert_eq!(value["player_id"], ids[1]);
+    let fault = &value["fault"];
+    assert_eq!(fault["sender"], ids[0]);
+    assert_eq!(fault["capacity"], 256);
+    assert_eq!(fault["retained"], 256);
+    assert_eq!(
+        fault["application_sequence"].as_u64(),
+        fault["last_accepted_sequence"].as_u64().map(|v| v + 1)
+    );
+    assert!(fault["server_sequence"].as_u64().is_some_and(|v| v > 0));
+    assert!(fault["epoch"].as_u64().is_some_and(|v| v > 0));
+    assert_eq!(value["counters"]["inbound_overflow"], 1);
+    for key in [
+        "malformed_inbound",
+        "wrong_destination",
+        "unknown_sender",
+        "outbound_overflow",
+        "encode_failures",
+    ] {
+        assert_eq!(value["counters"][key], 0, "{key}: {value}");
+    }
+    assert_eq!(
+        value["ledger"]["last_sequence"],
+        fault["last_accepted_sequence"]
+    );
+    assert!(server.0.try_wait().expect("server survives").is_none());
+    assert!(
+        wait_for(
+            || creator
+                .child()
+                .try_wait()
+                .expect("creator status")
+                .is_some(),
+            Duration::from_secs(3)
+        ),
+        "sender observes departure"
+    );
+    let sender = creator.output().expect("creator output");
+    assert_eq!(sender.status.code(), Some(1));
+    assert!(sender.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&sender.stderr).contains("Signal Fish peer left before final ack")
+    );
+    println!("INBOUND_OVERFLOW fortress-native: {value}");
 }
