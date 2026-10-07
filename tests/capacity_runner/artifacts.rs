@@ -22,7 +22,7 @@
 //! the host that produced it.
 
 use std::fs;
-use std::io::{BufWriter, Write as _};
+use std::io::{BufRead, BufReader, BufWriter, Write as _};
 use std::path::Path;
 
 use hdrhistogram::serialization::Serializer as _;
@@ -334,6 +334,9 @@ pub fn write_deliveries(output_dir: &Path, records: &RunRecords) -> Result<(), S
             .map_err(|error| format!("serialize a deliveries event: {error}"))?;
         writeln!(writer).map_err(|error| format!("write {}: {error}", path.display()))?;
     }
+    writer
+        .flush()
+        .map_err(|error| format!("write {}: {error}", path.display()))?;
     Ok(())
 }
 
@@ -348,6 +351,9 @@ pub fn write_intervals(output_dir: &Path, samples: &[IntervalSample]) -> Result<
             .map_err(|error| format!("write {}: {error}", path.display()))?;
         writeln!(writer).map_err(|error| format!("write {}: {error}", path.display()))?;
     }
+    writer
+        .flush()
+        .map_err(|error| format!("write {}: {error}", path.display()))?;
     Ok(())
 }
 
@@ -371,28 +377,55 @@ pub fn read_manifest(output_dir: &Path) -> Result<Manifest, String> {
     serde_json::from_slice(&raw).map_err(|error| format!("parse {}: {error}", path.display()))
 }
 
+/// Visit nonempty JSONL records in file order. The input buffer holds one
+/// line; parsed records retained by a visitor remain that visitor's state.
+fn visit_jsonl(
+    mut reader: impl BufRead,
+    path: &Path,
+    mut visit: impl FnMut(&[u8]) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader
+            .read_until(b'\n', &mut line)
+            .map_err(|error| format!("read {}: {error}", path.display()))?
+            == 0
+        {
+            return Ok(());
+        }
+        if line.last() == Some(&b'\n') {
+            line.pop();
+        }
+        if !line.is_empty() {
+            visit(&line)?;
+        }
+    }
+}
+
 /// Read the interval samples back from an output directory.
 pub fn read_intervals(output_dir: &Path) -> Result<Vec<IntervalSample>, String> {
     let path = output_dir.join(INTERVALS_FILE);
-    let raw = fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
-    raw.split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(|line| {
+    let file =
+        fs::File::open(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    let mut samples = Vec::new();
+    visit_jsonl(BufReader::new(file), &path, |line| {
+        samples.push(
             serde_json::from_slice(line)
-                .map_err(|error| format!("parse an {} line: {error}", path.display()))
-        })
-        .collect()
+                .map_err(|error| format!("parse an {} line: {error}", path.display()))?,
+        );
+        Ok(())
+    })?;
+    Ok(samples)
 }
 
 /// Read the deliveries event log back from an output directory.
 pub fn read_records(output_dir: &Path) -> Result<RunRecords, String> {
     let path = output_dir.join(DELIVERIES_FILE);
-    let raw = fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    let file =
+        fs::File::open(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
     let mut records = RunRecords::default();
-    for line in raw.split(|byte| *byte == b'\n') {
-        if line.is_empty() {
-            continue;
-        }
+    visit_jsonl(BufReader::new(file), &path, |line| {
         let value: Value = serde_json::from_slice(line)
             .map_err(|error| format!("parse a {} line: {error}", path.display()))?;
         let kind = value
@@ -445,7 +478,8 @@ pub fn read_records(output_dir: &Path) -> Result<RunRecords, String> {
             }
             other => return Err(format!("unknown deliveries event kind {other:?}")),
         }
-    }
+        Ok(())
+    })?;
     Ok(records)
 }
 
@@ -478,4 +512,262 @@ pub fn replay(output_dir: &Path) -> Result<OutcomeSummary, String> {
         &churn,
         manifest.config.experiment,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oracle::InvalidReason;
+    use crate::records::{
+        ChurnEvent, ChurnPhase, DisconnectEvent, DisconnectObservation, UnsupportedNoticeEvent,
+    };
+    use std::collections::BTreeMap;
+    use std::io::{self, Cursor, Read};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn buffered_artifact_writers_report_final_flush_failures() {
+        let records = RunRecords::default();
+        let sample: IntervalSample = serde_json::from_value(serde_json::json!({
+            "t_us": 1, "counters": {}
+        }))
+        .expect("sample");
+        let mut results = Vec::new();
+        for (file, interval) in [(DELIVERIES_FILE, false), (INTERVALS_FILE, true)] {
+            let output = tempfile::tempdir().expect("output");
+            std::os::unix::fs::symlink("/dev/full", output.path().join(file))
+                .expect("full device fixture");
+            let result = if interval {
+                write_intervals(output.path(), std::slice::from_ref(&sample))
+            } else {
+                write_deliveries(output.path(), &records)
+            };
+            results.push((file, result));
+        }
+        assert!(
+            results.iter().all(|(_, result)| result.is_err()),
+            "every writer must report its buffered failure: {results:?}"
+        );
+        for (file, result) in results {
+            assert!(result.expect_err("write failure").contains(file));
+        }
+    }
+
+    #[test]
+    fn jsonl_readers_preserve_every_event_and_arrival_order() {
+        let context = crate::unit_context();
+        let mut expected = crate::complete_records(&context.plans);
+        expected.sent.reverse();
+        expected.receipts.reverse();
+        expected.gaps.push(crate::gap_for(
+            "r0p1",
+            "r0p0",
+            0,
+            signal_fish_server::protocol::DeliveryGapReason::LatestSuperseded,
+        ));
+        expected.unsupported_notices.push(UnsupportedNoticeEvent {
+            recipient: "r0p1".into(),
+            at_us: 123,
+        });
+        expected.disconnects.push(DisconnectEvent {
+            recipient: "r0p1".into(),
+            observation: DisconnectObservation::ServerClosed(Some(1000)),
+        });
+        expected.churn.push(ChurnEvent {
+            recipient: "r0p1".into(),
+            phase: ChurnPhase::Rejoined,
+            at_us: 456,
+            epoch: Some(2),
+            tails: BTreeMap::from([("r0p0".into(), ("id0".into(), 3))]),
+        });
+        expected.join_failures.push("join refused".into());
+        expected.faults.push(InvalidReason::ServerTerminated);
+        expected.registry.insert("id0".into(), ("r0p0".into(), 1));
+        let output = tempfile::tempdir().expect("output");
+        let lines: Vec<_> = expected
+            .events()
+            .map(|event| serde_json::to_vec(&event).expect("event"))
+            .collect();
+        let kinds: std::collections::BTreeSet<_> = lines
+            .iter()
+            .map(|line| {
+                serde_json::from_slice::<Value>(line).expect("value")["event_kind"]
+                    .as_str()
+                    .expect("kind")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(kinds.len(), 9);
+        for newline in [b"\n".as_slice(), b"\r\n".as_slice()] {
+            // Exactly empty lines are ignored. CR-only lines remain malformed.
+            let mut raw = b"\n".to_vec();
+            raw.extend_from_slice(br#"{"event_kind":"registry","senders":{"obsolete":["old",1]}}"#);
+            raw.extend_from_slice(newline);
+            for line in &lines {
+                raw.extend_from_slice(line);
+                raw.extend_from_slice(newline);
+            }
+            raw.truncate(raw.len() - newline.len());
+            fs::write(output.path().join(DELIVERIES_FILE), raw).expect("fixture");
+            assert_eq!(
+                serde_json::to_value(read_records(output.path()).expect("read events"))
+                    .expect("actual"),
+                serde_json::to_value(&expected).expect("expected")
+            );
+        }
+        // Preserve Value's last-key-wins behavior, including event_kind.
+        fs::write(output.path().join(DELIVERIES_FILE),
+            br#"{"event_kind":"unknown","event_kind":"join_failure","detail":"first","detail":"last"}"#).expect("duplicate keys");
+        assert_eq!(
+            read_records(output.path())
+                .expect("duplicate keys accepted")
+                .join_failures,
+            vec!["last"]
+        );
+        let samples = [
+            serde_json::json!({"t_us":9,"counters":{"x":1}}),
+            serde_json::json!({"t_us":3,"counters":{"x":2}}),
+        ];
+        for newline in ["\n", "\r\n"] {
+            let raw = format!("\n{}{newline}{}", samples[0], samples[1]);
+            fs::write(output.path().join(INTERVALS_FILE), raw).expect("interval fixture");
+            let actual = read_intervals(output.path()).expect("intervals");
+            assert_eq!(
+                actual.iter().map(|sample| sample.t_us).collect::<Vec<_>>(),
+                vec![9, 3]
+            );
+            assert_eq!(actual[0].counters, samples[0]["counters"]);
+        }
+    }
+
+    #[test]
+    fn jsonl_readers_keep_empty_and_malformed_line_semantics() {
+        let output = tempfile::tempdir().expect("output");
+        for file in [DELIVERIES_FILE, INTERVALS_FILE] {
+            for raw in [b"".as_slice(), b"\n\n".as_slice()] {
+                fs::write(output.path().join(file), raw).expect("empty fixture");
+                if file == DELIVERIES_FILE {
+                    assert!(read_records(output.path())
+                        .expect("empty records")
+                        .sent
+                        .is_empty());
+                } else {
+                    assert!(read_intervals(output.path())
+                        .expect("empty intervals")
+                        .is_empty());
+                }
+            }
+            for raw in [
+                b" \n".as_slice(),
+                b"\r\n".as_slice(),
+                b"\xff\n".as_slice(),
+                b"{\n".as_slice(),
+            ] {
+                fs::write(output.path().join(file), raw).expect("malformed fixture");
+                let error = if file == DELIVERIES_FILE {
+                    read_records(output.path()).expect_err("malformed")
+                } else {
+                    read_intervals(output.path()).expect_err("malformed")
+                };
+                assert!(error.starts_with("parse "), "{error}");
+            }
+        }
+        for (raw, expected) in [
+            (
+                r#"{"event_kind":"unknown"}"#,
+                "unknown deliveries event kind",
+            ),
+            (r#"{"event_kind":7}"#, "line missing event_kind"),
+            (
+                r#"{"event_kind":"join_failure"}"#,
+                "join_failure line missing detail",
+            ),
+            (
+                r#"{"event_kind":"registry"}"#,
+                "registry line missing senders",
+            ),
+            (r#"{"event_kind":"sent"}"#, "parse sent event"),
+        ] {
+            fs::write(output.path().join(DELIVERIES_FILE), raw).expect("fixture");
+            assert!(read_records(output.path())
+                .expect_err("invalid event")
+                .contains(expected));
+        }
+    }
+
+    /// A readable prefix followed by a virtual large tail that refuses reads.
+    /// A streaming parser must report a bad prefix without touching that tail.
+    struct GuardedTail {
+        prefix: Cursor<Vec<u8>>,
+        reads: Arc<AtomicUsize>,
+    }
+    impl Read for GuardedTail {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            if self.prefix.position() < u64::try_from(self.prefix.get_ref().len()).expect("prefix")
+            {
+                self.prefix.read(out)
+            } else {
+                Err(io::Error::other("large tail was read"))
+            }
+        }
+    }
+
+    #[test]
+    fn jsonl_visitor_stops_before_reading_a_malformed_records_tail() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let reader = GuardedTail {
+            prefix: Cursor::new(b"{\n".to_vec()),
+            reads: Arc::clone(&reads),
+        };
+        let error = visit_jsonl(BufReader::new(reader), Path::new("guarded.jsonl"), |line| {
+            serde_json::from_slice::<Value>(line)
+                .map(|_| ())
+                .map_err(|error| format!("parse prefix: {error}"))
+        })
+        .expect_err("bad prefix");
+        assert!(error.starts_with("parse prefix:"), "{error}");
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "never read the trailing input"
+        );
+    }
+
+    #[test]
+    fn jsonl_visitor_reuses_lines_and_propagates_late_read_errors() {
+        let raw = format!(
+            "\n{}\n{{}}",
+            serde_json::json!({"text":"é".repeat(100_000)})
+        );
+        let mut sizes = Vec::new();
+        visit_jsonl(
+            BufReader::with_capacity(7, Cursor::new(raw.as_bytes())),
+            Path::new("large.jsonl"),
+            |line| {
+                serde_json::from_slice::<Value>(line).expect("complete line");
+                sizes.push(line.len());
+                Ok(())
+            },
+        )
+        .expect("large and final lines");
+        assert_eq!(sizes, vec![raw.len() - 4, 2]);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let reader = GuardedTail {
+            prefix: Cursor::new(b"{}\n".to_vec()),
+            reads: Arc::clone(&reads),
+        };
+        let mut visited = 0;
+        let error = visit_jsonl(BufReader::new(reader), Path::new("late.jsonl"), |_| {
+            visited += 1;
+            Ok(())
+        })
+        .expect_err("late read error");
+        assert_eq!(visited, 1);
+        assert_eq!(error, "read late.jsonl: large tail was read");
+    }
 }
