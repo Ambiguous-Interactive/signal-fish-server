@@ -22,6 +22,7 @@ const FRAME_TIME: Duration = Duration::from_nanos(1_000_000_000 / 60);
 #[serde(rename_all = "snake_case")]
 enum RunMode {
     Healthy,
+    DrainProbe,
     NegativeOneAdmissionPerCallback,
 }
 
@@ -33,6 +34,23 @@ fn admission_budget(mode: RunMode, active: bool) -> usize {
     } else {
         usize::MAX
     }
+}
+
+fn drain_probe_ready(
+    confirmed: i32,
+    advanced: u64,
+    rollbacks: u64,
+    checksums: (u64, u64, u64),
+    traffic: (u64, u64),
+) -> bool {
+    (120..TARGET_CONFIRMED_FRAMES).contains(&confirmed)
+        && advanced > 0
+        && rollbacks > 0
+        && checksums.0 > 0
+        && checksums.0 == checksums.1
+        && checksums.2 == 0
+        && traffic.0 > 0
+        && traffic.1 > 0
 }
 
 struct PendingInbound {
@@ -181,6 +199,7 @@ async fn main() -> Result<(), String> {
     };
     let run_mode = match args.next().as_deref() {
         None | Some("healthy") => RunMode::Healthy,
+        Some("drain-probe") => RunMode::DrainProbe,
         Some("negative-one-admission-per-callback") => RunMode::NegativeOneAdmissionPerCallback,
         _ => return Err("unknown run mode".to_string()),
     };
@@ -196,7 +215,7 @@ async fn main() -> Result<(), String> {
     config.command_channel_capacity = 64;
     let mut client = SignalFishPollingClient::new(transport, config);
     let relay = RelaySocket::default();
-    if run_mode == RunMode::Healthy {
+    if run_mode != RunMode::NegativeOneAdmissionPerCallback {
         relay.hold_inputs_until_prediction();
     }
 
@@ -220,6 +239,7 @@ async fn main() -> Result<(), String> {
     let mut workload_finished = false;
     let mut peer_left_after_ack = false;
     let mut pending_inbound = Vec::new();
+    let mut drain_probe_published = false;
 
     while Instant::now() < deadline {
         let events = client.poll();
@@ -277,6 +297,12 @@ async fn main() -> Result<(), String> {
                         seq,
                         epoch,
                     });
+                }
+                SignalFishEvent::GoingAway {
+                    deadline_ms,
+                    retry_after_secs,
+                } => {
+                    eprintln!("server going away: deadline_ms={deadline_ms}, retry_after_secs={retry_after_secs:?}");
                 }
                 SignalFishEvent::Disconnected { reason, .. } => {
                     return Err(format!("server disconnected peer: {reason:?}"));
@@ -359,7 +385,7 @@ async fn main() -> Result<(), String> {
                         running_client_sent_baseline = client.stats().game_data_sent;
                         running_relay_enqueued_baseline = relay.counters().enqueued_outbound;
                     }
-                    let target_reached = run_mode == RunMode::Healthy
+                    let target_reached = run_mode != RunMode::NegativeOneAdmissionPerCallback
                         && fortress.confirmed_frame().as_i32() >= TARGET_CONFIRMED_FRAMES;
                     observe_running_phase(
                         target_reached,
@@ -394,11 +420,14 @@ async fn main() -> Result<(), String> {
             }
             if local_target_reached && running_relay_enqueued_at_end.is_none() {
                 running_relay_enqueued_at_end = Some(relay.counters().enqueued_outbound);
-                if run_mode == RunMode::Healthy {
+                if run_mode != RunMode::NegativeOneAdmissionPerCallback {
                     running_client_sent_at_end = Some(client.stats().game_data_sent);
                 }
             }
-            if run_mode == RunMode::Healthy && local_target_reached && !relay.target_enqueued() {
+            if run_mode != RunMode::NegativeOneAdmissionPerCallback
+                && local_target_reached
+                && !relay.target_enqueued()
+            {
                 let local_id = local.ok_or("local id disappeared")?;
                 let remote = roster
                     .iter()
@@ -498,6 +527,45 @@ async fn main() -> Result<(), String> {
             }
             let relay_stats = relay.counters();
             let client_stats = client.stats();
+            if run_mode == RunMode::DrainProbe
+                && !drain_probe_published
+                && drain_probe_ready(
+                    fortress.confirmed_frame().as_i32(),
+                    fortress.metrics().frames_advanced,
+                    fortress.metrics().rollback_count,
+                    (
+                        fortress.metrics().checksums_compared,
+                        fortress.metrics().checksums_matched,
+                        fortress.metrics().checksums_mismatched,
+                    ),
+                    (client_stats.game_data_sent, client_stats.game_data_received),
+                )
+            {
+                let metrics = fortress.metrics();
+                let evidence = serde_json::json!({
+                    "role": role, "player_id": local, "confirmed_frame": fortress.confirmed_frame().as_i32(),
+                    "frames_advanced": metrics.frames_advanced, "rollback_count": metrics.rollback_count,
+                    "checksums_compared": metrics.checksums_compared,
+                    "checksums_matched": metrics.checksums_matched,
+                    "checksums_mismatched": metrics.checksums_mismatched,
+                    "sent": client_stats.game_data_sent, "received": client_stats.game_data_received,
+                    "sent_ledger": relay.sent_ledger().count, "received_ledger": relay.received_ledger().count,
+                    "malformed": relay_stats.malformed_inbound, "wrong_destination": relay_stats.wrong_destination,
+                    "unknown_sender": relay_stats.unknown_sender, "inbound_overflow": relay_stats.inbound_overflow,
+                    "outbound_overflow": relay_stats.outbound_overflow, "encode_failures": relay_stats.encode_failures,
+                    "completion_underflow": relay_stats.completion_underflow,
+                });
+                let path =
+                    std::path::Path::new(&room_file).with_extension(format!("active-{role}"));
+                let temporary = path.with_extension(format!("active-{role}-tmp"));
+                tokio::fs::write(&temporary, evidence.to_string())
+                    .await
+                    .map_err(|error| format!("write drain readiness: {error}"))?;
+                tokio::fs::rename(temporary, path)
+                    .await
+                    .map_err(|error| format!("publish drain readiness: {error}"))?;
+                drain_probe_published = true;
+            }
             let role_handshake_done = (role == "creator" && relay.joiner_ack_received())
                 || (role == "joiner" && peer_left_after_ack);
             if role_handshake_done
@@ -612,9 +680,49 @@ mod tests {
     use super::{observe_running_phase, outbound_is_drained, running_elapsed};
 
     #[test]
+    fn drain_readiness_requires_unfinished_game_progress_and_matching_traffic() {
+        for (name, frame, advanced, rollback, checksums, traffic, ready) in [
+            ("first ready frame", 120, 120, 1, (1, 1, 0), (1, 1), true),
+            (
+                "last unfinished frame",
+                599,
+                599,
+                1,
+                (1, 1, 0),
+                (1, 1),
+                true,
+            ),
+            ("before progress", 119, 120, 1, (1, 1, 0), (1, 1), false),
+            ("already completed", 600, 600, 1, (1, 1, 0), (1, 1), false),
+            ("no advancement", 120, 0, 1, (1, 1, 0), (1, 1), false),
+            ("no rollback", 120, 120, 0, (1, 1, 0), (1, 1), false),
+            ("no comparison", 120, 120, 1, (0, 0, 0), (1, 1), false),
+            (
+                "unmatched comparison",
+                120,
+                120,
+                1,
+                (2, 1, 0),
+                (1, 1),
+                false,
+            ),
+            ("corrupt comparison", 120, 120, 1, (1, 1, 1), (1, 1), false),
+            ("no completed send", 120, 120, 1, (1, 1, 0), (0, 1), false),
+            ("no receive", 120, 120, 1, (1, 1, 0), (1, 0), false),
+        ] {
+            assert_eq!(
+                super::drain_probe_ready(frame, advanced, rollback, checksums, traffic),
+                ready,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn callback_admission_budget_caps_active_negative_work_and_releases_final_drain() {
         for (mode, active, expected) in [
             (super::RunMode::Healthy, true, usize::MAX),
+            (super::RunMode::DrainProbe, true, usize::MAX),
             (super::RunMode::NegativeOneAdmissionPerCallback, true, 1),
             (
                 super::RunMode::NegativeOneAdmissionPerCallback,

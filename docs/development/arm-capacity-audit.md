@@ -1872,6 +1872,26 @@ carries a disposition.
   Fortress source is private compatibility-fixture code. The changelog gate
   now classifies the two literal Fortress source roots as internal (#803).
   Native and browser reference-client runtime changes still need release notes.
+- **Native Fortress drain and restart (session 367, #741 item 7 slice).**
+  A Unix-only cell waits for both native peers to publish atomic gameplay
+  checkpoints. Each checkpoint proves an unfinished game at or beyond frame 120,
+  rollback repair, matching checksums, bidirectional traffic, and zero relay
+  faults. The harness verifies both peers are alive before it sends SIGTERM
+  to the real server with a one-second drain grace.
+  Both peers must fail within one shared bound. Each failure must include
+  the shutdown advisory and the server's coded 4000 `server_shutdown` close.
+  A successful report, an unrelated error, a panic, or the normal process
+  deadline cannot satisfy this control. The server must exit successfully
+  within the separate drain bound.
+  The harness starts a new server on the same port. Fresh peers with new
+  identities must complete the full healthy workload and delivery gates.
+  This proves service after restart, not restoration of the interrupted game.
+  Suppressing the disconnect abort made the live cell fail on an unrelated
+  send error despite receiving the shutdown advisory. The restored fixture
+  passed the drain cell and both existing live workloads.
+  Process and file guards clean owned resources on assertion failure.
+  Mid-handshake close, inbound overflow, and restore exercisability remain
+  open in #741. This cell does not cover WASM shutdown behavior.
 - **Opaque over a v2 negotiation (fixed with the same sweep).** The native
   client validated an opaque request against the requested version only;
   the `ProtocolInfo` `None`-version (v2) arm skipped every format check,
@@ -2264,7 +2284,7 @@ neither is a deployed capacity preset.
 | Admin and shutdown: `src/server/admin.rs`, `shutdown.rs`, `connection_manager.rs` | Drain closes all owned tasks and reports queued work accurately | `tests/close_code_semantics_e2e.rs`, `formal/tla/ConnectionTeardown.tla`; C1 drain/shutdown review above | The drain choreography, the reconnect-commit fence, close ordering with queued data, and the drain reservation accounting are reviewed, fixed where defective, and pinned; a distinct 4000-close counter remains follow-up observability | Partially reviewed |
 | Browser client: `clients/browser/src/**` | Reconnect, delivery reports, fallback, and negotiation match server | `clients/browser/src/page/*.test.ts`; C1 client and deployment boundaries review above | Reports, fallback, and negotiation verified and pinned (plus the ARM-C033 downgrade fix and its pin); reconnect initiation absent by documented scope with inbound arms unit-pinned; a live browser accountability cell, loss→recovery transitions, and browser-as-host remain | Partially reviewed |
 | Native client: `clients/native/src/**` | Same client contract across native sockets | `clients/native/tests/interop_e2e.rs`; C1 client and deployment boundaries review above | Accountability model, fallback (cripple/TURN/host-star/Direct rejection), and negotiation verified and pinned (plus the ARM-C033 downgrade fix, the v2-opaque guard, and their pins); native downgrade and cross-format advisory consumption now have live cells; the MessagePack cohort is pinned; restore/reconnect end-to-end remains | Partially reviewed |
-| Fortress clients: `clients/fortress/src/**`, `clients/fortress-wasm/src/**` | Reference peers handle relay without silent loss | `clients/fortress/tests/multiprocess.rs`, `clients/fortress-wasm/harness.mjs`, both interop workflows; C1 client and deployment boundaries review above | Silent-loss detection substantiated by executable CI gates on both stacks (contiguity, cross-peer ledger equality, queue-age/checksum gating; both families add an asserted expected-negative control); fixtures are WebSocket-only and evidence no ICE-fallback claim; drain/restart and reconnect cells remain (#741) | Partially reviewed |
+| Fortress clients: `clients/fortress/src/**`, `clients/fortress-wasm/src/**` | Reference peers handle relay without silent loss | `clients/fortress/tests/multiprocess.rs`, `clients/fortress-wasm/harness.mjs`, both interop workflows; C1 client and deployment boundaries review above | Silent-loss detection substantiated by executable CI gates on both stacks (contiguity, cross-peer ledger equality, queue-age/checksum gating; both families add an asserted expected-negative control); fixtures are WebSocket-only and evidence no ICE-fallback claim; a Unix native drain/restart cell proves bounded active-game failure and fresh healthy games after restart; restore, handshake-close, and inbound-overflow cells remain (#741) | Partially reviewed |
 
 `src/server.rs` owns shared server state across the server rows. `src/websocket/routes.rs`
 and `src/main.rs` own the plain/TLS listener boundary. `src/config/coordination.rs`
