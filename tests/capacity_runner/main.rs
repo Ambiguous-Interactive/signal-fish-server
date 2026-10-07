@@ -144,7 +144,10 @@ async fn small_reliable_relay_scenario_passes_and_artifacts_replay_to_the_same_s
                 altered["config"]["server_overlay"]["server"]["ping_timeout"] =
                     serde_json::json!(999)
             }
-            "endpoint" => altered["server"]["endpoint"] = serde_json::json!("ws://127.0.0.1:1"),
+            "endpoint" => {
+                altered["server"]["endpoint"] =
+                    serde_json::json!(format!("{}/different", manifest.server.endpoint))
+            }
             "filebacked" => {
                 altered["config"]["server_overlay"]["security"]["app_auth_path"] =
                     serde_json::json!("/missing/registry");
