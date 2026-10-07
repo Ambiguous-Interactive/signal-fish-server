@@ -2342,6 +2342,14 @@ and MSRV suites can otherwise run many generators at once and exhaust a
 cell's lag bound. The lock matches nextest's process-spawning isolation;
 the workload and validation limits stay the same.
 
+Each connection polls reads alongside one persistent scheduled write. Ready
+reads and writes take turns, so overdue sends cannot starve receipts. Sender
+pauses hold only the write future. Reader resumption, churn, and quiescence
+wake independently of a pending write. Churn drops the old write and both
+socket halves before rejoining. The runner cancels and awaits its owned
+tasks before artifact capture. One immutable interval snapshot supplies
+both the published samples and the returned final counters (#783).
+
 **C2 next runner PR: churn/reconnect schedules — LANDED** (third runner
 PR, 2026-10-05). `ChurnSchedule` carries the reconnect-burst storm (the C3
 reconnect cell): at `start`, the seed-chosen `fraction_percent` of peers
