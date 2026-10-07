@@ -44,9 +44,9 @@ use crate::diagnostics;
 use crate::oracle::{self, InvalidReason, OutcomeSummary};
 use crate::records::{
     ChurnEvent, ChurnPhase, DisconnectEvent, DisconnectObservation, EventLog, GapEvent,
-    ReceiptEvent, SentEvent, UnsupportedNoticeEvent,
+    ReceiptEvent, RunRecords, SentEvent, UnsupportedNoticeEvent,
 };
-use crate::schedule::{build_run_shape, SenderPlan};
+use crate::schedule::{build_run_shape, ScheduledSend, SenderPlan};
 use crate::websocket_test_helpers;
 use crate::websocket_test_helpers::server_process::{
     effective_server_config, spawn_server, ServerProcess,
@@ -672,6 +672,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     // it once, before the snapshot the artifacts write.
     log.set_registry(registry.lock().expect("sender registry poisoned").clone());
     let records = log.snapshot();
+    let evidence_finished_us = micros(epoch.elapsed());
     let bound_us = micros(config.generator_lag_bound);
     let summary = oracle::summarize(
         &plans,
@@ -683,6 +684,20 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         &churn_plan,
         config.experiment,
     );
+
+    if !summary.valid {
+        let evidence = invalid_run_diagnostics(
+            &run_id,
+            &config,
+            &plans,
+            &records,
+            &interval_samples,
+            &summary,
+            evidence_finished_us,
+            tokio::runtime::Handle::current().metrics().num_workers(),
+        );
+        eprintln!("capacity invalid run: {evidence}");
+    }
 
     artifacts::write_deliveries(&config.output_dir, &records)?;
     artifacts::write_intervals(&config.output_dir, &interval_samples)?;
@@ -700,6 +715,208 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         final_counters,
         summary,
     })
+}
+
+#[derive(Default)]
+struct SenderProgress<'a> {
+    completed: u64,
+    first: Option<&'a SentEvent>,
+    last: Option<&'a SentEvent>,
+    worst: Option<&'a SentEvent>,
+}
+
+fn completed_send_evidence(send: &SentEvent) -> serde_json::Value {
+    json!({"seq": send.seq, "phase": send.phase,
+        "intended_us": send.intended_us, "sent_us": send.sent_us,
+        "lag_us": send.sent_us.saturating_sub(send.intended_us)})
+}
+
+fn interval_evidence(sample: &IntervalSample) -> serde_json::Value {
+    json!({"t_us": sample.t_us, "scrape_failed": sample.scrape_error.is_some(),
+        "server_cpu_seconds": sample.server_cpu_seconds,
+        "generator_cpu_seconds": sample.generator_cpu_seconds,
+        "server_rss_bytes": sample.server_rss_bytes,
+        "generator_rss_bytes": sample.generator_rss_bytes})
+}
+
+// Connection and scrape errors can carry endpoint credentials. Keep error
+// kinds and numeric context here; the artifacts retain the original details.
+fn reason_evidence(reason: &InvalidReason) -> serde_json::Value {
+    if let InvalidReason::JoinFailed { failures } = reason {
+        return json!({"kind":"join_failed", "failure_count":failures.len(),
+            "details_omitted":true});
+    }
+    fn omit_details(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                if fields.remove("detail").is_some() {
+                    fields.insert("detail_omitted".into(), serde_json::Value::Bool(true));
+                }
+                for child in fields.values_mut() {
+                    omit_details(child);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    omit_details(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut evidence = serde_json::to_value(reason).expect("reason evidence serializes");
+    omit_details(&mut evidence);
+    evidence
+}
+
+/// Failure-only context retains three send observations per peer and a
+/// constant sampler context. It does not infer a cause from timing gaps.
+#[allow(clippy::too_many_arguments)]
+fn invalid_run_diagnostics(
+    run_id: &str,
+    config: &RunConfig,
+    plans: &[SenderPlan],
+    records: &RunRecords,
+    samples: &[IntervalSample],
+    summary: &OutcomeSummary,
+    finished_us: u64,
+    runtime_workers: usize,
+) -> serde_json::Value {
+    let mut progress: BTreeMap<&str, SenderProgress<'_>> = plans
+        .iter()
+        .map(|plan| (plan.name.as_str(), SenderProgress::default()))
+        .collect();
+    for sent in &records.sent {
+        let peer = progress.entry(sent.sender.as_str()).or_default();
+        peer.completed += 1;
+        if peer
+            .first
+            .is_none_or(|first| (sent.sent_us, sent.seq) < (first.sent_us, first.seq))
+        {
+            peer.first = Some(sent);
+        }
+        if peer
+            .last
+            .is_none_or(|last| (sent.sent_us, sent.seq) > (last.sent_us, last.seq))
+        {
+            peer.last = Some(sent);
+        }
+        if peer.worst.is_none_or(|worst| {
+            sent.sent_us.saturating_sub(sent.intended_us)
+                > worst.sent_us.saturating_sub(worst.intended_us)
+        }) {
+            peer.worst = Some(sent);
+        }
+    }
+    let peers: Vec<_> = progress
+        .into_iter()
+        .map(|(sender, peer)| {
+            json!({
+                "sender": sender, "completed": peer.completed,
+                "first": peer.first.map(completed_send_evidence),
+                "last": peer.last.map(completed_send_evidence),
+                "worst": peer.worst.map(completed_send_evidence),
+            })
+        })
+        .collect();
+    let mut largest_gap = (0_u64, None, None);
+    let mut previous: Option<&IntervalSample> = None;
+    for next in samples {
+        let gap = next
+            .t_us
+            .saturating_sub(previous.map_or(0, |sample| sample.t_us));
+        if gap > largest_gap.0 {
+            largest_gap = (gap, previous, Some(next));
+        }
+        previous = Some(next);
+    }
+    let tail_gap = finished_us.saturating_sub(previous.map_or(0, |sample| sample.t_us));
+    if tail_gap > largest_gap.0 {
+        largest_gap = (tail_gap, previous, None);
+    }
+    json!({"event":"capacity_invalid_run", "run_id":run_id, "runtime_workers":runtime_workers,
+        "workload": {"encoding":config.encoding, "delivery_class":config.delivery_class,
+            "seed":config.seed, "churn":config.churn, "experiment":config.experiment,
+            "stall_senders_us":config.stall_senders.map(micros),
+            "pause_reads_us":config.pause_reads.map(micros),
+            "kill_server_after_us":config.kill_server_after.map(micros),
+            "pause_sends":config.pause_sends.map(|pause|json!({
+                "after_seq":pause.after_seq, "duration_us":micros(pause.duration)})),
+            "slow_reader":config.slow_reader, "latest_keys_per_sender":config.latest_keys_per_sender,
+            "payload_bytes":config.payload_bytes, "rooms":config.rooms,
+            "players_per_room":config.players_per_room,
+            "send_rate_per_sender":config.send_rate_per_sender,
+            "warmup_us":micros(config.warmup), "duration_us":micros(config.duration),
+            "lag_bound_us":micros(config.generator_lag_bound),
+            "drain_grace_us":micros(config.drain_grace),
+            "sample_interval_us":micros(config.sample_interval)},
+        "raw_fault_count":records.faults.len(),
+        "raw_faults":records.faults.iter().take(16).map(reason_evidence).collect::<Vec<_>>(),
+        "summary_reason_count":summary.reasons.len(),
+        "summary_reasons":summary.reasons.iter().take(16).map(reason_evidence).collect::<Vec<_>>(),
+        "senders":peers,
+        "sampler": {"count":samples.len(), "finished_us":finished_us,
+            "largest_gap_us":largest_gap.0,
+            "gap_start_us":largest_gap.1.map_or(0, |sample| sample.t_us),
+            "gap_end_us":largest_gap.2.map_or(finished_us, |sample| sample.t_us),
+            "before":largest_gap.1.map(interval_evidence),
+            "after":largest_gap.2.map(interval_evidence),
+            "recent":samples.iter().rev().take(3).map(interval_evidence).collect::<Vec<_>>()}})
+}
+
+/// A failed scheduled send and an over-bound completed send are different
+/// observations. These timestamps separate wake, preparation, and write time.
+#[derive(serde::Serialize)]
+struct SendLagObservation<'a> {
+    event: &'static str,
+    stage: &'static str,
+    sender: &'a str,
+    seq: u64,
+    phase: crate::schedule::Phase,
+    intended_us: u64,
+    observed_us: u64,
+    lag_us: u64,
+    bound_us: u64,
+    wake_us: u64,
+    write_start_us: Option<u64>,
+    sent_us: Option<u64>,
+    preparation_us: Option<u64>,
+    write_elapsed_us: Option<u64>,
+}
+
+fn send_lag_observation<'a>(
+    sender: &'a str,
+    send: ScheduledSend,
+    bound_us: u64,
+    wake_us: u64,
+    write_times: Option<(u64, u64)>,
+) -> SendLagObservation<'a> {
+    let observed_us = write_times.map_or(wake_us, |(_, sent_us)| sent_us);
+    SendLagObservation {
+        event: "capacity_generator_lag",
+        stage: if write_times.is_some() {
+            "completed_write"
+        } else {
+            "before_write"
+        },
+        sender,
+        seq: send.seq,
+        phase: send.phase,
+        intended_us: send.intended_us,
+        observed_us,
+        lag_us: observed_us.saturating_sub(send.intended_us),
+        bound_us,
+        wake_us,
+        write_start_us: write_times.map(|(start, _)| start),
+        sent_us: write_times.map(|(_, sent)| sent),
+        preparation_us: write_times.map(|(start, _)| start.saturating_sub(wake_us)),
+        write_elapsed_us: write_times.map(|(start, sent)| sent.saturating_sub(start)),
+    }
+}
+
+fn report_send_lag(observation: &SendLagObservation<'_>) {
+    let evidence = serde_json::to_string(observation).expect("send lag evidence serializes");
+    eprintln!("capacity generator lag: {evidence}");
 }
 
 /// SHA-256 of the server config overlay bytes (the overlay itself is part of
@@ -1158,8 +1375,16 @@ async fn peer_task(
                             tokio::time::sleep(stall).await;
                         }
                     }
-                    let lag = micros(epoch.elapsed()).saturating_sub(send.intended_us);
+                    let wake_us = micros(epoch.elapsed());
+                    let lag = wake_us.saturating_sub(send.intended_us);
                     if lag > facts.generator_lag_bound_us {
+                        report_send_lag(&send_lag_observation(
+                            &plan.name,
+                            send,
+                            facts.generator_lag_bound_us,
+                            wake_us,
+                            None,
+                        ));
                         log.push_fault(InvalidReason::GeneratorSaturated {
                             max_lag_us: lag,
                             bound_us: facts.generator_lag_bound_us,
@@ -1227,6 +1452,7 @@ async fn peer_task(
                         }
                     };
                     let encoded_frame_body_bytes = count_u64(frame.len());
+                    let write_start_us = micros(epoch.elapsed());
                     if let Err(error) = sink.send(frame).await {
                         // After a declared termination, socket errors are the
                         // expected consequence — the peer stops, and its
@@ -1239,13 +1465,23 @@ async fn peer_task(
                         }
                         return false;
                     }
+                    let sent_us = micros(epoch.elapsed());
+                    if sent_us.saturating_sub(send.intended_us) > facts.generator_lag_bound_us {
+                        report_send_lag(&send_lag_observation(
+                            &plan.name,
+                            send,
+                            facts.generator_lag_bound_us,
+                            wake_us,
+                            Some((write_start_us, sent_us)),
+                        ));
+                    }
                     log.push_sent(SentEvent {
                         sender: plan.name.clone(),
                         room: plan.room,
                         seq: send.seq,
                         epoch: incarnation,
                         intended_us: send.intended_us,
-                        sent_us: micros(epoch.elapsed()),
+                        sent_us,
                         phase: send.phase,
                         application_bytes,
                         encoded_frame_body_bytes,
@@ -1847,6 +2083,459 @@ async fn abort_and_join(handles: Vec<tokio::task::JoinHandle<()>>) -> Result<(),
 mod session_poll_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn send_lag_evidence_distinguishes_before_write_and_completed_write() {
+        let send = ScheduledSend {
+            seq: 17,
+            intended_us: 100_000,
+            phase: crate::schedule::Phase::Measured,
+        };
+        for (write_times, stage, observed, preparation, write) in [
+            (None, "before_write", 517_628, None, None),
+            (
+                Some((120_000, 517_628)),
+                "completed_write",
+                517_628,
+                Some(10_000),
+                Some(397_628),
+            ),
+        ] {
+            let wake = if write_times.is_some() {
+                110_000
+            } else {
+                517_628
+            };
+            let evidence = serde_json::to_value(send_lag_observation(
+                "r0p0",
+                send,
+                250_000,
+                wake,
+                write_times,
+            ))
+            .expect("lag JSON");
+            assert_eq!(evidence["stage"], stage);
+            assert_eq!(evidence["sender"], "r0p0");
+            assert_eq!(evidence["seq"], 17);
+            assert_eq!(evidence["phase"], "Measured");
+            assert_eq!(evidence["intended_us"], 100_000);
+            assert_eq!(evidence["observed_us"], observed);
+            assert_eq!(evidence["lag_us"], 417_628);
+            assert_eq!(evidence["bound_us"], 250_000);
+            assert_eq!(evidence["preparation_us"], serde_json::json!(preparation));
+            assert_eq!(evidence["write_elapsed_us"], serde_json::json!(write));
+        }
+    }
+
+    #[test]
+    fn invalid_run_evidence_preserves_all_senders_and_fault_origins() {
+        let context = crate::unit_context();
+        let mut config = crate::scenario_config(Encoding::V3Json);
+        config.endpoint = Some("wss://user:private-secret@example.invalid:1234".into());
+        config.server_overlay = json!({"secret":"private-secret"});
+        for live_fault in [true, false] {
+            let mut records = crate::complete_records(&context.plans);
+            records.sent.retain(|send| send.sender != "r0p2");
+            if live_fault {
+                records.faults.push(InvalidReason::GeneratorSaturated {
+                    max_lag_us: 417_628,
+                    bound_us: 250_000,
+                });
+            } else {
+                let culprit = records
+                    .sent
+                    .iter_mut()
+                    .rev()
+                    .find(|send| send.sender == "r0p0")
+                    .expect("culprit");
+                culprit.sent_us = culprit.intended_us + 417_628;
+            }
+            let summary = oracle::summarize(
+                &context.plans,
+                &context.roster,
+                &records,
+                250_000,
+                96,
+                context.delivery_class,
+                &crate::schedule::ChurnPlan::default(),
+                None,
+            );
+            assert!(!summary.valid);
+            let evidence = invalid_run_diagnostics(
+                "run-test",
+                &config,
+                &context.plans,
+                &records,
+                &[],
+                &summary,
+                750_000,
+                4,
+            );
+            assert_eq!(evidence["run_id"], "run-test");
+            assert_eq!(evidence["runtime_workers"], 4);
+            assert_eq!(evidence["workload"]["lag_bound_us"], 250_000);
+            assert_eq!(
+                evidence["raw_faults"].as_array().expect("raw faults").len(),
+                usize::from(live_fault)
+            );
+            assert_eq!(
+                evidence["summary_reasons"],
+                serde_json::to_value(&summary.reasons).expect("reasons")
+            );
+            let senders = evidence["senders"].as_array().expect("senders");
+            assert_eq!(senders.len(), 4, "include empty configured peers");
+            for plan in &context.plans {
+                let peer = senders
+                    .iter()
+                    .find(|peer| peer["sender"] == plan.name)
+                    .expect("each peer");
+                let count = records
+                    .sent
+                    .iter()
+                    .filter(|send| send.sender == plan.name)
+                    .count();
+                assert_eq!(peer["completed"], count);
+                if count == 0 {
+                    assert!(
+                        peer["first"].is_null()
+                            && peer["last"].is_null()
+                            && peer["worst"].is_null()
+                    );
+                } else {
+                    assert_eq!(peer["first"]["seq"], 0);
+                    assert_eq!(peer["last"]["seq"], 3);
+                }
+            }
+            assert_eq!(senders[0]["sender"], "r0p0");
+            if !live_fault {
+                assert_eq!(senders[0]["worst"]["lag_us"], 417_628);
+            }
+            assert_eq!(evidence["sampler"]["count"], 0);
+            assert_eq!(evidence["sampler"]["largest_gap_us"], 750_000);
+            assert!(evidence["sampler"]["before"].is_null());
+            assert!(evidence["sampler"]["after"].is_null());
+            assert!(!evidence.to_string().contains("private-secret"));
+        }
+    }
+
+    #[test]
+    fn invalid_run_evidence_records_declared_hooks_and_workload_identity() {
+        let context = crate::unit_context();
+        let mut config = crate::scenario_config(Encoding::V3Json);
+        config.seed = 17;
+        config.churn = ChurnSchedule::ReconnectBurst {
+            fraction_percent: 50,
+            start: Duration::from_micros(123_456),
+            window: Duration::from_micros(78_901),
+        };
+        config.experiment = Some(Experiment::UnsupportedFormat);
+        config.stall_senders = Some(Duration::from_millis(800));
+        config.pause_reads = Some(Duration::from_micros(111_222));
+        config.kill_server_after = Some(Duration::from_micros(333_444));
+        config.pause_sends = Some(SendPause {
+            after_seq: 7,
+            duration: Duration::from_micros(555_666),
+        });
+        config.slow_reader = true;
+        config.latest_keys_per_sender = 23;
+        let records = RunRecords::default();
+        let summary = oracle::summarize(
+            &context.plans,
+            &context.roster,
+            &records,
+            250_000,
+            96,
+            context.delivery_class,
+            &crate::schedule::ChurnPlan::default(),
+            None,
+        );
+        for declared in [true, false] {
+            if !declared {
+                config.churn = ChurnSchedule::None;
+                config.experiment = None;
+                config.stall_senders = None;
+                config.pause_reads = None;
+                config.kill_server_after = None;
+                config.pause_sends = None;
+                config.slow_reader = false;
+            }
+            let evidence = invalid_run_diagnostics(
+                "run-test",
+                &config,
+                &context.plans,
+                &records,
+                &[],
+                &summary,
+                750_000,
+                4,
+            );
+            let workload = &evidence["workload"];
+            assert_eq!(workload["seed"], 17);
+            assert_eq!(workload["lag_bound_us"], 250_000);
+            assert_eq!(workload["drain_grace_us"], 1_500_000);
+            assert_eq!(workload["slow_reader"], declared);
+            assert_eq!(workload["latest_keys_per_sender"], 23);
+            if declared {
+                assert_eq!(
+                    workload["churn"],
+                    json!({"ReconnectBurst":{
+                    "fraction_percent":50, "start":123_456, "window":78_901}})
+                );
+                assert_eq!(workload["experiment"], "UnsupportedFormat");
+                assert_eq!(workload["stall_senders_us"], 800_000);
+                assert_eq!(workload["pause_reads_us"], 111_222);
+                assert_eq!(workload["kill_server_after_us"], 333_444);
+                assert_eq!(
+                    workload["pause_sends"],
+                    json!({"after_seq":7,"duration_us":555_666})
+                );
+            } else {
+                assert_eq!(workload["churn"], "None");
+                for field in [
+                    "experiment",
+                    "stall_senders_us",
+                    "pause_reads_us",
+                    "kill_server_after_us",
+                    "pause_sends",
+                ] {
+                    assert!(
+                        workload[field].is_null(),
+                        "absent {field} must remain explicit"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_run_evidence_omits_endpoint_text_from_error_context() {
+        let context = crate::unit_context();
+        let config = crate::scenario_config(Encoding::V3Json);
+        let private_error = "connect wss://user:private-secret@example.invalid:1234: failed";
+        let mut records = crate::complete_records(&context.plans);
+        records.join_failures = vec![private_error.into(); 32];
+        records.faults = vec![
+            InvalidReason::ReconnectFailed {
+                peer: "r0p0".into(),
+                detail: private_error.into(),
+            },
+            InvalidReason::InvalidGapReports {
+                count: 1,
+                first: crate::oracle::GapViolation {
+                    recipient: "r0p1".into(),
+                    sender: "r0p0".into(),
+                    detail: private_error.into(),
+                },
+            },
+        ];
+        let summary = oracle::summarize(
+            &context.plans,
+            &context.roster,
+            &records,
+            250_000,
+            96,
+            context.delivery_class,
+            &crate::schedule::ChurnPlan::default(),
+            None,
+        );
+        let sample = serde_json::from_value(json!({"t_us": 100, "counters": {},
+            "scrape_error": "https://user:private-secret@example.invalid:1234/metrics/prom: failed"}))
+            .expect("private scrape failure");
+        let evidence = invalid_run_diagnostics(
+            "run-test",
+            &config,
+            &context.plans,
+            &records,
+            &[sample],
+            &summary,
+            200,
+            4,
+        );
+        assert!(!evidence.to_string().contains("private-secret"));
+        assert!(!evidence.to_string().contains("example.invalid"));
+        assert_eq!(evidence["raw_fault_count"], 2);
+        let reconnect = &evidence["raw_faults"][0];
+        assert_eq!(reconnect["kind"], "reconnect_failed");
+        assert_eq!(reconnect["peer"], "r0p0");
+        assert_eq!(reconnect["detail_omitted"], true);
+        assert!(reconnect.get("detail").is_none());
+        assert_eq!(evidence["raw_faults"][1]["first"]["detail_omitted"], true);
+        let joined = evidence["summary_reasons"]
+            .as_array()
+            .expect("reasons")
+            .iter()
+            .find(|reason| reason["kind"] == "join_failed")
+            .expect("join reason");
+        assert_eq!(joined["failure_count"], 32);
+        assert_eq!(joined["details_omitted"], true);
+        assert!(joined.get("failures").is_none());
+        assert_eq!(evidence["sampler"]["recent"][0]["scrape_failed"], true);
+        assert!(evidence["sampler"]["recent"][0]
+            .get("scrape_error")
+            .is_none());
+        assert_eq!(records.join_failures, vec![private_error.to_string(); 32]);
+        assert!(serde_json::to_value(&records.faults)
+            .expect("original faults")
+            .to_string()
+            .contains("private-secret"));
+        assert!(serde_json::to_value(&summary.reasons)
+            .expect("original reasons")
+            .to_string()
+            .contains("private-secret"));
+    }
+
+    #[test]
+    fn invalid_run_evidence_bounds_fault_and_reason_context_without_hiding_counts() {
+        let context = crate::unit_context();
+        let config = crate::scenario_config(Encoding::V3Json);
+        let mut records = crate::complete_records(&context.plans);
+        records.faults = (0..64)
+            .map(|index| InvalidReason::MalformedServerFrame {
+                recipient: format!("r0p{index}"),
+                detail: format!("fault-{index}"),
+            })
+            .collect();
+        let summary = oracle::summarize(
+            &context.plans,
+            &context.roster,
+            &records,
+            250_000,
+            96,
+            context.delivery_class,
+            &crate::schedule::ChurnPlan::default(),
+            None,
+        );
+        let evidence = invalid_run_diagnostics(
+            "run-test",
+            &config,
+            &context.plans,
+            &records,
+            &[],
+            &summary,
+            750_000,
+            4,
+        );
+        assert_eq!(evidence["raw_fault_count"], 64);
+        assert_eq!(evidence["summary_reason_count"], summary.reasons.len());
+        let expected: Vec<_> = (0..16)
+            .map(|index| {
+                json!({
+                    "kind":"malformed_server_frame", "recipient":format!("r0p{index}"),
+                    "detail_omitted":true,
+                })
+            })
+            .collect();
+        assert_eq!(evidence["raw_faults"], json!(expected));
+        assert_eq!(evidence["summary_reasons"], json!(expected));
+        assert_eq!(evidence["raw_faults"].as_array().expect("faults").len(), 16);
+        assert_eq!(
+            evidence["summary_reasons"]
+                .as_array()
+                .expect("reasons")
+                .len(),
+            16
+        );
+    }
+
+    #[test]
+    fn invalid_run_evidence_keeps_sampler_gap_context_and_null_resources() {
+        let context = crate::unit_context();
+        let config = crate::scenario_config(Encoding::V3Json);
+        let records = RunRecords::default();
+        let summary = oracle::summarize(
+            &context.plans,
+            &context.roster,
+            &records,
+            250_000,
+            96,
+            context.delivery_class,
+            &crate::schedule::ChurnPlan::default(),
+            None,
+        );
+        for (times, finished, gap, start, end, before, after) in [
+            (
+                vec![600_000, 650_000],
+                700_000,
+                600_000,
+                0,
+                600_000,
+                None,
+                Some(600_000),
+            ),
+            (
+                vec![10, 1000, 1100, 1150],
+                1200,
+                990,
+                10,
+                1000,
+                Some(10),
+                Some(1000),
+            ),
+            (vec![10, 20], 1000, 980, 20, 1000, Some(20), None),
+        ] {
+            let samples: Vec<IntervalSample> = times
+                .iter()
+                .map(|time| {
+                    serde_json::from_value(
+                        json!({"t_us":time, "counters":{"secret":"private-secret"},
+                    "scrape_error":if Some(time) == times.last() { None } else { Some("https://user:private-secret@example.invalid/metrics/prom: failed") }}),
+                    )
+                    .expect("sample")
+                })
+                .collect();
+            let evidence = invalid_run_diagnostics(
+                "run-test",
+                &config,
+                &context.plans,
+                &records,
+                &samples,
+                &summary,
+                finished,
+                4,
+            );
+            assert!(evidence["senders"]
+                .as_array()
+                .expect("empty peers")
+                .iter()
+                .all(|peer| peer["completed"] == 0 && peer["first"].is_null()));
+            let sampler = &evidence["sampler"];
+            assert_eq!(sampler["count"], times.len());
+            assert_eq!(sampler["largest_gap_us"], gap);
+            assert_eq!(sampler["gap_start_us"], start);
+            assert_eq!(sampler["gap_end_us"], end);
+            assert_eq!(
+                sampler["before"]
+                    .get("t_us")
+                    .and_then(serde_json::Value::as_u64),
+                before
+            );
+            assert_eq!(
+                sampler["after"]
+                    .get("t_us")
+                    .and_then(serde_json::Value::as_u64),
+                after
+            );
+            let recent = sampler["recent"].as_array().expect("recent");
+            assert_eq!(recent.len(), times.len().min(3));
+            assert_eq!(recent[0]["t_us"], *times.last().expect("last"));
+            for sample in recent {
+                assert_eq!(
+                    sample["scrape_failed"],
+                    sample["t_us"] != *times.last().expect("last")
+                );
+                assert!(sample.get("scrape_error").is_none());
+                for field in [
+                    "server_cpu_seconds",
+                    "generator_cpu_seconds",
+                    "server_rss_bytes",
+                    "generator_rss_bytes",
+                ] {
+                    assert!(sample[field].is_null(), "{field} remains unavailable");
+                }
+            }
+            assert!(!evidence.to_string().contains("private-secret"));
+        }
+    }
 
     struct DropCount(Arc<AtomicUsize>);
     impl Drop for DropCount {
