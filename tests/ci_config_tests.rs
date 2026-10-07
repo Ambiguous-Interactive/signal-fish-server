@@ -4108,6 +4108,142 @@ fn test_docs_deploy_requirements_file_exists() {
     );
 }
 
+/// Issue #801: the job must not cancel Pages while its deployment poller is
+/// still within its allowance. Keep five minutes for setup and final status.
+fn docs_pages_deadline_policy(workflow: &str) -> Result<(), String> {
+    const POLLING_MS: u64 = 600_000;
+    const HEADROOM_MS: u64 = 300_000;
+    let documents = Yaml::load_from_str(workflow).map_err(|error| error.to_string())?;
+    let deploy = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .and_then(|jobs| jobs.as_mapping_get("deploy"))
+        .ok_or("docs-deploy.yml must define jobs.deploy")?;
+    let steps = deploy
+        .as_mapping_get("steps")
+        .and_then(Yaml::as_vec)
+        .ok_or("jobs.deploy must define steps")?;
+    let actions = steps
+        .iter()
+        .filter(|step| {
+            step.as_mapping_get("uses")
+                .and_then(Yaml::as_str)
+                .is_some_and(|uses| uses.starts_with("actions/deploy-pages@"))
+        })
+        .collect::<Vec<_>>();
+    let [action] = actions.as_slice() else {
+        return Err("jobs.deploy must contain exactly one actions/deploy-pages step".to_string());
+    };
+    for (name, budget) in [
+        ("jobs.deploy", deploy.as_mapping_get("timeout-minutes")),
+        (
+            "deploy-pages step",
+            action.as_mapping_get("timeout-minutes"),
+        ),
+    ] {
+        if name == "deploy-pages step" && budget.is_none() {
+            continue;
+        }
+        let milliseconds = budget
+            .and_then(Yaml::as_integer)
+            .and_then(|minutes| u64::try_from(minutes).ok())
+            .filter(|minutes| *minutes > 0)
+            .and_then(|minutes| minutes.checked_mul(60_000));
+        if milliseconds.is_none_or(|milliseconds| milliseconds < POLLING_MS + HEADROOM_MS) {
+            return Err(format!("{name} timeout-minutes must provide at least 15 minutes ({POLLING_MS}ms polling + {HEADROOM_MS}ms headroom); found {budget:?}"));
+        }
+    }
+    let input = action
+        .as_mapping_get("with")
+        .and_then(|inputs| inputs.as_mapping_get("timeout"));
+    let polling_ms = input.and_then(|value| {
+        value
+            .as_integer()
+            .and_then(|integer| u64::try_from(integer).ok())
+            .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
+    });
+    if polling_ms != Some(POLLING_MS) {
+        return Err(format!("deploy-pages with.timeout must explicitly preserve {POLLING_MS}ms polling; found {input:?}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn test_docs_pages_deadline_policy_rejects_undersized_or_implicit_budgets() {
+    let cases = [
+        ("numeric input", "15", "600000", true),
+        ("quoted action input", "15", "'600000'", true),
+        ("additional finite job headroom", "20", "600000", true),
+        ("missing job budget", "", "600000", false),
+        ("missing action budget", "15", "", false),
+        ("original five-minute job", "5", "600000", false),
+        ("equal job and action deadline", "10", "600000", false),
+        ("insufficient setup headroom", "14", "600000", false),
+        ("zero job", "0", "600000", false),
+        ("negative job", "-1", "600000", false),
+        ("quoted job is not numeric YAML", "'15'", "600000", false),
+        (
+            "job multiplication overflow",
+            "9223372036854775807",
+            "600000",
+            false,
+        ),
+        ("zero action falls back to default", "15", "0", false),
+        ("negative action", "15", "-1", false),
+        ("malformed action", "15", "'NaN'", false),
+        ("boolean action", "15", "true", false),
+        ("fractional action", "15", "600000.5", false),
+        ("shortened polling allowance", "15", "300000", false),
+        (
+            "unsupported longer polling allowance",
+            "20",
+            "900000",
+            false,
+        ),
+    ];
+    let fixture = |job: &str, action: &str| {
+        format!(
+            "jobs:\n  deploy:\n{}    steps:\n      - uses: actions/deploy-pages@v5.0.1\n{}",
+            if job.is_empty() {
+                String::new()
+            } else {
+                format!("    timeout-minutes: {job}\n")
+            },
+            if action.is_empty() {
+                String::new()
+            } else {
+                format!("        with:\n          timeout: {action}\n")
+            },
+        )
+    };
+    for (name, job, action, expected) in cases {
+        let result = docs_pages_deadline_policy(&fixture(job, action));
+        assert_eq!(result.is_ok(), expected, "{name}: {result:?}");
+    }
+    let valid = fixture("15", "600000");
+    for (name, workflow, expected) in [
+        ("wrong job", valid.replace("  deploy:", "  build:"), false),
+        ("duplicate deployment step", format!("{valid}      - uses: actions/deploy-pages@v5.0.1\n        with:\n          timeout: 600000\n"), false),
+        ("missing deployment step", valid.replace("actions/deploy-pages@", "actions/configure-pages@"), false),
+        ("short step cancels polling", valid.replace("      - uses:", "      - timeout-minutes: 5\n        uses:"), false),
+        ("equal step and polling deadline", valid.replace("      - uses:", "      - timeout-minutes: 10\n        uses:"), false),
+        ("step also preserves headroom", valid.replace("      - uses:", "      - timeout-minutes: 15\n        uses:"), true),
+    ] {
+        let result = docs_pages_deadline_policy(&workflow);
+        assert_eq!(result.is_ok(), expected, "{name}: {result:?}");
+    }
+}
+
+#[test]
+fn test_docs_pages_deployment_deadline_preserves_polling_and_headroom() {
+    let workflow = read_live_file(&repo_root().join(".github/workflows/docs-deploy.yml"));
+    docs_pages_deadline_policy(&workflow).unwrap_or_else(|error| {
+        panic!(
+            "{error}\nFix: set deploy timeout-minutes: 15 and deploy-pages with.timeout: 600000."
+        )
+    });
+}
+
 #[test]
 fn test_workflow_run_steps_invoke_local_scripts_through_interpreters() {
     // Workflow scripts must be invoked through an interpreter instead of
