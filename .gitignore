@@ -71,3 +71,6 @@ progress/
 GOAL.md
 .claude/
 .env*
+
+# Local session work queue
+/PLAN.md

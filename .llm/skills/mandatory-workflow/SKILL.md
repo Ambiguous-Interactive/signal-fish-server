@@ -185,10 +185,11 @@ hosted check needs focused reproduction and a fix; a pending hosted check can
 carry into the next session with its exact PR head and check state recorded in
 `progress/`.
 
-Reserve the last 15 minutes of the roughly one-hour session for validation,
-delivery, and the progress note. Do not start another milestone then. If CI or
-review remains pending at the hour mark, end the session and resume the same
-PR next session; do not spend hours polling.
+Limit each session to two hours of active work. Select the most user-impacting
+achievable work and keep it in one PR. Stop starting new work at 90 minutes;
+reserve the last 30 minutes for validation, delivery, and the progress note.
+If CI or review remains pending at two hours, record the exact state and resume
+that PR next session. Keep `PLAN.md` local and gitignored.
 
 ```bash
 # Local gate for Rust changes
