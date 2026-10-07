@@ -74,6 +74,41 @@ impl Drop for Server {
     }
 }
 
+struct Peer(Option<Child>);
+impl Peer {
+    fn child(&mut self) -> &mut Child {
+        self.0.as_mut().expect("live child")
+    }
+    fn output(mut self) -> std::io::Result<Output> {
+        self.0
+            .take()
+            .expect("collect child once")
+            .wait_with_output()
+    }
+}
+impl Drop for Peer {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+struct RoomFiles(PathBuf);
+impl Drop for RoomFiles {
+    fn drop(&mut self) {
+        for path in [
+            self.0.clone(),
+            self.0.with_extension("active-creator"),
+            self.0.with_extension("active-joiner"),
+            self.0.with_extension("active-creator-tmp"),
+            self.0.with_extension("active-joiner-tmp"),
+        ] {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 fn free_port() -> u16 {
     let listener = TcpListener::bind("0.0.0.0:0").expect("reserve port");
     listener.local_addr().expect("ephemeral address").port()
@@ -120,32 +155,40 @@ fn wait_for_server(child: &mut Child, port: u16) -> Result<(), String> {
     ))
 }
 
+fn server_command(server_bin: &str, port: u16) -> Command {
+    let mut command = Command::new(server_bin);
+    command.stdout(Stdio::null()).stderr(Stdio::inherit());
+
+    /*
+        Config loading applies environment overrides last. Scrub the whole
+        namespace so ambient developer/runner settings cannot change auth,
+        TURN, rate limits, or any other behavior under this regression.
+    */
+    for (key, _) in std::env::vars_os() {
+        if key
+            .to_str()
+            .is_some_and(|key| key.starts_with("SIGNAL_FISH"))
+        {
+            command.env_remove(&key);
+        }
+    }
+    command
+        .env("SIGNAL_FISH__PORT", port.to_string())
+        .env("SIGNAL_FISH__LOGGING__LEVEL", "warn")
+        .env("SIGNAL_FISH__LOGGING__ENABLE_FILE_LOGGING", "false")
+        .env("SIGNAL_FISH__TURN__ENABLED", "false")
+        .env("SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH", "false")
+        .env("SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST", "false")
+        .env("SIGNAL_FISH__PROTOCOL__SDK_COMPATIBILITY__ENFORCE", "false");
+    command.env("SIGNAL_FISH__SERVER__DRAIN_GRACE_SECS", "1");
+    command
+}
+
 fn spawn_server(server_bin: &str) -> (Server, u16) {
     let mut failures = Vec::new();
     for attempt in 1..=SERVER_SPAWN_ATTEMPTS {
         let port = free_port();
-        let mut command = Command::new(server_bin);
-        command.stdout(Stdio::null()).stderr(Stdio::inherit());
-
-        // Config loading applies environment overrides last. Scrub the whole
-        // namespace so ambient developer/runner settings cannot change auth,
-        // TURN, rate limits, or any other behavior under this regression.
-        for (key, _) in std::env::vars_os() {
-            if key
-                .to_str()
-                .is_some_and(|key| key.starts_with("SIGNAL_FISH"))
-            {
-                command.env_remove(&key);
-            }
-        }
-        command
-            .env("SIGNAL_FISH__PORT", port.to_string())
-            .env("SIGNAL_FISH__LOGGING__LEVEL", "warn")
-            .env("SIGNAL_FISH__LOGGING__ENABLE_FILE_LOGGING", "false")
-            .env("SIGNAL_FISH__TURN__ENABLED", "false")
-            .env("SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH", "false")
-            .env("SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST", "false")
-            .env("SIGNAL_FISH__PROTOCOL__SDK_COMPATIBILITY__ENFORCE", "false");
+        let mut command = server_command(server_bin, port);
 
         match command.spawn() {
             Ok(mut child) => match wait_for_server(&mut child, port) {
@@ -167,18 +210,18 @@ fn spawn_server(server_bin: &str) -> (Server, u16) {
     );
 }
 
-fn wait_outputs(mut first: Child, mut second: Child) -> (Output, Output) {
+fn wait_outputs(mut first: Peer, mut second: Peer) -> (Output, Output) {
     if !wait_for(
         || {
-            first.try_wait().expect("query creator").is_some()
-                && second.try_wait().expect("query joiner").is_some()
+            first.child().try_wait().expect("query creator").is_some()
+                && second.child().try_wait().expect("query joiner").is_some()
         },
         CHILD_DEADLINE,
     ) {
-        let _ = first.kill();
-        let _ = second.kill();
-        let first_output = first.wait_with_output().expect("collect creator timeout");
-        let second_output = second.wait_with_output().expect("collect joiner timeout");
+        let _ = first.child().kill();
+        let _ = second.child().kill();
+        let first_output = first.output().expect("collect creator timeout");
+        let second_output = second.output().expect("collect joiner timeout");
         panic!(
             "timed out waiting for game processes\ncreator stdout={}\ncreator stderr={}\njoiner stdout={}\njoiner stderr={}",
             String::from_utf8_lossy(&first_output.stdout),
@@ -188,8 +231,8 @@ fn wait_outputs(mut first: Child, mut second: Child) -> (Output, Output) {
         );
     }
     (
-        first.wait_with_output().expect("collect creator output"),
-        second.wait_with_output().expect("collect joiner output"),
+        first.output().expect("collect creator output"),
+        second.output().expect("collect joiner output"),
     )
 }
 
@@ -524,30 +567,37 @@ fn run_cell(mode: &str) {
         Path::new(&server_bin).is_absolute(),
         "SIGNAL_FISH_SERVER_BIN must be absolute so child cwd changes cannot select another binary"
     );
+    let (mut server, port) = spawn_server(&server_bin);
+    run_pair_on_server(mode, &mut server, port);
+}
+
+fn run_pair_on_server(mode: &str, server: &mut Server, port: u16) -> [String; 2] {
     let peer_bin = env!("CARGO_BIN_EXE_fortress-relay-peer");
     let room_file = temp_room_file();
-    let (mut server, port) = spawn_server(&server_bin);
+    let _files = RoomFiles(room_file.clone());
     assert!(
         server.0.try_wait().expect("query server").is_none(),
         "server exited early"
     );
 
     let url = format!("ws://127.0.0.1:{port}/v2/ws");
-    let creator = Command::new(peer_bin)
-        .args([&url, "creator"])
-        .arg(&room_file)
-        .arg(mode)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn creator game process");
+    let creator = Peer(Some(
+        Command::new(peer_bin)
+            .args([&url, "creator"])
+            .arg(&room_file)
+            .arg(mode)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn creator game process"),
+    ));
     if !wait_for(
         || fs::metadata(&room_file).is_ok_and(|metadata| metadata.len() > 0),
         Duration::from_secs(10),
     ) {
         let mut creator = creator;
-        let _ = creator.kill();
-        let output = creator.wait_with_output().expect("collect creator timeout");
+        let _ = creator.child().kill();
+        let output = creator.output().expect("collect creator timeout");
         panic!(
             "timed out waiting for creator room code\nstdout={}\nstderr={}",
             String::from_utf8_lossy(&output.stdout),
@@ -555,15 +605,17 @@ fn run_cell(mode: &str) {
         );
     }
     let room_code = fs::read_to_string(&room_file).expect("read room code");
-    let joiner = Command::new(peer_bin)
-        .args([&url, "joiner"])
-        .arg(&room_file)
-        .arg(room_code.trim())
-        .arg(mode)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn joiner game process");
+    let joiner = Peer(Some(
+        Command::new(peer_bin)
+            .args([&url, "joiner"])
+            .arg(&room_file)
+            .arg(room_code.trim())
+            .arg(mode)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn joiner game process"),
+    ));
 
     let (creator_output, joiner_output) = wait_outputs(creator, joiner);
     let creator_report = parse_report("creator", creator_output);
@@ -617,4 +669,236 @@ fn run_cell(mode: &str) {
     if mode != "healthy" {
         println!("BUSTED fortress-native expected negative control: completed-rate and per-callback healthy gates rejected both clean peers");
     }
+    [creator_report.player_id, joiner_report.player_id]
+}
+
+#[cfg(unix)]
+fn assert_drain_ready(value: &serde_json::Value, role: &str) -> String {
+    assert_eq!(value["role"].as_str(), Some(role));
+    let id = value["player_id"].as_str().expect("barrier player id");
+    assert!(uuid::Uuid::parse_str(id).is_ok(), "valid player identity");
+    assert!(
+        value["confirmed_frame"]
+            .as_i64()
+            .is_some_and(|frame| (120..600).contains(&frame)),
+        "actual unfinished game progress: {value}"
+    );
+    for key in [
+        "frames_advanced",
+        "rollback_count",
+        "checksums_compared",
+        "sent",
+        "received",
+        "sent_ledger",
+        "received_ledger",
+    ] {
+        assert!(
+            value[key].as_u64().is_some_and(|count| count > 0),
+            "nonvacuous {key}: {value}"
+        );
+    }
+    assert_eq!(
+        value["checksums_compared"], value["checksums_matched"],
+        "matching checksums"
+    );
+    for key in [
+        "checksums_mismatched",
+        "malformed",
+        "wrong_destination",
+        "unknown_sender",
+        "inbound_overflow",
+        "outbound_overflow",
+        "encode_failures",
+        "completion_underflow",
+    ] {
+        assert_eq!(
+            value[key].as_u64(),
+            Some(0),
+            "clean pre-fault {key}: {value}"
+        );
+    }
+    id.to_string()
+}
+
+#[cfg(unix)]
+fn shutdown_failure(output: &Output) -> Result<(), &'static str> {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() {
+        return Err("accepted shutdown as success");
+    }
+    if output.status.code() != Some(1) {
+        return Err("abnormal process exit");
+    }
+    if !output.stdout.is_empty() {
+        return Err("healthy report after shutdown");
+    }
+    if !stderr.contains("server going away: deadline_ms=") {
+        return Err("missing GoingAway");
+    }
+    if !stderr.contains("server disconnected peer:")
+        || !stderr.contains("server_shutdown")
+        || !stderr.contains("code=Some(4000)")
+    {
+        return Err("wrong failure cause");
+    }
+    if stderr.contains("deadline expired") || stderr.contains("panicked") {
+        return Err("deadline or panic");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn assert_shutdown_failure(name: &str, output: &Output) {
+    assert_eq!(
+        shutdown_failure(output),
+        Ok(()),
+        "{name}: status={}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn shutdown_outcome_requires_the_advisory_and_authoritative_close() {
+    use std::os::unix::process::ExitStatusExt;
+    let valid =
+        "server going away: deadline_ms=123\nError: server disconnected peer: code=Some(4000), server_shutdown";
+    for (name, status, stdout, stderr, expected) in [
+        ("causal abort", 1, "", valid, Ok(())),
+        ("success", 0, "", valid, Err("accepted shutdown as success")),
+        ("other exit code", 2, "", valid, Err("abnormal process exit")),
+        ("signal termination", -9, "", valid, Err("abnormal process exit")),
+        ("healthy report", 1, "{}", valid, Err("healthy report after shutdown")),
+        ("missing notice", 1, "", "server disconnected peer: server_shutdown", Err("missing GoingAway")),
+        ("peer left", 1, "", "server going away: deadline_ms=123\nSignal Fish peer left before final ack", Err("wrong failure cause")),
+        ("wrong close", 1, "", "server going away: deadline_ms=123\nserver disconnected peer: protocol_error", Err("wrong failure cause")),
+        ("wrong close code", 1, "", "server going away: deadline_ms=123\nserver disconnected peer: code=Some(1001), server_shutdown", Err("wrong failure cause")),
+        ("panic", 1, "", "server going away: deadline_ms=123\nserver disconnected peer: code=Some(4000), server_shutdown\npanicked", Err("deadline or panic")),
+        ("deadline", 1, "", "server going away: deadline_ms=123\nserver disconnected peer: code=Some(4000), server_shutdown\npeer deadline expired", Err("deadline or panic")),
+    ] {
+        let output = Output { status: std::process::ExitStatus::from_raw(if status < 0 { -status } else { status << 8 }),
+            stdout: stdout.as_bytes().to_vec(), stderr: stderr.as_bytes().to_vec() };
+        assert_eq!(shutdown_failure(&output), expected, "{name}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn graceful_server_drain_fails_active_games_and_same_port_restart_completes_new_games() {
+    let _serial = LIVE_CELLS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let server_bin = std::env::var("SIGNAL_FISH_SERVER_BIN").expect("fresh real server binary");
+    assert!(Path::new(&server_bin).is_absolute());
+    let (mut server, port) = spawn_server(&server_bin);
+    let room = temp_room_file();
+    let _files = RoomFiles(room.clone());
+    let url = format!("ws://127.0.0.1:{port}/v2/ws");
+    let peer_bin = env!("CARGO_BIN_EXE_fortress-relay-peer");
+    let mut creator = Peer(Some(
+        Command::new(peer_bin)
+            .args([&url, "creator"])
+            .arg(&room)
+            .arg("drain-probe")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn drain creator"),
+    ));
+    assert!(
+        wait_for(
+            || fs::metadata(&room).is_ok_and(|m| m.len() > 0),
+            Duration::from_secs(10)
+        ),
+        "room readiness"
+    );
+    let code = fs::read_to_string(&room).expect("room code");
+    let mut joiner = Peer(Some(
+        Command::new(peer_bin)
+            .args([&url, "joiner"])
+            .arg(&room)
+            .arg(code.trim())
+            .arg("drain-probe")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn drain joiner"),
+    ));
+    let paths = [
+        room.with_extension("active-creator"),
+        room.with_extension("active-joiner"),
+    ];
+    assert!(
+        wait_for(
+            || paths.iter().all(|path| path.exists()),
+            Duration::from_secs(10)
+        ),
+        "both active game barriers"
+    );
+    let old_ids: Vec<_> = paths
+        .iter()
+        .zip(["creator", "joiner"])
+        .map(|(path, role)| {
+            let value = serde_json::from_slice(&fs::read(path).expect("barrier bytes"))
+                .expect("atomic barrier JSON");
+            println!("pre-drain {role}: {value}");
+            assert_drain_ready(&value, role)
+        })
+        .collect();
+    assert_ne!(old_ids[0], old_ids[1]);
+    assert!(creator.child().try_wait().expect("creator live").is_none());
+    assert!(joiner.child().try_wait().expect("joiner live").is_none());
+    assert!(server.0.try_wait().expect("server live").is_none());
+    let signal_at = Instant::now();
+    assert!(Command::new("kill")
+        .args(["-TERM", &server.0.id().to_string()])
+        .status()
+        .expect("deliver SIGTERM")
+        .success());
+    assert!(
+        wait_for(
+            || creator
+                .child()
+                .try_wait()
+                .expect("creator status")
+                .is_some()
+                && joiner.child().try_wait().expect("joiner status").is_some(),
+            Duration::from_secs(10)
+        ),
+        "peers must abort promptly after actual drain"
+    );
+    let creator_output = creator.output().expect("creator output");
+    let joiner_output = joiner.output().expect("joiner output");
+    assert_shutdown_failure("creator", &creator_output);
+    assert_shutdown_failure("joiner", &joiner_output);
+    assert!(
+        wait_for(
+            || server.0.try_wait().expect("server drain status").is_some(),
+            Duration::from_secs(15).saturating_sub(signal_at.elapsed())
+        ),
+        "bounded graceful server exit"
+    );
+    assert!(
+        server.0.wait().expect("reap drained server").success(),
+        "graceful server exits successfully"
+    );
+    let mut restarted = server_command(&server_bin, port)
+        .spawn()
+        .expect("restart exact same port");
+    if let Err(error) = wait_for_server(&mut restarted, port) {
+        let _ = restarted.kill();
+        let _ = restarted.wait();
+        panic!("restart readiness: {error}");
+    }
+    let mut restarted = Server(restarted);
+    let new_ids = run_pair_on_server("healthy", &mut restarted, port);
+    assert!(
+        new_ids
+            .iter()
+            .all(|id| uuid::Uuid::parse_str(id).is_ok() && !old_ids.contains(id)),
+        "new sessions after restart"
+    );
+    println!("DRAIN_RESTART fortress-native: active peers failed with server_shutdown; fresh games completed on the same port");
 }

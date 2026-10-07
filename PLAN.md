@@ -286,7 +286,10 @@ complete.
   and advisory cell with exact gap accounting and a valid JSON continuation.
   Session 366 adds a native capped-admission control that must fail the
   healthy throughput gates while both peers drain outbound work and exit successfully.
-  Restore exercisability and Fortress fault-injection cells remain open in #741.
+  Session 367 adds a real graceful drain during active native Fortress games,
+  followed by fresh healthy games after a restart on the same port.
+  Restore exercisability, handshake-close, and inbound-overflow cells remain
+  open in #741.
 
 For each finding:
 
