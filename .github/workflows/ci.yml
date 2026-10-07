@@ -13,9 +13,13 @@
 #     within the freshness window (the fail-open verified-head guard, issue
 #     #702); `deny` always audits so live advisory data keeps being reproved.
 #
+#   - Manual full verification (all three OS lanes, coverage, and MSRV tests).
+#     Manual runs always execute the verification work.
+#
 # Jobs:
 #   - lint: Cross-OS linting (clippy) matrix (ubuntu per pull request;
-#     macOS + Windows on the daily schedule only). Formatting is gated once
+#     macOS + Windows on the daily schedule; all three OS lanes on manual
+#     runs). Formatting is gated once
 #     by quick-check — rustfmt output is platform-independent (#512).
 #     The ubuntu leg also runs the zero-panic production policy
 #     (scripts/check-no-panics.sh) — issue #558 moved the standalone
@@ -23,7 +27,8 @@
 #     scan reuses this runner's toolchain, registry cache, and checkout,
 #     while keeping its own scrubbed nested target dir
 #   - nextest: Cross-OS test execution via cargo-nextest (doc-tests in doc-validation.yml)
-#     (ubuntu per pull request; macOS + Windows on the daily schedule only).
+#     (ubuntu per pull request; macOS + Windows on the daily schedule; all
+#     three OS lanes on manual runs).
 #     The ubuntu leg also enforces the deterministic relay allocation
 #     ceilings — issue #558 moved the standalone relay-allocations job here
 #     so one runner setup covers both, and the bench compile graph reuses
@@ -47,10 +52,9 @@
 #     release commits always change Cargo.toml/Cargo.lock, so releases keep
 #     full image validation.
 #   - coverage: Linux code coverage gate via cargo-llvm-cov (daily schedule
-#     only — the instrumented suite duplicates the per-event nextest run)
+#     and manual runs — it duplicates the per-event nextest suite)
 #   - msrv: MSRV verification (compilation per push/PR; the full test suite
-#     runs on the daily schedule — the suite itself is already covered
-#     per-event by ubuntu nextest)
+#     runs on the daily schedule and manual runs; ubuntu nextest covers PRs)
 #   - verified-head-guard: schedule-only fail-open guard (issue #702); on a
 #     duplicate tick it reports `duplicate=true` and the lint, nextest, msrv,
 #     and coverage jobs skip
@@ -67,6 +71,7 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  workflow_dispatch:
   schedule:
     # Daily security audit at noon UTC to catch new CVEs, plus the lanes
     # whose per-event cost outweighs their marginal signal (issues #513 and
@@ -152,9 +157,10 @@ jobs:
 
   # Event-dependent OS cohort for the lint/nextest matrices (issues #513 and
   # #512): macOS bills at 10x and Windows at 2x Linux per minute and the
-  # server deploys on Linux, so the macOS and Windows legs exist only on the
+  # server deploys on Linux, so the macOS and Windows legs normally run on the
   # daily cron (next-day signal for cross-OS regressions) while ubuntu covers
-  # every push and pull request. A dynamic matrix is required because
+  # every pull request. Manual verification runs all three OS lanes.
+  # A dynamic matrix is required because
   # `matrix` is not an available context in a job-level `if:`; this job costs
   # seconds of Linux time.
   ci-matrix:
@@ -169,7 +175,9 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
         run: |
-          if [ "$EVENT" = "schedule" ]; then
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo 'os=["ubuntu-latest","macos-latest","windows-latest"]' >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT" = "schedule" ]; then
             echo 'os=["macos-latest","windows-latest"]' >> "$GITHUB_OUTPUT"
           else
             echo 'os=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
@@ -185,7 +193,8 @@ jobs:
   # head. Fails open; only schedule ticks consult it — pull requests always
   # run every lane. The `deny` job below is deliberately NOT gated: its
   # analyzers reprove live advisory data (external input), not just the tree.
-  # The anchor step is coverage's report generation: it is schedule-only and
+  # The anchor step is coverage's report generation: it runs on schedule
+  # and manual verification and
   # lives in a gated job, so a tick skipped by this guard never shows an
   # executed anchor and cannot sustain its own skip (PR #703 round 2).
   verified-head-guard:
@@ -467,6 +476,9 @@ jobs:
 
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # A manual run validates the current tree, with no change event.
+            BASE_SHA="${{ github.sha }}"
           else
             BASE_SHA="${{ github.event.before }}"
           fi
@@ -782,7 +794,7 @@ jobs:
     # targets and features — the actual MSRV-breakage class (a dependency or
     # code change needing a newer rustc). The full MSRV TEST-SUITE run
     # duplicates the per-event ubuntu nextest suite on a second toolchain,
-    # so it runs on the daily schedule only (next-day signal, same
+    # so it runs on the daily schedule and manual verification (the same
     # trade-off as the macOS/Windows lanes).
     steps:
       - name: Require fast-fail gate success
@@ -822,20 +834,20 @@ jobs:
         # A no-codegen `check` across all targets and features: catches the
         # MSRV-breakage class (newer-rustc-only syntax, or a dependency bump
         # raising the effective MSRV) at a fraction of a full test run.
-        # Excluded from the schedule, where the full-suite step below
-        # subsumes the compilation — the cron compiles once, not twice.
-        if: github.event_name != 'schedule'
+        # Excluded from schedule and manual runs, where the full-suite step
+        # below subsumes compilation.
+        if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
         run: cargo check --locked --all-targets --all-features
 
       - name: Verify build and tests with MSRV
-        # Daily-schedule full suite (issue #512). Plain `cargo test` (NOT
+        # Scheduled and manual full suite (issue #512). Plain `cargo test` (NOT
         # nextest) runs every test binary in parallel with no
         # `process-spawning` isolation, so the multiprocess and
         # idle-timeout tests share CPU with ~40 other binaries. The timeout
         # multiplier gives the idle-timeout tests proportional headroom so a
         # starved task still resets the idle timer in time (see
         # idle_timeout_test_multiplier in tests/e2e_tests.rs).
-        if: github.event_name == 'schedule'
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         env:
           SIGNAL_FISH_TEST_TIMEOUT_MULTIPLIER: "3"
         run: |
@@ -996,7 +1008,7 @@ jobs:
   coverage:
     name: Coverage (llvm-cov)
     needs: [verified-head-guard, quick-check]
-    # Daily-schedule lane (issue #512): the instrumented run executes the
+    # Scheduled and manual lane (issue #512): the instrumented run executes the
     # same suite nextest already runs on every push/PR, at 2-4x slower
     # execution (see the timeout multiplier below). Keeping it per-event
     # tripled every full-suite execution for a threshold signal that
@@ -1004,7 +1016,7 @@ jobs:
     # lanes accepted (#513). The verified-head guard (issue #702) skips
     # duplicate scheduled ticks; `!cancelled()` keeps a guard failure
     # fail-open.
-    if: ${{ !cancelled() && github.event_name == 'schedule' && needs.verified-head-guard.outputs.duplicate != 'true' }}
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.verified-head-guard.outputs.duplicate != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

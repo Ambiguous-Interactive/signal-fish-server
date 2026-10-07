@@ -628,7 +628,9 @@ correctness evidence appears.
   when a patched braces release exists.
 - #636 — promoted to the highest-priority correctness-first ARM capacity
   campaign above. Its C0-C5 tasks own the active audit and optimization queue.
-- #512 — hosted CI: the session-239 audit found every per-event workflow
+- #512 — hosted CI: manual full verification (#781) checks all three OS
+  lanes, coverage, and the MSRV suite. The session-239 audit found every
+  per-event workflow
   path-narrowed, cache-warmed, and cohort-consolidated. Remaining levers
   need owner input: self-hosted runner labels; the interop quartet stays
   per-PR per #568; a cargo-deny single-container consolidation is blocked
