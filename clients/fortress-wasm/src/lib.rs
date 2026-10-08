@@ -41,6 +41,7 @@ enum RunMode {
     Healthy,
     DrainProbe,
     SyncCloseProbe,
+    InboundOverflowProbe,
     NegativeOneAdmissionPerCallback,
 }
 
@@ -172,6 +173,9 @@ struct Report {
     relay_unknown_sender: u64,
     relay_outbound_overflow: u64,
     relay_inbound_overflow: u64,
+    relay_inbound_queue_depth: usize,
+    relay_inbound_overflow_fault: Option<relay::InboundOverflow>,
+    overflow_replays_sent: usize,
     relay_encode_failures: u64,
     relay_completion_underflow: u64,
     relay_send_retries: u64,
@@ -221,11 +225,17 @@ fn sync_probe_ready(
 
 fn relay_for_mode(mode: RunMode) -> RelaySocket {
     let relay = RelaySocket::default();
-    if matches!(mode, RunMode::Healthy | RunMode::DrainProbe) {
+    if matches!(
+        mode,
+        RunMode::Healthy | RunMode::DrainProbe | RunMode::InboundOverflowProbe
+    ) {
         relay.hold_inputs_until_prediction();
     }
     if mode == RunMode::SyncCloseProbe {
         relay.allow_first_sync_reply_only();
+    }
+    if mode == RunMode::InboundOverflowProbe {
+        relay.capture_input_for_overflow_probe();
     }
     relay
 }
@@ -260,6 +270,10 @@ struct Runtime {
     sync_progress: Option<(u32, u32, u32)>,
     sync_json_pending: Option<String>,
     sync_frozen: bool,
+    overflow_frozen: bool,
+    overflow_replays_remaining: usize,
+    overflow_replays_sent: usize,
+    overflow_fault: Option<relay::InboundOverflow>,
 }
 
 impl Runtime {
@@ -341,6 +355,10 @@ impl Runtime {
             sync_progress: None,
             sync_json_pending: None,
             sync_frozen: false,
+            overflow_frozen: false,
+            overflow_replays_remaining: 0,
+            overflow_replays_sent: 0,
+            overflow_fault: None,
         })
     }
 
@@ -364,6 +382,30 @@ impl Runtime {
         }
         self.ensure_session()?;
         self.admit_pending_inbound()?;
+        if self.overflow_frozen {
+            // Keep the real client polling and the bounded relay receiving.
+            // Only the Fortress consumer is stopped by the harness.
+            if self.overflow_replays_remaining > 0 {
+                let remote = self
+                    .roster
+                    .iter()
+                    .copied()
+                    .find(|id| Some(*id) != self.local)
+                    .ok_or("missing overflow recipient")?;
+                self.relay
+                    .enqueue_captured_input(&remote)
+                    .map_err(str::to_owned)?;
+                self.overflow_replays_remaining -= 1;
+                self.overflow_replays_sent += 1;
+            }
+            drain_relay(
+                &mut self.client,
+                &self.relay,
+                &mut self.relay_retries,
+                usize::MAX,
+            )?;
+            return Ok(false);
+        }
 
         self.workload_finished |= self.local_target_reached
             && (self.config.run_mode == RunMode::NegativeOneAdmissionPerCallback
@@ -473,7 +515,10 @@ impl Runtime {
                 || self.relay.target_received());
 
         let admission_cap = match self.config.run_mode {
-            RunMode::Healthy | RunMode::DrainProbe | RunMode::SyncCloseProbe => usize::MAX,
+            RunMode::Healthy
+            | RunMode::DrainProbe
+            | RunMode::SyncCloseProbe
+            | RunMode::InboundOverflowProbe => usize::MAX,
             RunMode::NegativeOneAdmissionPerCallback => 1,
         };
         let admitted = drain_relay(
@@ -670,17 +715,20 @@ impl Runtime {
             return Ok(());
         };
         for frame in self.pending_inbound.drain(..) {
-            self.relay
-                .admit_inbound(InboundRelayFrame {
-                    local,
-                    known_remote: remote,
-                    from: frame.from_player,
-                    encoding: frame.encoding,
-                    seq: frame.seq,
-                    epoch: frame.epoch,
-                    payload: &frame.payload,
-                })
-                .map_err(|fault| format!("relay inbound queue capacity exceeded: {fault:?}"))?;
+            let admitted = self.relay.admit_inbound(InboundRelayFrame {
+                local,
+                known_remote: remote,
+                from: frame.from_player,
+                encoding: frame.encoding,
+                seq: frame.seq,
+                epoch: frame.epoch,
+                payload: &frame.payload,
+            });
+            if let Err(fault) = admitted {
+                let error = format!("relay inbound queue capacity exceeded: {fault:?}");
+                self.overflow_fault = Some(fault);
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -847,6 +895,9 @@ impl Runtime {
             relay_unknown_sender: relay_stats.unknown_sender,
             relay_outbound_overflow: relay_stats.outbound_overflow,
             relay_inbound_overflow: relay_stats.inbound_overflow,
+            relay_inbound_queue_depth: self.relay.inbound_depth(),
+            relay_inbound_overflow_fault: self.overflow_fault,
+            overflow_replays_sent: self.overflow_replays_sent,
             relay_encode_failures: relay_stats.encode_failures,
             relay_completion_underflow: relay_stats.completion_underflow,
             relay_send_retries: self.relay_retries,
@@ -992,7 +1043,7 @@ impl FortressWasmPeer {
         };
         if !matches!(
             runtime.config.run_mode,
-            RunMode::DrainProbe | RunMode::SyncCloseProbe
+            RunMode::DrainProbe | RunMode::SyncCloseProbe | RunMode::InboundOverflowProbe
         ) {
             return GString::new();
         }
@@ -1010,6 +1061,37 @@ impl FortressWasmPeer {
                 GString::new()
             }
         }
+    }
+
+    #[func]
+    fn freeze_overflow(&mut self) -> bool {
+        let Some(runtime) = self.runtime.as_mut() else {
+            return false;
+        };
+        if runtime.config.run_mode != RunMode::InboundOverflowProbe || self.completed {
+            return false;
+        }
+        runtime.overflow_frozen = true;
+        true
+    }
+
+    #[func]
+    fn send_overflow_inputs(&mut self, count: i64) -> bool {
+        let Some(runtime) = self.runtime.as_mut() else {
+            return false;
+        };
+        if runtime.config.run_mode != RunMode::InboundOverflowProbe
+            || runtime.config.role != "creator"
+            || !runtime.overflow_frozen
+            || runtime.overflow_replays_sent != 0
+            || runtime.overflow_replays_remaining != 0
+            || !(1..=relay::MAX_INBOUND_FRAMES as i64 + 1).contains(&count)
+            || self.completed
+        {
+            return false;
+        }
+        runtime.overflow_replays_remaining = count as usize;
+        true
     }
 
     #[func]
@@ -1032,8 +1114,10 @@ impl FortressWasmPeer {
             return GString::new();
         };
         let metrics = session.metrics();
-        if runtime.config.run_mode != RunMode::DrainProbe
-            || session.current_state() != SessionState::Running
+        if !matches!(
+            runtime.config.run_mode,
+            RunMode::DrainProbe | RunMode::InboundOverflowProbe
+        ) || session.current_state() != SessionState::Running
             || !(120..TARGET_CONFIRMED_FRAMES).contains(&session.confirmed_frame().as_i32())
             || metrics.frames_advanced == 0
             || metrics.rollback_count == 0
@@ -1329,6 +1413,7 @@ mod tests {
             None,
             Some(super::RunMode::Healthy),
             Some(super::RunMode::DrainProbe),
+            Some(super::RunMode::InboundOverflowProbe),
         ] {
             let configured = mode.is_some();
             let ids = [uuid::Uuid::from_u128(1), uuid::Uuid::from_u128(2)];
@@ -1442,6 +1527,46 @@ mod tests {
                     assert!(metrics.max_rollback_depth <= 4);
                     assert!(loads[index] > 0, "correction loads real saved state");
                     assert!(saves[index] > 0, "game saves real state");
+                }
+            }
+            if mode == Some(super::RunMode::InboundOverflowProbe) {
+                let baseline = sockets[1].received_ledger();
+                for replay in 1..=super::relay::MAX_INBOUND_FRAMES + 1 {
+                    sockets[0]
+                        .enqueue_captured_input(&ids[1])
+                        .map_err(str::to_owned)?;
+                    let frame = sockets[0].take_outbound().ok_or("captured input missing")?;
+                    sequence += 1;
+                    let admitted = sockets[1].admit_inbound(super::InboundRelayFrame {
+                        local: ids[1],
+                        known_remote: ids[0],
+                        from: ids[0],
+                        encoding: super::GameDataEncoding::MessagePack,
+                        seq: Some(sequence),
+                        epoch: Some(1),
+                        payload: &frame.payload,
+                    });
+                    if replay <= super::relay::MAX_INBOUND_FRAMES {
+                        assert!(
+                            admitted.is_ok(),
+                            "capacity must retain each accepted replay"
+                        );
+                        assert_eq!(sockets[1].inbound_depth(), replay);
+                    } else {
+                        let fault = admitted.err().ok_or("capacity failed to reject replay")?;
+                        assert_eq!(fault.capacity, super::relay::MAX_INBOUND_FRAMES);
+                        assert_eq!(fault.retained, super::relay::MAX_INBOUND_FRAMES);
+                        assert_eq!(fault.sender, ids[0]);
+                        assert_eq!(
+                            fault.last_accepted_sequence,
+                            sockets[1].received_ledger().last_sequence
+                        );
+                        assert_eq!(fault.application_sequence, fault.last_accepted_sequence + 1);
+                        assert_eq!(sockets[1].received_ledger().count, baseline.count + 256);
+                        assert_eq!(sockets[1].counters().inbound_overflow, 1);
+                    }
+                    sockets[0].mark_admitted(frame);
+                    sockets[0].record_client_sent(sockets[0].sent_ledger().count);
                 }
             }
             if !configured {

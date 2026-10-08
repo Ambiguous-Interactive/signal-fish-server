@@ -133,4 +133,7 @@ timeout --foreground 180s "${harness_launcher[@]}" node "${FIXTURE_ROOT}/harness
 timeout --foreground 180s "${harness_launcher[@]}" node "${FIXTURE_ROOT}/harness.mjs" \
     sync-close "${EXPORT_DIR}" "${SERVER_BIN}" "${ARTIFACT_DIR}" "${BUILD_SHA}"
 
+timeout --foreground 180s "${harness_launcher[@]}" node "${FIXTURE_ROOT}/harness.mjs" \
+    inbound-overflow "${EXPORT_DIR}" "${SERVER_BIN}" "${ARTIFACT_DIR}" "${BUILD_SHA}"
+
 printf 'HEALTHY: released Signal Fish client 0.13.0 satisfies the Godot no-thread WASM healthy gates\n'

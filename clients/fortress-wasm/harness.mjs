@@ -33,6 +33,7 @@ const reportKeys = [
   "peak_oldest_queue_age_us", "relay_frames_enqueued", "relay_frames_enqueued_during_run",
   "relay_frames_received", "relay_malformed", "relay_wrong_destination", "relay_unknown_sender",
   "relay_outbound_overflow", "relay_inbound_overflow", "relay_encode_failures",
+  "relay_inbound_queue_depth", "relay_inbound_overflow_fault", "overflow_replays_sent",
   "relay_completion_underflow", "relay_send_retries", "running_elapsed_ms",
   "relay_sent_sequence_count", "relay_sent_first_sequence", "relay_sent_last_sequence",
   "relay_sent_sequence_hash", "relay_received_sequence_count", "relay_received_first_sequence",
@@ -45,6 +46,8 @@ if (mode === "self-test") {
   runHealthGateSelfTests();
   runDrainGateSelfTests();
   runSyncGateSelfTests();
+  runOverflowGateSelfTests();
+  await runAttestationSourceSelfTests();
   runRestartGateSelfTests();
   await runServerLifecycleSelfTests();
   process.stdout.write("HEALTHY fortress-wasm health-gate self-test\n");
@@ -52,10 +55,10 @@ if (mode === "self-test") {
 }
 if (!mode || !exportDirectoryArg || !serverBinaryArg || !artifactDirectoryArg || !buildSha) {
   throw new Error(
-    "usage: node harness.mjs <released|negative|drain|restart|sync-close> <export-dir> <server-bin> <artifacts-dir> <build-sha>",
+    "usage: node harness.mjs <released|negative|drain|restart|sync-close|inbound-overflow> <export-dir> <server-bin> <artifacts-dir> <build-sha>",
   );
 }
-if (!new Set(["released", "negative", "drain", "restart", "sync-close"]).has(mode)) {
+if (!new Set(["released", "negative", "drain", "restart", "sync-close", "inbound-overflow"]).has(mode)) {
   throw new Error(`unsupported run mode: ${mode}`);
 }
 if (!isAbsolute(serverBinaryArg) || !existsSync(serverBinaryArg)) {
@@ -71,6 +74,7 @@ let expectedRunMode = {
   negative: "negative_one_admission_per_callback",
   drain: "drain_probe",
   "sync-close": "sync_close_probe",
+  "inbound-overflow": "inbound_overflow_probe",
 }[phaseMode];
 
 const fixtureDirectory = resolve(import.meta.dirname);
@@ -154,7 +158,7 @@ try {
   const pageUrl = `http://127.0.0.1:${httpPort}/index.html`;
   for (const phase of mode === "restart" ? ["drain", "released"] : [mode]) {
     phaseMode = phase;
-    expectedRunMode = { released: "healthy", negative: "negative_one_admission_per_callback", drain: "drain_probe", "sync-close": "sync_close_probe" }[phase];
+    expectedRunMode = { released: "healthy", negative: "negative_one_admission_per_callback", drain: "drain_probe", "sync-close": "sync_close_probe", "inbound-overflow": "inbound_overflow_probe" }[phase];
     if (mode === "restart" && phase === "released") {
       artifactDirectory = join(artifactRoot, "released");
       mkdirSync(artifactDirectory, { recursive: true });
@@ -212,6 +216,11 @@ async function runPhase(pageUrl) {
     expectedRemoteNonce: creatorNonce,
     pageUrl,
   });
+
+  if (phaseMode === "inbound-overflow") {
+    await runOverflowPhase(room.room_code);
+    return;
+  }
 
   if (isCloseProbe()) {
     activeCheckpoints = await Promise.all([
@@ -383,6 +392,112 @@ async function runPhase(pageUrl) {
   writeFileSync(join(artifactDirectory, "server.log"), Buffer.concat(serverChunks));
 }
 
+async function runOverflowPhase(roomCode) {
+  const peers = [creator, joiner];
+  const active = await Promise.all(peers.map((peer) => waitForGlobal(peer, "__FORTRESS_ACTIVE", 20_000)));
+  for (const [index, peer] of peers.entries()) {
+    assert(active[index].phase === "Running", `${peer.role}: overflow before Running`);
+    assert(activeGameViolations(active[index].report).length === 0, `${peer.role}: unhealthy overflow checkpoint`);
+    writeFileSync(join(artifactDirectory, `${peer.role}-active.json`), `${JSON.stringify(active[index], null, 2)}\n`);
+    await peer.page.evaluate(() => { globalThis.__FORTRESS_FREEZE_OVERFLOW = true; });
+  }
+  // Both consumers stop before the producer is released. Wait for all prior
+  // transport writes to arrive so the capacity crossing has an exact baseline.
+  await withDeadline((async () => {
+    for (;;) {
+      const snapshots = await Promise.all(peers.map((peer) => peer.page.evaluate(() => globalThis.__FORTRESS_OVERFLOW)));
+      if (snapshots.every(Boolean)) {
+        const reports = snapshots.map((snapshot) => snapshot.report);
+        if (reports.every((report, index) => report.final_pipeline_queue_depth === 0
+          && report.client_game_data_sent === report.relay_frames_enqueued
+          && report.relay_sent_sequence_count === reports[1 - index].relay_received_sequence_count)) {
+          activeCheckpoints = snapshots;
+          return;
+        }
+      }
+      await new Promise((accept) => setTimeout(accept, 20));
+    }
+  })(), 5_000, "overflow freeze did not settle prior transport traffic");
+  const baseline = activeCheckpoints[1].report;
+  assert(baseline.relay_inbound_queue_depth <= 256, "pre-fault queue already exceeded capacity");
+  const replayCount = 257 - baseline.relay_inbound_queue_depth;
+  writeFileSync(join(artifactDirectory, "overflow-baseline.json"), `${JSON.stringify({ snapshots: activeCheckpoints, replay_count: replayCount }, null, 2)}\n`);
+  assertServerLive(server, "server must be live before inbound overflow");
+  await creator.page.evaluate((count) => { globalThis.__FORTRESS_SEND_OVERFLOW = count; }, replayCount);
+  joinerReport = await waitForGlobal(joiner, "__FORTRESS_RESULT", 10_000);
+  await creator.page.waitForFunction(({ count, accepted }) => {
+    const report = globalThis.__FORTRESS_OVERFLOW?.report;
+    return report?.overflow_replays_sent === count && report.final_pipeline_queue_depth === 0
+      && report.client_game_data_sent === report.relay_frames_enqueued
+      && report.relay_sent_sequence_count === accepted + 1 && globalThis.__FORTRESS_RESULT === undefined;
+  }, { count: replayCount, accepted: joinerReport.relay_received_sequence_count }, { timeout: 2_000 });
+  creatorReport = (await creator.page.evaluate(() => globalThis.__FORTRESS_OVERFLOW)).report;
+  validateIdentityAndRuntime(creatorReport, joinerReport, await browserAttestation(creator, "overflow"), await browserAttestation(joiner), roomCode);
+  const violations = overflowFailureViolations(baseline, joinerReport, creatorReport, replayCount);
+  assert(violations.length === 0, `inbound overflow: ${violations.join(", ")}`);
+  assertServerLive(server, "overflow stopped the server");
+  await persistPeerArtifacts(joiner, joinerReport);
+  await persistPeerArtifacts(creator, creatorReport);
+  process.stdout.write("BUSTED fortress-wasm expected causal inbound overflow (256 retained, one rejected)\n");
+}
+
+function overflowFailureViolations(before, after, producer, replayCount) {
+  const failures = [];
+  const check = (condition, message) => { if (!condition) failures.push(message); };
+  const fault = after.relay_inbound_overflow_fault;
+  check(before.relay_inbound_queue_depth + replayCount === 257 && before.relay_inbound_overflow === 0,
+    "invalid capacity-crossing baseline");
+  check(after.runtime_error?.startsWith("relay inbound queue capacity exceeded:") === true, "wrong terminal error");
+  check(after.relay_inbound_overflow === 1 && after.relay_inbound_queue_depth === 256, "wrong overflow or retained queue count");
+  check(fault?.capacity === 256 && fault?.retained === 256, "missing structured capacity evidence");
+  check(fault?.sender === after.remote_player_id && fault?.epoch > 0 && fault?.server_sequence > 0, "wrong transport sender/epoch/sequence");
+  check(fault?.last_accepted_sequence === after.relay_received_last_sequence
+    && fault?.application_sequence === after.relay_received_last_sequence + 1, "rejected sequence advanced accepted ledger");
+  check(after.relay_frames_received === before.relay_frames_received + replayCount - 1, "wrong accepted replay count");
+  check(after.client_game_data_received === before.client_game_data_received + replayCount, "wrong transport replay count");
+  check(after.relay_received_sequence_count === before.relay_received_sequence_count + replayCount - 1, "wrong accepted ledger count");
+  check(after.player_id === before.player_id && after.instance_nonce === before.instance_nonce, "receiver identity changed after freeze");
+  check(["frames_advanced", "game_frame", "current_frame", "game_checksum", "checksums_compared", "checksums_matched"]
+    .every((key) => after[key] === before[key]), "consumer progressed after freeze");
+  check(producer.runtime_error === null && producer.relay_inbound_overflow === 0
+    && producer.relay_inbound_overflow_fault === null, "producer failed");
+  check(producer.overflow_replays_sent === replayCount && producer.final_pipeline_queue_depth === 0,
+    "producer did not drain bounded replay budget");
+  check(producer.relay_sent_sequence_count === after.relay_received_sequence_count + 1
+    && producer.relay_sent_last_sequence === fault?.application_sequence, "producer did not transport the rejected frame");
+  for (const report of [after, producer]) {
+    for (const key of ["relay_malformed", "relay_wrong_destination", "relay_unknown_sender", "relay_outbound_overflow", "relay_encode_failures", "relay_completion_underflow", "client_messages_undecodable", "checksums_mismatched"]) {
+      check(report[key] === 0, `${report.role}: unrelated ${key}`);
+    }
+  }
+  return failures;
+}
+
+function runOverflowGateSelfTests() {
+  const before = { relay_inbound_queue_depth: 0, relay_inbound_overflow: 0, relay_frames_received: 20, client_game_data_received: 20, relay_received_sequence_count: 20,
+    frames_advanced: 120, game_frame: 120, current_frame: 120, game_checksum: 42, checksums_compared: 4,
+    checksums_matched: 4, player_id: "joiner", instance_nonce: "joiner-instance" };
+  const after = { ...before, runtime_error: "relay inbound queue capacity exceeded: fault", relay_inbound_overflow: 1,
+    relay_inbound_queue_depth: 256, remote_player_id: "creator", relay_received_last_sequence: 276,
+    relay_frames_received: 276, client_game_data_received: 277, relay_received_sequence_count: 276,
+    relay_inbound_overflow_fault: { capacity: 256, retained: 256, sender: "creator", epoch: 1, server_sequence: 277, last_accepted_sequence: 276, application_sequence: 277 } };
+  const producer = { runtime_error: null, relay_inbound_overflow: 0, relay_inbound_overflow_fault: null, overflow_replays_sent: 257, final_pipeline_queue_depth: 0, relay_sent_sequence_count: 277, relay_sent_last_sequence: 277 };
+  for (const report of [after, producer]) for (const key of ["relay_malformed", "relay_wrong_destination", "relay_unknown_sender", "relay_outbound_overflow", "relay_encode_failures", "relay_completion_underflow", "client_messages_undecodable", "checksums_mismatched"]) report[key] = 0;
+  assert(overflowFailureViolations(before, after, producer, 257).length === 0, "valid overflow rejected");
+  for (const patch of [{ runtime_error: "90-second Rust runtime deadline expired" }, { relay_inbound_queue_depth: 257 },
+    { relay_inbound_overflow: 0 }, { relay_inbound_overflow_fault: null }, { relay_frames_received: 277 },
+    { client_game_data_received: 276 }, { relay_received_sequence_count: 277 }, { frames_advanced: 121 }, { game_checksum: 43 }, { instance_nonce: "replacement" },
+    { checksums_compared: 5 }, { relay_malformed: 1 },
+    ...["capacity", "retained", "epoch", "server_sequence", "last_accepted_sequence", "application_sequence", "sender"]
+      .map((key) => ({ relay_inbound_overflow_fault: { ...after.relay_inbound_overflow_fault, [key]: key === "sender" ? "unknown" : 0 } }))]) {
+    assert(overflowFailureViolations(before, { ...after, ...patch }, producer, 257).length > 0, `overflow mutation accepted: ${JSON.stringify(patch)}`);
+  }
+  for (const patch of [{ overflow_replays_sent: 256 }, { final_pipeline_queue_depth: 1 }, { runtime_error: "disconnected" },
+    { relay_sent_sequence_count: 276 }, { relay_sent_last_sequence: 276 }]) {
+    assert(overflowFailureViolations(before, after, { ...producer, ...patch }, 257).length > 0, `producer mutation accepted: ${JSON.stringify(patch)}`);
+  }
+}
+
 async function launchPeer({ role, roomCode, instanceNonce, expectedRemoteNonce, pageUrl }) {
   const logs = [];
   const errors = [];
@@ -541,8 +656,8 @@ async function assertWebGl2Available(peer) {
   );
 }
 
-async function browserAttestation(peer) {
-  const values = await peer.page.evaluate(async () => ({
+async function browserRuntimeValues(source) {
+  return {
     crossOriginIsolated: globalThis.crossOriginIsolated,
     sharedArrayBufferType: typeof globalThis.SharedArrayBuffer,
     workerConstructions: globalThis.__FORTRESS_WORKER_CONSTRUCTIONS,
@@ -550,9 +665,29 @@ async function browserAttestation(peer) {
       "serviceWorker" in navigator
         ? (await navigator.serviceWorker.getRegistrations()).length
         : 0,
-    resultIdentity: globalThis.__FORTRESS_RESULT?.instance_nonce,
-  }));
+    resultIdentity: source === "overflow"
+      ? globalThis.__FORTRESS_OVERFLOW?.report.instance_nonce
+      : globalThis.__FORTRESS_RESULT?.instance_nonce,
+  };
+}
+
+async function browserAttestation(peer, source = "result") {
+  const values = await peer.page.evaluate(browserRuntimeValues, source);
   return { ...values, browserName, browserPid: peer.pid, browserArtifact, browserArtifactSha256 };
+}
+
+async function runAttestationSourceSelfTests() {
+  globalThis.__FORTRESS_OVERFLOW = { report: { instance_nonce: "live-snapshot" } };
+  try {
+    assert((await browserRuntimeValues("overflow")).resultIdentity === "live-snapshot", "live producer attestation lost Rust nonce");
+    assert((await browserRuntimeValues("result")).resultIdentity === undefined, "terminal attestation used live snapshot fallback");
+    globalThis.__FORTRESS_RESULT = { instance_nonce: "terminal-report" };
+    assert((await browserRuntimeValues("result")).resultIdentity === "terminal-report", "terminal attestation lost Rust nonce");
+    assert((await browserRuntimeValues("overflow")).resultIdentity === "live-snapshot", "producer attestation used wrong report");
+  } finally {
+    delete globalThis.__FORTRESS_RESULT;
+    delete globalThis.__FORTRESS_OVERFLOW;
+  }
 }
 
 function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser, joinerBrowser, roomCode) {
@@ -563,7 +698,7 @@ function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser,
     assertExactKeys(report, reportKeys, `${name} report`);
     assert(report.schema_version === 3 && report.status === "complete", `${name}: incomplete schema`);
     assert(report.origin === "rust-gdextension", `${name}: report did not originate in Rust`);
-    if (!isCloseProbe()) assert(report.runtime_error === null, `${name}: ${report.runtime_error}`);
+    if (!isCloseProbe() && phaseMode !== "inbound-overflow") assert(report.runtime_error === null, `${name}: ${report.runtime_error}`);
     assert(report.role === name, `${name}: role mismatch`);
     assert(report.room_code === roomCode, `${name}: room mismatch`);
     assert(report.build_sha === buildSha, `${name}: current-checkout identity mismatch`);
@@ -613,7 +748,7 @@ function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser,
   assert(joinerReport.expected_remote_nonce === creatorReport.instance_nonce, "joiner expected-remote nonce mismatch");
   assert(creatorReport.remote_player_id === joinerReport.player_id, "creator remote player mismatch");
   assert(joinerReport.remote_player_id === creatorReport.player_id, "joiner remote player mismatch");
-  if (!isCloseProbe()) {
+  if (!isCloseProbe() && phaseMode !== "inbound-overflow") {
     assert(creatorReport.relay_sent_sequence_count === joinerReport.relay_received_sequence_count, "creator->joiner sequence count mismatch");
     assert(creatorReport.relay_sent_first_sequence === joinerReport.relay_received_first_sequence, "creator->joiner first sequence mismatch");
     assert(creatorReport.relay_sent_last_sequence === joinerReport.relay_received_last_sequence, "creator->joiner last sequence mismatch");
@@ -625,7 +760,7 @@ function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser,
   }
   for (const peer of [creator, joiner]) {
     assert(peer.errors.length === 0, `${peer.role}: browser errors:\n${peer.errors.join("\n")}`);
-    assert(peer.logs.filter((line) => line.includes("FORTRESS_WASM_RESULT ")).length === 1, `${peer.role}: expected exactly one report log`);
+    assert(peer.logs.filter((line) => line.includes("FORTRESS_WASM_RESULT ")).length === (phaseMode === "inbound-overflow" && peer.role === "creator" ? 0 : 1), `${peer.role}: wrong terminal report count`);
   }
 }
 
@@ -750,6 +885,7 @@ function healthViolations(name, report) {
   check(report.relay_frames_enqueued === report.client_game_data_sent, "send conservation failed");
   check(report.relay_frames_received === report.client_game_data_received, "receive conservation failed");
   check(report.final_pipeline_queue_depth === 0, `final pipeline depth=${report.final_pipeline_queue_depth}`);
+  check(report.relay_inbound_overflow_fault === null && report.overflow_replays_sent === 0, "unexpected overflow probe evidence");
   check(report.peak_pipeline_queue_depth <= 64, `peak pipeline depth=${report.peak_pipeline_queue_depth}`);
   check(report.peak_oldest_queue_age_us <= 500_000, `oldest queue age=${report.peak_oldest_queue_age_us}us`);
   const forbidden = ["relay_malformed", "relay_wrong_destination", "relay_unknown_sender", "relay_outbound_overflow", "relay_inbound_overflow", "relay_encode_failures", "relay_completion_underflow", "client_messages_undecodable", "checksums_mismatched", "events_discarded_total", "wait_recommendations"];
@@ -878,6 +1014,7 @@ async function persistPeerArtifacts(peer, knownReport) {
         active: globalThis.__FORTRESS_ACTIVE,
         sync: globalThis.__FORTRESS_SYNC,
         diagnostic: globalThis.__FORTRESS_DIAGNOSTIC,
+        overflow: globalThis.__FORTRESS_OVERFLOW,
         result: globalThis.__FORTRESS_RESULT,
       }));
       const snapshotTimeout = new Promise((_, reject) => {
