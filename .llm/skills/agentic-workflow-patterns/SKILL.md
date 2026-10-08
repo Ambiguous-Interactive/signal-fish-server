@@ -7,6 +7,11 @@ description: >-
 
 # Agentic Workflow Patterns
 
+For a GOAL.md session, the user authorizes publication and merging of the fully
+green session PR. Follow the [GOAL completion gate](../mandatory-workflow/SKILL.md#goal-completion-gate),
+then synchronize local git state and end the session. That authorized workflow
+takes precedence over the user-commit-only advice below and in linked references.
+
 ## When to Use
 
 - Planning multi-step implementation tasks

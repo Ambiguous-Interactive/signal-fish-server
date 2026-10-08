@@ -145,6 +145,7 @@ complete workflow after confirming the intended diff:
    extension / GitHub app.
 5. Monitor required checks and continue fixing in-scope failures until the PR is
    green.
+6. For GOAL.md sessions, follow the completion gate below.
 
 GitHub CLI (`gh`) is an optional fallback, not a prerequisite. Its absence is not
 a blocker when the Git remote accepts pushes and the connected VS Code GitHub
@@ -174,6 +175,37 @@ chore: update MSRV from 1.87.0 to 1.88.0
 1. ✅ Verify all checks pass (fmt, clippy, test)
 2. ✅ Provide commit instructions to user
 3. ❌ Do not infer permission to commit or publish
+
+---
+
+## GOAL completion gate
+
+A GOAL.md session ends only after its fully green PR is merged and local git
+state matches the remote base. The goal authorizes this merge; do not ask for
+approval again. This rule takes precedence over older user-commit-only advice
+in other skills for this authorized workflow.
+
+1. Refresh the PR and verify its current head SHA. Inspect all check runs,
+   commit statuses, and triggered workflows, including paginated results.
+   All applicable CI must pass; nothing may remain pending or failed.
+   Accept policy skips only when the check does not apply to the change.
+2. Inspect reviews, inline threads, and conversation comments. Address all PR
+   feedback, resolve addressed threads, and satisfy repository merge rules.
+   If fixes change the head, repeat CI and feedback verification.
+3. Merge through the connected GitHub extension/app with the verified head SHA
+   as the expected head. Verify GitHub reports the PR merged. A queued or
+   auto-merge request alone does not prove completion.
+4. Use local git to fetch and prune, switch to the PR base branch, and
+   fast-forward it to its remote tracking branch. Verify local HEAD equals
+   the freshly fetched remote base and the tracked worktree is clean.
+   Preserve unrelated user work; do not force-reset or discard it.
+5. Update the ignored plan and progress note with merge and sync evidence.
+   Mark the goal complete and end the session. Do not start another task or
+   PR after this gate passes.
+
+If CI, feedback, merging, or local synchronization remains incomplete, keep
+working on this PR within the session time limit. Record pending work at the
+limit and keep the goal active. A green but unmerged PR is incomplete.
 
 ---
 

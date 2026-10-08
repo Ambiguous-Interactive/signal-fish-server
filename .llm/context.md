@@ -86,6 +86,10 @@ relevant source, test, documentation, issue, or pull request.
   review in `progress/` and resume the same PR next session.
 - Keep `PLAN.md` local and gitignored. Durable decisions belong in source,
   documentation, issues, and PRs.
+- GOAL completion requires merging the green PR, syncing local git state,
+  and ending the session. Follow the
+  [completion gate](skills/mandatory-workflow/SKILL.md#goal-completion-gate).
+  GOAL.md authorizes this merge; no further approval is needed.
 
 ```bash
 # Rust changes: run in order. Full local gate — once before publication;
@@ -293,8 +297,3 @@ Canonical protocol samples:
 - [v3 server messages](code-samples/protocol/v3-server-messages.jsonl)
 
 ---
-
-## Skills Library
-
-The canonical skill list is generated in [skills/index.md](skills/index.md).
-Do not maintain a duplicate generated list in this file.
