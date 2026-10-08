@@ -233,6 +233,19 @@ test('only a causally prior exact range authorizes a sequence gap', () => {
   }
 });
 
+test('invalid delivery classes never expose field values', () => {
+  const token = 'private-room-token-in-delivery-class';
+  let detail = '';
+  try {
+    joinedState().recordGameData({ from_player: SENDER, epoch: 1, seq: 1, class: token });
+  } catch (error) {
+    detail = String(error);
+  }
+  if (!detail.includes('invalid delivery class') || detail.includes(token)) {
+    throw new Error('delivery-class rejection must omit the private field value');
+  }
+});
+
 test('class/key combinations and cumulative counters are enforced', () => {
   const validCases: Array<[unknown, unknown]> = [
     [undefined, undefined],
@@ -1403,10 +1416,7 @@ test('accountability mode follows ProtocolInfo rather than advertised max', () =
   const applicationFrame = classifyBrowserServerInput(
     JSON.stringify({ type: 'GameData', data: { from_player: SENDER } }),
   );
-  expectError(
-    () => negotiatedProtocolVersion(applicationFrame, 3),
-    'expected ProtocolInfo, got GameData',
-  );
+  expectError(() => negotiatedProtocolVersion(applicationFrame, 3), 'expected ProtocolInfo');
 });
 
 test('join success effects follow negotiated-v3 snapshot validation', () => {

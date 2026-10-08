@@ -173,6 +173,45 @@ impl ServerProcess {
         )
     }
 
+    /// Start the real Unix shutdown drain and wait for its committed barrier.
+    #[cfg(unix)]
+    pub async fn begin_drain(&mut self) {
+        let pid = self
+            .child
+            .as_ref()
+            .and_then(Child::id)
+            .expect("live server pid");
+        let status = tokio::time::timeout(
+            Duration::from_secs(5),
+            Command::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .status(),
+        )
+        .await
+        .expect("signal server within deadline")
+        .expect("send SIGTERM");
+        assert!(status.success(), "SIGTERM failed: {status}");
+        tokio::time::timeout(EVENT_TIMEOUT, async {
+            loop {
+                if self
+                    .captured_output()
+                    .contains("Server shutdown drain started")
+                {
+                    break;
+                }
+                assert!(
+                    self.child.as_mut().unwrap().try_wait().unwrap().is_none(),
+                    "server exited before drain barrier; {}",
+                    self.captured_output()
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("server drain starts within deadline");
+    }
+
     /// Stop and reap the server before its temporary diagnostic directory is
     /// released. Drop remains the panic-path emergency kill.
     pub async fn shutdown(&mut self) {

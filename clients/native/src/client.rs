@@ -51,7 +51,7 @@ use base64::Engine as _;
 use serde_json::json;
 use signal_fish_server::protocol::{
     ClientMessage, DeliveryReportPayload, DirectEndpoint, ErrorCode, GameDataEncoding, IceServer,
-    LobbyState, PlayerId, PlayerInfo, ServerMessage, SessionGeneration, Transport,
+    LobbyState, PlayerId, PlayerInfo, RoomId, ServerMessage, SessionGeneration, Transport,
 };
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
@@ -273,9 +273,9 @@ fn is_coordinated_p2p_rebuild_attempt(
     rebuild_configured && retry_count > 0 && attempt == retry_count
 }
 
-/// Logical exchange evidence is monotonic across physical transport and room
-/// membership teardown. A fully opened pair creates a debt; only observing
-/// both labels in both directions satisfies it.
+/// Logical exchange obligations survive transport and membership teardown.
+/// Ordinary pair retries keep evidence; a room incarnation restore invalidates
+/// current members' receipts and requires a new bidirectional exchange.
 #[derive(Default)]
 struct ExchangeLedger {
     obligations: BTreeSet<PlayerId>,
@@ -286,6 +286,13 @@ struct ExchangeLedger {
 impl ExchangeLedger {
     fn note_connected(&mut self, peer: PlayerId) {
         self.obligations.insert(peer);
+    }
+
+    /// A restored player has a new room incarnation. Keep logical debt,
+    /// but require fresh bidirectional traffic instead of old receipts.
+    fn reset_incarnation(&mut self, peer: PlayerId) {
+        self.sent.remove(&peer);
+        self.received.remove(&peer);
     }
 
     fn has_sent(&self, peer: PlayerId, label: &str) -> bool {
@@ -439,6 +446,18 @@ pub async fn run(cli: &Cli) -> i32 {
 async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
     validate_p2p_rebuild_retry_count(cli.p2p_rebuild_release_file.is_some(), cli.p2p_retry_count)
         .map_err(FatalError::protocol)?;
+    if !cli.reconnect_release_file.is_empty() && !cli.is_v3() {
+        return Err(FatalError::protocol(
+            "room restore requires --protocol-version 3",
+        ));
+    }
+    if !cli.reconnect_resume_file.is_empty()
+        && cli.reconnect_resume_file.len() != cli.reconnect_release_file.len()
+    {
+        return Err(FatalError::protocol(
+            "each reconnect release path requires one resume path",
+        ));
+    }
     // Room-capacity usage errors reject before any network touch (the
     // browser CLI rejects at parse time for the same reason): a doomed run
     // must not cost a server-side room or a connection.
@@ -480,8 +499,25 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
     });
 
     let (negotiated_version, game_data_encoding) = authenticate(&mut ws, cli).await?;
-    let (my_id, mut present, lobby_state, ready_players, accountability) =
-        join_room(&mut ws, cli, negotiated_version >= 3).await?;
+    let (
+        my_id,
+        mut present,
+        lobby_state,
+        ready_players,
+        accountability,
+        room_id,
+        reconnection_token,
+    ) = join_room(&mut ws, cli, negotiated_version >= 3).await?;
+
+    if !cli.reconnect_release_file.is_empty()
+        && reconnection_token
+            .as_ref()
+            .is_none_or(|token| token.is_empty())
+    {
+        return Err(FatalError::protocol(
+            "server did not issue a room restore token",
+        ));
+    }
 
     present.insert(my_id);
     let members_seen = present.clone();
@@ -493,6 +529,10 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         selected_pair_tx,
         selected_pair_rx,
         my_id,
+        room_id,
+        reconnection_token,
+        reconnect_attempts: 0,
+        reconnect_poll_at: (!cli.reconnect_release_file.is_empty()).then(Instant::now),
         negotiated_version,
         game_data_encoding,
         accountability,
@@ -593,9 +633,12 @@ fn advance_authenticate_handshake(
             });
             Ok(false)
         }
-        other => Err(FatalError::protocol(format!(
-            "expected Authenticated, got {other:?}"
-        ))),
+        ServerMessage::Reconnected(_) => Err(FatalError::protocol(
+            "received Reconnected before Authenticated",
+        )),
+        _ => Err(FatalError::protocol(
+            "expected Authenticated, received an unexpected server message",
+        )),
     }
 }
 
@@ -692,9 +735,8 @@ fn negotiated_version_from(
                 "ProtocolInfo.protocol_version {version} is outside 2..=3 or exceeds offered version {offered_version}"
             ))),
         },
-        other => Err(FatalError::protocol(format!(
-            "expected ProtocolInfo, got {other:?}"
-        ))),
+        ServerMessage::Reconnected(_) => Err(FatalError::protocol("received Reconnected before ProtocolInfo")),
+        _ => Err(FatalError::protocol("expected ProtocolInfo, received an unexpected server message")),
     }
 }
 
@@ -728,6 +770,8 @@ async fn join_room(
         LobbyState,
         BTreeSet<PlayerId>,
         DeliveryAccountability,
+        RoomId,
+        Option<String>,
     ),
     FatalError,
 > {
@@ -805,6 +849,8 @@ async fn join_room(
                     payload.lobby_state,
                     ready_players,
                     accountability,
+                    payload.room_id,
+                    payload.reconnection_token,
                 ));
             }
             ServerMessage::PlayerJoined { player } => early_joined.push(player),
@@ -818,10 +864,15 @@ async fn join_room(
                     "room join failed: {reason} ({error_code:?})"
                 )))
             }
-            other => {
-                return Err(FatalError::protocol(format!(
-                    "expected RoomJoined, got {other:?}"
-                )))
+            ServerMessage::Reconnected(_) => {
+                return Err(FatalError::protocol(
+                    "received Reconnected before RoomJoined",
+                ));
+            }
+            _ => {
+                return Err(FatalError::protocol(
+                    "expected RoomJoined, received an unexpected server message",
+                ))
             }
         }
     }
@@ -1011,16 +1062,31 @@ where
             Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>,
         > + Unpin,
 {
-    match wire::next_server_message(ws, HANDSHAKE_TIMEOUT).await {
-        Ok(message) => {
-            validate_json_negotiated_server_message(&message)?;
-            Ok(message)
-        }
-        Err(wire::ServerMessageReadError::Protocol(message)) => Err(FatalError::protocol(message)),
-        Err(wire::ServerMessageReadError::Connection(message)) => {
-            Err(FatalError::connection(message))
-        }
-    }
+    let deadline = Deadline::after(Instant::now(), HANDSHAKE_TIMEOUT);
+    deadline
+        .timeout(async {
+            loop {
+                match wire::next_server_message(ws, HANDSHAKE_TIMEOUT).await {
+                    Ok(ServerMessage::GoingAway { .. }) => {
+                        // Drain advice can precede an authenticated admission
+                        // refusal. Read the typed result under the same deadline.
+                        continue;
+                    }
+                    Ok(message) => {
+                        validate_json_negotiated_server_message(&message)?;
+                        return Ok(message);
+                    }
+                    Err(wire::ServerMessageReadError::Protocol(message)) => {
+                        return Err(FatalError::protocol(message));
+                    }
+                    Err(wire::ServerMessageReadError::Connection(message)) => {
+                        return Err(FatalError::connection(message));
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| FatalError::connection("server handshake response timed out"))?
 }
 
 /// Input multiplexed by the main loop.
@@ -1143,6 +1209,10 @@ struct Orchestrator<'a> {
     selected_pair_tx: mpsc::UnboundedSender<SelectedPairProbeResult>,
     selected_pair_rx: mpsc::UnboundedReceiver<SelectedPairProbeResult>,
     my_id: PlayerId,
+    room_id: RoomId,
+    reconnection_token: Option<String>,
+    reconnect_attempts: usize,
+    reconnect_poll_at: Option<Instant>,
     negotiated_version: u16,
     /// Game-data encoding negotiated in `Authenticate` (issue #627): drives
     /// the `--relay-payload` send shape and the binary receive interpretation.
@@ -1299,11 +1369,7 @@ impl Orchestrator<'_> {
                     // handler ran past the window.
                     self.pong_deadline = None;
                     self.pong_grace_applied = false;
-                    let message: ServerMessage = serde_json::from_str(&text).map_err(|error| {
-                        FatalError::protocol(format!(
-                            "invalid ServerMessage frame: {error}; text={text}"
-                        ))
-                    })?;
+                    let message = wire::decode_server_text(&text).map_err(FatalError::protocol)?;
                     // A text `GameData` under a negotiated opaque format is
                     // LEGITIMATE here, so it is applied, not refused: the
                     // server's text relay lane is format-blind — a JSON
@@ -1342,13 +1408,13 @@ impl Orchestrator<'_> {
                 LoopInput::Server(Some(Ok(other)))
                     if wire::is_transparent_transport_control(&other) =>
                 {
-                    tracing::debug!(frame = ?other, "ignoring non-text frame");
+                    tracing::debug!("ignoring WebSocket control frame");
                 }
-                LoopInput::Server(Some(Ok(other))) => {
+                LoopInput::Server(Some(Ok(_))) => {
                     self.accountability
                         .observe_server_message(false)
                         .map_err(FatalError::protocol)?;
-                    tracing::debug!(frame = ?other, "ignoring non-text application frame");
+                    tracing::debug!("ignoring non-text application frame");
                 }
                 LoopInput::Server(Some(Err(error))) => {
                     self.accountability.observe_terminal();
@@ -1393,6 +1459,208 @@ impl Orchestrator<'_> {
         }
     }
 
+    async fn maybe_reconnect(&mut self) -> Result<(), FatalError> {
+        let Some(path) = self.cli.reconnect_release_file.get(self.reconnect_attempts) else {
+            self.reconnect_poll_at = None;
+            return Ok(());
+        };
+        if Self::release_file_pending(Some(path), "--reconnect-release-file").await? {
+            self.reconnect_poll_at = Some(checked_deadline(Instant::now(), SUCCESS_RELEASE_POLL));
+            return Ok(());
+        }
+        let token = self
+            .reconnection_token
+            .clone()
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| FatalError::protocol("server did not issue a room restore token"))?;
+        let attempt = self.reconnect_attempts + 1;
+        // Open an unauthenticated replacement, then drop the old socket without
+        // LeaveRoom. The resume gate lets the harness observe PlayerLeft before
+        // claiming the token and send traffic while this member is absent.
+        let replacement = wire::connect(&self.cli.server_url)
+            .await
+            .map_err(|error| FatalError::connection(format!("{error:#}")))?;
+        drop(std::mem::replace(&mut self.ws, replacement));
+        emit(&Event::ReconnectStarted { attempt });
+        if let Some(path) = self.cli.reconnect_resume_file.get(self.reconnect_attempts) {
+            while Self::release_file_pending(Some(path), "--reconnect-resume-file").await? {
+                if self.run_deadline.is_due(Instant::now()) {
+                    return Err(FatalError::protocol(
+                        "room restore resume gate exceeded run deadline",
+                    ));
+                }
+                tokio::time::sleep(SUCCESS_RELEASE_POLL).await;
+            }
+        }
+        let (version, encoding) = authenticate(&mut self.ws, self.cli).await?;
+        if version < 3 {
+            return Err(FatalError::protocol(
+                "room restore requires a v3 negotiation",
+            ));
+        }
+        self.negotiated_version = version;
+        self.game_data_encoding = encoding;
+        // Counters belong to a physical connection. Room baselines arrive in
+        // Reconnected, after any connection-level accounting prefaces.
+        self.accountability = DeliveryAccountability::new(true);
+        let reconnect = ClientMessage::Reconnect {
+            player_id: self.my_id,
+            room_id: self.room_id,
+            auth_token: token,
+        };
+        let retry_deadline = Deadline::after(Instant::now(), Duration::from_secs(2));
+        wire::send_client_message(&mut self.ws, &reconnect)
+            .await
+            .map_err(|error| FatalError::connection(format!("{error:#}")))?;
+        loop {
+            let message = next_handshake_message(&mut self.ws).await?;
+            if consume_join_accountability_preface(&mut self.accountability, &message, |report| {
+                emit(&Event::DeliveryReport {
+                    report: report.clone(),
+                });
+            })
+            .map_err(FatalError::protocol)?
+            {
+                continue;
+            }
+            match message {
+                ServerMessage::Reconnected(payload) => {
+                    self.reconnect_attempts = attempt;
+                    self.restore_snapshot(*payload).await?;
+                    break;
+                }
+                ServerMessage::ReconnectionFailed {
+                    error_code: ErrorCode::PlayerAlreadyConnected,
+                    ..
+                } if !retry_deadline.is_due(Instant::now()) => {
+                    // Old socket cleanup may still own the live player. This
+                    // refusal preserves the token; every other refusal is final.
+                    tokio::time::sleep(SUCCESS_RELEASE_POLL).await;
+                    wire::send_client_message(&mut self.ws, &reconnect)
+                        .await
+                        .map_err(|error| FatalError::connection(format!("{error:#}")))?;
+                }
+                ServerMessage::ReconnectionFailed { reason, error_code } => {
+                    return Err(FatalError::protocol(format!(
+                        "room restore refused: {reason} ({error_code:?})"
+                    )));
+                }
+                _ => {
+                    return Err(FatalError::protocol(
+                        "expected Reconnected during room restore",
+                    ))
+                }
+            }
+        }
+        self.reconnect_poll_at = (attempt < self.cli.reconnect_release_file.len())
+            .then(|| checked_deadline(Instant::now(), SUCCESS_RELEASE_POLL));
+        self.next_ping_at = checked_deadline(Instant::now(), PING_INTERVAL);
+        self.pong_deadline = None;
+        self.pong_grace_applied = false;
+        self.maybe_send_ready().await?;
+        self.maybe_send_start_game().await?;
+        Ok(())
+    }
+
+    async fn restore_snapshot(
+        &mut self,
+        payload: signal_fish_server::protocol::ReconnectedPayload,
+    ) -> Result<(), FatalError> {
+        if payload.player_id != self.my_id || payload.room_id != self.room_id {
+            return Err(FatalError::protocol(
+                "room restore changed the room or player identity",
+            ));
+        }
+        let token_rotated = payload.reconnection_token.as_ref().is_some_and(|token| {
+            !token.is_empty() && Some(token) != self.reconnection_token.as_ref()
+        });
+        if self.negotiated_version >= 3 && (!token_rotated || payload.replay.is_none()) {
+            return Err(FatalError::protocol(
+                "v3 room restore omitted token rotation or replay status",
+            ));
+        }
+        self.accountability
+            .rebaseline_reconnected(&payload.current_players, &payload.sender_watermarks)
+            .map_err(FatalError::protocol)?;
+        let present: BTreeSet<_> = payload
+            .current_players
+            .iter()
+            .map(|player| player.id)
+            .collect();
+        if !present.contains(&self.my_id) {
+            return Err(FatalError::protocol(
+                "room restore snapshot omitted this player",
+            ));
+        }
+        // A snapshot supersedes missed control events. Applying their history
+        // on top could resurrect departed members or stale readiness.
+        self.present = present;
+        self.members_seen.extend(self.present.iter().copied());
+        for peer in &self.present {
+            if *peer != self.my_id {
+                self.exchange_ledger.reset_incarnation(*peer);
+            }
+        }
+        self.lobby_state = Some(payload.lobby_state.clone());
+        self.in_lobby = payload.lobby_state == LobbyState::Lobby;
+        self.game_started = payload.lobby_state == LobbyState::Finalized;
+        self.late_joined = self.game_started;
+        self.ready_sent = payload.ready_players.contains(&self.my_id);
+        self.start_game_gate = StartGameGate::new(payload.ready_players.iter().copied().collect());
+        self.reconnection_token = payload.reconnection_token;
+        self.initial_session_plan_pending = self.negotiated_version >= 3 && self.game_started;
+        self.pending_membership_plans.clear();
+        for peer in self.expected_peers.clone() {
+            self.remove_pair_obligation(peer).await;
+        }
+        // A fresh callback channel prevents old engine work from crossing the
+        // restore boundary even if an async callback finishes after closure.
+        let (engine_tx, engine_rx) = mpsc::unbounded_channel();
+        self.engine = Engine::new(self.cli.engine_settings(), engine_tx).map_err(|error| {
+            FatalError::protocol(format!("webrtc engine init failed: {error:#}"))
+        })?;
+        self.engine_rx = engine_rx;
+        let (selected_pair_tx, selected_pair_rx) = mpsc::unbounded_channel();
+        self.selected_pair_tx = selected_pair_tx;
+        self.selected_pair_rx = selected_pair_rx;
+        self.selected_pair_evidence = SelectedPairEvidence::default();
+        self.current_session_generation = None;
+        self.pending_signals.clear();
+        self.pending_pair_directives.clear();
+        self.webrtc_plan_seen = false;
+        self.last_ice_servers = payload.ice_servers;
+        self.transport_status = None;
+        self.p2p_deadline = None;
+        self.p2p_retry_at = None;
+        self.p2p_rebuild_release_poll_at = None;
+        self.p2p_rebuild_released = self.cli.p2p_rebuild_release_file.is_none();
+        self.exchange_released = self.cli.exchange_release_file.is_none();
+        self.unreliable_exchange_released = self.cli.unreliable_exchange_release_file.is_none();
+        self.drop_ice_from = None;
+        self.exchange_release_poll_at = None;
+        self.unreliable_exchange_release_poll_at = None;
+        self.peer_status_from.clear();
+        self.relay_received_from.clear();
+        self.relay_sent = false;
+        self.relay_send_at = (self.cli.relay_payload.is_some() && self.game_started)
+            .then(|| checked_deadline(Instant::now(), RELAY_SEND_SETTLE));
+        self.exchange_ready_reported = false;
+        self.exchange_reliable_ready_reported = false;
+        self.linger_until = None;
+        self.success_criteria_reported = false;
+        self.success_release_poll_at = None;
+        emit(&Event::Reconnected {
+            attempt: self.reconnect_attempts,
+            player_id: self.my_id,
+            lobby_state: payload.lobby_state,
+            current_players: self.present.iter().copied().collect(),
+            sender_watermarks: payload.sender_watermarks,
+            replay: payload.replay,
+            token_rotated,
+        });
+        Ok(())
+    }
+
     /// Earliest pending timer (the run deadline at the latest), so the select
     /// loop always wakes for due work even on a silent wire.
     fn next_wake(&self) -> Instant {
@@ -1419,6 +1687,9 @@ impl Orchestrator<'_> {
             wake = wake.min(at);
         }
         if let Some(at) = self.p2p_retry_at {
+            wake = wake.min(at);
+        }
+        if let Some(at) = self.reconnect_poll_at {
             wake = wake.min(at);
         }
         if let Some(at) = self.p2p_release_poll_at {
@@ -1448,6 +1719,13 @@ impl Orchestrator<'_> {
     /// Fire due timers; returns `Some(exit_code)` when the run is over.
     async fn process_timers(&mut self) -> Result<Option<i32>, FatalError> {
         let now = Instant::now();
+        if self.reconnect_poll_at.is_some_and(|at| now >= at) {
+            let deadline = self.run_deadline;
+            deadline
+                .timeout(self.maybe_reconnect())
+                .await
+                .map_err(|_| FatalError::protocol("room restore exceeded run deadline"))??;
+        }
 
         // Mandatory keepalive: send `Ping` on cadence and demand a timely
         // `Pong`. An unanswered ping is a broken connection or control path —
@@ -2088,29 +2366,28 @@ impl Orchestrator<'_> {
                     )
                     .map_err(FatalError::protocol)?;
             }
-            ServerMessage::Reconnected(payload) => {
-                self.accountability
-                    .rebaseline_reconnected(&payload.current_players, &payload.sender_watermarks)
-                    .map_err(FatalError::protocol)?;
-                self.lobby_state = Some(payload.lobby_state.clone());
-                self.in_lobby = payload.lobby_state == LobbyState::Lobby;
-                self.game_started = payload.lobby_state == LobbyState::Finalized;
-                // The reconnect snapshot's readiness is authoritative: lobby
-                // readiness can be pruned while we were away, so a cached
-                // pre-disconnect snapshot is exactly the stale `all_ready`
-                // class this gate exists to avoid.
-                self.start_game_gate
-                    .snapshot(payload.ready_players.iter().copied());
-                if self.negotiated_version >= 3 && payload.lobby_state == LobbyState::Finalized {
-                    self.initial_session_plan_pending = true;
-                    self.linger_until = None;
-                }
+            ServerMessage::Reconnected(_) => {
+                return Err(FatalError::protocol(
+                    "received Reconnected without a pending room restore",
+                ));
+            }
+            ServerMessage::ReconnectionFailed { reason, error_code } => {
+                return Err(FatalError::protocol(format!(
+                    "room restore refused: {reason} ({error_code:?})"
+                )));
             }
             ServerMessage::PlayerReconnected { player_id, epoch } => {
                 self.accountability
                     .note_player_reconnected(player_id, epoch)
                     .map_err(FatalError::protocol)?;
                 restore_reconnected_member(&mut self.present, &mut self.members_seen, player_id);
+                self.exchange_ledger.reset_incarnation(player_id);
+                self.exchange_reliable_ready_reported = false;
+                self.exchange_ready_reported = false;
+                self.exchange_released = self.cli.exchange_release_file.is_none();
+                self.unreliable_exchange_released =
+                    self.cli.unreliable_exchange_release_file.is_none();
+                self.p2p_rebuild_released = self.cli.p2p_rebuild_release_file.is_none();
                 if require_finalized_membership_plan(
                     &mut self.pending_membership_plans,
                     self.negotiated_version,
@@ -2215,8 +2492,8 @@ impl Orchestrator<'_> {
                 self.pong_deadline = None;
                 self.pong_grace_applied = false;
             }
-            other => {
-                tracing::debug!(message = ?other, "ignoring server message");
+            _ => {
+                tracing::debug!("ignoring server message");
             }
         }
         Ok(())
@@ -2861,8 +3138,12 @@ impl Orchestrator<'_> {
     /// the opaque payload surfaces base64-rendered in the event stream
     /// (lossless, encoding-explicit — the bytes are never guessed at).
     async fn handle_binary_game_data(&mut self, wire_bytes: &[u8]) -> Result<(), FatalError> {
-        let frame = wire::decode_v3_binary_game_data(wire_bytes).map_err(|error| {
-            FatalError::protocol(format!("invalid v3 binary game-data envelope: {error}"))
+        let frame = wire::decode_v3_binary_game_data(wire_bytes).map_err(|_| {
+            // Decoder errors can contain untrusted keys or encoding tokens.
+            FatalError::protocol(format!(
+                "invalid v3 binary game-data envelope ({} bytes)",
+                wire_bytes.len()
+            ))
         })?;
         let disposition = self
             .accountability
@@ -2937,6 +3218,9 @@ impl Orchestrator<'_> {
     /// Human-readable list of unmet criteria (for the failure diagnostics).
     fn unmet_criteria(&self) -> Vec<String> {
         let mut unmet = Vec::new();
+        if self.reconnect_attempts < self.cli.reconnect_release_file.len() {
+            unmet.push("awaiting requested room restore".to_string());
+        }
         if !self.game_started {
             unmet.push("GameStarting not received".to_string());
         }
@@ -3154,12 +3438,12 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
     use clap::Parser;
-    use tokio::time::Duration;
+    use tokio::time::{Duration, Instant};
 
     use serde_json::json;
     use signal_fish_server::protocol::{
         ClientMessage, DeliveryCountersByClass, DeliveryReportPayload, DirectEndpoint, ErrorCode,
-        GameDataEncoding, LobbyState, PlayerId, ServerMessage,
+        GameDataEncoding, LobbyState, PlayerId, RoomId, ServerMessage,
     };
 
     use crate::accountability::DeliveryAccountability;
@@ -3723,81 +4007,31 @@ mod tests {
         );
     }
 
-    /// Pins the orchestrator WIRING behind the [`StartGameGate`] (issue #449):
-    /// the pure-gate test above cannot observe whether the server-message arms
-    /// still call `maybe_send_start_game`. Driving `handle_server_message`
-    /// through the exact #449 sequence against a loopback fake server must put
-    /// the matching `ClientMessage` frames on the wire — one `StartGame` on
-    /// the first all-ready broadcast, none on a duplicate broadcast, and
-    /// exactly one re-issue when the unready latecomer departs. The
-    /// `PlayerLeft` arm is the one recovery path with no readiness broadcast
-    /// to fall back on, so dropping that call site would silently reintroduce
-    /// the departure stall while every gate-level test stays green.
-    #[tokio::test]
-    async fn player_left_arm_reissues_start_game_on_the_wire_after_invalidation() {
-        // Loopback fake server: accepts the reference client and forwards
-        // every client frame to the test as its serialized wire value.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback fake-server listener");
-        let server_url = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
-        let (client_frames_tx, mut client_frames) = tokio::sync::mpsc::unbounded_channel();
-        tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("reference client connects");
-            let mut ws = tokio_tungstenite::accept_async(stream)
-                .await
-                .expect("loopback websocket handshake");
-            while let Some(Ok(Message::Text(text))) = futures_util::StreamExt::next(&mut ws).await {
-                let frame: ClientMessage =
-                    serde_json::from_str(&text).expect("valid ClientMessage frame");
-                if client_frames_tx
-                    .send(serde_json::to_value(frame).expect("serialize ClientMessage"))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-
-        // Creator with `--peers 1`: alone in the room, so the first all-ready
-        // broadcast also fires `maybe_send_ready`.
-        let cli = Cli::parse_from([
-            "signal-fish-reference-native",
-            "--server-url",
-            server_url.as_str(),
-            "--create-room",
-            "--peers",
-            "1",
-        ]);
-        let creator = PlayerId::from_u128(0x00C7_EA7E_00C1);
-        let latecomer = PlayerId::from_u128(0x00B0_B1A7_E0C1);
-
+    fn fixture_orchestrator<'a>(
+        cli: &'a Cli,
+        ws: crate::wire::WsStream,
+        my_id: PlayerId,
+    ) -> Orchestrator<'a> {
         let (engine_tx, engine_rx) = tokio::sync::mpsc::unbounded_channel();
         let (selected_pair_tx, selected_pair_rx) = tokio::sync::mpsc::unbounded_channel();
-        let engine = crate::engine::Engine::new(cli.engine_settings(), engine_tx)
-            .expect("the webrtc engine initializes in-process");
-        let (ws, _handshake) = tokio_tungstenite::connect_async(server_url.as_str())
-            .await
-            .expect("reference client connects to the loopback fake server");
-
-        // Mirrors the `run_inner` constructor for a v2 creator that just
-        // joined a Waiting room. v2 keeps the fixtures free of v3 epoch
-        // baselines; every exercised arm is version-independent. A new
-        // Orchestrator field breaks this literal at compile time, forcing the
-        // author to decide how it participates in this wiring.
-        let mut orchestrator = Orchestrator {
-            cli: &cli,
+        let engine = crate::engine::Engine::new(cli.engine_settings(), engine_tx).unwrap();
+        Orchestrator {
+            cli,
             ws,
             engine,
             engine_rx,
             selected_pair_tx,
             selected_pair_rx,
-            my_id: creator,
+            my_id,
+            room_id: RoomId::nil(),
+            reconnection_token: None,
+            reconnect_attempts: 0,
+            reconnect_poll_at: None,
             negotiated_version: 2,
             game_data_encoding: GameDataEncoding::Json,
             accountability: DeliveryAccountability::new(false),
-            present: BTreeSet::from([creator]),
-            members_seen: BTreeSet::from([creator]),
+            present: BTreeSet::from([my_id]),
+            members_seen: BTreeSet::from([my_id]),
             lobby_state: Some(LobbyState::Waiting),
             in_lobby: false,
             ready_sent: false,
@@ -3849,7 +4083,371 @@ mod tests {
             next_ping_at: checked_deadline(tokio::time::Instant::now(), PING_INTERVAL),
             pong_deadline: None,
             pong_grace_applied: false,
+        }
+    }
+
+    // Regression #819: runtime decoding has the same token privacy contract.
+    #[tokio::test]
+    async fn malformed_runtime_snapshot_never_exposes_room_token() {
+        use futures_util::SinkExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            ws.send(Message::Text(
+                json!({"type":"Reconnected", "data": {
+                    "reconnection_token": "private-runtime-room-token", "lobby_state": "invalid"
+                }})
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+            ws
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let _server_ws = server.await.unwrap();
+        let cli = Cli::parse_from(["reference-native", "--server-url", &url, "--create-room"]);
+        let mut state = fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+        let error = state.run_loop().await.unwrap_err();
+        assert_eq!(error.code, EXIT_PROTOCOL_ERROR);
+        assert!(
+            !error.message.contains("private-runtime-room-token"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("bytes, Data error at line"),
+            "{}",
+            error.message
+        );
+    }
+
+    // Regression #819: binary metadata is untrusted diagnostic text too.
+    #[tokio::test]
+    async fn malformed_runtime_binary_metadata_never_exposes_tokens() {
+        use futures_util::SinkExt;
+        let mut failures = Vec::new();
+        for (extra_key, encoding) in [
+            (Some("private-binary-key-token"), "rkyv"),
+            (None, "private-binary-encoding-token"),
+        ] {
+            let mut bytes = Vec::new();
+            rmp::encode::write_map_len(&mut bytes, if extra_key.is_some() { 6 } else { 5 })
+                .unwrap();
+            rmp::encode::write_str(&mut bytes, "from_player").unwrap();
+            rmp::encode::write_bin(&mut bytes, PlayerId::from_u128(2).as_bytes()).unwrap();
+            rmp::encode::write_str(&mut bytes, "encoding").unwrap();
+            rmp::encode::write_str(&mut bytes, encoding).unwrap();
+            rmp::encode::write_str(&mut bytes, "payload").unwrap();
+            rmp::encode::write_bin(&mut bytes, &[1, 2]).unwrap();
+            rmp::encode::write_str(&mut bytes, "seq").unwrap();
+            rmp::encode::write_uint(&mut bytes, 1).unwrap();
+            rmp::encode::write_str(&mut bytes, "epoch").unwrap();
+            rmp::encode::write_uint(&mut bytes, 1).unwrap();
+            if let Some(key) = extra_key {
+                rmp::encode::write_str(&mut bytes, key).unwrap();
+                rmp::encode::write_nil(&mut bytes).unwrap();
+            }
+            let byte_count = bytes.len();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                ws.send(Message::Binary(bytes.into())).await.unwrap();
+                ws
+            });
+            let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            let _server_ws = server.await.unwrap();
+            let cli = Cli::parse_from(["reference-native", "--server-url", &url, "--create-room"]);
+            let mut state = fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+            state.negotiated_version = 3;
+            state.game_data_encoding = GameDataEncoding::Rkyv;
+            state.accountability = DeliveryAccountability::new(true);
+            let error = state.run_loop().await.unwrap_err();
+            assert_eq!(error.code, EXIT_PROTOCOL_ERROR);
+            failures.push((byte_count, error.message));
+        }
+        assert!(
+            failures
+                .iter()
+                .all(|(_, message)| !message.contains("private-binary")),
+            "binary metadata leaked: {failures:?}"
+        );
+        for (byte_count, message) in failures {
+            assert_eq!(
+                message,
+                format!("invalid v3 binary game-data envelope ({byte_count} bytes)")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn room_restore_invalid_options_fail_before_connecting() {
+        for (extra, expected) in [
+            (
+                vec![
+                    "--protocol-version",
+                    "2",
+                    "--reconnect-release-file",
+                    "release",
+                ],
+                "protocol-version 3",
+            ),
+            (
+                vec![
+                    "--reconnect-release-file",
+                    "one",
+                    "--reconnect-release-file",
+                    "two",
+                    "--reconnect-resume-file",
+                    "resume",
+                ],
+                "one resume path",
+            ),
+        ] {
+            let mut args = vec![
+                "reference-native",
+                "--server-url",
+                "ws://127.0.0.1:1/v3/ws",
+                "--create-room",
+            ];
+            args.extend(extra);
+            let cli = Cli::parse_from(args);
+            let error = super::run_inner(&cli).await.unwrap_err();
+            assert_eq!(error.code, EXIT_PROTOCOL_ERROR);
+            assert!(error.message.contains(expected), "{}", error.message);
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_snapshot_replaces_stale_membership_latches_and_pair_state() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(tcp).await.unwrap()
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let _server_ws = server.await.unwrap();
+        let cli = Cli::parse_from([
+            "reference-native",
+            "--server-url",
+            &url,
+            "--create-room",
+            "--exchange",
+            "--exchange-release-file",
+            "/held-exchange",
+            "--unreliable-exchange-release-file",
+            "/held-unreliable",
+            "--p2p-rebuild-release-file",
+            "/held-rebuild",
+            "--p2p-retry-count",
+            "1",
+        ]);
+        let me = PlayerId::from_u128(1);
+        let departed = PlayerId::from_u128(2);
+        let joined = PlayerId::from_u128(3);
+        let mut state = fixture_orchestrator(&cli, ws, me);
+        state.negotiated_version = 3;
+        state.accountability = DeliveryAccountability::new(true);
+        state.reconnection_token = Some("old-private-token".to_string());
+        state.present.insert(departed);
+        state.members_seen.insert(departed);
+        state.expected_peers.insert(departed);
+        state.connected_pairs.insert(departed);
+        state.pair_roles.insert(departed, true);
+        state.pending_pair_directives.insert(departed, true);
+        state.transport_status = Some(true);
+        state.webrtc_plan_seen = true;
+        state.p2p_rebuild_released = true;
+        state.exchange_released = true;
+        state.unreliable_exchange_released = true;
+        state.ready_sent = true;
+        state.start_game_gate.note_sent();
+        state.game_started = true;
+        state.relay_sent = true;
+        state.peer_status_from.insert(departed);
+        state.relay_received_from.insert(departed);
+        state.exchange_ledger.note_connected(joined);
+        state.exchange_ledger.note_sent(joined, RELIABLE_LABEL);
+        state
+            .exchange_ledger
+            .note_received(joined, RELIABLE_LABEL.to_string());
+        state.success_criteria_reported = true;
+        state.linger_until = Some(Instant::now());
+        let snapshot = serde_json::from_value::<ServerMessage>(json!({
+            "type": "Reconnected", "data": {
+                "room_id": state.room_id, "room_code": "ABC123", "player_id": me,
+                "game_name": "restore", "max_players": 2, "supports_authority": false,
+                "is_authority": false, "lobby_state": "lobby", "ready_players": [joined],
+                "relay_type": "none", "missed_events": [], "replay": "complete",
+                "reconnection_token": "new-private-token",
+                "current_players": [
+                    {"id": me, "name": "self", "is_authority": false, "is_ready": false, "epoch": 2, "seq": 0},
+                    {"id": joined, "name": "new", "is_authority": false, "is_ready": true, "epoch": 1, "seq": 7}
+                ],
+                "sender_watermarks": [
+                    {"player_id": me, "epoch": 2, "seq": 0},
+                    {"player_id": joined, "epoch": 1, "seq": 7}
+                ]
+            }
+        })).unwrap();
+        let ServerMessage::Reconnected(snapshot) = snapshot else {
+            unreachable!()
         };
+        let mut encoding = GameDataEncoding::Json;
+        for error in [
+            advance_authenticate_handshake(
+                ServerMessage::Reconnected(snapshot.clone()),
+                &mut encoding,
+            )
+            .unwrap_err(),
+            negotiated_version_from(
+                ServerMessage::Reconnected(snapshot.clone()),
+                3,
+                GameDataEncoding::Json,
+            )
+            .unwrap_err(),
+        ] {
+            assert!(!error.message.contains("private-token"));
+        }
+        for case in [
+            "changed player",
+            "changed room",
+            "missing token",
+            "reused token",
+            "missing replay",
+            "missing self",
+        ] {
+            let mut invalid = (*snapshot).clone();
+            match case {
+                "changed player" => invalid.player_id = departed,
+                "changed room" => invalid.room_id = RoomId::from_u128(4),
+                "missing token" => invalid.reconnection_token = None,
+                "reused token" => {
+                    invalid.reconnection_token = Some("old-private-token".to_string())
+                }
+                "missing replay" => invalid.replay = None,
+                "missing self" => {
+                    invalid.current_players.retain(|player| player.id != me);
+                    invalid
+                        .sender_watermarks
+                        .retain(|watermark| watermark.player_id != me);
+                }
+                _ => unreachable!(),
+            }
+            let error = state.restore_snapshot(invalid).await.expect_err(case);
+            assert_eq!(error.code, EXIT_PROTOCOL_ERROR, "{case}");
+            assert!(
+                !error.message.contains("private-token"),
+                "{case} leaked token"
+            );
+            assert!(
+                state.present.contains(&departed),
+                "{case} mutated membership"
+            );
+        }
+        state.restore_snapshot(*snapshot).await.unwrap();
+        assert_eq!(state.present, BTreeSet::from([me, joined]));
+        assert_eq!(state.members_seen, BTreeSet::from([me, departed, joined]));
+        assert!(state.in_lobby && !state.game_started && !state.ready_sent);
+        assert!(!state.start_game_gate.sent_since_invalidation);
+        assert_eq!(
+            state.start_game_gate.ready_players,
+            BTreeSet::from([joined])
+        );
+        assert!(state.expected_peers.is_empty() && state.connected_pairs.is_empty());
+        assert!(state.pair_roles.is_empty() && state.pending_pair_directives.is_empty());
+        assert!(state.current_session_generation.is_none() && !state.webrtc_plan_seen);
+        assert!(state.transport_status.is_none() && state.linger_until.is_none());
+        assert!(!state.success_criteria_reported && !state.relay_sent);
+        assert!(
+            !state.p2p_rebuild_released
+                && !state.exchange_released
+                && !state.unreliable_exchange_released
+        );
+        assert!(state.peer_status_from.is_empty() && state.relay_received_from.is_empty());
+        assert!(!state.exchange_ledger.has_sent(joined, RELIABLE_LABEL));
+        assert!(!state
+            .exchange_ledger
+            .label_complete(&BTreeSet::from([joined]), RELIABLE_LABEL));
+        assert!(state.exchange_ledger.obligations.contains(&joined));
+        assert_eq!(
+            state.reconnection_token.as_deref(),
+            Some("new-private-token")
+        );
+        assert_eq!(
+            state
+                .accountability
+                .record_game_data(joined, Some(8), Some(1), None, None)
+                .unwrap(),
+            crate::accountability::GameDataDisposition::Apply
+        );
+        let unsolicited = serde_json::from_value::<ServerMessage>(json!({"type":"Reconnected", "data":{
+            "room_id":state.room_id,"room_code":"ABC123","player_id":me,"game_name":"restore",
+            "max_players":2,"supports_authority":false,"is_authority":false,"lobby_state":"lobby",
+            "ready_players":[],"relay_type":"none","missed_events":[],"current_players":[]
+        }})).unwrap();
+        let error = state.handle_server_message(unsolicited).await.unwrap_err();
+        assert!(error.message.contains("without a pending room restore"));
+    }
+
+    /// Pins the orchestrator WIRING behind the [`StartGameGate`] (issue #449):
+    /// the pure-gate test above cannot observe whether the server-message arms
+    /// still call `maybe_send_start_game`. Driving `handle_server_message`
+    /// through the exact #449 sequence against a loopback fake server must put
+    /// the matching `ClientMessage` frames on the wire — one `StartGame` on
+    /// the first all-ready broadcast, none on a duplicate broadcast, and
+    /// exactly one re-issue when the unready latecomer departs. The
+    /// `PlayerLeft` arm is the one recovery path with no readiness broadcast
+    /// to fall back on, so dropping that call site would silently reintroduce
+    /// the departure stall while every gate-level test stays green.
+    #[tokio::test]
+    async fn player_left_arm_reissues_start_game_on_the_wire_after_invalidation() {
+        // Loopback fake server: accepts the reference client and forwards
+        // every client frame to the test as its serialized wire value.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback fake-server listener");
+        let server_url = format!("ws://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let (client_frames_tx, mut client_frames) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("reference client connects");
+            let mut ws = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("loopback websocket handshake");
+            while let Some(Ok(Message::Text(text))) = futures_util::StreamExt::next(&mut ws).await {
+                let frame: ClientMessage =
+                    serde_json::from_str(&text).expect("valid ClientMessage frame");
+                if client_frames_tx
+                    .send(serde_json::to_value(frame).expect("serialize ClientMessage"))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        // Creator with `--peers 1`: alone in the room, so the first all-ready
+        // broadcast also fires `maybe_send_ready`.
+        let cli = Cli::parse_from([
+            "signal-fish-reference-native",
+            "--server-url",
+            server_url.as_str(),
+            "--create-room",
+            "--peers",
+            "1",
+        ]);
+        let creator = PlayerId::from_u128(0x00C7_EA7E_00C1);
+        let latecomer = PlayerId::from_u128(0x00B0_B1A7_E0C1);
+
+        let (ws, _handshake) = tokio_tungstenite::connect_async(server_url.as_str())
+            .await
+            .expect("connect loopback fake server");
+        let mut orchestrator = fixture_orchestrator(&cli, ws, creator);
 
         // Every expectation is bounded by a real-clock wait far above loopback
         // latency: expected frames resolve in microseconds, and an absent
@@ -4316,6 +4914,42 @@ mod tests {
         assert_eq!(pending.get(&peer), Some(&2));
         clear_departed_membership_plan(&mut pending, peer, Some(2));
         assert!(pending.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handshake_drain_advice_does_not_hide_refusal_or_extend_deadline() {
+        let advice = Message::Text(
+            json!({"type": "GoingAway", "data": {
+                "deadline_ms": 1000, "retry_after_secs": 30
+            }})
+            .to_string()
+            .into(),
+        );
+        let refusal = Message::Text(
+            json!({"type": "ReconnectionFailed", "data": {
+                "reason": "The server is draining", "error_code": "SERVER_DRAINING"
+            }})
+            .to_string()
+            .into(),
+        );
+        let mut input = futures_util::stream::iter([Ok(advice.clone()), Ok(refusal)]);
+        assert!(matches!(
+            next_handshake_message(&mut input).await.unwrap(),
+            ServerMessage::ReconnectionFailed {
+                error_code: ErrorCode::ServerDraining,
+                ..
+            }
+        ));
+        let mut never_responds = futures_util::StreamExt::chain(
+            futures_util::stream::iter([Ok(advice)]),
+            futures_util::stream::pending(),
+        );
+        let started = Instant::now();
+        let error = next_handshake_message(&mut never_responds)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, super::EXIT_CONNECTION_ERROR);
+        assert_eq!(Instant::now() - started, super::HANDSHAKE_TIMEOUT);
     }
 
     #[tokio::test]

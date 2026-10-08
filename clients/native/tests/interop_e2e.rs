@@ -100,6 +100,13 @@
 //!     runs two clients that consume one handshake notice, adopt JSON, and
 //!     complete the exact relay exchange with v3 stamps.
 //!
+//! 12. `repeated_room_restore_rebaselines_missed_game_data_and_rotates_tokens`
+//!     restores a native room twice after missed relay traffic.
+//! 13. `active_room_restore_rebuilds_live_webrtc_before_exact_exchange`
+//!     restores a native active room and rebuilds both live WebRTC channels.
+//! 14. `room_restore_during_server_drain_fails_closed_with_bounded_exit`
+//!     proves a real Unix shutdown drain refuses a held restore promptly.
+//!
 //! Scenarios are serialized behind a mutex (each spawns 3+ OS processes and
 //! up to three concurrent WebRTC stacks; running them in parallel on small CI
 //! runners invites scheduling flakes for zero extra coverage). Ports are
@@ -141,15 +148,19 @@ const STANDARD_SCENARIO_CEILING_SECS: u64 = 45 + 90;
 const DEPARTURE_SCENARIO_CEILING_SECS: u64 = 45 + 30;
 // The opaque cell reuses its server for one additional bounded relay-only wave.
 const UNSUPPORTED_FORMAT_WAVE_SECS: u64 = 30;
+/// Restore cells: two 45 s client watchdogs and one 90 s WebRTC watchdog,
+/// each with the harness's 45 s server-start ceiling.
+const RESTORE_SCENARIO_CEILING_SECS: u64 = 2 * (45 + 45) + (45 + 90);
 /// A test may queue behind every other test. Bounding that wait by the entire
 /// suite's real composition remains conservative while keeping a degraded run
-/// within the workflow's 30-minute job policy (unlike multiplying the unique
+/// within the workflow's job policy (unlike multiplying the unique
 /// two-wave ceiling by every scenario).
 const SERIAL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(
     2 * LATE_JOIN_SCENARIO_CEILING_SECS
         + 9 * STANDARD_SCENARIO_CEILING_SECS
         + DEPARTURE_SCENARIO_CEILING_SECS
-        + UNSUPPORTED_FORMAT_WAVE_SECS,
+        + UNSUPPORTED_FORMAT_WAVE_SECS
+        + RESTORE_SCENARIO_CEILING_SECS,
 );
 
 const RELIABLE: &str = "reliable";
@@ -3097,4 +3108,450 @@ async fn unsupported_format_advisory_wave(url: &str, workdir: &std::path::Path) 
     assert!(!native
         .diagnostics()
         .contains("delivery accountability violation"));
+}
+
+/// A real socket disconnect must restore the authoritative relay baseline,
+/// consume the old room token, and retain the rotated token for a second restore.
+#[tokio::test]
+async fn repeated_room_restore_rebaselines_missed_game_data_and_rotates_tokens() {
+    use signal_fish_reference_native::wire;
+    use signal_fish_server::protocol::{
+        ClientMessage, GameDataEncoding, ServerMessage, Topology, Transport,
+    };
+    let _serial = acquire_serial().await;
+    let mut server = spawn_server("relay").await;
+    let url = server.v3_ws_url();
+    let workdir = tempfile::tempdir().expect("restore scenario workdir");
+    let release = [
+        workdir.path().join("disconnect-1"),
+        workdir.path().join("disconnect-2"),
+    ];
+    let resume = [
+        workdir.path().join("resume-1"),
+        workdir.path().join("resume-2"),
+    ];
+    let success = workdir.path().join("success");
+    let mut native = spawn_client_with_windows(
+        &ClientSpec {
+            name: "restoring",
+            server_url: &url,
+            game_name: "interop-repeated-restore",
+            join_code: None,
+            peers: 2,
+            exchange: false,
+            relay_payload: None,
+            extra_args: &[
+                "--supported-topologies",
+                "relay",
+                "--supported-transports",
+                "relay",
+                "--reconnect-release-file",
+                release[0].to_str().unwrap(),
+                "--reconnect-release-file",
+                release[1].to_str().unwrap(),
+                "--reconnect-resume-file",
+                resume[0].to_str().unwrap(),
+                "--reconnect-resume-file",
+                resume[1].to_str().unwrap(),
+                "--success-release-file",
+                success.to_str().unwrap(),
+            ],
+        },
+        workdir.path(),
+        30,
+        45,
+    );
+    let room = native.await_event("room_created", EVENT_TIMEOUT).await;
+    native.await_event("room_joined", EVENT_TIMEOUT).await;
+    let native_id = player_id_of(&native.events, "restoring");
+    let mut peer = wire::connect(&url).await.expect("connect incumbent");
+    wire::send_client_message(
+        &mut peer,
+        &ClientMessage::Authenticate {
+            app_id: harness::INTEROP_APP_ID.to_string(),
+            connect_token: None,
+            sdk_version: None,
+            platform: Some("interop-test".to_string()),
+            game_data_format: Some(GameDataEncoding::Json),
+            protocol_version: Some(3),
+            supported_transports: Some(vec![Transport::Relay]),
+            supported_topologies: Some(vec![Topology::Relay]),
+            requested_capabilities: None,
+        },
+    )
+    .await
+    .expect("authenticate incumbent");
+    await_restore_peer_message(&mut peer, |message| {
+        matches!(message, ServerMessage::ProtocolInfo(_))
+    })
+    .await;
+    wire::send_client_message(
+        &mut peer,
+        &ClientMessage::JoinRoom {
+            game_name: "interop-repeated-restore".to_string(),
+            room_code: Some(str_field(&room, "room_code").to_string()),
+            player_name: "incumbent".to_string(),
+            max_players: Some(2),
+            supports_authority: Some(false),
+            relay_transport: None,
+            password: None,
+            join_only: Some(true),
+        },
+    )
+    .await
+    .expect("join incumbent");
+    let ServerMessage::RoomJoined(joined) = await_restore_peer_message(&mut peer, |message| {
+        matches!(message, ServerMessage::RoomJoined(_))
+    })
+    .await
+    else {
+        unreachable!()
+    };
+    let peer_id = joined.player_id;
+    wire::send_client_message(&mut peer, &ClientMessage::PlayerReady)
+        .await
+        .expect("ready incumbent");
+    native.await_event("game_starting", EVENT_TIMEOUT).await;
+    for attempt in 1..=2_usize {
+        std::fs::write(&release[attempt - 1], b"release").unwrap();
+        let started = native.await_event("reconnect_started", EVENT_TIMEOUT).await;
+        assert_eq!(started["attempt"], attempt);
+        assert!(
+            events_named(&native.events, "success_criteria_met").is_empty(),
+            "success must wait for every requested restore; {}",
+            native.diagnostics()
+        );
+        await_restore_peer_message(&mut peer, |message| {
+            matches!(message,
+            ServerMessage::PlayerLeft { player_id, .. } if player_id.to_string() == native_id)
+        })
+        .await;
+        // The recipient is demonstrably absent. A Pong fences processing of
+        // this missed packet before the restore is released.
+        wire::send_game_data(&mut peer, json!({"missed": attempt}))
+            .await
+            .expect("send missed traffic");
+        wire::send_client_message(&mut peer, &ClientMessage::Ping)
+            .await
+            .expect("fence missed traffic");
+        await_restore_peer_message(&mut peer, |message| matches!(message, ServerMessage::Pong))
+            .await;
+        native.assert_running("while restore is held");
+        std::fs::write(&resume[attempt - 1], b"resume").unwrap();
+        let restored = native.await_event("reconnected", EVENT_TIMEOUT).await;
+        assert_eq!(restored["attempt"], attempt);
+        assert_eq!(restored["player_id"], native_id);
+        assert_eq!(restored["lobby_state"], "finalized");
+        assert_eq!(restored["token_rotated"], true);
+        let roster = restored["current_players"]
+            .as_array()
+            .expect("snapshot roster");
+        assert_eq!(roster.len(), 2);
+        assert!(roster.contains(&json!(native_id)));
+        assert!(roster.contains(&json!(peer_id)));
+        let watermarks = restored["sender_watermarks"]
+            .as_array()
+            .expect("snapshot watermarks");
+        let watermark = watermarks
+            .iter()
+            .find(|mark| mark["player_id"] == peer_id.to_string())
+            .expect("incumbent baseline");
+        assert_eq!(watermark["epoch"], 1);
+        assert_eq!(watermark["seq"], 2 * attempt - 1);
+        assert!(
+            !restored["replay"].is_null(),
+            "v3 replay contract is mandatory"
+        );
+        // The first live packet follows the missed baseline exactly. Successful
+        // receipt proves the client installed it rather than merely logging it.
+        wire::send_game_data(&mut peer, json!({"live": attempt}))
+            .await
+            .expect("send resumed traffic");
+        let live = native
+            .await_event("game_data_received", EVENT_TIMEOUT)
+            .await;
+        assert_eq!(live["from"], peer_id.to_string());
+        assert_eq!(live["payload"], json!({"live": attempt}));
+        assert_eq!(live["seq"], 2 * attempt);
+        assert_eq!(live["epoch"], 1);
+        assert_eq!(
+            events_named(&native.events, "session_plan").len(),
+            attempt + 1,
+            "each restore receives a fresh authoritative plan; {}",
+            native.diagnostics()
+        );
+    }
+    std::fs::write(success, b"success").unwrap();
+    drain_expect_success(&mut native).await;
+    assert_eq!(events_named(&native.events, "reconnected").len(), 2);
+    assert_eq!(
+        events_named(&native.events, "game_starting").len(),
+        1,
+        "restoring a finalized room must not restart the game"
+    );
+    assert_eq!(
+        events_named(&native.events, "game_data_received").len(),
+        2,
+        "missed game data is never replayed"
+    );
+    assert!(
+        events_named(&native.events, "error").is_empty(),
+        "{}",
+        native.diagnostics()
+    );
+    server.shutdown().await;
+}
+
+/// All ignored lifecycle frames share one absolute wait budget.
+async fn await_restore_peer_message(
+    peer: &mut signal_fish_reference_native::wire::WsStream,
+    matches: impl Fn(&signal_fish_server::protocol::ServerMessage) -> bool,
+) -> signal_fish_server::protocol::ServerMessage {
+    use signal_fish_reference_native::wire;
+    use signal_fish_server::protocol::ServerMessage;
+    tokio::time::timeout(EVENT_TIMEOUT, async {
+        loop {
+            let message = wire::next_server_message(peer, EVENT_TIMEOUT)
+                .await
+                .expect("restore incumbent message");
+            assert!(
+                !matches!(
+                    message,
+                    ServerMessage::Error { .. } | ServerMessage::ReconnectionFailed { .. }
+                ),
+                "incumbent failure: {message:?}"
+            );
+            if matches(&message) {
+                return message;
+            }
+        }
+    })
+    .await
+    .expect("incumbent restore boundary within deadline")
+}
+
+/// A restored active room must build fresh WebRTC channels before sending
+/// repeating reliable exchange and releasing the withheld unreliable half.
+#[tokio::test]
+async fn active_room_restore_rebuilds_live_webrtc_before_exact_exchange() {
+    let _serial = acquire_serial().await;
+    let mut server = spawn_server("mesh").await;
+    let url = server.v3_ws_url();
+    let workdir = tempfile::tempdir().expect("WebRTC restore workdir");
+    let disconnect = workdir.path().join("disconnect");
+    let resume = workdir.path().join("resume");
+    let exchange = workdir.path().join("exchange");
+    let unreliable = workdir.path().join("unreliable");
+    let success = workdir.path().join("success");
+    let common = [
+        "--exchange-release-file",
+        exchange.to_str().unwrap(),
+        "--unreliable-exchange-release-file",
+        unreliable.to_str().unwrap(),
+        "--success-release-file",
+        success.to_str().unwrap(),
+    ];
+    let mut restoring = spawn_client(
+        &ClientSpec {
+            name: "restoring-p2p",
+            server_url: &url,
+            game_name: "interop-p2p-room-restore",
+            join_code: None,
+            peers: 2,
+            exchange: true,
+            relay_payload: None,
+            extra_args: &[
+                "--exchange-release-file",
+                exchange.to_str().unwrap(),
+                "--unreliable-exchange-release-file",
+                unreliable.to_str().unwrap(),
+                "--success-release-file",
+                success.to_str().unwrap(),
+                "--reconnect-release-file",
+                disconnect.to_str().unwrap(),
+                "--reconnect-resume-file",
+                resume.to_str().unwrap(),
+            ],
+        },
+        workdir.path(),
+    );
+    let room = restoring.await_event("room_created", EVENT_TIMEOUT).await;
+    let code = str_field(&room, "room_code");
+    let mut incumbent = spawn_client(
+        &ClientSpec {
+            name: "incumbent-p2p",
+            server_url: &url,
+            game_name: "interop-p2p-room-restore",
+            join_code: Some(code),
+            peers: 2,
+            exchange: true,
+            relay_payload: None,
+            extra_args: &common,
+        },
+        workdir.path(),
+    );
+    for client in [&mut restoring, &mut incumbent] {
+        client.await_event("exchange_ready", EVENT_TIMEOUT).await;
+        assert_eq!(
+            events_named(&client.events, "channel_open").len(),
+            2,
+            "{}",
+            client.diagnostics()
+        );
+        assert!(events_named(&client.events, "channel_message_sent").is_empty());
+    }
+    let ids = [
+        player_id_of(&restoring.events, "restoring-p2p"),
+        player_id_of(&incumbent.events, "incumbent-p2p"),
+    ];
+    std::fs::write(exchange, b"exchange").unwrap();
+    for client in [&mut restoring, &mut incumbent] {
+        client
+            .await_event("exchange_reliable_ready", EVENT_TIMEOUT)
+            .await;
+        assert_eq!(events_named(&client.events, "channel_message").len(), 1);
+        assert_eq!(
+            events_named(&client.events, "channel_message_sent").len(),
+            1
+        );
+    }
+    let initial_log_lengths = [restoring.events.len(), incumbent.events.len()];
+    std::fs::write(disconnect, b"disconnect").unwrap();
+    restoring
+        .await_event("reconnect_started", EVENT_TIMEOUT)
+        .await;
+    incumbent.await_event("player_left", EVENT_TIMEOUT).await;
+    let plan_count = events_named(&incumbent.events, "session_plan").len();
+    std::fs::write(resume, b"resume").unwrap();
+    let restored = restoring.await_event("reconnected", EVENT_TIMEOUT).await;
+    assert_eq!(restored["player_id"], ids[0]);
+    assert_eq!(restored["token_rotated"], true);
+    restoring.await_event("exchange_ready", EVENT_TIMEOUT).await;
+    // The incumbent keeps its logical exchange gate, so wait directly for
+    // two newly opened channels rather than requiring a repeated ready event.
+    tokio::time::timeout(EVENT_TIMEOUT, async {
+        while events_named(&incumbent.events, "channel_open").len() < 4 {
+            incumbent.await_event("channel_open", EVENT_TIMEOUT).await;
+        }
+    })
+    .await
+    .expect("incumbent replacement channels open");
+    for client in [&restoring, &incumbent] {
+        assert_eq!(
+            events_named(&client.events, "channel_open").len(),
+            4,
+            "both channels reopen; {}",
+            client.diagnostics()
+        );
+    }
+    assert!(events_named(&restoring.events, "session_plan").len() >= 2);
+    assert!(events_named(&incumbent.events, "session_plan").len() > plan_count);
+    for client in [&mut restoring, &mut incumbent] {
+        tokio::time::timeout(EVENT_TIMEOUT, async {
+            while events_named(&client.events, "channel_message").len() < 2 {
+                client.await_event("channel_message", EVENT_TIMEOUT).await;
+            }
+        })
+        .await
+        .expect("fresh reliable exchange after restore");
+        assert_eq!(events_named(&client.events, "channel_message").len(), 2);
+        assert_eq!(
+            events_named(&client.events, "channel_message_sent").len(),
+            2
+        );
+        assert!(events_named(&client.events, "channel_message")
+            .iter()
+            .all(|event| event["label"] == RELIABLE));
+    }
+    std::fs::write(unreliable, b"unreliable").unwrap();
+    for client in [&mut restoring, &mut incumbent] {
+        client
+            .await_event("success_criteria_met", EVENT_TIMEOUT)
+            .await;
+    }
+    std::fs::write(success, b"success").unwrap();
+    for (index, client) in [&mut restoring, &mut incumbent].into_iter().enumerate() {
+        drain_expect_success(client).await;
+        let expected = BTreeSet::from([ids[1 - index].as_str()]);
+        assert_exchange_received_from(
+            &client.events[initial_log_lengths[index]..],
+            &client.name,
+            &expected,
+        );
+        assert_exchange_sent_to(
+            &client.events[initial_log_lengths[index]..],
+            &client.name,
+            &expected,
+        );
+        assert!(
+            events_named(&client.events, "error").is_empty(),
+            "{}",
+            client.diagnostics()
+        );
+    }
+    server.shutdown().await;
+}
+
+/// SIGTERM refuses a held restore with a bounded terminal error instead of
+/// leaving the native process waiting for its ordinary success criteria.
+#[cfg(unix)]
+#[tokio::test]
+async fn room_restore_during_server_drain_fails_closed_with_bounded_exit() {
+    let _serial = acquire_serial().await;
+    let mut server = spawn_server("relay").await;
+    let url = server.v3_ws_url();
+    let workdir = tempfile::tempdir().expect("draining restore workdir");
+    let disconnect = workdir.path().join("disconnect");
+    let resume = workdir.path().join("resume");
+    let mut native = spawn_client_with_windows(
+        &ClientSpec {
+            name: "draining-restore",
+            server_url: &url,
+            game_name: "interop-draining-restore",
+            join_code: None,
+            peers: 1,
+            exchange: false,
+            relay_payload: None,
+            extra_args: &[
+                "--supported-topologies",
+                "relay",
+                "--supported-transports",
+                "relay",
+                "--reconnect-release-file",
+                disconnect.to_str().unwrap(),
+                "--reconnect-resume-file",
+                resume.to_str().unwrap(),
+            ],
+        },
+        workdir.path(),
+        30,
+        45,
+    );
+    native.await_event("room_joined", EVENT_TIMEOUT).await;
+    std::fs::write(disconnect, b"disconnect").unwrap();
+    native.await_event("reconnect_started", EVENT_TIMEOUT).await;
+    server.begin_drain().await;
+    std::fs::write(resume, b"resume").unwrap();
+    let code = native.drain_to_exit(Duration::from_secs(20)).await;
+    assert_eq!(
+        code,
+        2,
+        "draining restore must fail with a protocol refusal; {}",
+        native.diagnostics()
+    );
+    let errors = events_named(&native.events, "error");
+    assert_eq!(
+        errors.len(),
+        1,
+        "one terminal error; {}",
+        native.diagnostics()
+    );
+    assert!(
+        str_field(errors[0], "message").contains("ServerDraining"),
+        "server must report its drain refusal; {}",
+        native.diagnostics()
+    );
+    assert!(events_named(&native.events, "reconnected").is_empty());
+    assert!(events_named(&native.events, "success_criteria_met").is_empty());
+    server.shutdown().await;
 }

@@ -2,8 +2,10 @@ import { encode } from '@msgpack/msgpack';
 import {
   bytesToBase64,
   classifyOpaqueNegotiatedServerInput,
+  classifyJsonNegotiatedServerInput,
   joinRoomFrameData,
   negotiatedGameDataFormat,
+  negotiatedProtocolVersion,
   parseV3BinaryGameDataFrame,
   sendOpaqueGameData,
   type ServerFrame,
@@ -212,4 +214,63 @@ function binaryEnvelope(
     'bytesToBase64 must render opaque bytes verbatim',
   );
   assert(bytesToBase64(new Uint8Array(0)) === '', 'an empty payload stays empty');
+}
+
+// Regression #819: neither malformed envelopes nor JSON parser errors may
+// expose a room token through the shared handshake/runtime classifiers.
+for (const text of [
+  'private-room-token',
+  JSON.stringify(['private-room-token']),
+  JSON.stringify({ reconnection_token: 'private-room-token' }),
+  JSON.stringify({ type: 'Reconnected', data: 'private-room-token' }),
+]) {
+  for (const classify of [
+    classifyJsonNegotiatedServerInput,
+    classifyOpaqueNegotiatedServerInput,
+  ]) {
+    let rejected = false;
+    try {
+      classify(text);
+    } catch (error) {
+      rejected = true;
+      const message = error instanceof Error ? error.message : String(error);
+      assert(!message.includes('private-room-token'), `token leaked: ${message}`);
+      assert(message.includes(`${text.length} characters`), `missing size: ${message}`);
+    }
+    assert(rejected, 'malformed credential frame must fail');
+  }
+}
+
+// An invalid message tag can contain the token too. Refusal diagnostics name
+// the expected phase without echoing that untrusted tag.
+for (const check of [
+  () => negotiatedProtocolVersion({ type: 'private-room-token', data: {} }, 3),
+  () => negotiatedGameDataFormat({ type: 'private-room-token', data: {} }, 'json'),
+]) {
+  try {
+    check();
+    assert(false, 'unexpected handshake message must fail');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    assert(message === 'expected ProtocolInfo', `unsafe phase diagnostic: ${message}`);
+  }
+}
+
+// Malformed binary metadata keys are also untrusted diagnostic input.
+const privateBinaryKey = exactArrayBuffer(
+  encode({
+    from_player: SENDER_BYTES,
+    encoding: 'rkyv',
+    payload: Uint8Array.of(1),
+    seq: 1,
+    'private-room-token': 1,
+  }),
+);
+try {
+  parseV3BinaryGameDataFrame(privateBinaryKey);
+  assert(false, 'unknown binary metadata key must fail');
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  assert(!message.includes('private-room-token'), `binary key leaked: ${message}`);
+  assert(message.includes('unknown field'), `missing binary failure cause: ${message}`);
 }

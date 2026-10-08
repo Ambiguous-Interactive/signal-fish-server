@@ -746,7 +746,7 @@ export function validateDeliveryClassAndKey(
       ? null
       : classValue === 'reliable' || classValue === 'latest' || classValue === 'volatile'
         ? classValue
-        : violation(`invalid delivery class ${String(classValue)}`);
+        : violation('invalid delivery class');
   const key =
     keyValue === undefined || keyValue === null
       ? null

@@ -206,7 +206,7 @@ export function advanceAuthenticateHandshake(
   ) {
     return { authenticated: false, effectiveFormat: 'json' };
   }
-  return { fatal: `expected Authenticated, got ${frame.type}` };
+  return { fatal: 'expected Authenticated' };
 }
 
 /** Restore application membership after a retained seat reconnects. */
@@ -903,7 +903,7 @@ class Orchestrator {
           earlyLeft.push(response.data);
         }
       } else {
-        throw FatalError.protocol(`expected RoomJoined, got ${response.type}`);
+        throw FatalError.protocol('expected RoomJoined');
       }
       response = await this.nextHandshakeFrame();
     }
@@ -1660,7 +1660,7 @@ class Orchestrator {
         console.error(
           frame.type === NON_TEXT_APPLICATION_FRAME
             ? 'ignoring non-text websocket application frame'
-            : `ignoring server message ${frame.type}`,
+            : 'ignoring unrecognized server message',
         );
         break;
     }

@@ -5,7 +5,9 @@ import {
   scheduleSuccessReleasePoll,
   shouldDeferSuccessAtRunDeadline,
   StartGameGate,
+  run,
 } from './orchestrator.js';
+import type { RunConfig } from '../shared/types.js';
 
 function assert(condition: boolean, message: string): void {
   if (!condition) {
@@ -185,3 +187,120 @@ console.error('ok - browser timer and latched-exchange state avoids false succes
 }
 
 console.error('ok - authenticate handshake adopts the pinned JSON downgrade notice');
+
+// Regression #819: a bad message tag is untrusted input, not diagnostic text.
+const credentialTag = advanceAuthenticateHandshake(
+  { type: 'private-room-token', data: {} },
+  'json',
+);
+assert(
+  'fatal' in credentialTag && credentialTag.fatal === 'expected Authenticated',
+  'unexpected authentication messages must not echo credential tags',
+);
+
+// Regression #819: drive the real JoinRoom handshake with a credential tag.
+{
+  const originalSocket = globalThis.WebSocket;
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const originalError = console.error;
+  const events: Record<string, unknown>[] = [];
+  const diagnostics: string[] = [];
+  const sent: string[] = [];
+  class HandshakeSocket {
+    static readonly OPEN = 1;
+    readonly readyState = 1;
+    readonly bufferedAmount = 0;
+    binaryType = 'arraybuffer';
+    onopen: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onclose: (() => void) | null = null;
+    constructor(_url: string) {
+      queueMicrotask(() => this.onopen?.());
+    }
+    send(text: string): void {
+      const frame = JSON.parse(text) as { type: string };
+      sent.push(frame.type);
+      const replies =
+        frame.type === 'Authenticate'
+          ? [
+              { type: 'Authenticated', data: {} },
+              {
+                type: 'ProtocolInfo',
+                data: { protocol_version: 3, game_data_formats: ['json'] },
+              },
+            ]
+          : [{ type: 'private-join-room-token', data: {} }];
+      queueMicrotask(() => {
+        for (const reply of replies) {
+          this.onmessage?.({ data: JSON.stringify(reply) });
+        }
+      });
+    }
+    close(): void {}
+  }
+  const config: RunConfig = {
+    serverUrl: 'ws://mock.invalid/v3/ws',
+    createRoom: true,
+    joinCode: null,
+    peers: 2,
+    maxPlayers: null,
+    expectTotalPeers: null,
+    leaveOnGameStart: false,
+    gameName: 'join-privacy',
+    playerName: 'test',
+    appId: 'test',
+    platform: 'test',
+    exchange: false,
+    relayPayload: null,
+    crippleIce: false,
+    p2pTimeoutSecs: 1,
+    runForSecs: 1,
+    successReleaseEnabled: false,
+    protocolVersion: 3,
+    supportedTopologies: ['relay'],
+    supportedTransports: ['relay'],
+    gameDataFormat: 'json',
+    sdkVersion: 'test',
+    elapsedBeforeStartMs: 0,
+  };
+  try {
+    globalThis.WebSocket = HandshakeSocket as unknown as typeof WebSocket;
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: {
+        __sf_emit: (line: string) => events.push(JSON.parse(line) as Record<string, unknown>),
+      },
+    });
+    console.error = (...args: unknown[]) => diagnostics.push(args.map(String).join(' '));
+    const code = await run(config);
+    assert(code === 2, 'an unexpected join reply must fail as a protocol error');
+    assert(
+      sent.join(',') === 'Authenticate,JoinRoom',
+      'the real join handler must receive the reply',
+    );
+    const errors = events.filter((event) => event['event'] === 'error');
+    assert(errors.length === 1, 'the join refusal must produce one terminal error');
+    assert(
+      !JSON.stringify(errors).includes('private-join-room-token'),
+      'join error event must not expose the credential tag',
+    );
+    assert(
+      !diagnostics.join(' ').includes('private-join-room-token'),
+      'join stderr must not expose the credential tag',
+    );
+    assert(
+      errors[0]?.['message'] === 'expected RoomJoined',
+      'join diagnostic must identify the expected response',
+    );
+  } finally {
+    globalThis.WebSocket = originalSocket;
+    console.error = originalError;
+    if (originalWindow === undefined) {
+      Reflect.deleteProperty(globalThis, 'window');
+    } else {
+      Object.defineProperty(globalThis, 'window', originalWindow);
+    }
+  }
+}
+
+console.error('ok - join handshake excludes credential tags from event and stderr diagnostics');

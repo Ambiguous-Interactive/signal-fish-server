@@ -196,6 +196,16 @@ pub struct Cli {
     #[arg(long, requires = "success_release_file")]
     pub require_ice_gathering_complete: bool,
 
+    /// TEST HARNESS ONLY: disconnect and restore the room when each path
+    /// exists, in order. Each restore must rotate the v3 room token.
+    #[arg(long, action = clap::ArgAction::Append)]
+    pub reconnect_release_file: Vec<PathBuf>,
+
+    /// TEST HARNESS ONLY: hold each restore after disconnection until its
+    /// corresponding path exists. Allows missed traffic and drain tests.
+    #[arg(long, requires = "reconnect_release_file", action = clap::ArgAction::Append)]
+    pub reconnect_resume_file: Vec<PathBuf>,
+
     /// Protocol version to advertise in Authenticate. 2 omits every v3 field
     /// entirely (a pure v2 client for mixed-room tests).
     #[arg(long, default_value_t = 3)]
