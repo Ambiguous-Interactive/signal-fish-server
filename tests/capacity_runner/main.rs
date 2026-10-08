@@ -1309,7 +1309,7 @@ async fn unidentified_game_data_keeps_byte_evidence_without_invented_receipts() 
             )
             .await
         );
-        let records = log.snapshot();
+        let records = log.take_records();
         assert!(records.receipts.is_empty(), "{case}");
         assert!(records.faults.iter().any(|fault| matches!(fault, oracle::InvalidReason::UnidentifiedGameData { application_bytes, encoded_frame_body_bytes, .. } if *application_bytes == application && *encoded_frame_body_bytes == encoded)), "{case}: {:?}", records.faults);
         let context = unit_context();
@@ -1367,7 +1367,7 @@ async fn unidentified_game_data_keeps_byte_evidence_without_invented_receipts() 
         .await
     );
     assert_eq!(
-        log.snapshot().receipts[0].seq,
+        log.take_records().receipts[0].seq,
         u64::MAX,
         "a v3 stamp avoids the v2 fallback overflow"
     );
@@ -2315,7 +2315,7 @@ fn experiment_complete_records(plans: &[SenderPlan]) -> RunRecords {
             at_us: 0,
         });
     }
-    log.snapshot()
+    log.take_records()
 }
 
 /// The advisory cadence bound the oracle enforces (see
@@ -2667,7 +2667,7 @@ async fn experiment_inbound_classification_is_exact() {
     )
     .await;
     assert!(survived, "the leak is evidence; the session keeps reading");
-    let records = log.snapshot();
+    let records = log.take_records();
     assert!(
         records
             .faults
@@ -2689,7 +2689,7 @@ async fn experiment_inbound_classification_is_exact() {
     )
     .await;
     assert!(survived);
-    let records = log.snapshot();
+    let records = log.take_records();
     assert!(
         records.faults.is_empty(),
         "the advisory is not a rejection: {:?}",
@@ -2710,7 +2710,7 @@ async fn experiment_inbound_classification_is_exact() {
     )
     .await;
     assert!(survived);
-    let records = log.snapshot();
+    let records = log.take_records();
     assert!(
         records.unsupported_notices.is_empty()
             && records
@@ -2733,7 +2733,7 @@ async fn experiment_inbound_classification_is_exact() {
     )
     .await;
     assert!(survived);
-    let records = log.snapshot();
+    let records = log.take_records();
     assert!(
         records.unsupported_notices.is_empty()
             && records
@@ -2760,7 +2760,7 @@ async fn experiment_inbound_classification_is_exact() {
     )
     .await;
     assert!(survived);
-    let records = log.snapshot();
+    let records = log.take_records();
     assert!(
         records.unsupported_notices.is_empty()
             && records
@@ -3603,7 +3603,7 @@ fn churned_records(context: &UnitContext, churn: &ChurnPlan) -> RunRecords {
         ("id-r0p2".to_string(), ("r0p2".to_string(), 1)),
         ("id-r0p3".to_string(), ("r0p3".to_string(), 1)),
     ]));
-    log.snapshot()
+    log.take_records()
 }
 
 /// Across a sender's rejoin, every stream must complete exactly once: the
@@ -4029,7 +4029,7 @@ fn replacement_records(plans: &[SenderPlan], churn: &ChurnPlan) -> RunRecords {
         ("id-r0p1".to_string(), ("r0p1".to_string(), 1)),
         ("id-r0p1b".to_string(), ("r0p1".to_string(), 2)),
     ]));
-    log.snapshot()
+    log.take_records()
 }
 
 /// Across a room replacement, every member's two incarnations are distinct,
@@ -4132,7 +4132,7 @@ fn a_replacement_wave_whose_rejoin_never_fires_is_invalid() {
             tails: BTreeMap::new(),
         });
     }
-    let records = log.snapshot();
+    let records = log.take_records();
     let summary = oracle::summarize(
         &plans,
         &roster,
@@ -4489,7 +4489,7 @@ fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
         ("id-r0p1".to_string(), ("r0p1".to_string(), 1)),
         ("id-r0p2".to_string(), ("r0p2".to_string(), 1)),
     ]));
-    let records = log.snapshot();
+    let records = log.take_records();
     let summary = oracle::summarize(
         &plans,
         &roster,
@@ -4589,7 +4589,7 @@ fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
         ("id-r0p1".to_string(), ("r0p1".to_string(), 1)),
         ("id-r0p2".to_string(), ("r0p2".to_string(), 1)),
     ]));
-    let records = log.snapshot();
+    let records = log.take_records();
     let summary = oracle::summarize(
         &plans,
         &roster,
@@ -4704,7 +4704,7 @@ fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
         ("id-r0p1-bump".to_string(), ("r0p1".to_string(), 2)),
         ("id-r0p2".to_string(), ("r0p2".to_string(), 1)),
     ]));
-    let records = log.snapshot();
+    let records = log.take_records();
     let summary = oracle::summarize(
         &plans,
         &roster,
@@ -4764,7 +4764,7 @@ fn an_unresolvable_snapshot_identity_is_a_loud_fault() {
         ("id-r0p1".to_string(), ("r0p1".to_string(), 1)),
         ("id-r0p2".to_string(), ("r0p2".to_string(), 1)),
     ]));
-    let records = log.snapshot();
+    let records = log.take_records();
     let summary = oracle::summarize(
         &plans,
         &roster,
@@ -4913,7 +4913,7 @@ fn complete_records(plans: &[SenderPlan]) -> RunRecords {
             }
         }
     }
-    log.snapshot()
+    log.take_records()
 }
 
 fn drop_receipt(records: &mut RunRecords, recipient: &str, sender: &str, seq: u64) {

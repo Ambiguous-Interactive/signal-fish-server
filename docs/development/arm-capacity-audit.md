@@ -3039,3 +3039,33 @@ byte for byte. All eight healthy payload and replay cells passed and emitted no
 failure diagnostics. These controls prove capture and validation, not the
 cause of the earlier macOS delay. Raw proof files remain under
 `/tmp/session361-*.log` and `/tmp/session361-*-proof.json`.
+
+### C2 inbound evidence after generator stop — #814
+
+The runner returned from the peer task when scheduled-send lag or frame
+preparation stopped outbound work. This dropped both socket halves before
+quiescence. The oracle still treated that recipient as connected because no
+termination was observed. This could truncate receipt evidence; it does not
+establish a server delivery defect.
+
+The peer now stops outbound work for its entire lifetime. It keeps the socket,
+normal inbound handling, read pauses, and declared churn until shared
+quiescence or observed termination. A rejoin keeps the stop state. Transport
+write failures retain their existing drain and termination deadline.
+
+The sweep covers lag refusal, application-data preparation, key conversion,
+and frame encoding. Completed writes still record their send and size data.
+The offered schedule, unsent accounting, generator invalidation, receipt
+clock, artifact schema, and oracle rules remain unchanged.
+
+A real-socket peer-task control fails before the fix at the session-lifetime
+assertion. Six cases cover preparation failure and saturation with normal
+quiescence, server close, and rejoin. They retain held and later receipts,
+exact gap reports, and server rejections. They check original-clock receipt
+times, stopped sends after rejoin, unchanged saturation lag, and event-artifact
+round trips. Existing saturation and termination cells check full replay.
+
+Test progress reads event counts without taking the evidence. The former
+`snapshot` method now has the name `take_records`, which makes its ownership
+transfer explicit. The final capture still transfers each record once after
+all tasks finish.
