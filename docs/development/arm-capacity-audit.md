@@ -1939,6 +1939,15 @@ carries a disposition.
   wrong close code, wrong cause, missing advisory, and vacuous checkpoints.
   WASM restart, partial-handshake close, inbound overflow, and reference
   restore exercisability remain open in #741.
+- **WASM Fortress restart (session 371, #741 item 7 slice).**
+  The runner first requires the active-game drain proof above. It closes
+  both old browsers and waits for the server to exit normally. It then
+  starts the same binary on the same port. Two fresh no-thread Godot peers
+  must pass every released healthy, runtime-identity, and exact delivery-ledger
+  gate. The harness keeps separate drain and restarted-game artifacts, with
+  the binary, build, port, process, and peer identities in a restart record.
+  Identity controls reject reuse across either peer role. Partial-handshake
+  close, inbound overflow, and restore exercisability remain open in #741.
 - **Opaque over a v2 negotiation (fixed with the same sweep).** The native
   client validated an opaque request against the requested version only;
   the `ProtocolInfo` `None`-version (v2) arm skipped every format check,
@@ -2331,7 +2340,7 @@ neither is a deployed capacity preset.
 | Admin and shutdown: `src/server/admin.rs`, `shutdown.rs`, `connection_manager.rs` | Drain closes all owned tasks and reports queued work accurately | `tests/close_code_semantics_e2e.rs`, `formal/tla/ConnectionTeardown.tla`; C1 drain/shutdown review above | The drain choreography, the reconnect-commit fence, close ordering with queued data, and the drain reservation accounting are reviewed, fixed where defective, and pinned; a distinct 4000-close counter remains follow-up observability | Partially reviewed |
 | Browser client: `clients/browser/src/**` | Reconnect, delivery reports, fallback, and negotiation match server | `clients/browser/src/page/*.test.ts`; C1 client and deployment boundaries review above | Reports, fallback, and negotiation verified and pinned (plus the ARM-C033 downgrade fix and its pin); reconnect initiation absent by documented scope with inbound arms unit-pinned; a live browser accountability cell, loss→recovery transitions, and browser-as-host remain | Partially reviewed |
 | Native client: `clients/native/src/**` | Same client contract across native sockets | `clients/native/tests/interop_e2e.rs`; C1 client and deployment boundaries review above | Accountability model, fallback (cripple/TURN/host-star/Direct rejection), and negotiation verified and pinned (plus the ARM-C033 downgrade fix, the v2-opaque guard, and their pins); native downgrade and cross-format advisory consumption now have live cells; the MessagePack cohort is pinned; restore/reconnect end-to-end remains | Partially reviewed |
-| Fortress clients: `clients/fortress/src/**`, `clients/fortress-wasm/src/**` | Reference peers handle relay without silent loss | `clients/fortress/tests/multiprocess.rs`, `clients/fortress-wasm/harness.mjs`, both interop workflows; C1 client and deployment boundaries review above | Silent-loss detection substantiated by executable CI gates on both stacks (contiguity, cross-peer ledger equality, queue-age/checksum gating; both families add an asserted expected-negative control); fixtures are WebSocket-only and evidence no ICE-fallback claim; Unix native drain/restart and partial-handshake close cells prove bounded causal failures; fresh healthy games pass after restart; a WASM active-game drain cell checks bounded causal failure; restore and remaining WASM fault cells remain (#741) | Partially reviewed |
+| Fortress clients: `clients/fortress/src/**`, `clients/fortress-wasm/src/**` | Reference peers handle relay without silent loss | `clients/fortress/tests/multiprocess.rs`, `clients/fortress-wasm/harness.mjs`, both interop workflows; C1 client and deployment boundaries review above | Silent-loss detection substantiated by executable CI gates on both stacks (contiguity, cross-peer ledger equality, queue-age/checksum gating; both families add an asserted expected-negative control); fixtures are WebSocket-only and evidence no ICE-fallback claim; Unix native drain/restart and partial-handshake close cells prove bounded causal failures; fresh healthy games pass after restart; a WASM drain/restart cell checks bounded causal failure and fresh healthy games on the same port; restore and remaining WASM fault cells remain (#741) | Partially reviewed |
 
 `src/server.rs` owns shared server state across the server rows. `src/websocket/routes.rs`
 and `src/main.rs` own the plain/TLS listener boundary. `src/config/coordination.rs`

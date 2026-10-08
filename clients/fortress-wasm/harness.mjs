@@ -44,15 +44,17 @@ const [mode, exportDirectoryArg, serverBinaryArg, artifactDirectoryArg, buildSha
 if (mode === "self-test") {
   runHealthGateSelfTests();
   runDrainGateSelfTests();
+  runRestartGateSelfTests();
+  await runServerLifecycleSelfTests();
   process.stdout.write("HEALTHY fortress-wasm health-gate self-test\n");
   process.exit(0);
 }
 if (!mode || !exportDirectoryArg || !serverBinaryArg || !artifactDirectoryArg || !buildSha) {
   throw new Error(
-    "usage: node harness.mjs <released|negative|drain> <export-dir> <server-bin> <artifacts-dir> <build-sha>",
+    "usage: node harness.mjs <released|negative|drain|restart> <export-dir> <server-bin> <artifacts-dir> <build-sha>",
   );
 }
-if (!new Set(["released", "negative", "drain"]).has(mode)) {
+if (!new Set(["released", "negative", "drain", "restart"]).has(mode)) {
   throw new Error(`unsupported run mode: ${mode}`);
 }
 if (!isAbsolute(serverBinaryArg) || !existsSync(serverBinaryArg)) {
@@ -62,15 +64,17 @@ if (!/^[0-9a-f]{40}$/.test(buildSha)) {
   throw new Error("build SHA must be a full lowercase Git object id");
 }
 
-const expectedRunMode = {
+let phaseMode = mode === "restart" ? "drain" : mode;
+let expectedRunMode = {
   released: "healthy",
   negative: "negative_one_admission_per_callback",
   drain: "drain_probe",
-}[mode];
+}[phaseMode];
 
 const fixtureDirectory = resolve(import.meta.dirname);
 const exportDirectory = resolve(exportDirectoryArg);
-const artifactDirectory = resolve(artifactDirectoryArg, mode);
+const artifactRoot = resolve(artifactDirectoryArg, mode);
+let artifactDirectory = mode === "restart" ? join(artifactRoot, "drain") : artifactRoot;
 mkdirSync(artifactDirectory, { recursive: true });
 const requireFromBrowser = createRequire(
   join(fixtureDirectory, "..", "browser", "package.json"),
@@ -90,14 +94,21 @@ const browserArtifactSha256 = createHash("sha256")
 
 const serverPort = await freePort();
 const httpPort = await freePort();
-const serverLog = join(artifactDirectory, "server.log");
-const server = spawn(serverBinaryArg, [], {
-  env: cleanServerEnvironment(serverPort, httpPort),
-  stdio: ["ignore", "pipe", "pipe"],
-});
-const serverChunks = [];
-server.stdout.on("data", (chunk) => serverChunks.push(chunk));
-server.stderr.on("data", (chunk) => serverChunks.push(chunk));
+let server;
+let serverExitObserved;
+let serverClosedObserved;
+let serverChunks;
+function startServer() {
+  server = spawn(serverBinaryArg, [], {
+    env: cleanServerEnvironment(serverPort, httpPort),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const observed = observeServer(server);
+  serverChunks = observed.chunks;
+  serverExitObserved = observed.exit;
+  serverClosedObserved = observed.closed;
+}
+startServer();
 const httpServer = createServer((request, response) => {
   try {
     const pathname = new URL(request.url ?? "/", "http://fixture.invalid").pathname;
@@ -130,13 +141,52 @@ let creatorReport;
 let joinerReport;
 let activeCheckpoints;
 let serverExit;
+let drainedPeers;
+let drainedServerPid;
 try {
-  await waitForTcp(serverPort, 10_000);
+  await waitForServer();
   await new Promise((accept, reject) => {
     httpServer.once("error", reject);
     httpServer.listen(httpPort, "127.0.0.1", accept);
   });
   const pageUrl = `http://127.0.0.1:${httpPort}/index.html`;
+  for (const phase of mode === "restart" ? ["drain", "released"] : [mode]) {
+    phaseMode = phase;
+    expectedRunMode = { released: "healthy", negative: "negative_one_admission_per_callback", drain: "drain_probe" }[phase];
+    if (mode === "restart" && phase === "released") {
+      artifactDirectory = join(artifactRoot, "released");
+      mkdirSync(artifactDirectory, { recursive: true });
+      startServer();
+      await waitForServer();
+      assertServerLive(server, "restarted server exited during bind");
+    }
+    await runPhase(pageUrl);
+  }
+} catch (error) {
+  process.stderr.write(`BUSTED fortress-wasm ${mode}: ${error.stack ?? error}\n`);
+  process.exitCode = 1;
+} finally {
+  await persistPeerArtifacts(joiner, joinerReport);
+  await persistPeerArtifacts(creator, creatorReport);
+  try {
+    const closures = await Promise.allSettled([closePeer(joiner), closePeer(creator)]);
+    for (const result of closures) {
+      if (result.status === "rejected") {
+        process.stderr.write(`BUSTED browser cleanup: ${result.reason}\n`);
+        process.exitCode = 1;
+      }
+    }
+  } finally {
+    httpServer.close();
+    try {
+      await stopServer();
+    } finally {
+      writeFileSync(join(artifactDirectory, "server.log"), Buffer.concat(serverChunks));
+    }
+  }
+}
+
+async function runPhase(pageUrl) {
   const creatorNonce = randomUUID();
   const joinerNonce = randomUUID();
   creator = await launchPeer({
@@ -161,7 +211,7 @@ try {
     pageUrl,
   });
 
-  if (mode === "drain") {
+  if (phaseMode === "drain") {
     activeCheckpoints = await Promise.all([
       waitForGlobal(creator, "__FORTRESS_ACTIVE", 20_000),
       waitForGlobal(joiner, "__FORTRESS_ACTIVE", 20_000),
@@ -178,14 +228,14 @@ try {
       assert(peer.logs.filter((line) => line.includes("FORTRESS_WASM_ACTIVE ")).length === 1, `${peer.role}: one active checkpoint`);
       writeFileSync(join(artifactDirectory, `${peer.role}-active.json`), `${JSON.stringify(checkpoint, null, 2)}\n`);
     }
-    assert(server.exitCode === null && server.signalCode === null, "server must be live before drain");
-    serverExit = new Promise((accept) => server.once("exit", (code, signal) => accept({ code, signal })));
+    assertServerLive(server, "server must be live before drain");
+    serverExit = serverExitObserved;
     assert(server.kill("SIGTERM"), "deliver actual server drain");
   }
 
   [creatorReport, joinerReport] = await Promise.all([
-    waitForGlobal(creator, "__FORTRESS_RESULT", mode === "drain" ? 10_000 : 105_000),
-    waitForGlobal(joiner, "__FORTRESS_RESULT", mode === "drain" ? 10_000 : 105_000),
+    waitForGlobal(creator, "__FORTRESS_RESULT", phaseMode === "drain" ? 10_000 : 105_000),
+    waitForGlobal(joiner, "__FORTRESS_RESULT", phaseMode === "drain" ? 10_000 : 105_000),
   ]);
   await new Promise((accept) => setTimeout(accept, 250));
   const creatorBrowser = await browserAttestation(creator);
@@ -206,7 +256,7 @@ try {
     joinerBrowser,
     room.room_code,
   );
-  if (mode === "drain") {
+  if (phaseMode === "drain") {
     for (const [index, report] of [creatorReport, joinerReport].entries()) {
       const before = activeCheckpoints[index].report;
       assert(report.player_id === before.player_id && report.instance_nonce === before.instance_nonce, `${report.role}: identity changed at shutdown`);
@@ -227,14 +277,20 @@ try {
       clearTimeout(drainTimer);
     }
     assert(exit.code === 0 && exit.signal === null, `server did not drain cleanly: ${JSON.stringify(exit)}`);
+    await withDeadline(serverClosedObserved, 2_000, "server drain stdio close deadline expired");
     process.stdout.write("HEALTHY fortress-wasm causal server-drain failures\n");
+    if (mode === "restart") {
+      drainedPeers = [creatorReport, joinerReport];
+      drainedServerPid = server.pid;
+    }
   } else {
+    assertServerLive(server, "server exited before gameplay completion");
     const peerHealth = [
       ["creator", creatorReport, healthViolations("creator", creatorReport)],
       ["joiner", joinerReport, healthViolations("joiner", joinerReport)],
     ];
     const healthyViolations = peerHealth.flatMap(([, , violations]) => violations);
-    if (mode === "released") {
+    if (phaseMode === "released") {
       for (const [name, report, violations] of peerHealth) {
         assert(
           report.max_admissions_per_callback > 1,
@@ -301,22 +357,28 @@ try {
       );
     }
   }
-} catch (error) {
-  process.stderr.write(`BUSTED fortress-wasm ${mode}: ${error.stack ?? error}\n`);
-  process.exitCode = 1;
-} finally {
+  if (mode === "restart" && phaseMode === "released") {
+    const violations = restartIdentityViolations(drainedPeers, [creatorReport, joinerReport]);
+    assert(violations.length === 0, `restart: ${violations.join(", ")}`);
+    writeFileSync(join(artifactRoot, "restart-evidence.json"), `${JSON.stringify({
+      server_binary: serverBinaryArg,
+      build_sha: buildSha,
+      server_port_before: serverPort,
+      server_port_after: serverPort,
+      drained_server_pid: drainedServerPid,
+      restarted_server_pid: server.pid,
+      drained_peers: drainedPeers.map(restartIdentity),
+      restarted_peers: [creatorReport, joinerReport].map(restartIdentity),
+    }, null, 2)}\n`);
+    process.stdout.write("HEALTHY fortress-wasm same-port server restart with fresh healthy peers\n");
+  }
   await persistPeerArtifacts(joiner, joinerReport);
   await persistPeerArtifacts(creator, creatorReport);
   await closePeer(joiner);
   await closePeer(creator);
-  httpServer.close();
-  server.kill("SIGTERM");
-  if (server.exitCode === null && server.signalCode === null) await Promise.race([
-    new Promise((accept) => server.once("exit", accept)),
-    new Promise((accept) => setTimeout(accept, 2_000)),
-  ]);
-  if (server.exitCode === null) server.kill("SIGKILL");
-  writeFileSync(serverLog, Buffer.concat(serverChunks));
+  joiner = creator = undefined;
+  joinerReport = creatorReport = undefined;
+  writeFileSync(join(artifactDirectory, "server.log"), Buffer.concat(serverChunks));
 }
 
 async function launchPeer({ role, roomCode, instanceNonce, expectedRemoteNonce, pageUrl }) {
@@ -499,7 +561,7 @@ function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser,
     assertExactKeys(report, reportKeys, `${name} report`);
     assert(report.schema_version === 3 && report.status === "complete", `${name}: incomplete schema`);
     assert(report.origin === "rust-gdextension", `${name}: report did not originate in Rust`);
-    if (mode !== "drain") assert(report.runtime_error === null, `${name}: ${report.runtime_error}`);
+    if (phaseMode !== "drain") assert(report.runtime_error === null, `${name}: ${report.runtime_error}`);
     assert(report.role === name, `${name}: role mismatch`);
     assert(report.room_code === roomCode, `${name}: room mismatch`);
     assert(report.build_sha === buildSha, `${name}: current-checkout identity mismatch`);
@@ -549,7 +611,7 @@ function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser,
   assert(joinerReport.expected_remote_nonce === creatorReport.instance_nonce, "joiner expected-remote nonce mismatch");
   assert(creatorReport.remote_player_id === joinerReport.player_id, "creator remote player mismatch");
   assert(joinerReport.remote_player_id === creatorReport.player_id, "joiner remote player mismatch");
-  if (mode !== "drain") {
+  if (phaseMode !== "drain") {
     assert(creatorReport.relay_sent_sequence_count === joinerReport.relay_received_sequence_count, "creator->joiner sequence count mismatch");
     assert(creatorReport.relay_sent_first_sequence === joinerReport.relay_received_first_sequence, "creator->joiner first sequence mismatch");
     assert(creatorReport.relay_sent_last_sequence === joinerReport.relay_received_last_sequence, "creator->joiner last sequence mismatch");
@@ -791,9 +853,146 @@ function safeWriteArtifact(name, contents) {
 
 async function closePeer(peer) {
   if (!peer) return;
-  await peer.context?.close().catch(() => {});
-  await peer.browser?.close().catch(() => {});
-  await peer.server?.close().catch(() => {});
+  const process = peer.server?.process();
+  try {
+    await withDeadline((async () => {
+      await peer.context?.close().catch(() => {});
+      await peer.browser?.close().catch(() => {});
+      await peer.server?.close();
+    })(), 5_000, `${peer.role}: browser close deadline expired`);
+  } catch (error) {
+    if (process && process.exitCode === null && process.signalCode === null) process.kill("SIGKILL");
+    throw error;
+  }
+  assert(!process || process.exitCode !== null || process.signalCode !== null, `${peer.role}: browser process survived close`);
+}
+
+async function waitForServer() {
+  await Promise.race([
+    waitForTcp(serverPort, 10_000),
+    serverExitObserved.then((exit) => { throw new Error(`server exited before bind: ${JSON.stringify(exit)}`); }),
+  ]);
+}
+
+function assertServerLive(child, message) {
+  assert(child.exitCode === null && child.signalCode === null, message);
+}
+
+function observeServer(child) {
+  // Each spawn owns its output even if exit precedes the final pipe data.
+  const chunks = [];
+  const exit = new Promise((accept) => {
+    child.once("exit", (code, signal) => accept({ code, signal }));
+    child.once("error", (error) => accept({ error: String(error) }));
+  });
+  const closed = new Promise((accept) => child.once("close", () => accept(exit)));
+  child.stdout.on("data", (chunk) => chunks.push(chunk));
+  child.stderr.on("data", (chunk) => chunks.push(chunk));
+  return { chunks, exit, closed };
+}
+
+async function stopServer() {
+  if (server.exitCode === null && server.signalCode === null && server.pid) {
+    server.kill("SIGTERM");
+    let timer;
+    try {
+      const stopped = await Promise.race([
+        serverExitObserved.then(() => true),
+        new Promise((accept) => { timer = setTimeout(() => accept(false), 2_000); }),
+      ]);
+      if (!stopped) {
+        server.kill("SIGKILL");
+        await withDeadline(serverExitObserved, 2_000, "server kill deadline expired");
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  await withDeadline(serverClosedObserved, 2_000, "server stdio close deadline expired");
+}
+
+async function runServerLifecycleSelfTests() {
+  // An inherited pipe forces a real exit-before-close transition with late data.
+  const tail = "process.stdin.resume(); process.stdin.on('end', () => process.stdout.write('old-tail'))";
+  const script = `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(tail)}], { stdio: [3, 1, 2] }); process.stdout.write('old-head', () => process.exit(7))`;
+  const oldChild = spawn(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "pipe", "pipe"] });
+  const old = observeServer(oldChild);
+  let fresh;
+  try {
+    assertServerLive(oldChild, "lifecycle control rejects live child");
+    let closed = false;
+    oldChild.once("close", () => { closed = true; });
+    const status = await withDeadline(old.exit, 5_000, "lifecycle control exit deadline expired");
+    assert(status.code === 7 && status.signal === null, "lifecycle control lost actual exit status");
+    let rejectedExit = false;
+    try {
+      assertServerLive(oldChild, "exited child");
+    } catch {
+      rejectedExit = true;
+    }
+    assert(rejectedExit, "gameplay completion accepted exited child");
+    fresh = observeServer(spawn(process.execPath, ["-e", "process.stdout.write('new-output')"], { stdio: ["ignore", "pipe", "pipe"] }));
+    const closedAtExit = closed;
+    oldChild.stdio[3].end();
+    assert(!closedAtExit, "lifecycle control did not exercise exit before close");
+    const finalStatus = await withDeadline(old.closed, 5_000, "lifecycle control close deadline expired");
+    assert(closed, "server logs finalized before stdio close");
+    await withDeadline(fresh.closed, 5_000, "lifecycle control fresh close deadline expired");
+    assert(finalStatus === status, "stdio close replaced actual exit status");
+    assert(Buffer.concat(old.chunks).toString() === "old-headold-tail", "old server lost late output");
+    assert(Buffer.concat(fresh.chunks).toString() === "new-output", "old server output leaked into restarted server");
+  } finally {
+    if (!oldChild.stdio[3].writableEnded) oldChild.stdio[3].end();
+    if (oldChild.exitCode === null && oldChild.signalCode === null) oldChild.kill("SIGKILL");
+    await withDeadline(Promise.all([old.closed, fresh?.closed]), 5_000, "lifecycle control cleanup deadline expired");
+  }
+}
+
+async function withDeadline(promise, milliseconds, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), milliseconds); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function restartIdentity(report) {
+  return Object.fromEntries(["instance_nonce", "player_id", "browser_process_id"].map((key) => [key, report[key]]));
+}
+
+function restartIdentityViolations(before, after) {
+  const failures = [];
+  for (const key of ["instance_nonce", "player_id"]) {
+    const oldValues = new Set(before.map((report) => report[key]));
+    if (after.some((report) => oldValues.has(report[key]))) failures.push(`reused ${key}`);
+  }
+  return failures;
+}
+
+function runRestartGateSelfTests() {
+  const before = [
+    { instance_nonce: "old-creator", player_id: "old-player-creator", browser_process_id: 101 },
+    { instance_nonce: "old-joiner", player_id: "old-player-joiner", browser_process_id: 102 },
+  ];
+  const fresh = [
+    { instance_nonce: "new-creator", player_id: "new-player-creator", browser_process_id: 201 },
+    { instance_nonce: "new-joiner", player_id: "new-player-joiner", browser_process_id: 202 },
+  ];
+  assert(restartIdentityViolations(before, fresh).length === 0, "restart gate rejects fresh peers");
+  const recycledPids = fresh.map((report, index) => ({ ...report, browser_process_id: before[index].browser_process_id }));
+  assert(restartIdentityViolations(before, recycledPids).length === 0, "restart gate rejects recycled process IDs after closure");
+  for (const key of ["instance_nonce", "player_id"]) {
+    for (const oldPeer of before) {
+      for (const index of [0, 1]) {
+        const reused = fresh.map((report, peerIndex) => peerIndex === index ? { ...report, [key]: oldPeer[key] } : report);
+        assert(restartIdentityViolations(before, reused).includes(`reused ${key}`), `restart gate accepts reused ${key}`);
+      }
+    }
+  }
 }
 
 function cleanServerEnvironment(port, browserOriginPort) {
