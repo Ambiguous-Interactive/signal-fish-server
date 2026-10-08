@@ -40,6 +40,7 @@ type Client = SignalFishPollingClient<GodotWebSocketTransport>;
 enum RunMode {
     Healthy,
     DrainProbe,
+    SyncCloseProbe,
     NegativeOneAdmissionPerCallback,
 }
 
@@ -191,6 +192,27 @@ struct ActiveCheckpoint {
     report: Report,
 }
 
+#[derive(Serialize)]
+struct SyncCheckpoint {
+    phase: String,
+    sync_progress: (u32, u32, u32),
+    report: Report,
+}
+
+fn sync_probe_ready(
+    phase: SessionState,
+    progress: Option<(u32, u32, u32)>,
+    frames: (i32, i32, u64),
+    traffic: (u64, u64),
+) -> bool {
+    phase == SessionState::Synchronizing
+        && progress
+            .is_some_and(|(count, total, requests)| count > 0 && count < total && requests > 0)
+        && frames == (0, 0, 0)
+        && traffic.0 > 0
+        && traffic.1 > 0
+}
+
 struct Runtime {
     config: BrowserConfig,
     client: Client,
@@ -218,6 +240,9 @@ struct Runtime {
     workload_finished: bool,
     pending_inbound: Vec<PendingInbound>,
     shutdown_notice: Option<String>,
+    sync_progress: Option<(u32, u32, u32)>,
+    sync_json_pending: Option<String>,
+    sync_frozen: bool,
 }
 
 impl Runtime {
@@ -295,6 +320,9 @@ impl Runtime {
             workload_finished: false,
             pending_inbound: Vec::new(),
             shutdown_notice: None,
+            sync_progress: None,
+            sync_json_pending: None,
+            sync_frozen: false,
         })
     }
 
@@ -313,7 +341,7 @@ impl Runtime {
         }
         // Stop producing gameplay after the server's drain advisory. Keep
         // polling the real transport until its authoritative close arrives.
-        if self.shutdown_notice.is_some() {
+        if self.shutdown_notice.is_some() || self.sync_frozen {
             return Ok(false);
         }
         self.ensure_session()?;
@@ -328,6 +356,14 @@ impl Runtime {
                 fortress.poll_remote_clients();
                 for event in fortress.events() {
                     match event {
+                        FortressEvent::Synchronizing {
+                            count,
+                            total,
+                            total_requests_sent,
+                            ..
+                        } if self.config.run_mode == RunMode::SyncCloseProbe => {
+                            self.sync_progress = Some((count, total, total_requests_sent));
+                        }
                         FortressEvent::WaitRecommendation { skip_frames } => {
                             self.recommended_skips = skip_frames;
                         }
@@ -342,6 +378,11 @@ impl Runtime {
                 }
 
                 if fortress.current_state() == SessionState::Running {
+                    if self.config.run_mode == RunMode::SyncCloseProbe {
+                        return Err(
+                            "Fortress synchronization completed before close checkpoint".to_owned()
+                        );
+                    }
                     let now = Instant::now();
                     if self.running_since.is_none() {
                         self.running_since = Some(now);
@@ -412,7 +453,7 @@ impl Runtime {
                 || self.relay.target_received());
 
         let admission_cap = match self.config.run_mode {
-            RunMode::Healthy | RunMode::DrainProbe => usize::MAX,
+            RunMode::Healthy | RunMode::DrainProbe | RunMode::SyncCloseProbe => usize::MAX,
             RunMode::NegativeOneAdmissionPerCallback => 1,
         };
         let admitted = drain_relay(
@@ -425,6 +466,7 @@ impl Runtime {
             .max_admissions_per_callback
             .max(u64::try_from(admitted).unwrap_or(u64::MAX));
         self.relay.sample_queue();
+        self.publish_sync_checkpoint()?;
 
         let drained = self.relay.queue_depth() == 0
             && self.relay.counters().enqueued_outbound == self.client.stats().game_data_sent;
@@ -620,6 +662,44 @@ impl Runtime {
                 })
                 .map_err(|fault| format!("relay inbound queue capacity exceeded: {fault:?}"))?;
         }
+        Ok(())
+    }
+
+    fn publish_sync_checkpoint(&mut self) -> Result<(), String> {
+        if self.config.run_mode != RunMode::SyncCloseProbe || self.sync_frozen {
+            return Ok(());
+        }
+        let Some(session) = self.session.as_ref() else {
+            return Ok(());
+        };
+        let stats = self.client.stats();
+        if !sync_probe_ready(
+            session.current_state(),
+            self.sync_progress,
+            (
+                session.current_frame().as_i32(),
+                self.state.frame,
+                session.metrics().frames_advanced,
+            ),
+            (stats.game_data_sent, stats.game_data_received),
+        ) {
+            return Ok(());
+        }
+        let progress = self
+            .sync_progress
+            .ok_or("missing Fortress synchronization progress")?;
+        let checkpoint = SyncCheckpoint {
+            phase: session.current_state().to_string(),
+            sync_progress: progress,
+            report: self.report(None),
+        };
+        self.sync_json_pending = Some(
+            serde_json::to_string(&checkpoint)
+                .map_err(|error| format!("serialize synchronization checkpoint: {error}"))?,
+        );
+        // Keep this actual partial handshake unchanged while signaling polls
+        // continue to observe the server drain advisory and transport close.
+        self.sync_frozen = true;
         Ok(())
     }
 
@@ -883,6 +963,14 @@ impl FortressWasmPeer {
     }
 
     #[func]
+    fn take_sync_json(&mut self) -> GString {
+        self.runtime
+            .as_mut()
+            .and_then(|runtime| runtime.sync_json_pending.take())
+            .map_or_else(GString::new, |json| GString::from(json.as_str()))
+    }
+
+    #[func]
     fn take_active_json(&mut self) -> GString {
         if self.completed || self.active_published {
             return GString::new();
@@ -994,6 +1082,119 @@ mod extension_registration {
 #[allow(clippy::panic)]
 mod tests {
     use super::{percentile, summarize_intervals};
+
+    #[test]
+    fn synchronization_checkpoint_requires_partial_handshake_and_real_traffic() {
+        use super::SessionState::{Running, Synchronizing};
+        for (name, phase, progress, frames, traffic, ready) in [
+            (
+                "partial",
+                Synchronizing,
+                Some((1, 5, 1)),
+                (0, 0, 0),
+                (1, 1),
+                true,
+            ),
+            (
+                "missing event",
+                Synchronizing,
+                None,
+                (0, 0, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "zero count",
+                Synchronizing,
+                Some((0, 5, 1)),
+                (0, 0, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "complete",
+                Synchronizing,
+                Some((5, 5, 5)),
+                (0, 0, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "excess count",
+                Synchronizing,
+                Some((6, 5, 5)),
+                (0, 0, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "no requests",
+                Synchronizing,
+                Some((1, 5, 0)),
+                (0, 0, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "running",
+                Running,
+                Some((1, 5, 1)),
+                (0, 0, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "session cursor",
+                Synchronizing,
+                Some((1, 5, 1)),
+                (1, 0, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "game cursor",
+                Synchronizing,
+                Some((1, 5, 1)),
+                (0, 1, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "advance",
+                Synchronizing,
+                Some((1, 5, 1)),
+                (0, 0, 1),
+                (1, 1),
+                false,
+            ),
+            (
+                "no send",
+                Synchronizing,
+                Some((1, 5, 1)),
+                (0, 0, 0),
+                (0, 1),
+                false,
+            ),
+            (
+                "no receive",
+                Synchronizing,
+                Some((1, 5, 1)),
+                (0, 0, 0),
+                (1, 0),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                super::sync_probe_ready(phase, progress, frames, traffic),
+                ready,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            serde_json::from_str::<super::RunMode>("\"sync_close_probe\"").ok(),
+            Some(super::RunMode::SyncCloseProbe)
+        );
+    }
 
     #[test]
     fn callback_summary_is_deterministic() {

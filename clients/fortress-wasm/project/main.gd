@@ -2,6 +2,7 @@ extends Node
 
 const CONFIG_KEY := "__FORTRESS_CONFIG"
 const ROOM_KEY := "__FORTRESS_ROOM_READY"
+const SYNC_KEY := "__FORTRESS_SYNC"
 const ACTIVE_KEY := "__FORTRESS_ACTIVE"
 const RESULT_KEY := "__FORTRESS_RESULT"
 
@@ -9,6 +10,7 @@ const RESULT_KEY := "__FORTRESS_RESULT"
 var room_published := false
 var result_published := false
 var active_published := false
+var sync_published := false
 
 
 func _ready() -> void:
@@ -56,6 +58,12 @@ func _process(_delta: float) -> void:
 			room_published = true
 			JavaScriptBridge.eval("globalThis.%s = %s" % [ROOM_KEY, room_json], true)
 			print("FORTRESS_WASM_ROOM ", room_json)
+	if not sync_published:
+		var sync_json: String = peer.take_sync_json()
+		if not sync_json.is_empty():
+			sync_published = true
+			JavaScriptBridge.eval("globalThis.%s = %s" % [SYNC_KEY, sync_json], true)
+			print("FORTRESS_WASM_SYNC ", sync_json)
 	if not active_published:
 		var active_json: String = peer.take_active_json()
 		if not active_json.is_empty():
