@@ -221,6 +221,9 @@ fn sync_probe_ready(
 
 fn relay_for_mode(mode: RunMode) -> RelaySocket {
     let relay = RelaySocket::default();
+    if matches!(mode, RunMode::Healthy | RunMode::DrainProbe) {
+        relay.hold_inputs_until_prediction();
+    }
     if mode == RunMode::SyncCloseProbe {
         relay.allow_first_sync_reply_only();
     }
@@ -368,6 +371,8 @@ impl Runtime {
         let mut target_reached = self.local_target_reached;
         if !self.workload_finished {
             if let Some(fortress) = self.session.as_mut() {
+                self.relay
+                    .observe_local_frame(fortress.current_frame().as_i32());
                 fortress.poll_remote_clients();
                 for event in fortress.events() {
                     match event {
@@ -1241,6 +1246,32 @@ mod tests {
         );
     }
 
+    fn exchange_test_relays(
+        sockets: &[super::RelaySocket; 2],
+        ids: [uuid::Uuid; 2],
+        sequence: &mut u64,
+    ) -> Result<(), String> {
+        for index in 0..2 {
+            while let Some(frame) = sockets[index].take_outbound() {
+                *sequence += 1;
+                sockets[1 - index]
+                    .admit_inbound(super::InboundRelayFrame {
+                        local: ids[1 - index],
+                        known_remote: ids[index],
+                        from: ids[index],
+                        encoding: super::GameDataEncoding::MessagePack,
+                        seq: Some(*sequence),
+                        epoch: Some(1),
+                        payload: &frame.payload,
+                    })
+                    .map_err(|fault| format!("unexpected relay fault: {fault:?}"))?;
+                sockets[index].mark_admitted(frame);
+                sockets[index].record_client_sent(sockets[index].sent_ledger().count);
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn configured_sync_probe_stays_partial_while_other_modes_complete_handshake(
     ) -> Result<(), String> {
@@ -1272,22 +1303,7 @@ mod tests {
                         }
                     }
                 }
-                for index in 0..2 {
-                    while let Some(frame) = sockets[index].take_outbound() {
-                        server_sequence += 1;
-                        sockets[1 - index]
-                            .admit_inbound(super::InboundRelayFrame {
-                                local: ids[1 - index],
-                                known_remote: ids[index],
-                                from: ids[index],
-                                encoding: super::GameDataEncoding::MessagePack,
-                                seq: Some(server_sequence),
-                                epoch: Some(1),
-                                payload: &frame.payload,
-                            })
-                            .map_err(|fault| format!("unexpected relay fault: {fault:?}"))?;
-                    }
-                }
+                exchange_test_relays(&sockets, ids, &mut server_sequence)?;
             }
             for (index, session) in sessions.iter().enumerate() {
                 if mode == super::RunMode::SyncCloseProbe {
@@ -1301,6 +1317,139 @@ mod tests {
                         "{mode:?}"
                     );
                 }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn drain_probe_forces_real_corrections_when_timely_inputs_need_no_rollback(
+    ) -> Result<(), String> {
+        for mode in [
+            None,
+            Some(super::RunMode::Healthy),
+            Some(super::RunMode::DrainProbe),
+        ] {
+            let configured = mode.is_some();
+            let ids = [uuid::Uuid::from_u128(1), uuid::Uuid::from_u128(2)];
+            let sockets = match mode {
+                Some(mode) => [super::relay_for_mode(mode), super::relay_for_mode(mode)],
+                None => [super::RelaySocket::default(), super::RelaySocket::default()],
+            };
+            for index in 0..2 {
+                sockets[index]
+                    .configure_identity(ids[index], ids[1 - index])
+                    .map_err(str::to_owned)?;
+            }
+            let mut sessions = [
+                super::build_session(ids[0], ids[1], sockets[0].clone())?,
+                super::build_session(ids[1], ids[0], sockets[1].clone())?,
+            ];
+            let mut states = [super::GameState::default(), super::GameState::default()];
+            let mut sequence = 0;
+            let mut loads = [0u64; 2];
+            let mut saves = [0u64; 2];
+            for _ in 0..32 {
+                for session in &mut sessions {
+                    session.poll_remote_clients();
+                }
+                exchange_test_relays(&sockets, ids, &mut sequence)?;
+            }
+            for session in &sessions {
+                assert_eq!(session.current_state(), super::SessionState::Running);
+            }
+            // Deliver peer 0's real input before peer 1 advances. Without the
+            // startup gate, peer 1 can run this whole game without a correction.
+            for _ in 0..160 {
+                for index in 0..2 {
+                    let session = &mut sessions[index];
+                    sockets[index].observe_local_frame(session.current_frame().as_i32());
+                    session.poll_remote_clients();
+                    for handle in session.local_player_handles() {
+                        session
+                            .add_local_input(
+                                handle,
+                                super::input_for_frame(
+                                    session.current_frame().as_i32(),
+                                    handle.as_usize(),
+                                ),
+                            )
+                            .map_err(|error| error.to_string())?;
+                    }
+                    let requests = session.advance_frame().map_err(|error| error.to_string())?;
+                    for request in &requests {
+                        match request {
+                            fortress_rollback::FortressRequest::LoadGameState { .. } => {
+                                loads[index] += 1
+                            }
+                            fortress_rollback::FortressRequest::SaveGameState { .. } => {
+                                saves[index] += 1
+                            }
+                            _ => {}
+                        }
+                    }
+                    super::apply_requests(&mut states[index], requests);
+                    exchange_test_relays(&sockets, ids, &mut sequence)?;
+                }
+            }
+            for _ in 0..8 {
+                for (index, session) in sessions.iter_mut().enumerate() {
+                    sockets[index].observe_local_frame(session.current_frame().as_i32());
+                    session.poll_remote_clients();
+                }
+                exchange_test_relays(&sockets, ids, &mut sequence)?;
+            }
+            for index in 0..2 {
+                assert_eq!(
+                    sockets[index].sent_ledger(),
+                    sockets[1 - index].received_ledger()
+                );
+                let counters = sockets[index].counters();
+                assert_eq!(
+                    counters.enqueued_outbound,
+                    sockets[index].sent_ledger().count
+                );
+                assert_eq!(
+                    counters.accepted_inbound,
+                    sockets[index].received_ledger().count
+                );
+                assert_eq!(counters.malformed_inbound, 0);
+                assert_eq!(counters.wrong_destination, 0);
+                assert_eq!(counters.unknown_sender, 0);
+                assert_eq!(counters.outbound_overflow, 0);
+                assert_eq!(counters.inbound_overflow, 0);
+                assert_eq!(counters.encode_failures, 0);
+                assert_eq!(counters.completion_underflow, 0);
+                assert_eq!(sockets[index].queue_depth(), 0);
+                assert_eq!(
+                    sockets[index].inbound_depth(),
+                    0,
+                    "final polls drain received frames"
+                );
+            }
+            for (index, session) in sessions.iter().enumerate() {
+                let metrics = session.metrics();
+                assert!(session.confirmed_frame().as_i32() >= 120);
+                assert!(metrics.frames_advanced > 0);
+                assert!(metrics.checksums_compared > 0);
+                assert_eq!(metrics.checksums_compared, metrics.checksums_matched);
+                assert_eq!(metrics.checksums_mismatched, 0);
+                if configured {
+                    assert!(
+                        metrics.rollback_count > 0,
+                        "configured probe must exercise a real correction"
+                    );
+                    assert!(metrics.max_rollback_depth <= 4);
+                    assert!(loads[index] > 0, "correction loads real saved state");
+                    assert!(saves[index] > 0, "game saves real state");
+                }
+            }
+            if !configured {
+                assert_eq!(
+                    sessions[1].metrics().rollback_count,
+                    0,
+                    "timely peer is healthy without rollback"
+                );
             }
         }
         Ok(())

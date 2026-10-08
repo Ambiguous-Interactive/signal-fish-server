@@ -1959,7 +1959,13 @@ carries a disposition.
   within ten seconds, with no gameplay or unrelated relay fault. It keeps
   each pre-close checkpoint and terminal report. Validator controls reject
   empty or completed handshakes, early gameplay, missing traffic, and wrong
-  close causes. WASM inbound overflow and reference restore remain in #741.
+  close causes. Healthy and drain cells hold startup inputs through local
+  frame four, as the native fixture does, to force a real prediction and
+  correction before requiring rollback evidence (#815). A paired-session
+  control covers smooth delivery with zero rollbacks and the configured
+  correction path. Failure artifacts retain periodic Rust-origin probe
+  metrics and active/sync checkpoints. WASM inbound overflow and reference
+  restore remain in #741.
 - **Opaque over a v2 negotiation (fixed with the same sweep).** The native
   client validated an opaque request against the requested version only;
   the `ProtocolInfo` `None`-version (v2) arm skipped every format check,
