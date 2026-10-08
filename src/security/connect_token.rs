@@ -532,7 +532,7 @@ mod tests {
         let verifier = test_verifier(&signing);
         let escaped = mint_with_bytes(
             &signing,
-            br#"{"app_id":"caf\u00e9","exp":1300,"nonce":"n"}"#,
+            br#"{"app_id":"\u0063\u0061\u0066\u00e9","exp":1300,"nonce":"n"}"#,
         );
         assert_eq!(
             verifier
