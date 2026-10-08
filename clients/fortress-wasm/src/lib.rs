@@ -193,6 +193,12 @@ struct ActiveCheckpoint {
 }
 
 #[derive(Serialize)]
+struct DiagnosticSnapshot {
+    phase: Option<String>,
+    report: Report,
+}
+
+#[derive(Serialize)]
 struct SyncCheckpoint {
     phase: String,
     sync_progress: (u32, u32, u32),
@@ -969,6 +975,36 @@ impl FortressWasmPeer {
             .as_mut()
             .and_then(Runtime::take_room_json)
             .map_or_else(GString::new, |json| GString::from(json.as_str()))
+    }
+
+    #[func]
+    fn snapshot_report_json(&self) -> GString {
+        if self.completed {
+            return GString::new();
+        }
+        let Some(runtime) = self.runtime.as_ref() else {
+            return GString::new();
+        };
+        if !matches!(
+            runtime.config.run_mode,
+            RunMode::DrainProbe | RunMode::SyncCloseProbe
+        ) {
+            return GString::new();
+        }
+        let snapshot = DiagnosticSnapshot {
+            phase: runtime
+                .session
+                .as_ref()
+                .map(|session| session.current_state().to_string()),
+            report: runtime.report(None),
+        };
+        match serde_json::to_string(&snapshot) {
+            Ok(json) => GString::from(json.as_str()),
+            Err(error) => {
+                godot_error!("FORTRESS_WASM diagnostic serialization error: {error}");
+                GString::new()
+            }
+        }
     }
 
     #[func]

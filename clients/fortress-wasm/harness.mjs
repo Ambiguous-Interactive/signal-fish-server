@@ -875,6 +875,9 @@ async function persistPeerArtifacts(peer, knownReport) {
         url: globalThis.location.href,
         readyState: globalThis.document.readyState,
         roomReady: globalThis.__FORTRESS_ROOM_READY,
+        active: globalThis.__FORTRESS_ACTIVE,
+        sync: globalThis.__FORTRESS_SYNC,
+        diagnostic: globalThis.__FORTRESS_DIAGNOSTIC,
         result: globalThis.__FORTRESS_RESULT,
       }));
       const snapshotTimeout = new Promise((_, reject) => {
