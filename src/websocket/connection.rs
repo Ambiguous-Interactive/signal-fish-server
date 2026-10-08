@@ -801,7 +801,7 @@ async fn flush_pending_unsupported_report(
     // accumulation gate plus the Authenticate-first rule), so the gate is
     // unreachable defense: a violation leaves the ranges pending rather than
     // leaking the frame onto a v2 wire.
-    if !rx.supports_v3() {
+    if rx.report_write_is_ambiguous() || !rx.supports_v3() {
         return false;
     }
     let Some(report) = rx.pending_unsupported_report() else {
@@ -811,6 +811,7 @@ async fn flush_pending_unsupported_report(
     // shutdown settle timeout covers this budget too. The ranges are retired
     // only after the frame is written, so a timed-out or failed write leaves the
     // accounting recorded rather than silently dropped.
+    let report_write = rx.begin_report_write();
     match registered_close_write_timeout(
         RegisteredConnectionCloseStep::FinalDeliveryReport,
         send_immediate_server_message(
@@ -824,9 +825,11 @@ async fn flush_pending_unsupported_report(
     {
         Ok(Ok(())) => {
             rx.commit_pending_unsupported_report(&report);
+            report_write.resolve();
             false
         }
         Ok(Err(ImmediateSendError::MessageTooLarge { size, max })) => {
+            report_write.resolve();
             tracing::warn!(%player_id, size, max, "Final delivery report exceeds outbound message-size limit");
             true
         }
@@ -991,10 +994,10 @@ async fn finalize_closed_connection(
                 "Socket write was abandoned in flight while closing; abandoning the queue behind it \
                  rather than writing past an unaccountable sequence"
             );
-            // The coalesced omissions are still exact and still describe frames
-            // this recipient already saw skipped, so they are written after the
-            // abandonment snapshot above — a report never advances the data
-            // sequence and so can never open a hole of its own.
+            // Coalesced omissions may still be reported after cancelling game
+            // data. If a report write itself was cancelled, its retained copy
+            // and counter frontier are uncertain: the flush helper preserves
+            // that evidence without submitting another report.
             flush_pending_unsupported_report(
                 sender,
                 rx,
@@ -4411,6 +4414,122 @@ mod tests {
             1
         );
         pair.shutdown().await;
+    }
+
+    /// Cancellation may leave the report inside SplitSink even though its
+    /// ledger commit did not run. Teardown must not enqueue a second copy.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn canceled_idle_report_is_not_replayed_when_the_peer_recovers() {
+        let server = test_server().await;
+        let player_id = PlayerId::from_u128(9);
+        let (tx, mut rx) = crate::coordination::outbound_queue::channel(16, 16);
+        tx.set_protocol_version(3);
+        assert!(rx.record_unsupported_format(ledger_data(1).metadata.expect("stamped fixture")));
+        let expected_report = rx
+            .pending_unsupported_report()
+            .expect("exact pending report");
+        tx.try_enqueue_data(ledger_data(2))
+            .expect("queue successor behind report");
+        let mut pair = UpgradedSocketPair::connect_with_small_client_recv_buffer(Some(
+            CLIENT_CLAMPED_RECV_BUFFER_BYTES,
+        ))
+        .await;
+        // This raw frame is transport pressure, not a valid game-data frame.
+        // The oracle below covers exact report bytes and terminal ordering.
+        {
+            let fill = pair
+                .server_sink
+                .send(Message::Binary(vec![0_u8; 8 << 20].into()));
+            tokio::pin!(fill);
+            assert!(futures_util::poll!(fill.as_mut()).is_pending());
+        }
+        tokio::time::pause();
+        let budget = Duration::from_millis(20);
+        let (close_signal, _listener) = ConnectionCloseSignal::channel();
+        {
+            let write = write_idle_unsupported_report(
+                &mut pair.server_sink,
+                &rx,
+                &player_id,
+                &server,
+                &close_signal,
+                budget,
+            );
+            tokio::pin!(write);
+            assert!(futures_util::poll!(write.as_mut()).is_pending());
+            tokio::time::advance(budget).await;
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_millis(2), write).await,
+                Ok(Err(QueueWriteError::SojournExpired))
+            ));
+        }
+        assert!(
+            rx.pending_unsupported_report().is_some(),
+            "unconfirmed evidence must remain available"
+        );
+        tokio::time::resume();
+        let UpgradedSocketPair {
+            mut server_sink,
+            mut client,
+            serve_task,
+            ..
+        } = pair;
+        let drain = tokio::spawn(async move {
+            let mut reports = Vec::new();
+            while let Some(frame) = client.next().await {
+                match frame.expect("client stream stays decodable") {
+                    TungsteniteMessage::Text(text) => {
+                        match serde_json::from_str::<ServerMessage>(&text)
+                            .expect("server frame decodes")
+                        {
+                            ServerMessage::DeliveryReport(report) => reports.push(*report),
+                            ServerMessage::Error { .. } => {}
+                            other => panic!(
+                                "later gameplay must not pass the canceled report: {other:?}"
+                            ),
+                        }
+                    }
+                    TungsteniteMessage::Binary(bytes) => assert_eq!(bytes.len(), 8 << 20),
+                    TungsteniteMessage::Close(Some(close)) => {
+                        assert_eq!(u16::from(close.code), 4002);
+                        return reports;
+                    }
+                    other => panic!("unexpected frame {other:?}"),
+                }
+            }
+            panic!("server must send a coded close");
+        });
+        let (probe_state, _probe_updates) = watch::channel(PingProbeState::default());
+        let mut batcher = MessageBatcher::new(1, 1);
+        finalize_closed_connection(
+            &mut server_sink,
+            &mut rx,
+            &mut batcher,
+            Some(CloseReason::SlowConsumer),
+            &player_id,
+            &server,
+            &close_signal,
+            &probe_state,
+            budget,
+        )
+        .await;
+        let reports = tokio::time::timeout(Duration::from_secs(10), drain)
+            .await
+            .expect("recovering peer drains close")
+            .expect("client task succeeds");
+        serve_task.abort();
+        let _ = serve_task.await;
+        assert!(rx.report_write_is_ambiguous());
+        assert!(
+            rx.pending_unsupported_report().is_some(),
+            "teardown must preserve unconfirmed evidence without retrying it"
+        );
+        assert_eq!(
+            reports,
+            vec![expected_report],
+            "the sink-retained report must reach the peer exactly once with unchanged attribution"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

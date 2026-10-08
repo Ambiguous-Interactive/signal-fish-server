@@ -30,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Prevent duplicate delivery reports after a canceled socket write when the
+  recipient resumes reading during teardown (#833).
+
 - Apply the configured write deadline to idle delivery reports so a stalled
   recipient cannot block the socket writer beyond that budget (#830).
 

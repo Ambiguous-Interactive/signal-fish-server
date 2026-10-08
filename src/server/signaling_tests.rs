@@ -2385,12 +2385,29 @@ async fn reconnect_authority_restore_is_live_and_replay_visible() {
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_replay_drops_authority_events_the_snapshot_supersedes() {
+    assert_reconnect_replay_snapshot_contract(true).await;
+}
+
+/// The frozen v2 wire retains peer endpoints. V3 strips them in the socket
+/// writer, so endpoint loss is a v2 serialization-level counterexample only.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn reconnect_v2_snapshot_replaces_historical_peer_metadata() {
+    assert_reconnect_replay_snapshot_contract(false).await;
+}
+
+async fn assert_reconnect_replay_snapshot_contract(recipient_supports_v3: bool) {
     let server = create_test_server_with_session(mesh_session_config()).await;
     let (authority, _old_authority_rx) = register_client(&server).await;
     let (existing, mut _existing_rx) = register_client(&server).await;
     let (current, mut current_rx) = register_client(&server).await;
     for player in [authority, existing, current] {
         server.set_client_protocol(&player, v3_webrtc());
+    }
+    if !recipient_supports_v3 {
+        // A v3 player can use its known credential after negotiating v2 on the
+        // replacement connection. Only that recipient's wire shape changes.
+        server.set_client_protocol(&current, NegotiatedProtocol::default());
     }
     let room_id = create_db_room_with_max(&server, authority, 2).await;
     server
@@ -2477,54 +2494,71 @@ async fn reconnect_replay_drops_authority_events_the_snapshot_supersedes() {
             .await
     );
 
-    match recv(&mut current_rx).await.as_ref() {
+    let response = recv(&mut current_rx).await;
+    match response.as_ref() {
         ServerMessage::Reconnected(payload) => {
-            let snapshot_player = payload
-                .current_players
-                .iter()
-                .find(|player| player.id == existing)
-                .expect("the current snapshot contains the incumbent");
-            let historical_player = payload
-                .missed_events
-                .iter()
-                .find_map(|event| match event {
-                    ServerMessage::PlayerJoined { player } if player.id == existing => Some(player),
-                    _ => None,
-                })
-                .expect("the buffered join remains available as history");
-            assert!(historical_player.connection_info.is_none());
-            assert_eq!(
-                serde_json::to_value(&snapshot_player.connection_info).expect("serialize snapshot"),
-                serde_json::to_value(&fresh_endpoint).expect("serialize fresh endpoint"),
-                "the snapshot must carry metadata supplied after the buffered join"
-            );
-            // Negative control: the old documented snapshot-then-replay
-            // algorithm replaces a current PlayerInfo with the historical join.
-            let mut client_players: std::collections::HashMap<_, _> = payload
-                .current_players
-                .iter()
-                .map(|player| (player.id, player.clone()))
-                .collect();
-            client_players.insert(existing, historical_player.clone());
-            assert!(
-                client_players[&existing].connection_info.is_none(),
-                "applying the historical join after the snapshot loses the endpoint"
-            );
-            // The corrected contract makes the current snapshot the final
-            // replacement, regardless of whether clients processed history.
-            client_players = payload
-                .current_players
-                .iter()
-                .map(|player| (player.id, player.clone()))
-                .collect();
-            assert_eq!(
-                serde_json::to_value(&client_players[&existing].connection_info)
-                    .expect("serialize reconciled endpoint"),
-                serde_json::to_value(&fresh_endpoint).expect("serialize fresh endpoint")
-            );
+            if !recipient_supports_v3 {
+                // V2 Reconnected goes through plain JSON serialization in the
+                // production writer. The builder already stripped v3 fields. This
+                // round trip tests the emitted shape without claiming TCP receipt.
+                let wire_response: ServerMessage = serde_json::from_slice(
+                    &serde_json::to_vec(response.as_ref()).expect("serialize v2 Reconnected"),
+                )
+                .expect("decode v2 Reconnected");
+                let ServerMessage::Reconnected(wire_payload) = wire_response else {
+                    panic!("serialized response must remain Reconnected");
+                };
+                let payload = wire_payload.as_ref();
+                let snapshot_player = payload
+                    .current_players
+                    .iter()
+                    .find(|player| player.id == existing)
+                    .expect("the current snapshot contains the incumbent");
+                let historical_player = payload
+                    .missed_events
+                    .iter()
+                    .find_map(|event| match event {
+                        ServerMessage::PlayerJoined { player } if player.id == existing => {
+                            Some(player)
+                        }
+                        _ => None,
+                    })
+                    .expect("the buffered join remains available as history");
+                assert!(historical_player.connection_info.is_none());
+                assert_eq!(
+                    serde_json::to_value(&snapshot_player.connection_info)
+                        .expect("serialize snapshot"),
+                    serde_json::to_value(&fresh_endpoint).expect("serialize fresh endpoint"),
+                    "the snapshot must carry metadata supplied after the buffered join"
+                );
+                // Negative control: the old documented snapshot-then-replay
+                // algorithm replaces a current PlayerInfo with the historical join.
+                let mut client_players: std::collections::HashMap<_, _> = payload
+                    .current_players
+                    .iter()
+                    .map(|player| (player.id, player.clone()))
+                    .collect();
+                client_players.insert(existing, historical_player.clone());
+                assert!(
+                    client_players[&existing].connection_info.is_none(),
+                    "applying the historical join after the snapshot loses the endpoint"
+                );
+                // The corrected contract makes the current snapshot the final
+                // replacement, regardless of whether clients processed history.
+                client_players = payload
+                    .current_players
+                    .iter()
+                    .map(|player| (player.id, player.clone()))
+                    .collect();
+                assert_eq!(
+                    serde_json::to_value(&client_players[&existing].connection_info)
+                        .expect("serialize reconciled endpoint"),
+                    serde_json::to_value(&fresh_endpoint).expect("serialize fresh endpoint")
+                );
+            }
             assert_eq!(
                 payload.replay,
-                Some(crate::protocol::ReplayStatus::Complete)
+                recipient_supports_v3.then_some(crate::protocol::ReplayStatus::Complete)
             );
             assert!(
                 payload.is_authority,

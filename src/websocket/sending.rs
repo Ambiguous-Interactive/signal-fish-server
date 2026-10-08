@@ -1920,8 +1920,9 @@ async fn notify_on_undeliverable(
 /// Peek-write-commit rather than take-then-write: the send task's close
 /// `select!` can cancel this at its await, and losing the only copy of a
 /// coalesced burst would silently drop accountability for every omission in it.
-/// A cancelled write leaves the ranges pending for the next flush or for the
-/// connection's teardown.
+/// A cancelled write preserves the ranges as evidence but fences re-emission:
+/// the sink may still hold the first copy. Teardown may flush that retained
+/// copy as it closes, but must not submit another report or later game data.
 pub(super) async fn write_pending_unsupported_report(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     receiver: &OutboundReceiver,
@@ -1943,22 +1944,36 @@ pub(super) async fn write_pending_unsupported_report(
     // rather than trusting that cross-file argument means a violation can only
     // leave the ranges pending (they retire only after the wire), never leak
     // the frame onto a v2 wire.
+    if receiver.report_write_is_ambiguous() {
+        return Err(SendMessageError::SocketClosed);
+    }
     if !receiver.supports_v3() {
         return Ok(false);
     }
     let Some(report) = receiver.pending_unsupported_report() else {
         return Ok(false);
     };
-    send_text_message(
+    let report_write = receiver.begin_report_write();
+    let result = send_text_message(
         sender,
         &ServerMessage::DeliveryReport(Box::new(report.clone())),
         player_id,
         max_outbound_message_size,
         metrics,
     )
-    .await?;
-    receiver.commit_pending_unsupported_report(&report);
-    Ok(true)
+    .await;
+    match result {
+        Ok(()) => {
+            receiver.commit_pending_unsupported_report(&report);
+            report_write.resolve();
+            Ok(true)
+        }
+        Err(error @ SendMessageError::MessageTooLarge { .. }) => {
+            report_write.resolve();
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(super) async fn send_text_message(

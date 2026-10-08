@@ -329,9 +329,9 @@ where
 /// Materialize and write one queued delivery report, advancing its counter
 /// frontier only after the sink's send/flush future succeeds.
 ///
-/// Keeping prepare/write/confirm in one production seam makes cancellation
-/// safe by construction: dropping this future while `write` is pending leaves
-/// the frontier unchanged.
+/// Cancellation leaves the frontier unchanged and marks the report's socket
+/// position ambiguous. The sticky fence prevents teardown from writing later
+/// reports against an unconfirmed frontier or exposing later game data.
 async fn write_queued_report<F, Fut>(
     receiver: &OutboundReceiver,
     mut report: DeliveryReportPayload,
@@ -341,12 +341,24 @@ where
     F: FnOnce(Arc<ServerMessage>) -> Fut,
     Fut: Future<Output = Result<SendDisposition, SendMessageError>>,
 {
+    if receiver.report_write_is_ambiguous() {
+        return Err(SendMessageError::SocketClosed);
+    }
     receiver.prepare_report_for_wire(&mut report);
     let per_class = report.per_class;
-    let disposition = write(Arc::new(ServerMessage::DeliveryReport(Box::new(report)))).await?;
+    let report_write = receiver.begin_report_write();
+    let disposition = match write(Arc::new(ServerMessage::DeliveryReport(Box::new(report)))).await {
+        Ok(disposition) => disposition,
+        Err(error @ SendMessageError::MessageTooLarge { .. }) => {
+            report_write.resolve();
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
     if disposition == SendDisposition::Written {
         receiver.confirm_report_written(per_class);
     }
+    report_write.resolve();
     Ok(disposition)
 }
 
@@ -891,6 +903,18 @@ mod tests {
             "a successful send/flush must confirm the prepared frontier"
         );
 
+        assert_eq!(
+            write_queued_report(&receiver, DeliveryReportPayload::default(), |_| async {
+                Err(SendMessageError::MessageTooLarge { size: 2, max: 1 })
+            })
+            .await,
+            Err(SendMessageError::MessageTooLarge { size: 2, max: 1 })
+        );
+        assert!(
+            !receiver.report_write_is_ambiguous(),
+            "a prewrite size rejection has no retained frame"
+        );
+
         let before_failure = report_frontier(&receiver);
         let mut failed_report = DeliveryReportPayload::default();
         failed_report.per_class.volatile.dropped = 2;
@@ -906,6 +930,11 @@ mod tests {
             before_failure,
             "a failed socket send must not confirm its report"
         );
+
+        assert!(receiver.report_write_is_ambiguous());
+        assert!(receiver.abandoned_in_flight_write());
+        let (_tx, receiver) = channel(1, 1);
+        receiver.confirm_report_written(before_failure);
 
         let mut accounted_drop = DeliveryReportPayload::default();
         accounted_drop.per_class.volatile.dropped = 4;
@@ -937,6 +966,15 @@ mod tests {
             report_frontier(&receiver),
             before_failure,
             "cancelling an in-flight socket send must not confirm its report"
+        );
+        assert!(receiver.report_write_is_ambiguous());
+        assert!(receiver.abandoned_in_flight_write());
+        assert_eq!(
+            write_queued_report(&receiver, DeliveryReportPayload::default(), |_| async {
+                panic!("a terminally ambiguous report must never reach another socket write")
+            })
+            .await,
+            Err(SendMessageError::SocketClosed)
         );
     }
 

@@ -155,9 +155,10 @@ current Rust endpoint tests do not extend that model's state space.
 Affected contract: reconnect scenario, protocol, client guide, and ReplayStatus.
 
 During A's absence, B joins without connection information and then supplies a
-Direct endpoint. The reconnect snapshot contains B's new endpoint, while the
-historical `PlayerJoined` contains none. Following the documented instruction
-to apply the snapshot and then replay removes the endpoint.
+Direct endpoint. On a v2 replacement connection, the reconnect snapshot contains
+B's new endpoint, while the historical `PlayerJoined` contains none. Following
+the documented instruction to apply the snapshot and then replay removes the
+endpoint.
 
 The experiment falsifies that client algorithm; it does not identify a server
 snapshot defect. The retained negative control demonstrates the stale overwrite
@@ -169,8 +170,13 @@ Historical processing is optional and must precede that replacement.
 every authority transition was returned or that the client received an old
 socket's unread events. Existing filtering is deliberate. The native reference
 client already ignores history when applying the snapshot.
-The reproduction uses server handlers and outbound queues with a small client
-state map; it does not exercise a TCP reconnect or every reference client.
+The initial fixture inspected internal v3 messages before wire projection.
+Independent review identified that v3 omits `connection_info`; that experiment
+does not establish v3 wire-visible endpoint loss. The corrected counterexample
+uses a v2 replacement connection and a JSON round trip matching its serializer.
+A separate v3 fixture retains the authority-filtering and `complete` assertions.
+These tests use server handlers, outbound queues, and a small client state map;
+they do not exercise a TCP reconnect or every reference client.
 
 ### F04 — Idle delivery reports bypass the write-progress deadline
 
@@ -198,22 +204,55 @@ advance. That assumption was false; its red result is excluded. The corrected
 experiment proves bounded completion after timer-driver progress, not exact
 wall-clock latency on every operating system.
 
+### F05 — Retrying an ambiguous report duplicates exact omission ranges
+
+**Client correctness defect; high confidence.** Issue
+[#833](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/833).
+Affected code: pending, queued, and final delivery-report writes.
+
+Canceling a report send can leave its frame buffered inside the WebSocket sink.
+The server has not committed the pending omission ledger. Teardown retries that
+ledger, so a recovering peer receives overlapping reports with identical
+cumulative counters. A timeout cannot distinguish an unwritten report from one
+that will become visible when a later close flushes the sink.
+
+The real-socket regression expires an idle report against a non-reading peer,
+then resumes the peer while slow-consumer teardown runs. It observed two reports
+for sender 9, epoch 1, sequence 1, both with `unsupported_format: 1`. The close
+code was 4002 and no later queued gameplay arrived. This exposes a gap in F04's
+initial oracle: bounded writer completion alone does not prove safe recovery.
+
+The repair records ambiguity for the physical connection when a report-write
+guard drops before completion. Successful later writes cannot clear that state.
+Pending, queued, and final report paths preserve the unconfirmed evidence,
+prevent report retries, and fence later gameplay. Known size rejection occurs
+before socket submission and leaves the connection's report state unambiguous.
+
+The test compares the complete recovered report and requires exactly one copy.
+It uses an oversized binary filler solely to create transport pressure; that
+filler is not valid protocol gameplay. It covers one controlled cancellation
+and recovery schedule, not every partial-write boundary or client implementation.
+
 ### Session 380 validation
 
 | Experiment | Red or negative control | Green evidence and limits |
 | --- | --- | --- |
 | Close-tail matrix | Rate-limit close emitted later queued data after an abandoned write | All reasons, healthy/abandoned states; real socket payload and drop-count checks |
 | Idle omission report | Timeout-bypass mutant fails corrected paused-clock oracle | Deadline test plus healthy, empty, and disabled-budget controls |
+| Canceled report recovery | Recovering peer receives two identical reports | Exactly one complete report, close 4002, no later gameplay; sticky-state and prewrite controls |
 | Z3 A/G | A7 fails with Direct-only support and no host; G5 fails with client 1 and server range `[2,2]` | 33 UNSAT obligations and 7 SAT controls; G6 also exhibits the supported v2/`[3,3]` clamp error |
 | Rust/model crosschecks | Existing implementation tests, not new red cases | Three negotiation and Direct-endpoint tests pass |
-| Snapshot/replay | Old documented algorithm clears B's endpoint | Snapshot-last control passes with `replay: complete` |
+| Snapshot/replay | Old documented algorithm clears B's endpoint on serialized v2 messages | Snapshot-last restores it; separate v3 control checks authority filtering and `replay: complete` |
 
 Reproduce the focused behavioral checks:
 
 ```bash
 cargo nextest run --lib -E 'test(close_flush_never_writes_the_queue_behind_an_abandoned_write)'
 cargo nextest run --lib -E 'test(idle_omission_report_)'
+cargo nextest run --lib -E 'test(canceled_idle_report_is_not_replayed_when_the_peer_recovers)'
+cargo nextest run --lib -E 'test(report_write_guard_preserves_evidence_and_fences_retries)'
 cargo nextest run --lib -E 'test(reconnect_replay_drops_authority_events_the_snapshot_supersedes)'
+cargo nextest run --lib -E 'test(reconnect_v2_snapshot_replaces_historical_peer_metadata)'
 cargo nextest run --lib -E 'test(negotiate_caps_at_server_max_without_raising_client_max)'
 cargo nextest run --lib -E 'test(host_direct_rejects_missing_and_malformed_host_endpoints)'
 cargo nextest run --lib -E 'test(host_direct_requires_a_valid_endpoint_and_elects_an_executable_host)'
@@ -225,21 +264,24 @@ helpers are shared between queued and idle paths. Reconnect clients following
 the old scenario must apply the fresh snapshot last; the server wire stays
 unchanged. Hosted checks and PR review remain required before merge.
 
-Local validation passed: eight delivery tests, three Rust/model crosschecks,
-one reconnect regression, the 40 Z3 checks, formatting, and all-target/all-feature
-Clippy with warnings denied. Markdown, documentation consistency, CI-config,
-and hook policy checks passed. Hook execution exceeded its one-second target;
+Local validation passed eleven delivery tests, three Rust/model crosschecks,
+two reconnect tests, and the 40 Z3 checks. The final recovery oracle compares
+the complete report. Independent review found no remaining issue in this
+repair batch. Formatting and all-target/all-feature Clippy with warnings denied
+passed again after the cancellation repair. Markdown, documentation
+consistency, CI-config, and hook policy checks passed.
+Hook execution exceeded its one-second target;
 file discovery and source scanning dominated, within the area tracked by
 [#811](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/811).
 
 ### Unresolved hypotheses and explicit limits
 
-- A canceled omission-report send can leave bytes inside the sink. Retrying the
-  same pending ranges during close might produce duplicate reports. Reproduce
-  exact wire ranges before changing retry or client rules.
-- Reliable sojourn is checked when a reliable item is selected. Test whether a
-  sustained priority-control stream can starve that selection beyond the
-  advertised bound. Distinguish queue age from write-progress deadlines.
+- [#832](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/832):
+  reliable sojourn is checked when a reliable item is selected. Source inspection
+  found no independent reliable-age timer. Two slow but timely control writes
+  can delay reliable selection beyond its budget. This is a source-supported
+  counterexample awaiting a runtime experiment for both batching modes. The
+  existing timestamp-accessor test does not prove live deadline enforcement.
 - Reconnect token rotation commits at queue admission. Losing the replacement
   response can leave the client with a consumed token. The local-commit
   contract does not promise client receipt; quantify this recovery limitation
