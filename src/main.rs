@@ -1622,7 +1622,18 @@ mod connect_token_reload_tests {
         // also proves a rejected config never installs its key. The
         // required-entry-without-key config drops the block entirely, so a
         // wrongly applied reload would disable verification instead.
-        let cases = vec![duplicates, token_required_no_key];
+        let mut identity = [0_u8; 32];
+        identity[0] = 1;
+        let mut weak_key = security_with(&second);
+        let weak_config = weak_key.connect_token.as_mut().expect("key set");
+        weak_config.public_key = base64::engine::general_purpose::STANDARD.encode(identity);
+        weak_config.required = true;
+        weak_key.allowed_apps = vec![app_entry("new-app")];
+        assert!(
+            server.install_connect_token_key(&weak_key).is_err(),
+            "direct installation must also refuse a weak key"
+        );
+        let cases = vec![duplicates, token_required_no_key, weak_key];
         for invalid in cases {
             reload_allowed_apps_from_config(&server, loaded_config(invalid)).await;
 

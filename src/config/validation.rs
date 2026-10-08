@@ -2470,7 +2470,10 @@ mod tests {
             "a valid key validates"
         );
 
+        let mut identity = [0_u8; 32];
+        identity[0] = 1;
         for bad in [
+            base64::engine::general_purpose::STANDARD.encode(identity),
             String::new(),
             base64::engine::general_purpose::STANDARD.encode([9_u8; 31]),
             "not-a-key".to_string(),
@@ -2481,7 +2484,7 @@ mod tests {
                 required: false,
             });
             let error = validate_config_security(&config)
-                .expect_err("a non-parseable key must fail validation");
+                .expect_err("an invalid or weak key must fail validation");
             assert!(
                 error.to_string().contains("security.connect_token"),
                 "error must name the config seam: {error}"

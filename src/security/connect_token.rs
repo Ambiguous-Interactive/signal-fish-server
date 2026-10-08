@@ -45,7 +45,7 @@ use base64::engine::general_purpose::{
     URL_SAFE_NO_PAD as BASE64_URL_SAFE_NO_PAD,
 };
 use base64::Engine as _;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -131,6 +131,9 @@ pub enum ConnectTokenKeyError {
          public key); got {0} bytes"
     )]
     InvalidLength(usize),
+    /// Low-order points do not establish a signing identity.
+    #[error("security.connect_token.public_key must not be a weak Ed25519 key")]
+    WeakKey,
 }
 
 /// The signed payload's on-disk (on-wire) JSON shape. Unknown keys are
@@ -156,7 +159,7 @@ impl ConnectTokenVerifier {
     ///
     /// Accepts standard (padded) or URL-safe base64 so the same key can be
     /// pasted from either a cloud CLI or a PEM-less export; the decoded bytes
-    /// must be exactly 32.
+    /// must be exactly 32 and represent a non-weak Ed25519 key.
     pub fn from_encoded_key(encoded: &str) -> Result<Self, ConnectTokenKeyError> {
         let trimmed = encoded.trim();
         let decoded = BASE64_STANDARD
@@ -172,6 +175,9 @@ impl ConnectTokenVerifier {
             .map_err(|_| ConnectTokenKeyError::InvalidLength(key_len))?;
         let key = VerifyingKey::from_bytes(&bytes)
             .map_err(|error| ConnectTokenKeyError::InvalidEncoding(error.to_string()))?;
+        if key.is_weak() {
+            return Err(ConnectTokenKeyError::WeakKey);
+        }
         Ok(Self { key })
     }
 
@@ -191,7 +197,7 @@ impl ConnectTokenVerifier {
         let signature =
             Signature::from_slice(&signature_bytes).map_err(|_| ConnectTokenError::Malformed)?;
         self.key
-            .verify(signed_bytes, &signature)
+            .verify_strict(signed_bytes, &signature)
             .map_err(|_| ConnectTokenError::InvalidSignature)?;
 
         let payload: ConnectTokenPayload =
@@ -308,7 +314,7 @@ impl ConnectTokenKeyState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
+    use ed25519_dalek::{Signer, SigningKey, Verifier};
     use sha2::{Digest, Sha256};
 
     /// Deterministic 32-byte test seed from a label.
@@ -665,6 +671,63 @@ mod tests {
                     Err(ConnectTokenError::Malformed)
                 ),
                 "payload {payload} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn weak_verification_keys_are_refused_in_every_config_encoding() {
+        // Compressed Edwards identity and the order-two point are valid
+        // curve encodings, but neither establishes a signing identity.
+        let mut identity = [0_u8; 32];
+        identity[0] = 1;
+        let mut order_two = [0xff_u8; 32];
+        order_two[0] = 0xec;
+        order_two[31] = 0x7f;
+        for bytes in [identity, order_two] {
+            let key = VerifyingKey::from_bytes(&bytes).expect("valid curve point");
+            assert!(key.is_weak());
+            for encoded in [
+                BASE64_STANDARD.encode(bytes),
+                BASE64_URL_SAFE_NO_PAD.encode(bytes),
+                BASE64_URL_SAFE.encode(bytes),
+            ] {
+                assert!(
+                    ConnectTokenVerifier::from_encoded_key(&encoded).is_err(),
+                    "weak key must be refused: {encoded}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn identity_key_cannot_accept_a_signature_forged_without_a_private_key() {
+        let mut identity = [0_u8; 32];
+        identity[0] = 1;
+        let key = VerifyingKey::from_bytes(&identity).expect("valid curve point");
+        // R = identity, S = zero satisfies ordinary verification for every
+        // message under A = identity. No signing key is used here.
+        let mut forged = [0_u8; 64];
+        forged[0] = 1;
+        let signature = Signature::from_bytes(&forged);
+        let verifier = ConnectTokenVerifier { key };
+        for app in ["tenant-one", "tenant-two"] {
+            let payload = serde_json::json!({"app_id": app, "exp": 1300, "nonce": "n"});
+            let head = format!(
+                "{CONNECT_TOKEN_PREFIX}.{}",
+                BASE64_URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("JSON"))
+            );
+            assert!(
+                key.verify(head.as_bytes(), &signature).is_ok(),
+                "control proves forgery"
+            );
+            let token = format!("{head}.{}", BASE64_URL_SAFE_NO_PAD.encode(forged));
+            assert!(
+                matches!(
+                    verifier.verify(&token, app, 1000),
+                    Err(ConnectTokenError::InvalidSignature)
+                ),
+                "forged credential must not authorize {app}"
             );
         }
     }
