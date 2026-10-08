@@ -13,6 +13,8 @@ var result_published := false
 var active_published := false
 var sync_published := false
 var diagnostic_callbacks := 0
+var overflow_frozen := false
+var overflow_send_started := false
 
 
 func _ready() -> void:
@@ -80,6 +82,15 @@ func _process(_delta: float) -> void:
 			print("FORTRESS_WASM_RESULT ", result_json)
 
 	if not result_published:
+		if not overflow_frozen and JavaScriptBridge.eval("globalThis.__FORTRESS_FREEZE_OVERFLOW === true", true):
+			overflow_frozen = peer.freeze_overflow()
+		if overflow_frozen:
+			var snapshot: String = peer.snapshot_report_json()
+			if not snapshot.is_empty():
+				JavaScriptBridge.eval("globalThis.__FORTRESS_OVERFLOW = %s" % snapshot, true)
+			var send_count = JavaScriptBridge.eval("globalThis.__FORTRESS_SEND_OVERFLOW ?? 0", true)
+			if not overflow_send_started and send_count > 0:
+				overflow_send_started = peer.send_overflow_inputs(int(send_count))
 		diagnostic_callbacks += 1
 		if diagnostic_callbacks % 60 == 0:
 			var diagnostic_json: String = peer.snapshot_report_json()

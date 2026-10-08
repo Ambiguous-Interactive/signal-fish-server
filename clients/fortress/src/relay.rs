@@ -43,7 +43,7 @@ pub struct RelayLedger {
     pub sequence_hash: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct InboundOverflow {
     pub capacity: usize,
     pub retained: usize,
@@ -79,9 +79,7 @@ struct Shared {
     hold_gameplay_inputs: bool,
     hold_sync_replies_after_first: bool,
     sync_reply_released: bool,
-    #[cfg(not(target_arch = "wasm32"))]
     capture_input: bool,
-    #[cfg(not(target_arch = "wasm32"))]
     captured_input: Option<Message>,
     counters: RelayCounters,
     observed_client_sent: u64,
@@ -114,14 +112,12 @@ pub struct RelaySocket {
 }
 
 impl RelaySocket {
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn capture_input_for_overflow_probe(&self) {
         if let Ok(mut shared) = self.shared.lock() {
             shared.capture_input = true;
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn enqueue_captured_input(&self, destination: &Uuid) -> Result<(), &'static str> {
         let message = self
             .shared
@@ -134,7 +130,6 @@ impl RelaySocket {
         Ok(())
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn inbound_depth(&self) -> usize {
         self.shared
             .lock()
@@ -566,7 +561,6 @@ fn enqueue_frame(
 
 impl NonBlockingSocket<Uuid> for RelaySocket {
     fn send_to(&mut self, message: &Message, destination: &Uuid) {
-        #[cfg(not(target_arch = "wasm32"))]
         if let Ok(mut shared) = self.shared.lock() {
             if shared.capture_input
                 && fortress_rollback::__internal::message_metadata(message).1
