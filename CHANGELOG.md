@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Add opt-in native reference-client reconnect controls that restore room
-  and transport state and rotate the reconnect token (#741).
+  and transport state, preserve player identity, and rotate the reconnect token (#741).
 
 - Metrics: new Prometheus gauges expose live rooms, seated occupants,
   pending publications and reconnections, retained replay state, and the

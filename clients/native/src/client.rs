@@ -1473,7 +1473,10 @@ impl Orchestrator<'_> {
             .clone()
             .filter(|token| !token.is_empty())
             .ok_or_else(|| FatalError::protocol("server did not issue a room restore token"))?;
-        let attempt = self.reconnect_attempts + 1;
+        let attempt = self
+            .reconnect_attempts
+            .checked_add(1)
+            .ok_or_else(|| FatalError::protocol("room restore attempt count exceeded its limit"))?;
         // Open an unauthenticated replacement, then drop the old socket without
         // LeaveRoom. The resume gate lets the harness observe PlayerLeft before
         // claiming the token and send traffic while this member is absent.
