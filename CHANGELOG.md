@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Redact native and browser reference-client frame errors so malformed replies cannot
   expose room tokens (#819).
 
+### Security
+
+- Reject weak tenant verification keys and forged connect tokens (#821).
+
 ## [0.10.0] - 2026-10-06
 
 ### Added

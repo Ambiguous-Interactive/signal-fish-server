@@ -2291,6 +2291,28 @@ Clean dispositions:
 | Confidence and reproduction | Static roster arithmetic over the registration path (all registrations — players, spectators, reconnects — consume a per-IP slot in `register_delivery`). |
 | Disposition | Default raised 24 → 64 with a corrected comment; pinned by `default_per_ip_budget_admits_a_full_nat_roster_with_churn_slack` (data-driven over the roster formula). The parallel `ServerConfig::default()` literal in `src/server.rs` now derives from the same `default_max_connections_per_ip()` instead of a divergent hardcoded 24. Config-reference table, deployment docs, checklist, and example configs updated to the new default. |
 
+### ARM-C044 — Weak tenant keys accepted forged connect tokens
+
+At `49731ecb` (2026-10-08), the connect-token key loader accepted low-order
+Ed25519 public keys. Permissive verification accepted `R = identity, S = 0`
+under the identity key for arbitrary tenant claims without a signing key.
+This requires an operator-configured weak key; generated signing keys are
+not affected. See [#821](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/821).
+
+- **Red evidence:** `weak_verification_keys_are_refused_in_every_config_encoding`
+  accepted the identity key, and
+  `identity_key_cannot_accept_a_signature_forged_without_a_private_key`
+  accepted the forged tenant claim against unchanged production code.
+- **Fix:** the shared key constructor refuses low-order points and credential
+  verification uses `verify_strict`. Configuration validation, startup,
+  direct key installation, and SIGHUP all use that constructor.
+- **Controls:** identity and order-two keys across all supported base64
+  encodings; arbitrary forged claims; startup validation; SIGHUP rejection
+  preserving the running allowlist, key, and enforcement posture. Existing
+  RFC key, valid-token, expiry, TTL, app-ID, and rotation controls remain.
+- **Scope:** this closes weak-key admission. The remaining connect-token
+  claim-boundary audit is still open.
+
 ### C1 protocol subsystem review (2026-10-05)
 
 At `8f80cc6e` (main after #746), reviewed the protocol coverage row across

@@ -278,7 +278,8 @@ callouts, no store.
 - The key is public material. The path option exists for mount and rotation
   convenience, not secrecy.
 - A key that does not parse (not base64, not 32 bytes, not a valid curve
-  point) is a startup error.
+  point) or has low order is a startup error. Use a public key derived from
+  an Ed25519 signing key. The server verifies token signatures strictly.
 - The key reloads on `SIGHUP` with the allowlist. A reload with a corrupt
   key keeps the running key; removing the block removes verification, and
   presented tokens are then refused.
