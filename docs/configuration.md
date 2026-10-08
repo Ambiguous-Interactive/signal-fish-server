@@ -587,6 +587,9 @@ cargo run -- --print-config
 
 ```
 
+Use `--print-config-evidence` to record a redacted snapshot and fingerprints
+of the redacted and full loaded config. See [config fingerprints](run-modes.md#config-fingerprints).
+
 ### Strict keys in the `security` subtree
 
 Keys under `security` (including `security.transport`,

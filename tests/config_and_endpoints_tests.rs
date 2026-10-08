@@ -3108,53 +3108,72 @@ fn test_print_config_redacts_secrets_end_to_end() {
     )
     .expect("write test config");
 
-    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_signal-fish-server"));
-    command
-        .arg("--print-config")
-        .current_dir(workdir.path())
-        .stdin(std::process::Stdio::null());
-    // Scrub every inherited SIGNAL_FISH* variable: env overrides are applied
-    // last by the loader and would silently override the temp config.
-    for (key, _) in std::env::vars_os() {
-        if key
-            .to_str()
-            .is_some_and(|key| key.starts_with("SIGNAL_FISH"))
-        {
-            command.env_remove(&key);
+    for flag in ["--print-config", "--print-config-evidence"] {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_signal-fish-server"));
+        command
+            .arg(flag)
+            .current_dir(workdir.path())
+            .stdin(std::process::Stdio::null());
+        // Scrub every inherited SIGNAL_FISH* variable: env overrides are applied
+        // last by the loader and would silently override the temp config.
+        for (key, _) in std::env::vars_os() {
+            if key
+                .to_str()
+                .is_some_and(|key| key.starts_with("SIGNAL_FISH"))
+            {
+                command.env_remove(&key);
+            }
         }
+        command.env("SIGNAL_FISH_CONFIG_PATH", &config_path);
+
+        let output = command
+            .output()
+            .expect("run signal-fish-server --print-config");
+        assert!(
+            output.status.success(),
+            "--print-config exited with {:?}; stderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+        let printed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("--print-config stdout is a single JSON document");
+
+        let printed = if flag == "--print-config-evidence" {
+            use sha2::{Digest as _, Sha256};
+            let hash = |value: &serde_json::Value| -> String {
+                Sha256::digest(serde_json::to_vec(value).unwrap())
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect()
+            };
+            assert_eq!(printed["effective_sha256"], hash(&printed["effective"]));
+            let mut loaded = printed["effective"].clone();
+            loaded["turn"]["static_auth_secret"] = SENTINEL_SECRET.into();
+            assert_eq!(printed["loaded_sha256"], hash(&loaded));
+            assert_ne!(printed["loaded_sha256"], printed["effective_sha256"]);
+            printed["effective"].clone()
+        } else {
+            printed
+        };
+        // The set secret is replaced by the redaction marker...
+        assert_eq!(
+            printed["turn"]["static_auth_secret"],
+            serde_json::Value::String(REDACTED_SECRET.to_string()),
+            "expected turn.static_auth_secret to print as the redaction marker"
+        );
+        // ...and the raw credential appears nowhere in the output.
+        assert!(
+            !stdout.contains(SENTINEL_SECRET),
+            "raw secret leaked into --print-config output:\n{stdout}"
+        );
+        // Non-secret TURN fields stay visible so operators can audit the config.
+        assert_eq!(
+            printed["turn"]["urls"][0], "turn:turn.example.com:3478",
+            "non-secret turn.urls should print unredacted"
+        );
     }
-    command.env("SIGNAL_FISH_CONFIG_PATH", &config_path);
-
-    let output = command
-        .output()
-        .expect("run signal-fish-server --print-config");
-    assert!(
-        output.status.success(),
-        "--print-config exited with {:?}; stderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
-    let printed: serde_json::Value =
-        serde_json::from_str(&stdout).expect("--print-config stdout is a single JSON document");
-
-    // The set secret is replaced by the redaction marker...
-    assert_eq!(
-        printed["turn"]["static_auth_secret"],
-        serde_json::Value::String(REDACTED_SECRET.to_string()),
-        "expected turn.static_auth_secret to print as the redaction marker"
-    );
-    // ...and the raw credential appears nowhere in the output.
-    assert!(
-        !stdout.contains(SENTINEL_SECRET),
-        "raw secret leaked into --print-config output:\n{stdout}"
-    );
-    // Non-secret TURN fields stay visible so operators can audit the config.
-    assert_eq!(
-        printed["turn"]["urls"][0], "turn:turn.example.com:3478",
-        "non-secret turn.urls should print unredacted"
-    );
 }
 
 /// The REAL compiled binary must serve the conventional top-level `/health`

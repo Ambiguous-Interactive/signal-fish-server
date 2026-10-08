@@ -2949,11 +2949,11 @@ contents are not yet recorded. Use inline values for these runs. Replay checks
 config hashes, layer reconstruction, port agreement, and server identity. These
 checks detect inconsistent artifacts; they are not signatures.
 
-External endpoints are labeled `unknown_external`, with no binary or effective
-configuration evidence. Their delivery results can remain valid and replay
-exactly, but they cannot support an accepted capacity point. External-host
-evidence intake remains in #776, along with exact application payload sizing
-and encoded ingress/egress frame sizes.
+External endpoints without supplied evidence are labeled `unknown_external`.
+Their delivery results can remain valid and replay exactly, but they cannot
+support an accepted capacity point. Schema 10 adds the
+[external host evidence intake](#external-host-evidence). Schema 9's exact
+application and encoded frame-body size evidence is described below.
 
 The real-binary regression compares the snapshot with the production
 `--print-config` loader under the same isolated configuration and environment.
@@ -2961,6 +2961,61 @@ It pins defaults, harness overrides, legacy keys, and the reserved port.
 Additional controls reject malformed overlays, conflicting aliases, file-backed
 sources, altered hashes or layers, and old schema 7 artifacts. The manifest
 presence check failed against the previous runner before acceptance.
+
+### External host evidence
+
+Issue [#776](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/776)
+requires external-host config and binary identity before capacity acceptance.
+Schema 10 embeds an operator capture as `external_host_declared`. Runs without
+this capture retain `unknown_external`. The delivery oracle's verdict remains
+separate from provenance and from the capacity acceptance gates.
+
+On the server host, use the deployment's user, working directory, environment,
+and exact binary. Freeze config, referenced files, and the binary for capture
+and the entire run. For stdin-based deployments, preserve the same inputs in a
+config file first. The
+[capture sample](../../.llm/code-samples/capacity/capture-host-evidence.py)
+validates settings, invokes `--print-config-evidence`, hashes the binary, and
+hashes referenced app-registry, connect-token key, and active TLS files.
+It refuses to overwrite an earlier capture.
+
+```sh
+python3 .llm/code-samples/capacity/capture-host-evidence.py \
+  --binary /srv/signal-fish-server \
+  --endpoint ws://capacity-host:3536 \
+  --deployment immutable-deployment-1 \
+  --output /tmp/host-evidence.json
+```
+
+Copy that file to the generator. Set `CAPACITY_RUNNER_ENDPOINT` to the exact
+endpoint in the capture and `CAPACITY_RUNNER_EXTERNAL_HOST_EVIDENCE` to the
+file path. The endpoint must be a `ws` or `wss` origin with an explicit port
+and no path, credentials, query, or fragment. Proxy listener ports may differ
+from the backend config's port.
+
+The runner checks complete canonical redacted settings, the snapshot hash,
+SHA-256 formats, a positive binary size, host and deployment identifiers,
+the collection timestamp, and exact referenced-file hash coverage. It embeds
+the document in the run inputs and server provenance. The original host file
+is not needed for replay. Invalid evidence fails before output or connections.
+Replay also checks endpoint, binary identity, and input/provenance agreement.
+Earlier schemas are rejected.
+
+The snapshot hash covers the redacted config. The loaded-config hash covers
+all loaded values, including secrets and file-loaded app and key values.
+File hashes identify referenced authentication and active TLS material without
+archiving its contents. Keep captures and fingerprints private. Neither hashes
+nor a second loader invocation authenticate the live remote process. The
+operator must verify that the captured deployment serves the endpoint and
+does not reload or change during the run. Capture again for a changed deployment.
+`has_config_evidence` reports evidence presence, not accepted capacity.
+
+Controls cover a real host binary and collector, source-file removal before
+the run, exact delivery replay, unknown-host replay, endpoint and identifier
+boundaries, secret redaction and rotation fingerprints, file-hash coverage,
+malformed inputs, inconsistent archived identities, and schema rejection.
+This intake establishes no capacity point. The generator-memory and macOS
+delay requirements in #775 and #795 remain open.
 
 ## C3 exact application and encoded frame-body sizes — 2026-10-07
 

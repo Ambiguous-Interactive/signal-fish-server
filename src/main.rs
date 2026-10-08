@@ -21,13 +21,34 @@ use std::fmt::Write as _;
 struct Cli {
     /// Validate configuration and exit without starting the server.
     /// Useful for CI/CD pipelines and pre-deployment checks.
-    #[arg(long, short = 'c', conflicts_with = "print_config")]
+    #[arg(long, short = 'c', conflicts_with_all = ["print_config", "print_config_evidence"])]
     validate_config: bool,
 
     /// Print the loaded configuration to stdout (as JSON) and exit.
     /// Useful for debugging configuration loading from multiple sources.
-    #[arg(long, conflicts_with = "validate_config")]
+    #[arg(long, conflicts_with_all = ["validate_config", "print_config_evidence"])]
     print_config: bool,
+
+    /// Print a redacted config snapshot and loaded-config SHA-256 hashes, then exit.
+    #[arg(long, conflicts_with_all = ["validate_config", "print_config"])]
+    print_config_evidence: bool,
+}
+
+/// Hash canonical compact JSON values, so object key order is stable across hosts.
+/// The loaded hash identifies secret changes without publishing secret values.
+fn config_evidence(cfg: &config::Config) -> anyhow::Result<serde_json::Value> {
+    use sha2::{Digest as _, Sha256};
+    let loaded = serde_json::to_value(cfg)?;
+    let effective = serde_json::to_value(cfg.redacted_for_display())?;
+    let hash = |value: &serde_json::Value| -> anyhow::Result<String> {
+        let digest = Sha256::digest(serde_json::to_vec(value)?);
+        Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+    };
+    Ok(serde_json::json!({
+        "effective_sha256": hash(&effective)?,
+        "loaded_sha256": hash(&loaded)?,
+        "effective": effective,
+    }))
 }
 
 /// Write one line to an `io::Write` sink: the value, then a newline.
@@ -64,6 +85,12 @@ async fn main() -> anyhow::Result<()> {
     // hard error here: booting on defaults would silently revert every operator
     // setting while the process appears healthy.
     let cfg = Arc::new(config::load()?);
+
+    if cli.print_config_evidence {
+        let json = serde_json::to_string_pretty(&config_evidence(&cfg)?)?;
+        emit_to_stdout_or_exit(&json);
+        return Ok(());
+    }
 
     // Handle --print-config: output the loaded configuration as JSON. Secrets
     // (TURN secrets, metrics tokens, ICE credentials) are redacted so credential
@@ -876,6 +903,48 @@ mod cli_tests {
         let cli = Cli::try_parse_from(["signal-fish-server", "--print-config"]).unwrap();
         assert!(!cli.validate_config);
         assert!(cli.print_config);
+    }
+
+    #[test]
+    fn config_evidence_flag_is_exclusive_and_hashes_secret_changes() {
+        let cli = Cli::try_parse_from(["signal-fish-server", "--print-config-evidence"])
+            .expect("config evidence flag");
+        assert!(cli.print_config_evidence);
+        for other in ["--print-config", "--validate-config", "-c"] {
+            assert!(
+                Cli::try_parse_from(["signal-fish-server", "--print-config-evidence", other])
+                    .is_err()
+            );
+        }
+        let mut config = signal_fish_server::config::Config::default();
+        let unset = super::config_evidence(&config).expect("unset evidence");
+        assert_eq!(unset["effective_sha256"], unset["loaded_sha256"]);
+        config.security.metrics_auth_token = Some("first-secret-marker".into());
+        config.turn.static_auth_secret = "turn-secret-marker".into();
+        config.session.ice_servers = vec![signal_fish_server::protocol::IceServer {
+            urls: vec!["turn:example.invalid:3478".into()],
+            username: Some("user".into()),
+            credential: Some("ice-secret-marker".into()),
+        }];
+        let first = super::config_evidence(&config).expect("first evidence");
+        config.security.metrics_auth_token = Some("second-secret-marker".into());
+        let second = super::config_evidence(&config).expect("rotated evidence");
+        assert_eq!(first["effective"], second["effective"]);
+        assert_eq!(first["effective_sha256"], second["effective_sha256"]);
+        assert_ne!(first["loaded_sha256"], second["loaded_sha256"]);
+        assert_ne!(first["loaded_sha256"], first["effective_sha256"]);
+        let bytes = serde_json::to_string(&first).expect("evidence JSON");
+        for secret in [
+            "first-secret-marker",
+            "turn-secret-marker",
+            "ice-secret-marker",
+        ] {
+            assert!(!bytes.contains(secret), "secret leaked in config evidence");
+        }
+        config.server.ping_timeout += 1;
+        let changed = super::config_evidence(&config).expect("changed setting");
+        assert_ne!(second["effective_sha256"], changed["effective_sha256"]);
+        assert_ne!(second["loaded_sha256"], changed["loaded_sha256"]);
     }
 
     #[test]

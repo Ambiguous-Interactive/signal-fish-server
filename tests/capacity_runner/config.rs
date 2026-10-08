@@ -230,13 +230,35 @@ pub struct SendPause {
     pub duration: Duration,
 }
 
-/// Complete input set for one run. Serialized into the run manifest, so a
-/// replay can rebuild the exact schedule from the manifest alone.
+/// Operator-captured external deployment identity and config snapshot.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalHostEvidence {
+    pub endpoint: String,
+    pub host: String,
+    /// Operator identifier for the unchanged server deployment during the run.
+    pub deployment: String,
+    pub collected_at_rfc3339: String,
+    /// Complete redacted snapshot from `--print-config-evidence`.
+    pub effective: Value,
+    pub effective_sha256: String,
+    /// Digest of the full loaded config, including secrets. Host-declared:
+    /// replay cannot recompute this hash from a redacted snapshot.
+    pub loaded_sha256: String,
+    pub binary_sha256: String,
+    pub binary_bytes: u64,
+    /// Referenced authentication and active TLS files, keyed by config field.
+    pub file_sha256: std::collections::BTreeMap<String, String>,
+}
+
+/// Complete input set for one run, including embedded external host evidence.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RunConfig {
     /// Connect to an existing server (`ws://host:port`) instead of spawning
     /// the compiled binary. `None` spawns the binary on a fresh port.
     pub endpoint: Option<String>,
+    #[serde(default)]
+    pub external_host_evidence: Option<ExternalHostEvidence>,
     /// Seed for the deterministic send schedule (jitter and phase placement).
     pub seed: u64,
     pub rooms: u32,
@@ -472,7 +494,8 @@ impl RunConfig {
     /// Build the run config from `CAPACITY_RUNNER_*` environment
     /// variables so the runner is standalone on a capacity host:
     ///
-    /// `ENDPOINT` (optional), `SEED`, `ROOMS`, `PLAYERS`, `ENCODING`
+    /// `ENDPOINT` (optional), `EXTERNAL_HOST_EVIDENCE` (optional JSON file,
+    /// embedded before the run; requires `ENDPOINT`), `SEED`, `ROOMS`, `PLAYERS`, `ENCODING`
     /// (`v2-json` | `v3-json`), `PAYLOAD_BYTES`, `RATE_PER_SENDER`, `CLASS`
     /// (`reliable` | `latest` | `volatile`), `EXPERIMENT`
     /// (`unsupported-format`), `LATEST_KEYS`, `WARMUP_SECS`,
@@ -493,6 +516,14 @@ impl RunConfig {
             }
         };
         let endpoint = var("ENDPOINT")?;
+        let external_host_evidence = var("EXTERNAL_HOST_EVIDENCE")?
+            .map(|path| {
+                let bytes = std::fs::read(&path)
+                    .map_err(|error| format!("read external host evidence {path}: {error}"))?;
+                serde_json::from_slice::<ExternalHostEvidence>(&bytes)
+                    .map_err(|error| format!("parse external host evidence {path}: {error}"))
+            })
+            .transpose()?;
         let seed = var("SEED")?
             .map(|raw| raw.parse::<u64>())
             .transpose()
@@ -612,6 +643,7 @@ impl RunConfig {
 
         Ok(RunConfig {
             endpoint,
+            external_host_evidence,
             seed: seed.unwrap_or(0xC0FFEE),
             rooms: rooms.unwrap_or(1),
             players_per_room: players.unwrap_or(4),

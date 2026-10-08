@@ -94,6 +94,9 @@ pub struct RunOutcome {
 /// Run one configured capacity experiment end to end and write its
 /// artifacts. Returns the exact outcome summary the run recorded.
 pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
+    if let Some(evidence) = &config.external_host_evidence {
+        evidence.validate(config.endpoint.as_deref())?;
+    }
     if config.rooms == 0 {
         return Err("rooms must be at least 1".to_string());
     }
@@ -428,10 +431,21 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         Some(base) => ServerIdentity {
             endpoint: base.clone(),
             pid: None,
-            binary_sha256: None,
-            binary_bytes: None,
+            binary_sha256: config
+                .external_host_evidence
+                .as_ref()
+                .map(|evidence| evidence.binary_sha256.clone()),
+            binary_bytes: config
+                .external_host_evidence
+                .as_ref()
+                .map(|evidence| evidence.binary_bytes),
             config_overlay_sha256: overlay_sha256(&config)?,
-            config_provenance: ConfigProvenance::UnknownExternal,
+            config_provenance: config.external_host_evidence.clone().map_or(
+                ConfigProvenance::UnknownExternal,
+                |evidence| ConfigProvenance::ExternalHostDeclared {
+                    evidence: Box::new(evidence),
+                },
+            ),
         },
         None => {
             let (pid, binary_sha256, binary_bytes, config_provenance) = {
