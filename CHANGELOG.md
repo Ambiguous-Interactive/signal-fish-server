@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add opt-in native reference-client reconnect controls that restore room
+  and transport state, preserve player identity, and rotate the reconnect token (#741).
+
 - Metrics: new Prometheus gauges expose live rooms, seated occupants,
   pending publications and reconnections, retained replay state, and the
   maintenance-sweep count and last duration (#648).
@@ -21,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   negotiated protocol versions, per-session traffic, and authority
   transfers, and the endpoint accepts `?since=<seq>` and
   `?applicationId=<uuid>` filters (#766).
+
+### Fixed
+
+- Redact native and browser reference-client frame errors so malformed replies cannot
+  expose room tokens (#819).
 
 ## [0.10.0] - 2026-10-06
 

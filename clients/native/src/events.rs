@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Serialize;
 use signal_fish_server::protocol::{
-    DeliveryClass, DeliveryReportPayload, LobbyState, PlayerId, RoomId, Topology, Transport,
+    DeliveryClass, DeliveryReportPayload, LobbyState, PlayerId, ReplayStatus, RoomId,
+    SenderWatermark, Topology, Transport,
 };
 
 /// One JSONL stdout event. Variant names serialize as the snake_case `event`
@@ -38,6 +39,19 @@ pub enum Event {
         room_id: RoomId,
         player_id: PlayerId,
         lobby_state: LobbyState,
+    },
+    /// A harness restore has dropped the previous physical socket.
+    ReconnectStarted { attempt: usize },
+    /// The authoritative room snapshot replaced the previous local state.
+    /// Tokens remain private; successful harness restores require rotation.
+    Reconnected {
+        attempt: usize,
+        player_id: PlayerId,
+        lobby_state: LobbyState,
+        current_players: Vec<PlayerId>,
+        sender_watermarks: Vec<SenderWatermark>,
+        replay: Option<ReplayStatus>,
+        token_rotated: bool,
     },
     /// Another player joined the room.
     PeerJoined {

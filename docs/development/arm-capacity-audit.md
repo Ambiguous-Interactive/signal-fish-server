@@ -1983,7 +1983,30 @@ carries a disposition.
   incorrect fault evidence, ledger deltas, traffic, and continued gameplay.
   Live producer identity comes from its Rust snapshot; receiver identity
   comes from its terminal report. Healthy and capped-admission cells retain
-  their existing gates. Reference restore exercisability remains in #741.
+  their existing gates. The controlled restore cells below close the final
+  reference-client gap in #741.
+- **Native controlled restore (session 376, #741 item 4).**
+  Repeated release-file controls exercise real v3 reconnects. The client
+  captures the private room token, keeps the player and room identity,
+  requires token rotation and replay status, and replaces membership,
+  readiness, delivery cursors, and connection counters from the snapshot.
+  Old engine callback channels and physical pair state are discarded.
+  A finalized restore waits for a fresh plan. Logical exchange debt survives,
+  but current members require fresh sends and receipts. Incumbents reset
+  exchange evidence when the restored incarnation is announced.
+  The relay cell sends traffic during two confirmed absences, checks exact
+  nonzero watermarks, and receives the next stamped packet after each
+  restore. Missed gameplay never becomes a receipt. A live mesh cell sends
+  reliable data before restore, then requires fresh reliable and unreliable
+  exchanges after rebuilding both data channels. The Unix drain cell holds
+  an already-open replacement socket, starts the real server drain, and
+  requires a bounded `SERVER_DRAINING` refusal with no restore or success.
+  State-machine controls cover malformed identity/token/replay snapshots,
+  stale membership and readiness, callback replacement, and old exchange
+  evidence. Only `PLAYER_ALREADY_CONNECTED` retries, within a bounded
+  teardown window and the run deadline. Automatic reconnect and game-state
+  resync remain outside this reference client's scope. Browser and released
+  Fortress fixtures do not gain reconnect initiation.
 - **Opaque over a v2 negotiation (fixed with the same sweep).** The native
   client validated an opaque request against the requested version only;
   the `ProtocolInfo` `None`-version (v2) arm skipped every format check,
@@ -2007,9 +2030,10 @@ carries a disposition.
   inbound `Reconnected`/watermark arms correct at unit level. Native:
   accountability model, transport fallback (cripple, TURN bad-secret,
   host-star, Direct rejection), and negotiation happy paths match and are
-  pinned; reconnect initiation likewise absent by documented scope
-  (`docs/guides/building-a-client.md` marks `Reconnect` optional) and the
-  restore contract has zero native exercisability. Fortress fixtures: the
+  pinned. The initial C1 review found no native reconnect initiation or
+  restore exercisability; session 376 adds the controlled restore cells
+  described above. Automatic recovery remains outside the documented scope.
+  Fortress fixtures: the
   "without silent loss" invariant is substantiated by executable CI gates
   on both stacks (cross-peer ledger equality, contiguity, queue-age and
   checksum gating; both families add an asserted expected-negative
@@ -2029,11 +2053,23 @@ carries a disposition.
   drain→4000 close path over TLS and the failure-after-partial-startup
   regressions are pinned over the real binary in
   `tests/tls_deployment_boundaries_e2e.rs`. The Fortress native harness
-  gaps remain tracked (#741).
+  gaps are closed by the live cells recorded above (#741).
 
-With this review, the client and deployment boundary slice has recorded
-dispositions: the client rows move to partially reviewed with the missing
-cases named below, and the deployment gaps are filed instead of open.
+The client and deployment boundary slice has recorded dispositions. The
+reference-client gaps in #741 and deployment gaps in #740 are closed.
+External-platform acceptance remains separate from this code and live-test
+evidence.
+
+### ARM-C044 — Reference-client error diagnostics exposed room tokens
+
+| Field | Record |
+| --- | --- |
+| State, severity | Fixed, low |
+| Player impact | A malformed server snapshot could copy its reconnect bearer token into native and browser client error output. Unexpected snapshot diagnostics could expose it too. |
+| Source and revision | `clients/native/src/wire.rs::next_server_message` and `client.rs` text/binary decoder and unexpected-handshake diagnostics, and the browser wire decoder, delivery-class validator, and handshake gates, reviewed at `78ef4936` during session 376 (#819). |
+| Invariant | Protocol failures stay fatal without emitting room tokens, raw frames, or invalid field values. |
+| Confidence and reproduction | Red-first malformed `RoomJoined` and `Reconnected` snapshots contain a valid token and an invalid lifecycle value. The handshake and active-session controls fail when either the raw frame or serde error text reaches the error event. Binary controls use token-bearing metadata keys and encoding values; the browser controls use a token-bearing message tag and delivery class. |
+| Disposition | Both text paths share a safe decoder. Errors retain frame bytes, error category, line, and column. Unexpected handshake diagnostics omit snapshot payloads. Browser envelope errors and JavaScript parser excerpts also omit input contents. Binary diagnostics omit untrusted decoder text and metadata keys. Token controls cover native handshake/runtime paths, browser classifiers, delivery validation, and the public browser join flow. |
 
 ### ARM-C033 — Reference clients aborted the server's JSON downgrade handshake
 
@@ -2375,8 +2411,8 @@ neither is a deployed capacity preset.
 | Metrics and logging: `src/metrics.rs`, `src/logging.rs`, `src/websocket/metrics.rs`, `prometheus.rs` | Counters report outcomes; labels and logs stay bounded and safe | `tests/config_and_endpoints_tests.rs`, `tests/websocket_test_helpers/prometheus_scrape.rs`; C1 metrics label cardinality and error/logging pressure reviews above (ARM-C031/ARM-C032 fixed the rejected-ID log forgery and the unthrottled undeliverable-relay warning) | Cardinality is bounded with pinned lifecycles; hot-path log content, amplification, and throttle cadences are reviewed and pinned or dispositioned | Reviewed |
 | Admin and shutdown: `src/server/admin.rs`, `shutdown.rs`, `connection_manager.rs` | Drain closes all owned tasks and reports queued work accurately | `tests/close_code_semantics_e2e.rs`, `formal/tla/ConnectionTeardown.tla`; C1 drain/shutdown review above | The drain choreography, the reconnect-commit fence, close ordering with queued data, and the drain reservation accounting are reviewed, fixed where defective, and pinned; a distinct 4000-close counter remains follow-up observability | Partially reviewed |
 | Browser client: `clients/browser/src/**` | Reconnect, delivery reports, fallback, and negotiation match server | `clients/browser/src/page/*.test.ts`; C1 client and deployment boundaries review above | Reports, fallback, and negotiation verified and pinned (plus the ARM-C033 downgrade fix and its pin); reconnect initiation absent by documented scope with inbound arms unit-pinned; a live browser accountability cell, loss→recovery transitions, and browser-as-host remain | Partially reviewed |
-| Native client: `clients/native/src/**` | Same client contract across native sockets | `clients/native/tests/interop_e2e.rs`; C1 client and deployment boundaries review above | Accountability model, fallback (cripple/TURN/host-star/Direct rejection), and negotiation verified and pinned (plus the ARM-C033 downgrade fix, the v2-opaque guard, and their pins); native downgrade and cross-format advisory consumption now have live cells; the MessagePack cohort is pinned; restore/reconnect end-to-end remains | Partially reviewed |
-| Fortress clients: `clients/fortress/src/**`, `clients/fortress-wasm/src/**` | Reference peers handle relay without silent loss | `clients/fortress/tests/multiprocess.rs`, `clients/fortress-wasm/harness.mjs`, both interop workflows; C1 client and deployment boundaries review above | Silent-loss detection substantiated by executable CI gates on both stacks (contiguity, cross-peer ledger equality, queue-age/checksum gating; both families add an asserted expected-negative control); fixtures are WebSocket-only and evidence no ICE-fallback claim; Unix native drain/restart and partial-handshake close cells prove bounded causal failures; fresh healthy games pass after restart; WASM drain/restart and partial-handshake close cells check bounded causal failures and fresh healthy games on the same port; native and WASM inbound-overflow cells check the real queue boundary and first rejected frame; restore remains (#741) | Partially reviewed |
+| Native client: `clients/native/src/**` | Same client contract across native sockets | `clients/native/tests/interop_e2e.rs`; C1 client and deployment boundaries review above | Accountability model, fallback (cripple/TURN/host-star/Direct rejection), and negotiation verified and pinned (plus the ARM-C033 downgrade fix, the v2-opaque guard, and their pins); native downgrade and cross-format advisory consumption now have live cells; the MessagePack cohort is pinned; controlled v3 JSON relay restores, rotated-token reuse, fresh WebRTC exchange, and Unix drain refusal have live cells; automatic recovery and game-state resync remain outside shipped scope | Reviewed |
+| Fortress clients: `clients/fortress/src/**`, `clients/fortress-wasm/src/**` | Reference peers handle relay without silent loss | `clients/fortress/tests/multiprocess.rs`, `clients/fortress-wasm/harness.mjs`, both interop workflows; C1 client and deployment boundaries review above | Silent-loss detection substantiated by executable CI gates on both stacks (contiguity, cross-peer ledger equality, queue-age/checksum gating; both families add an asserted expected-negative control); fixtures are WebSocket-only and evidence no ICE-fallback claim; Unix native drain/restart and partial-handshake close cells prove bounded causal failures; fresh healthy games pass after restart; WASM drain/restart and partial-handshake close cells check bounded causal failures and fresh healthy games on the same port; native and WASM inbound-overflow cells check the real queue boundary and first rejected frame; these released fixtures do not initiate reconnects, while native reference restore is covered above | Partially reviewed |
 
 `src/server.rs` owns shared server state across the server rows. `src/websocket/routes.rs`
 and `src/main.rs` own the plain/TLS listener boundary. `src/config/coordination.rs`

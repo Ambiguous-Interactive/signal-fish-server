@@ -4,7 +4,7 @@ A **native Rust reference client** for the Signal Fish protocol v3 with a **real
 ([webrtc-rs](https://github.com/webrtc-rs/webrtc) 0.21: actual ICE gathering, DTLS handshakes, and SCTP data
 channels). It exists for **conformance and reference** — executable documentation of the client side of
 [`docs/protocol.md`](../../docs/protocol.md) and the engine of the in-repo multi-process interop suite. It is
-**not a product**: no reconnection logic, no game loop, no API stability promises.
+**not a product**: no automatic reconnection, no game loop, no API stability promises.
 
 Design rationale (standalone crate, direct webrtc-rs, path-dependency type reuse, supply-chain scope) lives in
 [ADR-0004](../../docs/adr/0004-native-reference-client.md).
@@ -73,6 +73,8 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--max-runtime-secs <S>` | `60` | Watchdog: abort with exit 4 when its absolute deadline is representable; larger accepted values remain beyond the process lifetime as described below |
 | `--success-release-file <PATH>` | — | Test harness only: after success criteria hold, emit `success_criteria_met` and stay connected until PATH exists; the normal bounded exit behavior is unchanged when omitted |
 | `--require-ice-gathering-complete` | off | Signal-ledger harness only; requires `--success-release-file`. Add end-of-gathering for every live peer-connection generation to the success criteria. Ordinary gameplay barriers do not wait for unrelated candidate transactions after a selected path is connected |
+| `--reconnect-release-file <PATH>` | — | Harness only; repeat to drop and restore the current room in order when each path exists. Requires v3 and a room token. Normal runs do not reconnect |
+| `--reconnect-resume-file <PATH>` | — | Harness only; hold each restore after the socket drops until its matching path exists. Supply one path per reconnect trigger to coordinate missed traffic or drain refusal |
 | `--protocol-version <V>` | `3` | `2` omits every v3 `Authenticate` field — a pure v2 client for mixed-room tests |
 | `--supported-topologies <LIST>` | `relay,host,mesh` | Comma-separated topologies advertised in v3 `Authenticate` |
 | `--supported-transports <LIST>` | `relay,webrtc` | Comma-separated transports advertised in v3 `Authenticate` |
@@ -116,6 +118,21 @@ Consequently, `game_data_received` is emitted only for the current application
 incarnation. A trailing stale frame can be valid for wire accountability without
 becoming a JSONL application event.
 
+## Controlled restore
+
+Reconnect initiation is opt-in and intended for the conformance harness.
+Repeat `--reconnect-release-file` to request a fixed number of restores.
+Use matching `--reconnect-resume-file` paths to hold each attempt after its
+socket drops. The existing run deadline bounds every hold and attempt.
+The client does not reconnect after an unrelated socket failure.
+
+Each successful restore keeps the player identity, replaces room membership
+and readiness from the snapshot, and adopts the rotated token. It resets
+connection delivery counters and old transport and exchange state. A
+finalized room requires a fresh session plan and new exchange evidence.
+Missed gameplay data is not replayed. The application must resync its own
+state; sender watermarks establish the post-restore delivery baseline.
+
 ## JSONL event contract
 
 One JSON object per stdout line, tagged by a snake_case `event` field. Per-client ordering is causal (a single
@@ -130,6 +147,8 @@ process continues to its normal bounded exit.
 | `protocol_info` | `negotiated_version` | Negotiation result (v2 connections report `2`) |
 | `room_created` | `room_code` | This client created the room (harnesses scrape the code) |
 | `room_joined` | `room_id`, `player_id`, `lobby_state` | Seated in the room; `lobby_state` ∈ `waiting`/`lobby`/`finalized` — `finalized` marks a late join into a running session |
+| `reconnect_started` | `attempt` | Harness mode dropped the old socket; attempts start at one |
+| `reconnected` | `attempt`, `player_id`, `lobby_state`, `current_players`, `sender_watermarks`, `replay`, `token_rotated` | A restore replaced room and delivery state; the token stays private |
 | `peer_joined` | `player_id`, optional `epoch` | Another player joined or reconnected |
 | `player_left` | `player_id`, optional `epoch`/`final_seq` | Another player left with its v3 terminal watermark |
 | `game_starting` | `is_authority` | Lobby finalized (this client's own authority flag); never re-broadcast to late joiners |

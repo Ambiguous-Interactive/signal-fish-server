@@ -11,7 +11,7 @@
 # config disables TURN and configures zero STUN URLs, so the suite performs no
 # external network access.
 #
-# The full eight-scenario matrix runs on Linux. `native-platforms` adds the
+# The full scenario suite runs on Linux. `native-platforms` adds the
 # compile + unit-test proof and the smallest complete live WebRTC mesh on
 # Windows and macOS, so every supported desktop platform executes real ICE,
 # DTLS, SCTP, process, and socket behavior rather than stopping at linkage.
@@ -69,7 +69,9 @@ jobs:
   interop:
     name: Native Client Interop (Linux)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The serialized live cells can take 34m45s at their declared deadlines.
+    # Leave time for setup and compilation before the complete suite runs.
+    timeout-minutes: 40
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1

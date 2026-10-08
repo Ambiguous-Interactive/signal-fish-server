@@ -274,21 +274,27 @@ function normalizeOutgoingDelivery(
 
 /** Parse one server frame; throws on a non-envelope payload. */
 export function parseServerFrame(text: string): ServerFrame {
-  const value: unknown = JSON.parse(text);
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    // JavaScript parser errors can include input excerpts and bearer tokens.
+    throw new Error(`server frame has invalid JSON (${text.length} characters)`);
+  }
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error(`server frame is not an object: ${text}`);
+    throw new Error(`server frame is not an object (${text.length} characters)`);
   }
   const envelope = value as Record<string, unknown>;
   const type = envelope['type'];
   if (typeof type !== 'string') {
-    throw new Error(`server frame has no string \`type\`: ${text}`);
+    throw new Error(`server frame has no string \`type\` (${text.length} characters)`);
   }
   const data = envelope['data'];
   if (
     data !== undefined &&
     (typeof data !== 'object' || data === null || Array.isArray(data))
   ) {
-    throw new Error(`server frame \`data\` is not an object: ${text}`);
+    throw new Error(`server frame \`data\` is not an object (${text.length} characters)`);
   }
   return { type, data: (data as Record<string, unknown> | undefined) ?? {} };
 }
@@ -346,7 +352,7 @@ export function parseV3BinaryGameDataFrame(wire: ArrayBuffer | ArrayBufferView):
         epoch = reader.readPositiveInteger('epoch', BigInt(MAX_U32));
         break;
       default:
-        throw new Error(`v3 binary GameData envelope contains unknown field: ${key}`);
+        throw new Error('v3 binary GameData envelope contains unknown field');
     }
   }
   reader.requireEnd();
@@ -622,7 +628,7 @@ export function negotiatedGameDataFormat(
   requested: GameDataFormat,
 ): GameDataFormat {
   if (frame.type !== 'ProtocolInfo') {
-    throw new Error(`expected ProtocolInfo, got ${frame.type}`);
+    throw new Error('expected ProtocolInfo');
   }
   const value = frame.data['game_data_formats'];
   if (!Array.isArray(value) || value.some((token) => typeof token !== 'string')) {
@@ -641,7 +647,7 @@ export function negotiatedGameDataFormat(
 /** Extract the physical connection's negotiated mode from ProtocolInfo. */
 export function negotiatedProtocolVersion(frame: ServerFrame, offeredVersion: number): number {
   if (frame.type !== 'ProtocolInfo') {
-    throw new Error(`expected ProtocolInfo, got ${frame.type}`);
+    throw new Error('expected ProtocolInfo');
   }
   const value = frame.data['protocol_version'];
   if (value === undefined) {

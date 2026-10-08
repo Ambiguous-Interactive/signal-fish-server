@@ -119,6 +119,20 @@ pub enum ServerMessageReadError {
     Connection(String),
 }
 
+/// Decode text without copying secrets or attacker-controlled values into
+/// diagnostics. Serde's displayed errors can contain the rejected value.
+pub(crate) fn decode_server_text(text: &str) -> std::result::Result<ServerMessage, String> {
+    serde_json::from_str(text).map_err(|error| {
+        format!(
+            "invalid ServerMessage text frame ({} bytes, {:?} error at line {}, column {})",
+            text.len(),
+            error.classify(),
+            error.line(),
+            error.column()
+        )
+    })
+}
+
 /// Read the next `ServerMessage`, skipping only transparent WebSocket control
 /// frames and bounding the wait.
 ///
@@ -138,24 +152,27 @@ where
         })?;
         match frame {
             Some(Ok(Message::Text(text))) => {
-                return serde_json::from_str(&text).map_err(|error| {
-                    ServerMessageReadError::Protocol(format!(
-                        "invalid ServerMessage text frame: {text}: {error}"
-                    ))
-                });
+                return decode_server_text(&text).map_err(ServerMessageReadError::Protocol);
             }
             Some(Ok(other)) if is_transparent_transport_control(&other) => {
-                tracing::debug!(frame = ?other, "skipping non-text frame");
+                tracing::debug!("skipping WebSocket control frame");
             }
             Some(Ok(Message::Close(frame))) => {
                 return Err(ServerMessageReadError::Connection(format!(
                     "websocket closed by server: {frame:?}"
                 )));
             }
-            Some(Ok(other)) => {
+            Some(Ok(Message::Binary(bytes))) => {
                 return Err(ServerMessageReadError::Protocol(format!(
-                    "unexpected non-text application frame while waiting for ServerMessage: {other:?}"
+                    "unexpected {}-byte binary frame while waiting for ServerMessage",
+                    bytes.len()
                 )));
+            }
+            Some(Ok(_)) => {
+                return Err(ServerMessageReadError::Protocol(
+                    "unexpected non-text application frame while waiting for ServerMessage"
+                        .to_string(),
+                ));
             }
             Some(Err(error)) => {
                 return Err(ServerMessageReadError::Connection(format!(
@@ -197,6 +214,42 @@ mod tests {
             outcome.is_err(),
             "the finite outer test deadline must expire before the distant message wait"
         );
+    }
+
+    // Regression #819: malformed snapshots must not copy bearer tokens to logs.
+    #[tokio::test]
+    async fn malformed_room_snapshots_never_expose_tokens_in_diagnostics() {
+        for kind in ["RoomJoined", "Reconnected"] {
+            // A data error can echo an invalid enum value too. Neither the
+            // raw frame nor serde's error text is safe to emit.
+            let text = json!({"type": kind, "data": {
+                "room_id": Uuid::nil(), "room_code": "ABC123", "player_id": Uuid::nil(),
+                "game_name": "restore", "max_players": 2, "supports_authority": false,
+                "current_players": [], "is_authority": false,
+                "lobby_state": "private-token-in-invalid-field", "ready_players": [],
+                "relay_type": "none", "missed_events": [],
+                "reconnection_token": "private-room-token"
+            }})
+            .to_string();
+            let mut stream = futures_util::stream::iter([Ok(Message::Text(text.clone().into()))]);
+            let ServerMessageReadError::Protocol(error) =
+                next_server_message(&mut stream, Duration::from_secs(1))
+                    .await
+                    .unwrap_err()
+            else {
+                panic!("malformed snapshot must fail as a protocol error")
+            };
+            assert!(
+                !error.contains("private-room-token"),
+                "{kind} leaked room token: {error}"
+            );
+            assert!(
+                !error.contains("private-token-in-invalid-field"),
+                "{kind} echoed invalid value: {error}"
+            );
+            assert!(error.contains(&format!("{} bytes", text.len())), "{error}");
+            assert!(error.contains("Data error at line 1, column"), "{error}");
+        }
     }
 
     #[test]
