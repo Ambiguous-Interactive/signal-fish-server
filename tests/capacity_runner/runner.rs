@@ -671,7 +671,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     // The registry is complete only after every peer task is done: record
     // it once, before the snapshot the artifacts write.
     log.set_registry(registry.lock().expect("sender registry poisoned").clone());
-    let records = log.snapshot();
+    let records = log.take_records();
     let evidence_finished_us = micros(epoch.elapsed());
     let bound_us = micros(config.generator_lag_bound);
     let summary = oracle::summarize(
@@ -1312,6 +1312,9 @@ async fn peer_task(
     let mut session: Option<(WsSink, WsReceiver)> = Some((initial.0, initial.1));
     let mut send_cursor = 0usize;
     let mut churn_cursor = 0usize;
+    // Generator failure stops sends for every later incarnation. Keep the
+    // socket and its inbound evidence alive through the normal lifecycle.
+    let mut outbound_stopped = false;
     let epoch = match ready_for_epoch(ready, &mut start).await {
         Ok(epoch) => epoch,
         Err(error) => {
@@ -1378,7 +1381,11 @@ async fn peer_task(
             // Keep one send future alive while handling any number of inbound
             // frames. Recreating SinkExt::send after a read could resend a frame.
             let event = {
-                let next_send = plan.sends.get(send_cursor);
+                let next_send = if outbound_stopped {
+                    None
+                } else {
+                    plan.sends.get(send_cursor)
+                };
                 let mut writer = std::pin::pin!(async {
                     let Some(send) = next_send else {
                         return std::future::pending::<SendOutcome>().await;
@@ -1545,7 +1552,8 @@ async fn peer_task(
             };
             match event {
                 SessionEvent::Send(SendOutcome::Sent) => send_cursor += 1,
-                SessionEvent::Send(SendOutcome::Stopped) | SessionEvent::Quiescence => return,
+                SessionEvent::Send(SendOutcome::Stopped) => outbound_stopped = true,
+                SessionEvent::Quiescence => return,
                 SessionEvent::Send(SendOutcome::TransportFailed) => {
                     drain_after_failed_write(
                         &recipient,
@@ -2777,7 +2785,7 @@ mod session_poll_tests {
                 },
             )
             .await;
-            let records = log.snapshot();
+            let records = log.take_records();
             assert_eq!(
                 records
                     .receipts
@@ -2864,6 +2872,371 @@ mod session_poll_tests {
                     );
                 }
             }
+        }
+    }
+
+    // Poll socket I/O without letting paused Tokio time jump to quiescence.
+    async fn poll_without_clock_advance<F: std::future::Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let std::task::Poll::Ready(output) = futures_util::poll!(future.as_mut()) {
+                return output;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "socket I/O did not progress"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn stopped_generator_preserves_held_and_later_receipts_until_session_end() {
+        use signal_fish_server::protocol::{
+            DeliveryGap, DeliveryGapReason, DeliveryReportPayload, ErrorCode, PlayerId,
+        };
+        // The preparation failure and saturation take separate writer branches.
+        // The socket must remain open for ordinary quiescence and real close.
+        for (saturated, close, churn) in [
+            (false, false, false),
+            (false, true, false),
+            (true, false, false),
+            (true, true, false),
+            (false, false, true),
+            (true, false, true),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind mock server");
+            let address = listener.local_addr().expect("mock address");
+            let (client, server) = tokio::join!(
+                tokio_tungstenite::connect_async(format!("ws://{address}")),
+                async {
+                    let (socket, _) = listener.accept().await.expect("accept mock peer");
+                    tokio_tungstenite::accept_async(socket)
+                        .await
+                        .expect("mock handshake")
+                }
+            );
+            let (sink, reader) = client.expect("client handshake").0.split();
+            let mut server = server;
+            let player = PlayerId::new_v4();
+            let frame = |seq| {
+                Message::Text(
+                    serde_json::to_string(&ServerMessage::GameData {
+                        from_player: player,
+                        data: ledger_application_data("r0p1", seq, 96).expect("ledger"),
+                        seq: Some(seq + 1),
+                        epoch: Some(1),
+                        class: None,
+                        key: None,
+                    })
+                    .expect("inbound frame")
+                    .into(),
+                )
+            };
+            server.send(frame(0)).await.expect("queue initial inbound");
+            let registry = Arc::new(std::sync::Mutex::new(BTreeMap::from([(
+                player.to_string(),
+                ("r0p1".to_string(), 1),
+            )])));
+            let log = Arc::new(EventLog::new());
+            let plan = crate::unit_context().plans.remove(0);
+            let first_send_us = plan.sends.get(0).expect("scheduled send").intended_us;
+            tokio::time::pause();
+            let epoch = Instant::now();
+            let (start, receiver) = tokio::sync::watch::channel(Some(epoch));
+            let (ready, readiness) = tokio::sync::oneshot::channel();
+            let peer = tokio::spawn(peer_task(
+                plan.name.clone(),
+                plan,
+                PeerFacts {
+                    ws_url: format!("ws://{address}"),
+                    encoding: Encoding::V2Json,
+                    players_per_room: 4,
+                    payload_bytes: if saturated { 96 } else { 0 },
+                    delivery_class: DeliveryClass::Reliable,
+                    latest_keys_per_sender: 1,
+                    generator_lag_bound_us: if saturated { 0 } else { 1_000_000 },
+                    pause_sends: None,
+                    stall_senders: None,
+                    experiment: ExperimentContext {
+                        active: false,
+                        opaque_sender: false,
+                    },
+                    game_data_format: None,
+                },
+                if churn {
+                    vec![PeerChurnCycle {
+                        disconnect_us: 2_500_000,
+                        reconnect_us: 3_000_000,
+                        rejoin_room_code: "STOP01".to_string(),
+                    }]
+                } else {
+                    Vec::new()
+                },
+                receiver,
+                ready,
+                Arc::clone(&registry),
+                (
+                    sink,
+                    reader,
+                    PlayerId::new_v4().to_string(),
+                    BTreeMap::new(),
+                ),
+                Arc::clone(&log),
+                4_000_000,
+                Some(Duration::from_secs(2)),
+                false,
+            ));
+            poll_without_clock_advance(readiness)
+                .await
+                .expect("peer ready");
+            // Advance past timer granularity; any lateness trips the zero lag bound.
+            tokio::time::advance(Duration::from_micros(first_send_us + 2_000)).await;
+            poll_without_clock_advance(futures_util::future::poll_fn(|_| {
+                if log.observation_counts().1 == 0 {
+                    std::task::Poll::Pending
+                } else {
+                    std::task::Poll::Ready(())
+                }
+            }))
+            .await;
+            assert!(
+                !peer.is_finished(),
+                "stopping outbound must preserve the session"
+            );
+            assert!(
+                log.observation_counts().0 == 0,
+                "the read pause remains active"
+            );
+            poll_without_clock_advance(server.send(frame(1)))
+                .await
+                .expect("send after stop");
+            for message in [
+                ServerMessage::DeliveryReport(Box::new(DeliveryReportPayload {
+                    gaps: vec![DeliveryGap {
+                        from_player: player,
+                        epoch: 1,
+                        from_seq: 4,
+                        to_seq: 4,
+                        reason: DeliveryGapReason::VolatileDropped,
+                    }],
+                    ..Default::default()
+                })),
+                ServerMessage::Error {
+                    message: "scripted rejection".into(),
+                    error_code: Some(ErrorCode::RateLimitExceeded),
+                },
+            ] {
+                poll_without_clock_advance(
+                    server.send(Message::Text(
+                        serde_json::to_string(&message)
+                            .expect("evidence frame")
+                            .into(),
+                    )),
+                )
+                .await
+                .expect("queue evidence after stop");
+            }
+            tokio::time::advance(epoch + Duration::from_millis(2_002) - Instant::now()).await;
+            poll_without_clock_advance(futures_util::future::poll_fn(|_| {
+                if log.observation_counts().0 == 2 {
+                    std::task::Poll::Ready(())
+                } else {
+                    std::task::Poll::Pending
+                }
+            }))
+            .await;
+            poll_without_clock_advance(server.send(frame(2)))
+                .await
+                .expect("send after resume");
+            poll_without_clock_advance(futures_util::future::poll_fn(|_| {
+                if log.observation_counts().0 == 3 {
+                    std::task::Poll::Ready(())
+                } else {
+                    std::task::Poll::Pending
+                }
+            }))
+            .await;
+            assert!(
+                !peer.is_finished(),
+                "reading receipts must preserve the socket"
+            );
+            assert!(
+                futures_util::poll!(server.next()).is_pending(),
+                "outbound work stays stopped"
+            );
+            if churn {
+                tokio::time::advance(Duration::from_millis(500)).await;
+                let terminal = poll_without_clock_advance(server.next()).await;
+                assert!(
+                    matches!(terminal, None | Some(Err(_))),
+                    "churn drops the old socket"
+                );
+                assert!(!peer.is_finished(), "churn must retain the observer task");
+                tokio::time::advance(Duration::from_millis(500)).await;
+                let mut rejoined = poll_without_clock_advance(async {
+                    let (socket, _) = listener.accept().await.expect("accept rejoined peer");
+                    tokio_tungstenite::accept_async(socket)
+                        .await
+                        .expect("rejoin handshake")
+                })
+                .await;
+                let join = poll_without_clock_advance(rejoined.next())
+                    .await
+                    .expect("rejoin frame")
+                    .expect("rejoin transport");
+                let Message::Text(join) = join else {
+                    panic!("expected JSON join");
+                };
+                assert!(
+                    matches!(serde_json::from_str::<ClientMessage>(&join).expect("join message"),
+                    ClientMessage::JoinRoom { room_code: Some(code), .. } if code == "STOP01")
+                );
+                let rejoined_id = PlayerId::new_v4();
+                let joined = ServerMessage::RoomJoined(Box::new(
+                    signal_fish_server::protocol::RoomJoinedPayload {
+                        room_id: PlayerId::new_v4(),
+                        room_code: "STOP01".to_string(),
+                        player_id: rejoined_id,
+                        game_name: GAME_NAME.to_string(),
+                        max_players: 4,
+                        supports_authority: false,
+                        current_players: vec![signal_fish_server::protocol::PlayerInfo {
+                            id: player,
+                            name: "r0p1".to_string(),
+                            is_authority: false,
+                            is_ready: false,
+                            connected_at: None,
+                            connection_info: None,
+                            epoch: Some(1),
+                            seq: Some(3),
+                            region_id: String::new(),
+                        }],
+                        is_authority: false,
+                        lobby_state: signal_fish_server::protocol::LobbyState::Lobby,
+                        ready_players: Vec::new(),
+                        relay_type: "WebSocket".to_string(),
+                        current_spectators: Vec::new(),
+                        ice_servers: Vec::new(),
+                        reconnection_token: None,
+                    },
+                ));
+                poll_without_clock_advance(
+                    rejoined.send(Message::Text(
+                        serde_json::to_string(&joined)
+                            .expect("join snapshot")
+                            .into(),
+                    )),
+                )
+                .await
+                .expect("send rejoin snapshot");
+                poll_without_clock_advance(rejoined.send(frame(4)))
+                    .await
+                    .expect("send after rejoin");
+                poll_without_clock_advance(futures_util::future::poll_fn(|_| {
+                    if log.observation_counts().0 == 4 {
+                        std::task::Poll::Ready(())
+                    } else {
+                        std::task::Poll::Pending
+                    }
+                }))
+                .await;
+                assert!(!peer.is_finished(), "new incarnation remains an observer");
+                assert!(
+                    futures_util::poll!(rejoined.next()).is_pending(),
+                    "rejoin must not restart outbound work"
+                );
+                assert_eq!(log.observation_counts().1, 2, "stop state survives rejoin");
+                // Keep the new server half alive through ordinary quiescence.
+                // Both server values have the same concrete TCP WebSocket type.
+                server = rejoined;
+            }
+
+            if close {
+                poll_without_clock_advance(server.send(Message::Close(None)))
+                    .await
+                    .expect("close peer");
+            } else {
+                tokio::time::advance(epoch + Duration::from_millis(4_002) - Instant::now()).await;
+            }
+            poll_without_clock_advance(peer)
+                .await
+                .expect("peer task completes");
+            let records = log.take_records();
+            assert_eq!(
+                records
+                    .receipts
+                    .iter()
+                    .map(|receipt| receipt.seq)
+                    .collect::<Vec<_>>(),
+                if churn {
+                    vec![0, 1, 2, 4]
+                } else {
+                    vec![0, 1, 2]
+                }
+            );
+            assert!(
+                records.sent.is_empty(),
+                "the failed send and its remainder are unsent"
+            );
+            assert_eq!(records.disconnects.len(), usize::from(close));
+            assert_eq!(
+                records.faults.len(),
+                2,
+                "ordinary quiescence adds no deadline fault"
+            );
+            assert!(matches!(
+                (&records.faults[0], saturated),
+                (InvalidReason::GeneratorSaturated { .. }, true)
+                    | (InvalidReason::SendFailed { .. }, false)
+            ));
+            if saturated {
+                assert_eq!(
+                    records.faults[0],
+                    InvalidReason::GeneratorSaturated {
+                        max_lag_us: 2_000,
+                        bound_us: 0
+                    }
+                );
+            }
+            assert!(matches!(
+                &records.faults[1],
+                InvalidReason::ServerRejected { .. }
+            ));
+            assert_eq!(records.gaps.len(), 1);
+            assert_eq!((records.gaps[0].from_seq, records.gaps[0].to_seq), (4, 4));
+            assert_eq!(records.gaps[0].reason, DeliveryGapReason::VolatileDropped);
+            assert!(records.receipts[..3]
+                .iter()
+                .all(|receipt| receipt.received_us == 2_002_000));
+            if churn {
+                assert_eq!(records.churn.len(), 2);
+                assert_eq!(records.churn[0].phase, ChurnPhase::Disconnect);
+                assert_eq!(records.churn[1].phase, ChurnPhase::Rejoined);
+                assert_eq!(records.churn[1].epoch, Some(2));
+                assert_eq!(
+                    records.churn[1].tails.get("r0p1"),
+                    Some(&(player.to_string(), 3))
+                );
+                assert!(registry
+                    .lock()
+                    .expect("registry")
+                    .values()
+                    .any(|identity| identity == &("r0p0".to_string(), 2)));
+                assert_eq!(records.receipts[3].received_us, 3_002_000);
+            }
+            let output = tempfile::tempdir().expect("event artifacts");
+            artifacts::write_deliveries(output.path(), &records).expect("write retained evidence");
+            let replayed = artifacts::read_records(output.path()).expect("read retained evidence");
+            assert_eq!(
+                serde_json::to_value(&replayed).expect("replayed records"),
+                serde_json::to_value(&records).expect("records")
+            );
+            drop(start);
+            tokio::time::resume();
         }
     }
 
@@ -2983,7 +3356,7 @@ mod session_poll_tests {
                 .await
             );
         }
-        assert_eq!(log.snapshot().receipts.len(), 2);
+        assert_eq!(log.take_records().receipts.len(), 2);
         assert_eq!(started.load(Ordering::SeqCst), 1);
         assert_eq!(completed.load(Ordering::SeqCst), 0);
         assert_eq!(dropped.load(Ordering::SeqCst), 0);

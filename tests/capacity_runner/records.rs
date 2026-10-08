@@ -273,11 +273,18 @@ impl EventLog {
         self.state.lock().expect("event log poisoned").registry = registry;
     }
 
-    /// Snapshot every recorded event (deterministic order: sends by
+    /// Observe test progress without transferring the run's final evidence.
+    #[cfg(test)]
+    pub(super) fn observation_counts(&self) -> (usize, usize) {
+        let state = self.state.lock().expect("event log poisoned");
+        (state.receipts.len(), state.faults.len())
+    }
+
+    /// Drain every recorded event after all run tasks finish. Sends sort by
     /// `(sender, seq)`; receipts, disconnects, churn actions, join failures,
-    /// and faults in recorded arrival order — the oracle checks per-stream
-    /// ARRIVAL order, so receipts must never be reordered).
-    pub fn snapshot(&self) -> RunRecords {
+    /// and faults retain arrival order. The oracle checks stream arrival order,
+    /// so receipts must never be reordered.
+    pub fn take_records(&self) -> RunRecords {
         let mut state = self.state.lock().expect("event log poisoned");
         let mut records = RunRecords {
             sent: std::mem::take(&mut state.sent),
