@@ -1171,6 +1171,36 @@ pub(crate) fn ledger_application_data(
     Ok(data)
 }
 
+/// Encode the actual frame once. The protocol serializer also supplies the
+/// envelope size, so JSON byte accounting does not serialize the body twice.
+fn encode_application_frame(
+    data: serde_json::Value,
+    class: Option<WireDeliveryClass>,
+    key: Option<u32>,
+    opaque: bool,
+) -> Result<(Message, u64), String> {
+    if opaque {
+        let payload = serde_json::to_vec(&data).map_err(|error| format!("serialize: {error}"))?;
+        let application_bytes = count_u64(payload.len());
+        return Ok((Message::Binary(payload.into()), application_bytes));
+    }
+    let envelope = serde_json::to_string(&ClientMessage::GameData {
+        class,
+        key,
+        data: serde_json::Value::Null,
+    })
+    .map_err(|error| format!("serialize envelope: {error}"))?;
+    let frame = serde_json::to_string(&ClientMessage::GameData { class, key, data })
+        .map_err(|error| format!("serialize: {error}"))?;
+    // The null placeholder contributes four bytes to the canonical envelope.
+    let application_bytes = frame
+        .len()
+        .checked_add(4)
+        .and_then(|size| size.checked_sub(envelope.len()))
+        .ok_or_else(|| "serialized GameData frame is smaller than its envelope".to_string())?;
+    Ok((Message::Text(frame.into()), count_u64(application_bytes)))
+}
+
 /// Reject an undersized target for any scheduled sequence before run effects.
 pub(crate) fn validate_payload_size(
     plans: &[SenderPlan],
@@ -1402,23 +1432,10 @@ async fn peer_task(
                                 return SendOutcome::Stopped;
                             }
                         };
-                    let application_payload = match serde_json::to_vec(&data) {
-                        Ok(payload) => payload,
-                        Err(error) => {
-                            log.push_fault(InvalidReason::SendFailed {
-                                sender: plan.name.clone(),
-                                detail: format!("serialize: {error}"),
-                            });
-                            return SendOutcome::Stopped;
-                        }
-                    };
-                    let application_bytes = count_u64(application_payload.len());
-                    let frame = if facts.experiment.opaque_sender {
-                        // Opaque frames carry the same exact ledger document as
-                        // JSON GameData.data. They have no protocol envelope.
-                        Message::Binary(application_payload.into())
+                    let (class, key) = if facts.experiment.opaque_sender {
+                        (None, None)
                     } else {
-                        let (class, key) = match facts.delivery_class {
+                        match facts.delivery_class {
                             DeliveryClass::Reliable => (None, None),
                             DeliveryClass::Latest => {
                                 // The coalescing key is a sender-scoped u32; a
@@ -1438,17 +1455,21 @@ async fn peer_task(
                                 }
                             }
                             DeliveryClass::Volatile => (Some(WireDeliveryClass::Volatile), None),
-                        };
-                        let message = ClientMessage::GameData { class, key, data };
-                        match serde_json::to_string(&message) {
-                            Ok(frame) => Message::Text(frame.into()),
-                            Err(error) => {
-                                log.push_fault(InvalidReason::SendFailed {
-                                    sender: plan.name.clone(),
-                                    detail: format!("serialize: {error}"),
-                                });
-                                return SendOutcome::Stopped;
-                            }
+                        }
+                    };
+                    let (frame, application_bytes) = match encode_application_frame(
+                        data,
+                        class,
+                        key,
+                        facts.experiment.opaque_sender,
+                    ) {
+                        Ok(encoded) => encoded,
+                        Err(detail) => {
+                            log.push_fault(InvalidReason::SendFailed {
+                                sender: plan.name.clone(),
+                                detail,
+                            });
+                            return SendOutcome::Stopped;
                         }
                     };
                     let encoded_frame_body_bytes = count_u64(frame.len());
@@ -2166,6 +2187,48 @@ async fn abort_and_join(handles: Vec<tokio::task::JoinHandle<()>>) -> Result<(),
 mod session_poll_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn outgoing_frame_bytes_match_canonical_body_and_protocol_serializers() {
+        let mut documents = vec![
+            serde_json::Value::Null,
+            json!(true),
+            json!(1234567890),
+            json!(-12.25),
+            json!("quotes\", slash\\, newline\n, 雪 😀"),
+            json!({"escaped\"key": [null, false, 0, "\t\r漢字"]}),
+        ];
+        for bytes in [96, 1_024, 16_384, 65_536] {
+            documents.push(ledger_application_data("r0p1", u64::MAX, bytes).expect("ledger body"));
+        }
+        for data in documents {
+            let reference_body = serde_json::to_vec(&data).expect("canonical body");
+            for (class, key) in [
+                (None, None),
+                (Some(WireDeliveryClass::Reliable), None),
+                (Some(WireDeliveryClass::Volatile), None),
+                (Some(WireDeliveryClass::Latest), Some(0)),
+                (Some(WireDeliveryClass::Latest), Some(9)),
+                (Some(WireDeliveryClass::Latest), Some(10)),
+                (Some(WireDeliveryClass::Latest), Some(u32::MAX)),
+            ] {
+                let reference_frame = serde_json::to_string(&ClientMessage::GameData {
+                    class,
+                    key,
+                    data: data.clone(),
+                })
+                .expect("canonical frame");
+                let (frame, bytes) =
+                    encode_application_frame(data.clone(), class, key, false).expect("JSON frame");
+                assert_eq!(frame, Message::Text(reference_frame.into()));
+                assert_eq!(bytes, count_u64(reference_body.len()));
+            }
+            let (frame, bytes) =
+                encode_application_frame(data, None, None, true).expect("opaque frame");
+            assert_eq!(bytes, count_u64(reference_body.len()));
+            assert_eq!(frame, Message::Binary(reference_body.into()));
+        }
+    }
 
     #[test]
     fn send_lag_evidence_distinguishes_before_write_and_completed_write() {
