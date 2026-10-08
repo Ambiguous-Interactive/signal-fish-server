@@ -404,7 +404,7 @@ async fn injected_send_pause_lands_in_scheduled_send_latency_without_reducing_of
     );
     let manifest_path = output.path().join(artifacts::MANIFEST_FILE);
     let mut manifest = artifacts::read_manifest(output.path()).expect("read pause manifest");
-    assert_eq!(manifest.schema_version, 9);
+    assert_eq!(manifest.schema_version, 10);
     manifest.schema_version = 8;
     std::fs::write(
         manifest_path,
@@ -413,7 +413,7 @@ async fn injected_send_pause_lands_in_scheduled_send_latency_without_reducing_of
     .expect("write old-schema manifest");
     assert_eq!(
         artifacts::replay(output.path()).expect_err("reject old latency semantics"),
-        "unsupported artifact schema 8 (expected 9)"
+        "unsupported artifact schema 8 (expected 10)"
     );
 }
 
@@ -967,6 +967,202 @@ async fn external_capacity_runs_keep_unknown_provenance_and_exact_replay() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn external_host_evidence_survives_file_removal_and_replays_exactly() {
+    let mut config = scenario_config(Encoding::V3Json);
+    let host_inputs = tempfile::tempdir().expect("host-owned inputs");
+    let registry = host_inputs.path().join("apps.json");
+    std::fs::write(&registry, b"{\"apps\":[]}\n").expect("host app registry");
+    config.server_overlay["security"]["app_auth_path"] =
+        registry.to_string_lossy().to_string().into();
+    let server =
+        websocket_test_helpers::server_process::spawn_server(config.server_overlay.clone()).await;
+    let directory = server.binary_path().parent().expect("server directory");
+    let mut command = std::process::Command::new(server.binary_path());
+    for (key, _) in std::env::vars_os() {
+        if key
+            .to_str()
+            .is_some_and(|key| key.starts_with("SIGNAL_FISH"))
+        {
+            command.env_remove(key);
+        }
+    }
+    let printed = command
+        .arg("--print-config-evidence")
+        .current_dir(directory)
+        .env(
+            "SIGNAL_FISH_CONFIG_PATH",
+            directory.join("server-config.json"),
+        )
+        .env("SIGNAL_FISH__PORT", server.port.to_string())
+        .output()
+        .expect("host binary evidence command");
+    assert!(
+        printed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&printed.stderr)
+    );
+    let mut evidence: serde_json::Value =
+        serde_json::from_slice(&printed.stdout).expect("config evidence");
+    assert_eq!(&evidence["effective"], server.effective_config());
+    assert_eq!(evidence["loaded_sha256"], evidence["effective_sha256"]);
+    let (binary_sha256, binary_bytes) =
+        diagnostics::sha256_file(server.binary_path()).expect("host binary hash");
+    let endpoint = format!("ws://127.0.0.1:{}", server.port);
+    evidence["endpoint"] = endpoint.clone().into();
+    evidence["host"] = "isolated-arm-host".into();
+    evidence["deployment"] = "external-process-1".into();
+    evidence["collected_at_rfc3339"] = "2026-10-08T21:00:00Z".into();
+    evidence["binary_sha256"] = binary_sha256.clone().into();
+    evidence["binary_bytes"] = binary_bytes.into();
+    evidence["file_sha256"] = serde_json::json!({
+        "security.app_auth_path": diagnostics::sha256_bytes(b"{\"apps\":[]}\n"),
+    });
+    let output = tempfile::tempdir().expect("host output");
+    let path = output.path().join("host.json");
+    artifacts::write_json(&path, &evidence).expect("evidence file");
+    #[cfg(unix)]
+    {
+        let sample_path = output.path().join("sample-host.json");
+        let mut capture = std::process::Command::new("python3");
+        capture
+            .arg(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join(".llm/code-samples/capacity/capture-host-evidence.py"),
+            )
+            .args(["--binary"])
+            .arg(server.binary_path())
+            .args([
+                "--endpoint",
+                &endpoint,
+                "--host",
+                "isolated-arm-host",
+                "--deployment",
+                "external-process-1",
+                "--output",
+            ])
+            .arg(&sample_path)
+            .current_dir(directory);
+        for (key, _) in std::env::vars_os() {
+            if key
+                .to_str()
+                .is_some_and(|key| key.starts_with("SIGNAL_FISH"))
+            {
+                capture.env_remove(key);
+            }
+        }
+        capture
+            .env(
+                "SIGNAL_FISH_CONFIG_PATH",
+                directory.join("server-config.json"),
+            )
+            .env("SIGNAL_FISH__PORT", server.port.to_string());
+        let captured = capture.output().expect("run documented host capture");
+        assert!(
+            captured.status.success(),
+            "{}",
+            String::from_utf8_lossy(&captured.stderr)
+        );
+        let sample: config::ExternalHostEvidence =
+            serde_json::from_slice(&std::fs::read(&sample_path).expect("captured sample"))
+                .expect("complete sample evidence");
+        sample
+            .validate(Some(&endpoint))
+            .expect("valid host capture");
+        assert_eq!(sample.binary_sha256, binary_sha256);
+        assert_eq!(sample.binary_bytes, binary_bytes);
+        assert_eq!(sample.effective, evidence["effective"]);
+        assert_eq!(sample.loaded_sha256, evidence["loaded_sha256"]);
+        assert_eq!(
+            sample.file_sha256["security.app_auth_path"],
+            diagnostics::sha256_bytes(b"{\"apps\":[]}\n")
+        );
+        assert!(
+            !capture.output().expect("repeat capture").status.success(),
+            "never overwrite an earlier capture"
+        );
+    }
+    std::env::set_var("CAPACITY_RUNNER_EXTERNAL_HOST_EVIDENCE", &path);
+    let inputs = RunConfig::from_env();
+    std::env::remove_var("CAPACITY_RUNNER_EXTERNAL_HOST_EVIDENCE");
+    config.external_host_evidence = inputs.expect("read host evidence").external_host_evidence;
+    std::fs::remove_file(&path).expect("remove host input file");
+    config.endpoint = Some(endpoint);
+    config.output_dir = output.path().to_path_buf();
+    let outcome = runner::run(config).await.expect("host-declared run");
+    assert!(outcome.summary.valid, "{:?}", outcome.summary.reasons);
+    let manifest = artifacts::read_manifest(output.path()).expect("host manifest");
+    assert!(manifest.server.config_provenance.has_config_evidence());
+    assert!(matches!(
+        manifest.server.config_provenance,
+        artifacts::ConfigProvenance::ExternalHostDeclared { .. }
+    ));
+    assert_eq!(manifest.server.binary_sha256, Some(binary_sha256));
+    assert_eq!(manifest.server.binary_bytes, Some(binary_bytes));
+    let replay = artifacts::replay(output.path()).expect("self-contained replay");
+    assert_eq!(
+        serde_json::to_value(replay).unwrap(),
+        serde_json::to_value(outcome.summary).unwrap()
+    );
+    let original = serde_json::to_value(&manifest).expect("manifest JSON");
+    let manifest_path = output.path().join(artifacts::MANIFEST_FILE);
+    for field in [
+        "snapshot",
+        "hash",
+        "loaded_hash",
+        "file_hash",
+        "binary",
+        "bytes",
+        "endpoint",
+        "pid",
+        "input",
+        "downgrade",
+        "schema",
+    ] {
+        let mut altered = original.clone();
+        match field {
+            "snapshot" => {
+                altered["server"]["config_provenance"]["evidence"]["effective"]["server"]
+                    ["ping_timeout"] = 999.into()
+            }
+            "hash" => {
+                altered["server"]["config_provenance"]["evidence"]["effective_sha256"] =
+                    "ab".repeat(32).into()
+            }
+            "loaded_hash" => {
+                altered["server"]["config_provenance"]["evidence"]["loaded_sha256"] =
+                    "invalid".into()
+            }
+            "file_hash" => {
+                altered["server"]["config_provenance"]["evidence"]["file_sha256"] =
+                    serde_json::json!({})
+            }
+            "binary" => altered["server"]["binary_sha256"] = "ab".repeat(32).into(),
+            "bytes" => altered["server"]["binary_bytes"] = 0.into(),
+            "endpoint" => {
+                altered["server"]["endpoint"] = format!("{}/other", manifest.server.endpoint).into()
+            }
+            "pid" => altered["server"]["pid"] = 123.into(),
+            "input" => altered["config"]["external_host_evidence"] = serde_json::Value::Null,
+            "downgrade" => {
+                altered["server"]["config_provenance"] =
+                    serde_json::json!({"source":"unknown_external"});
+                altered["server"]["binary_sha256"] = serde_json::Value::Null;
+                altered["server"]["binary_bytes"] = serde_json::Value::Null;
+            }
+            "schema" => altered["schema_version"] = 9.into(),
+            _ => unreachable!(),
+        }
+        artifacts::write_json(&manifest_path, &altered).expect("mutated manifest");
+        assert!(
+            artifacts::replay(output.path()).is_err(),
+            "reject {field} drift"
+        );
+    }
+    artifacts::write_json(&manifest_path, &original).expect("restore manifest");
+}
+
 #[tokio::test]
 async fn capacity_provenance_refuses_file_backed_config_before_starting() {
     for overlay in [
@@ -1001,6 +1197,281 @@ fn config_provenance_rejects_malformed_and_conflicting_overlays() {
             effective_server_config(3536, &overlay).is_err(),
             "reject overlay {overlay}"
         );
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn external_host_evidence_env_embeds_the_file_in_run_inputs() {
+    // Issue #776: archival replay must not depend on a file on the host.
+    let directory = tempfile::tempdir().expect("host evidence directory");
+    let path = directory.path().join("host.json");
+    let effective = websocket_test_helpers::server_process::effective_server_config(
+        3536,
+        &RunConfig::default_server_overlay(),
+    )
+    .expect("effective host config");
+    let evidence = serde_json::json!({
+        "endpoint": format!("ws://{}:{}", "127.0.0.1", 3536),
+        "host": "capacity-arm-node",
+        "deployment": "immutable-process-1",
+        "collected_at_rfc3339": "2026-10-08T21:00:00Z",
+        "effective": effective,
+        "effective_sha256": diagnostics::sha256_bytes(&serde_json::to_vec(&effective).unwrap()),
+        "loaded_sha256": diagnostics::sha256_bytes(&serde_json::to_vec(&effective).unwrap()),
+        "binary_sha256": "ab".repeat(32),
+        "binary_bytes": 12345,
+        "file_sha256": {},
+    });
+    artifacts::write_json(&path, &evidence).expect("host evidence");
+    std::env::set_var("CAPACITY_RUNNER_EXTERNAL_HOST_EVIDENCE", &path);
+    let result = RunConfig::from_env();
+    std::env::remove_var("CAPACITY_RUNNER_EXTERNAL_HOST_EVIDENCE");
+    let inputs = serde_json::to_value(result.expect("read evidence")).expect("run inputs");
+    assert_eq!(inputs["external_host_evidence"], evidence);
+}
+
+fn host_evidence_fixture() -> config::ExternalHostEvidence {
+    let effective = websocket_test_helpers::server_process::effective_server_config(
+        3536,
+        &RunConfig::default_server_overlay(),
+    )
+    .expect("host config");
+    let hash = diagnostics::sha256_bytes(&serde_json::to_vec(&effective).unwrap());
+    config::ExternalHostEvidence {
+        endpoint: format!("ws://{}:{}", "127.0.0.1", 3536),
+        host: "arm-host".into(),
+        deployment: "fixed-deployment".into(),
+        collected_at_rfc3339: "2026-10-08T21:00:00Z".into(),
+        effective,
+        effective_sha256: hash.clone(),
+        loaded_sha256: hash,
+        binary_sha256: "ab".repeat(32),
+        binary_bytes: 12345,
+        file_sha256: BTreeMap::new(),
+    }
+}
+
+#[tokio::test]
+async fn external_host_evidence_refuses_invalid_inputs_before_artifacts_or_connections() {
+    let valid = host_evidence_fixture();
+    for case in [
+        "missing_endpoint",
+        "wrong_endpoint",
+        "empty_host",
+        "control_host",
+        "large_deployment",
+        "empty_deployment",
+        "bad_binary_hash",
+        "uppercase_hash",
+        "bad_loaded_hash",
+        "bad_collection_time",
+        "zero_bytes",
+        "altered_snapshot",
+        "partial_snapshot",
+        "unknown_config_key",
+        "raw_secret",
+        "unknown_field",
+        "invalid_type",
+    ] {
+        let mut config = scenario_config(Encoding::V3Json);
+        config.endpoint = Some(valid.endpoint.clone());
+        let mut value = serde_json::to_value(&valid).unwrap();
+        match case {
+            "missing_endpoint" => config.endpoint = None,
+            "wrong_endpoint" => config.endpoint = Some(format!("{}/other", valid.endpoint)),
+            "empty_host" => value["host"] = "  ".into(),
+            "control_host" => value["host"] = "host\nforged".into(),
+            "large_deployment" => value["deployment"] = "x".repeat(513).into(),
+            "empty_deployment" => value["deployment"] = "".into(),
+            "bad_binary_hash" => value["binary_sha256"] = "g".repeat(64).into(),
+            "uppercase_hash" => value["binary_sha256"] = "AB".repeat(32).into(),
+            "bad_loaded_hash" => value["loaded_sha256"] = "abc".into(),
+            "bad_collection_time" => value["collected_at_rfc3339"] = "yesterday".into(),
+            "zero_bytes" => value["binary_bytes"] = 0.into(),
+            "altered_snapshot" => value["effective"]["port"] = 1234.into(),
+            "partial_snapshot" => {
+                value["effective"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("logging");
+            }
+            "unknown_config_key" => value["effective"]["unknown"] = true.into(),
+            "raw_secret" => {
+                value["effective"]["security"]["metrics_auth_token"] =
+                    "secret-must-not-archive".into()
+            }
+            "unknown_field" => value["extra"] = true.into(),
+            "invalid_type" => value["effective"]["port"] = "bad-port".into(),
+            _ => unreachable!(),
+        }
+        // Recompute the snapshot digest: missing/defaulted fields and plaintext
+        // secrets must fail independently of the hash check.
+        if matches!(
+            case,
+            "partial_snapshot" | "unknown_config_key" | "raw_secret"
+        ) {
+            value["effective_sha256"] =
+                diagnostics::sha256_bytes(&serde_json::to_vec(&value["effective"]).unwrap()).into();
+        }
+        let evidence = serde_json::from_value(value);
+        if case == "unknown_field" {
+            assert!(evidence.is_err(), "strict evidence shape");
+            continue;
+        }
+        config.external_host_evidence = Some(evidence.expect("well-shaped evidence"));
+        let output = tempfile::tempdir().expect("refused output");
+        config.output_dir = output.path().join("not-created");
+        let error = runner::run(config.clone()).await.expect_err(case);
+        assert!(
+            !error.contains("secret-must-not-archive"),
+            "do not echo rejected secrets"
+        );
+        assert!(
+            !config.output_dir.exists(),
+            "{case}: refuse before output or connections"
+        );
+    }
+}
+
+#[test]
+fn external_host_evidence_endpoint_and_redaction_boundaries() {
+    for (endpoint, accepted) in [
+        (format!("ws://{}:{}", "example.invalid", 80), true),
+        (format!("wss://{}:{}", "example.invalid", 443), true),
+        (format!("ws://[{}]:{}", "::1", 3536), true),
+        (format!("https://{}:{}", "example.invalid", 3536), false),
+        (format!("ws://{}", "example.invalid"), false),
+        (format!("ws://{}:{}", "example.invalid", 0), false),
+        (format!("ws://{}:{}/path", "example.invalid", 3536), false),
+        (format!("ws://{}:{}/", "example.invalid", 3536), false),
+        (
+            format!("ws://{}:{}?secret=hidden", "example.invalid", 3536),
+            false,
+        ),
+        (
+            format!("ws://{}:{}#fragment", "example.invalid", 3536),
+            false,
+        ),
+        (
+            format!("ws://user:secret@{}:{}", "example.invalid", 3536),
+            false,
+        ),
+    ] {
+        let mut evidence = host_evidence_fixture();
+        evidence.endpoint = endpoint;
+        assert_eq!(
+            evidence.validate(Some(&evidence.endpoint)).is_ok(),
+            accepted,
+            "endpoint {}",
+            evidence.endpoint
+        );
+    }
+    let mut evidence = host_evidence_fixture();
+    evidence.host = "鱼".repeat(170); // 510 bytes: identifiers are byte-bounded.
+    evidence.deployment = "x".repeat(512);
+    evidence.effective["security"]["metrics_auth_token"] = "<redacted>".into();
+    evidence.effective_sha256 =
+        diagnostics::sha256_bytes(&serde_json::to_vec(&evidence.effective).unwrap());
+    evidence.loaded_sha256 = "cd".repeat(32);
+    evidence
+        .validate(Some(&evidence.endpoint))
+        .expect("redacted loaded config with distinct full hash");
+    evidence.host.push('鱼');
+    assert!(evidence.validate(Some(&evidence.endpoint)).is_err());
+}
+
+#[test]
+fn external_host_evidence_requires_exact_referenced_file_hashes() {
+    for field in [
+        "security.app_auth_path",
+        "security.connect_token.public_key_path",
+        "security.transport.tls.certificate_path",
+        "security.transport.tls.private_key_path",
+        "security.transport.tls.client_ca_cert_path",
+    ] {
+        let mut evidence = host_evidence_fixture();
+        let mut typed: signal_fish_server::config::Config =
+            serde_json::from_value(evidence.effective).unwrap();
+        let path = Some("host-owned-file".to_string());
+        match field {
+            "security.app_auth_path" => typed.security.app_auth_path = path,
+            "security.connect_token.public_key_path" => {
+                typed.security.connect_token =
+                    Some(signal_fish_server::config::ConnectTokenConfig {
+                        public_key: String::new(),
+                        public_key_path: path,
+                        required: false,
+                    })
+            }
+            "security.transport.tls.certificate_path" => {
+                typed.security.transport.tls.enabled = true;
+                typed.security.transport.tls.certificate_path = path;
+            }
+            "security.transport.tls.private_key_path" => {
+                typed.security.transport.tls.enabled = true;
+                typed.security.transport.tls.private_key_path = path;
+            }
+            "security.transport.tls.client_ca_cert_path" => {
+                typed.security.transport.tls.enabled = true;
+                typed.security.transport.tls.client_ca_cert_path = path;
+            }
+            _ => unreachable!(),
+        }
+        evidence.effective = serde_json::to_value(typed).unwrap();
+        evidence.effective_sha256 =
+            diagnostics::sha256_bytes(&serde_json::to_vec(&evidence.effective).unwrap());
+        assert!(
+            evidence.validate(Some(&evidence.endpoint)).is_err(),
+            "{field}: missing host hash"
+        );
+        evidence.file_sha256.insert(field.into(), "ab".repeat(32));
+        evidence
+            .validate(Some(&evidence.endpoint))
+            .expect("referenced file covered");
+        evidence
+            .file_sha256
+            .insert("unused".into(), "cd".repeat(32));
+        assert!(
+            evidence.validate(Some(&evidence.endpoint)).is_err(),
+            "reject unrelated evidence"
+        );
+        evidence.file_sha256.remove("unused");
+        evidence.file_sha256.insert(field.into(), "invalid".into());
+        assert!(
+            evidence.validate(Some(&evidence.endpoint)).is_err(),
+            "reject bad file hash"
+        );
+    }
+    let mut evidence = host_evidence_fixture();
+    evidence.effective["security"]["transport"]["tls"]["private_key_path"] =
+        "unused-disabled-tls-key".into();
+    evidence.effective_sha256 =
+        diagnostics::sha256_bytes(&serde_json::to_vec(&evidence.effective).unwrap());
+    evidence
+        .validate(Some(&evidence.endpoint))
+        .expect("disabled TLS does not read its files");
+}
+
+#[test]
+#[serial_test::serial]
+fn external_host_evidence_env_rejects_missing_and_malformed_files() {
+    let directory = tempfile::tempdir().expect("evidence directory");
+    let path = directory.path().join("host.json");
+    for document in [
+        None,
+        Some("{"),
+        Some("[]"),
+        Some("{}"),
+        Some("{\"host\":\"a\",\"host\":\"b\"}"),
+    ] {
+        if let Some(document) = document {
+            std::fs::write(&path, document).unwrap();
+        }
+        std::env::set_var("CAPACITY_RUNNER_EXTERNAL_HOST_EVIDENCE", &path);
+        let result = RunConfig::from_env();
+        std::env::remove_var("CAPACITY_RUNNER_EXTERNAL_HOST_EVIDENCE");
+        assert!(result.is_err(), "refuse {document:?}");
     }
 }
 
@@ -4796,6 +5267,7 @@ fn an_unresolvable_snapshot_identity_is_a_loud_fault() {
 fn scenario_config(encoding: Encoding) -> RunConfig {
     RunConfig {
         endpoint: None,
+        external_host_evidence: None,
         seed: 1,
         rooms: 1,
         players_per_room: 4,

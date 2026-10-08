@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add `--print-config-evidence` to fingerprint loaded settings without exposing
+  secrets and attach host config and binary evidence to external capacity runs (#776).
+
 - Add opt-in native reference-client reconnect controls that restore room
   and transport state, preserve player identity, and rotate the reconnect token (#741).
 

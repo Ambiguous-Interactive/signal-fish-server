@@ -218,9 +218,10 @@ The binary accepts a small set of flags (run `--help` for the full list):
 | --- | --- |
 | `--validate-config` (`-c`) | Load and validate the config, print a summary, and exit. Non-zero exit on failure. |
 | `--print-config` | Print the resolved config (file + environment overrides) as JSON, then exit. Secrets are redacted. |
+| `--print-config-evidence` | Print the redacted resolved config and SHA-256 fingerprints, then exit. |
 | `--version` | Print the version and exit. |
 
-`--validate-config` and `--print-config` are mutually exclusive.
+`--validate-config`, `--print-config`, and `--print-config-evidence` are mutually exclusive.
 
 ### `--validate-config` in CI
 
@@ -252,6 +253,20 @@ locations, not secrets, and stay visible.
 ```bash
 cargo run -- --print-config
 ```
+
+### Config fingerprints
+
+`--print-config-evidence` prints `effective`, the complete redacted config,
+`effective_sha256`, its digest, and `loaded_sha256`, the digest of the full
+loaded config before redaction. Each digest hashes compact JSON with sorted
+object keys and UTF-8 strings. A secret change alters `loaded_sha256` without
+printing the secret. Keep these fingerprints private with the run artifacts.
+
+This command loads settings and exits before binding a listener. It does not
+inspect a running process or replace `--validate-config`. Use the same binary,
+working directory, config sources, and environment as the deployment. The
+[external host evidence guide](development/arm-capacity-audit.md#external-host-evidence)
+shows how to capture and attach the result.
 
 ## See also
 

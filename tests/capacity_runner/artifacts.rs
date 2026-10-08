@@ -30,7 +30,7 @@ use serde_json::Value;
 
 use crate::diagnostics;
 
-use crate::config::{micros, RunConfig};
+use crate::config::{micros, ExternalHostEvidence, RunConfig};
 use crate::oracle::{summarize, OutcomeSummary};
 use crate::records::RunRecords;
 use crate::schedule::build_run_shape;
@@ -51,7 +51,8 @@ use crate::schedule::build_run_shape;
 /// Version 9 records exact application and encoded message body sizes on
 /// sends and receipts, validates the configured application size, and reports
 /// byte totals by phase and direction. Receipt timestamps precede decoding.
-pub const SCHEMA_VERSION: u64 = 9;
+/// Version 10 embeds host-declared external config and binary evidence.
+pub const SCHEMA_VERSION: u64 = 10;
 
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const DELIVERIES_FILE: &str = "deliveries.jsonl";
@@ -88,6 +89,9 @@ pub enum ConfigProvenance {
     },
     /// An endpoint alone supplies no config or binary evidence.
     UnknownExternal,
+    /// Supplied by the host operator. Consistency is checked; remote process
+    /// identity and unchanged settings must be verified by the operator.
+    ExternalHostDeclared { evidence: Box<ExternalHostEvidence> },
 }
 
 impl ConfigProvenance {
@@ -105,8 +109,125 @@ impl ConfigProvenance {
 
     /// Unknown external provenance cannot support a capacity point.
     pub fn has_config_evidence(&self) -> bool {
-        matches!(self, Self::SpawnedControlled { .. })
+        !matches!(self, Self::UnknownExternal)
     }
+}
+
+impl ExternalHostEvidence {
+    pub fn validate(&self, endpoint: Option<&str>) -> Result<(), String> {
+        if endpoint != Some(self.endpoint.as_str()) {
+            return Err("external host evidence endpoint does not match run endpoint".into());
+        }
+        let url = reqwest::Url::parse(&self.endpoint)
+            .map_err(|error| format!("external evidence endpoint: {error}"))?;
+        if !matches!(url.scheme(), "ws" | "wss")
+            || url.host_str().is_none()
+            || self
+                .endpoint
+                .split("://")
+                .nth(1)
+                .and_then(|authority| authority.rsplit(':').next())
+                .and_then(|port| port.parse::<u16>().ok())
+                .is_none_or(|port| port == 0)
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || url.path() != "/"
+            || self.endpoint.ends_with('/')
+        {
+            return Err(
+                "external evidence endpoint requires a ws/wss origin with explicit port".into(),
+            );
+        }
+        for (name, value) in [("host", &self.host), ("deployment", &self.deployment)] {
+            if value.trim().is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+                return Err(format!(
+                    "external host evidence {name} must be a bounded nonempty identifier"
+                ));
+            }
+        }
+        chrono::DateTime::parse_from_rfc3339(&self.collected_at_rfc3339)
+            .map_err(|_| "external host evidence collection time must be RFC 3339".to_string())?;
+        for (name, hash) in [
+            ("effective_sha256", &self.effective_sha256),
+            ("loaded_sha256", &self.loaded_sha256),
+            ("binary_sha256", &self.binary_sha256),
+        ] {
+            if !is_sha256(hash) {
+                return Err(format!(
+                    "external host evidence {name} must be lowercase SHA-256 hex"
+                ));
+            }
+        }
+        if self.binary_bytes == 0 {
+            return Err("external host evidence binary_bytes must be positive".into());
+        }
+        let typed: signal_fish_server::config::Config =
+            serde_json::from_value(self.effective.clone())
+                .map_err(|error| format!("parse external effective config: {error}"))?;
+        let canonical = serde_json::to_value(typed.redacted_for_display())
+            .map_err(|error| format!("serialize external effective config: {error}"))?;
+        if canonical != self.effective {
+            return Err(
+                "external effective config must be complete, canonical, and redacted".into(),
+            );
+        }
+        let bytes = serde_json::to_vec(&self.effective)
+            .map_err(|error| format!("serialize external effective config: {error}"))?;
+        if diagnostics::sha256_bytes(&bytes) != self.effective_sha256 {
+            return Err("external effective config hash does not match recorded config".into());
+        }
+        let mut files = std::collections::BTreeSet::new();
+        for (field, pointer) in [
+            ("security.app_auth_path", "/security/app_auth_path"),
+            (
+                "security.connect_token.public_key_path",
+                "/security/connect_token/public_key_path",
+            ),
+            (
+                "security.transport.tls.certificate_path",
+                "/security/transport/tls/certificate_path",
+            ),
+            (
+                "security.transport.tls.private_key_path",
+                "/security/transport/tls/private_key_path",
+            ),
+            (
+                "security.transport.tls.client_ca_cert_path",
+                "/security/transport/tls/client_ca_cert_path",
+            ),
+        ] {
+            if field.starts_with("security.transport.tls.") && !typed.security.transport.tls.enabled
+            {
+                continue;
+            }
+            if let Some(path) = self.effective.pointer(pointer).and_then(Value::as_str) {
+                if path.trim().is_empty() {
+                    return Err(format!("external config {field} is empty"));
+                }
+                files.insert(field.to_string());
+            }
+        }
+        if files != self.file_sha256.keys().cloned().collect() {
+            return Err("external host evidence file hashes must match referenced auth and active TLS files".into());
+        }
+        for hash in self.file_sha256.values() {
+            if !is_sha256(hash) {
+                return Err(
+                    "external host evidence file hashes must be lowercase SHA-256 hex".into(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+fn is_sha256(hash: &str) -> bool {
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 impl Manifest {
@@ -121,6 +242,7 @@ impl Manifest {
         match &self.server.config_provenance {
             ConfigProvenance::UnknownExternal => {
                 if self.config.endpoint.as_deref() != Some(self.server.endpoint.as_str())
+                    || self.config.external_host_evidence.is_some()
                     || self.server.pid.is_some()
                     || self.server.binary_sha256.is_some()
                     || self.server.binary_bytes.is_some()
@@ -130,6 +252,17 @@ impl Manifest {
                     );
                 }
             }
+            ConfigProvenance::ExternalHostDeclared { evidence } => {
+                evidence.validate(self.config.endpoint.as_deref())?;
+                if self.config.external_host_evidence.as_ref() != Some(evidence.as_ref())
+                    || self.server.endpoint != evidence.endpoint
+                    || self.server.pid.is_some()
+                    || self.server.binary_sha256.as_ref() != Some(&evidence.binary_sha256)
+                    || self.server.binary_bytes != Some(evidence.binary_bytes)
+                {
+                    return Err("external host evidence has inconsistent server identity".into());
+                }
+            }
             ConfigProvenance::SpawnedControlled {
                 defaults,
                 harness_base,
@@ -137,6 +270,7 @@ impl Manifest {
                 effective_sha256,
             } => {
                 if self.config.endpoint.is_some()
+                    || self.config.external_host_evidence.is_some()
                     || self.server.pid.is_none()
                     || self.server.binary_sha256.is_none()
                     || self.server.binary_bytes.is_none()
