@@ -683,7 +683,6 @@ mod connect_token_support {
     /// Mint a token exactly the way the control plane would:
     /// `sfct_v1.<base64url(payload)>.<base64url(signature)>`.
     pub fn mint(signing: &SigningKey, app_id: &str, ttl_secs: i64, nonce: &str) -> String {
-        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         let now = i64::try_from(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -696,7 +695,12 @@ mod connect_token_support {
             "exp": now + ttl_secs,
             "nonce": nonce,
         });
-        let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        mint_with_bytes(signing, &serde_json::to_vec(&payload).unwrap())
+    }
+
+    pub fn mint_with_bytes(signing: &SigningKey, payload: &[u8]) -> String {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
         let signed = format!("sfct_v1.{payload_b64}");
         let signature = signing.sign(signed.as_bytes());
         format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()))
@@ -902,6 +906,42 @@ async fn invalid_token_refuses_with_connect_token_invalid_and_allows_retry() {
         AuthHandshake::Accepted
     ));
 
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn signed_claim_array_is_refused_without_committing_admission() {
+    let (running, signing) = connect_token_server().await;
+    let valid = connect_token_support::mint(&signing, "token-app", 300, "n");
+    use base64::Engine as _;
+    let payload_b64 = valid.split('.').nth(1).expect("payload segment");
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .expect("payload base64");
+    let claims: serde_json::Value = serde_json::from_slice(&payload).expect("claims JSON");
+    let positional = serde_json::to_vec(&serde_json::json!([
+        claims["app_id"],
+        claims["exp"],
+        claims["nonce"]
+    ]))
+    .expect("array JSON");
+    let mut ws = connect_socket(running.addr()).await;
+    assert!(matches!(
+        attempt_authenticate(
+            &mut ws,
+            "token-app",
+            Some(connect_token_support::mint_with_bytes(
+                &signing,
+                &positional
+            ))
+        )
+        .await,
+        AuthHandshake::Rejected(ErrorCode::ConnectTokenInvalid)
+    ));
+    assert!(matches!(
+        attempt_authenticate(&mut ws, "token-app", Some(valid)).await,
+        AuthHandshake::Accepted
+    ));
     running.shutdown().await;
 }
 
