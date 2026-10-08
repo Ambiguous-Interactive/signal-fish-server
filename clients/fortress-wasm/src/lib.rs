@@ -40,6 +40,7 @@ type Client = SignalFishPollingClient<GodotWebSocketTransport>;
 enum RunMode {
     Healthy,
     DrainProbe,
+    SyncCloseProbe,
     NegativeOneAdmissionPerCallback,
 }
 
@@ -191,6 +192,44 @@ struct ActiveCheckpoint {
     report: Report,
 }
 
+#[derive(Serialize)]
+struct DiagnosticSnapshot {
+    phase: Option<String>,
+    report: Report,
+}
+
+#[derive(Serialize)]
+struct SyncCheckpoint {
+    phase: String,
+    sync_progress: (u32, u32, u32),
+    report: Report,
+}
+
+fn sync_probe_ready(
+    phase: SessionState,
+    progress: Option<(u32, u32, u32)>,
+    frames: (i32, i32, u64),
+    traffic: (u64, u64),
+) -> bool {
+    phase == SessionState::Synchronizing
+        && progress
+            .is_some_and(|(count, total, requests)| count > 0 && count < total && requests > 0)
+        && frames == (0, 0, 0)
+        && traffic.0 > 0
+        && traffic.1 > 0
+}
+
+fn relay_for_mode(mode: RunMode) -> RelaySocket {
+    let relay = RelaySocket::default();
+    if matches!(mode, RunMode::Healthy | RunMode::DrainProbe) {
+        relay.hold_inputs_until_prediction();
+    }
+    if mode == RunMode::SyncCloseProbe {
+        relay.allow_first_sync_reply_only();
+    }
+    relay
+}
+
 struct Runtime {
     config: BrowserConfig,
     client: Client,
@@ -218,6 +257,9 @@ struct Runtime {
     workload_finished: bool,
     pending_inbound: Vec<PendingInbound>,
     shutdown_notice: Option<String>,
+    sync_progress: Option<(u32, u32, u32)>,
+    sync_json_pending: Option<String>,
+    sync_frozen: bool,
 }
 
 impl Runtime {
@@ -268,10 +310,11 @@ impl Runtime {
         client_config.game_data_format = Some(GameDataEncoding::MessagePack);
         client_config.command_channel_capacity = 64;
 
+        let relay = relay_for_mode(config.run_mode);
         Ok(Self {
             config,
             client: SignalFishPollingClient::new(transport, client_config),
-            relay: RelaySocket::default(),
+            relay,
             local: None,
             roster: BTreeSet::new(),
             session: None,
@@ -295,6 +338,9 @@ impl Runtime {
             workload_finished: false,
             pending_inbound: Vec::new(),
             shutdown_notice: None,
+            sync_progress: None,
+            sync_json_pending: None,
+            sync_frozen: false,
         })
     }
 
@@ -313,7 +359,7 @@ impl Runtime {
         }
         // Stop producing gameplay after the server's drain advisory. Keep
         // polling the real transport until its authoritative close arrives.
-        if self.shutdown_notice.is_some() {
+        if self.shutdown_notice.is_some() || self.sync_frozen {
             return Ok(false);
         }
         self.ensure_session()?;
@@ -325,9 +371,19 @@ impl Runtime {
         let mut target_reached = self.local_target_reached;
         if !self.workload_finished {
             if let Some(fortress) = self.session.as_mut() {
+                self.relay
+                    .observe_local_frame(fortress.current_frame().as_i32());
                 fortress.poll_remote_clients();
                 for event in fortress.events() {
                     match event {
+                        FortressEvent::Synchronizing {
+                            count,
+                            total,
+                            total_requests_sent,
+                            ..
+                        } if self.config.run_mode == RunMode::SyncCloseProbe => {
+                            self.sync_progress = Some((count, total, total_requests_sent));
+                        }
                         FortressEvent::WaitRecommendation { skip_frames } => {
                             self.recommended_skips = skip_frames;
                         }
@@ -342,6 +398,11 @@ impl Runtime {
                 }
 
                 if fortress.current_state() == SessionState::Running {
+                    if self.config.run_mode == RunMode::SyncCloseProbe {
+                        return Err(
+                            "Fortress synchronization completed before close checkpoint".to_owned()
+                        );
+                    }
                     let now = Instant::now();
                     if self.running_since.is_none() {
                         self.running_since = Some(now);
@@ -412,7 +473,7 @@ impl Runtime {
                 || self.relay.target_received());
 
         let admission_cap = match self.config.run_mode {
-            RunMode::Healthy | RunMode::DrainProbe => usize::MAX,
+            RunMode::Healthy | RunMode::DrainProbe | RunMode::SyncCloseProbe => usize::MAX,
             RunMode::NegativeOneAdmissionPerCallback => 1,
         };
         let admitted = drain_relay(
@@ -425,6 +486,7 @@ impl Runtime {
             .max_admissions_per_callback
             .max(u64::try_from(admitted).unwrap_or(u64::MAX));
         self.relay.sample_queue();
+        self.publish_sync_checkpoint()?;
 
         let drained = self.relay.queue_depth() == 0
             && self.relay.counters().enqueued_outbound == self.client.stats().game_data_sent;
@@ -620,6 +682,44 @@ impl Runtime {
                 })
                 .map_err(|fault| format!("relay inbound queue capacity exceeded: {fault:?}"))?;
         }
+        Ok(())
+    }
+
+    fn publish_sync_checkpoint(&mut self) -> Result<(), String> {
+        if self.config.run_mode != RunMode::SyncCloseProbe || self.sync_frozen {
+            return Ok(());
+        }
+        let Some(session) = self.session.as_ref() else {
+            return Ok(());
+        };
+        let stats = self.client.stats();
+        if !sync_probe_ready(
+            session.current_state(),
+            self.sync_progress,
+            (
+                session.current_frame().as_i32(),
+                self.state.frame,
+                session.metrics().frames_advanced,
+            ),
+            (stats.game_data_sent, stats.game_data_received),
+        ) {
+            return Ok(());
+        }
+        let progress = self
+            .sync_progress
+            .ok_or("missing Fortress synchronization progress")?;
+        let checkpoint = SyncCheckpoint {
+            phase: session.current_state().to_string(),
+            sync_progress: progress,
+            report: self.report(None),
+        };
+        self.sync_json_pending = Some(
+            serde_json::to_string(&checkpoint)
+                .map_err(|error| format!("serialize synchronization checkpoint: {error}"))?,
+        );
+        // Keep this actual partial handshake unchanged while signaling polls
+        // continue to observe the server drain advisory and transport close.
+        self.sync_frozen = true;
         Ok(())
     }
 
@@ -883,6 +983,44 @@ impl FortressWasmPeer {
     }
 
     #[func]
+    fn snapshot_report_json(&self) -> GString {
+        if self.completed {
+            return GString::new();
+        }
+        let Some(runtime) = self.runtime.as_ref() else {
+            return GString::new();
+        };
+        if !matches!(
+            runtime.config.run_mode,
+            RunMode::DrainProbe | RunMode::SyncCloseProbe
+        ) {
+            return GString::new();
+        }
+        let snapshot = DiagnosticSnapshot {
+            phase: runtime
+                .session
+                .as_ref()
+                .map(|session| session.current_state().to_string()),
+            report: runtime.report(None),
+        };
+        match serde_json::to_string(&snapshot) {
+            Ok(json) => GString::from(json.as_str()),
+            Err(error) => {
+                godot_error!("FORTRESS_WASM diagnostic serialization error: {error}");
+                GString::new()
+            }
+        }
+    }
+
+    #[func]
+    fn take_sync_json(&mut self) -> GString {
+        self.runtime
+            .as_mut()
+            .and_then(|runtime| runtime.sync_json_pending.take())
+            .map_or_else(GString::new, |json| GString::from(json.as_str()))
+    }
+
+    #[func]
     fn take_active_json(&mut self) -> GString {
         if self.completed || self.active_published {
             return GString::new();
@@ -994,6 +1132,328 @@ mod extension_registration {
 #[allow(clippy::panic)]
 mod tests {
     use super::{percentile, summarize_intervals};
+
+    #[test]
+    fn synchronization_checkpoint_requires_partial_handshake_and_real_traffic() {
+        use super::SessionState::{Running, Synchronizing};
+        for (name, phase, progress, frames, traffic, ready) in [
+            (
+                "partial",
+                Synchronizing,
+                Some((1, 5, 1)),
+                (0, 0, 0),
+                (1, 1),
+                true,
+            ),
+            (
+                "missing event",
+                Synchronizing,
+                None,
+                (0, 0, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "zero count",
+                Synchronizing,
+                Some((0, 5, 1)),
+                (0, 0, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "complete",
+                Synchronizing,
+                Some((5, 5, 5)),
+                (0, 0, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "excess count",
+                Synchronizing,
+                Some((6, 5, 5)),
+                (0, 0, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "no requests",
+                Synchronizing,
+                Some((1, 5, 0)),
+                (0, 0, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "running",
+                Running,
+                Some((1, 5, 1)),
+                (0, 0, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "session cursor",
+                Synchronizing,
+                Some((1, 5, 1)),
+                (1, 0, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "game cursor",
+                Synchronizing,
+                Some((1, 5, 1)),
+                (0, 1, 0),
+                (1, 1),
+                false,
+            ),
+            (
+                "advance",
+                Synchronizing,
+                Some((1, 5, 1)),
+                (0, 0, 1),
+                (1, 1),
+                false,
+            ),
+            (
+                "no send",
+                Synchronizing,
+                Some((1, 5, 1)),
+                (0, 0, 0),
+                (0, 1),
+                false,
+            ),
+            (
+                "no receive",
+                Synchronizing,
+                Some((1, 5, 1)),
+                (0, 0, 0),
+                (1, 0),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                super::sync_probe_ready(phase, progress, frames, traffic),
+                ready,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            serde_json::from_str::<super::RunMode>("\"sync_close_probe\"").ok(),
+            Some(super::RunMode::SyncCloseProbe)
+        );
+    }
+
+    fn exchange_test_relays(
+        sockets: &[super::RelaySocket; 2],
+        ids: [uuid::Uuid; 2],
+        sequence: &mut u64,
+    ) -> Result<(), String> {
+        for index in 0..2 {
+            while let Some(frame) = sockets[index].take_outbound() {
+                *sequence += 1;
+                sockets[1 - index]
+                    .admit_inbound(super::InboundRelayFrame {
+                        local: ids[1 - index],
+                        known_remote: ids[index],
+                        from: ids[index],
+                        encoding: super::GameDataEncoding::MessagePack,
+                        seq: Some(*sequence),
+                        epoch: Some(1),
+                        payload: &frame.payload,
+                    })
+                    .map_err(|fault| format!("unexpected relay fault: {fault:?}"))?;
+                sockets[index].mark_admitted(frame);
+                sockets[index].record_client_sent(sockets[index].sent_ledger().count);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn configured_sync_probe_stays_partial_while_other_modes_complete_handshake(
+    ) -> Result<(), String> {
+        for mode in [
+            super::RunMode::Healthy,
+            super::RunMode::DrainProbe,
+            super::RunMode::NegativeOneAdmissionPerCallback,
+            super::RunMode::SyncCloseProbe,
+        ] {
+            let ids = [uuid::Uuid::from_u128(1), uuid::Uuid::from_u128(2)];
+            let sockets = [super::relay_for_mode(mode), super::relay_for_mode(mode)];
+            for index in 0..2 {
+                sockets[index]
+                    .configure_identity(ids[index], ids[1 - index])
+                    .map_err(str::to_owned)?;
+            }
+            let mut sessions = [
+                super::build_session(ids[0], ids[1], sockets[0].clone())?,
+                super::build_session(ids[1], ids[0], sockets[1].clone())?,
+            ];
+            let mut progress = [0; 2];
+            let mut server_sequence = 0u64;
+            for _ in 0..32 {
+                for (index, session) in sessions.iter_mut().enumerate() {
+                    session.poll_remote_clients();
+                    for event in session.events() {
+                        if let super::FortressEvent::Synchronizing { count, .. } = event {
+                            progress[index] = progress[index].max(count);
+                        }
+                    }
+                }
+                exchange_test_relays(&sockets, ids, &mut server_sequence)?;
+            }
+            for (index, session) in sessions.iter().enumerate() {
+                if mode == super::RunMode::SyncCloseProbe {
+                    assert_eq!(session.current_state(), super::SessionState::Synchronizing);
+                    assert_eq!(progress[index], 1, "one genuine sync reply per peer");
+                    assert_eq!(session.metrics().frames_advanced, 0);
+                } else {
+                    assert_eq!(
+                        session.current_state(),
+                        super::SessionState::Running,
+                        "{mode:?}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn drain_probe_forces_real_corrections_when_timely_inputs_need_no_rollback(
+    ) -> Result<(), String> {
+        for mode in [
+            None,
+            Some(super::RunMode::Healthy),
+            Some(super::RunMode::DrainProbe),
+        ] {
+            let configured = mode.is_some();
+            let ids = [uuid::Uuid::from_u128(1), uuid::Uuid::from_u128(2)];
+            let sockets = match mode {
+                Some(mode) => [super::relay_for_mode(mode), super::relay_for_mode(mode)],
+                None => [super::RelaySocket::default(), super::RelaySocket::default()],
+            };
+            for index in 0..2 {
+                sockets[index]
+                    .configure_identity(ids[index], ids[1 - index])
+                    .map_err(str::to_owned)?;
+            }
+            let mut sessions = [
+                super::build_session(ids[0], ids[1], sockets[0].clone())?,
+                super::build_session(ids[1], ids[0], sockets[1].clone())?,
+            ];
+            let mut states = [super::GameState::default(), super::GameState::default()];
+            let mut sequence = 0;
+            let mut loads = [0u64; 2];
+            let mut saves = [0u64; 2];
+            for _ in 0..32 {
+                for session in &mut sessions {
+                    session.poll_remote_clients();
+                }
+                exchange_test_relays(&sockets, ids, &mut sequence)?;
+            }
+            for session in &sessions {
+                assert_eq!(session.current_state(), super::SessionState::Running);
+            }
+            // Deliver peer 0's real input before peer 1 advances. Without the
+            // startup gate, peer 1 can run this whole game without a correction.
+            for _ in 0..160 {
+                for index in 0..2 {
+                    let session = &mut sessions[index];
+                    sockets[index].observe_local_frame(session.current_frame().as_i32());
+                    session.poll_remote_clients();
+                    for handle in session.local_player_handles() {
+                        session
+                            .add_local_input(
+                                handle,
+                                super::input_for_frame(
+                                    session.current_frame().as_i32(),
+                                    handle.as_usize(),
+                                ),
+                            )
+                            .map_err(|error| error.to_string())?;
+                    }
+                    let requests = session.advance_frame().map_err(|error| error.to_string())?;
+                    for request in &requests {
+                        match request {
+                            fortress_rollback::FortressRequest::LoadGameState { .. } => {
+                                loads[index] += 1
+                            }
+                            fortress_rollback::FortressRequest::SaveGameState { .. } => {
+                                saves[index] += 1
+                            }
+                            _ => {}
+                        }
+                    }
+                    super::apply_requests(&mut states[index], requests);
+                    exchange_test_relays(&sockets, ids, &mut sequence)?;
+                }
+            }
+            for _ in 0..8 {
+                for (index, session) in sessions.iter_mut().enumerate() {
+                    sockets[index].observe_local_frame(session.current_frame().as_i32());
+                    session.poll_remote_clients();
+                }
+                exchange_test_relays(&sockets, ids, &mut sequence)?;
+            }
+            for index in 0..2 {
+                assert_eq!(
+                    sockets[index].sent_ledger(),
+                    sockets[1 - index].received_ledger()
+                );
+                let counters = sockets[index].counters();
+                assert_eq!(
+                    counters.enqueued_outbound,
+                    sockets[index].sent_ledger().count
+                );
+                assert_eq!(
+                    counters.accepted_inbound,
+                    sockets[index].received_ledger().count
+                );
+                assert_eq!(counters.malformed_inbound, 0);
+                assert_eq!(counters.wrong_destination, 0);
+                assert_eq!(counters.unknown_sender, 0);
+                assert_eq!(counters.outbound_overflow, 0);
+                assert_eq!(counters.inbound_overflow, 0);
+                assert_eq!(counters.encode_failures, 0);
+                assert_eq!(counters.completion_underflow, 0);
+                assert_eq!(sockets[index].queue_depth(), 0);
+                assert_eq!(
+                    sockets[index].inbound_depth(),
+                    0,
+                    "final polls drain received frames"
+                );
+            }
+            for (index, session) in sessions.iter().enumerate() {
+                let metrics = session.metrics();
+                assert!(session.confirmed_frame().as_i32() >= 120);
+                assert!(metrics.frames_advanced > 0);
+                assert!(metrics.checksums_compared > 0);
+                assert_eq!(metrics.checksums_compared, metrics.checksums_matched);
+                assert_eq!(metrics.checksums_mismatched, 0);
+                if configured {
+                    assert!(
+                        metrics.rollback_count > 0,
+                        "configured probe must exercise a real correction"
+                    );
+                    assert!(metrics.max_rollback_depth <= 4);
+                    assert!(loads[index] > 0, "correction loads real saved state");
+                    assert!(saves[index] > 0, "game saves real state");
+                }
+            }
+            if !configured {
+                assert_eq!(
+                    sessions[1].metrics().rollback_count,
+                    0,
+                    "timely peer is healthy without rollback"
+                );
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn callback_summary_is_deterministic() {

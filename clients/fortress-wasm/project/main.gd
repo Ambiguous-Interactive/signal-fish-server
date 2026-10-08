@@ -2,13 +2,17 @@ extends Node
 
 const CONFIG_KEY := "__FORTRESS_CONFIG"
 const ROOM_KEY := "__FORTRESS_ROOM_READY"
+const SYNC_KEY := "__FORTRESS_SYNC"
 const ACTIVE_KEY := "__FORTRESS_ACTIVE"
+const DIAGNOSTIC_KEY := "__FORTRESS_DIAGNOSTIC"
 const RESULT_KEY := "__FORTRESS_RESULT"
 
 @onready var peer: Node = $FortressWasmPeer
 var room_published := false
 var result_published := false
 var active_published := false
+var sync_published := false
+var diagnostic_callbacks := 0
 
 
 func _ready() -> void:
@@ -56,6 +60,12 @@ func _process(_delta: float) -> void:
 			room_published = true
 			JavaScriptBridge.eval("globalThis.%s = %s" % [ROOM_KEY, room_json], true)
 			print("FORTRESS_WASM_ROOM ", room_json)
+	if not sync_published:
+		var sync_json: String = peer.take_sync_json()
+		if not sync_json.is_empty():
+			sync_published = true
+			JavaScriptBridge.eval("globalThis.%s = %s" % [SYNC_KEY, sync_json], true)
+			print("FORTRESS_WASM_SYNC ", sync_json)
 	if not active_published:
 		var active_json: String = peer.take_active_json()
 		if not active_json.is_empty():
@@ -68,6 +78,16 @@ func _process(_delta: float) -> void:
 			result_published = true
 			JavaScriptBridge.eval("globalThis.%s = %s" % [RESULT_KEY, result_json], true)
 			print("FORTRESS_WASM_RESULT ", result_json)
+
+	if not result_published:
+		diagnostic_callbacks += 1
+		if diagnostic_callbacks % 60 == 0:
+			var diagnostic_json: String = peer.snapshot_report_json()
+			if not diagnostic_json.is_empty():
+				JavaScriptBridge.eval(
+					"globalThis.%s = %s" % [DIAGNOSTIC_KEY, diagnostic_json],
+					true,
+				)
 
 
 func _publish_bridge_error(message: String) -> void:

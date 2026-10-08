@@ -44,6 +44,7 @@ const [mode, exportDirectoryArg, serverBinaryArg, artifactDirectoryArg, buildSha
 if (mode === "self-test") {
   runHealthGateSelfTests();
   runDrainGateSelfTests();
+  runSyncGateSelfTests();
   runRestartGateSelfTests();
   await runServerLifecycleSelfTests();
   process.stdout.write("HEALTHY fortress-wasm health-gate self-test\n");
@@ -51,10 +52,10 @@ if (mode === "self-test") {
 }
 if (!mode || !exportDirectoryArg || !serverBinaryArg || !artifactDirectoryArg || !buildSha) {
   throw new Error(
-    "usage: node harness.mjs <released|negative|drain|restart> <export-dir> <server-bin> <artifacts-dir> <build-sha>",
+    "usage: node harness.mjs <released|negative|drain|restart|sync-close> <export-dir> <server-bin> <artifacts-dir> <build-sha>",
   );
 }
-if (!new Set(["released", "negative", "drain", "restart"]).has(mode)) {
+if (!new Set(["released", "negative", "drain", "restart", "sync-close"]).has(mode)) {
   throw new Error(`unsupported run mode: ${mode}`);
 }
 if (!isAbsolute(serverBinaryArg) || !existsSync(serverBinaryArg)) {
@@ -69,6 +70,7 @@ let expectedRunMode = {
   released: "healthy",
   negative: "negative_one_admission_per_callback",
   drain: "drain_probe",
+  "sync-close": "sync_close_probe",
 }[phaseMode];
 
 const fixtureDirectory = resolve(import.meta.dirname);
@@ -152,7 +154,7 @@ try {
   const pageUrl = `http://127.0.0.1:${httpPort}/index.html`;
   for (const phase of mode === "restart" ? ["drain", "released"] : [mode]) {
     phaseMode = phase;
-    expectedRunMode = { released: "healthy", negative: "negative_one_admission_per_callback", drain: "drain_probe" }[phase];
+    expectedRunMode = { released: "healthy", negative: "negative_one_admission_per_callback", drain: "drain_probe", "sync-close": "sync_close_probe" }[phase];
     if (mode === "restart" && phase === "released") {
       artifactDirectory = join(artifactRoot, "released");
       mkdirSync(artifactDirectory, { recursive: true });
@@ -211,22 +213,22 @@ async function runPhase(pageUrl) {
     pageUrl,
   });
 
-  if (phaseMode === "drain") {
+  if (isCloseProbe()) {
     activeCheckpoints = await Promise.all([
-      waitForGlobal(creator, "__FORTRESS_ACTIVE", 20_000),
-      waitForGlobal(joiner, "__FORTRESS_ACTIVE", 20_000),
+      waitForGlobal(creator, phaseMode === "drain" ? "__FORTRESS_ACTIVE" : "__FORTRESS_SYNC", 20_000),
+      waitForGlobal(joiner, phaseMode === "drain" ? "__FORTRESS_ACTIVE" : "__FORTRESS_SYNC", 20_000),
     ]);
     for (const [index, peer] of [creator, joiner].entries()) {
       const checkpoint = activeCheckpoints[index];
-      assertExactKeys(checkpoint, ["phase", "report"], `${peer.role} checkpoint`);
-      assert(checkpoint.phase === "Running", `${peer.role}: fault before Running`);
+      assertExactKeys(checkpoint, phaseMode === "drain" ? ["phase", "report"] : ["phase", "sync_progress", "report"], `${peer.role} checkpoint`);
+      assert(checkpoint.phase === (phaseMode === "drain" ? "Running" : "Synchronizing"), `${peer.role}: wrong pre-fault phase`);
       assertExactKeys(checkpoint.report, reportKeys, `${peer.role} checkpoint report`);
       assert(checkpoint.report.origin === "rust-gdextension", `${peer.role}: checkpoint origin`);
       assert(checkpoint.report.runtime_error === null, `${peer.role}: unhealthy checkpoint`);
-      const violations = activeGameViolations(checkpoint.report);
-      assert(violations.length === 0, `${peer.role}: pre-drain ${violations.join(", ")}`);
-      assert(peer.logs.filter((line) => line.includes("FORTRESS_WASM_ACTIVE ")).length === 1, `${peer.role}: one active checkpoint`);
-      writeFileSync(join(artifactDirectory, `${peer.role}-active.json`), `${JSON.stringify(checkpoint, null, 2)}\n`);
+      const violations = phaseMode === "drain" ? activeGameViolations(checkpoint.report) : syncCheckpointViolations(checkpoint);
+      assert(violations.length === 0, `${peer.role}: pre-close ${violations.join(", ")}`);
+      assert(peer.logs.filter((line) => line.includes(phaseMode === "drain" ? "FORTRESS_WASM_ACTIVE " : "FORTRESS_WASM_SYNC ")).length === 1, `${peer.role}: one pre-close checkpoint`);
+      writeFileSync(join(artifactDirectory, `${peer.role}-${phaseMode === "drain" ? "active" : "sync"}.json`), `${JSON.stringify(checkpoint, null, 2)}\n`);
     }
     assertServerLive(server, "server must be live before drain");
     serverExit = serverExitObserved;
@@ -234,8 +236,8 @@ async function runPhase(pageUrl) {
   }
 
   [creatorReport, joinerReport] = await Promise.all([
-    waitForGlobal(creator, "__FORTRESS_RESULT", phaseMode === "drain" ? 10_000 : 105_000),
-    waitForGlobal(joiner, "__FORTRESS_RESULT", phaseMode === "drain" ? 10_000 : 105_000),
+    waitForGlobal(creator, "__FORTRESS_RESULT", isCloseProbe() ? 10_000 : 105_000),
+    waitForGlobal(joiner, "__FORTRESS_RESULT", isCloseProbe() ? 10_000 : 105_000),
   ]);
   await new Promise((accept) => setTimeout(accept, 250));
   const creatorBrowser = await browserAttestation(creator);
@@ -256,12 +258,12 @@ async function runPhase(pageUrl) {
     joinerBrowser,
     room.room_code,
   );
-  if (phaseMode === "drain") {
+  if (isCloseProbe()) {
     for (const [index, report] of [creatorReport, joinerReport].entries()) {
       const before = activeCheckpoints[index].report;
       assert(report.player_id === before.player_id && report.instance_nonce === before.instance_nonce, `${report.role}: identity changed at shutdown`);
       assert(report.frames_advanced >= before.frames_advanced, `${report.role}: progress moved backwards`);
-      const violations = drainFailureViolations(report);
+      const violations = phaseMode === "drain" ? drainFailureViolations(report) : syncFailureViolations(report);
       assert(violations.length === 0, `${report.role}: shutdown ${violations.join(", ")}; runtime_error=${report.runtime_error}`);
     }
     let drainTimer;
@@ -278,7 +280,7 @@ async function runPhase(pageUrl) {
     }
     assert(exit.code === 0 && exit.signal === null, `server did not drain cleanly: ${JSON.stringify(exit)}`);
     await withDeadline(serverClosedObserved, 2_000, "server drain stdio close deadline expired");
-    process.stdout.write("HEALTHY fortress-wasm causal server-drain failures\n");
+    process.stdout.write(`HEALTHY fortress-wasm causal ${phaseMode === "drain" ? "server-drain" : "partial-handshake close"} failures\n`);
     if (mode === "restart") {
       drainedPeers = [creatorReport, joinerReport];
       drainedServerPid = server.pid;
@@ -561,7 +563,7 @@ function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser,
     assertExactKeys(report, reportKeys, `${name} report`);
     assert(report.schema_version === 3 && report.status === "complete", `${name}: incomplete schema`);
     assert(report.origin === "rust-gdextension", `${name}: report did not originate in Rust`);
-    if (phaseMode !== "drain") assert(report.runtime_error === null, `${name}: ${report.runtime_error}`);
+    if (!isCloseProbe()) assert(report.runtime_error === null, `${name}: ${report.runtime_error}`);
     assert(report.role === name, `${name}: role mismatch`);
     assert(report.room_code === roomCode, `${name}: room mismatch`);
     assert(report.build_sha === buildSha, `${name}: current-checkout identity mismatch`);
@@ -611,7 +613,7 @@ function validateIdentityAndRuntime(creatorReport, joinerReport, creatorBrowser,
   assert(joinerReport.expected_remote_nonce === creatorReport.instance_nonce, "joiner expected-remote nonce mismatch");
   assert(creatorReport.remote_player_id === joinerReport.player_id, "creator remote player mismatch");
   assert(joinerReport.remote_player_id === creatorReport.player_id, "joiner remote player mismatch");
-  if (phaseMode !== "drain") {
+  if (!isCloseProbe()) {
     assert(creatorReport.relay_sent_sequence_count === joinerReport.relay_received_sequence_count, "creator->joiner sequence count mismatch");
     assert(creatorReport.relay_sent_first_sequence === joinerReport.relay_received_first_sequence, "creator->joiner first sequence mismatch");
     assert(creatorReport.relay_sent_last_sequence === joinerReport.relay_received_last_sequence, "creator->joiner last sequence mismatch");
@@ -640,8 +642,67 @@ function activeGameViolations(report) {
   return failures;
 }
 
+function isCloseProbe() {
+  return phaseMode === "drain" || phaseMode === "sync-close";
+}
+
+function syncReportViolations(report) {
+  const failures = [];
+  for (const key of ["current_frame", "game_frame", "frames_advanced", "active_callback_count"]) {
+    if (report[key] !== 0) failures.push(`gameplay before close: ${key}`);
+  }
+  for (const key of ["client_game_data_sent", "client_game_data_received", "relay_sent_sequence_count", "relay_received_sequence_count"]) {
+    if (!Number.isSafeInteger(report[key]) || report[key] <= 0) failures.push(`missing ${key}`);
+  }
+  for (const key of ["checksums_mismatched", "relay_malformed", "relay_wrong_destination", "relay_unknown_sender", "relay_outbound_overflow", "relay_inbound_overflow", "relay_encode_failures", "relay_completion_underflow", "client_messages_undecodable"]) {
+    if (report[key] !== 0) failures.push(`unclean ${key}`);
+  }
+  return failures;
+}
+
+function syncCheckpointViolations(checkpoint) {
+  const failures = syncReportViolations(checkpoint.report);
+  if (checkpoint.phase !== "Synchronizing") failures.push("not Synchronizing");
+  const progress = checkpoint.sync_progress;
+  if (!Array.isArray(progress) || progress.length !== 3 || !progress.every(Number.isSafeInteger)
+      || progress[0] <= 0 || progress[0] >= progress[1] || progress[2] <= 0) failures.push("not a partial handshake");
+  return failures;
+}
+
+function syncFailureViolations(report) {
+  return [...syncReportViolations(report), ...shutdownCloseViolations(report)];
+}
+
+function runSyncGateSelfTests() {
+  const report = Object.fromEntries(reportKeys.map((key) => [key, 0]));
+  for (const key of ["client_game_data_sent", "client_game_data_received", "relay_sent_sequence_count", "relay_received_sequence_count"]) report[key] = 1;
+  const checkpoint = { phase: "Synchronizing", sync_progress: [1, 5, 1], report };
+  assert(syncCheckpointViolations(checkpoint).length === 0, "sync gate rejects a real partial handshake");
+  for (const [name, change] of [
+    ["no successful steps", { sync_progress: [0, 5, 1] }],
+    ["completed handshake", { sync_progress: [5, 5, 1] }],
+    ["no requests", { sync_progress: [1, 5, 0] }],
+    ["wrong phase", { phase: "Running" }],
+    ...["current_frame", "game_frame", "frames_advanced", "relay_inbound_overflow", "client_messages_undecodable"].map((key) => [key, { report: { ...report, [key]: 1 } }]),
+    ...["client_game_data_sent", "client_game_data_received", "relay_sent_sequence_count", "relay_received_sequence_count"].map((key) => [key, { report: { ...report, [key]: 0 } }]),
+  ]) {
+    assert(syncCheckpointViolations({ ...checkpoint, ...change }).length > 0, `sync gate accepts ${name}`);
+  }
+  const close = "Signal Fish disconnected: code=Some(4000) server_shutdown; server going away: deadline_ms=1";
+  assert(syncFailureViolations({ ...report, runtime_error: close }).length === 0, "sync close rejects causal failure");
+  for (const reason of [null, "deadline expired", close.replace("4000", "1006"), close.replace("server_shutdown", "other"), close.split(";")[0]]) {
+    assert(syncFailureViolations({ ...report, runtime_error: reason }).length > 0, `sync close accepts ${reason}`);
+  }
+}
+
 function drainFailureViolations(report) {
   const failures = activeGameViolations(report);
+  failures.push(...shutdownCloseViolations(report));
+  return failures;
+}
+
+function shutdownCloseViolations(report) {
+  const failures = [];
   const reason = report.runtime_error;
   if (typeof reason !== "string" || !reason.includes("Signal Fish disconnected:") || !reason.includes("code=Some(4000)") || !reason.includes("server_shutdown")) failures.push("missing authoritative shutdown close");
   if (typeof reason !== "string" || !reason.includes("server going away: deadline_ms=")) failures.push("missing shutdown advisory");
@@ -814,6 +875,9 @@ async function persistPeerArtifacts(peer, knownReport) {
         url: globalThis.location.href,
         readyState: globalThis.document.readyState,
         roomReady: globalThis.__FORTRESS_ROOM_READY,
+        active: globalThis.__FORTRESS_ACTIVE,
+        sync: globalThis.__FORTRESS_SYNC,
+        diagnostic: globalThis.__FORTRESS_DIAGNOSTIC,
         result: globalThis.__FORTRESS_RESULT,
       }));
       const snapshotTimeout = new Promise((_, reject) => {

@@ -32359,6 +32359,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "released \"${EXPORT_DIR}\"",
         "negative \"${EXPORT_DIR}\"",
         "restart \"${EXPORT_DIR}\"",
+        "sync-close \"${EXPORT_DIR}\"",
         "timeout --foreground 180s",
         "timeout --foreground",
         "signal-fish-client v0.13.0",
@@ -32373,12 +32374,12 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     }
     assert_eq!(
         runner.matches("timeout --foreground 180s").count(),
-        3,
-        "P13 runner must run released, negative, and drain/restart browser cells"
+        4,
+        "P13 runner must run released, negative, drain/restart, and partial-handshake close cells"
     );
     for required in [
-        "waitForGlobal(creator, \"__FORTRESS_RESULT\", phaseMode === \"drain\" ? 10_000 : 105_000)",
-        "waitForGlobal(joiner, \"__FORTRESS_RESULT\", phaseMode === \"drain\" ? 10_000 : 105_000)",
+        "waitForGlobal(creator, \"__FORTRESS_RESULT\", isCloseProbe() ? 10_000 : 105_000)",
+        "waitForGlobal(joiner, \"__FORTRESS_RESULT\", isCloseProbe() ? 10_000 : 105_000)",
     ] {
         assert!(
             harness.contains(required),
