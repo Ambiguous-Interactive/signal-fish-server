@@ -34,7 +34,7 @@
 //! until `exp`, so a leaked token replays until expiry — accepted over TLS.
 //! The server additionally refuses tokens whose remaining validity exceeds
 //! `CONNECT_TOKEN_MAX_TTL_SECS` (plus a fixed clock-skew allowance), which
-//! caps the replay window at mint time even for a misbehaving minter. The
+//! bounds remaining validity at verification, not time since minting. The
 //! signed `nonce` gives the control plane an anchor for optional single-use
 //! enforcement at its edge.
 
@@ -53,9 +53,10 @@ use thiserror::Error;
 /// prefix; this server rejects unknown prefixes instead of guessing.
 pub const CONNECT_TOKEN_PREFIX: &str = "sfct_v1";
 
-/// Maximum token validity the server accepts: the ratified #517 replay
+/// Maximum remaining token validity the server accepts: the ratified #517 replay
 /// policy. A minter may set a shorter `exp`; a longer one is refused so the
-/// replay window stays bounded by policy, not by minter discipline.
+/// remaining validity stays bounded at verification. No issue-time claim
+/// bounds the token's age.
 pub const CONNECT_TOKEN_MAX_TTL_SECS: i64 = 300;
 
 /// Fixed clock-skew allowance applied to the TTL ceiling only (not to
@@ -200,6 +201,12 @@ impl ConnectTokenVerifier {
             .verify_strict(signed_bytes, &signature)
             .map_err(|_| ConnectTokenError::InvalidSignature)?;
 
+        // Derived struct deserialization also accepts positional arrays.
+        // The signed claims contract requires an object; serde still checks
+        // its full syntax, field types, and duplicate known fields below.
+        if !payload_bytes.trim_ascii_start().starts_with(b"{") {
+            return Err(ConnectTokenError::Malformed);
+        }
         let payload: ConnectTokenPayload =
             serde_json::from_slice(&payload_bytes).map_err(|_| ConnectTokenError::Malformed)?;
         // Field sanity before any policy check: a token minted with an empty
@@ -346,7 +353,11 @@ mod tests {
 
     fn mint_with_payload(signing: &SigningKey, payload: &serde_json::Value) -> String {
         let payload_json = serde_json::to_vec(payload).expect("payload serializes");
-        let payload_b64 = BASE64_URL_SAFE_NO_PAD.encode(&payload_json);
+        mint_with_bytes(signing, &payload_json)
+    }
+
+    fn mint_with_bytes(signing: &SigningKey, payload: &[u8]) -> String {
+        let payload_b64 = BASE64_URL_SAFE_NO_PAD.encode(payload);
         let signed = format!("{CONNECT_TOKEN_PREFIX}.{payload_b64}");
         let signature = signing.sign(signed.as_bytes());
         format!(
@@ -398,6 +409,196 @@ mod tests {
         assert_eq!(claims.app_id, "mb_app_one");
         assert_eq!(claims.exp, 1_700_000_300);
         assert_eq!(claims.nonce, "n-1");
+    }
+
+    #[test]
+    fn signed_claims_require_a_json_object() {
+        let signing = SigningKey::from_bytes(&seed(b"claim-shape"));
+        let verifier = test_verifier(&signing);
+        for payload in [
+            r#"["app",1300,"n"]"#,
+            " \n\t[\"app\",1300,\"n\"]",
+            r#"null"#,
+            r#""app""#,
+            r#"1300"#,
+            r#"true"#,
+        ] {
+            let token = mint_with_bytes(&signing, payload.as_bytes());
+            assert!(
+                matches!(
+                    verifier.verify(&token, "app", 1000),
+                    Err(ConnectTokenError::Malformed)
+                ),
+                "signed non-object claims must be refused: {payload}"
+            );
+        }
+        for payload in [
+            r#"{"app_id":"app","exp":1300,"nonce":"n"}"#,
+            " \n\t{\"app_id\":\"app\",\"exp\":1300,\"nonce\":\"n\"}\r\n",
+        ] {
+            let token = mint_with_bytes(&signing, payload.as_bytes());
+            assert!(
+                verifier.verify(&token, "app", 1000).is_ok(),
+                "valid object: {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn signed_claims_refuse_duplicate_fields_and_non_integer_expiry() {
+        let signing = SigningKey::from_bytes(&seed(b"typed-claims"));
+        let verifier = test_verifier(&signing);
+        for (name, payload) in [
+            (
+                "duplicate app",
+                r#"{"app_id":"other","app_id":"app","exp":1300,"nonce":"n"}"#,
+            ),
+            (
+                "escaped duplicate app",
+                r#"{"app_id":"app","app\u005fid":"app","exp":1300,"nonce":"n"}"#,
+            ),
+            (
+                "duplicate expiry",
+                r#"{"app_id":"app","exp":0,"exp":1300,"nonce":"n"}"#,
+            ),
+            (
+                "duplicate nonce",
+                r#"{"app_id":"app","exp":1300,"nonce":"n","nonce":"n"}"#,
+            ),
+            (
+                "trailing object",
+                r#"{"app_id":"app","exp":1300,"nonce":"n"}{}"#,
+            ),
+            (
+                "malformed JSON",
+                r#"{"app_id":"app","exp":1300,"nonce":"n""#,
+            ),
+        ] {
+            let token = mint_with_bytes(&signing, payload.as_bytes());
+            assert!(
+                matches!(
+                    verifier.verify(&token, "app", 1000),
+                    Err(ConnectTokenError::Malformed)
+                ),
+                "{name}"
+            );
+        }
+        for exp in [
+            "1300.0",
+            "1300.5",
+            "1.3e3",
+            "\"1300\"",
+            "null",
+            "true",
+            "9223372036854775808",
+            "-9223372036854775809",
+        ] {
+            let payload = format!(r#"{{"app_id":"app","exp":{exp},"nonce":"n"}}"#);
+            let token = mint_with_bytes(&signing, payload.as_bytes());
+            assert!(
+                matches!(
+                    verifier.verify(&token, "app", 1000),
+                    Err(ConnectTokenError::Malformed)
+                ),
+                "expiry {exp}"
+            );
+        }
+    }
+
+    #[test]
+    fn signature_is_checked_before_signed_claim_shape_and_policy() {
+        let signing = SigningKey::from_bytes(&seed(b"claim-order"));
+        let rogue = SigningKey::from_bytes(&seed(b"claim-order-rogue"));
+        let verifier = test_verifier(&signing);
+        for payload in [
+            r#"["app",1300,"n"]"#,
+            r#"{"app_id":"app","exp":1300,"nonce":"n""#,
+            r#"{"app_id":"other","exp":0,"nonce":"n"}"#,
+        ] {
+            let token = mint_with_bytes(&rogue, payload.as_bytes());
+            assert!(
+                matches!(
+                    verifier.verify(&token, "app", 1000),
+                    Err(ConnectTokenError::InvalidSignature)
+                ),
+                "unsigned claims must not reach parsing or policy: {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn unicode_claims_use_decoded_identity_and_nonce_byte_limits() {
+        let signing = SigningKey::from_bytes(&seed(b"unicode-claims"));
+        let verifier = test_verifier(&signing);
+        let escaped = mint_with_bytes(
+            &signing,
+            br#"{"app_id":"\u0063\u0061\u0066\u00e9","exp":1300,"nonce":"n"}"#,
+        );
+        assert_eq!(
+            verifier
+                .verify(&escaped, "café", 1000)
+                .expect("decoded identity")
+                .app_id,
+            "café"
+        );
+        for other in ["cafe\u{301}", "Café", "café "] {
+            assert!(
+                matches!(
+                    verifier.verify(&escaped, other, 1000),
+                    Err(ConnectTokenError::AppIdMismatch)
+                ),
+                "identity must match exactly: {other:?}"
+            );
+        }
+        for nonce in ["é".repeat(64), "🐟".repeat(32)] {
+            assert_eq!(nonce.len(), 128);
+            let token = mint(&signing, "app", 1300, &nonce);
+            assert_eq!(
+                verifier
+                    .verify(&token, "app", 1000)
+                    .expect("128 bytes accepted")
+                    .nonce,
+                nonce
+            );
+            let over = mint(&signing, "app", 1300, &format!("{nonce}n"));
+            assert!(
+                matches!(
+                    verifier.verify(&over, "app", 1000),
+                    Err(ConnectTokenError::Malformed)
+                ),
+                "129 UTF-8 bytes must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_and_clock_steps_apply_remaining_validity_at_verification() {
+        let signing = SigningKey::from_bytes(&seed(b"claim-clock"));
+        let verifier = test_verifier(&signing);
+        let token = mint(&signing, "app", 1361, "same-nonce");
+        assert!(matches!(
+            verifier.verify(&token, "app", 1000),
+            Err(ConnectTokenError::TtlTooLong)
+        ));
+        for now in [1001, 1001, 1360, 1001] {
+            assert!(
+                verifier.verify(&token, "app", now).is_ok(),
+                "replay within remaining validity at {now}"
+            );
+        }
+        for now in [1361, 1362, i64::MAX] {
+            assert!(
+                matches!(
+                    verifier.verify(&token, "app", now),
+                    Err(ConnectTokenError::Expired)
+                ),
+                "expired at {now}"
+            );
+        }
+        assert!(matches!(
+            verifier.verify(&token, "app", i64::MIN),
+            Err(ConnectTokenError::TtlTooLong)
+        ));
     }
 
     #[test]

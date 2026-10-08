@@ -2291,7 +2291,7 @@ Clean dispositions:
 | Confidence and reproduction | Static roster arithmetic over the registration path (all registrations — players, spectators, reconnects — consume a per-IP slot in `register_delivery`). |
 | Disposition | Default raised 24 → 64 with a corrected comment; pinned by `default_per_ip_budget_admits_a_full_nat_roster_with_churn_slack` (data-driven over the roster formula). The parallel `ServerConfig::default()` literal in `src/server.rs` now derives from the same `default_max_connections_per_ip()` instead of a divergent hardcoded 24. Config-reference table, deployment docs, checklist, and example configs updated to the new default. |
 
-### ARM-C044 — Weak tenant keys accepted forged connect tokens
+### ARM-C045 — Weak tenant keys accepted forged connect tokens
 
 At `49731ecb` (2026-10-08), the connect-token key loader accepted low-order
 Ed25519 public keys. Permissive verification accepted `R = identity, S = 0`
@@ -2310,8 +2310,56 @@ not affected. See [#821](https://github.com/Ambiguous-Interactive/signal-fish-se
   encodings; arbitrary forged claims; startup validation; SIGHUP rejection
   preserving the running allowlist, key, and enforcement posture. Existing
   RFC key, valid-token, expiry, TTL, app-ID, and rotation controls remain.
-- **Scope:** this closes weak-key admission. The remaining connect-token
-  claim-boundary audit is still open.
+- **Scope:** this closes weak-key admission. The claim-boundary review below
+  closes the remaining connect-token audit. The weak-key finding is ARM-C045;
+  ARM-C044 identifies the earlier client diagnostic finding.
+
+### ARM-C046 — Signed connect-token arrays bypassed the object contract
+
+At `4c26fb23` (2026-10-08), a correctly signed JSON array
+`["app",1300,"n"]` passed verification. Derived struct deserialization
+accepted positional claims despite the documented object format. This needs
+a trusted signing key; it is not a signature bypass. See
+[#823](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/823).
+
+- **Red evidence:** `signed_claims_require_a_json_object` failed on unchanged
+  production because the signed array was accepted.
+- **Fix:** after signature verification, require an object before typed
+  parsing. Valid JSON whitespace and extension fields remain accepted.
+- **Controls:** signed arrays and scalar shapes; duplicate claims, including
+  escaped field names; non-integer and out-of-range expiry; malformed and
+  trailing JSON; signature-before-claims ordering; exact decoded app identity;
+  Unicode nonce byte limits; replay and clock changes. All 21 token unit
+  controls pass. The real-socket
+  `signed_claim_array_is_refused_without_committing_admission` control proves
+  refusal with `CONNECT_TOKEN_INVALID` and valid retry on the same socket.
+
+### C1 connect-token claim-boundary review (2026-10-08)
+
+Reviewed `src/security/connect_token.rs`, the key install and verification
+wrappers in `src/server.rs`, and admission in `src/websocket/connection.rs`.
+Encoding and total length precede strict signature verification. Object
+shape, required typed fields, duplicate known fields, empty identity, and
+nonce byte length precede expiry and remaining validity. App binding compares
+the decoded identity exactly; no Unicode normalization or case folding occurs.
+Existing controls cover token size, missing fields, empty values, unknown
+extensions, signature tampering, expiry, TTL, key rotation, and removal.
+The new raw-payload controls close the claim ambiguity gaps above.
+
+Admission resolves and charges the app budget before credential checks, then
+verifies before capability negotiation or handshake state commit. Every token
+refusal uses the charged error-reply path and remains retryable. Existing
+real-socket controls cover app mismatch, missing key, expiry, invalid signature,
+and global/per-app enforcement; the new shape control covers malformed signed
+claims on that same path. Errors contain no claim or credential bytes.
+
+Intentional exclusions: verification uses the current key snapshot and server
+wall clock; clock changes can change validity. The TTL ceiling bounds remaining
+validity at admission, not lifetime since minting. No issue-time claim exists.
+Replay is accepted until expiry, nonce consumption belongs to the operator's
+edge, and expiry does not revoke an admitted session. Unknown extension fields
+are tolerated. These policies are documented; no further claim defect was
+found. Independent adversarial review found no remaining issue in this slice.
 
 ### C1 protocol subsystem review (2026-10-05)
 
@@ -2420,7 +2468,7 @@ neither is a deployed capacity preset.
 | Startup and CLI: `src/main.rs`, `src/lib.rs` | Startup rejects bad config; startup failure leaves no listener | `tests/config_and_endpoints_tests.rs`, `tests/tls_deployment_boundaries_e2e.rs`; C1 client and deployment boundaries review above | Startup order verified: every fallible step precedes the bind and start logs follow it, so no half-started server is reachable; the failure-after-partial-startup regressions (bind conflict, invalid PEM post-spawn) are pinned over the real binary (ARM-C036 closed) | Reviewed |
 | Config and reload: `src/config/**` | Defaults, validation, and reload preserve one coherent policy | `tests/config_and_endpoints_tests.rs`, `tests/config_validation_coverage_scan.rs`; C1 allowlist and key reload boundary review and C1 config and reload coverage review above | SIGHUP key/allowlist swap order and invalid reload reviewed and pinned; default coherence verified guard-by-guard against `Config::default()`; malformed-document and env-override breadth reviewed with five fixed defect classes (ARM-C038..ARM-C042) and the per-IP default-coherence fix (ARM-C043), all red-proven and pinned | Reviewed |
 | Authentication: `src/auth/**`, `src/rate_limit.rs` | Unauthorized traffic cannot enter a room; limits count refusals | `tests/auth_integration_tests.rs`, `formal/tla/RateLimitWindow.tla`; C1 authentication admission boundary and rate-limit rejection accounting reviews above | Flood posture, budget-before-credential ordering, refusal closes, the absolute activity-immune auth deadline (`pre_handshake_activity_does_not_extend_the_auth_deadline`), concurrent ceiling conservation (`concurrent_handshakes_conserve_the_app_ceiling_and_count_every_rejection`), and every refusal path's exact-once charge/counter pairing (the drain-window creation refusal's deliberate budget-free shape is now pinned) are reviewed and pinned | Reviewed |
-| Security: `src/security/**`, `src/websocket/token_binding.rs` | Token, origin, TLS, and TURN credential checks fail closed | `tests/mtls_token_binding_e2e.rs`, `tests/tls_deployment_boundaries_e2e.rs`, `fuzz/fuzz_targets/fuzz_reconnect_tokens.rs`; C1 token rotation boundary and client/deployment boundaries reviews above | Rotation ordering and concurrent-claim refusals are reviewed and pinned; the TLS-variant posture is verified (silent enable impossible, cert/key fail closed pre-bind, mTLS binding pinned e2e over the real binary) and the drain close path over TLS is pinned over the real binary (ARM-C035 closed); connect-token claim boundaries remain | Partially reviewed |
+| Security: `src/security/**`, `src/websocket/token_binding.rs` | Token, origin, TLS, and TURN credential checks fail closed | `tests/mtls_token_binding_e2e.rs`, `tests/tls_deployment_boundaries_e2e.rs`, `fuzz/fuzz_targets/fuzz_reconnect_tokens.rs`; C1 token rotation boundary and client/deployment boundaries reviews above | Rotation ordering and concurrent-claim refusals are reviewed and pinned; the TLS-variant posture is verified (silent enable impossible, cert/key fail closed pre-bind, mTLS binding pinned e2e over the real binary) and the drain close path over TLS is pinned over the real binary (ARM-C035 closed); weak-key admission (ARM-C045) and signed object shape (ARM-C046) are fixed; connect-token claim boundaries are reviewed and pinned with the explicit policies above | Reviewed |
 | Protocol: `src/protocol/**`, `src/trace_validation.rs` | V2/V3 decoding, wire bytes, and delivery class match contract | `tests/v2_wire_golden.rs`, `tests/v3_wire_properties.rs`, `fuzz/fuzz_targets/decode_protocol.rs`; C1 protocol subsystem review above | Malformed/deep frames, mixed format boundaries, delivery-class carry, enum/tag fail-closed behavior, duplicate-member precedence, and numeric-literal fidelity are reviewed and pinned (or previously pinned); the recorder-only `trace_validation.rs` has no decode seam | Reviewed |
 | Room and player storage: `src/database/**` | Membership and room limits stay atomic and app isolated | `tests/integration_tests.rs`, `tests/model_based_state_machines.rs`; C1 admission-limit review above | Other adapters, rollback, and leave/disconnect races remain | Unreviewed |
 | Room lifecycle and moderation: `src/server/room_service.rs`, `moderation.rs`, `spectator_service.rs`, `spectator_handlers.rs` | Join, leave, kick, ban, spectator state and ownership agree | `tests/lobby_integration_tests.rs`, `src/server/room_service_tests.rs`; C1 admission-limit, leave/disconnect ordering, and identity-slice completion reviews above | ARM-C001–C004 fixed in spectator and room-code seams; identity cases (concurrent limits, join-only, leave/disconnect, spectator transitions, kick/ban races, application isolation) reviewed and pinned or derived; storage-fault interleavings on other adapters remain | Partially reviewed |

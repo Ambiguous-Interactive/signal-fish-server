@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject signed connect-token claim arrays that do not match the documented JSON object format (#823).
+
 - Redact native and browser reference-client frame errors so malformed replies cannot
   expose room tokens (#819).
 

@@ -351,8 +351,13 @@ Both base64 encodings are URL-safe without padding. The 64-byte Ed25519
 signature covers the exact ASCII bytes of `"sfct_v1." ++ payload_b64` — the
 encoded form is signed, so there is no JSON canonicalization anywhere.
 
-The server verifies, in order: encoding, signature, expiry, validity window,
-then that the payload's `app_id` equals the presented `app_id`. Every failure
+The payload must be one JSON object. Arrays, duplicate claim fields, and
+non-integer expiry values are refused. Unknown fields are allowed.
+The decoded `app_id` must match exactly. The `nonce` must contain 1 to 128
+UTF-8 bytes.
+
+The server verifies, in order: encoding, signature, claim structure, expiry,
+remaining validity, then that the payload's `app_id` equals the presented `app_id`. Every failure
 reports the same error code, `CONNECT_TOKEN_INVALID`; the `error` text carries
 the reason, and the token is never logged or echoed.
 
@@ -365,10 +370,12 @@ the reason, and the token is never logged or echoed.
 - **Presented without a configured key.** Refused with
   `CONNECT_TOKEN_INVALID` (fail closed). A client that expects credentials to
   matter must not be silently downgraded to public-label semantics.
-- **Token lifetime.** The server accepts a token only while `exp` is in the
+- **Remaining validity.** The server accepts a token only while `exp` is in the
   future and its remaining validity is at most 300 seconds plus a fixed
-  60-second clock-skew allowance. A minter that sets a longer window fails;
-  the replay window stays bounded by policy, not minter discipline.
+  60-second clock-skew allowance. A token outside this window is refused now
+  but can become valid later. The token has no issue-time claim; this limit
+  does not bound time since minting. These checks use the server's wall clock.
+  Token expiry does not close a connection that already authenticated.
 - **Replay is accepted within the window.** The server is stateless and does
   no single-use tracking. Send tokens only over TLS. A leaked token replays
   until expiry — this is the ratified trade-off. Use the signed `nonce` at
