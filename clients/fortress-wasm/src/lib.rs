@@ -213,6 +213,14 @@ fn sync_probe_ready(
         && traffic.1 > 0
 }
 
+fn relay_for_mode(mode: RunMode) -> RelaySocket {
+    let relay = RelaySocket::default();
+    if mode == RunMode::SyncCloseProbe {
+        relay.allow_first_sync_reply_only();
+    }
+    relay
+}
+
 struct Runtime {
     config: BrowserConfig,
     client: Client,
@@ -293,10 +301,11 @@ impl Runtime {
         client_config.game_data_format = Some(GameDataEncoding::MessagePack);
         client_config.command_channel_capacity = 64;
 
+        let relay = relay_for_mode(config.run_mode);
         Ok(Self {
             config,
             client: SignalFishPollingClient::new(transport, client_config),
-            relay: RelaySocket::default(),
+            relay,
             local: None,
             roster: BTreeSet::new(),
             session: None,
@@ -1194,6 +1203,71 @@ mod tests {
             serde_json::from_str::<super::RunMode>("\"sync_close_probe\"").ok(),
             Some(super::RunMode::SyncCloseProbe)
         );
+    }
+
+    #[test]
+    fn configured_sync_probe_stays_partial_while_other_modes_complete_handshake(
+    ) -> Result<(), String> {
+        for mode in [
+            super::RunMode::Healthy,
+            super::RunMode::DrainProbe,
+            super::RunMode::NegativeOneAdmissionPerCallback,
+            super::RunMode::SyncCloseProbe,
+        ] {
+            let ids = [uuid::Uuid::from_u128(1), uuid::Uuid::from_u128(2)];
+            let sockets = [super::relay_for_mode(mode), super::relay_for_mode(mode)];
+            for index in 0..2 {
+                sockets[index]
+                    .configure_identity(ids[index], ids[1 - index])
+                    .map_err(str::to_owned)?;
+            }
+            let mut sessions = [
+                super::build_session(ids[0], ids[1], sockets[0].clone())?,
+                super::build_session(ids[1], ids[0], sockets[1].clone())?,
+            ];
+            let mut progress = [0; 2];
+            let mut server_sequence = 0u64;
+            for _ in 0..32 {
+                for (index, session) in sessions.iter_mut().enumerate() {
+                    session.poll_remote_clients();
+                    for event in session.events() {
+                        if let super::FortressEvent::Synchronizing { count, .. } = event {
+                            progress[index] = progress[index].max(count);
+                        }
+                    }
+                }
+                for index in 0..2 {
+                    while let Some(frame) = sockets[index].take_outbound() {
+                        server_sequence += 1;
+                        sockets[1 - index]
+                            .admit_inbound(super::InboundRelayFrame {
+                                local: ids[1 - index],
+                                known_remote: ids[index],
+                                from: ids[index],
+                                encoding: super::GameDataEncoding::MessagePack,
+                                seq: Some(server_sequence),
+                                epoch: Some(1),
+                                payload: &frame.payload,
+                            })
+                            .map_err(|fault| format!("unexpected relay fault: {fault:?}"))?;
+                    }
+                }
+            }
+            for (index, session) in sessions.iter().enumerate() {
+                if mode == super::RunMode::SyncCloseProbe {
+                    assert_eq!(session.current_state(), super::SessionState::Synchronizing);
+                    assert_eq!(progress[index], 1, "one genuine sync reply per peer");
+                    assert_eq!(session.metrics().frames_advanced, 0);
+                } else {
+                    assert_eq!(
+                        session.current_state(),
+                        super::SessionState::Running,
+                        "{mode:?}"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     #[test]

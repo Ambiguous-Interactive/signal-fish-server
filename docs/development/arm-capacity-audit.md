@@ -1951,7 +1951,9 @@ carries a disposition.
 - **WASM Fortress partial-handshake close (session 372, #741 item 7 slice).**
   The `sync-close` cell waits for both Rust runtimes to report an actual
   `Synchronizing` event with nonzero, incomplete progress and bidirectional
-  handshake traffic. Each runtime freezes Fortress progression at that point
+  handshake traffic. The relay releases one sync reply and retains later
+  replies, so a retry backlog cannot finish the handshake in one poll.
+  Each runtime freezes Fortress progression at that point
   and continues polling the real signaling transport. The harness drains the
   server and requires both peers to report its advisory and coded 4000 close
   within ten seconds, with no gameplay or unrelated relay fault. It keeps

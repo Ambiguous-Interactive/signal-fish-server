@@ -142,7 +142,6 @@ impl RelaySocket {
     }
 
     /// Keep synchronization incomplete while requests and controls still flow.
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn allow_first_sync_reply_only(&self) {
         if let Ok(mut shared) = self.shared.lock() {
             shared.hold_sync_replies_after_first = true;
