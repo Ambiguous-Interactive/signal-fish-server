@@ -30,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Apply the configured write deadline to idle delivery reports so a stalled
+  recipient cannot block the socket writer beyond that budget (#830).
+
+- Stop sending later gameplay frames after a canceled socket write when a player
+  is kicked or rate limited (#827).
+
 - Reject signed connect-token claim arrays that do not match the documented JSON object format (#823).
 
 - Redact native and browser reference-client frame errors so malformed replies cannot

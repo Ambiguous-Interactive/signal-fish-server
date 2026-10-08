@@ -207,7 +207,7 @@ pub(super) enum QueueWriteError {
     OutboundMessageTooLarge,
 }
 
-fn classify_send_error(
+pub(super) fn classify_send_error(
     error: SendMessageError,
     player_id: &PlayerId,
     close_signal: &ConnectionCloseSignal,
@@ -289,7 +289,7 @@ fn queued_write_deadline(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn complete_selected_write<F>(
+pub(super) async fn complete_selected_write<F>(
     deadline: Option<Instant>,
     write: F,
     player_id: &PlayerId,

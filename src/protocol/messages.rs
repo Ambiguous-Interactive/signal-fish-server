@@ -540,14 +540,17 @@ pub struct ReconnectedPayload {
     /// ICE from the late-join `SessionPlan`, never from here).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ice_servers: Vec<IceServer>,
-    /// Events that occurred while disconnected
+    /// Historical control events after the server's disconnect cursor, with
+    /// own membership and superseded authority events removed. Optional history
+    /// processing must precede snapshot replacement; older player metadata must
+    /// not overwrite this payload's current state.
     pub missed_events: Vec<ServerMessage>,
-    /// Completeness of `missed_events` (v3+ only). Populated only for a
+    /// Ring retention for `missed_events` (v3+ only). Populated only for a
     /// recipient that negotiated protocol v3+; `None` — and absent from the
     /// wire via `skip_serializing_if`, keeping the v2 JSON and MessagePack
     /// bytes identical — otherwise. See [`ReplayStatus`] for the contract each
-    /// value places on the client (a truncated/unavailable replay requires a
-    /// resync from this payload's snapshot fields).
+    /// value places on the client. Every status requires replacement from this
+    /// payload's snapshot fields, after any optional history processing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay: Option<ReplayStatus>,
     /// Authoritative per-sender relay baseline for this room (v3+ only).
@@ -578,7 +581,7 @@ pub struct SenderWatermark {
     pub seq: u64,
 }
 
-/// Completeness of `Reconnected.missed_events` (v3+ recipients only; the field
+/// Ring retention for `Reconnected.missed_events` (v3+ recipients only; the field
 /// is absent on the v2 wire).
 ///
 /// Only room-uniform control events (`PlayerJoined`, `PlayerLeft`,
@@ -587,10 +590,15 @@ pub struct SenderWatermark {
 /// `Signal`, and the per-recipient `GameStarting` never are — reconnectors
 /// resync from the `Reconnected` snapshot and, for started sessions, the
 /// late-join `SessionPlan` flow.
+/// The server removes own membership events and authority events that disagree
+/// with the current authority after checking retention. The server-side cursor
+/// does not acknowledge receipt of an old socket's unread events. Always replace
+/// room state with the snapshot after any optional history processing.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplayStatus {
-    /// Every replayable control event since disconnect is in `missed_events`.
+    /// No event after the server's disconnect cursor was evicted. Recipient
+    /// filtering still applies; this is not a client-receipt guarantee.
     Complete,
     /// Events were evicted from the bounded replay ring; `missed_events` is a
     /// suffix. Resync from the `Reconnected` snapshot fields.

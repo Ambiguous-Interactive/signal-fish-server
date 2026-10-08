@@ -2394,16 +2394,9 @@ async fn reconnect_replay_drops_authority_events_the_snapshot_supersedes() {
     }
     let room_id = create_db_room_with_max(&server, authority, 2).await;
     server
-        .database
-        .add_player_to_room(&room_id, player_info(existing, "existing"))
-        .await
-        .expect("add incumbent");
-    for player in [authority, existing] {
-        server
-            .connection_manager
-            .assign_client_to_room(&player, room_id)
-            .await;
-    }
+        .connection_manager
+        .assign_client_to_room(&authority, room_id)
+        .await;
     let authority_info = server
         .database
         .get_room_by_id(&room_id)
@@ -2439,8 +2432,8 @@ async fn reconnect_replay_drops_authority_events_the_snapshot_supersedes() {
         .unregister_local_client(&authority)
         .await
         .expect("unroute disconnected authority");
-    // The departure that vacated the role is buffered for replay, as is an
-    // unrelated room event that the snapshot does not supersede.
+    // The departure that vacated the role is buffered for replay. Another
+    // player then joins during the authority's absence.
     manager
         .record_room_event(
             &room_id,
@@ -2449,6 +2442,15 @@ async fn reconnect_replay_drops_authority_events_the_snapshot_supersedes() {
                 you_are_authority: false,
             },
         )
+        .await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(existing, "existing"))
+        .await
+        .expect("add incumbent during the reconnect window");
+    server
+        .connection_manager
+        .assign_client_to_room(&existing, room_id)
         .await;
     manager
         .record_room_event(
@@ -2459,6 +2461,16 @@ async fn reconnect_replay_drops_authority_events_the_snapshot_supersedes() {
         )
         .await;
 
+    // Peer metadata can change without a replayable control event. This
+    // history is older than the snapshot even when no replay event was lost.
+    let fresh_endpoint = ConnectionInfo::Direct {
+        host: "127.0.0.1".to_string(),
+        port: 7777,
+    };
+    server
+        .handle_provide_connection_info(&existing, fresh_endpoint.clone())
+        .await;
+
     assert!(
         server
             .handle_reconnect(&current, &authority, &room_id, &token)
@@ -2467,6 +2479,53 @@ async fn reconnect_replay_drops_authority_events_the_snapshot_supersedes() {
 
     match recv(&mut current_rx).await.as_ref() {
         ServerMessage::Reconnected(payload) => {
+            let snapshot_player = payload
+                .current_players
+                .iter()
+                .find(|player| player.id == existing)
+                .expect("the current snapshot contains the incumbent");
+            let historical_player = payload
+                .missed_events
+                .iter()
+                .find_map(|event| match event {
+                    ServerMessage::PlayerJoined { player } if player.id == existing => Some(player),
+                    _ => None,
+                })
+                .expect("the buffered join remains available as history");
+            assert!(historical_player.connection_info.is_none());
+            assert_eq!(
+                serde_json::to_value(&snapshot_player.connection_info).expect("serialize snapshot"),
+                serde_json::to_value(&fresh_endpoint).expect("serialize fresh endpoint"),
+                "the snapshot must carry metadata supplied after the buffered join"
+            );
+            // Negative control: the old documented snapshot-then-replay
+            // algorithm replaces a current PlayerInfo with the historical join.
+            let mut client_players: std::collections::HashMap<_, _> = payload
+                .current_players
+                .iter()
+                .map(|player| (player.id, player.clone()))
+                .collect();
+            client_players.insert(existing, historical_player.clone());
+            assert!(
+                client_players[&existing].connection_info.is_none(),
+                "applying the historical join after the snapshot loses the endpoint"
+            );
+            // The corrected contract makes the current snapshot the final
+            // replacement, regardless of whether clients processed history.
+            client_players = payload
+                .current_players
+                .iter()
+                .map(|player| (player.id, player.clone()))
+                .collect();
+            assert_eq!(
+                serde_json::to_value(&client_players[&existing].connection_info)
+                    .expect("serialize reconciled endpoint"),
+                serde_json::to_value(&fresh_endpoint).expect("serialize fresh endpoint")
+            );
+            assert_eq!(
+                payload.replay,
+                Some(crate::protocol::ReplayStatus::Complete)
+            );
             assert!(
                 payload.is_authority,
                 "the restored member holds the vacant role again"
@@ -2487,7 +2546,7 @@ async fn reconnect_replay_drops_authority_events_the_snapshot_supersedes() {
                     .missed_events
                     .iter()
                     .any(|event| matches!(event, ServerMessage::PlayerJoined { .. })),
-                "the filter must drop only what the snapshot supersedes: {:?}",
+                "authority filtering must preserve other historical control events: {:?}",
                 payload.missed_events
             );
         }

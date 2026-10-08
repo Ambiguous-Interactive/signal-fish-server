@@ -2,6 +2,9 @@
 
 Guide for building, testing, and contributing to Signal Fish Server.
 
+The [production correctness audit](development/production-correctness-audit.md)
+records reviewed contracts, reproducible findings, and the remaining audit work.
+
 ## Prerequisites
 
 - Rust 1.91.0 or later (see `rust-version` in `Cargo.toml`)

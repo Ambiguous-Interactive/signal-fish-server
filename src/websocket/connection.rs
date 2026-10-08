@@ -22,7 +22,10 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch, RwLock};
 use tokio::time::Instant;
 
-use super::batching::{send_batch, send_queued, MessageBatcher, QueueWriteError, WritePhase};
+use super::batching::{
+    classify_send_error, complete_selected_write, send_batch, send_queued, MessageBatcher,
+    QueueWriteError, WritePhase,
+};
 use super::sending::{
     send_immediate_server_message, write_pending_unsupported_report, ImmediateSendError,
 };
@@ -740,6 +743,41 @@ where
     tokio::time::timeout(CLOSE_WRITE_TIMEOUT, operation).await
 }
 
+/// Bound timer-driven omission reports by the same write-progress deadline as
+/// queued reports. The heartbeat task waits for this writer and cannot time
+/// out a report that prevents it from starting the next Ping.
+async fn write_idle_unsupported_report(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    rx: &OutboundReceiver,
+    player_id: &PlayerId,
+    server: &EnhancedGameServer,
+    close_signal: &ConnectionCloseSignal,
+    max_sojourn: Duration,
+) -> Result<bool, QueueWriteError> {
+    let metrics = server.metrics();
+    let write = write_pending_unsupported_report(
+        sender,
+        rx,
+        player_id,
+        server.config().max_outbound_message_size,
+        &metrics,
+    );
+    let result = if max_sojourn.is_zero() {
+        write.await
+    } else {
+        complete_selected_write(
+            deadline_after(Instant::now(), max_sojourn),
+            write,
+            player_id,
+            server,
+            close_signal,
+            max_sojourn,
+        )
+        .await?
+    };
+    result.map_err(|error| classify_send_error(error, player_id, close_signal))
+}
+
 /// Write whatever exact omission accounting is still coalesced for this
 /// recipient, once no further frame will carry it.
 ///
@@ -932,17 +970,7 @@ async fn finalize_closed_connection(
             )
             .await;
         }
-        Some(
-            CloseReason::Shutdown
-            | CloseReason::AuthTimeout
-            | CloseReason::ActivityTimeout
-            | CloseReason::IdleTimeout
-            | CloseReason::RoomInactive
-            | CloseReason::Unregistered,
-        )
-        | None
-            if rx.abandoned_in_flight_write() =>
-        {
+        _ if rx.abandoned_in_flight_write() => {
             // A queued payload was abandoned while a socket write owned it, so
             // its wire position is unknown (the sink may have taken the frame
             // into its own buffer before the close cancelled the write, or the
@@ -1851,12 +1879,13 @@ pub(super) async fn handle_socket(
                     } => {
                         let current_player_id =
                             *effective_player_id_for_send.read().await;
-                        match write_pending_unsupported_report(
+                        match write_idle_unsupported_report(
                             &mut sender,
                             &rx,
                             &current_player_id,
-                            server_clone.config().max_outbound_message_size,
-                            &server_clone.metrics(),
+                            &server_clone,
+                            &send_task_close_signal,
+                            max_sojourn,
                         )
                         .await
                         {
@@ -1867,23 +1896,7 @@ pub(super) async fn handle_socket(
                                 );
                             }
                             Ok(false) => {}
-                            Err(error) => {
-                                if let super::sending::SendMessageError::MessageTooLarge {
-                                    size,
-                                    max,
-                                } = error
-                                {
-                                    tracing::warn!(
-                                        %current_player_id,
-                                        size,
-                                        max,
-                                        "Pending delivery report exceeds outbound message-size limit"
-                                    );
-                                    send_task_close_signal
-                                        .request_close(CloseReason::OutboundMessageTooLarge);
-                                }
-                                break;
-                            }
+                            Err(_) => break,
                         }
                         continue;
                     }
@@ -4240,71 +4253,219 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     async fn close_flush_never_writes_the_queue_behind_an_abandoned_write() {
         const QUEUED: u64 = 3;
-        for (abandoned_in_flight, expected_written, context) in [
-            (false, vec![1, 2, 3], "healthy teardown flushes its queue"),
-            (
-                true,
-                Vec::new(),
-                "teardown after an abandoned in-flight write writes nothing behind it",
-            ),
+        for reason in [
+            None,
+            Some(CloseReason::Shutdown),
+            Some(CloseReason::AuthTimeout),
+            Some(CloseReason::SlowConsumer),
+            Some(CloseReason::ActivityTimeout),
+            Some(CloseReason::IdleTimeout),
+            Some(CloseReason::RoomInactive),
+            Some(CloseReason::InboundRateLimited),
+            Some(CloseReason::OutboundMessageTooLarge),
+            Some(CloseReason::Kicked),
+            Some(CloseReason::Unregistered),
         ] {
-            let server = test_server().await;
-            let player_id = PlayerId::from_u128(9);
-            let (tx, mut rx) = crate::coordination::outbound_queue::channel(16, 16);
-            for seq in 1..=QUEUED {
-                tx.try_enqueue_data(ledger_data(seq))
-                    .unwrap_or_else(|_| panic!("{context}: queue seq {seq}"));
-            }
-
-            let (close_signal, _close_listener) = ConnectionCloseSignal::channel();
-            let (probe_state, _probe_updates) = watch::channel(PingProbeState::default());
-            if abandoned_in_flight {
-                // The production seam, exactly: a socket write owned one
-                // payload and its future was dropped before resolving.
-                let accounting = crate::websocket::sending::SendAccounting::new(
-                    &rx,
-                    &server,
-                    &probe_state,
-                    player_id,
-                    Some(crate::protocol::DeliveryClass::Reliable),
+            for (abandoned_in_flight, mut expected_written, context) in [
+                (false, vec![1, 2, 3], "healthy teardown flushes its queue"),
+                (
+                    true,
+                    Vec::new(),
+                    "teardown after an abandoned in-flight write writes nothing behind it",
+                ),
+            ] {
+                let discard_by_policy = matches!(
+                    reason,
+                    Some(CloseReason::SlowConsumer | CloseReason::OutboundMessageTooLarge)
                 );
-                drop(accounting);
-            }
+                if discard_by_policy {
+                    expected_written.clear();
+                }
+                let server = test_server().await;
+                let player_id = PlayerId::from_u128(9);
+                let (tx, mut rx) = crate::coordination::outbound_queue::channel(16, 16);
+                tx.set_protocol_version(3);
+                for seq in 1..=QUEUED + u64::from(abandoned_in_flight) {
+                    tx.try_enqueue_data(ledger_data(seq))
+                        .unwrap_or_else(|_| panic!("{context}: queue seq {seq}"));
+                }
 
-            let mut pair = UpgradedSocketPair::connect().await;
-            let mut batcher = MessageBatcher::new(1, 1);
-            finalize_closed_connection(
+                let (close_signal, _close_listener) = ConnectionCloseSignal::channel();
+                let (probe_state, _probe_updates) = watch::channel(PingProbeState::default());
+                if abandoned_in_flight {
+                    // Cancel the selected first payload before the sink accepts it.
+                    // The queue now starts at seq 2, which cannot legally reach the
+                    // client without seq 1 or an exact omission report.
+                    let selected = rx.try_recv().expect("select seq 1 for its socket write");
+                    assert_eq!(selected.metadata.expect("stamped payload").seq, 1);
+                    drop(selected);
+                    let accounting = crate::websocket::sending::SendAccounting::new(
+                        &rx,
+                        &server,
+                        &probe_state,
+                        player_id,
+                        Some(crate::protocol::DeliveryClass::Reliable),
+                    );
+                    drop(accounting);
+                }
+
+                let mut pair = UpgradedSocketPair::connect().await;
+                let mut batcher = MessageBatcher::new(1, 1);
+                finalize_closed_connection(
+                    &mut pair.server_sink,
+                    &mut rx,
+                    &mut batcher,
+                    reason,
+                    &player_id,
+                    &server,
+                    &close_signal,
+                    &probe_state,
+                    Duration::from_secs(5),
+                )
+                .await;
+
+                let written = pair.drain_written_game_data().await;
+                assert_eq!(
+                    written, expected_written,
+                    "{context}: close reason {reason:?} must preserve the stream prefix"
+                );
+                let expected_dropped = if abandoned_in_flight || discard_by_policy {
+                    QUEUED
+                } else {
+                    0
+                } + u64::from(abandoned_in_flight);
+                assert_eq!(
+                    server
+                        .metrics()
+                        .websocket_messages_dropped
+                        .load(Ordering::Relaxed),
+                    expected_dropped,
+                    "{context}: abandoned payloads must be counted, never lost silently"
+                );
+                pair.shutdown().await;
+            }
+        }
+    }
+
+    /// The timer path must enforce the same write budget as queued reports.
+    /// A real non-reading peer holds bytes in the sink; virtual time makes the
+    /// expiry deterministic and avoids waiting for an unrelated heartbeat.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn idle_omission_report_write_expires_on_a_stalled_socket() {
+        let server = test_server().await;
+        let player_id = PlayerId::from_u128(9);
+        let (tx, rx) = crate::coordination::outbound_queue::channel(16, 16);
+        tx.set_protocol_version(3);
+        assert!(rx.record_unsupported_format(ledger_data(1).metadata.expect("stamped fixture")));
+        let mut pair = UpgradedSocketPair::connect_with_small_client_recv_buffer(Some(
+            CLIENT_CLAMPED_RECV_BUFFER_BYTES,
+        ))
+        .await;
+        {
+            let fill = pair
+                .server_sink
+                .send(Message::Binary(vec![0_u8; 8 << 20].into()));
+            tokio::pin!(fill);
+            assert!(
+                futures_util::poll!(fill.as_mut()).is_pending(),
+                "non-reading peer must stall the sink"
+            );
+        }
+        tokio::time::pause();
+        let budget = Duration::from_millis(20);
+        let (close_signal, _listener) = ConnectionCloseSignal::channel();
+        {
+            let write = write_idle_unsupported_report(
                 &mut pair.server_sink,
-                &mut rx,
-                &mut batcher,
-                None,
+                &rx,
                 &player_id,
                 &server,
                 &close_signal,
-                &probe_state,
-                Duration::from_secs(5),
-            )
-            .await;
+                budget,
+            );
+            tokio::pin!(write);
+            assert!(futures_util::poll!(write.as_mut()).is_pending());
+            tokio::time::advance(budget).await;
+            assert!(
+                matches!(
+                    tokio::time::timeout(Duration::from_millis(2), write).await,
+                    Ok(Err(QueueWriteError::SojournExpired))
+                ),
+                "an idle report must stop at its deadline once the timer driver runs"
+            );
+        }
+        assert_eq!(
+            close_signal.requested_reason(),
+            Some(CloseReason::SlowConsumer)
+        );
+        assert!(
+            rx.pending_unsupported_report().is_some(),
+            "an incomplete write must preserve exact omission evidence"
+        );
+        assert_eq!(
+            server
+                .metrics()
+                .websocket_slow_consumer_disconnects
+                .load(Ordering::Relaxed),
+            1
+        );
+        pair.shutdown().await;
+    }
 
-            let written = pair.drain_written_game_data().await;
-            assert_eq!(
-                written, expected_written,
-                "{context}: the client's observed stream must match the contract"
-            );
-            let expected_dropped = if abandoned_in_flight {
-                // The abandoned in-flight payload plus the whole queue behind it.
-                QUEUED + 1
-            } else {
-                0
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
+    async fn idle_omission_report_commits_only_the_written_ranges() {
+        for budget in [Duration::from_secs(5), Duration::ZERO] {
+            let server = test_server().await;
+            let player_id = PlayerId::from_u128(9);
+            let (tx, rx) = crate::coordination::outbound_queue::channel(16, 16);
+            tx.set_protocol_version(3);
+            let (close_signal, _listener) = ConnectionCloseSignal::channel();
+            let mut pair = UpgradedSocketPair::connect().await;
+            assert!(!write_idle_unsupported_report(
+                &mut pair.server_sink,
+                &rx,
+                &player_id,
+                &server,
+                &close_signal,
+                budget,
+            )
+            .await
+            .expect("an empty report needs no write"));
+            for seq in 1..=2 {
+                assert!(rx.record_unsupported_format(
+                    ledger_data(seq).metadata.expect("stamped fixture")
+                ));
+            }
+            assert!(write_idle_unsupported_report(
+                &mut pair.server_sink,
+                &rx,
+                &player_id,
+                &server,
+                &close_signal,
+                budget,
+            )
+            .await
+            .expect("a healthy recipient accepts its pending report"));
+            assert!(rx.pending_unsupported_report().is_none());
+            assert_eq!(close_signal.requested_reason(), None);
+            let frame = tokio::time::timeout(Duration::from_secs(10), pair.client.next())
+                .await
+                .expect("report must reach client")
+                .expect("open socket")
+                .expect("valid frame");
+            let TungsteniteMessage::Text(text) = frame else {
+                panic!("expected report text, got {frame:?}");
             };
-            assert_eq!(
-                server
-                    .metrics()
-                    .websocket_messages_dropped
-                    .load(Ordering::Relaxed),
-                expected_dropped,
-                "{context}: abandoned payloads must be counted, never lost silently"
-            );
+            let ServerMessage::DeliveryReport(report) =
+                serde_json::from_str(&text).expect("valid report")
+            else {
+                panic!("expected report, got {text}");
+            };
+            assert_eq!(report.gaps.len(), 1);
+            assert_eq!((report.gaps[0].from_seq, report.gaps[0].to_seq), (1, 2));
+            assert_eq!(report.per_class.reliable.unsupported_format, 2);
             pair.shutdown().await;
         }
     }

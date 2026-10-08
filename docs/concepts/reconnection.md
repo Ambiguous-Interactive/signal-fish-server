@@ -80,6 +80,12 @@ armed for a server shutdown drain (`GoingAway` / close code `4000
 server_shutdown`); the instance is going away, so clients should join or create a
 fresh room on another healthy instance.
 
+Token rotation commits when the server queues `Reconnected`, before the
+client receives it. If that response is lost, the old token is already spent
+and the client may never learn the replacement. Retrying the old token cannot
+recover that seat after the committed reconnect. The application must recover
+through a fresh join; the protocol has no receipt acknowledgement for rotation.
+
 ### Phase 2: Reconnect After a Disconnect
 
 When the WebSocket connection drops, open a new WebSocket to the server
@@ -182,12 +188,12 @@ host.
 }
 ```
 
-The `replay` field states how complete `missed_events` is. It is sent
+The `replay` field reports ring retention before recipient filtering. It is sent
 only to clients that negotiated protocol v3 or higher (the v2 wire is
 unchanged — no `replay` key) and takes one of three values:
 
-- `complete` -- Every replayable control event since your disconnect is
-  in `missed_events`.
+- `complete` -- The ring evicted no event after the server's recorded
+  disconnect cursor.
 - `truncated` -- The bounded replay ring evicted events you needed, so
   `missed_events` is only a suffix of what happened. Discard any local
   room-membership bookkeeping and resync from the `Reconnected`
@@ -197,9 +203,13 @@ unchanged — no `replay` key) and takes one of three values:
   (`event_buffer_size` is `0`). Treat every reconnection as a full
   resync from the snapshot fields, exactly as for `truncated`.
 
-v2 clients should always resync from the snapshot fields; the replayed
-events are a convenience, not a completeness guarantee, without the
-`replay` field.
+For every protocol version and replay status, replace local room state with
+the snapshot fields. You can ignore `missed_events`. If you process this
+history, process it before applying the snapshot; historical player metadata
+can be older than the snapshot. The server removes your own membership
+events and authority events that disagree with the current authority, even
+when `replay` is `complete`. The cursor is server-side and does not confirm
+receipt of the old socket's unread events.
 
 The `sender_watermarks` field is also v3-only. It gives one authoritative
 `(epoch, seq)` baseline for every current room member, including the

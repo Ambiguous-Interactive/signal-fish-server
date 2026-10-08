@@ -116,9 +116,12 @@ At the same time, the server tells the other members that Bob is back with `Play
 }
 ```
 
-Next: Bob's client reconciles its local state from `current_players` / `lobby_state`, replays any
-`missed_events` control entries **in order**, and asks the game authority or peers for the current gameplay state.
-For v3 relay sequencing, `sender_watermarks` resets Bob's per-sender `(epoch, seq)` baselines after his absence.
+Next: Bob's client replaces its room state with the `Reconnected` snapshot.
+It must not apply `missed_events` after that snapshot: the history can contain
+older player metadata. If Bob processes this history, he processes it first,
+then replaces the result with the snapshot, even when `replay` is `complete`.
+For v3 relay sequencing, `sender_watermarks` resets Bob's per-sender `(epoch, seq)` baselines.
+Bob then asks the game authority or peers for the current gameplay state.
 The game resumes after that application-level resync.
 
 ## 3. v3 note — reconnecting into an active session

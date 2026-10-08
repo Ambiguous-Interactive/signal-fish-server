@@ -1155,16 +1155,26 @@ Response to client `Ping`.
 Reconnection successful. Includes current room state. The `missed_events`
 field carries the replayable **control** events (membership / lobby / authority
 transitions) broadcast to the room while the player was disconnected, oldest
-first, from a bounded per-room replay ring (`server.event_buffer_size`); it is
-NOT empty when such events occurred during the absence. High-rate data-path
+first, from a bounded per-room replay ring (`server.event_buffer_size`). The
+server omits your own membership events and authority events that disagree
+with the current authority. The list can therefore be empty after filtering.
+High-rate data-path
 traffic (`GameData` / `Signal`) is deliberately not replayed. The companion
-`replay` field (v3+ recipients only) reports the completeness of that list —
-`complete`, `truncated` (the ring evicted an event the player needed, so
+`replay` field (v3+ recipients only) reports ring retention before this filtering —
+`complete` (no event after the server's disconnect cursor was evicted),
+`truncated` (the ring evicted an event the player needed, so
 `missed_events` is only a suffix), or `unavailable` (replay disabled,
 `event_buffer_size = 0`). v3+ recipients also receive
 `sender_watermarks`, the authoritative `(epoch, seq)` tail for every current
 room member, so they can re-baseline after skipped `GameData`. See
 [Reconnection Flow](#reconnection-flow).
+
+Always replace local room state with the snapshot, including when `replay`
+is `complete`. You can ignore `missed_events`. If you process this historical
+list, process it before applying the snapshot and `sender_watermarks`.
+Applying an old `PlayerJoined` afterward can overwrite newer player metadata.
+The disconnect cursor records server state, not client receipt; `complete`
+does not guarantee recovery of unread events on the old socket.
 
 `sender_watermarks` replaces every pre-disconnect sequence expectation; it is
 not a replay promise. A new physical connection also starts new
@@ -1452,9 +1462,9 @@ and `room_id` (from the original `RoomJoined` response) to reconnect:
 On successful reconnection, the server sends a `Reconnected` message with the current room state.
 
 Note: replayable **control** events (membership / lobby / authority
-transitions) broadcast while the player was disconnected ARE buffered in a
-bounded per-room replay ring and returned in the `Reconnected` payload's
-`missed_events` list, with the `replay` field reporting completeness
+transitions) broadcast while the player was disconnected are buffered in a
+bounded per-room replay ring. After recipient filtering, retained events appear
+in `Reconnected.missed_events`, with `replay` reporting ring retention
 (`complete` / `truncated` / `unavailable`). High-rate data-path traffic
 (`GameData` / `Signal`) is **not** replayed, and a `truncated` or
 `unavailable` replay means control history is incomplete. v3 clients also use
@@ -1464,8 +1474,8 @@ expectations and connection-scoped delivery counters; the replacement socket
 starts a new accounting lifetime. Clients must still treat reconnection as
 requiring an application-level state resync (for example, have the authority or
 another peer re-send the current game state after `PlayerReconnected`). A
-`truncated` or `unavailable` replay specifically requires snapshot resync because
-the control-event history is incomplete.
+snapshot resync is required for every replay status. Optional historical-event
+processing must finish before applying that snapshot.
 
 ## Protocol v3 additions
 

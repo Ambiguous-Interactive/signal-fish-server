@@ -8,9 +8,11 @@ universally quantified properties* of the pure decision functions over
 that an explicit-state checker can only sample.
 
 Each proof asserts the **negation** of a property and checks for `unsat`:
-`unsat` means no counterexample exists, i.e. the property holds for all inputs.
+`unsat` means no counterexample exists within that model's stated domain.
+These checks do not execute Rust or prove that the handwritten models refine
+the implementation. Direct Rust tests and source review establish that link.
 
-Functions modeled (faithful to the Rust source — anchors are stable):
+Functions modeled by hand (source correspondence requires separate Rust tests):
 
 - ``choose_session_plan`` ladder walk  — src/server/session_policy.rs:327
   (``UPGRADE_LADDER`` :190, ``topology_rank`` :208, ``transport_enabled`` :218,
@@ -32,11 +34,9 @@ Functions modeled (faithful to the Rust source — anchors are stable):
   relay-envelope headroom, batch-deadline representability, timeout floors —
   and the new guards are NECESSARY, each by an explicit counterexample witness)
 
-Every obligation is an ``unsat`` proof except one deliberate EXISTENCE check:
-``naive_gap_predicate_unsound`` (set F) asserts a scenario and expects ``sat``,
-exhibiting the interleaved-rooms witness that makes any sequence-GAP-based
-truncation predicate lie — the SMT twin of ``formal/tla/ReconnectReplay.tla``'s
-``NaiveGapPredicateBug`` counterexample, proving the watermark design necessary.
+Proof obligations expect ``unsat``. Named control witnesses expect ``sat``:
+the selector's missing-endpoint case, obsolete negotiation clamp, rejected
+gap-based replay predicate, and configuration admission/necessity examples.
 
 Run: ``python3 formal/z3/protocol_invariants.py`` (needs the ``z3`` module;
 the dev container installs ``python3-z3``). CI: formal-verification.yml.
@@ -107,19 +107,21 @@ def witness(name: str, solver: Solver) -> None:
 # three upgrade rungs is abstracted to a free boolean (proof set B re-attaches it
 # to member capabilities). This proves the *find-first-fit-else-relay* logic is
 # correct for every possible (desired ceiling, transport-enable, per-rung
-# support) combination — an exhaustive proof the Rust `.find().unwrap_or(RELAY)`
-# matches its contract.
+# support, Direct host readiness) combination of the modeled ladder. Rust's
+# `.find().unwrap_or(RELAY)` correspondence is checked separately by unit tests.
 # ---------------------------------------------------------------------------
-def selector_chosen_rank(desired, en_webrtc, en_direct, a_mesh_w, a_host_w, a_host_d):
+def selector_chosen_rank(
+    desired, en_webrtc, en_direct, a_mesh_w, a_host_w, a_host_d, has_direct_host
+):
     """Mirror of the ladder walk; returns the chosen topology rank.
 
     Rung order (richest first): Mesh+WebRtc, Host+WebRtc, Host+Direct, else Relay
     floor. A rung fits iff rank<=desired AND its transport is enabled AND every
-    member supports it.
+    member supports it. Direct also requires a usable host endpoint.
     """
     fit_mesh_w = And(MESH <= desired, en_webrtc, a_mesh_w)
     fit_host_w = And(HOST <= desired, en_webrtc, a_host_w)
-    fit_host_d = And(HOST <= desired, en_direct, a_host_d)
+    fit_host_d = And(HOST <= desired, en_direct, a_host_d, has_direct_host)
     return If(fit_mesh_w, MESH, If(fit_host_w, HOST, If(fit_host_d, HOST, RELAY)))
 
 
@@ -136,10 +138,11 @@ def proof_set_a() -> None:
     desired = Int("desired")
     en_webrtc, en_direct = Bool("en_webrtc"), Bool("en_direct")
     a_mesh_w, a_host_w, a_host_d = Bool("a_mesh_w"), Bool("a_host_w"), Bool("a_host_d")
+    has_direct_host = Bool("has_direct_host")
     # `desired` is a real Topology, so its rank is one of the three.
     desired_valid = Or(desired == RELAY, desired == HOST, desired == MESH)
     chosen = selector_chosen_rank(
-        desired, en_webrtc, en_direct, a_mesh_w, a_host_w, a_host_d
+        desired, en_webrtc, en_direct, a_mesh_w, a_host_w, a_host_d, has_direct_host
     )
 
     # A1: chosen rank never exceeds the desired ceiling.
@@ -170,7 +173,7 @@ def proof_set_a() -> None:
             chosen == HOST,
             And(
                 HOST <= desired,
-                Or(And(en_webrtc, a_host_w), And(en_direct, a_host_d)),
+                Or(And(en_webrtc, a_host_w), And(en_direct, a_host_d, has_direct_host)),
             ),
         ),
     )
@@ -200,6 +203,30 @@ def proof_set_a() -> None:
     s.add(host_direct)
     s.add(uses_webrtc)  # negation of "must be false"
     prove("A6 host+direct plan never enables WebRTC signaling", s)
+
+    # Production requires at least one usable Direct host endpoint even when
+    # every member negotiated Direct. Keep endpoint readiness independent of
+    # capability support: conflating them would make this obligation vacuous.
+    s = Solver()
+    s.add(desired_valid, Not(en_webrtc), en_direct, a_host_d)
+    s.add(Not(has_direct_host), desired == HOST)
+    s.add(chosen != RELAY)
+    prove("A7 Direct capabilities without a usable host fall to relay", s)
+
+    # Positive control: endpoint readiness must not disable a runnable rung.
+    s = Solver()
+    s.add(desired == HOST, Not(en_webrtc), en_direct, a_host_d, has_direct_host)
+    s.add(chosen != HOST)
+    prove("A8 a runnable Direct rung is selected", s)
+
+    # Negative control: bypassing endpoint readiness must expose the old bug.
+    ungated = selector_chosen_rank(
+        desired, en_webrtc, en_direct, a_mesh_w, a_host_w, a_host_d, True
+    )
+    s = Solver()
+    s.add(desired == HOST, Not(en_webrtc), en_direct, a_host_d, Not(has_direct_host))
+    s.add(ungated == HOST, chosen == RELAY)
+    witness("A9 bypassing Direct endpoint readiness changes the selected plan", s)
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +311,9 @@ def proof_set_c() -> None:
 
 # ---------------------------------------------------------------------------
 # Proof set D — host election (src/server/session_policy.rs:372).
-# Prefers `authority` if seated; else earliest joiner, ties by smaller id.
+# Prefers `authority` in the eligible input set; else earliest joiner, ties by
+# smaller id. Production filters by can_host before calling elect_host; these
+# obligations check the ordering of that filtered set, not endpoint validation.
 # ---------------------------------------------------------------------------
 def proof_set_d() -> None:
     print("Proof set D — host election determinism")
@@ -413,36 +442,35 @@ def proof_set_f() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Proof set G — protocol version negotiation clamp
+# Proof set G — protocol version negotiation and caller refusal
 # (src/config/protocol.rs `negotiate_protocol_version`):
 #   client_max.unwrap_or(min_protocol_version)
 #             .min(max_protocol_version)
-#             .max(min_protocol_version)
 # Quantified over every server range validated by `ProtocolConfig::validate`
 # with the v3 ceiling (2 <= min <= max <= 3) and every client request
-# (including the omitted-version v2 default).
+# in the u16 domain. The socket caller supplies its endpoint default when the
+# wire field is omitted, then rejects a negotiated result below the floor.
+# None below models the public pure helper's own floor default, not the wire.
 # ---------------------------------------------------------------------------
 def proof_set_g() -> None:
-    print("Proof set G — negotiate_protocol_version clamp")
+    print("Proof set G — negotiate_protocol_version and caller refusal")
     has_client, client = Bool("has_client"), Int("client_req")
     smin, smax = Int("server_min"), Int("server_max")
 
     def zmin(a, b):
         return If(a <= b, a, b)
 
-    def zmax(a, b):
-        return If(a >= b, a, b)
-
     # Exact mirror of the Rust expression, including the unwrap_or default.
-    negotiated = zmax(zmin(If(has_client, client, smin), smax), smin)
+    negotiated = zmin(If(has_client, client, smin), smax)
     valid_range = And(smin >= 2, smax <= 3, smin <= smax)
-    valid_client = client >= 0  # u16 domain
+    valid_client = And(client >= 0, client <= 65535)  # u16 domain
 
-    # G1: the result always lands inside the served range.
+    # G1: only accepted results must be inside the served range; every result
+    # must also honor an explicit client's ceiling.
     s = Solver()
     s.add(valid_range, valid_client)
-    s.add(Not(And(negotiated >= smin, negotiated <= smax)))
-    prove("G1 negotiated version always lands in [min, max]", s)
+    s.add(Not(And(negotiated <= smax, Implies(has_client, negotiated <= client))))
+    prove("G1 negotiation never exceeds the server or client ceiling", s)
 
     # G2: an in-range client request is honored exactly (never up/downgraded).
     s = Solver()
@@ -450,21 +478,37 @@ def proof_set_g() -> None:
     s.add(Not(negotiated == client))
     prove("G2 an in-range client request is negotiated verbatim", s)
 
-    # G3: an omitted version is a pure-v2 client — negotiated to the floor.
+    # G3: the pure helper's None argument uses the deployment floor.
     s = Solver()
     s.add(valid_range, Not(has_client))
     s.add(Not(negotiated == smin))
-    prove("G3 an omitted client version negotiates to the server floor", s)
+    prove("G3 the pure helper defaults None to the server floor", s)
 
-    # G4: out-of-range requests clamp to the violated bound (never elsewhere).
+    # G4: requests above the ceiling downgrade; below-floor requests preserve
+    # the client's value so the caller can refuse them.
     s = Solver()
     s.add(valid_range, valid_client, has_client)
     clamped = And(
         Implies(client > smax, negotiated == smax),
-        Implies(client < smin, negotiated == smin),
+        Implies(client < smin, negotiated == client),
     )
     s.add(Not(clamped))
-    prove("G4 out-of-range requests clamp to the violated bound", s)
+    prove("G4 high requests downgrade and low requests remain below the floor", s)
+
+    # The caller rejects an explicit client maximum below the deployment
+    # floor. Negotiation must preserve that result rather than upgrade it.
+    s = Solver()
+    s.add(valid_range, valid_client, has_client, client < smin)
+    s.add(negotiated >= smin)
+    prove("G5 below-floor requests remain rejectable by the caller", s)
+
+    # Negative control: the obsolete lower clamp silently upgrades v2 on a
+    # v3-only deployment. Pin that supported-version witness explicitly.
+    lower_clamped = If(negotiated < smin, smin, negotiated)
+    s = Solver()
+    s.add(valid_range, has_client, client == 2, smin == 3, smax == 3)
+    s.add(negotiated < smin, lower_clamped >= smin, lower_clamped > client)
+    witness("G6 restoring the lower clamp silently upgrades a v2 client", s)
 
 
 # ---------------------------------------------------------------------------
@@ -472,7 +516,10 @@ def proof_set_g() -> None:
 # model-checked in formal/tla/SequencedRelay.tla): the server stamps
 # `seq = counter + 1` and then stores the stamp back as the counter, so the
 # k-th message of an epoch carries stamp k; a leave/rejoin resets the counter
-# to 0 (a new epoch). Proves per-epoch strict monotonicity AND contiguity —
+# to 0 (a new epoch). This integer-arithmetic model covers successful increments
+# only: production uses checked_add on u64 and refuses exhaustion. The overflow
+# branch and concurrent access are not proved by these obligations.
+# Proves per-epoch strict monotonicity AND contiguity —
 # the property that makes a recipient-observed gap evidence of an eviction
 # bracket rather than a stamping artifact.
 # ---------------------------------------------------------------------------
@@ -773,7 +820,7 @@ def main() -> int:
     if _FAILURES:
         print(f"RESULT: {len(_FAILURES)} proof(s) FAILED: {', '.join(_FAILURES)}")
         return 1
-    print("RESULT: all proofs PASS (every property holds for all inputs)")
+    print("RESULT: all proofs PASS (within each handwritten model's stated domain)")
     return 0
 
 
