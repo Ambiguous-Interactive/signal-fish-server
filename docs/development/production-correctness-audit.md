@@ -65,7 +65,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
 | A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
-| A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial |
+| A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11 |
 
 For each task, record reviewed functions and tests, unresolved hypotheses, and
 the exact scope of any successful experiment. Default, TLS, legacy-fullmesh,
@@ -485,6 +485,45 @@ requires completing drain while the owning runtime lives, or discarding the
 server instance after abrupt runtime destruction. Asynchronous cleanup cannot
 run on a destroyed runtime. This does not change standalone process-loss
 semantics or certify arbitrary cross-runtime reuse.
+
+### F11 — Container publication depends on anonymous Docker Hub pulls
+
+**Delivery infrastructure defect; high confidence.** Issue
+[#841](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/841).
+Main publication of `a381ad2d` failed in
+[run 37990034187](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/37990034187).
+Both attempts failed before QEMU setup completed. Docker Hub refused the
+anonymous `tonistiigi/binfmt:latest` pull with `toomanyrequests`. No image
+was built or published. Full main CI
+[37991420668](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/37991420668)
+also failed while preparing the Docker-based dependency audit action. Its
+pinned Rust base pull returned HTTP 429 before workflow steps ran. A daemon
+configuration step cannot repair action preparation. This failure does not
+establish a server runtime defect.
+
+The source sweep found the same registry dependency in both Buildx bootstrap
+steps and the Dockerfile's Rust and Debian base images. Hosted CI proved that
+QEMU and linter images can miss the public mirror and still hit HTTP 429.
+The repair uses native QEMU and Docker's embedded builder with the containerd
+image store. It removes both bootstrap image pulls. The embedded builder uses
+the daemon's registry mirrors for base images. The
+[Google mirror contract](https://cloud.google.com/artifact-registry/docs/pull-cached-dockerhub-images)
+retains Docker Hub fallback for uncached images. A cache miss or an outage of
+both registries can still fail the build; the repair does not guarantee
+external registry availability.
+
+The dependency audit uses native cargo-deny `0.20.2`, the same version shipped
+by the old action. Every Cargo graph retains its policy, all-feature selection,
+and explicit metadata toolchain. The central CI relevance gate and manual
+interop audit gates still apply. Native installation removes the Docker image
+preparation boundary; it still depends on external tool and advisory downloads.
+
+Hosted PR CI also exposed the workflow linter's runtime Docker pull and a
+coturn cache miss. Native actionlint uses the same release and retains its
+ShellCheck and Python analyzers. The TURN profile and offline harness use the official
+GHCR coturn image with the same `faca4aa5` manifest digest. Registry inspection
+confirmed all seven platform descriptors match that pinned manifest. The
+registry change alters the pull location, not the coturn version or image bytes.
 
 ### Session 383 physical reconnect-response loss
 

@@ -85,9 +85,15 @@ jobs:
             exit 1
           fi
           echo "version=$MSRV" >> "$GITHUB_OUTPUT"
-      - name: Run cargo-deny (Fortress fixture)
-        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+      - name: Install cargo-deny metadata toolchain
+        uses: dtolnay/rust-toolchain@v1
         with:
-          manifest-path: clients/fortress/Cargo.toml
-          arguments: --all-features
-          rust-version: ${{ steps.deny-msrv.outputs.version }}
+          toolchain: ${{ steps.deny-msrv.outputs.version }}
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2.87.22
+        with:
+          tool: cargo-deny@0.20.2
+      - name: Run cargo-deny (Fortress fixture)
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.deny-msrv.outputs.version }}
+        run: cargo deny --log-level warn --manifest-path clients/fortress/Cargo.toml --all-features check

@@ -178,7 +178,7 @@ with Docker and GNU coreutils. Provision the digest-pinned image and locked
 Cargo dependencies first; the proof itself then runs offline:
 
 ```bash
-docker pull coturn/coturn:4.12.0-alpine@sha256:faca4aa57efc436916c31546f3867bd1a3fb1077723291bcfba0bf814bcaf48a
+docker pull ghcr.io/coturn/coturn:4.12.0-alpine@sha256:faca4aa57efc436916c31546f3867bd1a3fb1077723291bcfba0bf814bcaf48a
 cargo fetch --locked
 cargo fetch --locked --manifest-path clients/native/Cargo.toml
 bash scripts/run-turn-interop.sh

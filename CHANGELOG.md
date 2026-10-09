@@ -30,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Use the official GHCR coturn image for the TURN profile to avoid Docker Hub
+  pull limits (#841).
+
 - Clean up canceled client admission, log admission failures, and keep WebSocket
   connections tracked through cleanup after supervisor failures (#839).
   **Breaking:** Rust embedders must handle the new

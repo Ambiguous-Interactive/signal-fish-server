@@ -33,7 +33,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   COTURN_IMAGE: >-
-    coturn/coturn:4.12.0-alpine@sha256:faca4aa57efc436916c31546f3867bd1a3fb1077723291bcfba0bf814bcaf48a
+    ghcr.io/coturn/coturn:4.12.0-alpine@sha256:faca4aa57efc436916c31546f3867bd1a3fb1077723291bcfba0bf814bcaf48a
 
 jobs:
   turn-interop:

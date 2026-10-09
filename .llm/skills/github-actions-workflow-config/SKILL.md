@@ -211,49 +211,31 @@ the push ref avoids the unique-run-ID fallback that defeats push cancellation.
 
 ---
 
-## 6. Docker-Based Actions and Toolchain Overrides
+## 6. Native Cargo Audit Tools and Explicit Toolchains
 
-### The Problem
-
-Some GitHub Actions (e.g., `cargo-deny-action`, `cargo-audit-action`) run inside
-their own Docker container with a pre-installed Rust toolchain. If the repo's
-`rust-toolchain.toml` pins a specific version, rustup inside the container tries
-to install it — which may not be available, causing the action to fail.
-
-### Solution: Explicit `rust-version` Input
-
-Prefer the action input `rust-version` so the container installs a concrete
-toolchain before executing:
+Docker actions build their image before workflow steps run. A daemon mirror
+step cannot repair a Docker Hub refusal during action preparation. Install
+pinned native cargo-deny instead, and keep each graph's metadata toolchain
+explicit. Retain the relevance gate on both installation and execution.
 
 ```yaml
-# ✅ CORRECT: install an explicit toolchain for Docker-based actions
-- name: Extract MSRV
-  id: deny-msrv
-  run: |
-    MSRV=$(bash scripts/read-toml-string.sh Cargo.toml rust-version package)
-    echo "version=$MSRV" >> "$GITHUB_OUTPUT"
-
-- name: Run cargo-deny
-  uses: EmbarkStudios/cargo-deny-action@v2.0.15
+- name: Install cargo-deny metadata toolchain
+  uses: dtolnay/rust-toolchain@v1
   with:
-    arguments: --all-features
-    rust-version: ${{ steps.deny-msrv.outputs.version }}
+    toolchain: ${{ steps.deny-msrv.outputs.version }}
+- name: Install cargo-deny
+  uses: taiki-e/install-action@v2.87.22
+  with:
+    tool: cargo-deny@0.20.2
+- name: Run cargo-deny
+  env:
+    RUSTUP_TOOLCHAIN: ${{ steps.deny-msrv.outputs.version }}
+  run: cargo deny --log-level warn --all-features check
 ```
 
-### When to Use This Pattern
-
-| Action Type                              | Needs Override? | Rationale                              |
-|------------------------------------------|-----------------|----------------------------------------|
-| Metadata-only (cargo-deny, cargo-audit)  | Yes             | Only reads lock files, no compilation  |
-| Compilation actions (build, test)        | No              | Needs exact toolchain for correctness  |
-| Linting actions (clippy)                 | No              | Lint results depend on Rust version    |
-| Formatting actions (rustfmt)             | Depends         | Format output may vary by version      |
-
-**Key Insight:** Metadata-only actions still need a deterministic toolchain setup.
-`with.rust-version` is more reliable than environment alias overrides
-(`RUSTUP_TOOLCHAIN=stable`), which can fail when `stable` is not preinstalled.
-
----
+Use the owning manifest for every separate Cargo graph. Install its explicit
+Rust toolchain before selecting it. Keep compilation and lint jobs on their
+existing toolchains. Cargo.lock v4 needs Cargo 1.78 or newer.
 
 ## 7. Schedule Trigger Guards
 

@@ -2100,6 +2100,85 @@ fn test_actionlint_runs_on_relevant_changes_without_a_static_weekly_rerun() {
             );
         }
     }
+    assert!(
+        extract_workflow_event_paths(&workflow, "pull_request")
+            .iter()
+            .any(|path| path == ".devcontainer/Dockerfile"),
+        "actionlint must validate changes to its consumed tool pin"
+    );
+    let install = extract_named_workflow_step(&workflow, "Install native actionlint")
+        .expect("native installer must replace the Docker wrapper");
+    for required in [
+        ".devcontainer/Dockerfile",
+        "ACTIONLINT_VERSION",
+        "ACTIONLINT_AMD64_SHA256",
+        "sha256sum -c",
+        "releases/download",
+    ] {
+        assert!(
+            install.contains(required),
+            "native actionlint installer must consume and verify {required}"
+        );
+    }
+    for required in ["shellcheck@0.11.0", "pyflakes==3.4.0", "fallback: none"] {
+        assert!(
+            workflow.contains(required),
+            "native actionlint must preserve pinned shell/Python validators through {required}"
+        );
+    }
+    for forbidden in [
+        "devops-actions/actionlint@",
+        "docker run",
+        "-shellcheck=",
+        "-pyflakes=",
+    ] {
+        assert!(
+            !workflow.contains(forbidden),
+            "native actionlint must avoid {forbidden}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_actionlint_logging_preserves_validation_and_tool_failure_status() {
+    let workflow = read_file(&repo_root().join(".github/workflows/actionlint.yml"));
+    let documents = Yaml::load_from_str(&workflow).expect("actionlint workflow parses");
+    let steps = documents[0]["jobs"]["actionlint"]["steps"]
+        .as_vec()
+        .unwrap();
+    let run = steps
+        .iter()
+        .find(|step| step.as_mapping_get("name").and_then(Yaml::as_str) == Some("Run actionlint"))
+        .unwrap()
+        .as_mapping_get("run")
+        .and_then(Yaml::as_str)
+        .expect("native actionlint run script");
+    for (case, status) in [
+        ("valid workflows", 0),
+        ("invalid workflows", 1),
+        ("tool unavailable", 127),
+    ] {
+        let temp_dir = unique_temp_dir("actionlint-status");
+        let script = format!(
+            "actionlint() {{ printf 'validator diagnostic\\n' >&2; return {status}; }}\n{run}"
+        );
+        let output = bash_command()
+            .args(["-c", &script])
+            .current_dir(&temp_dir)
+            .output()
+            .expect("run logging seam");
+        assert_eq!(
+            output.status.code(),
+            Some(status),
+            "{case}: preserve validator exit status"
+        );
+        assert!(
+            read_file(&temp_dir.path().join("actionlint-results.log"))
+                .contains("validator diagnostic"),
+            "{case}: retain diagnostics for upload"
+        );
+    }
 }
 
 #[test]
@@ -3714,8 +3793,28 @@ fn test_workflow_apt_update_sites_drop_broken_microsoft_mirrors() {
     let mut problems = Vec::new();
     let mut checked = 0usize;
 
-    for entry in collect_workflow_files(&workflows_dir) {
-        let path = entry.path();
+    let mut apt_files: Vec<PathBuf> = collect_workflow_files(&workflows_dir)
+        .into_iter()
+        .map(|entry| entry.path())
+        .collect();
+    for action in std::fs::read_dir(root.join(".github/actions")).expect("shared actions directory")
+    {
+        let action = action.expect("shared action entry");
+        if action.path().is_dir() {
+            apt_files.extend(
+                collect_workflow_files(&action.path())
+                    .into_iter()
+                    .map(|entry| entry.path()),
+            );
+        }
+    }
+    assert!(
+        apt_files
+            .iter()
+            .any(|path| path.ends_with("setup-docker-builder/action.yml")),
+        "apt guard must inspect the native builder action"
+    );
+    for path in apt_files {
         let content = read_file(&path);
         let filename = path.file_name().unwrap().to_string_lossy().to_string();
         let lines: Vec<&str> = content.lines().collect();
@@ -5670,7 +5769,52 @@ fn test_docker_publish_builds_multi_arch_manifest() {
         );
     }
 
-    // setup-buildx-action is required for multi-platform output; setup-qemu is
+    // CI must exercise the same platform manifest before publication.
+    let ci = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let ci_docs = Yaml::load_from_str(&ci).expect("CI workflow YAML parses");
+    let ci_steps = ci_docs[0]["jobs"]["docker"]["steps"]
+        .as_vec()
+        .expect("CI Docker steps");
+    let ci_build = ci_steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("uses")
+                .and_then(Yaml::as_str)
+                .is_some_and(|uses| uses.starts_with("docker/build-push-action@"))
+        })
+        .expect("CI Docker build");
+    let expected: BTreeSet<_> = REQUIRED_CONTAINER_PLATFORMS.iter().copied().collect();
+    for (lane, platforms) in [
+        (
+            "publication",
+            platforms_line
+                .trim()
+                .strip_prefix("platforms:")
+                .unwrap()
+                .trim(),
+        ),
+        (
+            "CI",
+            ci_build
+                .as_mapping_get("with")
+                .and_then(|with| with.as_mapping_get("platforms"))
+                .and_then(Yaml::as_str)
+                .expect("CI must build every publication platform"),
+        ),
+    ] {
+        assert_eq!(
+            platforms.split(',').map(str::trim).collect::<BTreeSet<_>>(),
+            expected,
+            "{lane}: build all supported platforms"
+        );
+    }
+    assert_eq!(
+        ci_build["with"]["load"].as_bool(),
+        Some(true),
+        "CI must load the multi-platform image for smoke tests"
+    );
+
+    // setup-buildx-action is required for multi-platform output; native QEMU is
     // required so the arm64/armv7 runtime stage (useradd/apt-get) can execute
     // under emulation (the Rust compile is cross-compiled, the runtime is not).
     assert!(
@@ -5679,9 +5823,243 @@ fn test_docker_publish_builds_multi_arch_manifest() {
          manifests cannot be produced by the classic builder."
     );
     assert!(
-        content.contains("docker/setup-qemu-action"),
-        "docker-publish.yml must set up docker/setup-qemu-action; multi-platform \
-         manifests cannot be produced by the classic builder."
+        content.contains("/.github/actions/setup-docker-builder"),
+        "docker-publish.yml must install native QEMU through the shared builder action."
+    );
+}
+
+fn docker_step_value<'a>(step: &'a Yaml<'_>, name: &str) -> Option<&'a Yaml<'a>> {
+    step.as_mapping()?
+        .iter()
+        .find_map(|(key, value)| (key.as_str() == Some(name)).then_some(value))
+}
+
+fn docker_step_field<'a>(step: &'a Yaml<'_>, name: &str) -> Option<&'a str> {
+    docker_step_value(step, name)?.as_str()
+}
+
+// Native QEMU and the Docker driver avoid Docker Hub bootstrap images.
+fn docker_mirror_steps_valid(steps: &[Yaml<'_>], builds: bool) -> bool {
+    let Some(mirror_index) = steps
+        .iter()
+        .position(|step| docker_step_field(step, "name") == Some("Prepare Docker builder"))
+    else {
+        return false;
+    };
+    let mirror = &steps[mirror_index];
+    if !docker_step_field(mirror, "uses")
+        .unwrap_or_default()
+        .ends_with("/.github/actions/setup-docker-builder")
+    {
+        return false;
+    }
+    let mut saw_buildx = false;
+    for (index, step) in steps.iter().enumerate() {
+        let action = docker_step_field(step, "uses").unwrap_or_default();
+        if action.starts_with("docker/setup-qemu-action@") {
+            return false;
+        }
+        let bootstrap = action.starts_with("docker/setup-buildx-action@");
+        let pulls = docker_step_field(step, "run")
+            .unwrap_or_default()
+            .contains("docker pull");
+        if bootstrap || pulls {
+            if index <= mirror_index
+                || docker_step_value(step, "if") != docker_step_value(mirror, "if")
+            {
+                return false;
+            }
+            if action.starts_with("docker/setup-buildx-action@") {
+                saw_buildx = true;
+                let with = docker_step_value(step, "with");
+                if with.and_then(|with| docker_step_field(with, "driver")) != Some("docker")
+                    || with
+                        .and_then(|with| docker_step_value(with, "buildkitd-config-inline"))
+                        .is_some()
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    saw_buildx == builds
+}
+
+#[test]
+fn test_docker_hub_mirrors_cover_bootstrap_and_builds() {
+    for (workflow, job, builds) in [
+        ("docker-publish.yml", "docker-publish", true),
+        ("ci.yml", "docker", true),
+    ] {
+        let text = read_file(&repo_root().join(".github/workflows").join(workflow));
+        let docs = Yaml::load_from_str(&text).expect("workflow YAML parses");
+        let steps = docs[0]["jobs"][job]["steps"]
+            .as_vec()
+            .expect("Docker job steps");
+        assert!(
+            docker_mirror_steps_valid(steps, builds),
+            "{workflow}: prepare the native Docker builder before Buildx and image pulls"
+        );
+        let mirror_index = steps
+            .iter()
+            .position(|step| docker_step_field(step, "name") == Some("Prepare Docker builder"))
+            .unwrap();
+        let first_pull = steps
+            .iter()
+            .position(|step| {
+                docker_step_field(step, "uses")
+                    .unwrap_or_default()
+                    .starts_with("docker/setup-")
+                    || docker_step_field(step, "run")
+                        .unwrap_or_default()
+                        .contains("docker pull")
+            })
+            .unwrap();
+        let mut missing_daemon = steps.clone();
+        missing_daemon.remove(mirror_index);
+        let mut late_daemon = steps.clone();
+        late_daemon.swap(mirror_index, first_pull);
+        let mut wrong_guard = steps.clone();
+        wrong_guard[mirror_index].as_mapping_mut().unwrap().insert(
+            Yaml::scalar_from_string("if".to_owned()),
+            Yaml::scalar_from_string("false".to_owned()),
+        );
+        for (case, invalid) in [
+            ("no runner mirror", missing_daemon),
+            ("runner mirror after first pull", late_daemon),
+            ("different execution guard", wrong_guard),
+        ] {
+            assert!(
+                !docker_mirror_steps_valid(&invalid, builds),
+                "{workflow}: must reject {case}"
+            );
+        }
+        if builds {
+            let buildx_index = steps
+                .iter()
+                .position(|step| {
+                    docker_step_field(step, "uses")
+                        .unwrap_or_default()
+                        .starts_with("docker/setup-buildx-action@")
+                })
+                .unwrap();
+            let mut missing_buildkit = steps.clone();
+            missing_buildkit[buildx_index]["with"]["driver"] =
+                Yaml::scalar_from_string("docker-container".to_owned());
+            assert!(
+                !docker_mirror_steps_valid(&missing_buildkit, builds),
+                "{workflow}: must reject a Docker Hub BuildKit container bootstrap"
+            );
+        }
+    }
+    let publish = read_file(&repo_root().join(".github/workflows/docker-publish.yml"));
+    assert!(
+        extract_named_workflow_step(
+            &extract_workflow_job_block(&publish, "docker-publish").unwrap(),
+            "Checkout publication tooling"
+        )
+        .unwrap()
+        .contains(".github/actions/setup-docker-builder"),
+        "publication tooling must include the shared local action"
+    );
+    for (workflow, event) in [
+        ("docker-publish.yml", "push"),
+        ("actionlint.yml", "pull_request"),
+    ] {
+        let text = read_file(&repo_root().join(".github/workflows").join(workflow));
+        assert!(
+            extract_workflow_event_paths(&text, event)
+                .iter()
+                .any(|path| path == ".github/actions/setup-docker-builder/**"
+                    || path == ".github/actions/**"),
+            "{workflow}: changes to the shared action must trigger validation"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_docker_hub_mirror_merge_preserves_runner_configuration() {
+    let filter_pattern = Regex::new(r"jq '([^']+)'").unwrap();
+    let workflow = "setup-docker-builder/action.yml";
+    let step = read_file(&repo_root().join(".github/actions").join(workflow));
+    let captures = filter_pattern.captures(&step).expect("jq merge filter");
+    let expression = format!("$config | {}", &captures[1]);
+    for (case, input, expected) in [
+        (
+            "fresh runner",
+            "{}",
+            Some(
+                serde_json::json!({"registry-mirrors": ["https://mirror.gcr.io"], "features":{"containerd-snapshotter":true}}),
+            ),
+        ),
+        (
+            "preserve options and mirror order",
+            r#"{"debug":true,"registry-mirrors":["https://z.example","https://a.example"]}"#,
+            Some(
+                serde_json::json!({"debug":true,"registry-mirrors":["https://mirror.gcr.io","https://z.example","https://a.example"],"features":{"containerd-snapshotter":true}}),
+            ),
+        ),
+        (
+            "deduplicate preferred mirror",
+            r#"{"registry-mirrors":["https://z.example","https://mirror.gcr.io"]}"#,
+            Some(
+                serde_json::json!({"registry-mirrors":["https://mirror.gcr.io","https://z.example"],"features":{"containerd-snapshotter":true}}),
+            ),
+        ),
+        (
+            "preserve existing feature settings",
+            r#"{"features":{"buildkit":true,"containerd-snapshotter":false}}"#,
+            Some(
+                serde_json::json!({"features":{"buildkit":true,"containerd-snapshotter":true},"registry-mirrors":["https://mirror.gcr.io"]}),
+            ),
+        ),
+        (
+            "invalid feature configuration",
+            r#"{"features":"bad"}"#,
+            None,
+        ),
+        ("invalid existing JSON", "{", None),
+        ("invalid mirror type", r#"{"registry-mirrors":"bad"}"#, None),
+    ] {
+        let output = Command::new("jq")
+            .args(["--null-input", "--argjson", "config", input, &expression])
+            .output()
+            .expect("jq must be available for workflow validation");
+        assert_eq!(
+            output.status.success(),
+            expected.is_some(),
+            "{workflow}: {case}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if let Some(expected) = expected {
+            let actual: serde_json::Value =
+                serde_json::from_slice(&output.stdout).expect("merged JSON");
+            assert_eq!(actual, expected, "{workflow}: {case}");
+        }
+    }
+    for required in [
+        "containerd-snapshotter",
+        "qemu-user-static binfmt-support",
+        "update-binfmts --enable",
+        "qemu-aarch64 qemu-arm",
+        "flags:.*F",
+        "Docker Engine 28",
+    ] {
+        assert!(
+            step.contains(required),
+            "native builder setup must retain {required}"
+        );
+    }
+    let merge = step
+        .find(r#"> "$config_dir/merged.json""#)
+        .expect("merge writes a temporary file");
+    let install = step
+        .find("sudo install")
+        .expect("install follows a successful merge");
+    assert!(
+        merge < install,
+        "{workflow}: validate JSON before replacing the live daemon configuration"
     );
 }
 
@@ -6027,32 +6405,14 @@ fn test_ci_deny_job_skips_dependency_irrelevant_pull_requests() {
                 format!("{working_directory}/{file}")
             }
         };
-        if let Some(uses) = step.as_mapping_get("uses").and_then(Yaml::as_str) {
-            if uses.starts_with("EmbarkStudios/cargo-deny-action@") {
-                let manifest = step
-                    .as_mapping_get("with")
-                    .and_then(|with| with.as_mapping_get("manifest-path"))
-                    .and_then(Yaml::as_str)
-                    .unwrap_or("Cargo.toml");
-                consumed.insert(manifest.to_owned());
-                // cargo-deny reads its policy from the manifest's directory by
-                // default, so each sub-graph step consumes its own `deny.toml`
-                // — relaxing a sub-graph policy IS a dependency-relevant change.
-                let manifest_dir = std::path::Path::new(manifest)
-                    .parent()
-                    .and_then(std::path::Path::to_str)
-                    .unwrap_or(".");
-                if manifest_dir == "." {
-                    consumed.insert("deny.toml".to_owned());
-                } else {
-                    consumed.insert(format!("{manifest_dir}/deny.toml"));
-                }
-            }
-            continue;
-        }
         let Some(run) = step.as_mapping_get("run").and_then(Yaml::as_str) else {
             continue;
         };
+        if let Some(manifest) = cargo_deny_manifest(run) {
+            consumed.insert(manifest.clone());
+            // The policy resides beside each standalone manifest.
+            consumed.insert(cargo_deny_policy_path(&manifest));
+        }
         if run.contains("cargo audit") {
             let mut scanned = false;
             for line in run.lines() {
@@ -9224,97 +9584,177 @@ fn test_github_actions_use_version_refs_not_commit_hashes() {
     }
 }
 
+/// Return the graph policy in the slash-separated namespace used by Git diffs.
+fn cargo_deny_policy_path(manifest: &str) -> String {
+    let manifest = manifest.replace('\\', "/");
+    manifest.rsplit_once('/').map_or_else(
+        || "deny.toml".to_owned(),
+        |(directory, _)| format!("{directory}/deny.toml"),
+    )
+}
+
 #[test]
-fn test_cargo_deny_action_minimum_version() {
-    // This test ensures cargo-deny-action is at least v2.0.15
-    // v2.0.15+ includes important security and stability fixes
-    //
-    // Background: Earlier versions had issues with:
-    // - Advisory database sync failures
-    // - False positives in license checking
-    // - Performance issues with large dependency graphs
+fn test_cargo_deny_policy_paths_use_git_separators_on_every_host() {
+    for (case, manifest, expected) in [
+        ("root graph", "Cargo.toml", "deny.toml"),
+        (
+            "native graph",
+            "clients/native/Cargo.toml",
+            "clients/native/deny.toml",
+        ),
+        (
+            "Windows native graph",
+            r"clients\native\Cargo.toml",
+            "clients/native/deny.toml",
+        ),
+        (
+            "Windows WASM graph",
+            r"clients\fortress-wasm\Cargo.toml",
+            "clients/fortress-wasm/deny.toml",
+        ),
+        (
+            "mixed host separators",
+            r"clients/fortress\Cargo.toml",
+            "clients/fortress/deny.toml",
+        ),
+        ("standalone fuzz graph", "fuzz/Cargo.toml", "fuzz/deny.toml"),
+    ] {
+        let policy = cargo_deny_policy_path(manifest);
+        assert_eq!(
+            policy, expected,
+            "{case}: policy must use Git path separators"
+        );
+        assert!(
+            !policy.contains('\\'),
+            "{case}: Windows separators must not enter the filter inventory"
+        );
+        assert!(
+            glob_matches("**/deny.toml", &policy) || policy == "deny.toml",
+            "{case}: actual policy glob must cover the normalized path"
+        );
+        assert!(
+            !glob_matches("**/Cargo.toml", &policy),
+            "{case}: manifest-only filters must not cover policy changes"
+        );
+    }
+}
 
-    let root = repo_root();
-    let ci_workflow = root.join(".github/workflows/ci.yml");
-    let content = read_file(&ci_workflow);
+/// Identify the manifest read by a native cargo-deny policy command.
+fn cargo_deny_manifest(run: &str) -> Option<String> {
+    let command = run
+        .lines()
+        .find(|line| line.trim_start().starts_with("cargo deny "))?;
+    let args: Vec<_> = command.split_whitespace().collect();
+    Some(
+        args.windows(2)
+            .find(|pair| pair[0] == "--manifest-path")
+            .map_or("Cargo.toml", |pair| pair[1])
+            .to_owned(),
+    )
+}
 
-    // Find the cargo-deny-action reference
-    let mut found_cargo_deny = false;
-    let mut violations = Vec::new();
-
-    for (line_num, line) in content.lines().enumerate() {
-        let line_num = line_num + 1; // 1-indexed
-        let trimmed = line.trim();
-
-        let Some(uses_value) = extract_uses_value(trimmed) else {
-            continue;
-        };
-
-        if uses_value.contains("cargo-deny-action") {
-            found_cargo_deny = true;
-
-            // Extract and validate action ref
-            let Some((_, action_ref)) = parse_remote_action_reference(uses_value) else {
-                violations.push(format!(
-                    "Line {line_num}: cargo-deny-action reference is malformed: {trimmed}"
-                ));
+#[test]
+fn test_cargo_deny_audits_use_pinned_native_binary() {
+    // Issue #841: Docker actions pull their base image before any job step can
+    // authenticate. Install the same cargo-deny release directly on the runner.
+    for workflow in [
+        "ci.yml",
+        "webrtc-interop.yml",
+        "fortress-interop.yml",
+        "fortress-wasm-interop.yml",
+    ] {
+        let content = read_live_file(&repo_root().join(".github/workflows").join(workflow));
+        assert!(
+            !content.contains("EmbarkStudios/cargo-deny-action@"),
+            "{workflow} must avoid the Docker Hub action preparation pull"
+        );
+        let documents = Yaml::load_from_str(&content).expect("workflow YAML must parse");
+        let jobs = documents[0]
+            .as_mapping_get("jobs")
+            .and_then(Yaml::as_mapping)
+            .expect("workflow jobs");
+        let mut audit_count = 0;
+        for (_, job) in jobs {
+            let Some(steps) = job.as_mapping_get("steps").and_then(Yaml::as_sequence) else {
                 continue;
             };
-
-            // Parse version (must be vX.Y.Z for this minimum-version check)
-            if !action_ref.starts_with('v') {
-                violations.push(format!(
-                    "Line {line_num}: cargo-deny-action must use an explicit version like @vX.Y.Z, found: @{action_ref}"
-                ));
+            let audits: Vec<_> = steps
+                .iter()
+                .enumerate()
+                .filter(|(_, step)| {
+                    step.as_mapping_get("run")
+                        .and_then(Yaml::as_str)
+                        .is_some_and(|run| run.starts_with("cargo deny "))
+                })
+                .collect();
+            if audits.is_empty() {
                 continue;
             }
-
-            let version_numbers = action_ref.trim_start_matches('v');
-            let version_parts: Vec<&str> = version_numbers.split('.').collect();
-
-            if version_parts.len() < 3 {
-                violations.push(format!(
-                    "Line {line_num}: Invalid version format (expected vX.Y.Z): {action_ref}"
-                ));
-                continue;
-            }
-
-            // Parse major, minor, patch
-            let major: u32 = version_parts[0].parse().unwrap_or(0);
-            let minor: u32 = version_parts[1].parse().unwrap_or(0);
-            let patch: u32 = version_parts[2].parse().unwrap_or(0);
-
-            // Check against minimum version: v2.0.15
-            let min_major = 2;
-            let min_minor = 0;
-            let min_patch = 15;
-
-            let is_sufficient = major > min_major
-                || (major == min_major && minor > min_minor)
-                || (major == min_major && minor == min_minor && patch >= min_patch);
-
-            if !is_sufficient {
-                violations.push(format!(
-                    "Line {line_num}: cargo-deny-action version too old: {action_ref}\n  \
-                     Minimum required: v{min_major}.{min_minor}.{min_patch}\n  \
-                     Found: v{major}.{minor}.{patch}\n  \
-                     Please update to v2.0.15 or newer for security and stability fixes."
-                ));
+            audit_count += audits.len();
+            let installer = steps
+                .iter()
+                .position(|step| {
+                    step.as_mapping_get("uses")
+                        .and_then(Yaml::as_str)
+                        .is_some_and(|uses| {
+                            parse_remote_action_reference(uses).is_some_and(
+                                |(action, reference)| {
+                                    action == "taiki-e/install-action"
+                                        && is_action_version_ref(reference)
+                                },
+                            )
+                        })
+                        && step
+                            .as_mapping_get("with")
+                            .and_then(|with| with.as_mapping_get("tool"))
+                            .and_then(Yaml::as_str)
+                            == Some("cargo-deny@0.20.2")
+                })
+                .expect(
+                    "each audit job must install cargo-deny 0.20.2 from a pinned native installer",
+                );
+            for (index, step) in audits {
+                assert!(
+                    installer < index,
+                    "{workflow}: binary installation must precede each audit"
+                );
+                let run = step.as_mapping_get("run").and_then(Yaml::as_str).unwrap();
+                assert!(
+                    run.contains("--log-level warn") && run.contains("--all-features check"),
+                    "{workflow}: native audit must retain all policy checks and feature coverage"
+                );
+                let toolchain = step
+                    .as_mapping_get("env")
+                    .and_then(|env| env.as_mapping_get("RUSTUP_TOOLCHAIN"))
+                    .and_then(Yaml::as_str)
+                    .expect("each audit must select a concrete metadata toolchain");
+                let expected = if run.contains("clients/fortress-wasm/Cargo.toml") {
+                    "1.94.0"
+                } else {
+                    "${{ steps.deny-msrv.outputs.version }}"
+                };
+                assert_eq!(
+                    toolchain, expected,
+                    "{workflow}: metadata toolchain contract"
+                );
+                assert!(
+                    steps[..index].iter().any(|step| step
+                        .as_mapping_get("uses")
+                        .and_then(Yaml::as_str)
+                        .is_some_and(|uses| uses.starts_with("dtolnay/rust-toolchain@"))
+                        && step
+                            .as_mapping_get("with")
+                            .and_then(|with| with.as_mapping_get("toolchain"))
+                            .and_then(Yaml::as_str)
+                            == Some(toolchain)),
+                    "{workflow}: selected toolchain must be installed before audit"
+                );
             }
         }
-    }
-
-    assert!(
-        found_cargo_deny,
-        "cargo-deny-action not found in CI workflow.\n\
-         Expected to find 'uses: EmbarkStudios/cargo-deny-action@...' in {}",
-        ci_workflow.display()
-    );
-
-    if !violations.is_empty() {
-        panic!(
-            "cargo-deny-action version check failed:\n\n{}\n",
-            violations.join("\n")
+        assert_eq!(
+            audit_count,
+            if workflow == "ci.yml" { 5 } else { 1 },
+            "{workflow}: audit coverage"
         );
     }
 }
@@ -18472,23 +18912,12 @@ fn test_validate_ci_awk_syntax_check_supplies_an_input_filename() {
 
 #[test]
 fn test_cargo_deny_uses_explicit_msrv_toolchain_input() {
-    // This test prevents regression of cargo-deny toolchain selection in the
-    // Dockerized action runtime.
-    //
-    // Root cause: relying on env overrides like RUSTUP_TOOLCHAIN=stable can fail
-    // when that alias is not preinstalled inside the action container.
-    //
-    // Fix: Extract MSRV from Cargo.toml in a dedicated step and pass it via the
-    // action's `rust-version` input, so the action installs the exact toolchain
-    // before running cargo-deny.
-
+    // Metadata-only audits must install and select Cargo.toml's concrete
+    // MSRV. An uninstalled alias cannot override rust-toolchain.toml reliably.
     let root = repo_root();
     let ci_workflow = root.join(".github/workflows/ci.yml");
     let content = read_file(&ci_workflow);
-    // Presence checks below assert against the LIVE view so a commented-out
-    // `deny:` job or MSRV-wiring line cannot satisfy them; the RUSTUP_TOOLCHAIN
-    // absence check stays on raw `content` (a commented occurrence is still a
-    // real occurrence worth flagging).
+    // Commented configuration must not satisfy the wiring requirements.
     let content_live = strip_comment_lines(&content);
 
     assert!(
@@ -18510,8 +18939,8 @@ fn test_cargo_deny_uses_explicit_msrv_toolchain_input() {
             "echo \"version=$MSRV\" >> \"$GITHUB_OUTPUT\"",
         ),
         (
-            "cargo-deny rust-version input wired to deny-msrv output",
-            "rust-version: ${{ steps.deny-msrv.outputs.version }}",
+            "cargo-deny toolchain selected from deny-msrv output",
+            "RUSTUP_TOOLCHAIN: ${{ steps.deny-msrv.outputs.version }}",
         ),
     ];
 
@@ -18526,19 +18955,16 @@ fn test_cargo_deny_uses_explicit_msrv_toolchain_input() {
         missing.is_empty(),
         "cargo-deny workflow configuration is incomplete:\n\n{}\n\n\
          The deny job must extract MSRV and pass it to cargo-deny via \
-         `with.rust-version` to avoid container-specific toolchain alias failures.\n\
+         `env.RUSTUP_TOOLCHAIN` after installing the selected metadata toolchain.\n\
          File: {}",
         missing.join("\n"),
         ci_workflow.display()
     );
 
-    // Guard against regressing back to env-based alias overrides that caused
-    // container-specific failures in CI.
+    // Guard against uninstalled alias overrides.
     assert!(
-        !content.contains("RUSTUP_TOOLCHAIN:"),
-        "ci.yml deny job should not set RUSTUP_TOOLCHAIN directly.\n\
-         Use cargo-deny `rust-version` input instead to ensure installation\n\
-         and deterministic toolchain selection inside the action container.\n\
+        !content_live.contains("RUSTUP_TOOLCHAIN: stable"),
+        "ci.yml deny job must select the installed concrete metadata toolchain.\n\
          File: {}",
         ci_workflow.display()
     );
@@ -21390,17 +21816,12 @@ fn test_fuzz_dependency_resolution_is_locked_in_ci() {
                 == Some("Run cargo-deny (fuzz package)")
         })
         .unwrap_or_else(|| panic!("ci.yml must define the live fuzz cargo-deny step"));
-    let fuzz_deny_action = fuzz_deny
-        .as_mapping_get("uses")
-        .and_then(Yaml::as_str)
-        .and_then(parse_remote_action_reference);
     assert!(
-        fuzz_deny_action.is_some_and(|(action, reference)| {
-            action == "EmbarkStudios/cargo-deny-action" && is_action_version_ref(reference)
-        }) && fuzz_deny
-            .as_mapping_get("with")
-            .and_then(|with| with.as_mapping_get("manifest-path"))
+        fuzz_deny
+            .as_mapping_get("run")
             .and_then(Yaml::as_str)
+            .and_then(cargo_deny_manifest)
+            .as_deref()
             == Some("fuzz/Cargo.toml")
             && ci_commands
                 .iter()
@@ -27796,17 +28217,10 @@ fn test_deny_job_covers_every_tracked_cargo_graph() {
         .unwrap_or_else(|| panic!("ci.yml must define jobs.deny.steps"));
     let configured = steps
         .iter()
-        .filter(|step| {
-            step.as_mapping_get("uses")
+        .filter_map(|step| {
+            step.as_mapping_get("run")
                 .and_then(Yaml::as_str)
-                .is_some_and(|uses| uses.starts_with("EmbarkStudios/cargo-deny-action@"))
-        })
-        .map(|step| {
-            step.as_mapping_get("with")
-                .and_then(|with| with.as_mapping_get("manifest-path"))
-                .and_then(Yaml::as_str)
-                .unwrap_or("Cargo.toml")
-                .to_owned()
+                .and_then(cargo_deny_manifest)
         })
         .collect::<BTreeSet<_>>();
     let expected = tracked_cargo_lockfiles(&root)
@@ -30961,6 +31375,23 @@ fn test_turn_interop_gate_is_local_pinned_and_fail_closed() {
     let workflow = read_live_file(&root.join(".github/workflows/turn-interop.yml"));
     let runner = read_file(&root.join("scripts/run-turn-interop.sh"));
     let test = read_file(&root.join("clients/native/tests/turn_interop_e2e.rs"));
+    let expected_image = "ghcr.io/coturn/coturn:4.12.0-alpine@sha256:faca4aa57efc436916c31546f3867bd1a3fb1077723291bcfba0bf814bcaf48a";
+    let compose = read_file(&root.join("docker-compose.yml"));
+    let compose_docs = Yaml::load_from_str(&compose).expect("Compose YAML parses");
+    assert_eq!(
+        compose_docs[0]["services"]["coturn"]["image"].as_str(),
+        Some(expected_image)
+    );
+    let workflow_docs = Yaml::load_from_str(&workflow).expect("TURN workflow YAML parses");
+    assert_eq!(
+        workflow_docs[0]["env"]["COTURN_IMAGE"]
+            .as_str()
+            .map(str::trim),
+        Some(expected_image)
+    );
+    assert!(runner.contains(&format!("COTURN_IMAGE=\"{expected_image}\"")));
+    let guide = read_file(&root.join("docs/deployment-turn.md"));
+    assert!(guide.contains(&format!("docker pull {expected_image}")));
 
     assert_workflow_triggers_on_paths(
         &workflow,
@@ -30996,7 +31427,7 @@ fn test_turn_interop_gate_is_local_pinned_and_fail_closed() {
     }
 
     for required in [
-        "coturn/coturn:4.12.0-alpine@sha256:faca4aa57efc436916c31546f3867bd1a3fb1077723291bcfba0bf814bcaf48a",
+        "ghcr.io/coturn/coturn:4.12.0-alpine@sha256:faca4aa57efc436916c31546f3867bd1a3fb1077723291bcfba0bf814bcaf48a",
         "network_create_args=(--internal)",
         "--pull=never",
         "BIND_HOST=\"${SF_TURN_INTEROP_BIND_HOST:-127.0.0.1}\"",
@@ -32414,7 +32845,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "cargo +\"$RUST_NIGHTLY\" clippy",
         "actions/upload-artifact@v7.0.1",
         "if: failure()",
-        "rust-version: 1.94.0",
+        "RUSTUP_TOOLCHAIN: 1.94.0",
         "schedule:",
         "browser: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '[\"firefox\"]' || '[\"chromium\"]') }}",
         "FORTRESS_WASM_BROWSER: ${{ matrix.browser }}",

@@ -656,46 +656,49 @@ jobs:
             exit 1
           fi
           echo "version=$MSRV" >> "$GITHUB_OUTPUT"
+      - name: Install cargo-deny metadata toolchain
+        if: steps.dep-relevance.outputs.relevant == 'true'
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.deny-msrv.outputs.version }}
+      - name: Install cargo-deny
+        if: steps.dep-relevance.outputs.relevant == 'true'
+        uses: taiki-e/install-action@v2.87.22
+        with:
+          tool: cargo-deny@0.20.2
       - name: Run cargo-deny
         # No !cancelled(): like the original unguarded step, a failure in an
         # earlier step still short-circuits the deny pass; the gate clause is
         # what lets a dependency-irrelevant pull request skip it entirely.
         if: steps.dep-relevance.outputs.relevant == 'true'
-        uses: EmbarkStudios/cargo-deny-action@v2.1.1
-        with:
-          arguments: --all-features
-          # Ensure the Dockerized action installs and uses a concrete toolchain
-          # before executing cargo-deny. This avoids relying on preinstalled
-          # aliases like `stable` that may be absent in the container image.
-          rust-version: ${{ steps.deny-msrv.outputs.version }}
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.deny-msrv.outputs.version }}
+        run: cargo deny --log-level warn --manifest-path Cargo.toml --all-features check
       - name: Run cargo-deny (native reference client)
         if: steps.dep-relevance.outputs.relevant == 'true'
-        uses: EmbarkStudios/cargo-deny-action@v2.1.1
-        with:
-          manifest-path: clients/native/Cargo.toml
-          arguments: --all-features
-          rust-version: ${{ steps.deny-msrv.outputs.version }}
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.deny-msrv.outputs.version }}
+        run: cargo deny --log-level warn --manifest-path clients/native/Cargo.toml --all-features check
       - name: Run cargo-deny (fuzz package)
         if: steps.dep-relevance.outputs.relevant == 'true'
-        uses: EmbarkStudios/cargo-deny-action@v2.1.1
-        with:
-          manifest-path: fuzz/Cargo.toml
-          arguments: --all-features
-          rust-version: ${{ steps.deny-msrv.outputs.version }}
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.deny-msrv.outputs.version }}
+        run: cargo deny --log-level warn --manifest-path fuzz/Cargo.toml --all-features check
       - name: Run cargo-deny (Fortress fixture)
         if: steps.dep-relevance.outputs.relevant == 'true'
-        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.deny-msrv.outputs.version }}
+        run: cargo deny --log-level warn --manifest-path clients/fortress/Cargo.toml --all-features check
+      - name: Install Fortress WASM metadata toolchain
+        if: steps.dep-relevance.outputs.relevant == 'true'
+        uses: dtolnay/rust-toolchain@v1
         with:
-          manifest-path: clients/fortress/Cargo.toml
-          arguments: --all-features
-          rust-version: ${{ steps.deny-msrv.outputs.version }}
+          toolchain: 1.94.0
       - name: Run cargo-deny (Fortress WASM fixture)
         if: steps.dep-relevance.outputs.relevant == 'true'
-        uses: EmbarkStudios/cargo-deny-action@v2.1.1
-        with:
-          manifest-path: clients/fortress-wasm/Cargo.toml
-          arguments: --all-features
-          rust-version: 1.94.0
+        env:
+          RUSTUP_TOOLCHAIN: 1.94.0
+        run: cargo deny --log-level warn --manifest-path clients/fortress-wasm/Cargo.toml --all-features check
       - name: Install Node.js for npm audits
         if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         uses: actions/setup-node@v7.0.0
@@ -910,7 +913,7 @@ jobs:
                 RELEVANT="true"
                 break
                 ;;
-              Dockerfile|.dockerignore|.github/workflows/ci.yml|.github/workflows/docker-publish.yml)
+              Dockerfile|.dockerignore|.github/workflows/ci.yml|.github/workflows/docker-publish.yml|.github/actions/setup-docker-builder/**)
                 RELEVANT="true"
                 break
                 ;;
@@ -918,12 +921,27 @@ jobs:
           done < changed-files.txt
           echo "Image-relevant change: $RELEVANT"
           echo "relevant=$RELEVANT" >> "$GITHUB_OUTPUT"
+      - name: Prepare Docker builder
+        if: steps.image-relevance.outputs.relevant == 'true'
+        uses: ./.github/actions/setup-docker-builder
+
       - name: Set up Docker Buildx
         if: steps.image-relevance.outputs.relevant == 'true'
         # Buildx unlocks the GitHub Actions layer cache below. Mirrors the proven
         # pattern in docker-publish.yml (same pinned action versions), turning a
         # cold ~3-5 min image build into a warm sub-minute one on cache hits.
         uses: docker/setup-buildx-action@v4.4.1
+        with:
+          # Use the daemon's embedded BuildKit without pulling a builder image.
+          driver: docker
+      - name: Verify emulated runtime platforms
+        if: steps.image-relevance.outputs.relevant == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for platform in linux/arm64 linux/arm/v7; do
+            docker run --rm --platform "$platform" debian:bookworm-slim uname -m
+          done
       - name: Build Docker image
         if: steps.image-relevance.outputs.relevant == 'true'
         uses: docker/build-push-action@v7.4.0
@@ -932,6 +950,7 @@ jobs:
           # load (not push): import the built image into the local Docker daemon
           # so the smoke test below can `docker run` it.
           load: true
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
           tags: signal-fish-server:ci
           # Reads are always safe; only EXPORT the layer cache from same-repo runs.
           # A fork PR gets a read-only GITHUB_TOKEN that cannot write the Actions
