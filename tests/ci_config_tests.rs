@@ -5714,7 +5714,8 @@ fn docker_mirror_steps_valid(steps: &[Yaml<'_>], builds: bool) -> bool {
     for (index, step) in steps.iter().enumerate() {
         let action = docker_step_field(step, "uses").unwrap_or_default();
         let bootstrap = action.starts_with("docker/setup-qemu-action@")
-            || action.starts_with("docker/setup-buildx-action@");
+            || action.starts_with("docker/setup-buildx-action@")
+            || action.starts_with("devops-actions/actionlint@");
         let pulls = docker_step_field(step, "run")
             .unwrap_or_default()
             .contains("docker pull");
@@ -5745,7 +5746,7 @@ fn test_docker_hub_mirrors_cover_bootstrap_and_builds() {
     for (workflow, job, builds) in [
         ("docker-publish.yml", "docker-publish", true),
         ("ci.yml", "docker", true),
-        ("turn-interop.yml", "turn-interop", false),
+        ("actionlint.yml", "actionlint", false),
     ] {
         let text = read_file(&repo_root().join(".github/workflows").join(workflow));
         let docs = Yaml::load_from_str(&text).expect("workflow YAML parses");
@@ -5763,6 +5764,9 @@ fn test_docker_hub_mirrors_cover_bootstrap_and_builds() {
                 docker_step_field(step, "uses")
                     .unwrap_or_default()
                     .starts_with("docker/setup-")
+                    || docker_step_field(step, "uses")
+                        .unwrap_or_default()
+                        .starts_with("devops-actions/actionlint@")
                     || docker_step_field(step, "run")
                         .unwrap_or_default()
                         .contains("docker pull")
@@ -5816,13 +5820,14 @@ fn test_docker_hub_mirrors_cover_bootstrap_and_builds() {
     );
     for (workflow, event) in [
         ("docker-publish.yml", "push"),
-        ("turn-interop.yml", "pull_request"),
+        ("actionlint.yml", "pull_request"),
     ] {
         let text = read_file(&repo_root().join(".github/workflows").join(workflow));
         assert!(
             extract_workflow_event_paths(&text, event)
                 .iter()
-                .any(|path| path == ".github/actions/configure-docker-mirror/**"),
+                .any(|path| path == ".github/actions/configure-docker-mirror/**"
+                    || path == ".github/actions/**"),
             "{workflow}: changes to the shared action must trigger validation"
         );
     }
@@ -31145,6 +31150,23 @@ fn test_turn_interop_gate_is_local_pinned_and_fail_closed() {
     let workflow = read_live_file(&root.join(".github/workflows/turn-interop.yml"));
     let runner = read_file(&root.join("scripts/run-turn-interop.sh"));
     let test = read_file(&root.join("clients/native/tests/turn_interop_e2e.rs"));
+    let expected_image = "ghcr.io/coturn/coturn:4.12.0-alpine@sha256:faca4aa57efc436916c31546f3867bd1a3fb1077723291bcfba0bf814bcaf48a";
+    let compose = read_file(&root.join("docker-compose.yml"));
+    let compose_docs = Yaml::load_from_str(&compose).expect("Compose YAML parses");
+    assert_eq!(
+        compose_docs[0]["services"]["coturn"]["image"].as_str(),
+        Some(expected_image)
+    );
+    let workflow_docs = Yaml::load_from_str(&workflow).expect("TURN workflow YAML parses");
+    assert_eq!(
+        workflow_docs[0]["env"]["COTURN_IMAGE"]
+            .as_str()
+            .map(str::trim),
+        Some(expected_image)
+    );
+    assert!(runner.contains(&format!("COTURN_IMAGE=\"{expected_image}\"")));
+    let guide = read_file(&root.join("docs/deployment-turn.md"));
+    assert!(guide.contains(&format!("docker pull {expected_image}")));
 
     assert_workflow_triggers_on_paths(
         &workflow,
@@ -31180,7 +31202,7 @@ fn test_turn_interop_gate_is_local_pinned_and_fail_closed() {
     }
 
     for required in [
-        "coturn/coturn:4.12.0-alpine@sha256:faca4aa57efc436916c31546f3867bd1a3fb1077723291bcfba0bf814bcaf48a",
+        "ghcr.io/coturn/coturn:4.12.0-alpine@sha256:faca4aa57efc436916c31546f3867bd1a3fb1077723291bcfba0bf814bcaf48a",
         "network_create_args=(--internal)",
         "--pull=never",
         "BIND_HOST=\"${SF_TURN_INTEROP_BIND_HOST:-127.0.0.1}\"",

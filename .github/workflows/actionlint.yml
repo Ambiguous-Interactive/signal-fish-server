@@ -37,6 +37,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
+      - name: Configure Docker Hub mirror
+        uses: ./.github/actions/configure-docker-mirror
       - name: Run actionlint
         id: actionlint
         uses: devops-actions/actionlint@v0.1.13

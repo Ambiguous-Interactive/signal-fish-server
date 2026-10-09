@@ -516,6 +516,13 @@ and explicit metadata toolchain. The central CI relevance gate and manual
 interop audit gates still apply. Native installation removes the Docker image
 preparation boundary; it still depends on external tool and advisory downloads.
 
+Hosted PR CI also exposed the workflow linter's runtime Docker pull and a
+coturn cache miss. The linter now configures the same daemon mirror before its
+pinned action runs. The TURN profile and offline harness use the official
+GHCR coturn image with the same `faca4aa5` manifest digest. Registry inspection
+confirmed all seven platform descriptors match that pinned manifest. The
+registry change alters the pull location, not the coturn version or image bytes.
+
 ### Session 383 physical reconnect-response loss
 
 The A05/A06 experiment uses a real WebSocket relay between two TCP connections.
