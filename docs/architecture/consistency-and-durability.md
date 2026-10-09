@@ -46,6 +46,12 @@ Neither queue commit nor WebSocket write completion proves a disk flush,
 replica quorum, client application observation, or end-to-end gameplay-state
 commit.
 
+A reconnect consumes the old token when its baseline is queued. If the
+connection fails before the client receives the rotated token in
+`Reconnected`, the client can lose its ability to reclaim the seat. The
+protocol does not acknowledge receipt or retain the old token for retries
+after this commit. Applications must support recovery through a fresh join.
+
 ## Additional disconnect/outage exposure bound
 
 `Reconnected.missed_events` contains bounded **control** replay only. It never
@@ -119,17 +125,25 @@ but permits no steady-rate admission. See the
 
 Control replay has a different contract:
 
-- `replay: "complete"` means every replayable control event after the recorded
-  cursor is present;
+- `replay: "complete"` means the ring evicted no event after the recorded
+  server-side disconnect cursor;
 - `replay: "truncated"` means the bounded ring evicted at least one required
   event;
 - `replay: "unavailable"` means event replay is disabled; and
 - in every v3 case, the `Reconnected` membership fields and
   `sender_watermarks` are the authoritative fresh baseline.
 
-The replay suffix is a convenience for applying changes. It is not the source
-of truth after reconnect. `ReconnectReplay.tla` proves the completeness status,
-and `EndToEndGapAccountability.tla` proves that snapshot replacement plus
+The server filters the reconnecting player's own membership events and
+authority events that disagree with the current authority. These omissions
+do not change `complete` to `truncated`. The cursor is not a client receipt
+acknowledgement, so `complete` does not cover an old socket's unread tail.
+
+Clients can ignore the historical events. If they process them, they must do
+so before replacing room state with the snapshot and applying sender
+watermarks. Replaying an old `PlayerJoined` after the snapshot can overwrite
+newer peer metadata. This rule applies to every replay status.
+`ReconnectReplay.tla` models ring completeness before recipient filtering.
+`EndToEndGapAccountability.tla` models how snapshot replacement plus
 per-sender watermark re-baselining heals a truncated or socket-lost tail.
 
 ## Client obligations

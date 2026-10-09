@@ -1832,7 +1832,8 @@ impl EnhancedGameServer {
 
         // Complete only after `Reconnected` is queued and the restored player is
         // visible to room routing. A failure before this point releases the claim
-        // for retry, so the token is never consumed without a delivered baseline.
+        // for retry. Queue admission consumes the token; a later socket failure
+        // can still prevent the client from receiving the rotated credential.
         if !claim_guard.complete().await {
             tracing::warn!(
                 %reconnect_player_id,

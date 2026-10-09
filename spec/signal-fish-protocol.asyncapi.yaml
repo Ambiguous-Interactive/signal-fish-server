@@ -516,13 +516,18 @@ components:
     ReplayStatus:
       type: string
       description: >-
-        Completeness of Reconnected.missed_events (v3+ recipients only; the
-        field is absent on the v2 wire). complete: every replayable control
-        event since disconnect is present. truncated: the bounded replay ring
+        Ring retention for Reconnected.missed_events (v3+ recipients only; the
+        field is absent on the v2 wire). complete: no event after the server's
+        disconnect cursor was evicted. Recipient filtering still removes own
+        membership events and authority events that disagree with the current
+        authority. The cursor does not acknowledge client receipt.
+        truncated: the bounded replay ring
         evicted events the player needed, so missed_events is a suffix —
         resync from the Reconnected snapshot fields. unavailable: event replay
         is not active on this deployment (event_buffer_size 0) — treat the
-        reconnection as a full resync from the snapshot.
+        reconnection as a full resync from the snapshot. For every status,
+        ignore missed_events or process them before replacing room state with
+        the snapshot and applying sender_watermarks.
       enum: [complete, truncated, unavailable]
     PlayerId:
       type: string

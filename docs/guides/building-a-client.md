@@ -320,9 +320,11 @@ A client is conformant when it passes these scenarios:
       then surface `4003 activity_timeout` or `4002 slow_consumer` and reconnect
       instead of treating one-way progress as a healthy connection.
 - [ ] **Reconnect (if implemented):** drop and `Reconnect` with the join
-      `auth_token`, replay control-only `missed_events`, resync gameplay state
-      at the application layer, and for v3 apply `sender_watermarks` as
-      per-sender `(epoch, seq)` baselines while resetting report counters.
+      `auth_token`. Ignore historical `missed_events`, or process them before
+      replacing room state with the `Reconnected` snapshot for every replay
+      status. Resync gameplay state at the application layer, and for v3 apply
+      `sender_watermarks` as per-sender `(epoch, seq)` baselines while resetting
+      report counters.
 - [ ] **v3 negotiation (if implemented):** advertise WebRTC, receive a
       `SessionPlan`, complete the offer/answer/ICE exchange following
       `you_initiate`, and **fall back to relay** when WebRTC fails.

@@ -223,22 +223,26 @@ evidence is reported as an artifact warning.
 
 ## Z3 proofs
 
-`z3/protocol_invariants.py` discharges 35 proof obligations across ten sets, each by
-asserting the **negation** of a property and checking it is `unsat` (no counterexample
-exists, so the property holds for every input):
+`z3/protocol_invariants.py` checks ten sets of handwritten models. Proof obligations
+assert the **negation** of a property and require `unsat`. Control witnesses require
+`sat`. Each result applies to the stated model and input domain. The script does not
+execute Rust or prove that the models refine the implementation. Source review and
+direct Rust tests must establish that link.
 
 | Set | Models | Proves |
 | --- | ------ | ------ |
-| **A** | the ladder walk in `choose_session_plan` (`session_policy.rs:338`) | the selector is total and legal, never exceeds the `desired` ceiling, falls to the relay floor when no transport is enabled, is sound (a chosen rung genuinely fits), is richest-first (mesh+webrtc is never skipped when it fits), and never enables WebRTC signaling for a `host+direct` plan |
+| **A** | the ladder walk in `choose_session_plan` (`session_policy.rs`) | legal, bounded, richest-first selection; Direct requires a usable host endpoint; a positive host control and a missing-endpoint mutant witness check that boundary |
 | **B** | `all_support` over an unbounded member set (`session_policy.rs:175`) | a single non-v3 member denies every upgrade rung (the relay-floor back-compat invariant), `all_support` implies pointwise support, and an empty room never upgrades |
-| **C** | `local_initiates` glare rule (`signaling.rs:60`) | exactly one peer offers per distinct pair, no peer self-initiates, and the offer orientation is acyclic (no glare deadlock) |
-| **D** | `elect_host` (`session_policy.rs:372`) | `(joined_at, id)` totally orders members (a unique host), and a seated authority is the unambiguous host |
+| **C** | `local_initiates` glare rule (`signaling.rs:60`) | exactly one designated offerer per distinct pair, no self-initiation, and an acyclic offer orientation; signaling delivery and SDP state are outside this model |
+| **D** | `elect_host` over the eligible input set (`session_policy.rs`) | `(joined_at, id)` totally orders candidates; an eligible authority is unambiguous; production host filtering is a separate obligation |
+| **G** | `negotiate_protocol_version` and the caller's refusal predicate (`config/protocol.rs`, `websocket/connection.rs`) | negotiation honors both ceilings and preserves below-floor requests for refusal; a lower-clamp mutant silently upgrades a v2 client on a v3-only deployment |
 | **J** | the numeric guards of `validate_config_security` + `WebSocketConfig::validate` (`config/validation.rs`) | the config-admission closure: every admitted config satisfies the runtime safety envelope (relay-envelope headroom, capacity pairing, positive occupied-room GC deadline, batch-deadline ceiling, slow-consumer floor); the compiled defaults pass (non-vacuity); and the session-197 guards plus the strict headroom are necessary — each has an explicit witness config that would violate its runtime property without it |
 
-The proofs are deliberately _decomposed from member counting_ where it sharpens decidability
-(set A abstracts each rung's `all_support` to a free boolean; set B re-attaches it), and the
-harness is self-checking: a deliberately wrong selector produces a `sat` counterexample, so a
-`PASS` is never vacuous.
+Set A abstracts each rung's capability support and Direct host readiness to separate
+booleans. Set B models support over members. The negative controls detect the named
+model regressions; they do not establish that every property is non-vacuous. Set H
+checks successful sequence increments with mathematical integers. It does not model
+the production `u64` exhaustion branch or concurrent access.
 
 ## Correspondence table (spec ⇄ code)
 
@@ -1095,6 +1099,13 @@ bidirectional relay `GameData` between the v2 replacement and a v3 incumbent.
 
 ## Intentionally not modeled (and why)
 
+- **Direct endpoint readiness in the session lifecycle** —
+  `SignalFishSession.tla` profiles contain protocol and capability fields only.
+  Its Direct selection and `HostValid` checks assume each capable host has a
+  usable endpoint. They do not cover endpoint loss on reconnect or election
+  among members with mixed endpoint readiness. Z3 set A checks the pure
+  selector's endpoint gate; Rust tests cover endpoint validation and Direct
+  reconnect/failover. Neither extends the TLA lifecycle state space.
 - **Complete relay backpressure dynamics** — quantitative multi-message queue dynamics are
   orthogonal to the session state machine. Note what this does **not**
   mean: since the slow-consumer hardening (issue #131), per-connection delivery is _not_

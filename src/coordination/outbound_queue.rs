@@ -534,10 +534,9 @@ impl PendingUnsupported {
     /// Build the report these ranges would produce, **without** consuming them.
     ///
     /// The ranges stay pending until [`Self::commit`] is called with the same
-    /// report, so a write that is cancelled — the send task's close `select!`
-    /// can cancel at any await — leaves the accounting to be re-emitted by a
-    /// later flush or by the connection's teardown instead of losing an entire
-    /// coalesced burst. `wire` is likewise only advanced at commit.
+    /// report. Cancellation preserves the accounting as evidence, but the
+    /// report-write guard prevents retrying a copy the sink may still hold.
+    /// `wire` is likewise only advanced at commit.
     fn peek(&self, wire: DeliveryCountersByClass) -> Option<DeliveryReportPayload> {
         if self.is_empty() {
             return None;
@@ -723,6 +722,8 @@ struct SharedQueue {
     /// Set once a queued payload was abandoned while a socket write owned it.
     /// See [`OutboundReceiver::record_abandoned_in_flight_write`].
     abandoned_in_flight_write: AtomicBool,
+    /// A report may be retained by the sink without a confirmed ledger commit.
+    ambiguous_report_write: AtomicBool,
     unsupported_notices: Mutex<UnsupportedNoticeLimiter>,
     data_capacity: usize,
     control_capacity: usize,
@@ -989,6 +990,7 @@ fn channel_inner(
         protocol_version: AtomicU16::new(crate::config::SERVER_MIN_PROTOCOL_VERSION),
         game_data_format: AtomicU8::new(encoding_tag(GameDataEncoding::Json)),
         abandoned_in_flight_write: AtomicBool::new(false),
+        ambiguous_report_write: AtomicBool::new(false),
         unsupported_notices: Mutex::new(UnsupportedNoticeLimiter::default()),
         data_capacity,
         control_capacity,
@@ -1892,7 +1894,45 @@ impl Drop for OutboundPermit {
     }
 }
 
+/// Fence report retries if cancellation leaves their socket position unknown.
+/// Successful writes and pre-write size rejections resolve the guard; neither
+/// resolution can clear ambiguity from an earlier write on this connection.
+#[must_use]
+pub(crate) struct ReportWriteGuard<'a> {
+    receiver: &'a OutboundReceiver,
+    resolved: bool,
+}
+
+impl ReportWriteGuard<'_> {
+    pub(crate) fn resolve(mut self) {
+        self.resolved = true;
+    }
+}
+
+impl Drop for ReportWriteGuard<'_> {
+    fn drop(&mut self) {
+        if !self.resolved {
+            self.receiver
+                .shared
+                .ambiguous_report_write
+                .store(true, Ordering::Release);
+            self.receiver.record_abandoned_in_flight_write();
+        }
+    }
+}
+
 impl OutboundReceiver {
+    pub(crate) fn begin_report_write(&self) -> ReportWriteGuard<'_> {
+        ReportWriteGuard {
+            receiver: self,
+            resolved: false,
+        }
+    }
+
+    pub(crate) fn report_write_is_ambiguous(&self) -> bool {
+        self.shared.ambiguous_report_write.load(Ordering::Acquire)
+    }
+
     /// Stop all producers before teardown snapshots or drains the queue.
     /// Existing items remain readable by this receiver.
     pub fn close(&mut self) {
@@ -2343,8 +2383,8 @@ impl OutboundReceiver {
     ///
     /// The ranges remain pending until
     /// [`Self::commit_pending_unsupported_report`] confirms the write, so a
-    /// cancelled write re-emits them later instead of losing them. That
-    /// ordering is required rather than cosmetic: `wire_counters` advances only
+    /// cancelled write preserves evidence instead of losing it. A report with
+    /// an ambiguous socket position must not be re-emitted. `wire_counters` advances only
     /// on commit, so emitting any other report first would advertise an
     /// `unsupported_format` counter delta whose exact ranges had not been sent.
     pub fn pending_unsupported_report(&self) -> Option<DeliveryReportPayload> {
@@ -4139,6 +4179,37 @@ mod tests {
         assert_eq!(pending.gaps[0].reason, DeliveryGapReason::UnsupportedFormat);
     }
 
+    #[test]
+    fn report_write_guard_preserves_evidence_and_fences_retries() {
+        let (tx, rx) = channel(1, 1);
+        tx.set_protocol_version(3);
+        assert!(rx.record_unsupported_format(unsupported_metadata(DeliveryClass::Reliable, 4, 1)));
+        let evidence = rx.pending_unsupported_report().expect("pending evidence");
+        rx.begin_report_write().resolve();
+        assert!(
+            !rx.report_write_is_ambiguous(),
+            "a resolved write does not fence reports"
+        );
+        rx.record_abandoned_in_flight_write();
+        assert!(
+            !rx.report_write_is_ambiguous(),
+            "cancelled game data must not suppress known pending reports"
+        );
+        drop(rx.begin_report_write());
+        assert!(rx.report_write_is_ambiguous());
+        assert!(rx.abandoned_in_flight_write());
+        assert_eq!(rx.pending_unsupported_report(), Some(evidence));
+        assert_eq!(
+            rx.shared.state().wire_counters,
+            DeliveryCountersByClass::default()
+        );
+        rx.begin_report_write().resolve();
+        assert!(
+            rx.report_write_is_ambiguous(),
+            "ambiguity is sticky for the physical connection"
+        );
+    }
+
     /// The ranges must survive a write that never completes: the send task's
     /// close `select!` can cancel between building the report and committing it,
     /// and coalescing means a lost frame would take a whole burst with it.
@@ -4159,8 +4230,8 @@ mod tests {
             .expect("a coalesced range is pending");
         assert_eq!(first.per_class.reliable.unsupported_format, 3);
 
-        // Peeking is idempotent: a cancelled write changes nothing, and the same
-        // report is offered again.
+        // Peeking is idempotent and preserves evidence. A socket-write guard
+        // separately fences re-emission when the sink may retain a copy.
         let retry = rx
             .pending_unsupported_report()
             .expect("an uncommitted report stays pending");

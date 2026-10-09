@@ -1,0 +1,319 @@
+# Production Correctness Audit
+
+Campaign: [#826](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/826).
+Baseline: `5edad6e0`. Started: 2026-10-08. Status: **in progress**.
+
+This report records a staged audit, not a production certification. An inspected
+path is not a verified subsystem. A passing bounded model does not prove the
+implementation, its environment, or all possible schedules correct.
+
+## Contract and method
+
+The shipped server owns each room in one process. In-memory lock and coordinator
+types do not implement cross-process consensus. Process loss discards rooms,
+routes, tokens, and replay. Read the
+[consistency contract](../architecture/consistency-and-durability.md) and
+[deployment boundary](../architecture/single-instance-deployment.md).
+
+Audit each observable operation at five separate boundaries: validation, local
+mutation, queue admission, socket write, and client application. Record an
+unknown outcome when transport failure prevents the client from distinguishing
+commit from rejection. Correlation IDs do not imply deduplication or idempotency.
+
+For each hypothesis, record the required invariant, competing explanation,
+smallest failure history, baseline revision, command, seed or schedule, result,
+and limits. Demonstrate a red test before repair. Preserve the green regression
+and use an independent review. A timeout, harness saturation, missing platform,
+or skipped scenario is not a successful experiment.
+
+Method references:
+
+- [Gilbert and Lynch's CAP result](https://www.cs.princeton.edu/courses/archive/spr22/cos418/papers/cap.pdf)
+  defines the partition tradeoff. Apply it to an explicit consistency and
+  availability contract; it does not establish this server's local correctness.
+- [Jepsen's linearizability definition](https://jepsen.io/consistency/models/linearizable)
+  motivates checking concurrent histories against independently specified legal
+  sequential histories, including incomplete operations.
+- [Tokio cancellation semantics](https://tokio.rs/tokio/tutorial/select)
+  motivate inspecting every suspension between mutation and publication.
+
+## Coverage ledger
+
+`Initial` means source and contract reconnaissance only. `Pending` means no
+audit conclusion. Findings below describe only the exact paths investigated.
+
+| Task | Implementation and operations | Invariants and experiments | Status |
+| --- | --- | --- | --- |
+| A01 | `protocol/`, AsyncAPI, wire samples | Schema, errors, optional fields, v2/v3 projections, exhaustive operation mapping | Initial |
+| A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Pending |
+| A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Pending |
+| A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial |
+| A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial |
+| A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial |
+| A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial |
+| A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial |
+| A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial |
+| A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Pending |
+| A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial |
+| A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial |
+| A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial |
+| A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
+| A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial |
+| A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial |
+| A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial |
+| A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Pending |
+| A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Pending |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial |
+| A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
+| A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial |
+
+For each task, record reviewed functions and tests, unresolved hypotheses, and
+the exact scope of any successful experiment. Default, TLS, legacy-fullmesh,
+and trace-validation paths need separate dispositions. Client packages have
+separate build and test gates.
+
+### Inbound operation crosswalk
+
+This inventory follows `ClientMessage` and `RoomOperationRequest` at the
+baseline. It maps audit ownership; it does not certify these operations.
+
+| Wire operation | Audit tasks | Required observable boundaries |
+| --- | --- | --- |
+| `Authenticate` | A02, A03, A18 | Endpoint default, explicit version, tenant proof, negotiated capability publication |
+| `JoinRoom` | A07, A08, A11 | Admission rollback, membership baseline, readiness and plan publication |
+| `LeaveRoom` | A04, A07, A09, A14 | Unroute, terminal watermark, authority change, old queued tail |
+| `GameData` and binary relay | A13, A14, A15 | Validate before stamp, fan-out set, exact delivery or omission evidence |
+| `Signal` | A11, A12 | Same room, negotiated transport, session generation, error and valid budgets |
+| `AuthorityRequest` | A09 | Role commit, personalized event, denial and reply budget |
+| `PlayerReady` | A08 | Toggle, membership snapshot, broadcast; repeated requests are not idempotent |
+| `StartGame` | A08, A11 | Authorization, exact readiness set, game and session-plan transaction |
+| `ProvideConnectionInfo` | A06, A11 | Metadata validation, endpoint usability, snapshot freshness |
+| `Ping` and WebSocket Ping/Pong | A04, A16 | Source identity, liveness, response budget, probe completion |
+| `Reconnect` | A04, A05, A06 | Claim, identity reassignment, snapshot queue commit, token rotation |
+| `JoinAsSpectator`, `LeaveSpectator` | A10, A14 | Role exclusion, baseline/terminal event, generation barrier |
+| `TransportStatus` | A11, A12 | Negotiated capability, per-generation deduplication, fan-out suppression |
+| `RoomOperation` envelope | A01, A12 | Capability gate, canonical ID, correlated result; no deduplication promise |
+| Wrapped join/leave/reconnect/spectator operations | A05, A07, A10 | Same transaction as legacy command, one correctly correlated terminal result |
+| `KickPlayer`, `BanPlayer`, `UnbanPlayer` | A05, A09, A15 | Authority check, target lifecycle, reconnect tombstone, ban perimeter, close |
+| `RegenerateRoomCode`, `SetRoomAccess` | A07, A09 | Admission serialization, authorization, uncertain response recovery |
+| `TransferAuthority` | A09, A11 | Eligible live member, replay/publication order, transport-host independence |
+
+## Initial findings
+
+### F01 — A canceled write does not fence every close path
+
+**High impact; high confidence.** Issue
+[#827](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/827).
+Affected code: `websocket/connection.rs::finalize_closed_connection`.
+
+`InboundRateLimited` and `Kicked` bypassed the branch that abandons queued data
+after a canceled write. If the selected frame never reached the socket, the
+close flush could deliver later sequence numbers without an exact omission
+report. A terminal close does not authorize an earlier unexplained hole.
+
+The existing regression exercised only the no-reason close. It could not prove
+the invariant for named close reasons. Extending its real-socket matrix exposed
+the rate-limit branch. The repair applies the abandonment check to every
+remaining close reason after the specialized slow-consumer and oversize paths.
+Healthy teardown remains a separate positive control.
+
+The experiment controls the selected-write cancellation seam and observes real
+WebSocket output. It does not reproduce every possible kernel partial-write
+schedule. The retained matrix includes all ten reasons and the absent reason,
+with both healthy and abandoned-write states. It checks gameplay output and
+drop counts, not exact close-code or delivery-report ordering.
+
+### F02 — Handwritten proofs certify obsolete decision rules
+
+**Verification defect; high confidence.** Issue
+[#828](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/828).
+Affected code: `formal/z3/protocol_invariants.py`, sets A and G.
+
+Set G raised below-floor versions to the server minimum. Rust preserves a lower
+client ceiling so the caller can reject it. With client maximum 2 and server
+range 3 through 3, the old model returned 3 while Rust returns 2. A passing old
+proof established the wrong negotiation contract.
+
+Set A selected Host+Direct when capabilities matched, without requiring a
+usable host endpoint. Rust also checks execution readiness. With WebRTC
+disabled, Direct enabled and supported, and no usable endpoint, the old model
+selected Host while Rust falls back to Relay.
+
+New obligations fail against both obsolete rules. The corrected models keep
+explicit mutant witnesses and a positive executable-Direct control. The proof
+documentation now distinguishes model assertions from Rust implementation
+verification and integer arithmetic from bounded machine arithmetic.
+
+The TLA session model still assumes executable Direct endpoints. Its profiles
+do not model endpoint loss on reconnect. This boundary is now explicit; the
+current Rust endpoint tests do not extend that model's state space.
+
+### F03 — Documented replay order overwrites fresh peer metadata
+
+**Client correctness defect in documentation; high confidence.** Issue
+[#829](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/829).
+Affected contract: reconnect scenario, protocol, client guide, and ReplayStatus.
+
+During A's absence, B joins without connection information and then supplies a
+Direct endpoint. On a v2 replacement connection, the reconnect snapshot contains
+B's new endpoint, while the historical `PlayerJoined` contains none. Following
+the documented instruction to apply the snapshot and then replay removes the
+endpoint.
+
+The experiment falsifies that client algorithm; it does not identify a server
+snapshot defect. The retained negative control demonstrates the stale overwrite
+and verifies that final snapshot replacement restores the endpoint. Corrected
+guidance requires authoritative snapshot replacement for every replay status.
+Historical processing is optional and must precede that replacement.
+
+`complete` reports ring retention before recipient filtering. It does not mean
+every authority transition was returned or that the client received an old
+socket's unread events. Existing filtering is deliberate. The native reference
+client already ignores history when applying the snapshot.
+The initial fixture inspected internal v3 messages before wire projection.
+Independent review identified that v3 omits `connection_info`; that experiment
+does not establish v3 wire-visible endpoint loss. The corrected counterexample
+uses a v2 replacement connection and a JSON round trip matching its serializer.
+A separate v3 fixture retains the authority-filtering and `complete` assertions.
+These tests use server handlers, outbound queues, and a small client state map;
+they do not exercise a TCP reconnect or every reference client.
+
+### F04 — Idle delivery reports bypass the write-progress deadline
+
+**Availability defect; high confidence.** Issue
+[#830](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/830).
+Affected code: the writer's pending-report timer in `websocket/connection.rs`.
+
+An idle flush awaited `write_pending_unsupported_report` without the deadline
+used for queued reports. A non-reading peer could hold this write beyond the
+configured progress budget. The heartbeat task waits for the same writer to
+acknowledge a Ping command, so it cannot independently bound this await.
+
+The repair shares the existing selected-write deadline and slow-consumer close
+policy. An incomplete write retains its pending omission evidence. A zero
+budget retains the existing explicit deadline-disable behavior.
+
+The real-socket experiment fills a clamped peer's receive pipeline, prepares a
+pending omission, advances a 20 ms virtual budget, and awaits the writer with a
+2 ms virtual scheduling allowance. Restoring the old unbounded await makes the
+corrected test fail. The repair passes. Healthy controls check exact ranges,
+counter totals, cleared pending state, no close, and disabled deadlines.
+
+An initial probe assumed a timer must resolve on the first poll after clock
+advance. That assumption was false; its red result is excluded. The corrected
+experiment proves bounded completion after timer-driver progress, not exact
+wall-clock latency on every operating system.
+
+### F05 — Retrying an ambiguous report duplicates exact omission ranges
+
+**Client correctness defect; high confidence.** Issue
+[#833](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/833).
+Affected code: pending, queued, and final delivery-report writes.
+
+Canceling a report send can leave its frame buffered inside the WebSocket sink.
+The server has not committed the pending omission ledger. Teardown retries that
+ledger, so a recovering peer receives overlapping reports with identical
+cumulative counters. A timeout cannot distinguish an unwritten report from one
+that will become visible when a later close flushes the sink.
+
+The real-socket regression expires an idle report against a non-reading peer,
+then resumes the peer while slow-consumer teardown runs. It observed two reports
+for sender 9, epoch 1, sequence 1, both with `unsupported_format: 1`. The close
+code was 4002 and no later queued gameplay arrived. This exposes a gap in F04's
+initial oracle: bounded writer completion alone does not prove safe recovery.
+
+The repair records ambiguity for the physical connection when a report-write
+guard drops before completion. Successful later writes cannot clear that state.
+Pending, queued, and final report paths preserve the unconfirmed evidence,
+prevent report retries, and fence later gameplay. Known size rejection occurs
+before socket submission and leaves the connection's report state unambiguous.
+
+The test compares the complete recovered report and requires exactly one copy.
+It uses an oversized binary filler solely to create transport pressure; that
+filler is not valid protocol gameplay. It covers one controlled cancellation
+and recovery schedule, not every partial-write boundary or client implementation.
+
+### Session 380 validation
+
+| Experiment | Red or negative control | Green evidence and limits |
+| --- | --- | --- |
+| Close-tail matrix | Rate-limit close emitted later queued data after an abandoned write | All reasons, healthy/abandoned states; real socket payload and drop-count checks |
+| Idle omission report | Timeout-bypass mutant fails corrected paused-clock oracle | Deadline test plus healthy, empty, and disabled-budget controls |
+| Canceled report recovery | Recovering peer receives two identical reports | Exactly one complete report, close 4002, no later gameplay; sticky-state and prewrite controls |
+| Z3 A/G | A7 fails with Direct-only support and no host; G5 fails with client 1 and server range `[2,2]` | 33 UNSAT obligations and 7 SAT controls; G6 also exhibits the supported v2/`[3,3]` clamp error |
+| Rust/model crosschecks | Existing implementation tests, not new red cases | Three negotiation and Direct-endpoint tests pass |
+| Snapshot/replay | Old documented algorithm clears B's endpoint on serialized v2 messages | Snapshot-last restores it; separate v3 control checks authority filtering and `replay: complete` |
+
+Reproduce the focused behavioral checks:
+
+```bash
+cargo nextest run --lib -E 'test(close_flush_never_writes_the_queue_behind_an_abandoned_write)'
+cargo nextest run --lib -E 'test(idle_omission_report_)'
+cargo nextest run --lib -E 'test(canceled_idle_report_is_not_replayed_when_the_peer_recovers)'
+cargo nextest run --lib -E 'test(report_write_guard_preserves_evidence_and_fences_retries)'
+cargo nextest run --lib -E 'test(reconnect_replay_drops_authority_events_the_snapshot_supersedes)'
+cargo nextest run --lib -E 'test(reconnect_v2_snapshot_replaces_historical_peer_metadata)'
+cargo nextest run --lib -E 'test(negotiate_caps_at_server_max_without_raising_client_max)'
+cargo nextest run --lib -E 'test(host_direct_rejects_missing_and_malformed_host_endpoints)'
+cargo nextest run --lib -E 'test(host_direct_requires_a_valid_endpoint_and_elects_an_executable_host)'
+python3 formal/z3/protocol_invariants.py
+```
+
+Production repairs change no wire fields or public signatures. Internal writer
+helpers are shared between queued and idle paths. Reconnect clients following
+the old scenario must apply the fresh snapshot last; the server wire stays
+unchanged. Hosted checks and PR review remain required before merge.
+
+Local validation passed eleven delivery tests, three Rust/model crosschecks,
+two reconnect tests, and the 40 Z3 checks. The final recovery oracle compares
+the complete report. Independent review found no remaining issue in this
+repair batch. Formatting and all-target/all-feature Clippy with warnings denied
+passed again after the cancellation repair. Markdown, documentation
+consistency, CI-config, and hook policy checks passed.
+Hook execution exceeded its one-second target;
+file discovery and source scanning dominated, within the area tracked by
+[#811](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/811).
+
+### Unresolved hypotheses and explicit limits
+
+- [#832](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/832):
+  reliable sojourn is checked when a reliable item is selected. Source inspection
+  found no independent reliable-age timer. Two slow but timely control writes
+  can delay reliable selection beyond its budget. This is a source-supported
+  counterexample awaiting a runtime experiment for both batching modes. The
+  existing timestamp-accessor test does not prove live deadline enforcement.
+- Reconnect token rotation commits at queue admission. Losing the replacement
+  response can leave the client with a consumed token. The local-commit
+  contract does not promise client receipt; quantify this recovery limitation
+  before designing any duplicate-token grace period or acknowledgement.
+- The single-home deployment and model-based subsystem contracts were read.
+  The full partition, restart, interop, fuzz, mutation, and platform campaigns
+  have not been rerun in this session.
+
+## Existing issues and measurement limits
+
+- [#678](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/678):
+  encoding support and capability enforcement. Audit existing formats before
+  considering new codecs.
+- [#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775):
+  generator and oracle memory grow with workload duration and fan-out. Large
+  runs cannot establish server capacity when the generator exhausts resources.
+- [#795](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/795):
+  macOS generator saturation. A later pass does not identify the failure cause.
+
+The two-instance split-brain test is an executable unsupported-topology failure
+catalog. Passing it does not prove multi-instance room operation. The
+model-based replay and delivery tests exercise selected subsystems; their
+results do not prove the complete socket-to-client transaction.
+
+## Campaign completion
+
+Close the campaign only after each ledger entry has a documented disposition,
+confirmed defects have verified repairs, significant test claims have negative
+controls, and remaining uncertainties are explicit. Record unavailable
+environments and bounded experiments without extending their conclusions.
+
+Use one reviewed repair PR per working session. Keep temporary logs and session
+notes under ignored `progress/`; keep durable results, regression tests, and
+issue links in the repository. Recheck relevant evidence after later changes
+invalidate a prior assumption.
