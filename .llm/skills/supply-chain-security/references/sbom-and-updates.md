@@ -153,12 +153,13 @@ the Rust toolchain.
 | Lockfile Version | Minimum Rust | Notes |
 |-----------------|--------------|-------|
 | v3 | 1.38+ | Widely supported by older CI actions |
-| v4 | 1.78+ | Requires `cargo-deny-action@v2` or later |
+| v4 | 1.78+ | Use a compatible Cargo toolchain for every audit graph |
 
 ### Rules
 
-- **`Cargo.lock` v4 requires `EmbarkStudios/cargo-deny-action@v2` or later** — `@v1` ships an older Cargo
-  that cannot parse v4 lockfiles and will fail silently or with cryptic errors.
+- **`Cargo.lock` v4 requires Cargo 1.78+**. CI installs pinned native cargo-deny
+  to avoid Docker action preparation pulls. Select the graph's explicit Rust
+  toolchain for metadata. A Docker action needs a compatible Cargo version too.
 - **When upgrading the Rust toolchain**, check whether the new version bumps the `Cargo.lock` format.
   If it does, audit every CI action that touches `Cargo.lock` for compatibility.
 - **When adding or updating CI actions** that invoke Cargo or parse `Cargo.lock`,
@@ -196,7 +197,7 @@ This script checks:
 - [ ] Dependency update PRs reviewed against checklist
 - [ ] Supply chain CI job runs on every PR and daily schedule
 - [ ] CI action versions compatible with `Cargo.lock` version (run `scripts/check-ci-config.sh`)
-- [ ] `cargo-deny-action@v2` or later used when `Cargo.lock` is v4+
+- [ ] Every audit graph uses Cargo 1.78+ when `Cargo.lock` is v4+
 
 ---
 

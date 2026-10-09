@@ -21,6 +21,7 @@ on:
       - "scripts/run-turn-interop.sh"
       - "scripts/read-toml-string.sh"
       - ".github/workflows/turn-interop.yml"
+      - ".github/actions/configure-docker-mirror/**"
   workflow_dispatch:
 
 concurrency:
@@ -67,6 +68,8 @@ jobs:
           save-if: >-
             ${{ github.event_name != 'pull_request' ||
                 github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Configure Docker Hub mirror
+        uses: ./.github/actions/configure-docker-mirror
       - name: Provision pinned test dependencies
         timeout-minutes: 4
         run: |

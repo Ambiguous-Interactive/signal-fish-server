@@ -22,13 +22,15 @@ if [[ -f Cargo.lock ]]; then
     LOCK_VERSION=$(grep -m1 '^version' Cargo.lock | sed 's/version = //' | tr -d '"\r' || true)
     info "Cargo.lock version: ${LOCK_VERSION:-unknown}"
     if [[ "$LOCK_VERSION" == "4" ]]; then
-        # Check whether the CI workflow already uses a compatible action version
-        if [[ -f "$CI_WORKFLOW" ]] && grep -q 'cargo-deny-action@v[2-9]' "$CI_WORKFLOW" 2>/dev/null; then
+        # Native audit tools use the explicitly installed workflow toolchain.
+        if [[ -f "$CI_WORKFLOW" ]] && grep -Eq '^[[:space:]]*tool: cargo-deny@[0-9]+\.[0-9]+\.[0-9]+' "$CI_WORKFLOW"; then
+            info "Cargo.lock is version 4 (requires Rust 1.78+). CI installs pinned cargo-deny natively."
+        elif [[ -f "$CI_WORKFLOW" ]] && grep -q 'cargo-deny-action@v[2-9]' "$CI_WORKFLOW" 2>/dev/null; then
             info "Cargo.lock is version 4 (requires Rust 1.78+). CI already uses a compatible cargo-deny-action."
         else
             warn "Cargo.lock is version 4 (requires Rust 1.78+)."
             warn "Ensure CI actions (e.g. cargo-deny-action) ship a compatible Cargo."
-            warn "EmbarkStudios/cargo-deny-action@v2 or later is required for lockfile v4."
+            warn "Use Rust 1.78+ with native cargo-deny, or a compatible Docker action."
         fi
     else
         success "Cargo.lock version ${LOCK_VERSION:-unknown} is compatible."

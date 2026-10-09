@@ -105,7 +105,7 @@ fn run_validator_with_dockerfile(dockerfile_tail: &str) -> (i32, String) {
     write_file(
         &temp_root.path().join(".github/workflows/ci.yml"),
         "\
-uses: EmbarkStudios/cargo-deny-action@v2
+tool: cargo-deny@0.20.2
 - name: Smoke test
   run: |
     for i in $(seq 1 3); do retry=true; done
@@ -323,7 +323,8 @@ fn test_repository_ci_config_has_active_matching_healthcheck() {
         "checked-in CI configuration should pass.\nOutput:\n{combined}"
     );
     assert!(
-        combined.contains("HEALTHCHECK port (3536) matches EXPOSE port (3536).")
+        combined.contains("CI installs pinned cargo-deny natively.")
+            && combined.contains("HEALTHCHECK port (3536) matches EXPOSE port (3536).")
             && combined.contains("All CI config checks passed."),
         "checked-in Dockerfile healthcheck should be recognized.\nOutput:\n{combined}"
     );

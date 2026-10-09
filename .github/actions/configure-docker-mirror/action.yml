@@ -1,0 +1,22 @@
+name: Configure Docker Hub mirror
+description: Use cached public images before Docker Hub and preserve runner configuration.
+runs:
+  using: composite
+  steps:
+    # The runner pulls bootstrap images before BuildKit can use its own mirror.
+    - shell: bash
+      run: |
+        set -euo pipefail
+        config_dir=$(mktemp -d)
+        trap 'rm -rf "$config_dir"' EXIT
+        config="$config_dir/current.json"
+        if [ -f /etc/docker/daemon.json ]; then
+          config_content=$(sudo cat /etc/docker/daemon.json)
+          printf '%s\n' "$config_content" > "$config"
+        else
+          echo '{}' > "$config"
+        fi
+        jq '."registry-mirrors" = (reduce (["https://mirror.gcr.io"] + (."registry-mirrors" // []))[] as $mirror ([]; if index($mirror) == null then . + [$mirror] else . end))' "$config" > "$config_dir/merged.json"
+        sudo install -m 0644 "$config_dir/merged.json" /etc/docker/daemon.json
+        sudo systemctl restart docker
+        docker info
