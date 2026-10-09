@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve active HTTP responses during graceful shutdown (#843).
+
 - Use the official GHCR coturn image for the TURN profile to avoid Docker Hub
   pull limits (#841).
 

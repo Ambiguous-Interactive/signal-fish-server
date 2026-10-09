@@ -259,10 +259,13 @@ pub async fn serve_with_http_header_deadline(
                         hyper_service,
                     );
                     tokio::pin!(conn);
-                    loop {
-                        tokio::select! {
-                            _ = &mut conn => break,
-                            _ = &mut shutdown_for_task => conn.as_mut().graceful_shutdown(),
+                    tokio::select! {
+                        _ = &mut conn => {},
+                        _ = &mut shutdown_for_task => {
+                            // The signal future is complete. Polling it again
+                            // panics and drops an active response during drain.
+                            conn.as_mut().graceful_shutdown();
+                            let _ = conn.await;
                         }
                     }
                 });
@@ -906,6 +909,89 @@ mod tests {
             serve_body.contains("try_join_next()"),
             "the serve loop must reap completed connection tasks; a JoinSet that only              joins at shutdown grows unboundedly with total connections served"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg_attr(miri, ignore)]
+    async fn graceful_http_shutdown_preserves_an_active_response() {
+        assert_http_drain_preserves_response(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg_attr(miri, ignore)]
+    async fn dropped_http_shutdown_sender_preserves_an_active_response() {
+        assert_http_drain_preserves_response(true).await;
+    }
+
+    // Issue #843: polling the completed shutdown future again drops the request.
+    async fn assert_http_drain_preserves_response(drop_sender: bool) {
+        use std::future::Future;
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let router = axum::Router::new().route(
+            "/held",
+            axum::routing::get({
+                let entered = Arc::clone(&entered);
+                let release = Arc::clone(&release);
+                move || {
+                    let entered = Arc::clone(&entered);
+                    let release = Arc::clone(&release);
+                    async move {
+                        let wait = release.notified();
+                        tokio::pin!(wait);
+                        std::future::poll_fn(|cx| {
+                            entered.notify_one();
+                            wait.as_mut().poll(cx)
+                        })
+                        .await;
+                        "finished"
+                    }
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let serve_task = tokio::spawn(serve_with_http_header_deadline(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+            HttpServeTimeouts::production(Duration::from_secs(5)),
+            shutdown_rx,
+        ));
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET /held HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("the real request must reach its held response");
+        if drop_sender {
+            drop(shutdown_tx);
+        } else {
+            shutdown_tx.send(true).unwrap();
+        }
+        // Keep the response pending across shutdown. A real-time observation
+        // gives the socket task a chance to repoll the completed signal.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let completed_early = serve_task.is_finished();
+        release.notify_one();
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut response))
+            .await
+            .expect("shutdown must close the socket after the response")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), serve_task)
+            .await
+            .expect("the server must finish after its active request")
+            .unwrap()
+            .unwrap();
+        assert!(!completed_early, "shutdown must retain the active request");
+        assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert!(response.ends_with(b"finished"));
     }
 
     /// Issue #553: an HTTP/2 client that completes the connection preface and
