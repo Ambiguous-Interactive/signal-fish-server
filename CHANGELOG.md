@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Clean up canceled client admission, log admission failures, and keep WebSocket
+  connections tracked through cleanup after supervisor failures (#839).
+  **Breaking:** Rust embedders must handle the new
+  `RegisterClientError::AdmissionFailed` variant in exhaustive matches.
+
 - Keep live WebSocket connections tracked through teardown when their caller is
   canceled (#835).
 

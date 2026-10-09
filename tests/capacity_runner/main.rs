@@ -423,34 +423,44 @@ async fn injected_send_pause_lands_in_scheduled_send_latency_without_reducing_of
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
 async fn generator_saturation_invalidates_the_run_with_the_recorded_lag_and_unsent_work() {
-    let output = tempfile::tempdir().expect("create output tempdir");
-    let mut config = scenario_config(Encoding::V2Json);
-    config.output_dir = output.path().to_path_buf();
-    config.players_per_room = 3;
-    config.stall_senders = Some(Duration::from_millis(800));
-    config.generator_lag_bound = Duration::from_millis(100);
+    // The functional wire/replay budget is still a hard bound. A slower
+    // declared stall must invalidate either profile and survive replay.
+    for bound in [
+        Duration::from_millis(100),
+        wire_correctness_config(Encoding::V2Json).generator_lag_bound,
+    ] {
+        let output = tempfile::tempdir().expect("create output tempdir");
+        let mut config = scenario_config(Encoding::V2Json);
+        config.output_dir = output.path().to_path_buf();
+        config.players_per_room = 3;
+        // Inject before the first send so host lag cannot stop a warmup
+        // sender before it reaches the declared fault.
+        config.warmup = Duration::ZERO;
+        let stall = bound + Duration::from_millis(700);
+        config.stall_senders = Some(stall);
+        config.generator_lag_bound = bound;
 
-    let outcome = runner::run(config).await.expect("stall run completes");
-    assert!(!outcome.summary.valid);
-    let saturated = outcome
-        .summary
-        .reasons
-        .iter()
-        .any(|reason| matches!(reason, oracle::InvalidReason::GeneratorSaturated { max_lag_us, bound_us: _ } if *max_lag_us >= 800_000));
-    assert!(
-        saturated,
-        "expected a generator-saturation reason naming the stall lag, got {:?}",
-        outcome.summary.reasons
-    );
-    assert!(
-        outcome.summary.totals.unsent > 0,
-        "stalled senders must leave explicit unsent work"
-    );
-    let replayed = artifacts::replay(output.path()).expect("replay artifacts");
-    assert_eq!(
-        serde_json::to_value(&replayed).expect("serialize replay"),
-        serde_json::to_value(&outcome.summary).expect("serialize summary"),
-    );
+        let outcome = runner::run(config).await.expect("stall run completes");
+        assert!(!outcome.summary.valid);
+        let saturated = outcome.summary.reasons.iter().any(|reason| {
+            matches!(reason, oracle::InvalidReason::GeneratorSaturated { max_lag_us, bound_us }
+                if *max_lag_us >= config::micros(stall) && *bound_us == config::micros(bound))
+        });
+        assert!(
+            saturated,
+            "expected saturation above {bound:?} naming the {stall:?} stall, got {:?}",
+            outcome.summary.reasons
+        );
+        assert!(
+            outcome.summary.totals.unsent > 0,
+            "stalled senders must leave explicit unsent work"
+        );
+        let replayed = artifacts::replay(output.path()).expect("replay artifacts");
+        assert_eq!(
+            serde_json::to_value(&replayed).expect("serialize replay"),
+            serde_json::to_value(&outcome.summary).expect("serialize summary"),
+        );
+    }
 }
 
 /// A terminated server invalidates the run with its explicit reason, and
@@ -750,7 +760,7 @@ async fn lossy_pressure_preserves_exact_gap_accounting_and_replay() {
 #[serial_test::serial]
 async fn latest_with_distinct_keys_delivers_every_message_without_policy_loss() {
     let output = tempfile::tempdir().expect("create output tempdir");
-    let mut config = scenario_config(Encoding::V3Json);
+    let mut config = wire_correctness_config(Encoding::V3Json);
     config.output_dir = output.path().to_path_buf();
     config.delivery_class = DeliveryClass::Latest;
     config.latest_keys_per_sender = 1_000_000;
@@ -785,7 +795,7 @@ async fn latest_with_distinct_keys_delivers_every_message_without_policy_loss() 
 #[serial_test::serial]
 async fn unsupported_format_experiment_reports_cross_format_omissions_over_real_sockets() {
     let output = tempfile::tempdir().expect("create output tempdir");
-    let mut config = scenario_config(Encoding::V3Json);
+    let mut config = wire_correctness_config(Encoding::V3Json);
     config.output_dir = output.path().to_path_buf();
     config.experiment = Some(Experiment::UnsupportedFormat);
     config.server_overlay = RunConfig::unsupported_format_overlay();
@@ -945,7 +955,7 @@ async fn controlled_server_snapshot_matches_the_binary_loader() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
 async fn external_capacity_runs_keep_unknown_provenance_and_exact_replay() {
-    let mut config = scenario_config(Encoding::V3Json);
+    let mut config = wire_correctness_config(Encoding::V3Json);
     let server =
         websocket_test_helpers::server_process::spawn_server(config.server_overlay.clone()).await;
     let output = tempfile::tempdir().expect("external output");
@@ -970,7 +980,7 @@ async fn external_capacity_runs_keep_unknown_provenance_and_exact_replay() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
 async fn external_host_evidence_survives_file_removal_and_replays_exactly() {
-    let mut config = scenario_config(Encoding::V3Json);
+    let mut config = wire_correctness_config(Encoding::V3Json);
     let host_inputs = tempfile::tempdir().expect("host-owned inputs");
     let registry = host_inputs.path().join("apps.json");
     std::fs::write(&registry, b"{\"apps\":[]}\n").expect("host app registry");
@@ -1525,7 +1535,7 @@ async fn exact_payload_cells_record_actual_ingress_and_egress_sizes_and_replay()
     ] {
         for bytes in [96, 1024] {
             let output = tempfile::tempdir().expect("exact cell output");
-            let mut config = scenario_config(encoding);
+            let mut config = wire_correctness_config(encoding);
             config.payload_bytes = bytes;
             config.delivery_class = delivery_class;
             config.output_dir = output.path().to_path_buf();
@@ -1629,6 +1639,10 @@ async fn exact_payload_cells_record_actual_ingress_and_egress_sizes_and_replay()
             assert_eq!(evidence.unmatched_egress.application.samples, 0);
             let manifest_path = output.path().join(artifacts::MANIFEST_FILE);
             let manifest = artifacts::read_manifest(output.path()).expect("exact-size manifest");
+            assert_eq!(
+                manifest.config.generator_lag_bound,
+                wire_correctness_config(encoding).generator_lag_bound
+            );
             let mut impossible = manifest.clone();
             impossible.config.payload_bytes = 45;
             artifacts::write_json(&manifest_path, &impossible).expect("alter target size");
@@ -5291,6 +5305,18 @@ fn scenario_config(encoding: Encoding) -> RunConfig {
         slow_reader: false,
         kill_server_after: None,
         room_code_prefix: None,
+    }
+}
+
+/// Live wire and artifact contract tests are functional checks on shared CI
+/// hosts, not capacity acceptance cells. Keep their workload and all delivery
+/// oracles, but give their generator the same two-second budget used by the
+/// bounded-pause control. The manifest records this budget and replay enforces
+/// it. The C2 acceptance cell and standalone runner keep their 250 ms bound.
+fn wire_correctness_config(encoding: Encoding) -> RunConfig {
+    RunConfig {
+        generator_lag_bound: Duration::from_secs(2),
+        ..scenario_config(encoding)
     }
 }
 

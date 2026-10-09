@@ -47,7 +47,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A01 | `protocol/`, AsyncAPI, wire samples | Schema, errors, optional fields, v2/v3 projections, exhaustive operation mapping | Initial |
 | A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Pending |
 | A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Pending |
-| A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation repaired in F07 |
+| A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10 |
 | A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial |
 | A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial |
 | A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial |
@@ -315,7 +315,8 @@ The normal standalone drain signals closes rather than canceling this caller.
 This experiment proves the caller-cancellation boundary, not an observed
 deployment shutdown failure. The repair adds one Tokio task per accepted socket;
 its performance cost has not been measured. Supervisor panic and runtime loss
-are separate boundaries; this repair does not certify them.
+are separate boundaries; this repair does not certify them. F10 records the
+later experiments at those boundaries.
 
 The identity sweep inspected lifecycle acquisition, identity reassignment and
 rollback, pointer-match checks, and unregister cleanup. Seventeen existing
@@ -384,6 +385,139 @@ code. TLS still uses the same `handle_socket` entrypoint; the legacy-fullmesh
 listener remains a separate lifecycle. This slice does not certify its socket
 supervision or the complete TLS route, schema, or feature audit. Applicable
 hosted CI and independent review remain required before merge.
+
+### F09 — Cross-platform fixtures assume incidental buffering and timing
+
+**Test-oracle defects; high confidence.** Issues
+[#838](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/838)
+and [#795](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/795).
+The scheduled main CI run
+[37928204106](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/37928204106)
+tested `9fa7c85c` and failed on Windows and macOS.
+
+The Windows canceled-report regression failed before its delivery assertion.
+Its first 8 MiB transport-pressure write completed. Clamping the peer receive
+buffer does not prove that this first write must remain pending. Three socket
+fixtures shared that assumption. Their setup now sends pressure frames until
+a write stalls for 50 ms on the real clock, with a limit of sixteen frames
+(128 MiB). A first Pending poll alone can mean transient socket readiness. The
+recovering-peer oracle counts every complete pressure frame and still requires
+one exact report, no later gameplay, and close 4002. A setup that never stalls
+fails; it is not a skipped or successful experiment.
+
+The macOS payload-size fixture rejected a run with 390167 us generator lag
+against a 250000 us budget. This fixture verifies live ingress and egress sizes
+and exact artifact replay; it does not establish deployment capacity. Related
+wire and provenance fixtures now declare a two-second functional lag budget.
+Their workload and delivery assertions remain intact. Production defaults and
+capacity acceptance retain their existing budgets. The live saturation control
+must reject a declared stall above either the short or functional budget, retain
+unsent work, and reproduce that rejection from artifacts.
+
+These corrections require focused tests and full hosted CI on Linux, macOS,
+and Windows. They do not prove a universal kernel-buffer limit, physical latency,
+or deployed capacity. The original hosted failures are the red evidence.
+
+### F10 — Admission and supervisor failure lose connection ownership
+
+**Lifecycle defect; high confidence.** Issue
+[#839](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/839).
+Baseline: `9fa7c85c`. A real socket joins a room, then a test-only gate injects
+an unwind in its owned supervisor. The caller returns while the connection
+remains registered. Dropping the supervisor's reader and writer JoinHandles
+detaches those tasks; dropping its tracker does not close them.
+
+The repair retains the lifecycle, close signal, and child handles outside the
+unwind boundary. An unwind requests physical close before asynchronous room
+cleanup. Cleanup follows the saved lifecycle through reconnect identity moves
+and preserves its pointer-match fence. Tracking ends after every remaining
+child has joined. Completed handles are removed before diagnostics or cleanup
+can unwind, so recovery never polls a completed JoinHandle twice. Failure logs
+record panic and cancellation categories without formatting panic payloads.
+
+Enabled Ping and RelayStats watchers also belong to the connection. Their
+unexpected termination now starts teardown; disabled watchers remain pending
+in the supervisor's select. The failure matrix covers reader, writer, Ping,
+and RelayStats aborts, joined supervisor unwind, and unwind after a reconnect
+identity move. A separate early-unwind case checks registration before any
+child starts. The established caller-cancellation control still requires a live
+Pong and orderly cleanup after client Close.
+
+The same ownership sweep found an earlier admission boundary. The manager
+reserves IP and global slots, inserts the client, and awaits the routing adapter
+before returning its identity. Callback unwind and caller cancellation both
+leave a live slot on the baseline. Red controls fail the release oracle; an
+ordinary adapter error still admits the client, as the existing policy requires.
+
+Admission now owns local rollback from reservation through caller handoff. An
+owned task handles the routing callback and its asynchronous rollback. The
+caller acknowledges receipt without another await; cancellation after the reply
+is sent still rolls back admission. The fresh lifecycle gate prevents maintenance
+from removing a pending client while routing runs. Connection slots remain held
+through routing cleanup, so a blocked adapter consumes bounded admission capacity.
+A real socket closes with code `4000` during pending admission while its routing
+pause stays held; registration and socket tracking then reach zero. Cleanup
+releases local registrations, connection budgets, metrics, and delivery ledgers. An adapter that cannot
+unregister may retain its own route; the close signal prevents that route from
+representing a live socket. Arbitrary adapter recovery remains outside this
+local cleanup guarantee.
+
+The injected unwind establishes this failure boundary; it does not identify a
+normal client request that triggers a panic. Process abort cannot unwind. No
+wire fields, runtime dependencies, or room transaction cancellation rules change.
+The public error enum gains `RegisterClientError::AdmissionFailed`: add this arm
+to exhaustive matches, as described in the [library guide](../library-usage.md).
+Admission unwind cleans up local state and returns that error. An unexpected
+owned-task exit returns the same error; abrupt runtime loss still requires
+discarding the server instance. WebSocket admission failure sends a bounded `1011 admission_failed`
+close without exposing the panic payload. Production code does not rethrow a
+panic; the repository's source-policy scan enforces that boundary. The routing
+cleanup catch covers both callback future construction and polling. Its controls
+include a synchronous constructor unwind and cleanup failures before and after
+routing effects.
+
+A separate experiment destroys a dedicated Tokio runtime after a wire-visible
+join while retaining the server Arc. The caller and listener terminate and
+socket tracking reaches zero, but registration, room membership, and active
+connection metrics remain. The inspection runtime only reads this stale state;
+it does not reuse the server. The [library guide](../library-usage.md) now
+requires completing drain while the owning runtime lives, or discarding the
+server instance after abrupt runtime destruction. Asynchronous cleanup cannot
+run on a destroyed runtime. This does not change standalone process-loss
+semantics or certify arbitrary cross-runtime reuse.
+
+### Session 383 physical reconnect-response loss
+
+The A05/A06 experiment uses a real WebSocket relay between two TCP connections.
+It receives the server's serialized `Reconnected`, then either forwards that
+baseline or discards it before dropping both transports without a WebSocket
+Close. Real unregister arms the rotated credential; the test never unregisters
+the lost connection directly.
+
+Both cells reject the spent token. In the forwarding control, the received new
+credential restores the original identity. In the loss cell, the application
+receives only transport failure and fresh-joins the same room and player name
+under a new identity. Its unknown rotated credential remains pending. The
+test uses that intercepted credential only to inspect server state, never to
+recover the loss-cell application. Forcing the relay to forward the lost
+baseline fails the no-application-frame oracle.
+
+This is a contract characterization, not a new reconnect defect. It establishes
+post-write physical response loss before client receipt. Pre-commit cuts,
+partial writes, TLS, and authenticated recovery remain separate boundaries.
+The relay and listener handles are retained and joined during failure cleanup.
+Focused validation and all applicable hosted checks remain required.
+
+Reproduce the session histories:
+
+```bash
+cargo nextest run --lib -E 'test(admission_callback_panic_releases) | test(canceled_admission) | test(ordinary_admission_callback_error)'
+cargo nextest run --lib -E 'test(socket_task_failures_close_registration_and_retain_tracking)'
+cargo nextest run --lib -E 'test(early_socket_supervisor_panic) | test(runtime_loss_leaves_retained_server_state_unusable)'
+cargo nextest run --lib -E 'test(test_lost_reconnected_wire_response_requires_fresh_join)'
+cargo nextest run --lib -E 'test(canceled_idle_report_is_not_replayed) | test(idle_omission_report_write_expires) | test(test_reliable_arrival_interrupts_stalled)'
+cargo nextest run --test capacity_runner -E 'test(exact_payload_cells) | test(generator_saturation_invalidates)'
+```
 
 ### Session 380 validation
 

@@ -972,7 +972,7 @@ conditions race, the first condition pinned wins the code (only `4000
 server_shutdown` supersedes an earlier reason). A `4006` budget exhaustion
 that races a `4007` kick, for example, still spends the budget and counts
 its rejection, but the close frame keeps `4007`. The server uses
-the standard RFC 6455 `1000` and `1009` codes plus stable private-range
+the standard RFC 6455 `1000`, `1009`, and `1011` codes plus stable private-range
 assignments that are never renumbered:
 
 | Code | Reason string | Meaning |
@@ -987,6 +987,7 @@ assignments that are never renumbered:
 | `4007` | `kicked` | The room's authority removed this member via the `KickPlayer` room operation; the seat is removed or the pending reconnection record tombstoned, and reconnection is not offered. Join again with a valid room code |
 | `1000` | `unregistered` | Normal closure (leave, replaced connection, ordinary teardown) |
 | `1009` | `outbound_message_too_large` | A complete encoded server application message exceeded the advertised outbound payload limit; no prefix of that message was written |
+| `1011` | `admission_failed` | An internal failure stopped connection admission before an identity reached the socket handler; open a new connection |
 
 A deadline cut (`4001`/`4004`) whose session never received a frame is counted by the
 `signal_fish_websocket_zero_frame_timeout_disconnects_total` Prometheus counter. The cut's

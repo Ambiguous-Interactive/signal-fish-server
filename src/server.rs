@@ -398,9 +398,9 @@ mod signaling_tests;
 mod spectator_handlers;
 mod spectator_service;
 
-use connection_manager::{ClientLifecycle, ConnectionManager};
+use connection_manager::ConnectionManager;
 pub(crate) use connection_manager::{
-    NegotiatedProtocol, OutboundQueueSample, TransportStatusUpdate,
+    ClientLifecycle, NegotiatedProtocol, OutboundQueueSample, TransportStatusUpdate,
 };
 
 /// Scrape-time live-state posture sampled when the metrics endpoint is hit:
@@ -687,6 +687,9 @@ pub enum RegisterClientError {
     CapacityExceeded { current: usize, limit: usize },
     #[error("Server is draining for shutdown")]
     ServerDraining,
+    /// Admission failed before the connection identity reached its caller.
+    #[error("Connection admission failed")]
+    AdmissionFailed,
 }
 
 #[derive(Debug, Error)]
@@ -1566,6 +1569,23 @@ impl EnhancedGameServer {
                 tracing::error!(%player_id, %error, "Owned client unregister transaction failed");
             }
         }
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn pause_admission_for_test(
+        &self,
+        client_addr: SocketAddr,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        self.connection_manager
+            .pause_admission_for_test(client_addr)
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn fail_admission_for_test(
+        &self,
+        client_addr: SocketAddr,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        self.connection_manager.fail_admission_for_test(client_addr)
     }
 
     pub(crate) fn client_lifecycle(&self, player_id: &PlayerId) -> Option<Arc<ClientLifecycle>> {

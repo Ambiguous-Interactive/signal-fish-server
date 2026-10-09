@@ -13,6 +13,7 @@ use std::sync::Arc;
 use tokio::time::Instant;
 
 use dashmap::DashMap;
+use futures_util::FutureExt;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -154,6 +155,7 @@ pub(crate) struct ClientConnection {
 pub(crate) struct ClientLifecycle {
     gate: Arc<tokio::sync::Mutex<()>>,
     player_id: std::sync::Mutex<PlayerId>,
+    admission_pending: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     lock_attempts: AtomicUsize,
     #[cfg(test)]
@@ -165,6 +167,7 @@ impl ClientLifecycle {
         Self {
             gate: Arc::new(tokio::sync::Mutex::new(())),
             player_id: std::sync::Mutex::new(player_id),
+            admission_pending: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             lock_attempts: AtomicUsize::new(0),
             #[cfg(test)]
@@ -342,6 +345,11 @@ pub(crate) struct ConnectionManager {
     /// counter (unbounded, like its per-IP sibling) so release stays
     /// balanced for every entry shape.
     live_connections: AtomicUsize,
+    #[cfg(test)]
+    admission_reply_sent: tokio::sync::Notify,
+    #[cfg(all(test, signal_fish_repository_tests))]
+    admission_pauses:
+        DashMap<SocketAddr, (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>, bool)>,
     max_connections_per_ip: usize,
     /// Whether per-connection delivery statistics (the v3 `RelayStats`
     /// ledger) are registered with the metrics sink for each connection.
@@ -351,6 +359,67 @@ pub(crate) struct ConnectionManager {
     /// Per-connection inbound error-reply budget the registration arms every
     /// gate with: `(max_inbound_error_replies, time_window)`.
     error_reply_budget: (u32, tokio::time::Duration),
+}
+
+/// Admission owns its budgets until the caller accepts the returned identity.
+/// Drop only rolls back local state; coordinator cleanup runs in the already
+/// owned admission task before this guard is dropped.
+struct PendingAdmission {
+    manager: Arc<ConnectionManager>,
+    ip: IpAddr,
+    close: ConnectionCloseSignal,
+    global_reserved: bool,
+    player_id: Option<PlayerId>,
+    active_counted: bool,
+    lifecycle: Option<Arc<ClientLifecycle>>,
+    armed: bool,
+}
+
+impl PendingAdmission {
+    async fn rollback_routing(&self, player_id: PlayerId) {
+        let result = std::panic::AssertUnwindSafe(async {
+            self.manager
+                .message_coordinator
+                .unregister_local_client(&player_id)
+                .await
+        })
+        .catch_unwind()
+        .await;
+        if !matches!(result, Ok(Ok(()))) {
+            // Diagnostics also belong to the unwind boundary. A subscriber
+            // failure must not interrupt local admission rollback.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                warn!(%player_id, panicked = result.is_err(), "Admission routing cleanup failed");
+            }));
+        }
+    }
+}
+
+impl Drop for PendingAdmission {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.close.request_close(CloseReason::Unregistered);
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.admission_pending.store(false, Ordering::Release);
+        }
+        if let Some(player_id) = self.player_id {
+            if self
+                .manager
+                .remove_client_for_unregistration(&player_id, || false)
+                .is_some()
+                && self.active_counted
+            {
+                self.manager.metrics.decrement_active_connections();
+            }
+        } else {
+            self.manager.release_ip_slot(self.ip);
+            if self.global_reserved {
+                self.manager.release_global_slot();
+            }
+        }
+    }
 }
 
 impl ConnectionManager {
@@ -397,14 +466,42 @@ impl ConnectionManager {
             message_coordinator,
             max_connections,
             live_connections: AtomicUsize::new(0),
+            #[cfg(test)]
+            admission_reply_sent: tokio::sync::Notify::new(),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            admission_pauses: DashMap::new(),
             max_connections_per_ip,
             track_delivery_stats,
             error_reply_budget,
         }
     }
 
-    pub async fn register_client(
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn pause_admission_for_test(
         &self,
+        client_addr: SocketAddr,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        self.admission_pauses.insert(
+            client_addr,
+            (Arc::clone(&reached), Arc::clone(&release), false),
+        );
+        (reached, release)
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn fail_admission_for_test(
+        &self,
+        client_addr: SocketAddr,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let (reached, release) = self.pause_admission_for_test(client_addr);
+        self.admission_pauses.get_mut(&client_addr).unwrap().2 = true;
+        (reached, release)
+    }
+
+    pub async fn register_client(
+        self: &Arc<Self>,
         sender: mpsc::Sender<Arc<ServerMessage>>,
         close: ConnectionCloseSignal,
         client_addr: SocketAddr,
@@ -415,7 +512,7 @@ impl ConnectionManager {
     }
 
     pub(crate) async fn register_classified_client(
-        &self,
+        self: &Arc<Self>,
         sender: DeliverySender,
         close: ConnectionCloseSignal,
         client_addr: SocketAddr,
@@ -426,7 +523,7 @@ impl ConnectionManager {
     }
 
     async fn register_delivery(
-        &self,
+        self: &Arc<Self>,
         sender: DeliverySender,
         close: ConnectionCloseSignal,
         client_addr: SocketAddr,
@@ -445,10 +542,19 @@ impl ConnectionManager {
                 limit: self.max_connections_per_ip,
             });
         }
+        let mut admission = PendingAdmission {
+            manager: Arc::clone(self),
+            ip,
+            close: close.clone(),
+            global_reserved: false,
+            player_id: None,
+            active_counted: false,
+            lifecycle: None,
+            armed: true,
+        };
         // Global ceiling second: if it refuses, the just-taken per-IP slot is
         // released so the two budgets stay independently consistent.
         if let Err(current) = self.try_reserve_global_slot() {
-            self.release_ip_slot(ip);
             warn!(
                 current,
                 max = self.max_connections,
@@ -460,10 +566,17 @@ impl ConnectionManager {
             });
         }
 
+        admission.global_reserved = true;
         let player_id = Uuid::new_v4();
+        let lifecycle = Arc::new(ClientLifecycle::new(player_id));
+        // Acquire the fresh gate before publishing any registration. A reaper
+        // cannot remove the entry or release its budgets while admission owns it.
+        let lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+        lifecycle.admission_pending.store(true, Ordering::Release);
+        admission.lifecycle = Some(Arc::clone(&lifecycle));
         let connection = ClientConnection {
             room_id: None,
-            lifecycle: Arc::new(ClientLifecycle::new(player_id)),
+            lifecycle: Arc::clone(&lifecycle),
             last_ping: Instant::now(),
             last_heartbeat_update: None,
             sender: sender.clone(),
@@ -483,7 +596,9 @@ impl ConnectionManager {
         };
 
         self.clients.insert(player_id, connection);
+        admission.player_id = Some(player_id);
         self.metrics.increment_connections();
+        admission.active_counted = true;
         if self.track_delivery_stats {
             self.metrics.register_connection_delivery_stats(player_id);
         }
@@ -492,16 +607,101 @@ impl ConnectionManager {
         self.metrics
             .register_slow_consumer_eviction_attributions(player_id);
 
-        if let Err(err) = self
-            .message_coordinator
-            .register_local_client(player_id, None, ClientDeliveryHandle { sender, close })
-            .await
-        {
-            warn!(%player_id, %err, "Failed to register client with coordinator");
+        // Reserve both budgets before spawning. Pending or abandoned callbacks
+        // cannot create more owned admission tasks than the connection ceiling.
+        let (mut reply, response) =
+            tokio::sync::oneshot::channel::<Result<PlayerId, RegisterClientError>>();
+        let (acknowledge, acknowledged) = tokio::sync::oneshot::channel();
+        let caller_lifecycle = Arc::clone(&lifecycle);
+        tokio::spawn(async move {
+            let _lifecycle_guard = lifecycle_guard;
+            let manager = Arc::clone(&admission.manager);
+            let mut admission_close = close.subscribe();
+            let result = std::panic::AssertUnwindSafe(async {
+                let registration = tokio::select! {
+                    biased;
+                    () = reply.closed() => return false,
+                    _reason = admission_close.closed() => {
+                        // Hand off the still-live, already-closed connection.
+                        // Its normal socket owner writes the semantic close
+                        // and unregisters after this gate is released.
+                        return true;
+                    },
+                    result = async {
+                        #[cfg(all(test, signal_fish_repository_tests))]
+                        if let Some((_, (reached, release, fail))) = manager.admission_pauses.remove(&client_addr) {
+                            reached.notify_one();
+                            release.notified().await;
+                            if fail { panic!("injected admission callback panic"); }
+                        }
+                        manager.message_coordinator.register_local_client(
+                            player_id, None, ClientDeliveryHandle { sender, close },
+                        ).await
+                    } => result,
+                };
+                if let Err(error) = registration {
+                    warn!(%player_id, %error, "Failed to register client with coordinator");
+                }
+                // Diagnostics stay before handoff so subscriber unwind cannot
+                // strand an identity that the caller has not received.
+                info!(%player_id, instance_id = %instance_id, client_addr = %client_addr, "Client registered");
+                true
+            }).catch_unwind().await;
+            match result {
+                Ok(ready) => {
+                    if ready {
+                        let sent = reply.send(Ok(player_id)).is_ok();
+                        #[cfg(test)]
+                        if sent {
+                            manager.admission_reply_sent.notify_one();
+                        }
+                        if sent && acknowledged.await.is_ok() {
+                            lifecycle.admission_pending.store(false, Ordering::Release);
+                            admission.armed = false;
+                            return;
+                        }
+                    }
+                    admission.rollback_routing(player_id).await;
+                    drop(admission);
+                }
+                Err(_panic) => {
+                    // Log before routing cleanup, which an adapter can delay.
+                    // A subscriber panic must not interrupt admission rollback.
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        tracing::error!(%player_id, %client_addr, failure = "admission_unwind", "Connection admission failed");
+                    }));
+                    admission.rollback_routing(player_id).await;
+                    drop(admission);
+                    let sent = reply
+                        .send(Err(RegisterClientError::AdmissionFailed))
+                        .is_ok();
+                    #[cfg(test)]
+                    if sent {
+                        manager.admission_reply_sent.notify_one();
+                    }
+                    #[cfg(not(test))]
+                    let _ = sent;
+                }
+            }
+        });
+        match response.await {
+            Ok(Ok(player_id)) => {
+                // No await or diagnostic callback may separate acknowledgement
+                // from returning ownership to the caller.
+                caller_lifecycle
+                    .admission_pending
+                    .store(false, Ordering::Release);
+                let _ = acknowledge.send(());
+                Ok(player_id)
+            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    tracing::error!(%player_id, %client_addr, failure = "handoff_channel_closed", "Connection admission failed");
+                }));
+                Err(RegisterClientError::AdmissionFailed)
+            }
         }
-
-        info!(%player_id, instance_id = %instance_id, client_addr = %client_addr, "Client registered");
-        Ok(player_id)
     }
 
     /// Test-only registration under an arbitrary player id. Production
@@ -1359,6 +1559,14 @@ impl ConnectionManager {
     where
         F: FnOnce() -> bool,
     {
+        if self.clients.get(player_id).is_some_and(|connection| {
+            connection
+                .lifecycle
+                .admission_pending
+                .load(Ordering::Acquire)
+        }) {
+            return None;
+        }
         // A room-bound entry owns the only authoritative terminal relay tail.
         // Normal unregister always calls `leave_room_locked` first; refusing an
         // out-of-order removal encodes that ordering invariant and prevents a
@@ -1572,6 +1780,41 @@ mod tests {
         /// ([`FarewellGate::park`]), so a test can land a concurrent map
         /// mutation inside a farewell await.
         farewell_gate: Option<Arc<FarewellGate>>,
+        admission_fault: Option<Arc<AdmissionFault>>,
+        cleanup_fault: Mutex<Option<Arc<AdmissionFault>>>,
+        cleanup_constructor_panics: std::sync::atomic::AtomicBool,
+        active_registrations: Mutex<std::collections::HashSet<PlayerId>>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum AdmissionBehavior {
+        Panic,
+        Park,
+        Error,
+    }
+
+    struct AdmissionFault {
+        behavior: AdmissionBehavior,
+        after_effect: bool,
+        armed: std::sync::atomic::AtomicBool,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        player_id: Mutex<Option<PlayerId>>,
+    }
+
+    impl AdmissionFault {
+        async fn trigger(&self, player_id: PlayerId) -> Result<()> {
+            *self.player_id.lock().await = Some(player_id);
+            self.entered.notify_one();
+            match self.behavior {
+                AdmissionBehavior::Panic => panic!("injected admission callback panic"),
+                AdmissionBehavior::Park => {
+                    self.release.notified().await;
+                    Ok(())
+                }
+                AdmissionBehavior::Error => anyhow::bail!("injected ordinary admission error"),
+            }
+        }
     }
 
     /// Parks [`TestCoordinator::try_send_to_player`] until released. The
@@ -1745,7 +1988,18 @@ mod tests {
             room_id: Option<RoomId>,
             _delivery: crate::coordination::ClientDeliveryHandle,
         ) -> Result<()> {
+            let fault = self
+                .admission_fault
+                .as_ref()
+                .filter(|fault| fault.armed.swap(false, Ordering::AcqRel));
+            if let Some(fault) = fault.filter(|fault| !fault.after_effect) {
+                fault.trigger(player_id).await?;
+            }
             self.registrations.lock().await.push((player_id, room_id));
+            self.active_registrations.lock().await.insert(player_id);
+            if let Some(fault) = fault.filter(|fault| fault.after_effect) {
+                fault.trigger(player_id).await?;
+            }
             Ok(())
         }
 
@@ -1766,9 +2020,30 @@ mod tests {
             Ok(Some((epoch, final_seq)))
         }
 
-        async fn unregister_local_client(&self, player_id: &PlayerId) -> Result<()> {
-            self.unregisters.lock().await.push(*player_id);
-            Ok(())
+        fn unregister_local_client<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            player_id: &'life1 PlayerId,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            if self.cleanup_constructor_panics.load(Ordering::Acquire) {
+                panic!("injected cleanup future constructor panic");
+            }
+            Box::pin(async move {
+                self.unregisters.lock().await.push(*player_id);
+                let fault = self.cleanup_fault.lock().await.clone();
+                if let Some(fault) = fault.as_ref().filter(|fault| !fault.after_effect) {
+                    fault.trigger(*player_id).await?;
+                }
+                self.active_registrations.lock().await.remove(player_id);
+                if let Some(fault) = fault.as_ref().filter(|fault| fault.after_effect) {
+                    fault.trigger(*player_id).await?;
+                }
+                Ok(())
+            })
         }
 
         async fn should_process_message(&self, _message: &SequencedMessage) -> Result<bool> {
@@ -1788,24 +2063,24 @@ mod tests {
         }
     }
 
-    fn make_manager(max_connections_per_ip: usize) -> ConnectionManager {
+    fn make_manager(max_connections_per_ip: usize) -> Arc<ConnectionManager> {
         make_limited_manager(usize::MAX, max_connections_per_ip)
     }
 
     fn make_limited_manager(
         max_connections: usize,
         max_connections_per_ip: usize,
-    ) -> ConnectionManager {
+    ) -> Arc<ConnectionManager> {
         let metrics = Arc::new(ServerMetrics::new());
         let coordinator: Arc<dyn MessageCoordinator> = Arc::new(TestCoordinator::default());
-        ConnectionManager::new(
+        Arc::new(ConnectionManager::new(
             max_connections,
             max_connections_per_ip,
             metrics,
             coordinator,
             false,
             (u32::MAX, tokio::time::Duration::from_secs(60)),
-        )
+        ))
     }
 
     fn channel() -> (
@@ -1820,6 +2095,368 @@ mod tests {
         match outcome {
             ReassignmentOutcome::Reassigned(delivery) => delivery,
             other => panic!("expected reassignment, got {other:?}"),
+        }
+    }
+
+    fn admission_fault_manager(
+        behavior: AdmissionBehavior,
+        after_effect: bool,
+    ) -> (
+        Arc<ConnectionManager>,
+        Arc<TestCoordinator>,
+        Arc<AdmissionFault>,
+    ) {
+        let fault = Arc::new(AdmissionFault {
+            behavior,
+            after_effect,
+            armed: std::sync::atomic::AtomicBool::new(true),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            player_id: Mutex::new(None),
+        });
+        let coordinator = Arc::new(TestCoordinator {
+            admission_fault: Some(Arc::clone(&fault)),
+            ..TestCoordinator::default()
+        });
+        let manager = Arc::new(ConnectionManager::new(
+            1,
+            1,
+            Arc::new(ServerMetrics::new()),
+            coordinator.clone(),
+            true,
+            (u32::MAX, tokio::time::Duration::from_secs(60)),
+        ));
+        (manager, coordinator, fault)
+    }
+
+    async fn assert_failed_admission_is_released(
+        manager: &Arc<ConnectionManager>,
+        coordinator: &TestCoordinator,
+        fault: &AdmissionFault,
+        close: &ConnectionCloseSignal,
+    ) {
+        let player_id = fault.player_id.lock().await.expect("callback player id");
+        tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+            while manager.live_connections.load(Ordering::Acquire) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("failed admission kept its reserved slot");
+        assert!(manager.clients.is_empty());
+        assert!(manager.connections_per_ip.is_empty());
+        assert_eq!(
+            manager.metrics.active_connections.load(Ordering::Relaxed),
+            0
+        );
+        assert!(manager
+            .metrics
+            .connection_delivery_stats(&player_id)
+            .is_none());
+        manager.metrics.record_slow_consumer_eviction(&player_id);
+        assert!(manager
+            .metrics
+            .slow_consumer_eviction_attributions_snapshot()
+            .is_empty());
+        assert!(coordinator.active_registrations.lock().await.is_empty());
+        assert!(coordinator.unregisters.lock().await.contains(&player_id));
+        assert_eq!(close.requested_reason(), Some(CloseReason::Unregistered));
+        let (sender, _receiver) = channel();
+        let retry = manager
+            .register_client(
+                sender,
+                ConnectionCloseSignal::detached(),
+                "127.0.0.1:5050".parse().unwrap(),
+                Uuid::new_v4(),
+            )
+            .await
+            .expect("released admission must permit a retry");
+        assert!(manager.clients.contains_key(&retry));
+    }
+
+    // Regression #839: callbacks can unwind before admission returns its identity.
+    #[tokio::test]
+    async fn admission_callback_panic_releases_before_and_after_routing_effect() {
+        for after_effect in [false, true] {
+            let (manager, coordinator, fault) =
+                admission_fault_manager(AdmissionBehavior::Panic, after_effect);
+            let (close, _listener) = ConnectionCloseSignal::channel();
+            let (sender, _receiver) = channel();
+            let manager_for_caller = Arc::clone(&manager);
+            let close_for_caller = close.clone();
+            let caller = tokio::spawn(async move {
+                manager_for_caller
+                    .register_client(
+                        sender,
+                        close_for_caller,
+                        "127.0.0.1:5050".parse().unwrap(),
+                        Uuid::new_v4(),
+                    )
+                    .await
+            });
+            assert!(matches!(
+                caller.await.expect("callback panic is contained"),
+                Err(RegisterClientError::AdmissionFailed)
+            ));
+            assert_failed_admission_is_released(&manager, &coordinator, &fault, &close).await;
+        }
+    }
+
+    // Regression #839: cancellation cannot strand either admission or routing.
+    #[tokio::test]
+    async fn canceled_admission_releases_before_and_after_routing_effect() {
+        for after_effect in [false, true] {
+            let (manager, coordinator, fault) =
+                admission_fault_manager(AdmissionBehavior::Park, after_effect);
+            let (close, _listener) = ConnectionCloseSignal::channel();
+            let (sender, _receiver) = channel();
+            let manager_for_caller = Arc::clone(&manager);
+            let close_for_caller = close.clone();
+            let caller = tokio::spawn(async move {
+                manager_for_caller
+                    .register_client(
+                        sender,
+                        close_for_caller,
+                        "127.0.0.1:5050".parse().unwrap(),
+                        Uuid::new_v4(),
+                    )
+                    .await
+            });
+            tokio::time::timeout(
+                tokio::time::Duration::from_secs(5),
+                fault.entered.notified(),
+            )
+            .await
+            .expect("callback parked");
+            caller.abort();
+            assert!(caller
+                .await
+                .expect_err("admission caller canceled")
+                .is_cancelled());
+            assert_failed_admission_is_released(&manager, &coordinator, &fault, &close).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn canceled_admission_reply_before_ack_releases_committed_route() {
+        let (manager, coordinator, fault) = admission_fault_manager(AdmissionBehavior::Error, true);
+        let (close, _listener) = ConnectionCloseSignal::channel();
+        let (sender, _receiver) = channel();
+        let mut caller = Box::pin(manager.register_client(
+            sender,
+            close.clone(),
+            "127.0.0.1:5050".parse().unwrap(),
+            Uuid::new_v4(),
+        ));
+        assert!(futures_util::poll!(caller.as_mut()).is_pending());
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(5),
+            manager.admission_reply_sent.notified(),
+        )
+        .await
+        .expect("admission reply sent before caller observed it");
+        assert_eq!(manager.live_connections.load(Ordering::Acquire), 1);
+        assert_eq!(coordinator.active_registrations.lock().await.len(), 1);
+        drop(caller);
+        assert_failed_admission_is_released(&manager, &coordinator, &fault, &close).await;
+    }
+
+    #[tokio::test]
+    async fn pending_admission_close_preserves_identity_and_serializes_external_removal() {
+        for after_effect in [false, true] {
+            let (manager, coordinator, fault) =
+                admission_fault_manager(AdmissionBehavior::Park, after_effect);
+            let (close, _listener) = ConnectionCloseSignal::channel();
+            let (sender, _receiver) = channel();
+            let mut caller = Box::pin(manager.register_client(
+                sender,
+                close.clone(),
+                "127.0.0.1:5050".parse().unwrap(),
+                Uuid::new_v4(),
+            ));
+            assert!(futures_util::poll!(caller.as_mut()).is_pending());
+            tokio::time::timeout(
+                tokio::time::Duration::from_secs(5),
+                fault.entered.notified(),
+            )
+            .await
+            .expect("registration callback parked");
+            let player_id = fault.player_id.lock().await.unwrap();
+            assert!(manager
+                .remove_client_for_unregistration(&player_id, || false)
+                .is_none());
+            assert_eq!(manager.live_connections.load(Ordering::Acquire), 1);
+            let lifecycle = manager.client_lifecycle(&player_id).unwrap();
+            let mut removal = Box::pin(async {
+                let _gate = Arc::clone(&lifecycle).lock_owned().await;
+                coordinator
+                    .unregister_local_client(&player_id)
+                    .await
+                    .unwrap();
+                let removed = manager.remove_client_for_unregistration(&player_id, || true);
+                if removed.is_some() {
+                    manager.metrics.decrement_active_connections();
+                }
+                removed
+            });
+            assert!(futures_util::poll!(removal.as_mut()).is_pending());
+            close.request_close(CloseReason::Shutdown);
+            let admitted = tokio::time::timeout(tokio::time::Duration::from_secs(5), caller)
+                .await
+                .expect("physical close stops pending callback")
+                .expect("closed identity handoff");
+            assert_eq!(admitted, player_id);
+            assert!(manager.clients.contains_key(&admitted));
+            assert_eq!(close.requested_reason(), Some(CloseReason::Shutdown));
+            assert!(
+                tokio::time::timeout(tokio::time::Duration::from_secs(5), removal)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(manager.clients.is_empty());
+            assert!(coordinator.active_registrations.lock().await.is_empty());
+            assert_eq!(manager.live_connections.load(Ordering::Acquire), 0);
+            assert_eq!(
+                manager.metrics.active_connections.load(Ordering::Relaxed),
+                0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_admission_cleanup_preserves_local_rollback_and_structured_failure() {
+        for (behavior, constructor_panic) in [
+            (AdmissionBehavior::Error, false),
+            (AdmissionBehavior::Panic, false),
+            (AdmissionBehavior::Panic, true),
+        ] {
+            for after_effect in [false, true] {
+                let (manager, coordinator, _fault) =
+                    admission_fault_manager(AdmissionBehavior::Panic, true);
+                coordinator
+                    .cleanup_constructor_panics
+                    .store(constructor_panic, Ordering::Release);
+                *coordinator.cleanup_fault.lock().await = Some(Arc::new(AdmissionFault {
+                    behavior,
+                    after_effect,
+                    armed: std::sync::atomic::AtomicBool::new(true),
+                    entered: tokio::sync::Notify::new(),
+                    release: tokio::sync::Notify::new(),
+                    player_id: Mutex::new(None),
+                }));
+                let (sender, _receiver) = channel();
+                let (close, _listener) = ConnectionCloseSignal::channel();
+                let result = manager
+                    .register_client(
+                        sender,
+                        close.clone(),
+                        "127.0.0.1:5050".parse().unwrap(),
+                        Uuid::new_v4(),
+                    )
+                    .await;
+                assert!(matches!(result, Err(RegisterClientError::AdmissionFailed)));
+                tokio::time::timeout(
+                    tokio::time::Duration::from_secs(1),
+                    manager.admission_reply_sent.notified(),
+                )
+                .await
+                .expect("caught cleanup failure sends an explicit admission reply");
+                assert!(manager.clients.is_empty());
+                assert!(manager.connections_per_ip.is_empty());
+                assert_eq!(manager.live_connections.load(Ordering::Acquire), 0);
+                assert_eq!(
+                    manager.metrics.active_connections.load(Ordering::Relaxed),
+                    0
+                );
+                assert_eq!(close.requested_reason(), Some(CloseReason::Unregistered));
+                // An opaque adapter that fails before removing its route owns
+                // that retained state; local rollback cannot repair it.
+                assert_eq!(
+                    coordinator.active_registrations.lock().await.is_empty(),
+                    after_effect && !constructor_panic
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn blocked_admission_cleanup_retains_budget_until_routing_settles() {
+        let (manager, coordinator, fault) = admission_fault_manager(AdmissionBehavior::Park, true);
+        let cleanup = Arc::new(AdmissionFault {
+            behavior: AdmissionBehavior::Park,
+            after_effect: true,
+            armed: std::sync::atomic::AtomicBool::new(true),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            player_id: Mutex::new(None),
+        });
+        *coordinator.cleanup_fault.lock().await = Some(Arc::clone(&cleanup));
+        let (sender, _receiver) = channel();
+        let (close, _listener) = ConnectionCloseSignal::channel();
+        let mut caller = Box::pin(manager.register_client(
+            sender,
+            close.clone(),
+            "127.0.0.1:5050".parse().unwrap(),
+            Uuid::new_v4(),
+        ));
+        assert!(futures_util::poll!(caller.as_mut()).is_pending());
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(5),
+            fault.entered.notified(),
+        )
+        .await
+        .unwrap();
+        drop(caller);
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(5),
+            cleanup.entered.notified(),
+        )
+        .await
+        .unwrap();
+        let id = fault.player_id.lock().await.unwrap();
+        assert!(manager
+            .remove_client_for_unregistration(&id, || false)
+            .is_none());
+        assert_eq!(manager.live_connections.load(Ordering::Acquire), 1);
+        let (retry, _receiver) = channel();
+        assert!(matches!(
+            manager
+                .register_client(
+                    retry,
+                    ConnectionCloseSignal::detached(),
+                    "127.0.0.2:5050".parse().unwrap(),
+                    Uuid::new_v4(),
+                )
+                .await,
+            Err(RegisterClientError::CapacityExceeded { .. })
+        ));
+        cleanup.release.notify_one();
+        *coordinator.cleanup_fault.lock().await = None;
+        assert_failed_admission_is_released(&manager, &coordinator, &fault, &close).await;
+    }
+
+    #[tokio::test]
+    async fn ordinary_admission_callback_error_keeps_existing_acceptance_policy() {
+        for after_effect in [false, true] {
+            let (manager, _coordinator, _fault) =
+                admission_fault_manager(AdmissionBehavior::Error, after_effect);
+            let (sender, _receiver) = channel();
+            let player_id = manager
+                .register_client(
+                    sender,
+                    ConnectionCloseSignal::detached(),
+                    "127.0.0.1:5050".parse().unwrap(),
+                    Uuid::new_v4(),
+                )
+                .await
+                .expect("ordinary coordinator errors remain admitted");
+            assert!(manager.clients.contains_key(&player_id));
+            assert_eq!(manager.live_connections.load(Ordering::Acquire), 1);
+            assert_eq!(
+                manager.metrics.active_connections.load(Ordering::Relaxed),
+                1
+            );
         }
     }
 
@@ -1863,6 +2500,7 @@ mod tests {
             RegisterClientError::ServerDraining => {
                 panic!("connection manager does not own shutdown drain admission")
             }
+            RegisterClientError::AdmissionFailed => panic!("ordinary coordinator must admit"),
         }
 
         manager.remove_client(&first_id);
@@ -2137,14 +2775,14 @@ mod tests {
     async fn outbound_queue_sample_walks_live_classified_queues_only() {
         let metrics = Arc::new(ServerMetrics::new());
         let coordinator: Arc<dyn MessageCoordinator> = Arc::new(TestCoordinator::default());
-        let manager = ConnectionManager::new(
+        let manager = Arc::new(ConnectionManager::new(
             usize::MAX,
             4,
             metrics,
             coordinator,
             false,
             (2, tokio::time::Duration::from_secs(60)),
-        );
+        ));
         let addr: SocketAddr = "127.0.0.1:5045".parse().unwrap();
         let (legacy_tx, _legacy_rx) = tokio::sync::mpsc::channel::<Arc<ServerMessage>>(4);
         let (close_signal, _close_listener) = ConnectionCloseSignal::channel();
@@ -2238,14 +2876,14 @@ mod tests {
     async fn reassign_connection_carries_the_charged_error_reply_gate() {
         let metrics = Arc::new(ServerMetrics::new());
         let coordinator: Arc<dyn MessageCoordinator> = Arc::new(TestCoordinator::default());
-        let manager = ConnectionManager::new(
+        let manager = Arc::new(ConnectionManager::new(
             usize::MAX,
             4,
             metrics,
             coordinator,
             false,
             (2, tokio::time::Duration::from_secs(60)),
-        );
+        ));
         let addr: SocketAddr = "127.0.0.1:5044".parse().unwrap();
         let (tx, _rx) = channel();
         let (close_signal, close_listener) = ConnectionCloseSignal::channel();
@@ -2291,14 +2929,14 @@ mod tests {
     async fn restore_reassigned_connection_carries_the_charged_error_reply_gate_back() {
         let metrics = Arc::new(ServerMetrics::new());
         let coordinator: Arc<dyn MessageCoordinator> = Arc::new(TestCoordinator::default());
-        let manager = ConnectionManager::new(
+        let manager = Arc::new(ConnectionManager::new(
             usize::MAX,
             4,
             metrics.clone(),
             coordinator,
             false,
             (2, tokio::time::Duration::from_secs(60)),
-        );
+        ));
         let addr: SocketAddr = "127.0.0.1:5045".parse().unwrap();
         let (tx, _rx) = channel();
         let (close_signal, close_listener) = ConnectionCloseSignal::channel();
@@ -2361,14 +2999,14 @@ mod tests {
         ] {
             let metrics = Arc::new(ServerMetrics::new());
             let coordinator: Arc<dyn MessageCoordinator> = Arc::new(TestCoordinator::default());
-            let manager = ConnectionManager::new(
+            let manager = Arc::new(ConnectionManager::new(
                 usize::MAX,
                 4,
                 metrics.clone(),
                 coordinator,
                 false,
                 (1, tokio::time::Duration::from_secs(60)),
-            );
+            ));
             let addr: SocketAddr = "127.0.0.1:5046".parse().unwrap();
             let (tx, _rx) = channel();
             let (close_signal, close_listener) = ConnectionCloseSignal::channel();
@@ -2706,14 +3344,14 @@ mod tests {
     async fn assign_client_to_room_updates_coordinator_membership() {
         let metrics = Arc::new(ServerMetrics::new());
         let coordinator = Arc::new(TestCoordinator::default());
-        let manager = ConnectionManager::new(
+        let manager = Arc::new(ConnectionManager::new(
             usize::MAX,
             4,
             metrics.clone(),
             coordinator.clone() as Arc<dyn MessageCoordinator>,
             false,
             (u32::MAX, tokio::time::Duration::from_secs(60)),
-        );
+        ));
 
         let (tx, _rx) = channel();
         let addr: SocketAddr = "127.0.0.1:6000".parse().unwrap();
@@ -3195,7 +3833,7 @@ mod tests {
     /// After removal, new registrations should work (no underflow).
     #[tokio::test]
     async fn test_concurrent_release_ip_slot_no_underflow() {
-        let manager = Arc::new(make_manager(10));
+        let manager = make_manager(10);
 
         // Register 3 clients from same IP (different ports for each)
         let mut player_ids = Vec::new();
