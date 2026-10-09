@@ -232,6 +232,10 @@ to relay (the server warns but still starts).
 
 ## Token binding
 
+Use HTTP/1.1 for token-binding v2. Its key derivation requires
+`Sec-WebSocket-Key`, which HTTP/2 extended CONNECT does not use. Required
+binding rejects an HTTP/2 upgrade without this handshake material.
+
 Token binding v2 requires every JSON or binary client message to carry an HMAC
 under a connection key derived from both the WebSocket handshake key and a
 server-fresh challenge. One sequence covers both frame formats, so a proof

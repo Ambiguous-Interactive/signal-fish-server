@@ -127,6 +127,10 @@ If you destroy the runtime before draining, discard the server instance. Do not
 reuse a surviving `Arc<EnhancedGameServer>` on another runtime: its registrations,
 room membership, and connection metrics can retain state from dead sockets.
 
+The supplied WebSocket routers accept HTTP/1.1 GET and HTTP/2 extended CONNECT.
+If you mount a raw WebSocket handler, allow both methods and enable extended
+CONNECT on your HTTP/2 listener. Keep the required Origin policy extension.
+
 The admission API now returns `RegisterClientError::AdmissionFailed` when
 admission unwinds or its owned task ends before handoff. It returns no connection
 identity for that attempt. This is a breaking Rust API change: add an

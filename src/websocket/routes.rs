@@ -316,6 +316,8 @@ impl<S> axum_server::accept::Accept<TcpStream, S> for ConfiguredAcceptor {
 
 /// Create the nestable Axum router with WebSocket support.
 ///
+/// WebSocket routes accept HTTP/1 GET and HTTP/2 extended CONNECT requests.
+///
 /// This router is safe to mount under `/v2`: it exposes `/ws`, `/health`, and
 /// metrics routes only. The protocol-v3 alias is intentionally added by
 /// [`create_standalone_router`] or by the top-level production router so nesting
@@ -341,6 +343,7 @@ pub fn create_router_with_origin_policy(
 
 /// Create a standalone router for library users that serve Signal Fish at the
 /// HTTP root rather than nesting [`create_router`] under `/v2`.
+/// WebSocket routes accept HTTP/1 GET and HTTP/2 extended CONNECT requests.
 pub fn create_standalone_router(cors_origins: &str) -> axum::Router<Arc<EnhancedGameServer>> {
     create_standalone_router_with_origin_policy(parse_origin_policy_or_deny(cors_origins))
 }
@@ -360,6 +363,7 @@ pub fn create_standalone_router_with_origin_policy(
 }
 
 /// Build the top-level `/v3/ws` route with its required Origin policy.
+/// The route accepts HTTP/1 GET and HTTP/2 extended CONNECT requests.
 pub fn websocket_route_v3(
     cors_origins: &str,
 ) -> axum::routing::MethodRouter<Arc<EnhancedGameServer>> {
@@ -374,10 +378,13 @@ pub fn try_websocket_route_v3(
 }
 
 /// Build the top-level `/v3/ws` route from a pre-validated Origin policy.
+/// The route accepts HTTP/1 GET and HTTP/2 extended CONNECT requests.
 pub fn websocket_route_v3_with_origin_policy(
     origin_policy: OriginPolicy,
 ) -> axum::routing::MethodRouter<Arc<EnhancedGameServer>> {
-    get(websocket_handler_v3).layer(Extension(origin_policy))
+    get(websocket_handler_v3)
+        .connect(websocket_handler_v3)
+        .layer(Extension(origin_policy))
 }
 
 /// Build the version-neutral browser-readable client configuration route.
@@ -407,7 +414,7 @@ fn create_router_inner(
     let cors = origin_policy.cors_layer();
 
     let router = axum::Router::new()
-        .route("/ws", get(websocket_handler))
+        .route("/ws", get(websocket_handler).connect(websocket_handler))
         .route("/client-config", client_config_route())
         .route("/health", get(health_check))
         .route("/readyz", get(readyz))
@@ -417,7 +424,10 @@ fn create_router_inner(
 
     let router = if include_v3_alias {
         router
-            .route("/v3/ws", get(websocket_handler_v3))
+            .route(
+                "/v3/ws",
+                get(websocket_handler_v3).connect(websocket_handler_v3),
+            )
             .route("/v3/client-config", client_config_route())
     } else {
         router

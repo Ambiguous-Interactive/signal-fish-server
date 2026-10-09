@@ -239,3 +239,136 @@ pub fn test_protocol_config() -> ProtocolConfig {
         ..ProtocolConfig::default()
     }
 }
+
+/// Open an h2 client only after the server advertises RFC 8441 support.
+#[allow(dead_code)]
+pub async fn open_h2<S>(
+    stream: S,
+) -> (
+    hyper::client::conn::http2::SendRequest<axum::body::Body>,
+    tokio::task::JoinSet<Result<(), hyper::Error>>,
+)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    let (sender, connection) = hyper::client::conn::http2::handshake::<_, _, axum::body::Body>(
+        TokioExecutor::new(),
+        TokioIo::new(stream),
+    )
+    .await
+    .expect("h2 handshake");
+    // JoinSet cancels the driver if an assertion or timeout drops this future.
+    let mut driver = tokio::task::JoinSet::new();
+    let (settings_tx, settings_rx) = tokio::sync::oneshot::channel();
+    driver.spawn(async move {
+        tokio::pin!(connection);
+        let mut ticks = tokio::time::interval(Duration::from_millis(10));
+        loop {
+            tokio::select! {
+                result = &mut connection => return result,
+                _ = ticks.tick() => {
+                    if connection.is_extended_connect_protocol_enabled() {
+                        let _ = settings_tx.send(());
+                        return connection.await;
+                    }
+                }
+            }
+        }
+    });
+    settings_rx
+        .await
+        .expect("server must advertise extended CONNECT");
+    (sender, driver)
+}
+
+#[allow(dead_code)]
+pub async fn authenticate_over_h2<S>(stream: S, port: u16, path: &str, scheme: &str)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use futures_util::{SinkExt, StreamExt};
+    use hyper_util::rt::TokioIo;
+    use serde_json::{json, Value};
+    use tokio_tungstenite::{
+        tungstenite::{protocol::Role, Message},
+        WebSocketStream,
+    };
+    let operation = async {
+        let (mut sender, mut driver) = open_h2(stream).await;
+        let request = hyper::Request::builder()
+            .method(hyper::Method::CONNECT)
+            .uri(format!("{scheme}://localhost:{port}{path}"))
+            .header("sec-websocket-version", "13")
+            .header("origin", "https://allowed.example")
+            .extension(hyper::ext::Protocol::from_static("websocket"))
+            .body(axum::body::Body::empty())
+            .expect("extended CONNECT request");
+        let response = sender.send_request(request).await.expect("h2 response");
+        assert_eq!(response.status(), hyper::StatusCode::OK, "{scheme} {path}");
+        let upgraded = hyper::upgrade::on(response).await.expect("h2 upgrade");
+        let mut socket =
+            WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Client, None).await;
+        socket
+            .send(Message::Text(
+                json!({
+                    "type": "Authenticate",
+                    "data": { "app_id": "h2-route-test" }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("h2 Authenticate");
+        let mut authenticated = false;
+        loop {
+            let frame = socket
+                .next()
+                .await
+                .expect("h2 auth frame")
+                .expect("valid h2 websocket frame");
+            if let Message::Text(text) = frame {
+                let reply: Value = serde_json::from_str(&text).expect("h2 server JSON");
+                match reply["type"].as_str() {
+                    Some("Authenticated") => authenticated = true,
+                    Some("ProtocolInfo") => {
+                        assert!(authenticated, "Authenticate must precede ProtocolInfo");
+                        let expected = if path == "/v3/ws" {
+                            json!(3)
+                        } else {
+                            Value::Null
+                        };
+                        assert_eq!(
+                            reply["data"]["protocol_version"], expected,
+                            "{scheme} {path}"
+                        );
+                        break;
+                    }
+                    _ => panic!("unexpected h2 authentication reply: {reply}"),
+                }
+            }
+        }
+        socket.send(Message::Text(json!({
+            "type": "JoinRoom",
+            "data": { "game_name": "h2-test-game", "player_name": "h2-peer", "max_players": 4 }
+        }).to_string().into())).await.expect("h2 JoinRoom");
+        loop {
+            let frame = socket
+                .next()
+                .await
+                .expect("h2 room frame")
+                .expect("valid h2 room frame");
+            if let Message::Text(text) = frame {
+                let reply: Value = serde_json::from_str(&text).expect("h2 room JSON");
+                assert_eq!(reply["type"], "RoomJoined", "{scheme} {path}: {reply}");
+                break;
+            }
+        }
+        socket.close(None).await.expect("close h2 WebSocket");
+        driver.abort_all();
+        while driver.join_next().await.is_some() {}
+    };
+    tokio::time::timeout(Duration::from_secs(15), operation)
+        .await
+        .expect("h2 authentication deadline");
+}

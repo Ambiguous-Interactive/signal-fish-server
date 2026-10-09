@@ -45,7 +45,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | Task | Implementation and operations | Invariants and experiments | Status |
 | --- | --- | --- | --- |
 | A01 | `protocol/`, AsyncAPI, wire samples | Schema, errors, optional fields, v2/v3 projections, exhaustive operation mapping | Initial |
-| A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Pending |
+| A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Initial; HTTP/2 route rejection recorded in F13 |
 | A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Pending |
 | A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10 |
 | A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial |
@@ -559,6 +559,57 @@ Reproduce the focused histories:
 ```bash
 cargo nextest run --lib -E 'test(http_shutdown) | test(parked_h2_connection)'
 ```
+
+### F13 — WebSocket routes reject HTTP/2 CONNECT
+
+**Gameplay admission defect; high confidence.** Issue
+[#845](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/845).
+Baseline: `1e7d5932`. The plain and TLS listeners enable extended CONNECT;
+the TLS listener advertises HTTP/2 through ALPN. The routes accept only GET.
+A real HTTP/2 WebSocket request receives 405 before the upgrade handler runs.
+The library `/ws` route and production `/v2/ws` route reproduce that refusal.
+
+[RFC 8441](https://www.rfc-editor.org/rfc/rfc8441.html#section-5) uses CONNECT
+to open a WebSocket stream over HTTP/2. The route repair allows GET and CONNECT
+explicitly and keeps each shared upgrade handler. The sweep covers the nested
+v2 route, standalone aliases, and the public v3 route helper.
+The dependency sweep also found that Axum's `http2` feature was disabled.
+Its extractor validates the HTTP/2 `:protocol` value only with that feature.
+The repair enables it so CONNECT accepts `websocket` and rejects other
+protocols before creating a socket.
+With the route change alone, a real `other-protocol` CONNECT receives 200
+instead of 400. This negative control establishes why the feature change is
+required; the original GET-only routes refused CONNECT before this boundary.
+
+The client waits until Hyper reports the server's extended CONNECT setting
+before sending the request. TLS cells require an actual `h2` ALPN result.
+Originless native requests remain allowed by the existing policy; an initial
+missing-Origin rejection expectation was invalid and was corrected.
+
+The real-connection matrix checks authentication, the endpoint's default
+protocol version, and room admission through the production plain and TLS
+listeners and both library router shapes. Separate controls retain HTTP/1.1
+GET, reject blocked origins, drain-time upgrades, POST, and a wrong HTTP/2
+protocol, and refuse an unbound request when TLS token binding is required.
+Library and method-policy controls run with default features on all platforms;
+the existing real-binary TLS target runs on Unix with the TLS feature.
+
+Reproduce the focused histories:
+
+```bash
+cargo nextest run --test http_header_timeout_e2e -E 'test(http2_extended_connect)'
+cargo nextest run --all-features --test http_header_timeout_e2e --test tls_deployment_boundaries_e2e -E 'test(http2_extended_connect)'
+```
+
+Token-binding v2 remains a separate transport limit. Its derivation requires
+`Sec-WebSocket-Key`; extended CONNECT does not use that HTTP/1.1 handshake
+mechanism. Required binding must remain fail-closed. An HTTP/2 key contract and
+client interoperability are tracked in
+[#846](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/846).
+The deployment and configuration guides state this boundary.
+
+This finding does not certify HTTP/2 reconnect loss, arbitrary reverse proxies,
+TLS shutdown, or the legacy listener. The broader A02 audit remains incomplete.
 
 ### Session 383 physical reconnect-response loss
 

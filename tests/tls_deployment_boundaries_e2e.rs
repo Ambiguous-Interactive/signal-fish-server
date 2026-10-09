@@ -17,6 +17,8 @@
 
 #![cfg(all(feature = "tls", unix))]
 
+mod test_helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -513,6 +515,107 @@ async fn invalid_tls_pem_exits_nonzero_without_announcement_or_listener() {
         probe.is_err(),
         "a server aborted before bind must leave no listener on its port"
     );
+}
+
+/// Issue #845: RFC 8441 uses CONNECT, while HTTP/1 upgrades use GET.
+/// Exercise the production router and both listener stacks through real h2 DATA frames.
+#[tokio::test]
+async fn http2_extended_connect_authenticates_on_plain_binary_aliases() {
+    authenticate_binary_aliases(false).await;
+}
+
+#[tokio::test]
+async fn http2_extended_connect_authenticates_on_tls_binary_aliases() {
+    authenticate_binary_aliases(true).await;
+}
+
+async fn authenticate_binary_aliases(tls: bool) {
+    let server = if tls {
+        spawn_ready_tls_server(|| {
+            tls_server_config(&fixture("server-cert.pem"), &fixture("server-key.pem"))
+        })
+        .await
+    } else {
+        let server = spawn_server(plain_server_config(reserve_port()));
+        tokio::time::timeout(CONNECT_DEADLINE, async {
+            loop {
+                if TcpStream::connect(("127.0.0.1", server.port)).await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("plain listener readiness");
+        server
+    };
+    for path in ["/v2/ws", "/v3/ws"] {
+        let tcp = TcpStream::connect(("127.0.0.1", server.port))
+            .await
+            .expect("connect h2 socket");
+        if tls {
+            let mut config = (*client_config()).clone();
+            config.alpn_protocols = vec![b"h2".to_vec()];
+            let stream = TlsConnector::from(Arc::new(config))
+                .connect(ServerName::try_from("localhost").unwrap(), tcp)
+                .await
+                .expect("negotiate h2 TLS");
+            assert_eq!(stream.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+            test_helpers::authenticate_over_h2(stream, server.port, path, "https").await;
+        } else {
+            test_helpers::authenticate_over_h2(tcp, server.port, path, "http").await;
+        }
+    }
+}
+
+/// Required token binding must not become optional when CONNECT reaches the handler.
+#[tokio::test]
+async fn http2_extended_connect_rejects_missing_required_token_binding() {
+    let server = spawn_ready_tls_server(|| {
+        let mut config = tls_server_config(&fixture("server-cert.pem"), &fixture("server-key.pem"));
+        config["security"]["transport"]["token_binding"] =
+            json!({ "enabled": true, "required": true });
+        config
+    })
+    .await;
+    tokio::time::timeout(FRAME_DEADLINE, async {
+        let tcp = TcpStream::connect(("127.0.0.1", server.port))
+            .await
+            .unwrap();
+        let mut config = (*client_config()).clone();
+        config.alpn_protocols = vec![b"h2".to_vec()];
+        let stream = TlsConnector::from(Arc::new(config))
+            .connect(ServerName::try_from("localhost").unwrap(), tcp)
+            .await
+            .unwrap();
+        let (mut sender, mut driver) = test_helpers::open_h2(stream).await;
+        for path in ["/v2/ws", "/v3/ws"] {
+            let request = hyper::Request::builder()
+                .method(hyper::Method::CONNECT)
+                .uri(format!("https://localhost:{}{path}", server.port))
+                .header("sec-websocket-version", "13")
+                .extension(hyper::ext::Protocol::from_static("websocket"))
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = sender
+                .send_request(request)
+                .await
+                .expect("binding rejection");
+            assert_eq!(response.status(), hyper::StatusCode::BAD_REQUEST, "{path}");
+            let body = axum::body::to_bytes(axum::body::Body::new(response.into_body()), 1024)
+                .await
+                .unwrap();
+            assert_eq!(
+                body.as_ref(),
+                b"token binding subprotocol required",
+                "{path}"
+            );
+        }
+        driver.abort_all();
+        while driver.join_next().await.is_some() {}
+    })
+    .await
+    .expect("required binding rejection deadline");
 }
 
 fn unix_epoch_ms_now() -> u64 {

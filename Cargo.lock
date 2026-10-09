@@ -2821,6 +2821,7 @@ dependencies = [
  "hdrhistogram",
  "hkdf",
  "hmac",
+ "hyper",
  "hyper-util",
  "icu_casemap",
  "matchbox_signaling",

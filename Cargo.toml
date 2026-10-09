@@ -92,7 +92,7 @@ tokio = { version = "1.52", features = [
 ] }
 
 # Web framework
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "http2"] }
 tower-http = { version = "0.7", features = ["cors", "trace"] }
 # Explicit HTTP/1 connection builder so the pre-upgrade header-read deadline
 # is actually armed (issue #518): axum::serve and axum-server leave hyper's
@@ -211,6 +211,7 @@ tower = { version = "0.5", optional = true }
 tokio = { version = "1.52", features = ["process", "test-util"] }
 tempfile = "3.27"
 tokio-tungstenite = "0.29"
+hyper = { version = "1", features = ["client", "http2"] }
 futures-util = "0.3"
 regex = "1.12"
 proc-macro2 = { version = "1.0", features = ["span-locations"] }
