@@ -6411,8 +6411,7 @@ fn test_ci_deny_job_skips_dependency_irrelevant_pull_requests() {
         if let Some(manifest) = cargo_deny_manifest(run) {
             consumed.insert(manifest.clone());
             // The policy resides beside each standalone manifest.
-            let policy = std::path::Path::new(&manifest).with_file_name("deny.toml");
-            consumed.insert(policy.to_string_lossy().into_owned());
+            consumed.insert(cargo_deny_policy_path(&manifest));
         }
         if run.contains("cargo audit") {
             let mut scanned = false;
@@ -9581,6 +9580,61 @@ fn test_github_actions_use_version_refs_not_commit_hashes() {
                 .map(|f| format!("  - {f}"))
                 .collect::<Vec<_>>()
                 .join("\n")
+        );
+    }
+}
+
+/// Return the graph policy in the slash-separated namespace used by Git diffs.
+fn cargo_deny_policy_path(manifest: &str) -> String {
+    let manifest = manifest.replace('\\', "/");
+    manifest.rsplit_once('/').map_or_else(
+        || "deny.toml".to_owned(),
+        |(directory, _)| format!("{directory}/deny.toml"),
+    )
+}
+
+#[test]
+fn test_cargo_deny_policy_paths_use_git_separators_on_every_host() {
+    for (case, manifest, expected) in [
+        ("root graph", "Cargo.toml", "deny.toml"),
+        (
+            "native graph",
+            "clients/native/Cargo.toml",
+            "clients/native/deny.toml",
+        ),
+        (
+            "Windows native graph",
+            r"clients\native\Cargo.toml",
+            "clients/native/deny.toml",
+        ),
+        (
+            "Windows WASM graph",
+            r"clients\fortress-wasm\Cargo.toml",
+            "clients/fortress-wasm/deny.toml",
+        ),
+        (
+            "mixed host separators",
+            r"clients/fortress\Cargo.toml",
+            "clients/fortress/deny.toml",
+        ),
+        ("standalone fuzz graph", "fuzz/Cargo.toml", "fuzz/deny.toml"),
+    ] {
+        let policy = cargo_deny_policy_path(manifest);
+        assert_eq!(
+            policy, expected,
+            "{case}: policy must use Git path separators"
+        );
+        assert!(
+            !policy.contains('\\'),
+            "{case}: Windows separators must not enter the filter inventory"
+        );
+        assert!(
+            glob_matches("**/deny.toml", &policy) || policy == "deny.toml",
+            "{case}: actual policy glob must cover the normalized path"
+        );
+        assert!(
+            !glob_matches("**/Cargo.toml", &policy),
+            "{case}: manifest-only filters must not cover policy changes"
         );
     }
 }
