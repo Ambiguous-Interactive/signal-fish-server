@@ -348,7 +348,8 @@ pub(crate) struct ConnectionManager {
     #[cfg(test)]
     admission_reply_sent: tokio::sync::Notify,
     #[cfg(all(test, signal_fish_repository_tests))]
-    admission_pauses: DashMap<SocketAddr, (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    admission_pauses:
+        DashMap<SocketAddr, (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>, bool)>,
     max_connections_per_ip: usize,
     /// Whether per-connection delivery statistics (the v3 `RelayStats`
     /// ledger) are registered with the metrics sink for each connection.
@@ -376,11 +377,12 @@ struct PendingAdmission {
 
 impl PendingAdmission {
     async fn rollback_routing(&self, player_id: PlayerId) {
-        let result = std::panic::AssertUnwindSafe(
+        let result = std::panic::AssertUnwindSafe(async {
             self.manager
                 .message_coordinator
-                .unregister_local_client(&player_id),
-        )
+                .unregister_local_client(&player_id)
+                .await
+        })
         .catch_unwind()
         .await;
         if !matches!(result, Ok(Ok(()))) {
@@ -481,8 +483,20 @@ impl ConnectionManager {
     ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
         let reached = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
-        self.admission_pauses
-            .insert(client_addr, (Arc::clone(&reached), Arc::clone(&release)));
+        self.admission_pauses.insert(
+            client_addr,
+            (Arc::clone(&reached), Arc::clone(&release), false),
+        );
+        (reached, release)
+    }
+
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn fail_admission_for_test(
+        &self,
+        client_addr: SocketAddr,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let (reached, release) = self.pause_admission_for_test(client_addr);
+        self.admission_pauses.get_mut(&client_addr).unwrap().2 = true;
         (reached, release)
     }
 
@@ -595,7 +609,8 @@ impl ConnectionManager {
 
         // Reserve both budgets before spawning. Pending or abandoned callbacks
         // cannot create more owned admission tasks than the connection ceiling.
-        let (mut reply, response) = tokio::sync::oneshot::channel();
+        let (mut reply, response) =
+            tokio::sync::oneshot::channel::<Result<PlayerId, RegisterClientError>>();
         let (acknowledge, acknowledged) = tokio::sync::oneshot::channel();
         let caller_lifecycle = Arc::clone(&lifecycle);
         tokio::spawn(async move {
@@ -614,9 +629,10 @@ impl ConnectionManager {
                     },
                     result = async {
                         #[cfg(all(test, signal_fish_repository_tests))]
-                        if let Some((_, (reached, release))) = manager.admission_pauses.remove(&client_addr) {
+                        if let Some((_, (reached, release, fail))) = manager.admission_pauses.remove(&client_addr) {
                             reached.notify_one();
                             release.notified().await;
+                            if fail { panic!("injected admission callback panic"); }
                         }
                         manager.message_coordinator.register_local_client(
                             player_id, None, ClientDeliveryHandle { sender, close },
@@ -648,10 +664,18 @@ impl ConnectionManager {
                     admission.rollback_routing(player_id).await;
                     drop(admission);
                 }
-                Err(panic) => {
+                Err(_panic) => {
                     admission.rollback_routing(player_id).await;
                     drop(admission);
-                    let _ = reply.send(Err(panic));
+                    let sent = reply
+                        .send(Err(RegisterClientError::AdmissionFailed))
+                        .is_ok();
+                    #[cfg(test)]
+                    if sent {
+                        manager.admission_reply_sent.notify_one();
+                    }
+                    #[cfg(not(test))]
+                    let _ = sent;
                 }
             }
         });
@@ -665,8 +689,8 @@ impl ConnectionManager {
                 let _ = acknowledge.send(());
                 Ok(player_id)
             }
-            Ok(Err(panic)) => std::panic::resume_unwind(panic),
-            Err(_) => std::panic::resume_unwind(Box::new("Owned admission ended before handoff")),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(RegisterClientError::AdmissionFailed),
         }
     }
 
@@ -1748,6 +1772,7 @@ mod tests {
         farewell_gate: Option<Arc<FarewellGate>>,
         admission_fault: Option<Arc<AdmissionFault>>,
         cleanup_fault: Mutex<Option<Arc<AdmissionFault>>>,
+        cleanup_constructor_panics: std::sync::atomic::AtomicBool,
         active_registrations: Mutex<std::collections::HashSet<PlayerId>>,
     }
 
@@ -1985,17 +2010,30 @@ mod tests {
             Ok(Some((epoch, final_seq)))
         }
 
-        async fn unregister_local_client(&self, player_id: &PlayerId) -> Result<()> {
-            self.unregisters.lock().await.push(*player_id);
-            let fault = self.cleanup_fault.lock().await.clone();
-            if let Some(fault) = fault.as_ref().filter(|fault| !fault.after_effect) {
-                fault.trigger(*player_id).await?;
+        fn unregister_local_client<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            player_id: &'life1 PlayerId,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            if self.cleanup_constructor_panics.load(Ordering::Acquire) {
+                panic!("injected cleanup future constructor panic");
             }
-            self.active_registrations.lock().await.remove(player_id);
-            if let Some(fault) = fault.as_ref().filter(|fault| fault.after_effect) {
-                fault.trigger(*player_id).await?;
-            }
-            Ok(())
+            Box::pin(async move {
+                self.unregisters.lock().await.push(*player_id);
+                let fault = self.cleanup_fault.lock().await.clone();
+                if let Some(fault) = fault.as_ref().filter(|fault| !fault.after_effect) {
+                    fault.trigger(*player_id).await?;
+                }
+                self.active_registrations.lock().await.remove(player_id);
+                if let Some(fault) = fault.as_ref().filter(|fault| fault.after_effect) {
+                    fault.trigger(*player_id).await?;
+                }
+                Ok(())
+            })
         }
 
         async fn should_process_message(&self, _message: &SequencedMessage) -> Result<bool> {
@@ -2146,10 +2184,10 @@ mod tests {
                     )
                     .await
             });
-            assert!(caller
-                .await
-                .expect_err("callback must unwind caller")
-                .is_panic());
+            assert!(matches!(
+                caller.await.expect("callback panic is contained"),
+                Err(RegisterClientError::AdmissionFailed)
+            ));
             assert_failed_admission_is_released(&manager, &coordinator, &fault, &close).await;
         }
     }
@@ -2277,11 +2315,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_admission_cleanup_preserves_local_rollback_and_original_panic() {
-        for behavior in [AdmissionBehavior::Error, AdmissionBehavior::Panic] {
+    async fn failed_admission_cleanup_preserves_local_rollback_and_structured_failure() {
+        for (behavior, constructor_panic) in [
+            (AdmissionBehavior::Error, false),
+            (AdmissionBehavior::Panic, false),
+            (AdmissionBehavior::Panic, true),
+        ] {
             for after_effect in [false, true] {
                 let (manager, coordinator, _fault) =
                     admission_fault_manager(AdmissionBehavior::Panic, true);
+                coordinator
+                    .cleanup_constructor_panics
+                    .store(constructor_panic, Ordering::Release);
                 *coordinator.cleanup_fault.lock().await = Some(Arc::new(AdmissionFault {
                     behavior,
                     after_effect,
@@ -2292,19 +2337,21 @@ mod tests {
                 }));
                 let (sender, _receiver) = channel();
                 let (close, _listener) = ConnectionCloseSignal::channel();
-                let result = std::panic::AssertUnwindSafe(manager.register_client(
-                    sender,
-                    close.clone(),
-                    "127.0.0.1:5050".parse().unwrap(),
-                    Uuid::new_v4(),
-                ))
-                .catch_unwind()
+                let result = manager
+                    .register_client(
+                        sender,
+                        close.clone(),
+                        "127.0.0.1:5050".parse().unwrap(),
+                        Uuid::new_v4(),
+                    )
+                    .await;
+                assert!(matches!(result, Err(RegisterClientError::AdmissionFailed)));
+                tokio::time::timeout(
+                    tokio::time::Duration::from_secs(1),
+                    manager.admission_reply_sent.notified(),
+                )
                 .await
-                .expect_err("original admission callback unwound");
-                assert_eq!(
-                    result.downcast_ref::<&str>(),
-                    Some(&"injected admission callback panic")
-                );
+                .expect("caught cleanup failure sends an explicit admission reply");
                 assert!(manager.clients.is_empty());
                 assert!(manager.connections_per_ip.is_empty());
                 assert_eq!(manager.live_connections.load(Ordering::Acquire), 0);
@@ -2317,7 +2364,7 @@ mod tests {
                 // that retained state; local rollback cannot repair it.
                 assert_eq!(
                     coordinator.active_registrations.lock().await.is_empty(),
-                    after_effect
+                    after_effect && !constructor_panic
                 );
             }
         }
@@ -2443,6 +2490,7 @@ mod tests {
             RegisterClientError::ServerDraining => {
                 panic!("connection manager does not own shutdown drain admission")
             }
+            RegisterClientError::AdmissionFailed => panic!("ordinary coordinator must admit"),
         }
 
         manager.remove_client(&first_id);

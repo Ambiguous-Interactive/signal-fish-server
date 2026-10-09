@@ -127,6 +127,13 @@ If you destroy the runtime before draining, discard the server instance. Do not
 reuse a surviving `Arc<EnhancedGameServer>` on another runtime: its registrations,
 room membership, and connection metrics can retain state from dead sockets.
 
+The admission API now returns `RegisterClientError::AdmissionFailed` when
+admission unwinds or its owned task ends before handoff. It returns no connection
+identity for that attempt. This is a breaking Rust API change: add an
+`AdmissionFailed` arm to exhaustive matches on `RegisterClientError`. Handle it
+as a failed connection attempt. The WebSocket path reports close code `1011`
+with reason `admission_failed`. Panic payloads are not returned to the client.
+
 ## Custom Storage Backend
 
 Implement the `GameDatabase` trait for custom room-record storage. This alone

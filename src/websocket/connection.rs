@@ -1526,10 +1526,23 @@ async fn handle_socket_supervised(
             .await;
             return;
         }
-        Err(RegisterClientError::ServerDraining) => {
+        Err(
+            error @ (RegisterClientError::ServerDraining | RegisterClientError::AdmissionFailed),
+        ) => {
+            let (code, reason) = if matches!(error, RegisterClientError::ServerDraining)
+                || server.is_draining()
+                || close_signal.requested_reason() == Some(CloseReason::Shutdown)
+            {
+                (
+                    CloseReason::Shutdown.websocket_close_code(),
+                    CloseReason::Shutdown.close_frame_reason(),
+                )
+            } else {
+                (1011, "admission_failed")
+            };
             let close_frame = Message::Close(Some(axum::extract::ws::CloseFrame {
-                code: CloseReason::Shutdown.websocket_close_code(),
-                reason: CloseReason::Shutdown.close_frame_reason().into(),
+                code,
+                reason: reason.into(),
             }));
             match tokio::time::timeout(CLOSE_WRITE_TIMEOUT, sender.send(close_frame)).await {
                 Ok(Ok(())) => {}
@@ -1537,13 +1550,13 @@ async fn handle_socket_supervised(
                     tracing::debug!(
                         client_addr = %addr,
                         error = %err,
-                        "Failed to send drain close frame for late WebSocket registration"
+                        "Failed to send WebSocket registration close frame"
                     );
                 }
                 Err(_elapsed) => {
                     tracing::debug!(
                         client_addr = %addr,
-                        "Timed out sending drain close frame for late WebSocket registration"
+                        "Timed out sending WebSocket registration close frame"
                     );
                 }
             }
@@ -1553,13 +1566,13 @@ async fn handle_socket_supervised(
                     tracing::debug!(
                         client_addr = %addr,
                         error = %err,
-                        "Failed to close late shutdown WebSocket registration"
+                        "Failed to close WebSocket registration"
                     );
                 }
                 Err(_elapsed) => {
                     tracing::debug!(
                         client_addr = %addr,
-                        "Timed out closing late shutdown WebSocket registration"
+                        "Timed out closing WebSocket registration"
                     );
                 }
             }
@@ -5082,15 +5095,21 @@ mod tests {
         }
     }
 
-    // Regression #839: drain closes a real socket before admission's
-    // coordinator callback finishes, with tracking intact through teardown.
-    #[tokio::test]
     #[cfg(signal_fish_repository_tests)]
-    #[cfg_attr(miri, ignore)]
-    async fn shutdown_during_pending_admission_writes_4000_and_finishes_tracking() {
+    async fn assert_pending_admission_terminal_close(fail: bool, draining: bool) {
         let server = test_server().await;
-        let addr = "127.0.0.1:45560".parse().unwrap();
-        let (reached, release) = server.pause_admission_for_test(addr);
+        let addr = if fail {
+            "127.0.0.1:45561"
+        } else {
+            "127.0.0.1:45560"
+        }
+        .parse()
+        .unwrap();
+        let (reached, release) = if fail {
+            server.fail_admission_for_test(addr)
+        } else {
+            server.pause_admission_for_test(addr)
+        };
         let UpgradedSocketPair {
             server_sink,
             _server_stream: server_stream,
@@ -5115,8 +5134,17 @@ mod tests {
                 1
             );
             assert!(server.has_active_socket_tasks());
-            server.begin_shutdown_drain();
-            assert_eq!(server.close_connections_for_shutdown(), 1);
+            if fail {
+                if draining {
+                    // The fault lands during the drain grace window, before
+                    // close fanout. Global shutdown still wins the close code.
+                    server.begin_shutdown_drain();
+                }
+                release.notify_one();
+            } else {
+                server.begin_shutdown_drain();
+                assert_eq!(server.close_connections_for_shutdown(), 1);
+            }
             let close = tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
                     match client
@@ -5134,8 +5162,19 @@ mod tests {
                 }
             })
             .await
-            .expect("pending admission must observe shutdown before callback release");
-            assert_eq!(u16::from(close.code), 4000);
+            .expect("pending admission must receive its terminal close");
+            assert_eq!(
+                u16::from(close.code),
+                if fail && !draining { 1011 } else { 4000 }
+            );
+            assert_eq!(
+                close.reason,
+                if fail && !draining {
+                    "admission_failed"
+                } else {
+                    "server_shutdown"
+                }
+            );
             let _ = tokio::time::timeout(Duration::from_secs(5), client.flush()).await;
             tokio::time::timeout(Duration::from_secs(5), &mut handler)
                 .await
@@ -5155,8 +5194,8 @@ mod tests {
         })
         .catch_unwind()
         .await;
-        // Release only in cleanup. A success proves the close canceled the
-        // pending callback and did not need its test gate to open.
+        // Shutdown succeeds without opening the callback gate. The failure
+        // cell opens it to inject the panic. Cleanup releases either gate.
         release.notify_one();
         if !handler.is_finished() {
             handler.abort();
@@ -5172,6 +5211,24 @@ mod tests {
         let _ = serve_task.await;
         if let Err(panic) = exchange {
             std::panic::resume_unwind(panic);
+        }
+    }
+
+    // Regression #839: a pending callback cannot delay the shutdown close.
+    #[tokio::test]
+    #[cfg(signal_fish_repository_tests)]
+    #[cfg_attr(miri, ignore)]
+    async fn shutdown_during_pending_admission_writes_4000_and_finishes_tracking() {
+        assert_pending_admission_terminal_close(false, false).await;
+    }
+
+    // Callback failure reaches the client without rethrowing a production panic.
+    #[tokio::test]
+    #[cfg(signal_fish_repository_tests)]
+    #[cfg_attr(miri, ignore)]
+    async fn admission_callback_panic_writes_1011_and_finishes_tracking() {
+        for draining in [false, true] {
+            assert_pending_admission_terminal_close(true, draining).await;
         }
     }
 
@@ -6344,7 +6401,7 @@ mod tests {
             &server,
             &close_signal,
             &probe_state,
-            false,
+            0,
             2,
         )
         .await;
@@ -6369,7 +6426,7 @@ mod tests {
                 CLIENT_CLAMPED_RECV_BUFFER_BYTES,
             ))
             .await;
-            pair.stall_server_sink().await;
+            let pressure_frames = pair.stall_server_sink().await;
             tokio::time::pause();
             let budget = Duration::from_millis(20);
             if !ping {
@@ -6458,7 +6515,7 @@ mod tests {
                 &server,
                 &close_signal,
                 &probe_state,
-                true,
+                pressure_frames,
                 if ping { 1 } else { 2 },
             )
             .await;
@@ -6473,7 +6530,7 @@ mod tests {
         server: &Arc<EnhancedGameServer>,
         close_signal: &ConnectionCloseSignal,
         probe_state: &watch::Sender<PingProbeState>,
-        filled_sink: bool,
+        pressure_frames: usize,
         expected_abandoned: u64,
     ) {
         let UpgradedSocketPair {
@@ -6488,7 +6545,13 @@ mod tests {
             let mut close_code = None;
             while let Some(frame) = client.next().await {
                 match frame.expect("recovered socket stream stays decodable") {
-                    TungsteniteMessage::Binary(bytes) => binary_lengths.push(bytes.len()),
+                    TungsteniteMessage::Binary(bytes) => {
+                        assert!(
+                            bytes.iter().all(|byte| *byte == 0),
+                            "pressure frame payload stays intact"
+                        );
+                        binary_lengths.push(bytes.len());
+                    }
                     TungsteniteMessage::Text(text) => {
                         let message: ServerMessage = serde_json::from_str(&text)
                             .expect("recovered text frame remains valid JSON");
@@ -6526,8 +6589,8 @@ mod tests {
         let _ = serve_task.await;
         assert_eq!(
             observed.0,
-            if filled_sink { vec![8 << 20] } else { vec![] },
-            "cancelled buffered frame reaches client whole exactly once"
+            vec![8 << 20; pressure_frames],
+            "each pressure frame reaches the client whole exactly once"
         );
         assert_eq!(
             observed.1, 0,

@@ -464,8 +464,17 @@ local cleanup guarantee.
 
 The injected unwind establishes this failure boundary; it does not identify a
 normal client request that triggers a panic. Process abort cannot unwind. No
-wire fields, public signatures, runtime dependencies, or room transaction
-cancellation rules change.
+wire fields, runtime dependencies, or room transaction cancellation rules change.
+The public error enum gains `RegisterClientError::AdmissionFailed`: add this arm
+to exhaustive matches, as described in the [library guide](../library-usage.md).
+Admission unwind cleans up local state and returns that error. An unexpected
+owned-task exit returns the same error; abrupt runtime loss still requires
+discarding the server instance. WebSocket admission failure sends a bounded `1011 admission_failed`
+close without exposing the panic payload. Production code does not rethrow a
+panic; the repository's source-policy scan enforces that boundary. The routing
+cleanup catch covers both callback future construction and polling. Its controls
+include a synchronous constructor unwind and cleanup failures before and after
+routing effects.
 
 A separate experiment destroys a dedicated Tokio runtime after a wire-visible
 join while retaining the server Arc. The caller and listener terminate and
