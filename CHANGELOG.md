@@ -30,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Clean up canceled client admission and close WebSocket connections after
+  supervisor failures while keeping them tracked through cleanup (#839).
+
 - Keep live WebSocket connections tracked through teardown when their caller is
   canceled (#835).
 

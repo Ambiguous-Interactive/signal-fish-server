@@ -466,6 +466,13 @@ pub struct ConnectionCloseSignal {
 }
 
 impl ConnectionCloseSignal {
+    /// Observe close requests during connection admission.
+    pub(crate) fn subscribe(&self) -> ConnectionCloseListener {
+        ConnectionCloseListener {
+            rx: self.tx.subscribe(),
+        }
+    }
+
     /// Create a connected signal/listener pair for one connection.
     pub fn channel() -> (Self, ConnectionCloseListener) {
         let (tx, rx) = tokio::sync::watch::channel(None);

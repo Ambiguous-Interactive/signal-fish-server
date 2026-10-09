@@ -120,6 +120,13 @@ async fn main() -> anyhow::Result<()> {
 
 ```
 
+Keep the owning Tokio runtime alive until the shutdown drain finishes. Canceling
+an individual socket caller leaves its owned supervisor running. Destroying the
+runtime cancels every task and cannot complete asynchronous connection cleanup.
+If you destroy the runtime before draining, discard the server instance. Do not
+reuse a surviving `Arc<EnhancedGameServer>` on another runtime: its registrations,
+room membership, and connection metrics can retain state from dead sockets.
+
 ## Custom Storage Backend
 
 Implement the `GameDatabase` trait for custom room-record storage. This alone
