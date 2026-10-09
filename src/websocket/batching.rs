@@ -246,46 +246,103 @@ fn queued_write_deadline(
     write_started_at: Instant,
     known_unsupported: bool,
 ) -> Option<Instant> {
-    if known_unsupported {
-        // The reliable payload has already reached its terminal accounted-drop
-        // path. Its exact report is control progress, not unresolved reliable
-        // delivery, so unrelated reliable queue age must not expire it.
-        return deadline_after(write_started_at, max_sojourn);
-    }
-    match queued.class() {
-        Some(crate::protocol::DeliveryClass::Reliable) => deadline_after(
-            receiver
-                .oldest_reliable_enqueued_at()
-                .into_iter()
-                .chain(oldest_reliable_batched)
-                .chain(std::iter::once(queued.enqueued_at))
-                .min()
-                .unwrap_or(write_started_at),
-            max_sojourn,
-        ),
-        // Control traffic owns its queue-age deadline. In particular, a fresh
-        // DeliveryReport must not inherit the age of stale lossy data.
-        // A causal DeliveryReport carrier is the one exception to that
-        // queue-age rule: the queue deliberately parks it at the control-lane
-        // tail (fresh control is inserted ahead of it; gap appends and
-        // advisory refreshes mutate it in place without re-stamping), so its
-        // queue age measures the server's own parking decision rather than
-        // recipient progress. Expiring it by write progress — like the lossy
-        // classes — keeps a healthy recipient alive for the whole parked
-        // window, while a genuinely stalled write still evicts through this
-        // same budget and non-report control items keep their queue-age
-        // deadlines.
-        None if matches!(&queued.payload, OutboundPayload::DeliveryReport(_)) => {
-            deadline_after(write_started_at, max_sojourn)
+    let selected_deadline = if known_unsupported {
+        // This payload has a known accounted-drop outcome. Its report uses
+        // write progress rather than this payload's queue age. Other unresolved
+        // reliable rows still bound the writer below.
+        deadline_after(write_started_at, max_sojourn)
+    } else {
+        match queued.class() {
+            Some(crate::protocol::DeliveryClass::Reliable) => {
+                deadline_after(queued.enqueued_at, max_sojourn)
+            }
+            // Control traffic owns its queue-age deadline. In particular, a fresh
+            // DeliveryReport must not inherit the age of stale lossy data.
+            // A causal DeliveryReport carrier is the one exception to that
+            // queue-age rule: the queue deliberately parks it at the control-lane
+            // tail (fresh control is inserted ahead of it; gap appends and
+            // advisory refreshes mutate it in place without re-stamping), so its
+            // queue age measures the server's own parking decision rather than
+            // recipient progress. Expiring it by write progress — like the lossy
+            // classes — keeps a healthy recipient alive for the whole parked
+            // window, while a genuinely stalled write still evicts through this
+            // same budget and non-report control items keep their queue-age
+            // deadlines.
+            None if matches!(&queued.payload, OutboundPayload::DeliveryReport(_)) => {
+                deadline_after(write_started_at, max_sojourn)
+            }
+            None => deadline_after(queued.enqueued_at, max_sojourn),
+            // Latest/volatile queue age is resolved by their explicit loss policy.
+            // Once selected, retain a bounded write-progress budget so a peer that
+            // stops reading cannot wedge the sole socket writer forever.
+            Some(
+                crate::protocol::DeliveryClass::Latest | crate::protocol::DeliveryClass::Volatile,
+            ) => deadline_after(write_started_at, max_sojourn),
         }
-        None => deadline_after(queued.enqueued_at, max_sojourn),
-        // Latest/volatile queue age is resolved by their explicit loss policy.
-        // Once selected, retain a bounded write-progress budget so a peer that
-        // stops reading cannot wedge the sole socket writer forever.
-        Some(crate::protocol::DeliveryClass::Latest | crate::protocol::DeliveryClass::Volatile) => {
-            deadline_after(write_started_at, max_sojourn)
-        }
+    };
+    // Priority and lossy writes cannot extend unresolved reliable delivery.
+    // Only reliable age contributes: stale lossy data and parked reports keep
+    // their own progress policies. Include data staged outside the shared queue.
+    let reliable_deadline = receiver
+        .oldest_reliable_enqueued_at()
+        .into_iter()
+        .chain(oldest_reliable_batched)
+        .min()
+        .and_then(|oldest| deadline_after(oldest, max_sojourn));
+    selected_deadline.into_iter().chain(reliable_deadline).min()
+}
+
+/// Bound the whole live writer, including waits and writes that bypass queued
+/// selection. Request the close before dropping the operation so cancellation
+/// cannot let a competing heartbeat claim a different close reason.
+pub(super) async fn guard_reliable_sojourn<F, G>(
+    expired: G,
+    operation: F,
+    player_id: &PlayerId,
+    server: &EnhancedGameServer,
+    close_signal: &ConnectionCloseSignal,
+    max_sojourn: Duration,
+) -> Result<F::Output, QueueWriteError>
+where
+    F: Future,
+    G: Future<Output = ()>,
+{
+    tokio::pin!(expired);
+    tokio::pin!(operation);
+    tokio::select! {
+        biased;
+        () = &mut expired => {
+            request_sojourn_close(player_id, server, close_signal, max_sojourn);
+            Err(QueueWriteError::SojournExpired)
+        },
+        result = &mut operation => Ok(result),
     }
+}
+
+fn request_sojourn_close(
+    player_id: &PlayerId,
+    server: &EnhancedGameServer,
+    close_signal: &ConnectionCloseSignal,
+    max_sojourn: Duration,
+) {
+    #[cfg(feature = "trace-validation")]
+    close_signal.record_trace(
+        crate::trace_validation::DeliveryTraceAction::Unsupported,
+        None,
+        Some("writer-sojourn-expired"),
+    );
+    let initiated_close = close_signal.request_close(CloseReason::SlowConsumer);
+    if initiated_close {
+        server
+            .metrics()
+            .increment_websocket_slow_consumer_disconnects();
+    }
+    tracing::warn!(
+        %player_id,
+        max_sojourn_ms = u64::try_from(max_sojourn.as_millis()).unwrap_or(u64::MAX),
+        initiated_close,
+        "Outbound message exceeded the maximum queue sojourn; closing recipient"
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -303,24 +360,7 @@ where
     match complete_before_optional_deadline(deadline, write).await {
         Ok(result) => Ok(result),
         Err(_) => {
-            #[cfg(feature = "trace-validation")]
-            close_signal.record_trace(
-                crate::trace_validation::DeliveryTraceAction::Unsupported,
-                None,
-                Some("writer-sojourn-expired"),
-            );
-            let initiated_close = close_signal.request_close(CloseReason::SlowConsumer);
-            if initiated_close {
-                server
-                    .metrics()
-                    .increment_websocket_slow_consumer_disconnects();
-            }
-            tracing::warn!(
-                %player_id,
-                max_sojourn_ms = u64::try_from(max_sojourn.as_millis()).unwrap_or(u64::MAX),
-                initiated_close,
-                "Outbound message exceeded the maximum queue sojourn; closing recipient"
-            );
+            request_sojourn_close(player_id, server, close_signal, max_sojourn);
             Err(QueueWriteError::SojournExpired)
         }
     }
@@ -610,6 +650,7 @@ mod tests {
     fn data(class: DeliveryClass, seq: u64) -> OutboundData {
         let from_player = PlayerId::from_u128(1);
         let room_id = RoomId::from_u128(2);
+        let key = (class == DeliveryClass::Latest).then_some(1);
         OutboundData::new(
             Arc::new(ServerMessage::GameData {
                 from_player,
@@ -617,11 +658,11 @@ mod tests {
                 seq: Some(seq),
                 epoch: Some(1),
                 class: Some(class),
-                key: None,
+                key,
             }),
             DataDeliveryMetadata {
                 class,
-                key: None,
+                key,
                 from_player,
                 room_id,
                 epoch: 1,
@@ -976,6 +1017,66 @@ mod tests {
             .await,
             Err(SendMessageError::SocketClosed)
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resident_reliable_age_bounds_every_selected_write() {
+        let (tx, rx) = channel(4, 4);
+        tx.set_protocol_version(3);
+        tx.try_enqueue_data(data(DeliveryClass::Reliable, 1))
+            .expect("enqueue reliable data");
+        let oldest = rx.oldest_reliable_enqueued_at().expect("reliable age");
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let control = QueuedOutbound::test_control(Arc::new(ServerMessage::RoomLeft));
+        let mut report = control.clone();
+        report.payload = OutboundPayload::DeliveryReport(DeliveryReportPayload::default());
+        let mut selected = vec![("control", control, false), ("report", report, false)];
+        let (selected_tx, mut selected_rx) = channel(4, 4);
+        selected_tx.set_protocol_version(3);
+        for (name, class) in [
+            ("reliable", DeliveryClass::Reliable),
+            ("latest", DeliveryClass::Latest),
+            ("volatile", DeliveryClass::Volatile),
+        ] {
+            selected_tx
+                .try_enqueue_data(data(class, 2))
+                .expect("valid selected data");
+            selected.push((name, selected_rx.try_recv().expect("selected data"), false));
+        }
+        selected_tx
+            .try_enqueue_data(unsupported_binary_data(3))
+            .expect("selected unsupported reliable data");
+        selected.push((
+            "unsupported",
+            selected_rx.try_recv().expect("unsupported data"),
+            true,
+        ));
+        for (name, queued, known_unsupported) in selected {
+            assert_eq!(
+                queued_write_deadline(
+                    &queued,
+                    None,
+                    &rx,
+                    Duration::from_secs(15),
+                    Instant::now(),
+                    known_unsupported,
+                ),
+                Some(oldest + Duration::from_secs(15)),
+                "{name}: selected traffic cannot extend unrelated reliable delivery"
+            );
+            assert_eq!(
+                queued_write_deadline(
+                    &queued,
+                    Some(oldest),
+                    &selected_rx,
+                    Duration::from_secs(15),
+                    Instant::now(),
+                    known_unsupported
+                ),
+                Some(oldest + Duration::from_secs(15)),
+                "{name}: staged reliable data also bounds selected writes"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]

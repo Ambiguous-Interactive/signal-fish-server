@@ -716,6 +716,7 @@ impl QueueState {
 struct SharedQueue {
     state: Mutex<QueueState>,
     item_available: Notify,
+    reliable_added: Notify,
     capacity_available: Notify,
     protocol_version: AtomicU16,
     game_data_format: AtomicU8,
@@ -986,6 +987,7 @@ fn channel_inner(
     let shared = Arc::new(SharedQueue {
         state: Mutex::new(QueueState::new(data_capacity, control_capacity)),
         item_available: Notify::new(),
+        reliable_added: Notify::new(),
         capacity_available: Notify::new(),
         protocol_version: AtomicU16::new(crate::config::SERVER_MIN_PROTOCOL_VERSION),
         game_data_format: AtomicU8::new(encoding_tag(GameDataEncoding::Json)),
@@ -1248,6 +1250,7 @@ impl OutboundSender {
         push_data(&mut state, DataLane::Legacy, data, DeliveryClass::Reliable);
         self.shared.record_attempted(DeliveryClass::Reliable);
         drop(state);
+        self.shared.reliable_added.notify_waiters();
         self.shared.item_available.notify_one();
         Ok(EnqueueOutcome::ENQUEUED)
     }
@@ -1281,6 +1284,7 @@ impl OutboundSender {
         );
         self.shared.record_attempted(DeliveryClass::Reliable);
         drop(state);
+        self.shared.reliable_added.notify_waiters();
         self.shared.item_available.notify_one();
         Ok(EnqueueOutcome::ENQUEUED)
     }
@@ -1922,6 +1926,17 @@ impl Drop for ReportWriteGuard<'_> {
 }
 
 impl OutboundReceiver {
+    /// A sender used only by an explicitly armed socket writer test gate.
+    #[cfg(all(test, signal_fish_repository_tests))]
+    pub(crate) fn sender_for_test(&self) -> OutboundSender {
+        let mut state = self.shared.state();
+        state.sender_count = state.sender_count.saturating_add(1);
+        drop(state);
+        OutboundSender {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
     pub(crate) fn begin_report_write(&self) -> ReportWriteGuard<'_> {
         ReportWriteGuard {
             receiver: self,
@@ -2262,16 +2277,41 @@ impl OutboundReceiver {
     /// lossy traffic deliberately do not lend their age to reliable traffic:
     /// each has an independent writer deadline policy.
     pub(crate) fn oldest_reliable_enqueued_at(&self) -> Option<Instant> {
-        let state = self.shared.state();
-        state
-            .legacy
-            .iter()
-            .chain(state.control.iter())
-            .chain(state.data.iter())
-            .chain(state.barriers.iter())
-            .filter(|queued| queued.class() == Some(DeliveryClass::Reliable))
-            .map(|queued| queued.enqueued_at)
-            .min()
+        oldest_reliable_enqueued_at(&self.shared.state())
+    }
+
+    /// Watch resident reliable age independently of queue selection and socket
+    /// progress. The owned future does not borrow the sole mutable receiver.
+    pub(crate) fn reliable_sojourn_expired(
+        &self,
+        budget: Duration,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let shared = Arc::clone(&self.shared);
+        async move {
+            if budget.is_zero() {
+                std::future::pending::<()>().await;
+            }
+            loop {
+                // Register before reading so admission cannot be lost between
+                // the snapshot and the wait. Use a separate notification to
+                // avoid consuming the queue receiver's wakeup.
+                let added = shared.reliable_added.notified();
+                tokio::pin!(added);
+                added.as_mut().enable();
+                let deadline = oldest_reliable_enqueued_at(&shared.state())
+                    .and_then(|oldest| crate::deadline::after(oldest, budget));
+                if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                    return;
+                }
+                tokio::select! {
+                    biased;
+                    _ = crate::deadline::wait_until(deadline) => {},
+                    () = &mut added => {},
+                }
+                // A selected or discarded row no longer owns this timer.
+                // Re-read after expiry instead of closing from a stale snapshot.
+            }
+        }
     }
 
     pub fn record_written(&self, class: DeliveryClass) {
@@ -2516,6 +2556,18 @@ const fn encoding_from_tag(tag: u8) -> GameDataEncoding {
         3 => GameDataEncoding::Protobuf,
         _ => GameDataEncoding::Json,
     }
+}
+
+fn oldest_reliable_enqueued_at(state: &QueueState) -> Option<Instant> {
+    state
+        .legacy
+        .iter()
+        .chain(state.control.iter())
+        .chain(state.data.iter())
+        .chain(state.barriers.iter())
+        .filter(|queued| queued.class() == Some(DeliveryClass::Reliable))
+        .map(|queued| queued.enqueued_at)
+        .min()
 }
 
 fn scope_matches(state: &QueueState, generation: u64, room_id: Option<RoomId>) -> bool {
@@ -5354,5 +5406,150 @@ mod tests {
                 .len(),
             MAX_UNSUPPORTED_NOTICE_SENDERS
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reliable_sojourn_watcher_observes_enqueue_after_startup_in_both_lanes() {
+        for protocol_version in [2, 3] {
+            let (tx, rx) = channel(4, 4);
+            tx.set_protocol_version(protocol_version);
+            let mut expiry = Box::pin(rx.reliable_sojourn_expired(Duration::from_millis(100)));
+            assert!(futures_util::poll!(expiry.as_mut()).is_pending());
+
+            // Pre-v3 must watch the effective reliable class, even when the
+            // producer requested a lossy class.
+            let class = if protocol_version == 2 {
+                DeliveryClass::Volatile
+            } else {
+                DeliveryClass::Reliable
+            };
+            tx.try_enqueue_data(data(1, class, None, 1)).unwrap();
+            assert!(futures_util::poll!(expiry.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_millis(99)).await;
+            tokio::task::yield_now().await;
+            assert!(
+                futures_util::poll!(expiry.as_mut()).is_pending(),
+                "protocol {protocol_version} must retain the full reliable budget"
+            );
+            tokio::time::timeout(Duration::from_millis(2), expiry)
+                .await
+                .unwrap_or_else(|_| panic!("protocol {protocol_version} missed reliable expiry"));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reliable_sojourn_watcher_rechecks_removed_rows_and_fresh_successors() {
+        let (tx, mut rx) = channel(4, 4);
+        tx.set_protocol_version(3);
+        tx.try_enqueue_data(data(1, DeliveryClass::Reliable, None, 1))
+            .unwrap();
+        let mut expiry = Box::pin(rx.reliable_sojourn_expired(Duration::from_millis(100)));
+        assert!(futures_util::poll!(expiry.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_millis(50)).await;
+        assert_eq!(message_id(&rx.try_recv().unwrap()), 1);
+
+        // Settle the obsolete timer before adding a new row. A timer wake
+        // alone must never close a queue whose reliable row already left.
+        tokio::time::advance(Duration::from_millis(51)).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), expiry.as_mut())
+                .await
+                .is_err(),
+            "an obsolete timer must stay pending through timer-driver progress"
+        );
+
+        tx.try_enqueue_data(data(2, DeliveryClass::Reliable, None, 2))
+            .unwrap();
+        assert!(futures_util::poll!(expiry.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_millis(99)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            futures_util::poll!(expiry.as_mut()).is_pending(),
+            "the successor must receive its own enqueue-age budget"
+        );
+        tokio::time::timeout(Duration::from_millis(2), expiry)
+            .await
+            .expect("the fresh successor must eventually expire");
+        assert_eq!(message_id(&rx.try_recv().unwrap()), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reliable_sojourn_watcher_includes_rows_behind_generation_barriers() {
+        let (tx, mut rx) = channel(4, 4);
+        tx.set_protocol_version(3);
+        tx.try_enqueue_transition(Arc::new(ServerMessage::RoomLeft), 1)
+            .unwrap();
+        tx.try_enqueue_data(data(1, DeliveryClass::Reliable, None, 1))
+            .unwrap();
+        let expiry = rx.reliable_sojourn_expired(Duration::from_millis(100));
+        tokio::time::timeout(Duration::from_millis(102), expiry)
+            .await
+            .expect("a future-generation reliable row must retain its enqueue-age bound");
+        assert!(
+            rx.try_recv().unwrap().transition_barrier,
+            "watching expiry must preserve the transition barrier"
+        );
+        assert_eq!(message_id(&rx.try_recv().unwrap()), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reliable_sojourn_watcher_stale_timer_does_not_expire_fresh_resident_row() {
+        let (tx, mut rx) = channel(4, 4);
+        tx.set_protocol_version(3);
+        tx.try_enqueue_data(data(1, DeliveryClass::Reliable, None, 1))
+            .unwrap();
+        let mut expiry = Box::pin(rx.reliable_sojourn_expired(Duration::from_millis(100)));
+        assert!(futures_util::poll!(expiry.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_millis(50)).await;
+        assert_eq!(message_id(&rx.try_recv().unwrap()), 1);
+        tx.try_enqueue_data(data(2, DeliveryClass::Reliable, None, 2))
+            .unwrap();
+        tokio::time::advance(Duration::from_millis(51)).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), expiry.as_mut())
+                .await
+                .is_err(),
+            "the removed row's timer must not expire its fresh successor"
+        );
+        tokio::time::advance(Duration::from_millis(47)).await;
+        assert!(futures_util::poll!(expiry.as_mut()).is_pending());
+        tokio::time::timeout(Duration::from_millis(2), expiry)
+            .await
+            .expect("the successor expires at its own absolute deadline");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reliable_sojourn_watcher_keeps_zero_and_overflow_budgets_inert() {
+        for budget in [Duration::ZERO, Duration::from_secs(u64::MAX)] {
+            let (tx, rx) = channel(4, 4);
+            tx.set_protocol_version(3);
+            let mut expiry = Box::pin(rx.reliable_sojourn_expired(budget));
+            assert!(futures_util::poll!(expiry.as_mut()).is_pending());
+            tx.try_enqueue_data(data(1, DeliveryClass::Reliable, None, 1))
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(60), expiry)
+                    .await
+                    .is_err(),
+                "budget {budget:?} must not become an immediate reliable expiry"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reliable_sojourn_watcher_enqueue_at_expiry_cannot_refresh_oldest_age() {
+        let (tx, rx) = channel(4, 4);
+        tx.set_protocol_version(3);
+        tx.try_enqueue_data(data(1, DeliveryClass::Reliable, None, 1))
+            .unwrap();
+        let mut expiry = Box::pin(rx.reliable_sojourn_expired(Duration::from_millis(100)));
+        assert!(futures_util::poll!(expiry.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tx.try_enqueue_data(data(2, DeliveryClass::Reliable, None, 2))
+            .unwrap();
+        tokio::time::timeout(Duration::from_millis(2), expiry)
+            .await
+            .expect("a simultaneous enqueue must not reset the overdue row's deadline");
+        assert_eq!(rx.len(), 2, "the watcher must leave queue ownership intact");
     }
 }

@@ -30,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Enforce reliable delivery deadlines while priority control traffic keeps the
+  socket writer busy (#832).
+
 - Prevent duplicate delivery reports after a canceled socket write when the
   recipient resumes reading during teardown (#833).
 
