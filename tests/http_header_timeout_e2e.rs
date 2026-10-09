@@ -148,3 +148,116 @@ async fn prompt_requests_are_unaffected_by_the_header_deadline() {
     drop(ws);
     running_server.shutdown().await;
 }
+
+#[tokio::test]
+/// Issue #845: both library router constructors accept GET and extended CONNECT.
+async fn http2_extended_connect_authenticates_on_library_router_aliases() {
+    for standalone in [false, true] {
+        let server = test_helpers::create_test_server().await;
+        let router = if standalone {
+            signal_fish_server::websocket::create_standalone_router("https://allowed.example")
+        } else {
+            signal_fish_server::websocket::create_router("https://allowed.example").route(
+                "/v3/ws",
+                signal_fish_server::websocket::websocket_route_v3("https://allowed.example"),
+            )
+        }
+        .with_state(server.clone());
+        let running = test_helpers::RunningTestServer::spawn(server, router).await;
+        for path in ["/ws", "/v3/ws"] {
+            let (mut ws, response) =
+                tokio_tungstenite::connect_async(format!("ws://{}{path}", running.addr()))
+                    .await
+                    .expect("HTTP/1 GET WebSocket remains supported");
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::SWITCHING_PROTOCOLS
+            );
+            ws.close(None).await.expect("close HTTP/1 control");
+            let stream = TcpStream::connect(running.addr())
+                .await
+                .expect("library h2 connect");
+            test_helpers::authenticate_over_h2(stream, running.addr().port(), path, "http").await;
+        }
+        running.shutdown().await;
+    }
+}
+
+/// Extending the method route must preserve all admission gates.
+#[tokio::test]
+async fn http2_extended_connect_preserves_origin_drain_and_method_rejections() {
+    use axum::http::{Method, StatusCode};
+
+    let cases = [
+        (
+            "blocked Origin",
+            Method::CONNECT,
+            Some("https://blocked.example"),
+            false,
+            StatusCode::FORBIDDEN,
+            "websocket",
+        ),
+        (
+            "drain",
+            Method::CONNECT,
+            Some("https://allowed.example"),
+            true,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "websocket",
+        ),
+        (
+            "POST",
+            Method::POST,
+            Some("https://allowed.example"),
+            false,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "websocket",
+        ),
+        (
+            "wrong protocol",
+            Method::CONNECT,
+            Some("https://allowed.example"),
+            false,
+            StatusCode::BAD_REQUEST,
+            "other-protocol",
+        ),
+    ];
+    for (name, method, origin, draining, expected, protocol) in cases {
+        let server = test_helpers::create_test_server().await;
+        if draining {
+            server.begin_shutdown_drain();
+        }
+        let router =
+            signal_fish_server::websocket::create_standalone_router("https://allowed.example")
+                .with_state(server.clone());
+        let running = RunningTestServer::spawn(server, router).await;
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let stream = TcpStream::connect(running.addr())
+                .await
+                .expect("rejection socket");
+            let (mut sender, mut driver) = test_helpers::open_h2(stream).await;
+            for path in ["/ws", "/v3/ws"] {
+                let mut request = hyper::Request::builder()
+                    .method(method.clone())
+                    .uri(format!("http://{}{path}", running.addr()))
+                    .header("sec-websocket-version", "13");
+                if method == Method::CONNECT {
+                    request = request.extension(hyper::ext::Protocol::from_static(protocol));
+                }
+                if let Some(origin) = origin {
+                    request = request.header("origin", origin);
+                }
+                let response = sender
+                    .send_request(request.body(axum::body::Body::empty()).unwrap())
+                    .await
+                    .expect("rejection response");
+                assert_eq!(response.status(), expected, "{name} {path}");
+            }
+            driver.abort_all();
+            while driver.join_next().await.is_some() {}
+        })
+        .await;
+        running.shutdown().await;
+        result.expect("rejection deadline");
+    }
+}
