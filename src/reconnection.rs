@@ -73,7 +73,7 @@ impl std::fmt::Display for ReconnectionError {
 impl std::error::Error for ReconnectionError {}
 
 /// Authentication token for reconnection
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ReconnectionToken {
     /// Token value (UUID)
     pub token: String,
@@ -85,6 +85,18 @@ pub struct ReconnectionToken {
     pub created_at: DateTime<Utc>,
     /// When the token expires
     pub expires_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for ReconnectionToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReconnectionToken")
+            .field("token", &crate::config::REDACTED_SECRET)
+            .field("player_id", &self.player_id)
+            .field("room_id", &self.room_id)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 impl ReconnectionToken {
@@ -1636,6 +1648,46 @@ mod tests {
         assert_eq!(token.expires_at, DateTime::<Utc>::MAX_UTC);
         assert!(!token.is_expired());
         assert!(token.is_valid(&player_id, &room_id));
+    }
+
+    // Regression #836: Debug must not expose a bearer credential.
+    #[test]
+    fn reconnection_token_debug_never_exposes_the_credential() {
+        let token = ReconnectionToken {
+            token: "private-reconnect-credential".to_string(),
+            player_id: Uuid::from_u128(1),
+            room_id: Uuid::from_u128(2),
+            ..ReconnectionToken::new(Uuid::from_u128(1), Uuid::from_u128(2), 300)
+        };
+        let disconnected = DisconnectedPlayer {
+            player_id: token.player_id,
+            room_id: token.room_id,
+            disconnected_at: Utc::now(),
+            token: token.clone(),
+            last_sequence: 4,
+            was_authority: false,
+            player_info: None,
+            last_epoch: 2,
+        };
+        for diagnostic in [
+            format!("{token:?}"),
+            format!("{token:#?}"),
+            format!("{disconnected:?}"),
+            format!("{disconnected:#?}"),
+        ] {
+            assert!(
+                !diagnostic.contains(&token.token[..8]),
+                "credential prefix leaked"
+            );
+            assert!(diagnostic.contains(&token.player_id.to_string()));
+            assert!(diagnostic.contains(&token.room_id.to_string()));
+        }
+        assert_eq!(
+            token.clone().token,
+            token.token,
+            "redaction must not change credentials"
+        );
+        assert!(token.is_valid(&token.player_id, &token.room_id));
     }
 
     #[test]

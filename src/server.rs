@@ -50,6 +50,22 @@ mod constructor_validation_tests {
     use crate::protocol::IceServer;
     use std::time::Duration;
 
+    // Regression #836: runtime configuration is also a credential holder.
+    #[test]
+    fn runtime_server_config_debug_redacts_metrics_credentials() {
+        let secret = "private-runtime-metrics-credential";
+        let config = ServerConfig {
+            metrics_auth_token: Some(secret.to_string()),
+            ..ServerConfig::default()
+        };
+        for diagnostic in [format!("{config:?}"), format!("{config:#?}")] {
+            assert!(!diagnostic.contains(secret));
+            assert!(!diagnostic.contains("private-runtime"));
+            assert!(diagnostic.contains("max_outbound_message_size"));
+        }
+        assert_eq!(config.metrics_auth_token.as_deref(), Some(secret));
+    }
+
     #[derive(Default)]
     struct ConstructorInputs {
         server: ServerConfig,
@@ -702,7 +718,7 @@ pub struct MaxPlayersPerApplicationExceededError {
     pub limit: u8,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServerConfig {
     pub default_max_players: u8,
     pub ping_timeout: Duration,
@@ -760,6 +776,46 @@ pub struct ServerConfig {
     /// `2 * max_players` per room, `Some(0)` is unlimited, `Some(n > 0)`
     /// fixes the capacity.
     pub default_max_spectators: Option<u8>,
+}
+
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("default_max_players", &self.default_max_players)
+            .field("ping_timeout", &self.ping_timeout)
+            .field("room_cleanup_interval", &self.room_cleanup_interval)
+            .field("drain_grace", &self.drain_grace)
+            .field("max_rooms_per_game", &self.max_rooms_per_game)
+            .field("max_rooms", &self.max_rooms)
+            .field("rate_limit_config", &self.rate_limit_config)
+            .field("empty_room_timeout", &self.empty_room_timeout)
+            .field("inactive_room_timeout", &self.inactive_room_timeout)
+            .field("max_message_size", &self.max_message_size)
+            .field("max_outbound_message_size", &self.max_outbound_message_size)
+            .field("max_signal_bytes", &self.max_signal_bytes)
+            .field("max_connection_info_bytes", &self.max_connection_info_bytes)
+            .field("max_game_data_bytes", &self.max_game_data_bytes)
+            .field("max_connections_per_ip", &self.max_connections_per_ip)
+            .field("max_connections", &self.max_connections)
+            .field("require_metrics_auth", &self.require_metrics_auth)
+            .field(
+                "metrics_auth_token",
+                &self
+                    .metrics_auth_token
+                    .as_ref()
+                    .map(|_| crate::config::REDACTED_SECRET),
+            )
+            .field("reconnection_window", &self.reconnection_window)
+            .field("event_buffer_size", &self.event_buffer_size)
+            .field("enable_reconnection", &self.enable_reconnection)
+            .field("websocket_config", &self.websocket_config)
+            .field("app_id_allowlist_enabled", &self.app_id_allowlist_enabled)
+            .field("heartbeat_throttle", &self.heartbeat_throttle)
+            .field("region_id", &self.region_id)
+            .field("room_code_prefix", &self.room_code_prefix)
+            .field("default_max_spectators", &self.default_max_spectators)
+            .finish()
+    }
 }
 
 impl Default for ServerConfig {

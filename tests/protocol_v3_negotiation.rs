@@ -765,3 +765,268 @@ fn assert_session_plan_eq(expected: &ServerMessage, actual: &ServerMessage) {
         other => panic!("expected two SessionPlan messages, got {other:?}"),
     }
 }
+
+// Regression #836: diagnostic formatting must not disclose credentials.
+#[test]
+fn credential_debug_is_redacted_without_changing_wire_serialization() {
+    use serde::{de::DeserializeOwned, Serialize};
+    use signal_fish_server::protocol::{
+        ConnectionInfo, ReconnectedPayload, RoomJoinedPayload, RoomOperationRequest,
+    };
+    const SECRET: &str = "credential-prefix-must-stay-private-full-value";
+    fn check<T: DeserializeOwned + Serialize + std::fmt::Debug>(
+        name: &str,
+        wire: serde_json::Value,
+    ) {
+        let value: T = serde_json::from_value(wire).unwrap();
+        let before_json = serde_json::to_vec(&value).unwrap();
+        let before_binary = rmp_serde::to_vec_named(&value).unwrap();
+        assert!(
+            String::from_utf8_lossy(&before_json).contains(SECRET),
+            "{name}: fixture must retain its wire credential"
+        );
+        for rendered in [
+            format!("{value:?}"),
+            format!("{value:#?}"),
+            format!("{:?}", Some(&value)),
+            format!("{:#?}", vec![&value]),
+        ] {
+            assert!(
+                !rendered.contains("credential-prefix"),
+                "{name}: Debug exposes a credential: {rendered}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_vec(&value).unwrap(),
+            before_json,
+            "{name}: Debug must not alter JSON"
+        );
+        assert_eq!(
+            rmp_serde::to_vec_named(&value).unwrap(),
+            before_binary,
+            "{name}: Debug must not alter MessagePack"
+        );
+    }
+    for (kind, data) in [
+        (
+            "Authenticate",
+            json!({"app_id":"app", "connect_token":SECRET}),
+        ),
+        (
+            "JoinRoom",
+            json!({"game_name":"game", "player_name":"player", "password":SECRET}),
+        ),
+        (
+            "Reconnect",
+            json!({"player_id":PlayerId::nil(), "room_id":PlayerId::nil(), "auth_token":SECRET}),
+        ),
+        (
+            "JoinAsSpectator",
+            json!({"game_name":"game", "room_code":"ABCDEF", "spectator_name":"viewer", "password":SECRET}),
+        ),
+    ] {
+        let wire = json!({"type":kind,"data":data});
+        check::<ClientMessage>(kind, wire.clone());
+        if kind != "Authenticate" {
+            check::<RoomOperationRequest>(kind, wire.clone());
+            check::<ClientMessage>(
+                "correlated command",
+                json!({"type":"RoomOperation", "data":{"operation_id":PlayerId::nil(), "operation":wire}}),
+            );
+        }
+    }
+    check::<RoomOperationRequest>(
+        "SetRoomAccess",
+        json!({"type":"SetRoomAccess", "data":{"password":SECRET}}),
+    );
+    for wire in [
+        json!({"type":"relay", "host":"host", "port":1234, "allocation_id":"allocation", "token":SECRET}),
+        json!({"type":"unity_relay", "allocation_id":"allocation", "connection_data":SECRET, "key":SECRET}),
+    ] {
+        check::<ConnectionInfo>("connection metadata", wire.clone());
+        check::<ClientMessage>(
+            "connection metadata command",
+            json!({"type":"ProvideConnectionInfo", "data":{"connection_info":wire}}),
+        );
+    }
+    let connection = json!({"type":"relay", "host":"host", "port":1234, "allocation_id":"allocation", "token":SECRET});
+    check::<ServerMessage>(
+        "player metadata broadcast",
+        json!({"type":"PlayerJoined", "data":{"player":{"id":PlayerId::nil(), "name":"player", "is_authority":false, "is_ready":false, "connection_info":connection}}}),
+    );
+    check::<ServerMessage>(
+        "legacy handoff",
+        json!({"type":"GameStarting", "data":{"peer_connections":[{"player_id":PlayerId::nil(), "player_name":"player", "is_authority":false, "relay_type":"relay", "connection_info":connection}]}}),
+    );
+    check::<IceServer>(
+        "TURN",
+        json!({"urls":["turn:host:3478"], "username":"user", "credential":SECRET}),
+    );
+    let mut covered_snapshots = std::collections::BTreeSet::new();
+    for line in include_str!("../.llm/code-samples/protocol/v3-server-messages.jsonl").lines() {
+        let mut wire: serde_json::Value = serde_json::from_str(line).unwrap();
+        let Some(kind) = wire["type"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        if !matches!(kind.as_str(), "RoomJoined" | "Reconnected" | "SessionPlan") {
+            continue;
+        }
+        covered_snapshots.insert(kind.clone());
+        wire["data"]["ice_servers"] = json!([{"urls":["turn:host:3478"], "credential":SECRET}]);
+        if kind != "SessionPlan" {
+            wire["data"]["reconnection_token"] = json!(SECRET);
+        }
+        match kind.as_str() {
+            "RoomJoined" => check::<RoomJoinedPayload>(&kind, wire["data"].clone()),
+            "Reconnected" => check::<ReconnectedPayload>(&kind, wire["data"].clone()),
+            _ => {}
+        }
+        check::<ServerMessage>(&kind, wire.clone());
+        if kind != "SessionPlan" {
+            check::<ServerMessage>(
+                "correlated result",
+                json!({"type":"RoomOperationResult", "data":{"operation_id":PlayerId::nil(), "result":wire}}),
+            );
+        }
+    }
+    assert_eq!(
+        covered_snapshots,
+        ["RoomJoined", "Reconnected", "SessionPlan"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+}
+
+// Regression #836: diagnostic formatting must not disclose credentials.
+#[test]
+fn token_binding_and_turn_debug_hide_signatures_and_session_keys() {
+    use signal_fish_server::security::token_binding::{
+        ActiveTokenBinding, TokenBindingProof, TokenBindingScheme, TokenBoundBinaryFrame,
+    };
+    use signal_fish_server::security::turn_credentials::TurnCredentials;
+    const SECRET: &str = "credential-prefix-must-stay-private-full-value";
+    let proof = TokenBindingProof {
+        version: 2,
+        scheme: TokenBindingScheme::default(),
+        sequence: 1,
+        signature: SECRET.into(),
+        fingerprint: None,
+    };
+    let frame = TokenBoundBinaryFrame {
+        token_binding: proof.clone(),
+        payload: vec![1, 2, 3],
+    };
+    let active = ActiveTokenBinding::new(
+        std::sync::Arc::from(SECRET.as_bytes()),
+        TokenBindingScheme::default(),
+        false,
+    );
+    let turn = TurnCredentials {
+        username: "user".into(),
+        credential: SECRET.into(),
+    };
+    for (name, plain, pretty) in [
+        ("proof", format!("{proof:?}"), format!("{proof:#?}")),
+        ("binary frame", format!("{frame:?}"), format!("{frame:#?}")),
+        ("active key", format!("{active:?}"), format!("{active:#?}")),
+        ("TURN", format!("{turn:?}"), format!("{turn:#?}")),
+    ] {
+        for rendered in [plain, pretty] {
+            assert!(
+                !rendered.contains("credential-prefix"),
+                "{name}: credential leak: {rendered}"
+            );
+            assert!(
+                !rendered.contains("99, 114, 101, 100"),
+                "{name}: byte credential prefix leak: {rendered}"
+            );
+            assert!(
+                !rendered.contains("secret"),
+                "{name}: session key field must not be rendered: {rendered}"
+            );
+        }
+    }
+    assert_eq!(serde_json::to_value(&proof).unwrap()["signature"], SECRET);
+    assert_eq!(
+        rmp_serde::from_slice::<TokenBoundBinaryFrame>(&rmp_serde::to_vec_named(&frame).unwrap())
+            .unwrap()
+            .token_binding
+            .signature,
+        SECRET
+    );
+    assert_eq!(active.secret(), SECRET.as_bytes());
+    assert_eq!(turn.credential, SECRET);
+}
+
+// Regression #836: diagnostic formatting must not disclose credentials.
+#[test]
+fn configuration_and_room_password_debug_hide_stored_credentials() {
+    use signal_fish_server::config::{Config, SecurityConfig, TurnConfig};
+    use signal_fish_server::protocol::{Room, RoomPasswordCredential};
+    const SECRET: &str = "credential-prefix-must-stay-private-full-value";
+    let turn = TurnConfig {
+        static_auth_secret: SECRET.into(),
+        ..TurnConfig::default()
+    };
+    let security = SecurityConfig {
+        metrics_auth_token: Some(SECRET.into()),
+        ..SecurityConfig::default()
+    };
+    let config = Config {
+        turn: turn.clone(),
+        security: security.clone(),
+        ..Config::default()
+    };
+    let password = RoomPasswordCredential::new(SECRET);
+    let mut room = Room::new("game".into(), "ABCDEF".into(), 4, true, "relay".into());
+    room.password = Some(password.clone());
+    for (name, plain, pretty) in [
+        ("TURN config", format!("{turn:?}"), format!("{turn:#?}")),
+        (
+            "security config",
+            format!("{security:?}"),
+            format!("{security:#?}"),
+        ),
+        (
+            "nested config",
+            format!("{config:?}"),
+            format!("{config:#?}"),
+        ),
+        (
+            "password hash",
+            format!("{password:?}"),
+            format!("{password:#?}"),
+        ),
+        ("nested room", format!("{room:?}"), format!("{room:#?}")),
+    ] {
+        for rendered in [plain, pretty] {
+            assert!(
+                !rendered.contains("credential-prefix"),
+                "{name}: credential leak: {rendered}"
+            );
+            assert!(
+                !rendered.contains("salt:") && !rendered.contains("hash:"),
+                "{name}: password material leak: {rendered}"
+            );
+        }
+    }
+    assert!(password.matches(SECRET));
+    assert!(!password.matches("wrong"));
+    assert!(room.admits_join_password(Some(SECRET)));
+    assert!(!room.admits_join_password(Some("wrong")));
+    assert_eq!(
+        serde_json::to_value(&config).unwrap()["turn"]["static_auth_secret"],
+        SECRET
+    );
+    assert_eq!(
+        serde_json::to_value(&config).unwrap()["security"]["metrics_auth_token"],
+        SECRET
+    );
+    let round_trip: Config = serde_json::from_slice(&serde_json::to_vec(&config).unwrap()).unwrap();
+    assert_eq!(round_trip.turn.static_auth_secret, SECRET);
+    assert_eq!(
+        round_trip.security.metrics_auth_token.as_deref(),
+        Some(SECRET)
+    );
+}

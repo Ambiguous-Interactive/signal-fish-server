@@ -132,7 +132,7 @@ pub enum Topology {
 /// `urls` holds one or more STUN/TURN endpoints, and `username`/`credential`
 /// carry short-lived TURN credentials when present. Both auth fields are
 /// omitted from the wire when absent (public STUN needs no credentials).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct IceServer {
     /// STUN/TURN URLs for this server (e.g. `stun:stun.l.google.com:19302`).
     pub urls: Vec<String>,
@@ -142,6 +142,16 @@ pub struct IceServer {
     /// TURN credential (omitted for credential-less STUN servers).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
+}
+
+// TURN credentials stay on the wire and out of diagnostic output.
+impl std::fmt::Debug for IceServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IceServer")
+            .field("urls", &self.urls)
+            .field("username", &self.username)
+            .finish_non_exhaustive()
+    }
 }
 
 /// One peer a recipient should connect to under the chosen session topology.
@@ -218,7 +228,7 @@ pub struct SessionPlanPayload {
 /// reachability. A validated Direct variant is also the execution-readiness
 /// input for electing a v3 `host + direct` host. Protocol-v3 room snapshots
 /// omit it (issue #529); the write layer enforces the per-cohort split.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ConnectionInfo {
     /// Self-declared direct IP:port endpoint metadata.
@@ -263,6 +273,33 @@ pub enum ConnectionInfo {
     /// Custom connection data (extensible for other types)
     #[serde(rename = "custom")]
     Custom { data: serde_json::Value },
+}
+
+// Legacy metadata can contain relay credentials or arbitrary integration secrets.
+impl std::fmt::Debug for ConnectionInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Direct { host, port } => f
+                .debug_struct("Direct")
+                .field("host", host)
+                .field("port", port)
+                .finish(),
+            Self::UnityRelay { .. } => f.debug_struct("UnityRelay").finish_non_exhaustive(),
+            Self::Relay {
+                host,
+                port,
+                transport,
+                ..
+            } => f
+                .debug_struct("Relay")
+                .field("host", host)
+                .field("port", port)
+                .field("transport", transport)
+                .finish_non_exhaustive(),
+            Self::WebRTC { .. } => f.debug_struct("WebRTC").finish_non_exhaustive(),
+            Self::Custom { .. } => f.debug_struct("Custom").finish_non_exhaustive(),
+        }
+    }
 }
 
 /// A syntactically usable direct host endpoint carried by a v3

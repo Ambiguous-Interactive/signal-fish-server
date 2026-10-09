@@ -30,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep live WebSocket connections tracked through teardown when their caller is
+  canceled (#835).
+
 - Enforce reliable delivery deadlines while priority control traffic keeps the
   socket writer busy (#832).
 
@@ -48,6 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expose room tokens (#819).
 
 ### Security
+
+- Remove session credentials from logs and Debug output, and stop rejected-frame
+  diagnostics from quoting client values (#836).
 
 - Reject weak tenant verification keys and forged connect tokens (#821).
 

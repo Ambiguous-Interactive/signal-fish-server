@@ -44,7 +44,7 @@ pub const MAX_CREDENTIAL_TTL_SECS: u64 = 24 * 60 * 60;
 /// Self-hosted only: when [`enabled`](Self::enabled), the server mints coturn
 /// REST credentials for an operator-run TURN server. There is no managed /
 /// third-party-cloud mode.
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct TurnConfig {
     /// Whether TURN credentials are minted and advertised. When `false` (default),
     /// only [`stun_urls`](Self::stun_urls) are advertised and no secret is required.
@@ -65,6 +65,18 @@ pub struct TurnConfig {
     /// most [`MAX_CREDENTIAL_TTL_SECS`] (24 hours) when enabled.
     #[serde(default = "default_credential_ttl_secs")]
     pub credential_ttl_secs: u64,
+}
+
+// Debug preserves configuration metadata and omits the stored credential.
+impl std::fmt::Debug for TurnConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TurnConfig")
+            .field("enabled", &self.enabled)
+            .field("urls", &self.urls)
+            .field("stun_urls", &self.stun_urls)
+            .field("credential_ttl_secs", &self.credential_ttl_secs)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for TurnConfig {

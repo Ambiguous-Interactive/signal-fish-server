@@ -47,7 +47,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A01 | `protocol/`, AsyncAPI, wire samples | Schema, errors, optional fields, v2/v3 projections, exhaustive operation mapping | Initial |
 | A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Pending |
 | A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Pending |
-| A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial |
+| A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation repaired in F07 |
 | A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial |
 | A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial |
 | A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial |
@@ -62,7 +62,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial |
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Pending |
-| A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Pending |
+| A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
 | A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial |
@@ -292,6 +292,99 @@ the two full handlers miss the close deadline, and the all-class matrix rejects
 the extended deadline. The production repair is restored after that experiment.
 Hosted acceptance remains required.
 
+### F07 — Caller cancellation loses the live socket supervisor
+
+**Lifecycle defect; high confidence.** Issue
+[#835](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/835).
+Affected code: `websocket/connection.rs::handle_socket`.
+
+The handler owned shutdown tracking but spawned its reader and writer separately.
+Canceling the handler dropped their join handles, detached those tasks, and
+removed the tracker. A real socket remained registered and answered a later
+application Ping while `has_active_socket_tasks()` returned false.
+
+The repair gives the complete handler an owned supervisor. Canceling its caller
+stops that caller's wait; it does not interrupt the supervisor or its in-flight
+room transactions. Registration, early challenge waits, socket halves, and
+their existing bounded teardown remain inside the tracked lifetime. The
+regression cancels the caller after a wire-visible room join, checks retained
+tracking and a Pong, then closes the client and checks removal of registration
+and tracking. The original handler fails this history at the tracking boundary.
+
+The normal standalone drain signals closes rather than canceling this caller.
+This experiment proves the caller-cancellation boundary, not an observed
+deployment shutdown failure. The repair adds one Tokio task per accepted socket;
+its performance cost has not been measured. Supervisor panic and runtime loss
+are separate boundaries; this repair does not certify them.
+
+The identity sweep inspected lifecycle acquisition, identity reassignment and
+rollback, pointer-match checks, and unregister cleanup. Seventeen existing
+focused cases passed. This evidence does not complete every A04 schedule.
+
+### F08 — Diagnostic formatting exposes session credentials
+
+**Credential disclosure; high confidence.** Issue
+[#836](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/836).
+Affected code: reconnect registration, credential-holder Debug implementations,
+and `websocket/token_binding.rs::TokenBindingViolation`.
+
+The production disconnect log emitted eight characters of a bearer reconnect
+token. Derived Debug output also exposed complete reconnect and relay tokens,
+join passwords, TURN credentials, token-binding signatures and session keys,
+metrics credentials, and stored room password hashes. Nested messages, room
+state, and configuration inherited those disclosures.
+
+A separate malformed-frame history places a credential marker in an invalid
+message type, protocol-version value, proof scheme, or duplicate object key.
+The JSON and MessagePack parser errors quote those values, and the receive loop
+logs their Display text. The red parser test exercises those decode boundaries.
+The disconnect-log test captures the production registration event and checks
+its player/room metadata and credential absence.
+
+The repair removes the token-prefix field and gives credential holders explicit
+safe Debug output. Command bodies are omitted where they can contain secrets;
+safe operation names, IDs, scalars, and snapshot counts remain. Parser
+diagnostics keep safe error classes and numeric JSON positions rather than raw
+serde error text. Normal, pretty, and nested formatting are covered. JSON and
+MessagePack still carry the original wire credentials; configuration persistence,
+password verification, and reconnect validation remain separate positive checks.
+
+The prefix alone does not establish a practical seat-takeover exploit. Full
+Debug disclosure matters when callers log these public types. Arbitrary
+application payloads are not classified as typed credentials, and a caller can
+still explicitly log a public raw credential field. No credential format,
+public field, or verification algorithm changes.
+
+### Session 382 reconnect recovery characterization
+
+The A05/A06 history queues a successful `Reconnected` baseline and abandons its
+receiver before reading it. The committed reconnect consumes the old claim and
+retains a rotated credential. Actual unregister then arms that new credential.
+Retrying with the only token known to the client fails with
+`RECONNECTION_TOKEN_INVALID`; a fresh join recovers the same room and name under
+a new player identity. The old pending record remains bounded by its window.
+
+This is a characterization of the documented contract, not a new defect.
+Queue admission does not prove client observation. The experiment controls queue
+abandonment; physical socket-write loss, partial writes, and authenticated
+application recovery remain separate untested histories.
+
+Reproduce the focused session histories:
+
+```bash
+cargo nextest run --lib -E 'test(canceled_socket_caller_preserves_tracking)'
+cargo nextest run --lib -E 'test(reconnection_token_debug_never) | test(disconnect_registration_logs)'
+cargo nextest run --lib -E 'test(rejected_frame_diagnostics_never) | test(runtime_server_config_debug)'
+cargo nextest run --lib -E 'test(losing_unread_reconnected_baseline)'
+cargo nextest run --test protocol_v3_negotiation -E 'test(debug_) | test(configuration_and_room_password_debug)'
+```
+
+The default and all-feature builds exercise the same redaction and supervisor
+code. TLS still uses the same `handle_socket` entrypoint; the legacy-fullmesh
+listener remains a separate lifecycle. This slice does not certify its socket
+supervision or the complete TLS route, schema, or feature audit. Applicable
+hosted CI and independent review remain required before merge.
+
 ### Session 380 validation
 
 | Experiment | Red or negative control | Green evidence and limits |
@@ -353,10 +446,10 @@ cargo nextest run --lib -E 'test(send_batch_control_bypasses)'
 
 ### Unresolved hypotheses and explicit limits
 
-- Reconnect token rotation commits at queue admission. Losing the replacement
-  response can leave the client with a consumed token. The local-commit
-  contract does not promise client receipt; quantify this recovery limitation
-  before designing any duplicate-token grace period or acknowledgement.
+- Reconnect token rotation commits at queue admission. Session 382 quantifies
+  unread-baseline loss and fresh-join recovery. Physical socket-write loss still
+  needs its own history before designing any duplicate-token grace period or
+  acknowledgement.
 - The single-home deployment and model-based subsystem contracts were read.
   The full partition, restart, interop, fuzz, mutation, and platform campaigns
   have not been rerun in this session.

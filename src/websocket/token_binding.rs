@@ -391,7 +391,6 @@ pub(super) fn negotiate_token_binding(
     }))
 }
 
-#[derive(Debug)]
 pub(super) enum TokenBindingViolation {
     InvalidJson(serde_json::Error),
     MalformedEnvelope,
@@ -455,21 +454,44 @@ impl TokenBindingViolation {
 
 impl fmt::Display for TokenBindingViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Serde error text can quote credential-bearing client values. Keep
+        // only the error class and numeric position at this logging boundary.
         match self {
-            Self::InvalidJson(err) => write!(f, "invalid json: {err}"),
+            Self::InvalidJson(err) | Self::InvalidProof(err) | Self::Canonicalization(err) => {
+                write!(
+                    f,
+                    "{} ({:?}, line {}, column {})",
+                    self.user_message(),
+                    err.classify(),
+                    err.line(),
+                    err.column(),
+                )
+            }
             Self::MalformedEnvelope => write!(f, "message is not an object"),
             Self::MissingProof => write!(f, "missing token_binding section"),
-            Self::InvalidProof(err) => {
-                write!(f, "token_binding value is invalid: {err}")
-            }
-            Self::InvalidBinaryEnvelope(err) => write!(f, "binary envelope is invalid: {err}"),
-            Self::Canonicalization(err) => {
-                write!(f, "failed to canonicalize payload: {err}")
+            Self::InvalidBinaryEnvelope(err) => {
+                use rmp_serde::decode::Error;
+                let category = match err {
+                    Error::InvalidMarkerRead(_) | Error::InvalidDataRead(_) => "read",
+                    Error::TypeMismatch(_) => "type",
+                    Error::OutOfRange => "range",
+                    Error::LengthMismatch(_) => "length",
+                    Error::Uncategorized(_) | Error::Syntax(_) => "data",
+                    Error::Utf8Error(_) => "UTF-8",
+                    Error::DepthLimitExceeded => "depth",
+                };
+                write!(f, "{} ({category})", self.user_message())
             }
             Self::Verification(err) => {
                 write!(f, "token binding verification failed: {err}")
             }
         }
+    }
+}
+
+impl fmt::Debug for TokenBindingViolation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
     }
 }
 
@@ -553,6 +575,62 @@ mod tests {
                 nonce: BASE64_STANDARD.encode([7_u8; 32]),
                 first_sequence: 1,
             },
+        }
+    }
+
+    // Regression #836: malformed values must not reach diagnostic output.
+    #[test]
+    fn rejected_frame_diagnostics_never_echo_client_values() {
+        let secret = "private-credential-marker";
+        let binding = handshake_with_secret(Arc::from([7_u8; 32]), false, None);
+        let invalid_proof = json!({
+            "type": "Ping",
+            "token_binding": {
+                "version": 2,
+                "scheme": secret,
+                "sequence": 1,
+                "signature": secret,
+            },
+        });
+        let invalid_binary = rmp_serde::to_vec_named(&json!({
+            "token_binding": invalid_proof["token_binding"],
+            "payload": [],
+        }))
+        .expect("encode malformed proof");
+        let violations = [
+            parse_client_message(&json!({"type": secret}).to_string(), None).unwrap_err(),
+            parse_client_message(
+                &json!({"type": "Authenticate", "data": {
+                    "app_id": "public", "protocol_version": secret,
+                }})
+                .to_string(),
+                None,
+            )
+            .unwrap_err(),
+            parse_client_message(&invalid_proof.to_string(), Some(&binding)).unwrap_err(),
+            parse_client_message(
+                &format!("{{\"{secret}\":1,\"{secret}\":2}}"),
+                Some(&binding),
+            )
+            .unwrap_err(),
+            parse_binary_message(&invalid_binary, &binding).unwrap_err(),
+        ];
+        for violation in violations {
+            for diagnostic in [
+                format!("{violation}"),
+                format!("{violation:?}"),
+                format!("{violation:#?}"),
+            ] {
+                assert!(
+                    !diagnostic.contains(secret),
+                    "client value leaked: {diagnostic}"
+                );
+                assert!(
+                    !diagnostic.contains("private-credential"),
+                    "client prefix leaked"
+                );
+                assert!(!diagnostic.is_empty(), "retain a safe error diagnostic");
+            }
         }
     }
 

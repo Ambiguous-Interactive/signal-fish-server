@@ -7,7 +7,7 @@ use crate::protocol::ServerMessage;
 
 use super::EnhancedGameServer;
 
-/// Drops when a real WebSocket handler has fully returned.
+/// Drops when the owned WebSocket supervisor has fully returned.
 pub(crate) struct SocketTaskGuard {
     server: Arc<EnhancedGameServer>,
 }
@@ -192,7 +192,7 @@ impl EnhancedGameServer {
     /// The close frames are written by per-connection send tasks after
     /// [`Self::close_connections_for_shutdown`] requests `CloseReason::Shutdown`.
     /// Unregistration can happen before that bounded flush finishes, so this
-    /// waits on the parent WebSocket handler lifetime instead of connection-map
+    /// waits on the owned WebSocket supervisor lifetime instead of connection-map
     /// membership. It returns the number of handlers still active at timeout.
     pub async fn wait_for_shutdown_connections(&self, max_wait: Duration) -> usize {
         self.wait_for_shutdown_connections_after_active_check(max_wait, || {})
