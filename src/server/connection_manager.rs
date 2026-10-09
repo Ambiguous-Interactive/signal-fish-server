@@ -387,7 +387,7 @@ impl PendingAdmission {
         .await;
         if !matches!(result, Ok(Ok(()))) {
             // Diagnostics also belong to the unwind boundary. A subscriber
-            // failure must not replace the original admission panic.
+            // failure must not interrupt local admission rollback.
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 warn!(%player_id, panicked = result.is_err(), "Admission routing cleanup failed");
             }));
@@ -665,6 +665,11 @@ impl ConnectionManager {
                     drop(admission);
                 }
                 Err(_panic) => {
+                    // Log before routing cleanup, which an adapter can delay.
+                    // A subscriber panic must not interrupt admission rollback.
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        tracing::error!(%player_id, %client_addr, failure = "admission_unwind", "Connection admission failed");
+                    }));
                     admission.rollback_routing(player_id).await;
                     drop(admission);
                     let sent = reply
@@ -690,7 +695,12 @@ impl ConnectionManager {
                 Ok(player_id)
             }
             Ok(Err(error)) => Err(error),
-            Err(_) => Err(RegisterClientError::AdmissionFailed),
+            Err(_) => {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    tracing::error!(%player_id, %client_addr, failure = "handoff_channel_closed", "Connection admission failed");
+                }));
+                Err(RegisterClientError::AdmissionFailed)
+            }
         }
     }
 
