@@ -60,7 +60,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
 | A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial |
 | A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial |
-| A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial |
+| A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Pending |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
 | A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial |
@@ -524,6 +524,41 @@ ShellCheck and Python analyzers. The TURN profile and offline harness use the of
 GHCR coturn image with the same `faca4aa5` manifest digest. Registry inspection
 confirmed all seven platform descriptors match that pinned manifest. The
 registry change alters the pull location, not the coturn version or image bytes.
+
+### F12 — Plain HTTP shutdown drops active responses
+
+**Lifecycle defect; high confidence.** Issue
+[#843](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/843).
+Baseline: `e5ffa4f8`. A real HTTP/1.1 request reaches a handler whose response
+waits on a notification. The test signals shutdown while that response remains
+pending, then releases the handler. The baseline connection task panics with
+`async fn resumed after completion` and drops the request without its 200 response.
+Dropping the shutdown sender reproduces the same failure.
+
+The listener repeatedly selects a pinned `shutdown_resolved` async future.
+That future returns when shutdown starts; selecting it again polls a completed
+future. The outer JoinSet drain discards the resulting JoinError. An initial
+busy-spin hypothesis was disproved by the observed panic.
+
+The repair selects shutdown once, requests graceful connection shutdown, then
+awaits that connection without polling the signal again. Both regression
+histories require the server to retain the active request, deliver its complete
+200 response, close the socket, and finish the listener. The handler remains
+pending for 50 ms on the real clock to overlap shutdown with an active request;
+all socket and task waits have separate five-second observation bounds.
+The existing parked HTTP/2 keep-alive history remains a separate control.
+
+This establishes response loss on the plain listener. Production starts HTTP
+shutdown after WebSocket drain; the history does not prove gameplay loss during
+that earlier choreography. TLS uses axum-server's separate shutdown path and
+is not certified by this repair. No timeout, wire format, or public API changes.
+The A17 restart and partition coverage remains incomplete.
+
+Reproduce the focused histories:
+
+```bash
+cargo nextest run --lib -E 'test(http_shutdown) | test(parked_h2_connection)'
+```
 
 ### Session 383 physical reconnect-response loss
 
