@@ -2100,6 +2100,85 @@ fn test_actionlint_runs_on_relevant_changes_without_a_static_weekly_rerun() {
             );
         }
     }
+    assert!(
+        extract_workflow_event_paths(&workflow, "pull_request")
+            .iter()
+            .any(|path| path == ".devcontainer/Dockerfile"),
+        "actionlint must validate changes to its consumed tool pin"
+    );
+    let install = extract_named_workflow_step(&workflow, "Install native actionlint")
+        .expect("native installer must replace the Docker wrapper");
+    for required in [
+        ".devcontainer/Dockerfile",
+        "ACTIONLINT_VERSION",
+        "ACTIONLINT_AMD64_SHA256",
+        "sha256sum -c",
+        "releases/download",
+    ] {
+        assert!(
+            install.contains(required),
+            "native actionlint installer must consume and verify {required}"
+        );
+    }
+    for required in ["shellcheck@0.11.0", "pyflakes==3.4.0", "fallback: none"] {
+        assert!(
+            workflow.contains(required),
+            "native actionlint must preserve pinned shell/Python validators through {required}"
+        );
+    }
+    for forbidden in [
+        "devops-actions/actionlint@",
+        "docker run",
+        "-shellcheck=",
+        "-pyflakes=",
+    ] {
+        assert!(
+            !workflow.contains(forbidden),
+            "native actionlint must avoid {forbidden}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_actionlint_logging_preserves_validation_and_tool_failure_status() {
+    let workflow = read_file(&repo_root().join(".github/workflows/actionlint.yml"));
+    let documents = Yaml::load_from_str(&workflow).expect("actionlint workflow parses");
+    let steps = documents[0]["jobs"]["actionlint"]["steps"]
+        .as_vec()
+        .unwrap();
+    let run = steps
+        .iter()
+        .find(|step| step.as_mapping_get("name").and_then(Yaml::as_str) == Some("Run actionlint"))
+        .unwrap()
+        .as_mapping_get("run")
+        .and_then(Yaml::as_str)
+        .expect("native actionlint run script");
+    for (case, status) in [
+        ("valid workflows", 0),
+        ("invalid workflows", 1),
+        ("tool unavailable", 127),
+    ] {
+        let temp_dir = unique_temp_dir("actionlint-status");
+        let script = format!(
+            "actionlint() {{ printf 'validator diagnostic\\n' >&2; return {status}; }}\n{run}"
+        );
+        let output = bash_command()
+            .args(["-c", &script])
+            .current_dir(&temp_dir)
+            .output()
+            .expect("run logging seam");
+        assert_eq!(
+            output.status.code(),
+            Some(status),
+            "{case}: preserve validator exit status"
+        );
+        assert!(
+            read_file(&temp_dir.path().join("actionlint-results.log"))
+                .contains("validator diagnostic"),
+            "{case}: retain diagnostics for upload"
+        );
+    }
 }
 
 #[test]
@@ -3714,8 +3793,28 @@ fn test_workflow_apt_update_sites_drop_broken_microsoft_mirrors() {
     let mut problems = Vec::new();
     let mut checked = 0usize;
 
-    for entry in collect_workflow_files(&workflows_dir) {
-        let path = entry.path();
+    let mut apt_files: Vec<PathBuf> = collect_workflow_files(&workflows_dir)
+        .into_iter()
+        .map(|entry| entry.path())
+        .collect();
+    for action in std::fs::read_dir(root.join(".github/actions")).expect("shared actions directory")
+    {
+        let action = action.expect("shared action entry");
+        if action.path().is_dir() {
+            apt_files.extend(
+                collect_workflow_files(&action.path())
+                    .into_iter()
+                    .map(|entry| entry.path()),
+            );
+        }
+    }
+    assert!(
+        apt_files
+            .iter()
+            .any(|path| path.ends_with("setup-docker-builder/action.yml")),
+        "apt guard must inspect the native builder action"
+    );
+    for path in apt_files {
         let content = read_file(&path);
         let filename = path.file_name().unwrap().to_string_lossy().to_string();
         let lines: Vec<&str> = content.lines().collect();
@@ -5670,7 +5769,52 @@ fn test_docker_publish_builds_multi_arch_manifest() {
         );
     }
 
-    // setup-buildx-action is required for multi-platform output; setup-qemu is
+    // CI must exercise the same platform manifest before publication.
+    let ci = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let ci_docs = Yaml::load_from_str(&ci).expect("CI workflow YAML parses");
+    let ci_steps = ci_docs[0]["jobs"]["docker"]["steps"]
+        .as_vec()
+        .expect("CI Docker steps");
+    let ci_build = ci_steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("uses")
+                .and_then(Yaml::as_str)
+                .is_some_and(|uses| uses.starts_with("docker/build-push-action@"))
+        })
+        .expect("CI Docker build");
+    let expected: BTreeSet<_> = REQUIRED_CONTAINER_PLATFORMS.iter().copied().collect();
+    for (lane, platforms) in [
+        (
+            "publication",
+            platforms_line
+                .trim()
+                .strip_prefix("platforms:")
+                .unwrap()
+                .trim(),
+        ),
+        (
+            "CI",
+            ci_build
+                .as_mapping_get("with")
+                .and_then(|with| with.as_mapping_get("platforms"))
+                .and_then(Yaml::as_str)
+                .expect("CI must build every publication platform"),
+        ),
+    ] {
+        assert_eq!(
+            platforms.split(',').map(str::trim).collect::<BTreeSet<_>>(),
+            expected,
+            "{lane}: build all supported platforms"
+        );
+    }
+    assert_eq!(
+        ci_build["with"]["load"].as_bool(),
+        Some(true),
+        "CI must load the multi-platform image for smoke tests"
+    );
+
+    // setup-buildx-action is required for multi-platform output; native QEMU is
     // required so the arm64/armv7 runtime stage (useradd/apt-get) can execute
     // under emulation (the Rust compile is cross-compiled, the runtime is not).
     assert!(
@@ -5679,9 +5823,8 @@ fn test_docker_publish_builds_multi_arch_manifest() {
          manifests cannot be produced by the classic builder."
     );
     assert!(
-        content.contains("docker/setup-qemu-action"),
-        "docker-publish.yml must set up docker/setup-qemu-action; multi-platform \
-         manifests cannot be produced by the classic builder."
+        content.contains("/.github/actions/setup-docker-builder"),
+        "docker-publish.yml must install native QEMU through the shared builder action."
     );
 }
 
@@ -5695,27 +5838,28 @@ fn docker_step_field<'a>(step: &'a Yaml<'_>, name: &str) -> Option<&'a str> {
     docker_step_value(step, name)?.as_str()
 }
 
-// Docker Hub limits apply separately to runner pulls and BuildKit pulls.
+// Native QEMU and the Docker driver avoid Docker Hub bootstrap images.
 fn docker_mirror_steps_valid(steps: &[Yaml<'_>], builds: bool) -> bool {
     let Some(mirror_index) = steps
         .iter()
-        .position(|step| docker_step_field(step, "name") == Some("Configure Docker Hub mirror"))
+        .position(|step| docker_step_field(step, "name") == Some("Prepare Docker builder"))
     else {
         return false;
     };
     let mirror = &steps[mirror_index];
     if !docker_step_field(mirror, "uses")
         .unwrap_or_default()
-        .ends_with("/.github/actions/configure-docker-mirror")
+        .ends_with("/.github/actions/setup-docker-builder")
     {
         return false;
     }
     let mut saw_buildx = false;
     for (index, step) in steps.iter().enumerate() {
         let action = docker_step_field(step, "uses").unwrap_or_default();
-        let bootstrap = action.starts_with("docker/setup-qemu-action@")
-            || action.starts_with("docker/setup-buildx-action@")
-            || action.starts_with("devops-actions/actionlint@");
+        if action.starts_with("docker/setup-qemu-action@") {
+            return false;
+        }
+        let bootstrap = action.starts_with("docker/setup-buildx-action@");
         let pulls = docker_step_field(step, "run")
             .unwrap_or_default()
             .contains("docker pull");
@@ -5727,11 +5871,11 @@ fn docker_mirror_steps_valid(steps: &[Yaml<'_>], builds: bool) -> bool {
             }
             if action.starts_with("docker/setup-buildx-action@") {
                 saw_buildx = true;
-                let config = docker_step_value(step, "with")
-                    .and_then(|with| docker_step_field(with, "buildkitd-config-inline"))
-                    .unwrap_or_default();
-                if !config.contains("[registry.\"docker.io\"]")
-                    || !config.contains("mirrors = [\"mirror.gcr.io\"]")
+                let with = docker_step_value(step, "with");
+                if with.and_then(|with| docker_step_field(with, "driver")) != Some("docker")
+                    || with
+                        .and_then(|with| docker_step_value(with, "buildkitd-config-inline"))
+                        .is_some()
                 {
                     return false;
                 }
@@ -5746,17 +5890,19 @@ fn test_docker_hub_mirrors_cover_bootstrap_and_builds() {
     for (workflow, job, builds) in [
         ("docker-publish.yml", "docker-publish", true),
         ("ci.yml", "docker", true),
-        ("actionlint.yml", "actionlint", false),
     ] {
         let text = read_file(&repo_root().join(".github/workflows").join(workflow));
         let docs = Yaml::load_from_str(&text).expect("workflow YAML parses");
         let steps = docs[0]["jobs"][job]["steps"]
             .as_vec()
             .expect("Docker job steps");
-        assert!(docker_mirror_steps_valid(steps, builds), "{workflow}: configure the runner mirror before Docker pulls and the BuildKit mirror before builds");
+        assert!(
+            docker_mirror_steps_valid(steps, builds),
+            "{workflow}: prepare the native Docker builder before Buildx and image pulls"
+        );
         let mirror_index = steps
             .iter()
-            .position(|step| docker_step_field(step, "name") == Some("Configure Docker Hub mirror"))
+            .position(|step| docker_step_field(step, "name") == Some("Prepare Docker builder"))
             .unwrap();
         let first_pull = steps
             .iter()
@@ -5764,9 +5910,6 @@ fn test_docker_hub_mirrors_cover_bootstrap_and_builds() {
                 docker_step_field(step, "uses")
                     .unwrap_or_default()
                     .starts_with("docker/setup-")
-                    || docker_step_field(step, "uses")
-                        .unwrap_or_default()
-                        .starts_with("devops-actions/actionlint@")
                     || docker_step_field(step, "run")
                         .unwrap_or_default()
                         .contains("docker pull")
@@ -5801,10 +5944,11 @@ fn test_docker_hub_mirrors_cover_bootstrap_and_builds() {
                 })
                 .unwrap();
             let mut missing_buildkit = steps.clone();
-            missing_buildkit[buildx_index]["with"]["buildkitd-config-inline"] = Yaml::BadValue;
+            missing_buildkit[buildx_index]["with"]["driver"] =
+                Yaml::scalar_from_string("docker-container".to_owned());
             assert!(
                 !docker_mirror_steps_valid(&missing_buildkit, builds),
-                "{workflow}: must reject a missing BuildKit mirror"
+                "{workflow}: must reject a Docker Hub BuildKit container bootstrap"
             );
         }
     }
@@ -5815,7 +5959,7 @@ fn test_docker_hub_mirrors_cover_bootstrap_and_builds() {
             "Checkout publication tooling"
         )
         .unwrap()
-        .contains(".github/actions/configure-docker-mirror"),
+        .contains(".github/actions/setup-docker-builder"),
         "publication tooling must include the shared local action"
     );
     for (workflow, event) in [
@@ -5826,7 +5970,7 @@ fn test_docker_hub_mirrors_cover_bootstrap_and_builds() {
         assert!(
             extract_workflow_event_paths(&text, event)
                 .iter()
-                .any(|path| path == ".github/actions/configure-docker-mirror/**"
+                .any(|path| path == ".github/actions/setup-docker-builder/**"
                     || path == ".github/actions/**"),
             "{workflow}: changes to the shared action must trigger validation"
         );
@@ -5837,7 +5981,7 @@ fn test_docker_hub_mirrors_cover_bootstrap_and_builds() {
 #[test]
 fn test_docker_hub_mirror_merge_preserves_runner_configuration() {
     let filter_pattern = Regex::new(r"jq '([^']+)'").unwrap();
-    let workflow = "configure-docker-mirror/action.yml";
+    let workflow = "setup-docker-builder/action.yml";
     let step = read_file(&repo_root().join(".github/actions").join(workflow));
     let captures = filter_pattern.captures(&step).expect("jq merge filter");
     let expression = format!("$config | {}", &captures[1]);
@@ -5845,21 +5989,35 @@ fn test_docker_hub_mirror_merge_preserves_runner_configuration() {
         (
             "fresh runner",
             "{}",
-            Some(serde_json::json!({"registry-mirrors": ["https://mirror.gcr.io"]})),
+            Some(
+                serde_json::json!({"registry-mirrors": ["https://mirror.gcr.io"], "features":{"containerd-snapshotter":true}}),
+            ),
         ),
         (
             "preserve options and mirror order",
             r#"{"debug":true,"registry-mirrors":["https://z.example","https://a.example"]}"#,
             Some(
-                serde_json::json!({"debug":true,"registry-mirrors":["https://mirror.gcr.io","https://z.example","https://a.example"]}),
+                serde_json::json!({"debug":true,"registry-mirrors":["https://mirror.gcr.io","https://z.example","https://a.example"],"features":{"containerd-snapshotter":true}}),
             ),
         ),
         (
             "deduplicate preferred mirror",
             r#"{"registry-mirrors":["https://z.example","https://mirror.gcr.io"]}"#,
             Some(
-                serde_json::json!({"registry-mirrors":["https://mirror.gcr.io","https://z.example"]}),
+                serde_json::json!({"registry-mirrors":["https://mirror.gcr.io","https://z.example"],"features":{"containerd-snapshotter":true}}),
             ),
+        ),
+        (
+            "preserve existing feature settings",
+            r#"{"features":{"buildkit":true,"containerd-snapshotter":false}}"#,
+            Some(
+                serde_json::json!({"features":{"buildkit":true,"containerd-snapshotter":true},"registry-mirrors":["https://mirror.gcr.io"]}),
+            ),
+        ),
+        (
+            "invalid feature configuration",
+            r#"{"features":"bad"}"#,
+            None,
         ),
         ("invalid existing JSON", "{", None),
         ("invalid mirror type", r#"{"registry-mirrors":"bad"}"#, None),
@@ -5879,6 +6037,19 @@ fn test_docker_hub_mirror_merge_preserves_runner_configuration() {
                 serde_json::from_slice(&output.stdout).expect("merged JSON");
             assert_eq!(actual, expected, "{workflow}: {case}");
         }
+    }
+    for required in [
+        "containerd-snapshotter",
+        "qemu-user-static binfmt-support",
+        "update-binfmts --enable",
+        "qemu-aarch64 qemu-arm",
+        "flags:.*F",
+        "Docker Engine 28",
+    ] {
+        assert!(
+            step.contains(required),
+            "native builder setup must retain {required}"
+        );
     }
     let merge = step
         .find(r#"> "$config_dir/merged.json""#)

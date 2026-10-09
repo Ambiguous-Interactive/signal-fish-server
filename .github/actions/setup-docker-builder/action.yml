@@ -1,0 +1,38 @@
+name: Prepare Docker builder
+description: Configure the embedded builder and native ARM emulation without bootstrap image pulls.
+runs:
+  using: composite
+  steps:
+    # The Docker driver uses the daemon registry configuration and image store.
+    - shell: bash
+      run: |
+        set -euo pipefail
+        config_dir=$(mktemp -d)
+        trap 'rm -rf "$config_dir"' EXIT
+        config="$config_dir/current.json"
+        if [ -f /etc/docker/daemon.json ]; then
+          config_content=$(sudo cat /etc/docker/daemon.json)
+          printf '%s\n' "$config_content" > "$config"
+        else
+          echo '{}' > "$config"
+        fi
+        jq '.features = ((.features // {}) + {"containerd-snapshotter": true}) | ."registry-mirrors" = (reduce (["https://mirror.gcr.io"] + (."registry-mirrors" // []))[] as $mirror ([]; if index($mirror) == null then . + [$mirror] else . end))' "$config" > "$config_dir/merged.json"
+        sudo install -m 0644 "$config_dir/merged.json" /etc/docker/daemon.json
+        sudo systemctl restart docker
+        docker info
+        docker_version=$(docker version --format '{{.Server.Version}}')
+        if [ "${docker_version%%.*}" -lt 28 ]; then
+          echo "ERROR: Docker Engine 28 or newer is required for GitHub cache v2."
+          exit 1
+        fi
+        sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends qemu-user-static binfmt-support
+        for emulator in qemu-aarch64 qemu-arm; do
+          sudo update-binfmts --enable "$emulator"
+          if ! grep -q '^flags:.*F' "/proc/sys/fs/binfmt_misc/$emulator"; then
+            echo "ERROR: $emulator must register the fix-binary flag for containers."
+            exit 1
+          fi
+          cat "/proc/sys/fs/binfmt_misc/$emulator"
+        done

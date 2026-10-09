@@ -502,9 +502,11 @@ configuration step cannot repair action preparation. This failure does not
 establish a server runtime defect.
 
 The source sweep found the same registry dependency in both Buildx bootstrap
-steps and the Dockerfile's Rust and Debian base images. Docker daemon mirrors
-cover QEMU and the builder container. BuildKit needs its own registry mirror
-configuration for base images. The
+steps and the Dockerfile's Rust and Debian base images. Hosted CI proved that
+QEMU and linter images can miss the public mirror and still hit HTTP 429.
+The repair uses native QEMU and Docker's embedded builder with the containerd
+image store. It removes both bootstrap image pulls. The embedded builder uses
+the daemon's registry mirrors for base images. The
 [Google mirror contract](https://cloud.google.com/artifact-registry/docs/pull-cached-dockerhub-images)
 retains Docker Hub fallback for uncached images. A cache miss or an outage of
 both registries can still fail the build; the repair does not guarantee
@@ -517,8 +519,8 @@ interop audit gates still apply. Native installation removes the Docker image
 preparation boundary; it still depends on external tool and advisory downloads.
 
 Hosted PR CI also exposed the workflow linter's runtime Docker pull and a
-coturn cache miss. The linter now configures the same daemon mirror before its
-pinned action runs. The TURN profile and offline harness use the official
+coturn cache miss. Native actionlint uses the same release and retains its
+ShellCheck and Python analyzers. The TURN profile and offline harness use the official
 GHCR coturn image with the same `faca4aa5` manifest digest. Registry inspection
 confirmed all seven platform descriptors match that pinned manifest. The
 registry change alters the pull location, not the coturn version or image bytes.
