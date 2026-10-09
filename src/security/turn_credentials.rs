@@ -37,12 +37,21 @@ type HmacSha1 = Hmac<sha1::Sha1>;
 /// `credential` is the base64 of `HMAC-SHA1(static_auth_secret, username)`. coturn
 /// recomputes the same HMAC server-side to authenticate the client, and rejects the
 /// pair once `expiry` has passed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TurnCredentials {
     /// `"{expiry_unix}:{player_id}"` — the coturn REST username.
     pub username: String,
     /// `base64( HMAC-SHA1( static_auth_secret, username ) )`.
     pub credential: String,
+}
+
+// The minted password remains available to the caller, but not to Debug output.
+impl std::fmt::Debug for TurnCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TurnCredentials")
+            .field("username", &self.username)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Compute `base64_standard( HMAC-SHA1( key, msg ) )`.

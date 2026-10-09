@@ -4818,6 +4818,175 @@ async fn reconnect_baseline_delivery_failure_rolls_back_and_releases_claim_for_r
     );
 }
 
+// Regression #836: disconnect metadata must not include a credential fragment.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn disconnect_registration_logs_metadata_without_credential_fragments() {
+    use std::io::Write;
+    use std::sync::Mutex;
+    use tracing::instrument::WithSubscriber;
+
+    #[derive(Clone)]
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log lock").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let server = create_test_server().await;
+    let (player, _receiver) = register_client(&server).await;
+    let room_id = create_db_room(&server, player).await;
+    server
+        .connection_manager
+        .assign_client_to_room(&player, room_id)
+        .await;
+    let token = server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .pre_issue_token(player, room_id)
+        .await;
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = LogWriter(Arc::clone(&output));
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(move || writer.clone())
+        .finish();
+    assert!(
+        server
+            .register_disconnection_for_reconnect(
+                &player,
+                room_id,
+                true,
+                player_info(player, "log-safe-player"),
+            )
+            .with_subscriber(subscriber)
+            .await
+    );
+    let log = String::from_utf8(output.lock().expect("log lock").clone()).expect("UTF-8 log");
+    assert!(log.contains("Player disconnection registered for reconnection"));
+    assert!(log.contains(&player.to_string()));
+    assert!(log.contains(&room_id.to_string()));
+    assert!(
+        !log.contains(&token[..8]),
+        "disconnect log exposed credential prefix: {log}"
+    );
+    assert!(
+        !log.contains("reconnection_token="),
+        "credential field must not be logged"
+    );
+    assert!(server
+        .reconnection_manager()
+        .expect("reconnection enabled")
+        .validate_reconnection(&player, &room_id, &token)
+        .await
+        .is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn losing_unread_reconnected_baseline_requires_fresh_join_after_token_rotation() {
+    let server = create_test_server().await;
+    let fixture = setup_mesh_reconnect(&server, 16, 16, false).await;
+    let manager = server.reconnection_manager().expect("reconnection enabled");
+
+    assert!(
+        server
+            .handle_reconnect(
+                &fixture.current,
+                &fixture.reconnecting,
+                &fixture.room_id,
+                &fixture.token,
+            )
+            .await,
+        "queue admission commits the restored identity"
+    );
+    assert_eq!(fixture.current_rx.len(), 1, "the baseline remains unread");
+    assert!(server.connection_manager.has_client(&fixture.reconnecting));
+    assert!(
+        !manager
+            .has_pending_reconnection(&fixture.reconnecting)
+            .await
+    );
+    assert!(manager.has_pre_issued_token(&fixture.reconnecting).await);
+
+    // Lose the entire queued baseline without observing its rotated token.
+    // This controls queue abandonment, not a WebSocket write or network cut.
+    drop(fixture.current_rx);
+    server.unregister_client(&fixture.reconnecting).await;
+    assert!(
+        manager
+            .has_pending_reconnection(&fixture.reconnecting)
+            .await
+    );
+    assert!(!manager.has_pre_issued_token(&fixture.reconnecting).await);
+    assert!(!server
+        .database
+        .get_room_players(&fixture.room_id)
+        .await
+        .expect("room membership remains readable")
+        .iter()
+        .any(|player| player.id == fixture.reconnecting));
+
+    let (retry, mut retry_rx) = register_client(&server).await;
+    server.set_client_protocol(&retry, v3_webrtc());
+    assert!(
+        !server
+            .handle_reconnect(
+                &retry,
+                &fixture.reconnecting,
+                &fixture.room_id,
+                &fixture.token,
+            )
+            .await
+    );
+    assert!(matches!(
+        recv(&mut retry_rx).await.as_ref(),
+        ServerMessage::ReconnectionFailed { error_code, .. }
+            if *error_code == ErrorCode::ReconnectionTokenInvalid
+    ));
+    assert!(
+        manager
+            .has_pending_reconnection(&fixture.reconnecting)
+            .await
+    );
+
+    let room = server
+        .database
+        .get_room_by_id(&fixture.room_id)
+        .await
+        .expect("room remains readable")
+        .expect("incumbent keeps the room alive");
+    server
+        .handle_join_room(
+            &retry,
+            room.game_name,
+            Some(room.code),
+            "reconnecting".to_string(),
+            Some(2),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(matches!(
+        recv(&mut retry_rx).await.as_ref(),
+        ServerMessage::RoomJoined(payload)
+            if payload.player_id == retry
+                && payload.player_id != fixture.reconnecting
+                && payload.reconnection_token.is_some()
+    ));
+    assert_eq!(server.get_client_room(&retry).await, Some(fixture.room_id));
+}
+
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn reconnect_drain_flip_after_baseline_rotation_discards_the_fresh_token() {

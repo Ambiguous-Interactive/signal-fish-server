@@ -16,7 +16,7 @@ use std::fmt;
 /// Strict admission: unknown keys are rejected at startup
 /// (`deny_unknown_fields`), so a typo'd security knob fails loudly instead of
 /// silently substituting the default (issue #510).
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SecurityConfig {
     /// Allowed HTTP CORS and browser WebSocket origins (comma-separated, or
@@ -150,6 +150,28 @@ pub struct SecurityConfig {
     /// tokens keep the public-app_id semantics.
     #[serde(default)]
     pub connect_token: Option<ConnectTokenConfig>,
+}
+
+// Debug preserves configuration metadata and omits the stored credential.
+impl std::fmt::Debug for SecurityConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecurityConfig")
+            .field("cors_origins", &self.cors_origins)
+            .field("enforce_app_id_allowlist", &self.enforce_app_id_allowlist)
+            .field("require_metrics_auth", &self.require_metrics_auth)
+            .field("max_message_size", &self.max_message_size)
+            .field("max_outbound_message_size", &self.max_outbound_message_size)
+            .field("max_signal_bytes", &self.max_signal_bytes)
+            .field("max_connection_info_bytes", &self.max_connection_info_bytes)
+            .field("max_connections_per_ip", &self.max_connections_per_ip)
+            .field("max_connections", &self.max_connections)
+            .field("max_game_data_bytes", &self.max_game_data_bytes)
+            .field("transport", &self.transport)
+            .field("allowed_apps", &self.allowed_apps)
+            .field("app_auth_path", &self.app_auth_path)
+            .field("connect_token", &self.connect_token)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SecurityConfig {

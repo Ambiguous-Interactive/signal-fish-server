@@ -53,7 +53,7 @@ mod canonical_room_operation_id {
 }
 
 /// Message types sent from client to server
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ClientMessage {
     /// Submit a public app ID (MUST be the first application message).
@@ -249,8 +249,71 @@ pub enum ClientMessage {
     },
 }
 
+// Debug omits command bodies, which can carry credentials. Serde retains the wire fields.
+impl std::fmt::Debug for ClientMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::Authenticate { .. } => "Authenticate",
+            Self::JoinRoom { .. } => "JoinRoom",
+            Self::LeaveRoom => "LeaveRoom",
+            Self::GameData { .. } => "GameData",
+            Self::Signal { .. } => "Signal",
+            Self::AuthorityRequest { .. } => "AuthorityRequest",
+            Self::PlayerReady => "PlayerReady",
+            Self::StartGame => "StartGame",
+            Self::ProvideConnectionInfo { .. } => "ProvideConnectionInfo",
+            Self::Ping => "Ping",
+            Self::Reconnect { .. } => "Reconnect",
+            Self::JoinAsSpectator { .. } => "JoinAsSpectator",
+            Self::LeaveSpectator => "LeaveSpectator",
+            Self::RoomOperation { .. } => "RoomOperation",
+            Self::TransportStatus { .. } => "TransportStatus",
+        };
+        let mut debug = f.debug_struct(name);
+        match self {
+            Self::Authenticate {
+                app_id,
+                protocol_version,
+                ..
+            } => {
+                debug
+                    .field("app_id", app_id)
+                    .field("protocol_version", protocol_version);
+            }
+            Self::Reconnect {
+                player_id, room_id, ..
+            } => {
+                debug
+                    .field("player_id", player_id)
+                    .field("room_id", room_id);
+            }
+            Self::RoomOperation {
+                operation_id,
+                operation,
+            } => {
+                debug
+                    .field("operation_id", operation_id)
+                    .field("operation", operation);
+            }
+            Self::AuthorityRequest { become_authority } => {
+                debug.field("become_authority", become_authority);
+            }
+            Self::TransportStatus {
+                transport,
+                connected,
+            } => {
+                debug
+                    .field("transport", transport)
+                    .field("connected", connected);
+            }
+            _ => {}
+        }
+        debug.finish_non_exhaustive()
+    }
+}
+
 /// A correlated room-membership command.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum RoomOperationRequest {
     JoinRoom {
@@ -370,6 +433,43 @@ pub enum RoomOperationRequest {
     },
 }
 
+// Debug omits command bodies, which can carry credentials. Serde retains the wire fields.
+impl std::fmt::Debug for RoomOperationRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::JoinRoom { .. } => "JoinRoom",
+            Self::LeaveRoom => "LeaveRoom",
+            Self::Reconnect { .. } => "Reconnect",
+            Self::JoinAsSpectator { .. } => "JoinAsSpectator",
+            Self::LeaveSpectator => "LeaveSpectator",
+            Self::KickPlayer { .. } => "KickPlayer",
+            Self::RegenerateRoomCode => "RegenerateRoomCode",
+            Self::SetRoomAccess { .. } => "SetRoomAccess",
+            Self::BanPlayer { .. } => "BanPlayer",
+            Self::UnbanPlayer { .. } => "UnbanPlayer",
+            Self::TransferAuthority { .. } => "TransferAuthority",
+        };
+        let mut debug = f.debug_struct(name);
+        match self {
+            Self::Reconnect {
+                player_id, room_id, ..
+            } => {
+                debug
+                    .field("player_id", player_id)
+                    .field("room_id", room_id);
+            }
+            Self::KickPlayer { player_id }
+            | Self::BanPlayer { player_id }
+            | Self::UnbanPlayer { player_id }
+            | Self::TransferAuthority { player_id } => {
+                debug.field("player_id", player_id);
+            }
+            _ => {}
+        }
+        debug.finish_non_exhaustive()
+    }
+}
+
 /// A terminal response to a correlated room-membership command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -455,7 +555,7 @@ pub enum RoomOperationResult {
 
 /// Payload for the RoomJoined server message.
 /// Boxed in ServerMessage to reduce enum size.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RoomJoinedPayload {
     pub room_id: RoomId,
     pub room_code: String,
@@ -502,9 +602,24 @@ pub struct RoomJoinedPayload {
     pub reconnection_token: Option<String>,
 }
 
+// Credentials and member connection metadata are intentionally absent from Debug.
+impl std::fmt::Debug for RoomJoinedPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RoomJoinedPayload")
+            .field("room_id", &self.room_id)
+            .field("player_id", &self.player_id)
+            .field("max_players", &self.max_players)
+            .field("is_authority", &self.is_authority)
+            .field("lobby_state", &self.lobby_state)
+            .field("player_count", &self.current_players.len())
+            .field("spectator_count", &self.current_spectators.len())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Payload for the Reconnected server message.
 /// Boxed in ServerMessage to reduce enum size.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ReconnectedPayload {
     pub room_id: RoomId,
     pub room_code: String,
@@ -570,6 +685,21 @@ pub struct ReconnectedPayload {
     /// `RoomJoinedPayload::reconnection_token`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconnection_token: Option<String>,
+}
+
+// Credentials and member connection metadata are intentionally absent from Debug.
+impl std::fmt::Debug for ReconnectedPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReconnectedPayload")
+            .field("room_id", &self.room_id)
+            .field("player_id", &self.player_id)
+            .field("max_players", &self.max_players)
+            .field("is_authority", &self.is_authority)
+            .field("lobby_state", &self.lobby_state)
+            .field("player_count", &self.current_players.len())
+            .field("spectator_count", &self.current_spectators.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// A v3 reconnect baseline for one current room member's relayed game-data

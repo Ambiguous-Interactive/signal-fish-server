@@ -20,10 +20,18 @@ pub const MAX_ROOM_PASSWORD_LENGTH: usize = 256;
 /// admission, not an account password — a process-memory dump (or a
 /// persistence adapter's storage) must be treated as exposing the
 /// credential to offline guessing.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RoomPasswordCredential {
     salt: [u8; 16],
     hash: [u8; 32],
+}
+
+// Neither the salt nor the password hash belongs in diagnostic output.
+impl std::fmt::Debug for RoomPasswordCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RoomPasswordCredential")
+            .finish_non_exhaustive()
+    }
 }
 
 impl RoomPasswordCredential {

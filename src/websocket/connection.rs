@@ -1297,6 +1297,30 @@ pub(super) async fn handle_socket(
     default_protocol_version: u16,
     request_id: String,
 ) {
+    // The socket supervisor owns registration and both socket halves. Keep
+    // its lifetime intact if the caller stops waiting, as room transactions
+    // can still be committing when that caller is canceled.
+    let task = tokio::spawn(handle_socket_owned(
+        socket,
+        server,
+        addr,
+        token_binding,
+        default_protocol_version,
+        request_id,
+    ));
+    if let Err(error) = task.await {
+        tracing::error!(%error, "Owned WebSocket task failed");
+    }
+}
+
+async fn handle_socket_owned(
+    socket: WebSocket,
+    server: Arc<EnhancedGameServer>,
+    addr: SocketAddr,
+    token_binding: Option<TokenBindingHandshake>,
+    default_protocol_version: u16,
+    request_id: String,
+) {
     let _socket_task_guard = server.track_socket_task();
     let (mut sender, mut receiver) = socket.split();
     // Validated >= 1 at startup; clamp anyway because `mpsc::channel` panics on 0.
@@ -4273,6 +4297,119 @@ mod tests {
             self.serve_task.abort();
             let _ = self.serve_task.await;
         }
+    }
+
+    // Regression #835: caller cancellation must retain the live socket tracker.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn canceled_socket_caller_preserves_tracking_until_connection_closes() {
+        let server = test_server().await;
+        let UpgradedSocketPair {
+            server_sink,
+            _server_stream: server_stream,
+            mut client,
+            serve_task,
+        } = UpgradedSocketPair::connect().await;
+        let socket = server_sink.reunite(server_stream).expect("reunite socket");
+        let handler = tokio::spawn(handle_socket(
+            socket,
+            Arc::clone(&server),
+            "127.0.0.1:45555".parse().unwrap(),
+            None,
+            2,
+            "handler-cancellation-audit".to_string(),
+        ));
+        client
+            .send(TungsteniteMessage::Text(
+                serde_json::to_string(&ClientMessage::JoinRoom {
+                    game_name: "handler-cancellation-audit".to_string(),
+                    room_code: None,
+                    player_name: "player".to_string(),
+                    max_players: Some(2),
+                    supports_authority: Some(true),
+                    relay_transport: None,
+                    password: None,
+                    join_only: None,
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .expect("send join");
+        let player_id = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let frame = client
+                    .next()
+                    .await
+                    .expect("join stream")
+                    .expect("join frame");
+                if let TungsteniteMessage::Text(text) = frame {
+                    if let ServerMessage::RoomJoined(joined) = serde_json::from_str(&text).unwrap()
+                    {
+                        break joined.player_id;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("join deadline");
+        assert!(server.has_active_socket_tasks());
+        handler.abort();
+        assert!(handler.await.unwrap_err().is_cancelled());
+        let tracked_after_abort = server.has_active_socket_tasks();
+        let registered_after_abort = server.client_lifecycle(&player_id).is_some();
+        client
+            .send(TungsteniteMessage::Text(
+                serde_json::to_string(&ClientMessage::Ping).unwrap().into(),
+            ))
+            .await
+            .expect("send post-cancellation ping");
+        let post_abort_pong = tokio::time::timeout(Duration::from_secs(1), async {
+            while let Some(frame) = client.next().await {
+                match frame.expect("post-cancellation frame") {
+                    TungsteniteMessage::Text(text) => {
+                        if matches!(
+                            serde_json::from_str::<ServerMessage>(&text).unwrap(),
+                            ServerMessage::Pong
+                        ) {
+                            return true;
+                        }
+                    }
+                    TungsteniteMessage::Close(_) => return false,
+                    _ => {}
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false);
+        client.close(None).await.expect("client close");
+        let remaining = server
+            .wait_for_shutdown_connections(Duration::from_secs(5))
+            .await;
+        let registered_after_close = server.client_lifecycle(&player_id).is_some();
+        serve_task.abort();
+        let _ = serve_task.await;
+        assert!(
+            tracked_after_abort,
+            "live socket must retain its lifetime tracker after caller cancellation"
+        );
+        assert!(
+            registered_after_abort,
+            "caller cancellation must preserve the owned socket"
+        );
+        assert!(
+            post_abort_pong,
+            "owned socket must continue processing frames"
+        );
+        assert_eq!(
+            remaining, 0,
+            "client close must finish the owned supervisor"
+        );
+        assert!(
+            !registered_after_close,
+            "client close must remove the connection"
+        );
     }
 
     fn ledger_data(seq: u64) -> crate::coordination::outbound_queue::OutboundData {

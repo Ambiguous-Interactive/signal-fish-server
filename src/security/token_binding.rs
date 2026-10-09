@@ -92,7 +92,7 @@ pub struct TokenBindingChallenge {
 }
 
 /// Proof object embedded in every token-bound client message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TokenBindingProof {
     pub version: u8,
     pub scheme: TokenBindingScheme,
@@ -100,6 +100,17 @@ pub struct TokenBindingProof {
     pub signature: String,
     #[serde(default)]
     pub fingerprint: Option<String>,
+}
+
+// The proof signature authenticates a frame and must not appear in diagnostics.
+impl fmt::Debug for TokenBindingProof {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TokenBindingProof")
+            .field("version", &self.version)
+            .field("scheme", &self.scheme)
+            .field("sequence", &self.sequence)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Versioned binary client-frame envelope. The payload is the exact legacy
@@ -142,12 +153,22 @@ pub enum TokenBindingError {
 /// Per-connection token-binding state derived from the client handshake key and
 /// the server's fresh challenge. The sequence frontier is shared by JSON and
 /// binary frames, making replay and reordering fail before application logic.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ActiveTokenBinding {
     secret: Arc<[u8]>,
     expected_sequence: Arc<Mutex<u128>>,
     pub scheme: TokenBindingScheme,
     pub require_fingerprint: bool,
+}
+
+// Never format the derived session key or acquire the sequence lock for diagnostics.
+impl fmt::Debug for ActiveTokenBinding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ActiveTokenBinding")
+            .field("scheme", &self.scheme)
+            .field("require_fingerprint", &self.require_fingerprint)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ActiveTokenBinding {

@@ -360,7 +360,7 @@ impl EnhancedGameServer {
             .map(|stamp| stamp.epoch)
             .unwrap_or(0);
 
-        let token = reconnection_manager
+        reconnection_manager
             .register_disconnection_with_identity(
                 *player_id,
                 room_id,
@@ -420,7 +420,6 @@ impl EnhancedGameServer {
             %player_id,
             %room_id,
             %was_authority,
-            reconnection_token = %token.get(..8).unwrap_or("<invalid>"),
             "Player disconnection registered for reconnection"
         );
         true
