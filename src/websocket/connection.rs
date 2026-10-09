@@ -23,8 +23,8 @@ use tokio::sync::{mpsc, oneshot, watch, RwLock};
 use tokio::time::Instant;
 
 use super::batching::{
-    classify_send_error, complete_selected_write, send_batch, send_queued, MessageBatcher,
-    QueueWriteError, WritePhase,
+    classify_send_error, complete_selected_write, guard_reliable_sojourn, send_batch, send_queued,
+    MessageBatcher, QueueWriteError, WritePhase,
 };
 use super::sending::{
     send_immediate_server_message, write_pending_unsupported_report, ImmediateSendError,
@@ -67,6 +67,43 @@ fn arm_receive_ownership_pause(player_id: PlayerId) -> Arc<ReceiveOwnershipPause
     });
     RECEIVE_OWNERSHIP_PAUSES.insert(player_id, Arc::clone(&pause));
     pause
+}
+
+#[cfg(all(test, signal_fish_repository_tests))]
+static WRITER_SELECTION_PAUSES: std::sync::LazyLock<
+    dashmap::DashMap<PlayerId, Arc<WriterSelectionPause>>,
+> = std::sync::LazyLock::new(dashmap::DashMap::new);
+
+#[cfg(all(test, signal_fish_repository_tests))]
+struct WriterSelectionPause {
+    reached: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    queue: std::sync::Mutex<Option<outbound_queue::OutboundSender>>,
+}
+
+#[cfg(all(test, signal_fish_repository_tests))]
+struct WriterSelectionPauseRegistration {
+    player_id: PlayerId,
+    pause: Arc<WriterSelectionPause>,
+}
+
+#[cfg(all(test, signal_fish_repository_tests))]
+impl Drop for WriterSelectionPauseRegistration {
+    fn drop(&mut self) {
+        WRITER_SELECTION_PAUSES.remove(&self.player_id);
+        self.pause.release.notify_one();
+    }
+}
+
+#[cfg(all(test, signal_fish_repository_tests))]
+fn arm_writer_selection_pause(player_id: PlayerId) -> WriterSelectionPauseRegistration {
+    let pause = Arc::new(WriterSelectionPause {
+        reached: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        queue: std::sync::Mutex::new(None),
+    });
+    WRITER_SELECTION_PAUSES.insert(player_id, Arc::clone(&pause));
+    WriterSelectionPauseRegistration { player_id, pause }
 }
 
 async fn send_outbound_too_large_close(
@@ -1792,186 +1829,216 @@ pub(super) async fn handle_socket(
         // arm would only observe it BETWEEN writes, and a wedged write never
         // finishes; the sink half would then never drop and the connection
         // would linger as a zombie socket.
-        let close_request = run_until_close(&mut send_task_close, async {
-            let batch_interval = Duration::from_millis(batch_interval_ms.max(1));
-            loop {
-                // Read outside the `select!`: the arm below only needs the
-                // deadline value, and borrowing `rx` inside the select would
-                // conflict with the `&mut` receive arm.
-                let pending_flush_deadline = rx.pending_unsupported_flush_deadline();
-                let received = tokio::select! {
-                    biased;
-                    command = ping_command_rx.recv() => {
-                        let Some(command) = command else {
-                            break;
-                        };
-                        let write_started_at = Instant::now();
-                        let probe = begin_ping_probe(
-                            &ping_probe_state_for_send,
-                            command.baseline_generation,
-                            command.nonce,
-                            write_started_at,
-                        );
-                        if let Err(inbound_generation) = probe {
-                            clear_ping_probe(&ping_probe_state_for_send, command.nonce);
-                            let _ = command.write_outcome.send(
-                                PingWriteOutcome::SkippedActivity {
-                                    inbound_generation,
-                                    outbound_generation: ping_probe_state_for_send
-                                        .borrow()
-                                        .outbound_generation,
-                                }
-                            );
-                            continue;
-                        }
-                        let outbound_advanced = ping_probe_state_for_send
-                            .borrow()
-                            .outbound_generation
-                            != command.baseline_outbound_generation;
-                        let (ping_write_timeout, ping_write_timeout_reason) =
-                            ping_write_timeout_policy(
-                                outbound_advanced,
-                                max_sojourn,
-                                slow_consumer_timeout,
-                            );
-                        let payload = command.nonce.to_be_bytes().to_vec().into();
-                        match complete_ping_write(
-                            write_started_at,
-                            ping_write_timeout,
-                            ping_write_timeout_reason,
-                            sender.send(Message::Ping(payload)),
-                            &ping_probe_state_for_send,
-                            command.nonce,
-                            &send_task_close_signal,
-                            &server_clone,
-                        )
-                        .await
+        let close_request =
+            run_until_close(&mut send_task_close, async {
+                // Reliable admission can happen while a Ping, report, or batch
+                // wait already owns the writer. Watch the queue independently of
+                // those operations and preserve the selected write's own deadline.
+                let reliable_expiry = rx.reliable_sojourn_expired(max_sojourn);
+                let _ = guard_reliable_sojourn(
+                reliable_expiry,
+                async {
+                    let batch_interval = Duration::from_millis(batch_interval_ms.max(1));
+                    loop {
+                        #[cfg(all(test, signal_fish_repository_tests))]
+                        if let Some(pause) = WRITER_SELECTION_PAUSES
+                            .get(&player_id)
+                            .map(|entry| Arc::clone(entry.value()))
                         {
-                            Ok(timing) => {
-                                let _ = command.write_outcome.send(
-                                    PingWriteOutcome::Written(timing)
+                            {
+                                let mut queue = pause.queue.lock()
+                                    .unwrap_or_else(|error| error.into_inner());
+                                if queue.is_none() {
+                                    *queue = Some(rx.sender_for_test());
+                                }
+                            }
+                            pause.reached.notify_one();
+                            pause.release.notified().await;
+                        }
+                        // Read outside the `select!`: the arm below only needs the
+                        // deadline value, and borrowing `rx` inside the select would
+                        // conflict with the `&mut` receive arm.
+                        let pending_flush_deadline = rx.pending_unsupported_flush_deadline();
+                        let received = tokio::select! {
+                            biased;
+                            command = ping_command_rx.recv() => {
+                                let Some(command) = command else {
+                                    break;
+                                };
+                                let write_started_at = Instant::now();
+                                let probe = begin_ping_probe(
+                                    &ping_probe_state_for_send,
+                                    command.baseline_generation,
+                                    command.nonce,
+                                    write_started_at,
                                 );
+                                if let Err(inbound_generation) = probe {
+                                    clear_ping_probe(&ping_probe_state_for_send, command.nonce);
+                                    let _ = command.write_outcome.send(
+                                        PingWriteOutcome::SkippedActivity {
+                                            inbound_generation,
+                                            outbound_generation: ping_probe_state_for_send
+                                                .borrow()
+                                                .outbound_generation,
+                                        }
+                                    );
+                                    continue;
+                                }
+                                let outbound_advanced = ping_probe_state_for_send
+                                    .borrow()
+                                    .outbound_generation
+                                    != command.baseline_outbound_generation;
+                                let (ping_write_timeout, ping_write_timeout_reason) =
+                                    ping_write_timeout_policy(
+                                        outbound_advanced,
+                                        max_sojourn,
+                                        slow_consumer_timeout,
+                                    );
+                                let payload = command.nonce.to_be_bytes().to_vec().into();
+                                match complete_ping_write(
+                                    write_started_at,
+                                    ping_write_timeout,
+                                    ping_write_timeout_reason,
+                                    sender.send(Message::Ping(payload)),
+                                    &ping_probe_state_for_send,
+                                    command.nonce,
+                                    &send_task_close_signal,
+                                    &server_clone,
+                                )
+                                .await
+                                {
+                                    Ok(timing) => {
+                                        let _ = command.write_outcome.send(
+                                            PingWriteOutcome::Written(timing)
+                                        );
+                                        continue;
+                                    }
+                                    Err(PingWriteFailure::Socket(err)) => {
+                                        tracing::debug!(
+                                            error = %err,
+                                            "Failed to write WebSocket Ping"
+                                        );
+                                    }
+                                    Err(PingWriteFailure::DeadlineElapsed) => {
+                                        tracing::info!(
+                                            timeout_secs = ping_write_timeout.as_secs(),
+                                            ?ping_write_timeout_reason,
+                                            "WebSocket Ping write timed out - closing connection"
+                                        );
+                                    }
+                                }
+                                break;
+                            }
+                            // An idle recipient must still learn about coalesced
+                            // omissions within a bounded time: without this the last
+                            // range of a burst would wait for the next omission or
+                            // for the connection to close. `recv`/`recv_batched` are
+                            // cancel-safe, so losing this race costs nothing.
+                            () = async {
+                                match pending_flush_deadline {
+                                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                                    None => std::future::pending().await,
+                                }
+                            } => {
+                                let current_player_id =
+                                    *effective_player_id_for_send.read().await;
+                                match write_idle_unsupported_report(
+                                    &mut sender,
+                                    &rx,
+                                    &current_player_id,
+                                    &server_clone,
+                                    &send_task_close_signal,
+                                    max_sojourn,
+                                )
+                                .await
+                                {
+                                    Ok(true) => {
+                                        record_outbound_probe_activity(
+                                            &ping_probe_state_for_send,
+                                            Instant::now(),
+                                        );
+                                    }
+                                    Ok(false) => {}
+                                    Err(_) => break,
+                                }
                                 continue;
                             }
-                            Err(PingWriteFailure::Socket(err)) => {
-                                tracing::debug!(
-                                    error = %err,
-                                    "Failed to write WebSocket Ping"
-                                );
-                            }
-                            Err(PingWriteFailure::DeadlineElapsed) => {
-                                tracing::info!(
-                                    timeout_secs = ping_write_timeout.as_secs(),
-                                    ?ping_write_timeout_reason,
-                                    "WebSocket Ping write timed out - closing connection"
-                                );
-                            }
-                        }
-                        break;
-                    }
-                    // An idle recipient must still learn about coalesced
-                    // omissions within a bounded time: without this the last
-                    // range of a burst would wait for the next omission or
-                    // for the connection to close. `recv`/`recv_batched` are
-                    // cancel-safe, so losing this race costs nothing.
-                    () = async {
-                        match pending_flush_deadline {
-                            Some(deadline) => tokio::time::sleep_until(deadline).await,
-                            None => std::future::pending().await,
-                        }
-                    } => {
-                        let current_player_id =
-                            *effective_player_id_for_send.read().await;
-                        match write_idle_unsupported_report(
-                            &mut sender,
-                            &rx,
-                            &current_player_id,
-                            &server_clone,
-                            &send_task_close_signal,
-                            max_sojourn,
-                        )
-                        .await
-                        {
-                            Ok(true) => {
-                                record_outbound_probe_activity(
+                            received = async {
+                                if batching_enabled {
+                                    rx.recv_batched(batch_size, batch_interval).await
+                                } else {
+                                    rx.recv().await
+                                }
+                            } => received,
+                        };
+                        match received {
+                            Ok(Some(message)) if message.is_control() => {
+                                let current_player_id = *effective_player_id_for_send.read().await;
+                                if send_queued(
+                                    &mut sender,
+                                    message,
+                                    None,
+                                    &rx,
+                                    &current_player_id,
+                                    &server_clone,
+                                    &send_task_close_signal,
                                     &ping_probe_state_for_send,
-                                    Instant::now(),
-                                );
+                                    max_sojourn,
+                                    WritePhase::Live,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
                             }
-                            Ok(false) => {}
-                            Err(_) => break,
-                        }
-                        continue;
-                    }
-                    received = async {
-                        if batching_enabled {
-                            rx.recv_batched(batch_size, batch_interval).await
-                        } else {
-                            rx.recv().await
-                        }
-                    } => received,
-                };
-                match received {
-                    Ok(Some(message)) if message.is_control() => {
-                        let current_player_id = *effective_player_id_for_send.read().await;
-                        if send_queued(
-                            &mut sender,
-                            message,
-                            None,
-                            &rx,
-                            &current_player_id,
-                            &server_clone,
-                            &send_task_close_signal,
-                            &ping_probe_state_for_send,
-                            max_sojourn,
-                            WritePhase::Live,
-                        )
-                        .await
-                        .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Ok(Some(message)) => {
-                        // The receiver holds a batch in the shared queue
-                        // until it is ready, then releases one item at a
-                        // time. Never stage multiple undelivered data
-                        // messages outside the queue: keyed-latest
-                        // coalescing and exact gap reporting must still
-                        // see every item not actively being written.
-                        batcher.queue(message);
-                        let current_player_id = *effective_player_id_for_send.read().await;
-                        if send_batch(
-                            &mut sender,
-                            &mut batcher,
-                            &mut rx,
-                            &current_player_id,
-                            &server_clone,
-                            &send_task_close_signal,
-                            &ping_probe_state_for_send,
-                            max_sojourn,
-                            WritePhase::Live,
-                        )
-                        .await
-                        .is_err()
-                        {
-                            break;
+                            Ok(Some(message)) => {
+                                // The receiver holds a batch in the shared queue
+                                // until it is ready, then releases one item at a
+                                // time. Never stage multiple undelivered data
+                                // messages outside the queue: keyed-latest
+                                // coalescing and exact gap reporting must still
+                                // see every item not actively being written.
+                                batcher.queue(message);
+                                let current_player_id = *effective_player_id_for_send.read().await;
+                                if send_batch(
+                                    &mut sender,
+                                    &mut batcher,
+                                    &mut rx,
+                                    &current_player_id,
+                                    &server_clone,
+                                    &send_task_close_signal,
+                                    &ping_probe_state_for_send,
+                                    max_sojourn,
+                                    WritePhase::Live,
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(TryReceiveError::AccountabilityFailed) => {
+                                if send_task_close_signal.request_close(CloseReason::SlowConsumer) {
+                                    server_clone
+                                        .metrics()
+                                        .increment_websocket_slow_consumer_disconnects();
+                                }
+                                break;
+                            }
+                            Err(TryReceiveError::Empty | TryReceiveError::Disconnected) => break,
                         }
                     }
-                    Ok(None) => break,
-                    Err(TryReceiveError::AccountabilityFailed) => {
-                        if send_task_close_signal.request_close(CloseReason::SlowConsumer) {
-                            server_clone
-                                .metrics()
-                                .increment_websocket_slow_consumer_disconnects();
-                        }
-                        break;
-                    }
-                    Err(TryReceiveError::Empty | TryReceiveError::Disconnected) => break,
-                }
-            }
-        })
-        .await;
+                },
+                &player_id,
+                &server_clone,
+                &send_task_close_signal,
+                max_sojourn,
+            )
+            .await;
+            })
+            .await;
 
         // A close was requested (slow consumer, unregistration): the write
         // loop above was cancelled wherever it was; run the bounded farewell/
@@ -4657,6 +4724,829 @@ mod tests {
         );
         assert!(observed > 0, "the fixture must carry non-empty payloads");
         pair.shutdown().await;
+    }
+
+    /// Issue #832: run the complete spawned handle_socket writer through the
+    /// v3 route. The test gate holds it between selections, so every selection
+    /// sees one fresh priority control while reliable data remains queued.
+    #[tokio::test(start_paused = true)]
+    #[cfg(signal_fish_repository_tests)]
+    #[cfg_attr(miri, ignore)]
+    async fn test_live_writer_priority_controls_expire_reliable_unbatched() {
+        run_live_writer_priority_control_history(false).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[cfg(signal_fish_repository_tests)]
+    #[cfg_attr(miri, ignore)]
+    async fn test_live_writer_priority_controls_expire_reliable_batched() {
+        run_live_writer_priority_control_history(true).await;
+    }
+
+    #[cfg(signal_fish_repository_tests)]
+    async fn run_live_writer_priority_control_history(batching_enabled: bool) {
+        tokio::time::resume();
+        let mut config = ServerConfig::default();
+        config.websocket_config.enable_batching = batching_enabled;
+        config.websocket_config.batch_size = 4;
+        config.websocket_config.batch_interval_ms = 1;
+        config.websocket_config.max_sojourn_ms = 5_000;
+        config.websocket_config.server_ping_interval_secs = 0;
+        config.websocket_config.idle_timeout_secs = 0;
+        config.websocket_config.auth_timeout_secs = 60;
+        config.websocket_config.control_queue_capacity = 2;
+        config.websocket_config.send_queue_capacity = 4;
+        let server = test_server_with_config(config).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind live writer listener");
+        let addr = listener.local_addr().expect("live writer address");
+        let app = super::super::routes::create_standalone_router("http://localhost:3000")
+            .with_state(Arc::clone(&server));
+        let serve_task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .expect("serve live writer test");
+        });
+        let (mut client, _) = tokio::time::timeout(
+            Duration::from_secs(10),
+            connect_async(format!("ws://{addr}/v3/ws")),
+        )
+        .await
+        .expect("live writer connect deadline")
+        .expect("live writer connect");
+        let auth = ClientMessage::Authenticate {
+            app_id: "public".into(),
+            connect_token: None,
+            sdk_version: None,
+            platform: None,
+            game_data_format: None,
+            protocol_version: Some(3),
+            supported_transports: None,
+            supported_topologies: None,
+            requested_capabilities: None,
+        };
+        client
+            .send(TungsteniteMessage::Text(
+                serde_json::to_string(&auth).expect("serialize auth").into(),
+            ))
+            .await
+            .expect("authenticate live writer");
+        let handshake_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let frame = tokio::time::timeout_at(handshake_deadline, client.next())
+                .await
+                .expect("v3 auth response deadline")
+                .expect("v3 auth stream open")
+                .expect("v3 auth frame decodes");
+            if let TungsteniteMessage::Text(text) = frame {
+                if matches!(
+                    serde_json::from_str::<ServerMessage>(&text).expect("v3 auth JSON"),
+                    ServerMessage::ProtocolInfo(_)
+                ) {
+                    break;
+                }
+            }
+        }
+        let join = ClientMessage::JoinRoom {
+            game_name: "writer-starvation".into(),
+            room_code: None,
+            player_name: "recipient".into(),
+            max_players: Some(2),
+            supports_authority: Some(true),
+            relay_transport: None,
+            password: None,
+            join_only: None,
+        };
+        client
+            .send(TungsteniteMessage::Text(
+                serde_json::to_string(&join).expect("serialize join").into(),
+            ))
+            .await
+            .expect("join live writer room");
+        let join_deadline = Instant::now() + Duration::from_secs(10);
+        let (player_id, room_id) = loop {
+            let frame = tokio::time::timeout_at(join_deadline, client.next())
+                .await
+                .expect("live writer join deadline")
+                .expect("join stream open")
+                .expect("join frame decodes");
+            if let TungsteniteMessage::Text(text) = frame {
+                if let ServerMessage::RoomJoined(payload) =
+                    serde_json::from_str::<ServerMessage>(&text).expect("join JSON")
+                {
+                    break (payload.player_id, payload.room_id);
+                }
+            }
+        };
+        assert!(
+            server.client_supports_v3(&player_id),
+            "true v3 writer is negotiated"
+        );
+        let registration = arm_writer_selection_pause(player_id);
+        let pause = &registration.pause;
+        server
+            .send_error_to_player(&player_id, "writer bootstrap".into(), None)
+            .await
+            .expect("wake writer with bootstrap control");
+        tokio::time::timeout(Duration::from_secs(10), pause.reached.notified())
+            .await
+            .expect("live writer reaches selection gate");
+        let queue = pause
+            .queue
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .expect("armed gate exposes real registered queue")
+            .clone();
+        // A pending join advisory can reach the gate before the bootstrap.
+        // Drain each finite bootstrap selection under the gate first. Queue
+        // depth zero proves all bootstrap writes completed before data admission.
+        for _ in 0..8 {
+            if queue.depth_and_oldest().0 == 0 {
+                break;
+            }
+            pause.release.notify_one();
+            tokio::time::timeout(Duration::from_secs(10), pause.reached.notified())
+                .await
+                .expect("bootstrap writer selection completes");
+        }
+        assert_eq!(
+            queue.depth_and_oldest().0,
+            0,
+            "bootstrap queue is fully drained"
+        );
+        let bootstrap_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let frame = tokio::time::timeout_at(bootstrap_deadline, client.next())
+                .await
+                .expect("bootstrap frame deadline")
+                .expect("bootstrap stream open")
+                .expect("bootstrap frame decodes");
+            if let TungsteniteMessage::Text(text) = frame {
+                if matches!(serde_json::from_str::<ServerMessage>(&text)
+                    .expect("bootstrap JSON"), ServerMessage::Error { message, .. }
+                    if message == "writer bootstrap")
+                {
+                    break;
+                }
+            }
+        }
+        tokio::time::pause();
+        let reliable = crate::coordination::outbound_queue::OutboundData::new(
+            Arc::new(ServerMessage::GameData {
+                from_player: player_id,
+                data: serde_json::json!({"n": 1}),
+                seq: Some(1),
+                epoch: Some(1),
+                class: Some(crate::protocol::DeliveryClass::Reliable),
+                key: None,
+            }),
+            crate::coordination::outbound_queue::DataDeliveryMetadata {
+                from_player: player_id,
+                room_id,
+                epoch: 1,
+                seq: 1,
+                class: crate::protocol::DeliveryClass::Reliable,
+                key: None,
+            },
+        );
+        queue
+            .try_enqueue_data(reliable)
+            .expect("reliable enters the actual writer queue");
+        for round in 0..2 {
+            tokio::time::advance(Duration::from_secs(2)).await;
+            queue
+                .try_enqueue_control(Arc::new(ServerMessage::Error {
+                    message: format!("live fresh control {round}"),
+                    error_code: None,
+                }))
+                .expect("one fresh priority control has capacity");
+            assert_eq!(
+                queue.depth_and_oldest().0,
+                2,
+                "exactly one resident reliable and one fresh control before selection"
+            );
+            pause.release.notify_one();
+            // Reactor waits use real time. This keeps the queue ages set above
+            // without auto-advancing unrelated I/O deadlines.
+            tokio::time::resume();
+            tokio::time::timeout(Duration::from_secs(10), pause.reached.notified())
+                .await
+                .expect("true writer completes the fresh control selection");
+            let frame = tokio::time::timeout(Duration::from_secs(10), client.next())
+                .await
+                .expect("live control frame deadline")
+                .expect("live control stream open")
+                .expect("live control frame decodes");
+            let TungsteniteMessage::Text(text) = frame else {
+                panic!("expected live control text");
+            };
+            assert!(
+                matches!(serde_json::from_str::<ServerMessage>(&text).expect("control JSON"),
+                ServerMessage::Error { message, .. } if message == format!("live fresh control {round}")),
+                "true writer keeps fresh controls first before reliable age expires"
+            );
+            assert_eq!(
+                queue.depth_and_oldest().0,
+                1,
+                "reliable remains resident after control"
+            );
+            tokio::time::pause();
+        }
+        queue
+            .try_enqueue_control(Arc::new(ServerMessage::Error {
+                message: "live fresh control 2".into(),
+                error_code: None,
+            }))
+            .expect("third bounded priority control enters before deadline");
+        assert_eq!(queue.depth_and_oldest().0, 2);
+        // Keep the selection gate held: only the independently wired outer
+        // watcher can terminate the real writer at this boundary.
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::time::resume();
+        let drain_deadline = Instant::now() + Duration::from_secs(10);
+        let (mut leaked_data, mut late_control, mut close_code) = (0, false, None);
+        while let Some(frame) = tokio::time::timeout_at(drain_deadline, client.next())
+            .await
+            .expect("live writer must close at reliable deadline")
+        {
+            match frame.expect("live close stream remains decodable") {
+                TungsteniteMessage::Text(text) => {
+                    match serde_json::from_str::<ServerMessage>(&text).expect("live close JSON") {
+                        ServerMessage::GameData { .. } => leaked_data += 1,
+                        ServerMessage::Error { message, .. }
+                            if message == "live fresh control 2" =>
+                        {
+                            late_control = true
+                        }
+                        _ => {}
+                    }
+                }
+                TungsteniteMessage::Close(close) => {
+                    close_code = Some(close.expect("live semantic close").code);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        drop(registration);
+        drop(queue);
+        let _drain = server.begin_shutdown_drain();
+        server.close_connections_for_shutdown();
+        let remaining = server
+            .wait_for_shutdown_connections(
+                crate::websocket::registered_connection_shutdown_settle_timeout(),
+            )
+            .await;
+        serve_task.abort();
+        let _ = serve_task.await;
+        assert_eq!(remaining, 0, "live handler finishes before dropping server");
+        assert_eq!(
+            close_code,
+            Some(4002.into()),
+            "batching={batching_enabled}: live writer closes slow consumer"
+        );
+        assert_eq!(leaked_data, 0, "expired reliable never reaches client");
+        assert!(
+            !late_control,
+            "fresh priority control cannot survive expired resident reliable"
+        );
+        assert_eq!(
+            server
+                .metrics()
+                .delivery_metrics_by_class()
+                .reliable
+                .abandoned,
+            1,
+            "true writer abandons reliable exactly once"
+        );
+        assert_eq!(
+            server
+                .metrics()
+                .websocket_slow_consumer_disconnects
+                .load(Ordering::Relaxed),
+            1,
+            "true writer records one slow-consumer close"
+        );
+    }
+
+    /// Issue #832: exercise the production receive and write functions over
+    /// TCP with one fresh priority control before each selection. This covers
+    /// both queue receive modes, but does not run handle_socket's outer select.
+    /// The clock is paused only to age the resident data. Real socket I/O uses
+    /// the running clock so reactor readiness cannot advance virtual deadlines.
+    #[tokio::test(start_paused = true)]
+    #[cfg_attr(miri, ignore)]
+    async fn test_priority_controls_cannot_hide_reliable_socket_deadline_unbatched() {
+        run_priority_control_socket_case(
+            Some(crate::protocol::DeliveryClass::Reliable),
+            0,
+            true,
+            false,
+            Duration::from_secs(5),
+        )
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[cfg_attr(miri, ignore)]
+    async fn test_priority_controls_cannot_hide_reliable_socket_deadline_batched() {
+        run_priority_control_socket_case(
+            Some(crate::protocol::DeliveryClass::Reliable),
+            0,
+            true,
+            true,
+            Duration::from_secs(5),
+        )
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[cfg_attr(miri, ignore)]
+    async fn test_priority_control_socket_deadline_positive_controls() {
+        for (class, age_ms) in [
+            (Some(crate::protocol::DeliveryClass::Reliable), 1),
+            (Some(crate::protocol::DeliveryClass::Latest), 10_000),
+            (Some(crate::protocol::DeliveryClass::Volatile), 10_000),
+            (None, 10_000),
+        ] {
+            for batching_enabled in [false, true] {
+                run_priority_control_socket_case(
+                    class,
+                    age_ms,
+                    false,
+                    batching_enabled,
+                    Duration::from_secs(5),
+                )
+                .await;
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[cfg_attr(miri, ignore)]
+    async fn test_priority_control_socket_disabled_deadline_keeps_reliable_data() {
+        for batching_enabled in [false, true] {
+            run_priority_control_socket_case(
+                Some(crate::protocol::DeliveryClass::Reliable),
+                10_000,
+                false,
+                batching_enabled,
+                Duration::ZERO,
+            )
+            .await;
+        }
+    }
+
+    async fn run_priority_control_socket_case(
+        data_class: Option<crate::protocol::DeliveryClass>,
+        age_ms: u64,
+        expect_expiry: bool,
+        batching_enabled: bool,
+        max_sojourn: Duration,
+    ) {
+        {
+            tokio::time::resume();
+            let server = test_server().await;
+            let mut pair = UpgradedSocketPair::connect().await;
+            let (tx, mut rx) = crate::coordination::outbound_queue::channel(4, 1);
+            tx.set_protocol_version(3);
+            let (close_signal, _close_listener) = ConnectionCloseSignal::channel();
+            let (probe_state, _probe_updates) = watch::channel(PingProbeState::default());
+            let player_id = PlayerId::from_u128(9);
+            let mut batcher = MessageBatcher::new(4, 1);
+            tokio::time::pause();
+            if let Some(class) = data_class {
+                tx.try_enqueue_data(class_ledger_data(
+                    1,
+                    class,
+                    (class == crate::protocol::DeliveryClass::Latest).then_some(7),
+                ))
+                .expect("queue the resident data frame");
+            }
+            tokio::time::advance(Duration::from_millis(age_ms)).await;
+            tokio::time::resume();
+
+            let mut controls_written = 0;
+            let mut write_error = None;
+            for round in 0..3 {
+                if expect_expiry {
+                    tokio::time::pause();
+                    tokio::time::advance(Duration::from_secs(2)).await;
+                    tokio::time::resume();
+                }
+                // Capacity is one and every round adds exactly one control.
+                // Refill before selection rather than after a client ACK:
+                // an ACK would let the writer drain data before the refill.
+                tx.try_enqueue_control(Arc::new(ServerMessage::Error {
+                    message: format!("fresh control {round}"),
+                    error_code: None,
+                }))
+                .expect("bounded control lane has one free slot");
+                let selected = if batching_enabled {
+                    rx.recv_batched(4, Duration::from_millis(1)).await
+                } else {
+                    rx.recv().await
+                }
+                .expect("receive succeeds")
+                .expect("control is ready");
+                assert!(selected.is_control(), "fresh control retains priority");
+                let result = send_queued(
+                    &mut pair.server_sink,
+                    selected,
+                    None,
+                    &rx,
+                    &player_id,
+                    &server,
+                    &close_signal,
+                    &probe_state,
+                    max_sojourn,
+                    WritePhase::Live,
+                )
+                .await;
+                if let Err(error) = result {
+                    write_error = Some(error);
+                    break;
+                }
+                let frame = tokio::time::timeout(Duration::from_secs(10), pair.client.next())
+                    .await
+                    .expect("healthy client receives the written control")
+                    .expect("client stream is open")
+                    .expect("client frame decodes");
+                let TungsteniteMessage::Text(text) = frame else {
+                    panic!("expected control text, got {frame:?}");
+                };
+                let message: ServerMessage = serde_json::from_str(&text).expect("control JSON");
+                assert!(matches!(message, ServerMessage::Error { message, .. }
+                    if message == format!("fresh control {round}")));
+                controls_written += 1;
+            }
+
+            let reason = close_signal.requested_reason();
+            let remaining = rx.len();
+            // A healthy queue still delivers its reliable data after the
+            // finite controls stop. The same production batch drain is used
+            // for data by both modes in handle_socket.
+            let mut data_written = false;
+            if !expect_expiry && data_class.is_some() {
+                let selected = if batching_enabled {
+                    rx.recv_batched(4, Duration::from_millis(1)).await
+                } else {
+                    rx.recv().await
+                }
+                .expect("receive resident data")
+                .expect("resident data exists");
+                batcher.queue(selected);
+                send_batch(
+                    &mut pair.server_sink,
+                    &mut batcher,
+                    &mut rx,
+                    &player_id,
+                    &server,
+                    &close_signal,
+                    &probe_state,
+                    max_sojourn,
+                    WritePhase::Live,
+                )
+                .await
+                .expect("healthy resident data reaches the sink");
+                let frame = tokio::time::timeout(Duration::from_secs(10), pair.client.next())
+                    .await
+                    .expect("client receives resident data")
+                    .expect("client stream remains open")
+                    .expect("data frame decodes");
+                let TungsteniteMessage::Text(text) = frame else {
+                    panic!("expected data text, got {frame:?}");
+                };
+                let message: ServerMessage = serde_json::from_str(&text).expect("data JSON");
+                data_written = matches!(message, ServerMessage::GameData { data, .. }
+                    if data.get("n").and_then(serde_json::Value::as_u64) == Some(1));
+            }
+            pair.shutdown().await;
+            tokio::time::pause();
+            let context =
+                format!("batching={batching_enabled}, class={data_class:?}, age_ms={age_ms}");
+            if expect_expiry {
+                assert_eq!(reason, Some(CloseReason::SlowConsumer),
+                    "{context}: fresh control must not hide expired resident reliable data; controls_written={controls_written}, remaining={remaining}, error={write_error:?}");
+                assert_eq!(
+                    controls_written, 2,
+                    "{context}: controls before the reliable deadline must reach the client"
+                );
+                assert!(
+                    write_error.is_some(),
+                    "{context}: expired backlog stops the write"
+                );
+                assert_eq!(
+                    remaining, 1,
+                    "{context}: resident reliable frame stays accountable"
+                );
+            } else {
+                assert_eq!(reason, None, "{context}: healthy traffic remains connected");
+                assert!(
+                    write_error.is_none(),
+                    "{context}: healthy controls write successfully"
+                );
+                assert_eq!(
+                    controls_written, 3,
+                    "{context}: every bounded control reaches the client"
+                );
+                if data_class.is_some() {
+                    assert!(data_written, "{context}: resident data reaches the client");
+                }
+            }
+        }
+    }
+
+    /// Issue #832: a reliable frame behind a latest frame must expire while
+    /// recv_batched still waits to fill its batch. No payload is selected.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_reliable_watchdog_closes_socket_during_batch_wait() {
+        use super::super::batching::guard_reliable_sojourn;
+        let server = test_server().await;
+        let pair = UpgradedSocketPair::connect().await;
+        let player_id = PlayerId::from_u128(9);
+        let (tx, mut rx) =
+            crate::coordination::outbound_queue::channel_with_metrics(4, 1, server.metrics());
+        tx.set_protocol_version(3);
+        let (close_signal, _listener) = ConnectionCloseSignal::channel();
+        let (probe_state, _updates) = watch::channel(PingProbeState::default());
+        tokio::time::pause();
+        let budget = Duration::from_millis(20);
+        tx.try_enqueue_data(class_ledger_data(
+            1,
+            crate::protocol::DeliveryClass::Latest,
+            Some(7),
+        ))
+        .expect("queue latest before reliable");
+        tx.try_enqueue_data(ledger_data(2))
+            .expect("queue reliable behind latest");
+        {
+            let guarded = guard_reliable_sojourn(
+                rx.reliable_sojourn_expired(budget),
+                rx.recv_batched(4, Duration::from_secs(3600)),
+                &player_id,
+                &server,
+                &close_signal,
+                budget,
+            );
+            tokio::pin!(guarded);
+            assert!(
+                futures_util::poll!(guarded.as_mut()).is_pending(),
+                "undersized batch must still wait before reliable expires"
+            );
+            tokio::time::advance(budget).await;
+            assert!(
+                matches!(guarded.await, Err(QueueWriteError::SojournExpired)),
+                "resident reliable deadline must interrupt the batch wait"
+            );
+        }
+        assert_eq!(rx.len(), 2, "unselected data remains accountable");
+        assert_eq!(
+            close_signal.requested_reason(),
+            Some(CloseReason::SlowConsumer)
+        );
+        tokio::time::resume();
+        assert_watchdog_socket_teardown(
+            pair,
+            &mut rx,
+            &player_id,
+            &server,
+            &close_signal,
+            &probe_state,
+            false,
+            2,
+        )
+        .await;
+    }
+
+    /// Issue #832: reliable data can arrive after a control or Ping write
+    /// stalls. The resident-age watcher must wake while that write owns the
+    /// sink. A clamped, non-reading peer proves real TCP backpressure first.
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_reliable_arrival_interrupts_stalled_control_and_ping_socket_writes() {
+        use super::super::batching::guard_reliable_sojourn;
+        for ping in [false, true] {
+            let server = test_server().await;
+            let player_id = PlayerId::from_u128(9);
+            let (tx, mut rx) =
+                crate::coordination::outbound_queue::channel_with_metrics(4, 1, server.metrics());
+            tx.set_protocol_version(3);
+            let (close_signal, _listener) = ConnectionCloseSignal::channel();
+            let (probe_state, _updates) = watch::channel(PingProbeState::default());
+            let mut pair = UpgradedSocketPair::connect_with_small_client_recv_buffer(Some(
+                CLIENT_CLAMPED_RECV_BUFFER_BYTES,
+            ))
+            .await;
+            {
+                let fill = pair
+                    .server_sink
+                    .send(Message::Binary(vec![0_u8; 8 << 20].into()));
+                tokio::pin!(fill);
+                assert!(
+                    futures_util::poll!(fill.as_mut()).is_pending(),
+                    "non-reading peer must stall the real sink before testing watchdog"
+                );
+            }
+            tokio::time::pause();
+            let budget = Duration::from_millis(20);
+            if !ping {
+                tx.try_enqueue_control(Arc::new(ServerMessage::Error {
+                    message: "stalled fresh control".into(),
+                    error_code: None,
+                }))
+                .expect("queue fresh control");
+            }
+            let selected = if ping {
+                None
+            } else {
+                Some(
+                    rx.recv()
+                        .await
+                        .expect("receive fresh control")
+                        .expect("control ready"),
+                )
+            };
+            {
+                let operation = async {
+                    if let Some(selected) = selected {
+                        // Disable the selected-write budget to isolate the
+                        // independent watcher and its enqueue notification.
+                        send_queued(
+                            &mut pair.server_sink,
+                            selected,
+                            None,
+                            &rx,
+                            &player_id,
+                            &server,
+                            &close_signal,
+                            &probe_state,
+                            Duration::ZERO,
+                            WritePhase::Live,
+                        )
+                        .await
+                        .map_err(|_| ())
+                    } else {
+                        pair.server_sink
+                            .send(Message::Ping(vec![1_u8; 8].into()))
+                            .await
+                            .map_err(|_| ())
+                    }
+                };
+                let guarded = guard_reliable_sojourn(
+                    rx.reliable_sojourn_expired(budget),
+                    operation,
+                    &player_id,
+                    &server,
+                    &close_signal,
+                    budget,
+                );
+                tokio::pin!(guarded);
+                assert!(
+                    futures_util::poll!(guarded.as_mut()).is_pending(),
+                    "ping={ping}: operation must stall while queue has no reliable frame"
+                );
+                tokio::time::advance(budget * 2).await;
+                assert!(
+                    futures_util::poll!(guarded.as_mut()).is_pending(),
+                    "ping={ping}: empty reliable queue must not expire"
+                );
+                tx.try_enqueue_data(ledger_data(1))
+                    .expect("reliable arrives during stalled write");
+                assert!(
+                    futures_util::poll!(guarded.as_mut()).is_pending(),
+                    "ping={ping}: newly enqueued reliable still has its full budget"
+                );
+                tokio::time::advance(budget).await;
+                assert!(
+                    matches!(guarded.await, Err(QueueWriteError::SojournExpired)),
+                    "ping={ping}: arrival must wake watchdog and cancel the stalled write"
+                );
+            }
+            assert_eq!(rx.len(), 1, "ping={ping}: reliable stays resident");
+            assert_eq!(
+                close_signal.requested_reason(),
+                Some(CloseReason::SlowConsumer)
+            );
+            tokio::time::resume();
+            assert_watchdog_socket_teardown(
+                pair,
+                &mut rx,
+                &player_id,
+                &server,
+                &close_signal,
+                &probe_state,
+                true,
+                if ping { 1 } else { 2 },
+            )
+            .await;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn assert_watchdog_socket_teardown(
+        pair: UpgradedSocketPair,
+        rx: &mut OutboundReceiver,
+        player_id: &PlayerId,
+        server: &Arc<EnhancedGameServer>,
+        close_signal: &ConnectionCloseSignal,
+        probe_state: &watch::Sender<PingProbeState>,
+        filled_sink: bool,
+        expected_abandoned: u64,
+    ) {
+        let UpgradedSocketPair {
+            mut server_sink,
+            mut client,
+            serve_task,
+            ..
+        } = pair;
+        let drain = tokio::spawn(async move {
+            let mut binary_lengths = Vec::new();
+            let mut data_frames = 0;
+            let mut close_code = None;
+            while let Some(frame) = client.next().await {
+                match frame.expect("recovered socket stream stays decodable") {
+                    TungsteniteMessage::Binary(bytes) => binary_lengths.push(bytes.len()),
+                    TungsteniteMessage::Text(text) => {
+                        let message: ServerMessage = serde_json::from_str(&text)
+                            .expect("recovered text frame remains valid JSON");
+                        if matches!(message, ServerMessage::GameData { .. }) {
+                            data_frames += 1;
+                        }
+                    }
+                    TungsteniteMessage::Close(close) => {
+                        close_code = Some(close.expect("semantic close code").code);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            (binary_lengths, data_frames, close_code)
+        });
+        let mut batcher = MessageBatcher::new(4, 1);
+        finalize_closed_connection(
+            &mut server_sink,
+            rx,
+            &mut batcher,
+            Some(CloseReason::SlowConsumer),
+            player_id,
+            server,
+            close_signal,
+            probe_state,
+            Duration::from_secs(5),
+        )
+        .await;
+        let observed = tokio::time::timeout(Duration::from_secs(10), drain)
+            .await
+            .expect("recovered client finishes close handshake")
+            .expect("recovered drain task succeeds");
+        serve_task.abort();
+        let _ = serve_task.await;
+        assert_eq!(
+            observed.0,
+            if filled_sink { vec![8 << 20] } else { vec![] },
+            "cancelled buffered frame reaches client whole exactly once"
+        );
+        assert_eq!(
+            observed.1, 0,
+            "expired reliable backlog must never reach the client"
+        );
+        assert_eq!(
+            observed.2,
+            Some(4002.into()),
+            "watchdog emits slow-consumer close"
+        );
+        assert_eq!(
+            server
+                .metrics()
+                .websocket_messages_dropped
+                .load(Ordering::Relaxed),
+            expected_abandoned,
+            "teardown counts each abandoned queued or selected frame exactly once"
+        );
+        assert_eq!(
+            server
+                .metrics()
+                .delivery_metrics_by_class()
+                .reliable
+                .abandoned,
+            1,
+            "resident reliable frame is abandoned exactly once"
+        );
+        assert_eq!(
+            server
+                .metrics()
+                .websocket_slow_consumer_disconnects
+                .load(Ordering::Relaxed),
+            1,
+            "watchdog records one disconnect"
+        );
     }
 
     /// Issue #396 sweep pin: on a v3 connection the writer re-checks the

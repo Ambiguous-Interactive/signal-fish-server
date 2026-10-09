@@ -233,6 +233,65 @@ It uses an oversized binary filler solely to create transport pressure; that
 filler is not valid protocol gameplay. It covers one controlled cancellation
 and recovery schedule, not every partial-write boundary or client implementation.
 
+### F06 — Priority traffic hides reliable delivery age
+
+**Delivery correctness defect; high confidence.** Issue
+[#832](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/832).
+Affected code: the outbound queue, queued deadlines, and the live socket writer.
+
+Both receive modes prefer current-generation control over data. The batch drain
+also checks control before staged data. The old deadline consulted unresolved
+reliable age only when the selected payload itself was reliable. Fresh control
+could therefore continue reaching a healthy recipient after queued reliable
+had exceeded its enqueue-to-write budget. Ping and idle-report writes also
+bypassed that resident age, including reliable admitted during an existing write.
+
+The repair watches reliable admission independently of writer selection. Its
+notification does not consume the receiver's wakeups. The watcher includes
+all queue generations, rechecks rows after timer wake, and closes only for
+currently unresolved reliable data. Every selected write also retains the
+oldest resident or staged reliable bound. This covers immediately ready control
+drains that might otherwise run without yielding to the watcher. Queue order
+and transition barriers remain intact. Lossy age does not expire fresh control.
+Known unsupported payloads keep their own write-progress policy; unrelated
+unresolved reliable data still bounds the writer. Zero and unrepresentable
+internal deadlines retain their existing inert behavior.
+
+The initial real-socket red observed three fresh controls while expired reliable
+remained resident, in both receive modes. The regression then strengthened the
+history to write fresh controls at two and four seconds, before crossing the
+five-second reliable budget. Separate controls retain timely reliable delivery,
+stale latest/volatile progress, and an explicitly disabled internal budget.
+
+Queue tests cover delayed admission on both v2 and v3, stale timer removal,
+fresh successors, future generations, and simultaneous enqueue/expiry. Socket
+seam tests cover reliable arrival during stalled control and Ping writes, then
+restore reader progress and check semantic close 4002, no reliable leak, and
+exact abandonment. An exaggerated batching wait isolates watchdog cancellation;
+it is an internal seam test, not a claim that this operator configuration passes
+validation. The initial positive Latest fixture lacked its required key, and
+initial teardown queues lacked metrics; those invalid fixture results establish
+no production conclusion.
+
+The full `/v3/ws` experiment authenticates and joins a room, then exercises the
+spawned `handle_socket` writer in both batching modes. A player-keyed test gate
+holds only that writer between selections. Reliable data enters its actual
+queue once; one fresh control enters before each selection. Controls at two
+and four seconds reach the client. Crossing the five-second reliable budget
+while the next selection remains held causes close 4002 without releasing the
+gate. No overdue reliable or later control reaches the client. Abandonment and
+disconnection each count once. The gate and its temporary sender compile out of
+production; the test establishes a controlled schedule, not physical latency
+on every platform. An initial handler fixture used an invalid authentication
+timeout; that setup failure is excluded.
+
+Seventeen focused local tests pass. A temporary negative control disables the
+independent live watcher and restores selected-item-only deadlines. All five
+selected regressions fail: the two timed socket seams write the third control,
+the two full handlers miss the close deadline, and the all-class matrix rejects
+the extended deadline. The production repair is restored after that experiment.
+Hosted acceptance remains required.
+
 ### Session 380 validation
 
 | Experiment | Red or negative control | Green evidence and limits |
@@ -274,14 +333,26 @@ Hook execution exceeded its one-second target;
 file discovery and source scanning dominated, within the area tracked by
 [#811](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/811).
 
+### Session 381 validation
+
+The socket histories cover both receive modes and the actual spawned writer.
+Queue cases cover both protocol lanes and preserve generation barriers. The
+all-class deadline matrix separately pins resident and staged reliable age.
+No wire fields or public signatures change. No migration is required.
+
+Reproduce the focused runtime histories:
+
+```bash
+cargo nextest run --lib -E 'test(test_live_writer)'
+cargo nextest run --lib -E 'test(test_priority_control) | test(test_reliable_)'
+cargo nextest run --lib -E 'test(reliable_sojourn_watcher)'
+cargo nextest run --lib -E 'test(resident_reliable_age_bounds_every_selected_write)'
+cargo nextest run --lib -E 'test(writer_deadlines_are_partitioned_by_delivery_class)'
+cargo nextest run --lib -E 'test(send_batch_control_bypasses)'
+```
+
 ### Unresolved hypotheses and explicit limits
 
-- [#832](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/832):
-  reliable sojourn is checked when a reliable item is selected. Source inspection
-  found no independent reliable-age timer. Two slow but timely control writes
-  can delay reliable selection beyond its budget. This is a source-supported
-  counterexample awaiting a runtime experiment for both batching modes. The
-  existing timestamp-accessor test does not prove live deadline enforcement.
 - Reconnect token rotation commits at queue admission. Losing the replacement
   response can leave the client with a consumed token. The local-commit
   contract does not promise client receipt; quantify this recovery limitation
