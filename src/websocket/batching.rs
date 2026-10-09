@@ -1207,6 +1207,32 @@ mod tests {
             "precondition: the popped carrier must be the causal DeliveryReport"
         );
 
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(
+            queued_write_deadline(
+                &report,
+                None,
+                &rx,
+                Duration::from_secs(15),
+                Instant::now(),
+                false,
+            ),
+            rx.oldest_reliable_enqueued_at()
+                .map(|at| at + Duration::from_secs(15)),
+            "resident reliable data must still bound a parked report"
+        );
+        let reliable = rx
+            .recv()
+            .await
+            .expect("queue open")
+            .expect("reliable filler");
+        assert_eq!(reliable.class(), Some(DeliveryClass::Reliable));
+        // The filler has now left the queue and completed. Leaving it resident
+        // would test reliable starvation, which must bound even a gap report.
+        drop(reliable);
+        rx.record_written(DeliveryClass::Reliable);
+        assert!(rx.oldest_reliable_enqueued_at().is_none());
+
         // Simulate the parked window: same-generation control keeps overtaking
         // the report for longer than the whole sojourn budget while the writer
         // stays healthy.
