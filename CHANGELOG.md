@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Report browser reference-client channel state when P2P establishment times out (#853).
 - Add `--print-config-evidence` to fingerprint loaded settings without exposing
   secrets and attach host config and binary evidence to external capacity runs (#776).
 - Add opt-in native reference-client reconnect controls that restore room

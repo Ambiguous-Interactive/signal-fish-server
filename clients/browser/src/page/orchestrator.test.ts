@@ -8,6 +8,7 @@ import {
   run,
 } from './orchestrator.js';
 import type { RunConfig } from '../shared/types.js';
+import { Engine, RELIABLE_LABEL, UNRELIABLE_LABEL } from './engine.js';
 
 function assert(condition: boolean, message: string): void {
   if (!condition) {
@@ -669,3 +670,302 @@ for (const [membershipEvent, departure] of [
   }
 }
 console.error('ok - restored peers require fresh browser exchange traffic');
+
+// Regression #853: retain local transport state when initial pairing expires.
+for (const healthy of [false, true]) {
+  const originalSocket = globalThis.WebSocket;
+  const originalPc = globalThis.RTCPeerConnection;
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const originalNow = Date.now;
+  const originalError = console.error;
+  const errors: string[] = [];
+  const me = '00000000-0000-0000-0000-000000000001';
+  const peer = '00000000-0000-0000-0000-000000000002';
+  let now = originalNow();
+  let socket!: DiagnosticSocket;
+  let connection!: DiagnosticConnection;
+  let guardTimer: ReturnType<typeof setTimeout> | undefined;
+  const turn = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+  class DiagnosticChannel {
+    readonly readyState = healthy ? 'open' : 'connecting';
+    readonly bufferedAmount = 17;
+    onopen: (() => void) | null = null;
+    constructor(readonly label: string) {}
+    send(_text: string): void {}
+  }
+  class DiagnosticConnection {
+    readonly connectionState = 'connected';
+    readonly iceConnectionState = 'completed';
+    readonly sctp = { state: 'connected' };
+    constructor() {
+      connection = this;
+    }
+    createDataChannel(label: string): DiagnosticChannel {
+      return new DiagnosticChannel(label);
+    }
+    async createOffer(): Promise<{ type: string; sdp: string }> {
+      return { type: 'offer', sdp: 'private-sdp' };
+    }
+    async setLocalDescription(_description: unknown): Promise<void> {}
+    close(): void {}
+  }
+  class DiagnosticSocket {
+    static readonly OPEN = 1;
+    readonly readyState = 1;
+    readonly bufferedAmount = 0;
+    onopen: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onclose: (() => void) | null = null;
+    constructor() {
+      socket = this;
+      queueMicrotask(() => this.onopen?.());
+    }
+    deliver(frame: unknown): void {
+      this.onmessage?.({ data: JSON.stringify(frame) });
+    }
+    send(text: string): void {
+      const frame = JSON.parse(text) as { type: string };
+      if (frame.type === 'Authenticate') {
+        queueMicrotask(() => {
+          this.deliver({ type: 'Authenticated', data: {} });
+          this.deliver({ type: 'ProtocolInfo', data: { protocol_version: 3 } });
+        });
+      } else if (frame.type === 'JoinRoom') {
+        queueMicrotask(() => {
+          this.deliver({
+            type: 'RoomJoined',
+            data: {
+              player_id: me,
+              room_id: me,
+              room_code: 'TEST',
+              lobby_state: 'finalized',
+              ready_players: [],
+              current_players: [
+                { id: me, epoch: 1, seq: 0 },
+                { id: peer, epoch: 1, seq: 0 },
+              ],
+            },
+          });
+          this.deliver({
+            type: 'SessionPlan',
+            data: {
+              generation: me,
+              topology: 'mesh',
+              transport: 'webrtc',
+              fallback: 'relay',
+              ice_servers: [],
+              peers: [{ player_id: peer, initiate: true }],
+            },
+          });
+        });
+      }
+    }
+    close(): void {}
+  }
+  try {
+    globalThis.WebSocket = DiagnosticSocket as unknown as typeof WebSocket;
+    globalThis.RTCPeerConnection = DiagnosticConnection as unknown as typeof RTCPeerConnection;
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: { __sf_emit: () => {} },
+    });
+    Date.now = () => now;
+    console.error = (...args: unknown[]) => errors.push(args.map(String).join(' '));
+    const running = run({
+      serverUrl: 'ws://mock.invalid/v3/ws',
+      createRoom: true,
+      joinCode: null,
+      peers: 2,
+      maxPlayers: null,
+      expectTotalPeers: null,
+      leaveOnGameStart: false,
+      gameName: 'diagnostic',
+      playerName: 'test',
+      appId: 'test',
+      platform: 'test',
+      exchange: true,
+      relayPayload: null,
+      crippleIce: false,
+      p2pTimeoutSecs: 1,
+      runForSecs: 3,
+      successReleaseEnabled: false,
+      protocolVersion: 3,
+      supportedTopologies: ['mesh'],
+      supportedTransports: ['webrtc'],
+      gameDataFormat: 'json',
+      sdkVersion: 'test',
+      elapsedBeforeStartMs: 0,
+    });
+    await turn();
+    assert(connection !== undefined, 'the actual dispatcher must establish a peer');
+    now += 1100;
+    socket.deliver({ type: 'Pong' });
+    await turn();
+    const diagnostics = errors.filter((line) => line.startsWith('P2P timeout for '));
+    now += 3000;
+    socket.deliver({ type: 'Pong' });
+    await Promise.race([
+      running,
+      new Promise<never>((_resolve, reject) => {
+        guardTimer = setTimeout(
+          () => reject(new Error('P2P diagnostic history exceeded its bound')),
+          2000,
+        );
+      }),
+    ]);
+    assert(
+      diagnostics.length === (healthy ? 0 : 1),
+      `healthy=${healthy}: only unresolved pairs need timeout state; got ${errors.join('; ')}`,
+    );
+    if (!healthy) {
+      const line = diagnostics[0] ?? '';
+      assert(
+        line.startsWith(`P2P timeout for ${peer}: `),
+        'timeout state must identify the peer',
+      );
+      const snapshot = JSON.parse(line.slice(line.indexOf(': ') + 2));
+      assert(
+        snapshot.generation === 1 &&
+          snapshot.connectionState === 'connected' &&
+          snapshot.iceConnectionState === 'completed' &&
+          snapshot.sctpState === 'connected',
+        'timeout must retain actual peer and SCTP states',
+      );
+      for (const label of ['reliable', 'unreliable']) {
+        assert(
+          snapshot.channels[label].readyState === 'connecting' &&
+            snapshot.channels[label].bufferedAmount === 17 &&
+            snapshot.channels[label].openObserved === false,
+          `timeout must retain ${label} state`,
+        );
+      }
+      assert(
+        !line.includes('private-sdp'),
+        'timeout snapshots must exclude signaling payloads',
+      );
+    }
+  } finally {
+    clearTimeout(guardTimer);
+    socket?.onclose?.();
+    Date.now = originalNow;
+    globalThis.WebSocket = originalSocket;
+    globalThis.RTCPeerConnection = originalPc;
+    console.error = originalError;
+    if (originalWindow === undefined) Reflect.deleteProperty(globalThis, 'window');
+    else Object.defineProperty(globalThis, 'window', originalWindow);
+  }
+}
+console.error('ok - initial P2P timeout reports unresolved local states only');
+
+// Responder control for #853: observe either remote channel open order.
+for (const alreadyOpen of [false, true]) {
+  const originalPc = globalThis.RTCPeerConnection;
+  const connections: ResponderConnection[] = [];
+  const opens: string[] = [];
+  const messages: string[] = [];
+  let connected = 0;
+  class RemoteChannel {
+    readyState = alreadyOpen ? 'open' : 'connecting';
+    bufferedAmount = 0;
+    onopen: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    constructor(readonly label: string) {}
+  }
+  class ResponderConnection {
+    ondatachannel: ((event: { channel: RemoteChannel }) => void) | null = null;
+    constructor() {
+      connections.push(this);
+    }
+    close(): void {}
+  }
+  try {
+    globalThis.RTCPeerConnection = ResponderConnection as unknown as typeof RTCPeerConnection;
+    const engine = new Engine(false, {
+      onLocalCandidate: () => {},
+      onPcState: () => {},
+      onChannelClosed: () => {},
+      onChannelOpen: (peer, generation, label) => {
+        assert(
+          engine.isCurrentGeneration(peer, generation),
+          'open callback must belong to the current generation',
+        );
+        assert(
+          engine.channel(peer, label) !== undefined,
+          'remote channel must be stored before its open callback',
+        );
+        opens.push(label);
+        if (engine.noteChannelOpen(peer, label)) connected += 1;
+      },
+      onChannelMessage: (peer, generation, label, text) => {
+        assert(
+          engine.isCurrentGeneration(peer, generation),
+          'message callback must belong to the current generation',
+        );
+        messages.push(`${label}:${text}`);
+      },
+    });
+    await engine.pairWith('peer', false, []);
+    const channels = [RELIABLE_LABEL, UNRELIABLE_LABEL].map(
+      (label) => new RemoteChannel(label),
+    );
+    for (const channel of channels) {
+      connections[0]?.ondatachannel?.({ channel });
+      channel.onmessage?.({ data: 'initial-message' });
+      if (!alreadyOpen) {
+        channel.readyState = 'open';
+        channel.onopen?.();
+      }
+    }
+    await Promise.resolve();
+    for (const channel of channels) channel.onopen?.();
+    assert(
+      opens.join(',') === 'reliable,unreliable' && connected === 1,
+      `alreadyOpen=${alreadyOpen}: observe each open and pair exactly once`,
+    );
+    assert(
+      messages.join(',') === 'reliable:initial-message,unreliable:initial-message',
+      'initial messages must survive both responder open orders',
+    );
+    engine.removePeer('peer');
+    await engine.pairWith('peer', false, []);
+    for (const channel of channels) {
+      channel.onopen?.();
+      channel.onmessage?.({ data: 'stale-message' });
+    }
+    connections[0]?.ondatachannel?.({ channel: new RemoteChannel(RELIABLE_LABEL) });
+    assert(
+      messages.length === 2 && opens.length === 2 && connected === 1,
+      'retired responder callbacks must not change replacement state',
+    );
+    assert(
+      engine.channel('peer', RELIABLE_LABEL) === undefined,
+      'retired announcements must not populate the new generation',
+    );
+    // Retire before either already-open channel's queued notification runs.
+    // These fresh handlers have not consumed their one-shot open notification.
+    for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL]) {
+      const pendingChannel = new RemoteChannel(label);
+      pendingChannel.readyState = 'open';
+      connections[1]?.ondatachannel?.({ channel: pendingChannel });
+    }
+    engine.removePeer('peer');
+    await engine.pairWith('peer', false, []);
+    await Promise.resolve();
+    assert(
+      opens.length === 2 && connected === 1,
+      'queued open notifications from a retired link must not create open or pair evidence',
+    );
+    for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL]) {
+      assert(
+        engine.channel('peer', label) === undefined,
+        'queued retired opens must not populate replacement channels',
+      );
+    }
+    engine.removePeer('peer');
+  } finally {
+    globalThis.RTCPeerConnection = originalPc;
+  }
+}
+console.error(
+  'ok - responder channel announcements retain initial messages and suppress duplicate or stale opens',
+);

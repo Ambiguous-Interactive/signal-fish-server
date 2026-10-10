@@ -1218,6 +1218,13 @@ class Orchestrator {
     }
 
     if (this.p2pDeadline !== null && now >= this.p2pDeadline) {
+      for (const peer of this.expectedPeers) {
+        if (!this.connectedPairs.has(peer)) {
+          console.error(
+            `P2P timeout for ${peer}: ${JSON.stringify(this.engine.diagnosticSnapshot(peer))}`,
+          );
+        }
+      }
       // The current P2P window expired: report any real state change.
       this.resolveTransportStatus();
       this.p2pDeadline = null;
