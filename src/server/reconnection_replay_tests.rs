@@ -155,7 +155,7 @@ fn reconnect_replay_budget_sizes_the_v3_wire_projection_before_truncation() {
         else {
             unreachable!();
         };
-        player.connected_at = Some(chrono::Utc::now());
+        player.connected_at = Some(chrono::DateTime::UNIX_EPOCH);
         player.connection_info = Some(crate::protocol::ConnectionInfo::WebRTC {
             sdp: Some("sdp".repeat(1000)),
             ice_candidates: Vec::new(),

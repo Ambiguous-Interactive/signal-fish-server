@@ -72,7 +72,7 @@ fn bound_reconnect_baseline(
     if size > max {
         anyhow::bail!("reconnect snapshot exceeds the outbound frame limit");
     }
-    let mut retained = 0;
+    let mut retained = 0usize;
     for event in events.iter().rev() {
         // The empty array's brackets are in the baseline. Only subsequent
         // entries add a comma. JSON escaping and UTF-8 are counted by serde.
@@ -81,9 +81,9 @@ fn bound_reconnect_baseline(
             break;
         };
         size = next_size;
-        retained += 1;
+        retained = retained.saturating_add(1);
     }
-    events.drain(..events.len() - retained);
+    events.drain(..events.len().saturating_sub(retained));
     reconnect_payload_mut(&mut message)?.missed_events = events;
     Ok(message)
 }
