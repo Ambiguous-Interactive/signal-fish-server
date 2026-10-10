@@ -639,6 +639,18 @@ impl ConnectionCloseSignal {
         *self.tx.borrow()
     }
 
+    /// Order a synchronous queue commit before any later socket close request.
+    /// The callback must not request a close or wait for asynchronous work.
+    pub(crate) fn commit_if_open<T>(&self, commit: impl FnOnce() -> T) -> Option<T> {
+        let reason = self.tx.borrow();
+        if reason.is_some() {
+            return None;
+        }
+        let result = commit();
+        drop(reason);
+        Some(result)
+    }
+
     fn request_delivery_timeout_close(&self, delivery_id: Option<u64>) -> bool {
         #[cfg(not(feature = "trace-validation"))]
         let _ = delivery_id;
@@ -2341,7 +2353,14 @@ pub trait MessageCoordinator: Send + Sync {
         delivery: ClientDeliveryHandle,
         build_message: Box<dyn FnOnce() -> Arc<ServerMessage> + Send + 'a>,
     ) -> anyhow::Result<DeliveryOutcome> {
-        let outcome = match delivery.sender.try_send(build_message(), Some(room_id)) {
+        let message = build_message();
+        let Some(result) = delivery
+            .close
+            .commit_if_open(|| delivery.sender.try_send(message, Some(room_id)))
+        else {
+            return Ok(DeliveryOutcome::Canceled);
+        };
+        let outcome = match result {
             Ok(outcome) if outcome.enqueued => DeliveryOutcome::Delivered,
             Ok(outcome) if outcome.losses > 0 => DeliveryOutcome::AccountedDrop,
             Ok(_) => DeliveryOutcome::Canceled,
@@ -4235,6 +4254,35 @@ mod tests {
             "the fallback must request a slow-consumer close for a full initial queue"
         );
         drop(blocked_rx);
+
+        let (closing_handle, mut closing_rx, closing_listener) = delivery_handle(1);
+        let close = closing_handle.close.clone();
+        let outcome = coordinator
+            .register_local_client_with_initial_message(
+                blocked_player,
+                room_id,
+                closing_handle,
+                Box::new(move || {
+                    assert!(close.request_close(CloseReason::Unregistered));
+                    test_message()
+                }),
+            )
+            .await
+            .expect("known-close fallback cancels registration");
+        assert_eq!(outcome, DeliveryOutcome::Canceled);
+        assert_eq!(
+            closing_listener.requested_reason(),
+            Some(CloseReason::Unregistered)
+        );
+        let unexpected = closing_rx.try_recv();
+        assert!(matches!(
+            unexpected,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
+        assert_eq!(
+            coordinator.registrations.lock().await.as_slice(),
+            &[(player, Some(room_id))]
+        );
     }
 
     #[tokio::test]
