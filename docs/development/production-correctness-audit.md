@@ -919,6 +919,33 @@ Chromium; `scripts/run-browser-interop.sh` sets those prerequisites for hosted
 acceptance. This evidence does not certify arbitrary network failures, all
 client packages, or the remaining A20 boundaries.
 
+### Session 392 browser channel-establishment evidence
+
+At baseline `6910b21c`, the initial restore history and 20 further bounded
+attempts pass with both client event streams retained. These passes do not
+explain or repair [#853](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/853).
+The unsupported DTLS extension warnings also appear in passing attempts.
+
+Source inspection confirms that the native driver announces a remote channel
+before delivering its open event. The browser stores the channel before wiring
+handlers and handles channels already open at registration. The historical
+failure already had both native channels open and both native sends complete.
+It leaves browser bookkeeping, browser sends, transport delivery, and browser
+termination unresolved.
+
+The browser now reports a synchronous state snapshot for unresolved peers when
+the P2P window expires. It records connection, ICE, SCTP, required channels,
+buffer sizes, and observed open callbacks without SDP or credentials. The
+snapshot does not await network work or change timeout and fallback behavior.
+Responder controls exercise already-open and later-open channels, immediate
+messages, repeated open events, and retired callbacks, including a queued
+already-open notification retired before dispatch. The real Chromium/native
+restore and crippled-ICE histories pass locally. The deliberate ICE failure
+emits two peer snapshots through CLI stderr; the healthy browser emits none.
+Hosted browser interop acceptance remains required. This is diagnostic progress,
+not a root-cause repair or completion of A20/A22. Keep #853 open for a captured
+failure.
+
 ### F17 Reference clients count invalid payloads as exchange receipts
 
 **Client correctness defect; high confidence.** Issue

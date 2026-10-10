@@ -222,6 +222,35 @@ export class Engine {
     return this.peers.get(peer)?.channels.get(label);
   }
 
+  /** Local transport state only; excludes signaling payloads and ICE addresses. */
+  diagnosticSnapshot(peer: string): object | null {
+    const link = this.peers.get(peer);
+    if (link === undefined) {
+      return null;
+    }
+    return {
+      generation: link.generation,
+      connectionState: link.pc.connectionState,
+      iceConnectionState: link.pc.iceConnectionState,
+      sctpState: link.pc.sctp?.state ?? null,
+      channels: Object.fromEntries(
+        [RELIABLE_LABEL, UNRELIABLE_LABEL].map((label) => {
+          const channel = link.channels.get(label);
+          return [
+            label,
+            channel === undefined
+              ? null
+              : {
+                  readyState: channel.readyState,
+                  bufferedAmount: channel.bufferedAmount,
+                  openObserved: link.openLabels.has(label),
+                },
+          ];
+        }),
+      ),
+    };
+  }
+
   private linkOf(peer: string, what: string): PeerLink {
     const link = this.peers.get(peer);
     if (link === undefined) {

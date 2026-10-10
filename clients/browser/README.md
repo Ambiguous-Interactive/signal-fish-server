@@ -135,6 +135,12 @@ write is logged to stderr once and
 latches suppression; the run continues to its bounded exit. Usage errors exit `2` before the event stream
 starts (no `exiting` event), matching the documented clap behavior.
 
+When a P2P window expires, stderr reports each unresolved peer's connection,
+ICE, SCTP, and required data-channel states. The report includes channel buffer
+sizes and observed open callbacks. It excludes SDP, addresses, and credentials.
+The report records the timeout state; it does not identify the failure cause.
+The client can still accept a late connection within its run window.
+
 ## mDNS `.local` posture (empirically pinned)
 
 With `--mdns-obfuscation`, Chromium advertises only `.local` host candidates, which the native side cannot
