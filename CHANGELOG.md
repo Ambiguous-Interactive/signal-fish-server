@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Restart reference-client data-channel exchange when a peer reconnects or rejoins, while preserving completed exchange on duplicate announcements (#851).
+- Restart reference-client exchange after peer reconnect or rejoin; duplicate announcements keep completed exchange (#851).
 - Preserve player handshake retry budgets when concurrent requests fill the application limit (#849).
 - Accept HTTP/2 WebSocket connections on the supported signaling routes,
   including token-bound clients (#845, #846).
