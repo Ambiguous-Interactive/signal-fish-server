@@ -10,6 +10,7 @@ Design rationale (standalone crate, direct webrtc-rs, path-dependency type reuse
 [ADR-0004](../../docs/adr/0004-native-reference-client.md).
 
 The reference engine accepts only `reliable` and `unreliable` data channels.
+The engine cancels their polling tasks when it removes a peer or stops.
 It closes other remote labels without retaining them or starting callbacks.
 **Migration:** Applications that need extra channels must own their channel
 handling. This restriction belongs to these reference clients; the server

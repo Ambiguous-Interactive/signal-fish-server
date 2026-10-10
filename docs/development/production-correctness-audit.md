@@ -1314,3 +1314,34 @@ surface for them. Godot delegates channels to `WebRTCMultiplayerPeer`.
 [Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355)
 tracks its actual channel contract, resource bounds, and intended interop.
 Do not infer that Godot's engine channel names must match reference labels.
+
+### F25 — Retired native channel tasks retain peer state
+
+Baseline: `06016fb6`. A20. Finding: #874, under #870.
+
+The native engine discarded channel polling task handles. Runtime handle drop
+detaches a task. Each pending poll holds its channel, which holds the peer core
+and channel event senders. Local peer closure stops the driver without ending
+these polls. Each retired link can retain two tasks and both channel objects.
+
+The red regression uses a real unconnected initiator and weak references to
+both required channels. Peer removal succeeds and empties the map, but the
+channel objects remain alive past the one-second yield deadline. The failure
+is object retention evidence, not a measured process memory slope.
+
+The peer link now owns at most two polling task handles. Removal and failed
+pairing abort them before awaiting peer closure. Link destruction also aborts
+them, including engine destruction and cancellation during teardown. This
+does not depend on a stack close event. The green control covers local and
+remote admission, three remove/re-pair generations, and engine destruction.
+Each retired channel object must be released before the next generation.
+The live duplicate-channel history preserves bidirectional required delivery
+and the original close callback.
+
+No server wire, channel labels, or client API changes are required. The Rust
+and .NET sibling SDKs leave peer networking to the game. Godot delegates it
+to its engine; [Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355)
+continues its separate resource assessment. #870 remains open for stack
+allocation and required-label announcement floods. #872 still owns SCTP
+reset completion and closed-stream reuse. This repair proves poller-owned
+channel release, not total WebRTC stack memory reclamation.
