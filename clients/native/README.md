@@ -9,6 +9,12 @@ channels). It exists for **conformance and reference** — executable documentat
 Design rationale (standalone crate, direct webrtc-rs, path-dependency type reuse, supply-chain scope) lives in
 [ADR-0004](../../docs/adr/0004-native-reference-client.md).
 
+The reference engine accepts only `reliable` and `unreliable` data channels.
+It closes other remote labels without retaining them or starting callbacks.
+**Migration:** Applications that need extra channels must own their channel
+handling. This restriction belongs to these reference clients; the server
+continues to relay opaque signaling payloads.
+
 ## Quick start
 
 One line from the repository root (build server → lint client → run the full suite):

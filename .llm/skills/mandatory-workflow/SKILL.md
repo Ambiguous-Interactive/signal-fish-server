@@ -192,6 +192,11 @@ in other skills for this authorized workflow.
 2. Inspect reviews, inline threads, and conversation comments. Address all PR
    feedback, resolve addressed threads, and satisfy repository merge rules.
    If fixes change the head, repeat CI and feedback verification.
+   For API, protocol, or observable behavior changes, also verify the
+   [external-client assessment](../../context-protocol-and-scenarios.md#active-external-clients):
+   the PR links tracking issues in affected Rust, .NET, and Godot client repos
+   and gives a reason for each unaffected client. Unknown impact requires an
+   assessment issue. Client issue completion is separate from server CI.
 3. Merge through the connected GitHub extension/app with the verified head SHA
    as the expected head. Verify GitHub reports the PR merged. A queued or
    auto-merge request alone does not prove completion.

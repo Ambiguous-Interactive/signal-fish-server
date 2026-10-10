@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Pending |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -1225,7 +1225,7 @@ in #853. Twenty focused capture histories passed in nextest run `341866de`
 build, so this is not a frozen-baseline cohort. No new initial-establishment
 failure was captured. These passes do not explain or repair #853.
 
-Distinct optional labels still have no application-level channel-count bound.
+At the F23 baseline, distinct optional labels had no application-level channel-count bound.
 [#870](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/870)
 records that resource audit. The stack's effective limits and memory costs have
 not been measured. This repair does not certify that separate boundary.
@@ -1250,3 +1250,67 @@ cargo nextest run --locked --manifest-path clients/native/Cargo.toml --lib \
 cargo nextest run --locked --manifest-path clients/native/Cargo.toml --lib \
   -E 'test(detached_selected_pair_probe_observes_before_live_channel_closes)'
 ```
+
+### F24 — Unsupported remote channels grow client-owned state
+
+Baseline: `cee7bd9b`. A20. Follow-up: #870.
+
+Both reference clients retained each distinct remote label. The browser also
+installed open/message handlers. Native admission started a polling task and
+queued every announcement before the orchestrator inspected it. Neither
+reference client uses extra labels for gameplay. Required channels are
+`reliable` and `unreliable`; the server relays signaling without imposing this
+client channel contract.
+
+Red-first browser regression: the first unsupported channel remained open.
+Red-first native regression: the first unsupported announcement entered the
+unbounded engine event queue. These are direct admission failures, not
+measured process exhaustion or evidence about #853.
+
+The repair closes unsupported remote channels before browser retention or
+native event-queue admission. Native storage also refuses direct unsupported
+calls. Client-owned channel maps retain at most two fixed labels per link.
+Rejected channels install no browser callbacks and start no native polling
+tasks. Required-label duplicate admission keeps the F23 rule.
+
+Boundary controls use empty, case-mismatched, NUL-suffixed, 4096-character
+Unicode, and 128 distinct optional labels before required admission. Browser
+controls repeat the burst after required admission, for both roles and both
+connecting/open announcements. Native live peers offer 18 optional labels
+and two required-label duplicates in each direction after connection, then
+exchange required-channel traffic. The generator allocates the full workload
+before closure and verifies 20 distinct wire stream IDs so faulty SID reuse
+cannot lose offered opens (#872).
+The direct controls check closure, no optional event delivery, the two-channel
+bound, required delivery, map teardown, and fresh-link admission. They do not
+prove retired stack or polling-task lifetime bounds.
+
+Migration: reference-engine callers that need extra channels must own that
+handling. No server wire or signaling change is introduced. WebRTC allocates
+incoming channel objects before these callbacks run. This repair does not
+bound stack memory, required-label announcement floods, or application message
+queues. Keep general A20 resource coverage open.
+
+The initial sequential close/reopen generator exposed a stack defect: after the optional burst
+and a refused reliable duplicate, the next unreliable duplicate never reaches
+remote announcement. Three failures include one SCTP trace. The trace shows
+stream ID 5 reused for the new OPEN, then unregistered by a late reset, followed
+by `SctpHandler.handle_write got error: Stream not existed`. The allocator
+frees a locally closed SID before the reset exchange completes. An isolated
+no-reuse source probe passes the same history in both directions (4.449 s),
+which supports the reuse cause. It is not a production repair: permanently
+reserving retired IDs can exhaust the SID space. The first probe failed to
+compile with an LLVM output-memory error; a single-job, nonincremental build
+completed and ran the control.
+[#872](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/872)
+owns this reopening failure. The corrected admission oracle keeps every
+offered channel on a fresh SID and still requires remote closure and required
+delivery. It does not claim closed-stream reopening support. #870 remains
+open for stack resource and lifetime measurements.
+
+External-client assessment: current Rust and .NET READMEs leave peer networking
+to the game; this reference-only restriction changes no signaling or relay
+surface for them. Godot delegates channels to `WebRTCMultiplayerPeer`.
+[Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355)
+tracks its actual channel contract, resource bounds, and intended interop.
+Do not infer that Godot's engine channel names must match reference labels.

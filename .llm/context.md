@@ -22,9 +22,9 @@
 
 ## Skills Index
 
-- Generated skill catalog: [skills/index.md](skills/index.md)
-- Select skills by their catalog descriptions, then read the chosen `SKILL.md` completely.
-- Regenerate after skill changes: `python3 .llm/skills/manage-skills/scripts/generate_skills_index.py`
+- [Skills](skills/index.md) | [Active Rust, .NET, Godot clients and tracking policy](context-protocol-and-scenarios.md#active-external-clients)
+- Read selected skills completely; regenerate the catalog after skill changes:
+  `python3 .llm/skills/manage-skills/scripts/generate_skills_index.py`
 
 ---
 

@@ -10,6 +10,12 @@ adoption). It is **not a product**: no reconnection logic, no game loop, no API 
 Design rationale (real browser vs Node WebRTC stacks, page/CLI split, mDNS posture, Chromium teardown,
 feature-gated cells) lives in [ADR-0005](../../docs/adr/0005-browser-reference-client.md).
 
+The reference engine accepts only `reliable` and `unreliable` data channels.
+It closes other remote labels without retaining them or starting callbacks.
+**Migration:** Applications that need extra channels must own their channel
+handling. This restriction belongs to these reference clients; the server
+continues to relay opaque signaling payloads.
+
 ## Quick start
 
 One line from the repository root (build server + native client → lint/build the browser client → install the
