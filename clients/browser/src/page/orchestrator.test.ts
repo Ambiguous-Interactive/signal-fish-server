@@ -969,3 +969,134 @@ for (const alreadyOpen of [false, true]) {
 console.error(
   'ok - responder channel announcements retain initial messages and suppress duplicate or stale opens',
 );
+
+// Regression #861: bound pre-description storage and post-description admission.
+{
+  const originalPc = globalThis.RTCPeerConnection;
+  const connections: CandidateConnection[] = [];
+  class CandidateConnection {
+    readonly applied: RTCIceCandidateInit[] = [];
+    constructor() {
+      connections.push(this);
+    }
+    async setRemoteDescription(_description: unknown): Promise<void> {}
+    async addIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {
+      this.applied.push(candidate);
+    }
+    close(): void {}
+  }
+  try {
+    globalThis.RTCPeerConnection = CandidateConnection as unknown as typeof RTCPeerConnection;
+    const jsonMetadataBase = JSON.stringify({ candidate: '', usernameFragment: '' });
+    const jsonMetadata = JSON.stringify({
+      candidate: '',
+      usernameFragment: 'x'.repeat(4096 - jsonMetadataBase.length),
+    });
+    for (const [name, payload, accepted] of [
+      ['count', 'candidate:1 1 udp 2130706431 127.0.0.1 9 typ host', 128],
+      ['bytes', 'x'.repeat(4096), 16],
+      ['utf8', 'é'.repeat(2048), 16],
+      ['json-metadata', jsonMetadata, 16],
+    ] as const) {
+      const engine = new Engine(false, {
+        onLocalCandidate: () => {},
+        onPcState: () => {},
+        onChannelOpen: () => {},
+        onChannelClosed: () => {},
+        onChannelMessage: () => {},
+      });
+      await engine.pairWith('peer', false, []);
+      const connection = connections[connections.length - 1]!;
+      async function rejected(payload: string): Promise<void> {
+        let failed = false;
+        try {
+          await engine.handleRemoteCandidate('peer', payload);
+        } catch {
+          failed = true;
+        }
+        assert(failed, `${name}: excess candidate must fail`);
+      }
+      await rejected('x'.repeat(4097));
+      await rejected('é'.repeat(2049));
+      for (let index = 0; index < accepted; index += 1) {
+        await engine.handleRemoteCandidate('peer', payload);
+      }
+      for (let index = 0; index < 3; index += 1) await rejected(payload);
+      assert(connection.applied.length === 0, `${name}: defer until remote description`);
+      await engine.handleAnswer('peer', 'test-answer');
+      assert(connection.applied.length === accepted, `${name}: flush only accepted candidates`);
+      let expectedCandidate = payload;
+      if (name === 'json-metadata') expectedCandidate = '';
+      assert(
+        connection.applied.every((candidate) => candidate.candidate === expectedCandidate),
+        `${name}: preserve payloads`,
+      );
+      await rejected(payload);
+      assert(
+        connection.applied.length === accepted,
+        `${name}: drain must not renew the budget`,
+      );
+      await engine.pairWith('other', false, []);
+      await engine.handleRemoteCandidate('other', payload);
+      await engine.handleAnswer('other', 'other-answer');
+      assert(
+        connections[connections.length - 1]!.applied.length === 1,
+        `${name}: peers have independent budgets`,
+      );
+      engine.removePeer('other');
+      engine.removePeer('peer');
+      await engine.pairWith('peer', false, []);
+      await engine.handleRemoteCandidate('peer', payload);
+      await engine.handleAnswer('peer', 'replacement-answer');
+      assert(
+        connections[connections.length - 1]!.applied.length === 1,
+        `${name}: replacement gets fresh budget`,
+      );
+      engine.removePeer('peer');
+    }
+    const engine = new Engine(false, {
+      onLocalCandidate: () => {},
+      onPcState: () => {},
+      onChannelOpen: () => {},
+      onChannelClosed: () => {},
+      onChannelMessage: () => {},
+    });
+    await engine.pairWith('json-peer', false, []);
+    const connection = connections[connections.length - 1]!;
+    const candidate = {
+      candidate: 'candidate:1 1 udp 2130706431 127.0.0.1 9 typ host',
+      sdpMid: '0',
+      sdpMLineIndex: 0,
+      usernameFragment: null,
+    };
+    const payload = JSON.stringify(candidate);
+    for (let index = 0; index < 127; index += 1)
+      await engine.handleRemoteCandidate('json-peer', payload);
+    await engine.handleAnswer('json-peer', 'json-answer');
+    await engine.handleRemoteCandidate('json-peer', payload);
+    assert(
+      connection.applied.length === 128,
+      'JSON candidates apply before and after description',
+    );
+    assert(
+      connection.applied.every((value) => JSON.stringify(value) === payload),
+      'JSON candidate metadata survives queue drain',
+    );
+    let rejected = false;
+    try {
+      await engine.handleRemoteCandidate('json-peer', payload);
+    } catch {
+      rejected = true;
+    }
+    assert(
+      rejected && connection.applied.length === 128,
+      'JSON admission remains bounded after queue drain',
+    );
+    engine.removePeer('json-peer');
+  } finally {
+    globalThis.RTCPeerConnection = originalPc;
+  }
+}
+console.error(
+  'ok - remote ICE candidate admission bounds storage and preserves accepted signaling',
+);

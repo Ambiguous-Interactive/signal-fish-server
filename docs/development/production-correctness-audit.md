@@ -1031,3 +1031,33 @@ Focused verification:
 cargo nextest run --lib -E 'test(receiver_lost_during_reconnect_baseline_build)'
 cargo nextest run --lib -E 'test(reserved_control_detects_receiver_loss) | test(losing_unread_reconnected_baseline)'
 ```
+
+### F19 Reference clients admit unbounded remote ICE candidate state
+
+**Resource-bound defect; high confidence.** Issue
+[#861](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/861).
+Baseline: `b477069c`. A20.
+
+A planned peer can withhold its remote description while continuing to send
+candidate signals. Both engines append every candidate to their pending queue.
+The server bounds individual frames and arrival rate, but those limits do not
+bound retained client state over time. After description application, neither
+engine bounds cumulative input passed to its WebRTC stack.
+
+Both baseline engine regressions accept a 4,097-byte payload that the input
+budget must reject. The repaired engines enforce 128 candidate admissions,
+64 KiB total UTF-8 payload, and 4,096 bytes per payload per physical link.
+The budget includes JSON metadata and stack application failures. It survives
+queue drain and resets on physical link replacement. Excess input reports a
+fixed error and leaves accepted candidates and the live link intact.
+
+Data-driven controls cover count and byte exhaustion, exact payload limits,
+UTF-8 accounting, independent peers, replacement links, and post-description
+admission. The browser control flushes accepted candidates through the engine's
+actual answer path. A native real-SDP control buffers 127 JSON candidates,
+flushes them through the WebRTC stack on offer application, admits one after
+description, and rejects the next without renewing the budget. Real
+browser/native exchange and restore remain a separate runtime control.
+
+This finding does not establish deployed memory exhaustion, bound every WebRTC
+stack allocation, or explain #853. The broader A20 audit remains incomplete.

@@ -49,6 +49,12 @@ pub const RELIABLE_LABEL: &str = "reliable";
 /// Label of the unordered, no-retransmit channel (movement / state).
 pub const UNRELIABLE_LABEL: &str = "unreliable";
 
+// Per physical link, including candidates already passed to the WebRTC stack.
+// Keep aligned with the browser engine; draining the queue must not renew it.
+const MAX_REMOTE_CANDIDATES: usize = 128;
+const MAX_REMOTE_CANDIDATE_BYTES: usize = 64 * 1024;
+const MAX_CANDIDATE_PAYLOAD_BYTES: usize = 4096;
+
 /// Notifications from webrtc-rs callbacks back to the orchestrator task.
 /// (No `Debug` derive: `RTCDataChannel` is not `Debug`.)
 pub enum EngineEvent {
@@ -135,6 +141,8 @@ struct PeerLink {
     open_labels: BTreeSet<String>,
     /// Remote ICE candidates cannot be applied before the remote description.
     pending_candidates: Vec<RTCIceCandidateInit>,
+    remote_candidate_count: usize,
+    remote_candidate_bytes: usize,
     remote_description_set: bool,
     pair_connected: bool,
 }
@@ -351,6 +359,8 @@ impl Engine {
             channels: HashMap::new(),
             open_labels: BTreeSet::new(),
             pending_candidates: Vec::new(),
+            remote_candidate_count: 0,
+            remote_candidate_bytes: 0,
             remote_description_set: false,
             pair_connected: false,
         };
@@ -476,6 +486,9 @@ impl Engine {
         peer: PlayerId,
         candidate_payload: &str,
     ) -> Result<()> {
+        if candidate_payload.len() > MAX_CANDIDATE_PAYLOAD_BYTES {
+            return Err(anyhow!("remote ICE candidate payload exceeds 4096 bytes"));
+        }
         let init: RTCIceCandidateInit = match serde_json::from_str(candidate_payload) {
             Ok(init) => init,
             Err(_not_json) => RTCIceCandidateInit {
@@ -487,6 +500,13 @@ impl Engine {
             .peers
             .get_mut(&peer)
             .ok_or_else(|| anyhow!("candidate from unpaired peer {peer}"))?;
+        if link.remote_candidate_count >= MAX_REMOTE_CANDIDATES
+            || candidate_payload.len() > MAX_REMOTE_CANDIDATE_BYTES - link.remote_candidate_bytes
+        {
+            return Err(anyhow!("remote ICE candidate budget exhausted"));
+        }
+        link.remote_candidate_count += 1;
+        link.remote_candidate_bytes += candidate_payload.len();
         if link.remote_description_set {
             let pc = link.pc.clone();
             pc.add_ice_candidate(init)
@@ -1139,6 +1159,138 @@ fn convert_ice_servers(ice_servers: &[IceServer]) -> Vec<RTCIceServer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn remote_candidate_limits_preserve_accepted_signaling() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut engine = Engine::new(crippled_settings(IpFamily::Ipv4), tx).unwrap();
+        let mut json_payload = r#"{"candidate":"","usernameFragment":""}"#.to_string();
+        json_payload.insert_str(
+            json_payload.len() - 2,
+            &"x".repeat(4096 - json_payload.len()),
+        );
+        for (case, payload, accepted) in [
+            (
+                "count",
+                "candidate:1 1 udp 2130706431 127.0.0.1 9 typ host".to_string(),
+                128,
+            ),
+            ("bytes", "x".repeat(4096), 16),
+            ("utf8", "é".repeat(2048), 16),
+            ("json-metadata", json_payload, 16),
+        ] {
+            let peer = PlayerId::new_v4();
+            engine.pair_with(peer, false, &[]).await.unwrap();
+            assert!(
+                engine
+                    .handle_remote_candidate(peer, &"x".repeat(4097))
+                    .await
+                    .is_err(),
+                "{case}: oversized input"
+            );
+            assert!(
+                engine
+                    .handle_remote_candidate(peer, &"é".repeat(2049))
+                    .await
+                    .is_err(),
+                "{case}: oversized UTF-8 input"
+            );
+            assert!(
+                engine.peers[&peer].pending_candidates.is_empty(),
+                "{case}: rejected input must not be retained"
+            );
+            for _ in 0..accepted {
+                engine
+                    .handle_remote_candidate(peer, &payload)
+                    .await
+                    .unwrap();
+            }
+            for _ in 0..3 {
+                assert!(
+                    engine
+                        .handle_remote_candidate(peer, &payload)
+                        .await
+                        .is_err(),
+                    "{case}: exhausted candidate budget"
+                );
+            }
+            let link = &engine.peers[&peer];
+            assert_eq!(
+                link.pending_candidates.len(),
+                accepted,
+                "{case}: preserve bounded accepted candidates"
+            );
+            let expected_candidate = serde_json::from_str::<RTCIceCandidateInit>(&payload)
+                .map_or_else(|_| payload.clone(), |init| init.candidate);
+            assert!(link
+                .pending_candidates
+                .iter()
+                .all(|candidate| candidate.candidate == expected_candidate));
+            // Queue drain must not renew the WebRTC stack's admission budget.
+            let link = engine.peers.get_mut(&peer).unwrap();
+            link.remote_description_set = true;
+            link.pending_candidates.clear();
+            let error = engine
+                .handle_remote_candidate(peer, &payload)
+                .await
+                .unwrap_err();
+            assert_eq!(error.to_string(), "remote ICE candidate budget exhausted");
+            let other = PlayerId::new_v4();
+            engine.pair_with(other, false, &[]).await.unwrap();
+            engine
+                .handle_remote_candidate(other, &payload)
+                .await
+                .unwrap();
+            engine.remove_peer(other).await.unwrap();
+            engine.remove_peer(peer).await.unwrap();
+            engine.pair_with(peer, false, &[]).await.unwrap();
+            engine
+                .handle_remote_candidate(peer, &payload)
+                .await
+                .unwrap();
+            assert_eq!(
+                engine.peers[&peer].pending_candidates.len(),
+                1,
+                "{case}: replacement gets a fresh budget"
+            );
+            engine.remove_peer(peer).await.unwrap();
+        }
+    }
+
+    // Regression #861: use real SDP and the WebRTC stack on both sides of
+    // the pending-queue drain. The last admission must not renew that queue.
+    #[tokio::test]
+    async fn remote_candidate_budget_survives_real_description_application() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let settings = crippled_settings(IpFamily::Ipv4);
+        let mut offerer = Engine::new(settings, tx.clone()).unwrap();
+        let mut answerer = Engine::new(settings, tx).unwrap();
+        let a = PlayerId::new_v4();
+        let b = PlayerId::new_v4();
+        let offer = offerer.pair_with(b, true, &[]).await.unwrap().unwrap();
+        answerer.pair_with(a, false, &[]).await.unwrap();
+        let payload = r#"{"candidate":"candidate:1 1 udp 2130706431 127.0.0.1 9 typ host","sdpMid":"0","sdpMLineIndex":0,"usernameFragment":null}"#;
+        for _ in 0..127 {
+            answerer.handle_remote_candidate(a, payload).await.unwrap();
+        }
+        assert_eq!(answerer.peers[&a].pending_candidates.len(), 127);
+        assert_eq!(
+            answerer.peers[&a].pending_candidates[0].sdp_mline_index,
+            Some(0)
+        );
+        let answer = answerer.handle_offer(a, offer).await.unwrap();
+        assert!(answerer.peers[&a].pending_candidates.is_empty());
+        answerer.handle_remote_candidate(a, payload).await.unwrap();
+        assert!(answerer.peers[&a].pending_candidates.is_empty());
+        let error = answerer
+            .handle_remote_candidate(a, payload)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "remote ICE candidate budget exhausted");
+        offerer.handle_answer(b, answer).await.unwrap();
+        offerer.remove_peer(b).await.unwrap();
+        answerer.remove_peer(a).await.unwrap();
+    }
 
     /// Payload of the routing probes below. Its exact bytes are compared on
     /// arrival, so a datagram from anything else cannot be mistaken for it.
