@@ -26,7 +26,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -34,7 +34,7 @@ use async_trait::async_trait;
 use clap::ValueEnum;
 use rtc::ice::{mdns::MulticastDnsMode, network_type::NetworkType, url::SchemeType, url::Url};
 use signal_fish_server::protocol::{IceServer, PlayerId};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelInit};
 use webrtc::peer_connection::{
     PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
@@ -137,6 +137,8 @@ struct PeerLink {
     /// Channels by label, both locally created (initiator) and remotely
     /// announced (responder).
     channels: HashMap<String, Arc<dyn DataChannel>>,
+    /// Shared with the callback so unread announcements retain at most two channels.
+    channel_admission: Arc<Mutex<RequiredChannelAdmission>>,
     /// Labels observed open so far; the pair is connected when both labels are in.
     open_labels: BTreeSet<String>,
     /// Remote ICE candidates cannot be applied before the remote description.
@@ -349,11 +351,13 @@ impl Engine {
             // in remote SDP, below the signaling layer's candidate filters.
             setting_engine = setting_engine.with_network_types(vec![NetworkType::Tcp4]);
         }
+        let channel_admission = Arc::new(Mutex::new(RequiredChannelAdmission::default()));
         let handler = Arc::new(PeerHandler {
             peer,
             generation,
             crippled: self.settings.crippled,
             events: self.events.clone(),
+            channel_admission: channel_admission.clone(),
         });
         let udp_addrs = session_udp_addrs(
             self.settings,
@@ -375,6 +379,7 @@ impl Engine {
             generation,
             pc: pc.clone(),
             channels: HashMap::new(),
+            channel_admission: channel_admission.clone(),
             open_labels: BTreeSet::new(),
             pending_candidates: Vec::new(),
             remote_candidate_count: 0,
@@ -405,6 +410,11 @@ impl Engine {
                 )
                 .await
                 .context("create unreliable data channel")?;
+            {
+                let mut admission = channel_admission.lock().await;
+                admission.select(RELIABLE_LABEL, &reliable);
+                admission.select(UNRELIABLE_LABEL, &unreliable);
+            }
             let reliable_task = spawn_channel_event_loop(
                 &self.runtime,
                 &self.events,
@@ -559,6 +569,11 @@ impl Engine {
             let _ = channel.close().await;
             return;
         };
+        let selection = link.channel_admission.lock().await.select(&label, &channel);
+        if selection == ChannelSelection::Duplicate {
+            let _ = channel.close().await;
+            return;
+        }
         // WebRTC labels are not unique. Preserve the first selected channel.
         if let Some(existing) = link.channels.get(&label) {
             if Arc::ptr_eq(existing, &channel) {
@@ -754,6 +769,41 @@ struct PeerHandler {
     generation: u64,
     crippled: bool,
     events: mpsc::UnboundedSender<EngineEvent>,
+    channel_admission: Arc<Mutex<RequiredChannelAdmission>>,
+}
+
+#[derive(Default)]
+struct RequiredChannelAdmission {
+    reliable: Option<Weak<dyn DataChannel>>,
+    unreliable: Option<Weak<dyn DataChannel>>,
+}
+
+#[derive(PartialEq, Eq)]
+enum ChannelSelection {
+    First,
+    Repeated,
+    Duplicate,
+}
+
+impl RequiredChannelAdmission {
+    fn select(&mut self, label: &str, channel: &Arc<dyn DataChannel>) -> ChannelSelection {
+        let selected = match label {
+            RELIABLE_LABEL => &mut self.reliable,
+            UNRELIABLE_LABEL => &mut self.unreliable,
+            _ => return ChannelSelection::Duplicate,
+        };
+        let candidate = Arc::downgrade(channel);
+        match selected {
+            Some(existing) if Weak::ptr_eq(existing, &candidate) => ChannelSelection::Repeated,
+            Some(_) => ChannelSelection::Duplicate,
+            None => {
+                // Keep the identity after closure or queue drain. A fresh physical
+                // link gets fresh slots; weak references do not retain peer state.
+                *selected = Some(candidate);
+                ChannelSelection::First
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -810,6 +860,7 @@ impl PeerConnectionEventHandler for PeerHandler {
             Ok(label) => label,
             Err(error) => {
                 tracing::warn!(peer = %self.peer, %error, "failed to read remote data-channel label");
+                let _ = channel.close().await;
                 return;
             }
         };
@@ -819,12 +870,25 @@ impl PeerConnectionEventHandler for PeerHandler {
             let _ = channel.close().await;
             return;
         }
-        let _ = self.events.send(EngineEvent::RemoteChannel {
+        let selection = self.channel_admission.lock().await.select(&label, &channel);
+        match selection {
+            ChannelSelection::Repeated => return,
+            ChannelSelection::Duplicate => {
+                let _ = channel.close().await;
+                return;
+            }
+            ChannelSelection::First => {}
+        }
+        if let Err(error) = self.events.send(EngineEvent::RemoteChannel {
             peer: self.peer,
             generation: self.generation,
             label,
             channel,
-        });
+        }) {
+            if let EngineEvent::RemoteChannel { channel, .. } = error.0 {
+                let _ = channel.close().await;
+            }
+        }
     }
 }
 
@@ -1206,6 +1270,10 @@ fn convert_ice_servers(ice_servers: &[IceServer]) -> Vec<RTCIceServer> {
 #[cfg(test)]
 #[path = "engine_task_tests.rs"]
 mod task_tests;
+
+#[cfg(test)]
+#[path = "engine_admission_tests.rs"]
+mod admission_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2428,6 +2496,7 @@ mod tests {
             generation: engine.peers[&peer].generation,
             crippled: true,
             events: tx,
+            channel_admission: engine.peers[&peer].channel_admission.clone(),
         };
         let pc = engine.peers[&peer].pc.clone();
         let labels = [
@@ -2620,22 +2689,6 @@ mod tests {
                 .expect("remote refusal closes unsupported channel");
                 assert!(receiver.channel(receiver_peer, &label).is_none());
             }
-            let mut announcements = HashMap::new();
-            let mut announced_labels = BTreeSet::new();
-            let mut record_announcement =
-                |label: String,
-                 channel: Arc<dyn DataChannel>,
-                 pending: &mut HashMap<String, Arc<dyn DataChannel>>| {
-                    assert!(
-                        label == RELIABLE_LABEL || label == UNRELIABLE_LABEL,
-                        "unsupported channel entered application queue"
-                    );
-                    assert!(
-                        announced_labels.insert(label.clone()),
-                        "each offered required duplicate announces exactly once"
-                    );
-                    assert!(pending.insert(label, channel).is_none());
-                };
             sender
                 .channel(sender_peer, RELIABLE_LABEL)
                 .unwrap()
@@ -2650,8 +2703,8 @@ mod tests {
                             assert_eq!(text, "required-after-unsupported");
                             break;
                         }
-                        EngineEvent::RemoteChannel { label, channel, .. } => {
-                            record_announcement(label, channel, &mut announcements);
+                        EngineEvent::RemoteChannel { .. } => {
+                            panic!("refused channel announcement entered application queue")
                         }
                         EngineEvent::ChannelOpen { .. } | EngineEvent::ChannelClosed { .. } => {
                             panic!("unsupported channel reached application queue")
@@ -2666,21 +2719,14 @@ mod tests {
             for (label, duplicate) in duplicates {
                 let original = receiver.channel(receiver_peer, label).unwrap();
                 tokio::time::timeout(Duration::from_secs(5), async {
-                    while !announcements.contains_key(label) {
-                        match events.recv().await.unwrap() {
-                            EngineEvent::RemoteChannel { label, channel, .. } => {
-                                record_announcement(label, channel, &mut announcements);
-                            }
-                            EngineEvent::ChannelOpen { .. } |
-                            EngineEvent::ChannelClosed { .. } |
-                            EngineEvent::ChannelMessage { .. } => {
-                                panic!("unadmitted channel published a callback")
-                            }
-                            _ => {}
+                    // Callback admission closes duplicates without an orchestrator
+                    // event. The sender's close is the remote refusal barrier.
+                    loop {
+                        let event = duplicate.poll().await.expect("duplicate emits close");
+                        if matches!(event, DataChannelEvent::OnClose) {
+                            break;
                         }
                     }
-                    let channel = announcements.remove(label).unwrap();
-                    receiver.store_remote_channel(receiver_peer, label.to_string(), channel).await;
                     assert!(
                         Arc::ptr_eq(&original, &receiver.channel(receiver_peer, label).unwrap()),
                         "duplicate must not replace selected live channel"
@@ -2702,8 +2748,8 @@ mod tests {
                                 assert_eq!(text, "original-after-duplicate");
                                 break;
                             }
-                            EngineEvent::RemoteChannel { label, channel, .. } => {
-                                record_announcement(label, channel, &mut announcements);
+                            EngineEvent::RemoteChannel { .. } => {
+                                panic!("duplicate announcement entered application queue")
                             }
                             EngineEvent::ChannelOpen { .. } | EngineEvent::ChannelClosed { .. } => {
                                 panic!("duplicate emitted a channel lifecycle callback")
@@ -2714,30 +2760,14 @@ mod tests {
                 })
                 .await
                 .unwrap_or_else(|error| panic!("duplicate history timed out: from_initiator={from_initiator}, label={label}: {error}"));
-                // Wait until the remote refusal reaches the initiating handle.
-                tokio::time::timeout(Duration::from_secs(5), async {
-                    loop {
-                        let event = duplicate
-                            .poll()
-                            .await
-                            .expect("duplicate emits close before ending");
-                        if matches!(event, DataChannelEvent::OnClose) {
-                            break;
-                        }
-                    }
-                })
-                .await
-                .expect("remote refusal closes the duplicate");
                 // No callbacks from the rejected channel remain after its close.
                 loop {
                     match events.try_recv() {
-                        Ok(EngineEvent::RemoteChannel { label, channel, .. }) => {
-                            record_announcement(label, channel, &mut announcements);
-                        }
                         Ok(event) => assert!(
                             !matches!(
                                 event,
-                                EngineEvent::ChannelOpen { .. }
+                                EngineEvent::RemoteChannel { .. }
+                                    | EngineEvent::ChannelOpen { .. }
                                     | EngineEvent::ChannelClosed { .. }
                                     | EngineEvent::ChannelMessage { .. }
                             ),
@@ -2751,11 +2781,6 @@ mod tests {
                 }
                 assert_eq!(receiver.connected_pair_count(), 1);
             }
-            assert!(
-                announcements.is_empty(),
-                "no duplicate announcement left unhandled"
-            );
-            assert_eq!(announced_labels.len(), 2);
             let stats = sender.peers[&sender_peer]
                 .pc
                 .get_stats(std::time::Instant::now(), StatsSelector::None)
