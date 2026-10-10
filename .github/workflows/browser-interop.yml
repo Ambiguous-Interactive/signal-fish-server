@@ -55,9 +55,9 @@ jobs:
   interop:
     name: Browser Client Interop (Linux)
     runs-on: ubuntu-latest
-    # Worst case: 11 serialized scenarios x the suite's 240 s per-scenario
+    # Worst case: 12 serialized scenarios x the suite's 240 s per-scenario
     # panic ceiling (SCENARIO_COUNT x SCENARIO_CEILING in
-    # browser_interop_e2e.rs) = 44 min of
+    # browser_interop_e2e.rs) = 48 min of
     # fully degraded test time, plus cold cargo builds (server + the native
     # client's webrtc tree), npm ci, and a cache-miss Chromium download.
     # Warm-cache green runs finish in a small fraction of this; the ceiling

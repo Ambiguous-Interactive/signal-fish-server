@@ -219,6 +219,14 @@ impl DeliveryAccountability {
     /// Record a live player incarnation boundary. Replayed/snapshot duplicates
     /// of an as-yet-unobserved epoch are idempotent.
     pub fn note_player_joined(&mut self, player: &PlayerInfo) -> Result<(), String> {
+        self.note_player_joined_incarnation(player).map(|_| ())
+    }
+
+    /// Return whether this announcement starts a new sender incarnation.
+    pub(crate) fn note_player_joined_incarnation(
+        &mut self,
+        player: &PlayerInfo,
+    ) -> Result<bool, String> {
         self.note_epoch(player.id, player.epoch, player.seq, "PlayerJoined")
     }
 
@@ -227,6 +235,16 @@ impl DeliveryAccountability {
         player_id: PlayerId,
         epoch: Option<u32>,
     ) -> Result<(), String> {
+        self.note_player_reconnected_incarnation(player_id, epoch)
+            .map(|_| ())
+    }
+
+    /// Return whether this announcement starts a new sender incarnation.
+    pub(crate) fn note_player_reconnected_incarnation(
+        &mut self,
+        player_id: PlayerId,
+        epoch: Option<u32>,
+    ) -> Result<bool, String> {
         self.note_epoch(player_id, epoch, epoch.map(|_| 0), "PlayerReconnected")
     }
 
@@ -381,7 +399,7 @@ impl DeliveryAccountability {
         epoch: Option<u32>,
         seq: Option<u64>,
         source: &str,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let (epoch, seq) = match (self.protocol_v3, epoch, seq) {
             (true, Some(epoch), Some(seq)) => (epoch, seq),
             (true, _, _) => {
@@ -389,7 +407,8 @@ impl DeliveryAccountability {
                     "delivery accountability violation: v3 {source} omitted paired epoch/seq baseline for {player_id}"
                 ));
             }
-            (false, None, None) => return Ok(()),
+            // v2 has no incarnation discriminator; callers use membership.
+            (false, None, None) => return Ok(true),
             (false, epoch, seq) => {
                 return Err(format!(
                     "delivery accountability violation: v2 {source} exposed delivery baseline ({epoch:?}, {seq:?}) for {player_id}"
@@ -406,10 +425,10 @@ impl DeliveryAccountability {
                 },
             );
             self.stale_senders.remove(&player_id);
-            return Ok(());
+            return Ok(true);
         };
         if previous.epoch == epoch && !self.stale_senders.contains(&player_id) {
-            return Ok(());
+            return Ok(false);
         }
         if epoch <= previous.epoch {
             return Err(format!(
@@ -419,7 +438,7 @@ impl DeliveryAccountability {
         }
         let announced = self.announced_epochs.entry(player_id).or_default();
         if announced.contains(&epoch) {
-            return Ok(());
+            return Ok(false);
         }
         if announced.last().is_some_and(|latest| epoch <= *latest) {
             return Err(format!(
@@ -428,7 +447,7 @@ impl DeliveryAccountability {
         }
         announced.insert(epoch);
         self.stale_senders.insert(player_id);
-        Ok(())
+        Ok(true)
     }
 
     /// Record one causally prior exact gap report and its cumulative counters.
@@ -1200,14 +1219,44 @@ mod tests {
                 )
                 .unwrap();
 
-            state.note_player_joined(&player(sender, 4)).unwrap();
-            state.note_player_reconnected(sender, Some(4)).unwrap();
+            assert!(!state
+                .note_player_joined_incarnation(&player(sender, 4))
+                .unwrap());
+            assert!(!state
+                .note_player_reconnected_incarnation(sender, Some(4))
+                .unwrap());
 
             state
                 .note_player_left(sender, Some(4), Some(watermark_seq + 1))
                 .unwrap();
             assert!(state.note_player_joined(&player(sender, 4)).is_err());
             assert!(state.note_player_reconnected(sender, Some(4)).is_err());
+        }
+
+        for reconnect in [false, true] {
+            let mut state = DeliveryAccountability::default();
+            assert!(state
+                .note_player_joined_incarnation(&player(sender, 4))
+                .unwrap());
+            let announce = |state: &mut DeliveryAccountability| {
+                if reconnect {
+                    state.note_player_reconnected_incarnation(sender, Some(5))
+                } else {
+                    state.note_player_joined_incarnation(&player(sender, 5))
+                }
+            };
+            assert!(announce(&mut state).unwrap(), "new live epoch is fresh");
+            assert!(
+                !announce(&mut state).unwrap(),
+                "repeated announced epoch is not fresh"
+            );
+            state
+                .record_game_data(sender, Some(1), Some(5), None, None)
+                .unwrap();
+            assert!(
+                !announce(&mut state).unwrap(),
+                "repeated current epoch is not fresh"
+            );
         }
     }
 

@@ -349,8 +349,12 @@ test('same-epoch lifecycle is idempotent only while sender is present', () => {
       [{ player_id: SENDER, epoch: 4, seq }],
     );
 
-    state.notePlayerJoined({ id: SENDER, epoch: 4, seq: 0 });
-    state.notePlayerReconnected(SENDER, 4);
+    if (
+      state.notePlayerJoined({ id: SENDER, epoch: 4, seq: 0 }) ||
+      state.notePlayerReconnected(SENDER, 4)
+    ) {
+      throw new Error('same current epoch must not announce a fresh incarnation');
+    }
 
     state.notePlayerLeft(SENDER, 4, seq + 1);
     expectViolation(
@@ -358,6 +362,23 @@ test('same-epoch lifecycle is idempotent only while sender is present', () => {
       'is not newer',
     );
     expectViolation(() => state.notePlayerReconnected(SENDER, 4), 'is not newer');
+  }
+  for (const reconnect of [false, true]) {
+    const state = new DeliveryAccountability();
+    if (!state.notePlayerJoined({ id: SENDER, epoch: 4, seq: 0 })) {
+      throw new Error('an unseen sender starts a fresh incarnation');
+    }
+    const announce = () =>
+      reconnect
+        ? state.notePlayerReconnected(SENDER, 5)
+        : state.notePlayerJoined({ id: SENDER, epoch: 5, seq: 0 });
+    if (!announce() || announce()) {
+      throw new Error('a new live epoch is fresh only on its first announcement');
+    }
+    state.recordGameData({ from_player: SENDER, epoch: 5, seq: 1 });
+    if (announce()) {
+      throw new Error('a repeated current epoch is not fresh after data arrives');
+    }
   }
 });
 

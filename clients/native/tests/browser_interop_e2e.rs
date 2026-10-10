@@ -76,6 +76,9 @@
 //!     `game_data_received` receipt shape the native scenario 10 pins.
 //! 11. `opaque_protobuf_negotiation_relays_end_to_end_between_browser_clients`
 //!     — the protobuf mirror of cell 10 over `protocol.enable_protobuf_game_data`.
+//! 12. `native_restore_restarts_browser_bidirectional_exchange` — a native
+//!     player restores its room after a completed browser/native exchange;
+//!     both members exchange fresh messages on both replacement channels.
 //!
 //! Scenario assertions are copies of the native suite's
 //! (`tests/interop_e2e.rs`) — deliberately NOT shared, so this feature-gated
@@ -88,7 +91,7 @@ mod harness;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use harness::{
     events_named, player_id_of, scenario_window, single_event, spawn_browser_client, spawn_client,
     spawn_server, spawn_server_with_extra_env, str_field, ClientProcess, ClientSpec,
@@ -104,7 +107,7 @@ use base64::Engine as _;
 static SCENARIO_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Number of scenarios queueing behind [`SCENARIO_SERIAL`] (keep in sync with
 /// the `#[tokio::test]` functions in this file).
-const SCENARIO_COUNT: u64 = 11;
+const SCENARIO_COUNT: u64 = 12;
 /// Generous ceiling for ONE scenario in a fully degraded run: server spawn
 /// (up to 3 attempts x 15 s health deadline = 45 s) plus one client wave
 /// hard-bounded by `--max-runtime-secs 90`, with the rest absorbing Chromium
@@ -219,6 +222,127 @@ async fn drain_expect_success(client: &mut ClientProcess) {
         "client {}: exiting event must report code 0",
         client.name
     );
+}
+
+/// A restored player keeps its ID but needs fresh exchange obligations on the
+/// browser's replacement channels. Prior receipts cannot complete that exchange.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_restore_restarts_browser_bidirectional_exchange() {
+    let _serial = acquire_serial().await;
+    let mut server = spawn_server("mesh").await;
+    let url = server.v3_ws_url();
+    let workdir = tempfile::tempdir().expect("browser/native restore workdir");
+    let disconnect = workdir.path().join("disconnect");
+    let resume = workdir.path().join("resume");
+    let success = workdir.path().join("success");
+    let mut native = spawn_client(
+        &ClientSpec {
+            name: "restoring-native",
+            server_url: &url,
+            game_name: "browser-native-restore",
+            join_code: None,
+            peers: 2,
+            exchange: true,
+            relay_payload: None,
+            extra_args: &[
+                "--success-release-file",
+                success.to_str().unwrap(),
+                "--reconnect-release-file",
+                disconnect.to_str().unwrap(),
+                "--reconnect-resume-file",
+                resume.to_str().unwrap(),
+            ],
+        },
+        workdir.path(),
+    );
+    let created = native.await_event("room_created", EVENT_TIMEOUT).await;
+    let mut browser = spawn_browser_client(
+        &ClientSpec {
+            name: "incumbent-browser",
+            server_url: &url,
+            game_name: "browser-native-restore",
+            join_code: Some(str_field(&created, "room_code")),
+            peers: 2,
+            exchange: true,
+            relay_payload: None,
+            extra_args: &["--success-release-file", success.to_str().unwrap()],
+        },
+        workdir.path(),
+    );
+    // Native success includes its requested restore, so observe the initial
+    // channel exchange directly rather than waiting for that final barrier.
+    let (native_setup, browser_setup) = tokio::join!(
+        std::panic::AssertUnwindSafe(async {
+            tokio::time::timeout(EVENT_TIMEOUT, async {
+                while events_named(&native.events, "channel_message").len() < 2 {
+                    native.await_event("channel_message", EVENT_TIMEOUT).await;
+                }
+            })
+            .await
+            .expect("initial native exchange");
+        })
+        .catch_unwind(),
+        std::panic::AssertUnwindSafe(browser.await_event("success_criteria_met", EVENT_TIMEOUT))
+            .catch_unwind()
+    );
+    assert!(
+        native_setup.is_ok() && browser_setup.is_ok(),
+        "initial browser/native exchange; native: {}; browser: {}",
+        native.diagnostics(),
+        browser.diagnostics()
+    );
+    for client in [&mut native, &mut browser] {
+        client.assert_running("before the native room restore");
+        assert_eq!(events_named(&client.events, "channel_open").len(), 2);
+    }
+    let ids = [
+        player_id_of(&native.events, "restoring-native"),
+        player_id_of(&browser.events, "incumbent-browser"),
+    ];
+    let initial_lengths = [native.events.len(), browser.events.len()];
+    for (index, client) in [&native, &browser].into_iter().enumerate() {
+        let peers = BTreeSet::from([ids[1 - index].as_str()]);
+        assert_exchange_received_from(&client.events, &client.name, &peers);
+        assert_exchange_sent_to(&client.events, &client.name, &peers);
+    }
+
+    std::fs::write(disconnect, b"disconnect").expect("disconnect native player");
+    native.await_event("reconnect_started", EVENT_TIMEOUT).await;
+    let departed = browser.await_event("player_left", EVENT_TIMEOUT).await;
+    assert_eq!(departed["player_id"], ids[0]);
+    std::fs::write(resume, b"resume").expect("resume native room restore");
+    let restored = native.await_event("reconnected", EVENT_TIMEOUT).await;
+    assert_eq!(restored["player_id"], ids[0]);
+    assert_eq!(restored["token_rotated"], true);
+    let returned = browser.await_event("peer_joined", EVENT_TIMEOUT).await;
+    assert_eq!(returned["player_id"], ids[0]);
+
+    for (index, client) in [&mut native, &mut browser].into_iter().enumerate() {
+        tokio::time::timeout(EVENT_TIMEOUT, async {
+            while events_named(&client.events[initial_lengths[index]..], "channel_message").len()
+                < 2
+            {
+                client.await_event("channel_message", EVENT_TIMEOUT).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("fresh exchange after restore; {}", client.diagnostics()));
+        let peers = BTreeSet::from([ids[1 - index].as_str()]);
+        let fresh = &client.events[initial_lengths[index]..];
+        assert_eq!(events_named(fresh, "channel_open").len(), 2);
+        assert_exchange_received_from(fresh, &client.name, &peers);
+        assert_exchange_sent_to(fresh, &client.name, &peers);
+    }
+    std::fs::write(success, b"success").expect("release restored pair together");
+    for client in [&mut native, &mut browser] {
+        drain_expect_success(client).await;
+        assert!(
+            events_named(&client.events, "error").is_empty(),
+            "{}",
+            client.diagnostics()
+        );
+    }
+    server.shutdown().await;
 }
 
 /// Spawn the server with the given default topology, run the 3-client flow

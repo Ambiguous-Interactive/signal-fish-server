@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Pending |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11 |
 
@@ -840,3 +840,81 @@ Focused verification:
 ```bash
 cargo nextest run --lib -E 'test(auth::)'
 ```
+
+### F16 Reference clients reuse exchange evidence after peer incarnation changes
+
+**Client correctness defect; high confidence.** Issue
+[#851](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/851).
+Baseline: `0e1f1d5a`. A20.
+
+The browser restores membership on `PlayerReconnected` but retains the peer's
+completed data-channel exchange. Its sent-label checks skip traffic on the
+replacement channels. A native peer clears its exchange during restore and
+waits for fresh traffic that the browser does not send. Old browser receipts
+can also satisfy its success criteria. Both reference clients retain this
+evidence when a departed peer rejoins with the same player ID. Same-socket
+`LeaveRoom` followed by `JoinRoom` supports that history.
+
+The repair retains logical exchange debt but clears sent and received labels
+for the returning peer. V3 accountability distinguishes new epochs from
+repeated current or already-announced epochs. A new epoch resets exchange
+even if no departure event was seen. A duplicate keeps exchange evidence and
+does not create a new session-plan wait or readiness invalidation. V2 has no
+epoch discriminator; a returning `PlayerJoined` resets only a previously seen,
+absent member, and `PlayerReconnected` retains its existing reset behavior.
+Other peers and a physical transport rebuild without a membership change keep
+their completed exchanges. The native rejoin path also re-arms the existing
+exchange and rebuild gates, as its reconnect path already does.
+
+The controlled browser history drives the real dispatcher, channel callbacks,
+and success check with socket and peer-connection doubles. It completes the
+initial exchange, announces departure and reconnect, then creates replacement
+channels. The corrected baseline fails with only the two initial sends; fresh
+reliable and unreliable sends are absent. An initial fixture used the wrong
+receipt event name and never triggered restore; that failure is excluded.
+The final dispatcher oracle uses a virtual clock and explicit input turns.
+Withholding replacement receipts keeps success pending after the release and
+linger deadlines. Restoring only the send labels fails that assertion. Both
+join and reconnect histories also cover a new epoch without departure, then
+a repeated epoch after fresh exchange without a new session plan.
+
+The native handler history covers both v2 and v3. It completes exchanges for
+the returning peer and another peer, confirms that a duplicate live join and
+departure retain evidence, then announces a returning join. The baseline fails
+on the missing fresh-send obligation. The repair preserves the other peer,
+clears both directions for the returning peer, and re-arms its harness gates.
+Four selected native handler and exchange controls pass.
+
+The real-process history runs the shipped server, native client, and Chromium
+browser. It completes the initial exchange, holds success behind a shared
+release file, drops the native socket, waits for the browser's departure
+event, then restores the native identity. The baseline browser bundle opens
+replacement channels but sends no fresh exchange. The native recipient's
+bounded fresh-receipt wait fails. The repaired browser passes the same history
+in 2.292 seconds; the final diagnostic revision passes in 2.147 seconds.
+Both clients observe exactly two replacement channel opens
+and exact reliable/unreliable send and receipt payloads. Identity is retained
+and the token rotates. An initial setup waited for native success before its
+requested reconnect; that deadlocked setup is excluded.
+
+One later run failed during initial channel establishment, before reconnect.
+Native opened both channels and sent both payloads, but received neither
+browser payload. That attempt lacked consumed browser diagnostics. Subsequent
+runs passed with native as offerer and answerer; those passes do not explain
+or repair the failure. Follow-up
+[#853](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/853)
+remains open. The runtime cell now collects both initial event streams
+concurrently and includes both diagnostics in its bounded failure report.
+
+Focused verification:
+
+```bash
+(cd clients/browser && npm test && npm run typecheck && npm run format:check)
+cargo nextest run --manifest-path clients/native/Cargo.toml --lib -E 'test(returning_player_join_requires_fresh_exchange)'
+cargo test --manifest-path clients/native/Cargo.toml --features browser-interop --test browser_interop_e2e native_restore_restarts_browser_bidirectional_exchange
+```
+
+The runtime command requires the server, native, and browser bundles plus
+Chromium; `scripts/run-browser-interop.sh` sets those prerequisites for hosted
+acceptance. This evidence does not certify arbitrary network failures, all
+client packages, or the remaining A20 boundaries.
