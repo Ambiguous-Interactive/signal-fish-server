@@ -1,5 +1,7 @@
 #![cfg(feature = "tls")]
 
+mod test_helpers;
+
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -400,8 +402,8 @@ fn signed_binary_message(
     rmp_serde::to_vec_named(&frame).expect("encode signed binary envelope")
 }
 
-async fn authenticate(
-    socket: &mut TestSocket,
+async fn authenticate<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    socket: &mut WebSocketStream<S>,
     binding: &mut TokenBindingClient,
     fingerprint: Option<&str>,
 ) -> Value {
@@ -428,8 +430,8 @@ async fn authenticate(
         .expect("authentication response before close")
 }
 
-async fn send_signed(
-    socket: &mut TestSocket,
+async fn send_signed<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    socket: &mut WebSocketStream<S>,
     binding: &mut TokenBindingClient,
     message: &ClientMessage,
     fingerprint: Option<&str>,
@@ -447,7 +449,9 @@ async fn send_signed(
 /// close frames carry a plain reason string, and loaded sanitizer builds can
 /// surface either ahead of the awaited frame. Returns `None` once the socket
 /// closes or errors.
-async fn next_json_message(socket: &mut TestSocket) -> Option<Value> {
+async fn next_json_message<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    socket: &mut WebSocketStream<S>,
+) -> Option<Value> {
     loop {
         let frame = socket.next().await?.ok()?;
         let Ok(text) = frame.to_text() else {
@@ -459,7 +463,10 @@ async fn next_json_message(socket: &mut TestSocket) -> Option<Value> {
     }
 }
 
-async fn next_message_of_type(socket: &mut TestSocket, expected: &str) -> Value {
+async fn next_message_of_type<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    socket: &mut WebSocketStream<S>,
+    expected: &str,
+) -> Value {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             match next_json_message(socket).await {
@@ -1051,4 +1058,437 @@ async fn fingerprint_bound_authentication_advertises_signed_messagepack() {
     .await;
     let pong = next_message_of_type(&mut socket, "Pong").await;
     assert_eq!(pong.get("type").and_then(Value::as_str), Some("Pong"));
+}
+
+/* RFC 8441 omits Sec-WebSocket-Key; the test client must derive its key
+ * independently so a shared server derivation bug cannot pass the handshake. */
+type H2Socket = WebSocketStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>;
+struct H2Client {
+    sender: hyper::client::conn::http2::SendRequest<axum::body::Body>,
+    _driver: tokio::task::JoinSet<Result<(), hyper::Error>>,
+    port: u16,
+}
+
+impl H2Client {
+    async fn new(port: u16, certificate: &Path, key: &Path) -> Self {
+        let mut config = (*client_config(Some((certificate, key)))).clone();
+        config.alpn_protocols = vec![b"h2".to_vec()];
+        let tcp = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("h2 TCP");
+        let tls = TlsConnector::from(Arc::new(config))
+            .connect(ServerName::try_from("localhost").unwrap(), tcp)
+            .await
+            .expect("h2 mTLS handshake");
+        assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+        let (sender, driver) = test_helpers::open_h2(tls).await;
+        Self {
+            sender,
+            _driver: driver,
+            port,
+        }
+    }
+
+    async fn connect(
+        &mut self,
+        path: &str,
+        seed: &str,
+        spoof: Option<&str>,
+    ) -> (H2Socket, TokenBindingClient, Value) {
+        let mut request = hyper::Request::builder()
+            .method(hyper::Method::CONNECT)
+            .uri(format!("https://localhost:{}{path}", self.port))
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-protocol", TOKEN_BINDING_PROTOCOL)
+            .header("x-signalfish-token-binding-key", seed)
+            .extension(hyper::ext::Protocol::from_static("websocket"));
+        if let Some(spoof) = spoof {
+            request = request.header("x-signalfish-client-cert-sha256", spoof);
+        }
+        let request = request.body(axum::body::Body::empty()).unwrap();
+        assert!(!request.headers().contains_key("sec-websocket-key"));
+        let response = self
+            .sender
+            .send_request(request)
+            .await
+            .expect("h2 CONNECT response");
+        assert_eq!(
+            response.status(),
+            hyper::StatusCode::OK,
+            "{path}: application seed must support RFC 8441"
+        );
+        assert_eq!(
+            response.headers().get("sec-websocket-protocol").unwrap(),
+            TOKEN_BINDING_PROTOCOL
+        );
+        assert!(!response.headers().contains_key("sec-websocket-accept"));
+        let upgraded = hyper::upgrade::on(response).await.expect("h2 upgrade");
+        let mut socket = WebSocketStream::from_raw_socket(
+            hyper_util::rt::TokioIo::new(upgraded),
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        // The first application frame must be the challenge, before any registration reply.
+        let challenge = next_json_message(&mut socket)
+            .await
+            .expect("first h2 application frame");
+        assert_eq!(challenge["type"], "TokenBindingChallenge");
+        assert_eq!(challenge["data"]["version"], 2);
+        assert_eq!(challenge["data"]["scheme"], "server_nonce_hkdf_sha256");
+        assert_eq!(challenge["data"]["first_sequence"], 1);
+        let nonce = BASE64_STANDARD
+            .decode(challenge["data"]["nonce"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(nonce.len(), 32);
+        let client_seed = BASE64_STANDARD.decode(seed).unwrap();
+        let hkdf = hkdf::Hkdf::<Sha256>::new(Some(&nonce), &client_seed);
+        let mut secret = [0u8; 32];
+        hkdf.expand(b"signalfish.tokenbinding.v2/session-key", &mut secret)
+            .unwrap();
+        (
+            socket,
+            TokenBindingClient {
+                secret: Arc::from(secret),
+                next_sequence: 1,
+            },
+            challenge,
+        )
+    }
+}
+
+fn h2_authentication() -> ClientMessage {
+    ClientMessage::Authenticate {
+        app_id: "h2-token-binding".into(),
+        connect_token: None,
+        sdk_version: None,
+        platform: None,
+        game_data_format: Some(GameDataEncoding::MessagePack),
+        protocol_version: None,
+        supported_transports: None,
+        supported_topologies: None,
+        requested_capabilities: None,
+    }
+}
+
+async fn assert_binding_rejection(socket: &mut H2Socket, case: &str) {
+    /* A farewell is advisory; closure is the authoritative rejection. A valid
+     * Pong or Authenticated reply would prove the invalid frame was accepted. */
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .unwrap_or_else(|_| {
+                panic!("{case}: server did not reject before the 5-second deadline")
+            }) {
+            None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+            Some(Ok(Message::Text(text))) => {
+                let reply: Value = serde_json::from_str(&text).expect("rejection JSON");
+                assert_eq!(reply["type"], "Error", "{case}: {reply}");
+                assert_eq!(
+                    reply["data"]["error_code"], "UNAUTHORIZED",
+                    "{case}: {reply}"
+                );
+            }
+            Some(Ok(_)) => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn http2_token_binding_authenticates_rooms_and_shares_json_binary_sequence() {
+    let certificate = fixture("client-101-cert.pem");
+    let key = fixture("client-101-key.pem");
+    let fingerprint = certificate_fingerprint(&certificate);
+    let spoof = certificate_fingerprint(&fixture("client-102-cert.pem"));
+    let server = spawn_server(ClientAuthMode::Require, true).await;
+    tokio::time::timeout(CONNECT_DEADLINE, async {
+        let mut h2 = H2Client::new(server.port, &certificate, &key).await;
+        for (path, version) in [("/v2/ws", Value::Null), ("/v3/ws", json!(3))] {
+            let (mut socket, mut binding, _) = h2
+                .connect(path, "AQEBAQEBAQEBAQEBAQEBAQ==", Some(&spoof))
+                .await;
+            send_signed(
+                &mut socket,
+                &mut binding,
+                &h2_authentication(),
+                Some(&fingerprint),
+            )
+            .await;
+            next_message_of_type(&mut socket, "Authenticated").await;
+            let info = next_message_of_type(&mut socket, "ProtocolInfo").await;
+            assert_eq!(info["data"]["protocol_version"], version, "{path}");
+            assert_eq!(
+                info["data"]["game_data_formats"],
+                json!(["json", "message_pack"])
+            );
+            let join = ClientMessage::JoinRoom {
+                game_name: "h2-bound-room".into(),
+                room_code: None,
+                player_name: "h2-player".into(),
+                max_players: Some(2),
+                supports_authority: Some(true),
+                relay_transport: None,
+                password: None,
+                join_only: None,
+            };
+            send_signed(&mut socket, &mut binding, &join, Some(&fingerprint)).await;
+            let joined = next_message_of_type(&mut socket, "RoomJoined").await;
+            let (mut recipient, mut recipient_binding, _) =
+                h2.connect(path, "AwMDAwMDAwMDAwMDAwMDAw==", None).await;
+            send_signed(
+                &mut recipient,
+                &mut recipient_binding,
+                &h2_authentication(),
+                Some(&fingerprint),
+            )
+            .await;
+            next_message_of_type(&mut recipient, "Authenticated").await;
+            next_message_of_type(&mut recipient, "ProtocolInfo").await;
+            let mut recipient_join = join.clone();
+            if let ClientMessage::JoinRoom {
+                room_code,
+                player_name,
+                ..
+            } = &mut recipient_join
+            {
+                *room_code = Some(joined["data"]["room_code"].as_str().unwrap().to_string());
+                *player_name = "h2-recipient".into();
+            }
+            send_signed(
+                &mut recipient,
+                &mut recipient_binding,
+                &recipient_join,
+                Some(&fingerprint),
+            )
+            .await;
+            next_message_of_type(&mut recipient, "RoomJoined").await;
+            let payload = rmp_serde::to_vec_named(&json!({"frame": "h2-game"})).unwrap();
+            let frame = signed_binary_message(&mut binding, payload.clone(), Some(&fingerprint));
+            socket.send(Message::Binary(frame.into())).await.unwrap();
+            loop {
+                let frame = recipient
+                    .next()
+                    .await
+                    .expect("game relay frame")
+                    .expect("game relay socket");
+                match frame {
+                    Message::Binary(wire) => {
+                        #[derive(serde::Deserialize)]
+                        struct Relay {
+                            #[serde(with = "serde_bytes")]
+                            payload: Vec<u8>,
+                        }
+                        let relay: Relay =
+                            rmp_serde::from_slice(&wire).expect("MessagePack relay envelope");
+                        assert_eq!(
+                            relay.payload, payload,
+                            "{path}: gameplay payload must reach the other peer"
+                        );
+                        break;
+                    }
+                    Message::Text(text) => {
+                        let value: Value = serde_json::from_str(&text).unwrap();
+                        assert_ne!(value["type"], "Error", "{path}: {value}");
+                    }
+                    Message::Close(_) => panic!("{path}: recipient closed before gameplay relay"),
+                    _ => {}
+                }
+            }
+            send_signed(
+                &mut socket,
+                &mut binding,
+                &ClientMessage::Ping,
+                Some(&fingerprint),
+            )
+            .await;
+            loop {
+                let value = next_json_message(&mut socket)
+                    .await
+                    .expect("Pong after binary");
+                assert_ne!(value["type"], "Error", "{path}: {value}");
+                if value["type"] == "Pong" {
+                    break;
+                }
+            }
+            recipient.close(None).await.unwrap();
+            socket.close(None).await.unwrap();
+        }
+    })
+    .await
+    .expect("h2 token-binding usability deadline");
+}
+
+#[tokio::test]
+async fn http2_token_binding_rejects_replay_bad_proofs_and_unsigned_frames() {
+    let certificate = fixture("client-101-cert.pem");
+    let key = fixture("client-101-key.pem");
+    let fingerprint = certificate_fingerprint(&certificate);
+    let spoof = certificate_fingerprint(&fixture("client-102-cert.pem"));
+    let server = spawn_server(ClientAuthMode::Require, true).await;
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let mut h2 = H2Client::new(server.port, &certificate, &key).await;
+        for path in ["/v2/ws", "/v3/ws"] {
+            for case in [
+                "bad signature",
+                "wrong sequence",
+                "unsigned JSON",
+                "unsigned binary",
+                "certificate mismatch",
+                "cross-stream replay",
+                "binary sequence replay",
+                "JSON replay",
+                "missing fingerprint",
+            ] {
+                // Reuse both the TLS connection and seed: freshness must be per stream.
+                let (mut socket, mut binding, challenge) = h2
+                    .connect(path, "AgICAgICAgICAgICAgICAg==", Some(&spoof))
+                    .await;
+                if case == "cross-stream replay" {
+                    let proof =
+                        signed_message(&mut binding, &h2_authentication(), Some(&fingerprint));
+                    let (mut other, other_binding, other_challenge) = h2
+                        .connect(path, "AgICAgICAgICAgICAgICAg==", Some(&spoof))
+                        .await;
+                    assert_ne!(challenge["data"]["nonce"], other_challenge["data"]["nonce"]);
+                    assert_ne!(binding.secret, other_binding.secret);
+                    other.send(Message::Text(proof.into())).await.unwrap();
+                    assert_binding_rejection(&mut other, case).await;
+                    socket.close(None).await.unwrap();
+                    continue;
+                }
+                if case == "certificate mismatch" {
+                    let proof = signed_message(&mut binding, &h2_authentication(), Some(&spoof));
+                    socket.send(Message::Text(proof.into())).await.unwrap();
+                    assert_binding_rejection(&mut socket, case).await;
+                    continue;
+                }
+                send_signed(
+                    &mut socket,
+                    &mut binding,
+                    &h2_authentication(),
+                    Some(&fingerprint),
+                )
+                .await;
+                next_message_of_type(&mut socket, "Authenticated").await;
+                next_message_of_type(&mut socket, "ProtocolInfo").await;
+                send_signed(
+                    &mut socket,
+                    &mut binding,
+                    &ClientMessage::JoinRoom {
+                        game_name: "h2-rejection-controls".into(),
+                        room_code: None,
+                        player_name: "h2-control".into(),
+                        max_players: Some(2),
+                        supports_authority: Some(true),
+                        relay_transport: None,
+                        password: None,
+                        join_only: None,
+                    },
+                    Some(&fingerprint),
+                )
+                .await;
+                next_message_of_type(&mut socket, "RoomJoined").await;
+                let valid_payload =
+                    rmp_serde::to_vec_named(&json!({"frame": "valid-binary-control"})).unwrap();
+                // Prove this exact payload is usable before varying only its proof.
+                socket
+                    .send(Message::Binary(
+                        signed_binary_message(
+                            &mut binding,
+                            valid_payload.clone(),
+                            Some(&fingerprint),
+                        )
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+                send_signed(
+                    &mut socket,
+                    &mut binding,
+                    &ClientMessage::Ping,
+                    Some(&fingerprint),
+                )
+                .await;
+                next_message_of_type(&mut socket, "Pong").await;
+                let frame = match case {
+                    "missing fingerprint" => Message::Text(
+                        signed_message(&mut binding, &ClientMessage::Ping, None).into(),
+                    ),
+                    "JSON replay" => {
+                        let proof =
+                            signed_message(&mut binding, &ClientMessage::Ping, Some(&fingerprint));
+                        socket
+                            .send(Message::Text(proof.clone().into()))
+                            .await
+                            .unwrap();
+                        next_message_of_type(&mut socket, "Pong").await;
+                        Message::Text(proof.into())
+                    }
+                    "unsigned JSON" => {
+                        Message::Text(serde_json::to_string(&ClientMessage::Ping).unwrap().into())
+                    }
+                    "unsigned binary" => Message::Binary(valid_payload.clone().into()),
+                    "binary sequence replay" => {
+                        // Authentication consumed sequence 1 across both encodings.
+                        binding.next_sequence = 1;
+                        Message::Binary(
+                            signed_binary_message(&mut binding, valid_payload, Some(&fingerprint))
+                                .into(),
+                        )
+                    }
+                    _ => {
+                        if case == "wrong sequence" {
+                            binding.next_sequence = 99;
+                        }
+                        let signed =
+                            signed_message(&mut binding, &ClientMessage::Ping, Some(&fingerprint));
+                        let mut value: Value = serde_json::from_str(&signed).unwrap();
+                        if case == "bad signature" {
+                            value["token_binding"]["signature"] =
+                                json!(BASE64_STANDARD.encode([0u8; 32]));
+                        }
+                        Message::Text(value.to_string().into())
+                    }
+                };
+                socket.send(frame).await.unwrap();
+                assert_binding_rejection(&mut socket, case).await;
+            }
+        }
+    })
+    .await
+    .expect("h2 token-binding rejection deadline");
+}
+
+#[tokio::test]
+async fn http2_token_binding_rejects_missing_and_malformed_application_seeds() {
+    let certificate = fixture("client-101-cert.pem");
+    let key = fixture("client-101-key.pem");
+    let server = spawn_server(ClientAuthMode::Require, true).await;
+    tokio::time::timeout(CONNECT_DEADLINE, async {
+        let mut h2 = H2Client::new(server.port, &certificate, &key).await;
+        for path in ["/v2/ws", "/v3/ws"] {
+            for seed in [None, Some("invalid-base64")] {
+                let mut request = hyper::Request::builder()
+                    .method(hyper::Method::CONNECT)
+                    .uri(format!("https://localhost:{}{path}", server.port))
+                    .header("sec-websocket-version", "13")
+                    .header("sec-websocket-protocol", TOKEN_BINDING_PROTOCOL)
+                    .extension(hyper::ext::Protocol::from_static("websocket"));
+                if let Some(seed) = seed {
+                    request = request.header("x-signalfish-token-binding-key", seed);
+                }
+                let request = request.body(axum::body::Body::empty()).unwrap();
+                assert!(!request.headers().contains_key("sec-websocket-key"));
+                let response = h2.sender.send_request(request).await.unwrap();
+                assert_eq!(
+                    response.status(),
+                    hyper::StatusCode::BAD_REQUEST,
+                    "{path}: {seed:?}"
+                );
+            }
+        }
+    })
+    .await
+    .expect("h2 invalid seed rejection deadline");
 }

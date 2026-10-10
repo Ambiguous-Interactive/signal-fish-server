@@ -255,10 +255,11 @@ The signaling routes accept HTTP/1.1 WebSocket upgrades with GET and HTTP/2
 WebSocket upgrades with extended CONNECT (RFC 8441). A reverse proxy must
 support extended CONNECT to carry an HTTP/2 WebSocket connection upstream.
 TLS clients can negotiate HTTP/2 through ALPN.
-Token-binding v2 requires the HTTP/1.1 handshake key. Use HTTP/1.1 for
-token-bound connections; required binding still rejects an unbound HTTP/2
-upgrade. HTTP/2 binding support is tracked in
-[#846](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/846).
+Token-binding v2 also supports both transports. HTTP/1.1 clients use their
+`Sec-WebSocket-Key`; HTTP/2 clients send the
+`x-signalfish-token-binding-key` application header. Proxies must preserve this
+header on extended CONNECT. Required binding rejects an upgrade without the
+subprotocol or client key. See the [client contract](configuration-recipes.md#v2-wire-contract).
 
 The server reaps parked pre-upgrade connections by itself:
 

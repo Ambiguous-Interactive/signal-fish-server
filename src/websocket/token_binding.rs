@@ -14,6 +14,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::fmt;
 
+const TOKEN_BINDING_KEY_HEADER: &str = "x-signalfish-token-binding-key";
+
 fn canonical_json(value: &Value) -> serde_json::Result<Vec<u8>> {
     fn write(value: &Value, output: &mut Vec<u8>) -> serde_json::Result<()> {
         match value {
@@ -343,12 +345,33 @@ pub(super) fn negotiate_token_binding(
         return Ok(None);
     }
 
-    let Some(raw_key) = headers
-        .get(SEC_WEBSOCKET_KEY)
-        .and_then(|value| value.to_str().ok())
-    else {
-        tracing::warn!("Missing Sec-WebSocket-Key header on token-bound connection");
-        return Err((StatusCode::BAD_REQUEST, "Sec-WebSocket-Key header missing").into_response());
+    /* RFC 8441 replaces the HTTP/1.1 handshake key. The application header
+     * supplies the same 16-byte HKDF input for extended CONNECT. Reject
+     * competing inputs so peers cannot select different seeds.
+     */
+    let mut keys = headers
+        .get_all(TOKEN_BINDING_KEY_HEADER)
+        .iter()
+        .chain(headers.get_all(SEC_WEBSOCKET_KEY).iter());
+    let Some(key) = keys.next() else {
+        tracing::warn!("Token binding handshake key is missing");
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "token binding handshake key missing",
+        )
+            .into_response());
+    };
+    if keys.next().is_some() {
+        tracing::warn!("Token binding handshake has multiple keys");
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "exactly one token binding handshake key required",
+        )
+            .into_response());
+    }
+    let Ok(raw_key) = key.to_str() else {
+        tracing::warn!("Token binding handshake key is invalid");
+        return Err((StatusCode::BAD_REQUEST, "invalid token binding handshake").into_response());
     };
 
     if cfg.scheme == crate::security::token_binding::TokenBindingScheme::SecWebsocketKeySha256 {
@@ -371,8 +394,8 @@ pub(super) fn negotiate_token_binding(
     }
     let secret = match derive_server_nonce_secret(raw_key, &nonce) {
         Ok(secret) => secret,
-        Err(err) => {
-            tracing::warn!(error = %err, "Failed to derive token binding session key");
+        Err(_) => {
+            tracing::warn!("Failed to derive token binding session key");
             return Err(
                 (StatusCode::BAD_REQUEST, "invalid token binding handshake").into_response()
             );
@@ -958,6 +981,144 @@ mod tests {
             "65727072696e74c0a77061796c6f6164c40781a46461746101"
         );
         assert_eq!(encoded, decode_hex(expected));
+    }
+
+    #[test]
+    fn token_binding_negotiation_accepts_each_seed_header_and_fresh_proofs() {
+        let config = crate::config::TokenBindingConfig {
+            enabled: true,
+            required: true,
+            ..crate::config::TokenBindingConfig::default()
+        };
+        let seed = "MDEyMzQ1Njc4OWFiY2RlZg==";
+        for header in ["sec-websocket-key", "x-signalfish-token-binding-key"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header, seed.parse().expect("seed header"));
+            let first = negotiate_token_binding(&config, true, &headers, None)
+                .expect("valid seed must negotiate binding")
+                .expect("binding negotiated");
+            let second = negotiate_token_binding(&config, true, &headers, None)
+                .expect("same seed must negotiate another binding")
+                .expect("binding negotiated");
+            assert_ne!(first.challenge.nonce, second.challenge.nonce, "{header}");
+            let nonce = BASE64_STANDARD
+                .decode(&first.challenge.nonce)
+                .expect("challenge Base64");
+            assert_eq!(nonce.len(), 32, "{header}");
+            assert_eq!(first.challenge.version, TOKEN_BINDING_VERSION);
+            assert_eq!(first.challenge.scheme, config.scheme);
+            assert_eq!(first.challenge.first_sequence, 1);
+            let secret = derive_server_nonce_secret(seed, &nonce).expect("client key");
+            let payload = br#"{"type":"Ping"}"#;
+            let signed = proof(&secret, TOKEN_BINDING_JSON_DOMAIN, payload, 1, None);
+            first
+                .verifier
+                .verify(&signed, TOKEN_BINDING_JSON_DOMAIN, payload, None)
+                .expect("client proof must authenticate");
+            assert!(matches!(
+                first
+                    .verifier
+                    .verify(&signed, TOKEN_BINDING_JSON_DOMAIN, payload, None),
+                Err(TokenBindingError::InvalidSequence { .. })
+            ));
+            assert!(matches!(
+                second
+                    .verifier
+                    .verify(&signed, TOKEN_BINDING_JSON_DOMAIN, payload, None),
+                Err(TokenBindingError::InvalidSignature)
+            ));
+        }
+    }
+
+    #[test]
+    fn token_binding_negotiation_rejects_ambiguous_seed_headers() {
+        let config = crate::config::TokenBindingConfig {
+            enabled: true,
+            required: true,
+            ..crate::config::TokenBindingConfig::default()
+        };
+        let seed = "MDEyMzQ1Njc4OWFiY2RlZg==";
+        for names in [
+            vec![],
+            vec!["sec-websocket-key", "sec-websocket-key"],
+            vec![
+                "x-signalfish-token-binding-key",
+                "x-signalfish-token-binding-key",
+            ],
+            vec!["sec-websocket-key", "x-signalfish-token-binding-key"],
+        ] {
+            let mut headers = HeaderMap::new();
+            for name in &names {
+                headers.append(*name, seed.parse().expect("seed header"));
+            }
+            let response = negotiate_token_binding(&config, true, &headers, None)
+                .err()
+                .expect("missing or ambiguous seeds must fail closed");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{names:?}");
+        }
+    }
+
+    #[test]
+    fn token_binding_negotiation_rejects_invalid_seed_without_fallback() {
+        let config = crate::config::TokenBindingConfig {
+            enabled: true,
+            required: true,
+            ..crate::config::TokenBindingConfig::default()
+        };
+        let cases: Vec<(&str, axum::http::HeaderValue)> = vec![
+            ("empty", "".parse().expect("empty header")),
+            ("whitespace", " ".parse().expect("whitespace header")),
+            (
+                "invalid Base64",
+                "not-base64".parse().expect("invalid Base64 header"),
+            ),
+            (
+                "short seed",
+                BASE64_STANDARD
+                    .encode([0_u8; 15])
+                    .parse()
+                    .expect("short header"),
+            ),
+            (
+                "long seed",
+                BASE64_STANDARD
+                    .encode([0_u8; 17])
+                    .parse()
+                    .expect("long header"),
+            ),
+            (
+                "unpadded seed",
+                "MDEyMzQ1Njc4OWFiY2RlZg".parse().expect("unpadded header"),
+            ),
+            (
+                "non-ASCII",
+                axum::http::HeaderValue::from_bytes(&[0xff]).expect("non-ASCII header"),
+            ),
+        ];
+        for header in ["sec-websocket-key", "x-signalfish-token-binding-key"] {
+            for (name, value) in &cases {
+                let mut headers = HeaderMap::new();
+                headers.insert(header, value.clone());
+                let response = negotiate_token_binding(&config, true, &headers, None)
+                    .err()
+                    .expect("invalid seed must fail closed");
+                assert_eq!(
+                    response.status(),
+                    StatusCode::BAD_REQUEST,
+                    "{header}: {name}"
+                );
+                if header == "x-signalfish-token-binding-key" {
+                    headers.insert(
+                        SEC_WEBSOCKET_KEY,
+                        "MDEyMzQ1Njc4OWFiY2RlZg==".parse().expect("legacy seed"),
+                    );
+                    let response = negotiate_token_binding(&config, true, &headers, None)
+                        .err()
+                        .expect("invalid application seed must not fall back");
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{name}");
+                }
+            }
+        }
     }
 
     #[test]

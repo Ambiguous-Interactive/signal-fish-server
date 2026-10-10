@@ -34,7 +34,7 @@ pub(crate) fn token_binding_subprotocol_is_v2_compatible(subprotocol: &str) -> b
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TokenBindingScheme {
-    /// HKDF over the WebSocket handshake key and a server-generated nonce.
+    /// HKDF over a 16-byte handshake seed and a server-generated nonce.
     #[default]
     ServerNonceHkdfSha256,
     /// Protocol-v1 compatibility token. It remains deserializable so old
@@ -274,6 +274,9 @@ pub fn derive_session_secret(raw_key: &str) -> Result<Arc<[u8]>, TokenBindingErr
 }
 
 /// Derive a 256-bit connection key from both endpoints' handshake material.
+///
+/// `raw_key` is the standard-Base64 16-byte `Sec-WebSocket-Key` for HTTP/1.1
+/// or `x-signalfish-token-binding-key` for HTTP/2 extended CONNECT.
 pub fn derive_server_nonce_secret(
     raw_key: &str,
     server_nonce: &[u8],
