@@ -31,12 +31,20 @@ import {
   type RunConfig,
 } from '../shared/types.js';
 import { parseArgs, UsageError, USAGE, type CliOptions } from './args.js';
-import { writeAcknowledgedEventLine } from './output.js';
+import { DiagnosticOutput, writeAcknowledgedEventLine } from './output.js';
+import { EventOutput } from '../shared/event-output.js';
 
 const startedAtMs = Date.now();
 
+const diagnosticOutput = new DiagnosticOutput(process.stderr, () => {
+  void exitWith(EXIT_CONNECTION_ERROR);
+});
+process.stderr.on('error', () => {
+  void exitWith(EXIT_CONNECTION_ERROR);
+});
+
 function logError(message: string): void {
-  process.stderr.write(`[signal-fish-reference-browser] ${message}\n`);
+  void diagnosticOutput.write(message).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -63,8 +71,13 @@ async function writeEventLine(line: string): Promise<void> {
   }
 }
 
+const eventOutput = new EventOutput(writeEventLine, () => {
+  logError('stdout event delivery failed; the client stops');
+  void exitWith(EXIT_CONNECTION_ERROR);
+});
+
 function emitEvent(event: Record<string, unknown>): void {
-  void writeEventLine(JSON.stringify(event)).catch(() => {});
+  void eventOutput.emit(event).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -111,9 +124,23 @@ async function exitWith(code: number): Promise<void> {
     return;
   }
   shuttingDown = true;
-  emitEvent({ event: 'exiting', code });
-  await teardownBrowser();
-  process.exit(stdoutClosed && code === 0 ? EXIT_CONNECTION_ERROR : code);
+  const finalEvent = eventOutput.terminal({ event: 'exiting', code });
+  let deliveryTimer: ReturnType<typeof setTimeout> | undefined;
+  const delivery = Promise.race([
+    Promise.all([eventOutput.flush(), finalEvent]),
+    new Promise<never>((_resolve, reject) => {
+      deliveryTimer = setTimeout(
+        () => reject(new Error('stdout exit delivery timed out')),
+        1000,
+      );
+    }),
+  ]).then(
+    () => true,
+    () => false,
+  );
+  const [delivered] = await Promise.all([delivery, teardownBrowser()]);
+  clearTimeout(deliveryTimer);
+  process.exit((stdoutClosed || !delivered) && code === 0 ? EXIT_CONNECTION_ERROR : code);
 }
 
 /**
@@ -237,7 +264,8 @@ async function setupPage(options: CliOptions): Promise<Page> {
   // The stdout bridge must exist before the page bundle (and any event) does.
   await page.exposeFunction('__sf_emit', (line: unknown) => {
     if (typeof line !== 'string') throw new Error('stdout event must be a string');
-    return writeEventLine(line);
+    if (shuttingDown) throw new Error('the client is stopping');
+    return eventOutput.emitLine(line);
   });
   await page.exposeFunction('__sf_success_released', () => {
     const releaseFile = options.successReleaseFile;

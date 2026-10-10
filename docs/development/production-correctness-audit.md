@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Pending |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -1437,6 +1437,63 @@ tracks its mesh receive limits and reference-client compatibility.
 
 These controls bound decoded data-channel application traffic, not total
 WebRTC or process memory. Browser WebSocket input and ordinary diagnostic output
-have separate queue paths tracked in #879 that still need resource assessment. #870 remains
-open for those paths and stack retention. #872 reset/reopen and #853 initial
+have separate queue paths repaired in F28 (#879). #870 remains
+open for full stack retention. #872 reset/reopen and #853 initial
 establishment remain unresolved; the broader A20 audit is incomplete.
+
+### F28 — Browser input and output retain work during stdout stalls
+
+Baseline: `42b732e5`. A20. Finding: #879, under #870.
+
+The browser buffered every unread handshake frame and appended every streaming
+frame to a promise chain. Ordinary diagnostic and relay events entered the
+page/CLI bridge without count or byte limits. Deferred output could move the
+backlog downstream instead of applying backpressure.
+
+Red evidence: 257 ordinary events enter an unacknowledged bridge. A handshake
+burst reaches a later protocol error instead of refusing the receive backlog.
+The real Chromium regression stops reading stdout after `room_joined` and
+sends ordered 64 KiB relay payloads. The pre-fix bundle from `42b732e5` does not
+exit within the unchanged 15-second process gate (run `b0aa0d82`). The repaired
+bundle reports receive backlog overload and exits 3 (run `1f74dfd0`, 3.959 s).
+The stub remains open until the client closes it and verifies more than 256
+actual sends. These histories prove retained work, not process exhaustion.
+
+The browser reserves before parsing or queuing: 64 MiB per server frame,
+256 pending frames, and 128 MiB retained wire bytes. The per-frame limit matches
+`config::defaults::MAX_OUTBOUND_MESSAGE_SIZE`; the default outbound cap is
+8 MiB, independent of the 64 KiB inbound cap. Thus large room and reconnect
+snapshots retain the server's portable contract. Credits follow active pulls,
+early membership arrays, phase transfer, streaming processing, and stdout
+acknowledgment. A binary view charges its backing buffer. Callback tasks have
+a separate 512-entry and 128 MiB signal budget. Fatal admission interrupts
+handshake output waits, stops later work, and closes the socket and peer links.
+
+Both page and CLI output reserve 256 events and 128 MiB serialized UTF-8 bytes,
+including newlines. This permits base64 expansion of a maximum-size opaque
+frame. One extra terminal event has a 4096-byte cap. CLI stderr retains at most
+256 lines and 1 MiB; individual diagnostics truncate after 16000 UTF-16 units.
+Stream callbacks own credits through consumption. Output closure or overload
+fails the run with exit 3. Success flushes required output. Chromium teardown
+runs beside a one-second final-output gate; the hard watchdog does not wait
+for output. A full pipe can prevent the terminal line from being observed;
+the nonzero process exit and bounded teardown remain authoritative.
+
+Controls cover stalled authentication, room entry and baseline transfer;
+sequential early membership retention; exact frame/count/byte boundaries;
+small views with oversized backing buffers; stale callbacks; large snapshots;
+v2/v3 JSON and v3 rkyv/protobuf FIFO; actual Node stream backpressure, closure,
+capacity recovery, and the CLI diagnostic configuration. Real Chromium/native
+restore, v2 relay, both opaque relay formats, mid-handshake closure, and
+signal/reaper controls pass in run `7b330ada` (six tests, 15.912 s).
+
+**Migration:** Drain stdout and stderr continuously. Handle exit 3 as a failed
+run and start a fresh client. The change belongs to the browser reference
+driver, not the server wire. Rust, .NET and Godot do not use its page/CDP/CLI
+queues. Their SDK behavior is unchanged. Godot's separate engine and interop
+assessment remains in [Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355).
+
+These are application retention limits, not a 128 MiB process-memory promise.
+Decoded objects, Chromium WebSocket buffers, CDP and WebRTC stack retention
+remain separate resource boundaries. #870 and the wider A20 audit remain open.
+Issues #872 (reset/reopen) and #853 (initial establishment) remain unresolved.

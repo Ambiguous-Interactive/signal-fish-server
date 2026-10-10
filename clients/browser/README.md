@@ -117,6 +117,29 @@ browser's internal WebRTC buffers. Binary messages use array buffers and decode
 as UTF-8 with replacement characters for invalid bytes.
 **Migration:** Split payloads larger than 64 KiB and keep consuming output.
 
+### WebSocket and output limits
+
+The browser accepts each server frame up to 64 MiB, the server's portable
+maximum. Snapshots and reconnect replies can exceed the default 64 KiB inbound
+limit. The browser retains at most 256 pending server frames and 128 MiB of
+wire bytes. A frame stays charged through handshake processing, early room
+membership storage, streaming processing, and stdout acknowledgment.
+
+The page and CLI each retain at most 256 output events and 128 MiB of serialized
+UTF-8 bytes, including newlines. This allows a maximum-size opaque payload's
+base64 output. One additional terminal event can use up to 4096 bytes.
+The CLI also bounds stderr to 256 pending lines and 1 MiB. It truncates each
+diagnostic after 16000 UTF-16 units. Callback tasks have a separate 512-entry
+limit and 128 MiB signal budget.
+
+Overload or output closure ends the run with exit code 3. The client closes
+its signaling socket and P2P links. It does not silently drop a frame or count
+a failed output as success. The hard watchdog remains active during output
+stalls. Final stdout delivery waits at most one second while Chromium closes.
+**Migration:** Drain stdout and stderr continuously. Treat exit 3 as a failed
+run and start a fresh client. These limits bound retained application work;
+they do not establish a total browser or process memory limit.
+
 ## CLI reference
 
 The shared flag surface mirrors the native client's ([canonical reference](../native/README.md#cli-reference)):

@@ -1597,8 +1597,8 @@ for (const scenario of [
     );
     if (scenario.outputFailure) {
       assert(
-        (await running) === 2,
-        'critical output failure must stop the run with a protocol error',
+        (await running) === 3,
+        'critical output failure must stop the run with a connection error',
       );
       assert(
         events.some(

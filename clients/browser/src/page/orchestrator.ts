@@ -62,6 +62,8 @@ import {
   sendOpaqueGameData,
   type ServerFrame,
 } from './wire.js';
+import { Backlog, utf8Bytes } from '../shared/backlog.js';
+import { EventOutput } from '../shared/event-output.js';
 import type { GameDataFormat } from '../shared/types.js';
 
 /**
@@ -117,6 +119,11 @@ const MAX_PENDING_SIGNALS_TOTAL = 128;
 // Stale work keeps credits until consumption, across all peers and generations.
 const MAX_PENDING_CHANNEL_MESSAGES = 256;
 const MAX_PENDING_CHANNEL_MESSAGE_BYTES = 1024 * 1024;
+const MAX_SERVER_FRAME_BYTES = 64 * 1024 * 1024;
+const MAX_PENDING_SERVER_FRAMES = 256;
+const MAX_PENDING_SERVER_FRAME_BYTES = 128 * 1024 * 1024;
+
+type RetainedServerFrame = { frame: ServerFrame; release: () => void };
 /** A failure that terminates the run with a specific exit code. */
 class FatalError extends Error {
   readonly code: number;
@@ -621,22 +628,53 @@ export class StartGameGate {
 /** Single-chain state machine driving the session (see module docs). */
 class Orchestrator {
   private readonly config: RunConfig;
+  private readonly output = new EventOutput(
+    (line) => {
+      const bridge = window.__sf_emit;
+      if (bridge === undefined) throw new Error('stdout bridge is unavailable');
+      return bridge(line);
+    },
+    (error) =>
+      this.failFatal(
+        FatalError.connection(`stdout event delivery failed: ${error.message.slice(0, 512)}`),
+      ),
+  );
+
+  private async emit(event: Record<string, unknown>, requireDelivery = false): Promise<void> {
+    if (this.finished) {
+      if (requireDelivery) throw FatalError.connection('the client is stopping');
+      return;
+    }
+    try {
+      await this.output.emit(event);
+    } catch {
+      if (requireDelivery) throw FatalError.connection('stdout event delivery failed');
+    }
+  }
   private readonly engine: Engine;
   private ws: WebSocket | null = null;
   private myId = '';
 
   // --- Handshake frame queue (sequential pull until the room is joined) ---
   private streaming = false;
-  private readonly bufferedFrames: ServerFrame[] = [];
+  private readonly bufferedFrames: RetainedServerFrame[] = [];
+  private readonly serverBacklog = new Backlog(
+    MAX_PENDING_SERVER_FRAMES,
+    MAX_PENDING_SERVER_FRAME_BYTES,
+  );
+  private currentHandshakeRelease: (() => void) | null = null;
+  private readonly retainedHandshakeReleases: Array<() => void> = [];
   private frameWaiter: {
-    resolve: (frame: ServerFrame) => void;
+    resolve: (frame: RetainedServerFrame) => void;
     reject: (error: FatalError) => void;
   } | null = null;
   /** Fatal handshake failure observed while no frame pull was pending. */
   private handshakeFatal: FatalError | null = null;
+  private readonly handshakeFailed = new AbortController();
 
   // --- Serialized input processing (the "orchestrator task") ---
   private chain: Promise<void> = Promise.resolve();
+  private readonly taskBacklog = new Backlog(512, MAX_PENDING_SERVER_FRAME_BYTES);
   private pendingChannelMessages = 0;
   private pendingChannelMessageBytes = 0;
   private finishResolve: ((code: number) => void) | null = null;
@@ -712,19 +750,23 @@ class Orchestrator {
       onLocalCandidate: (peer, generation, candidateJson) => {
         // Crippled mode never reaches here (the engine drops gathered
         // candidates), so this is always a real trickle-ICE relay.
-        this.enqueue(async () => {
-          if (!this.engine.isCurrentGeneration(peer, generation)) {
-            return;
-          }
-          this.sendSignal(peer, 'ice_candidate', { IceCandidate: candidateJson });
-        });
+        this.enqueue(
+          async () => {
+            if (!this.engine.isCurrentGeneration(peer, generation)) {
+              return;
+            }
+            this.sendSignal(peer, 'ice_candidate', { IceCandidate: candidateJson });
+          },
+          undefined,
+          utf8Bytes(candidateJson),
+        );
       },
       onPcState: (peer, generation, state) => {
         this.enqueue(async () => {
           if (!this.engine.isCurrentGeneration(peer, generation)) {
             return;
           }
-          emit({ event: 'pc_state', peer, state });
+          this.emit({ event: 'pc_state', peer, state });
           if (isTerminalPeerConnectionState(state)) {
             this.handlePeerTransportLoss(peer);
           }
@@ -735,7 +777,7 @@ class Orchestrator {
           if (!this.engine.isCurrentGeneration(peer, generation)) {
             return;
           }
-          emit({ event: 'channel_open', peer, label });
+          this.emit({ event: 'channel_open', peer, label });
           if (this.engine.noteChannelOpen(peer, label)) {
             this.onPairConnected(peer);
           }
@@ -746,8 +788,8 @@ class Orchestrator {
           if (!this.engine.isCurrentGeneration(peer, generation)) {
             return;
           }
-          if (reason !== undefined) emit({ event: 'error', message: reason });
-          emit({ event: 'channel_closed', peer, label });
+          if (reason !== undefined) this.emit({ event: 'error', message: reason });
+          this.emit({ event: 'channel_closed', peer, label });
           this.handlePeerTransportLoss(peer);
         });
       },
@@ -769,7 +811,7 @@ class Orchestrator {
             if (this.config.exchange && isExchangeProbe(peer, label, text)) {
               this.exchangeLedger.noteReceived(peer, label);
             }
-            await emit({ event: 'channel_message', peer, label, text }, true);
+            await this.emit({ event: 'channel_message', peer, label, text }, true);
           },
           () => {
             this.pendingChannelMessages -= 1;
@@ -789,6 +831,21 @@ class Orchestrator {
   }
 
   async run(): Promise<number> {
+    try {
+      return await this.runSession();
+    } catch (error) {
+      const fatal = error instanceof FatalError ? error : FatalError.protocol(describe(error));
+      void this.output
+        .terminal({ event: 'error', message: fatal.message.slice(0, 512) })
+        .catch(() => {});
+      console.error(`fatal failure (code ${fatal.code}): ${fatal.message}`);
+      return fatal.code;
+    } finally {
+      this.teardown();
+    }
+  }
+
+  private async runSession(): Promise<number> {
     // The soft run window starts at PROCESS start: the CLI reports the time
     // already spent launching Chromium so the window matches the native
     // client's process-start semantics.
@@ -804,7 +861,7 @@ class Orchestrator {
       throw FatalError.connection(describe(error));
     }
     this.ws = ws;
-    emit({ event: 'connected' });
+    this.emit({ event: 'connected' });
     ws.onmessage = (event: MessageEvent<unknown>) => {
       this.onServerInput(event.data);
     };
@@ -816,6 +873,7 @@ class Orchestrator {
     this.negotiatedVersion = negotiatedVersion;
     this.accountability = new DeliveryAccountability(negotiatedVersion >= 3);
     const lobbyState = await this.joinRoom();
+    await this.flushHandshakeOutput();
 
     // Joining an already-Lobby room (seat fill) means readiness is
     // immediately possible; a Finalized room means the session is already
@@ -879,12 +937,12 @@ class Orchestrator {
       if (step.authenticated) {
         break;
       }
-      emit({
+      this.emit({
         event: 'error',
         message: 'server refused the requested game data format; session downgraded to JSON',
       });
     }
-    emit({ event: 'authenticated' });
+    this.emit({ event: 'authenticated' });
     this.effectiveFormat = effectiveFormat;
 
     const infoResponse = await this.nextHandshakeFrame();
@@ -911,7 +969,7 @@ class Orchestrator {
         );
       }
     }
-    emit({
+    this.emit({
       event: 'protocol_info',
       negotiated_version: negotiated,
     });
@@ -952,7 +1010,7 @@ class Orchestrator {
       } else {
         throw FatalError.protocol('expected RoomJoined');
       }
-      response = await this.nextHandshakeFrame();
+      response = await this.nextHandshakeFrame(true);
     }
     const payload = response.data;
     const currentPlayers = payload['current_players'];
@@ -963,11 +1021,11 @@ class Orchestrator {
       earlyLeft,
     );
     if (this.config.createRoom) {
-      emit({ event: 'room_created', room_code: String(payload['room_code']) });
+      this.emit({ event: 'room_created', room_code: String(payload['room_code']) });
     }
     const lobbyState = String(payload['lobby_state']);
     this.myId = String(payload['player_id']);
-    emit({
+    this.emit({
       event: 'room_joined',
       room_id: String(payload['room_id']),
       player_id: this.myId,
@@ -1004,71 +1062,110 @@ class Orchestrator {
   }
 
   /** Pull the next server frame during the sequential handshake phase. */
-  private nextHandshakeFrame(): Promise<ServerFrame> {
+  private async nextHandshakeFrame(retainPrevious = false): Promise<ServerFrame> {
+    await this.flushHandshakeOutput();
+    if (this.currentHandshakeRelease !== null) {
+      if (retainPrevious) this.retainedHandshakeReleases.push(this.currentHandshakeRelease);
+      else this.currentHandshakeRelease();
+      this.currentHandshakeRelease = null;
+    }
+    if (this.handshakeFatal !== null) throw this.handshakeFatal;
     const buffered = this.bufferedFrames.shift();
-    if (buffered !== undefined) {
-      return Promise.resolve(buffered);
-    }
-    if (this.handshakeFatal !== null) {
-      return Promise.reject(this.handshakeFatal);
-    }
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.frameWaiter = null;
-        reject(FatalError.connection('timed out waiting for a ServerMessage'));
-      }, HANDSHAKE_TIMEOUT_MS);
-      this.frameWaiter = {
-        resolve: (frame) => {
-          clearTimeout(timer);
+    const retained =
+      buffered ??
+      (await new Promise<RetainedServerFrame>((resolve, reject) => {
+        const timer = setTimeout(() => {
           this.frameWaiter = null;
-          resolve(frame);
-        },
-        reject: (error) => {
-          clearTimeout(timer);
-          this.frameWaiter = null;
-          reject(error);
-        },
-      };
-    });
+          reject(FatalError.connection('timed out waiting for a ServerMessage'));
+        }, HANDSHAKE_TIMEOUT_MS);
+        this.frameWaiter = {
+          resolve: (frame) => {
+            clearTimeout(timer);
+            this.frameWaiter = null;
+            resolve(frame);
+          },
+          reject: (error) => {
+            clearTimeout(timer);
+            this.frameWaiter = null;
+            reject(error);
+          },
+        };
+      }));
+    this.currentHandshakeRelease = retained.release;
+    if (this.handshakeFatal !== null) throw this.handshakeFatal;
+    return retained.frame;
   }
 
-  /** Route frames buffered during the handshake, then go fully event-driven. */
+  private async flushHandshakeOutput(): Promise<void> {
+    if (this.handshakeFatal !== null) throw this.handshakeFatal;
+    let rejectFailure: ((reason: unknown) => void) | undefined;
+    const failure = new Promise<never>((_resolve, reject) => {
+      rejectFailure = reject;
+    });
+    const abort = () => rejectFailure?.(this.handshakeFatal);
+    this.handshakeFailed.signal.addEventListener('abort', abort, { once: true });
+    try {
+      await Promise.race([this.output.flush(), failure]);
+    } finally {
+      this.handshakeFailed.signal.removeEventListener('abort', abort);
+    }
+  }
+
+  private releaseHandshakeFrames(): void {
+    this.currentHandshakeRelease?.();
+    this.currentHandshakeRelease = null;
+    for (const release of this.retainedHandshakeReleases.splice(0)) release();
+  }
+
+  /** Transfer the charged handshake backlog to streaming without renewing credits. */
   private startStreaming(): void {
-    const backlog = this.bufferedFrames.splice(0);
-    for (const frame of backlog) {
-      this.enqueue(() => this.handleServerMessage(frame));
-    }
+    this.releaseHandshakeFrames();
     this.streaming = true;
-    // A fatal recorded in the gap between the last handshake pull and this
-    // flip would otherwise have no consumer left to reject; end the run now.
-    if (this.handshakeFatal !== null) {
-      this.fail(this.handshakeFatal);
+    for (const { frame, release } of this.bufferedFrames.splice(0)) {
+      this.enqueue(() => this.handleServerMessage(frame), release);
     }
+    if (this.handshakeFatal !== null) this.fail(this.handshakeFatal);
   }
 
   private onServerInput(data: unknown): void {
+    if (this.finished || this.handshakeFatal !== null) return;
+    const wireBytes =
+      typeof data === 'string'
+        ? utf8Bytes(data)
+        : data instanceof ArrayBuffer || ArrayBuffer.isView(data)
+          ? data.byteLength
+          : 0;
+    if (wireBytes > MAX_SERVER_FRAME_BYTES) {
+      this.failFatal(FatalError.connection('WebSocket receive frame exceeds 64 MiB'));
+      return;
+    }
+    const retainedBytes = ArrayBuffer.isView(data) ? data.buffer.byteLength : wireBytes;
+    const release = this.serverBacklog.reserve(retainedBytes);
+    if (release === null) {
+      this.failFatal(FatalError.connection('WebSocket receive backlog limit exceeded'));
+      return;
+    }
     let frame: ServerFrame;
     try {
-      // The negotiated game-data format owns the physical frame grammar (#627);
-      // json keeps today's text-only classifier byte-for-byte.
       frame =
         this.effectiveFormat === 'json'
           ? classifyJsonNegotiatedServerInput(data)
           : classifyOpaqueNegotiatedServerInput(data);
     } catch (error) {
+      release();
       this.failFatal(FatalError.protocol(`invalid ServerMessage frame: ${describe(error)}`));
       return;
     }
-    this.routeServerFrame(frame);
+    this.routeServerFrame({ frame, release });
   }
 
-  private routeServerFrame(frame: ServerFrame): void {
+  private routeServerFrame(retained: RetainedServerFrame): void {
     if (this.streaming) {
-      this.enqueue(() => this.handleServerMessage(frame));
+      this.enqueue(() => this.handleServerMessage(retained.frame), retained.release);
     } else if (this.frameWaiter !== null) {
-      this.frameWaiter.resolve(frame);
+      this.frameWaiter.resolve(retained);
     } else {
-      this.bufferedFrames.push(frame);
+      this.bufferedFrames.push(retained);
     }
   }
 
@@ -1095,11 +1192,12 @@ class Orchestrator {
       this.fail(fatal);
       return;
     }
-    if (this.frameWaiter !== null) {
-      this.frameWaiter.reject(fatal);
-    } else if (this.handshakeFatal === null) {
+    if (this.handshakeFatal === null) {
       this.handshakeFatal = fatal;
+      this.handshakeFailed.abort(fatal);
     }
+    this.frameWaiter?.reject(this.handshakeFatal);
+    for (const retained of this.bufferedFrames.splice(0)) retained.release();
   }
 
   // -------------------------------------------------------------------------
@@ -1111,7 +1209,17 @@ class Orchestrator {
    * timers run and the next wake is scheduled (the native loop's
    * `process_timers` + `next_wake` pattern).
    */
-  private enqueue(task: () => Promise<void>, release?: () => void): void {
+  private enqueue(task: () => Promise<void>, release?: () => void, retainedBytes = 0): void {
+    if (this.finished) {
+      release?.();
+      return;
+    }
+    const releaseTask = this.taskBacklog.reserve(retainedBytes);
+    if (releaseTask === null) {
+      release?.();
+      this.failFatal(FatalError.connection('browser input task backlog limit exceeded'));
+      return;
+    }
     this.chain = this.chain
       .then(async () => {
         try {
@@ -1119,10 +1227,13 @@ class Orchestrator {
             return;
           }
           await task();
+          await this.output.flush();
+          if (this.finished) return;
           this.processTimers();
           this.scheduleWake();
         } finally {
           release?.();
+          releaseTask();
         }
       })
       .catch((error: unknown) => {
@@ -1141,7 +1252,9 @@ class Orchestrator {
     if (this.finished) {
       return;
     }
-    emit({ event: 'error', message: fatal.message });
+    void this.output
+      .terminal({ event: 'error', message: fatal.message.slice(0, 512) })
+      .catch(() => {});
     console.error(`fatal failure (code ${fatal.code}): ${fatal.message}`);
     this.finish(fatal.code);
   }
@@ -1155,7 +1268,12 @@ class Orchestrator {
       this.wakeTimer.cancel();
       this.wakeTimer = null;
     }
-    this.finishResolve?.(code);
+    if (code === EXIT_SUCCESS) {
+      void this.output.flush().then(
+        () => this.finishResolve?.(code),
+        () => this.finishResolve?.(EXIT_CONNECTION_ERROR),
+      );
+    } else this.finishResolve?.(code);
   }
 
   /** Earliest pending timer (the run deadline at the latest). */
@@ -1283,7 +1401,7 @@ class Orchestrator {
         this.finish(EXIT_SUCCESS);
         return;
       }
-      emit({
+      this.emit({
         event: 'error',
         message: `--run-for-secs elapsed with unmet success criteria: ${this.unmetCriteria().join(', ')}`,
       });
@@ -1308,7 +1426,7 @@ class Orchestrator {
       return;
     }
     if (this.config.successReleaseEnabled && !this.successCriteriaReported) {
-      emit({ event: 'success_criteria_met' });
+      this.emit({ event: 'success_criteria_met' });
       this.successCriteriaReported = true;
     }
     if (this.config.successReleaseEnabled && !this.successReleaseGranted) {
@@ -1415,7 +1533,7 @@ class Orchestrator {
         ) {
           this.lingerUntil = null;
         }
-        emit({ event: 'peer_joined', player_id: id });
+        this.emit({ event: 'peer_joined', player_id: id });
         this.maybeSendReady();
         break;
       }
@@ -1444,7 +1562,7 @@ class Orchestrator {
         ) {
           this.resolveTransportStatus();
         }
-        emit({ event: 'player_left', player_id: id });
+        this.emit({ event: 'player_left', player_id: id });
         // The departure may have made the remaining membership all-ready
         // again with no readiness broadcast; recompute and re-issue if so
         // (post-finalize departures are blocked by the gate's `gameStarted`
@@ -1461,7 +1579,7 @@ class Orchestrator {
         }
         const connections = (data['peer_connections'] ?? []) as Array<Record<string, unknown>>;
         const mine = connections.find((peer) => peer['player_id'] === this.myId);
-        emit({ event: 'game_starting', is_authority: mine?.['is_authority'] === true });
+        this.emit({ event: 'game_starting', is_authority: mine?.['is_authority'] === true });
         if (this.config.relayPayload !== null && !this.relaySent) {
           this.relaySendAt = Date.now() + RELAY_SEND_SETTLE_MS;
         }
@@ -1482,7 +1600,7 @@ class Orchestrator {
         if (generationChanged) {
           this.pendingSignals.clear();
         }
-        emit({
+        this.emit({
           event: 'session_plan',
           topology: String(data['topology']),
           transport,
@@ -1498,8 +1616,12 @@ class Orchestrator {
           break;
         }
         if (transport === 'direct') {
-          rejectUnsupportedDirectPlan(data['direct_endpoint'], (frame) =>
-            this.sendFrame(frame),
+          rejectUnsupportedDirectPlan(
+            data['direct_endpoint'],
+            (frame) => this.sendFrame(frame),
+            (event) => {
+              void this.emit(event);
+            },
           );
         }
         if (transport === 'webrtc') {
@@ -1542,7 +1664,7 @@ class Orchestrator {
       case 'NewPeer': {
         const peerId = String(data['peer_id']);
         const youInitiate = data['you_initiate'] === true;
-        emit({ event: 'new_peer', peer_id: peerId, you_initiate: youInitiate });
+        this.emit({ event: 'new_peer', peer_id: peerId, you_initiate: youInitiate });
         // Same pairing path as a plan peer (the late-join offerer rule).
         await this.establishPair(peerId, youInitiate);
         break;
@@ -1572,7 +1694,7 @@ class Orchestrator {
         ) {
           this.relayReceivedFrom.add(from);
         }
-        emit({ event: 'game_data_received', from, payload });
+        this.emit({ event: 'game_data_received', from, payload });
         break;
       }
       case 'GameDataBinary': {
@@ -1596,7 +1718,7 @@ class Orchestrator {
         // Event-stream parity with the native client (#627): surface the
         // receipt losslessly (encoding token + base64 payload) instead of
         // guessing at the opaque bytes.
-        emit({
+        this.emit({
           event: 'game_data_received',
           from,
           payload: { encoding: String(data['encoding']), payload: bytesToBase64(bytes) },
@@ -1652,7 +1774,7 @@ class Orchestrator {
         ) {
           this.lingerUntil = null;
         }
-        emit({ event: 'peer_joined', player_id: id });
+        this.emit({ event: 'peer_joined', player_id: id });
         this.maybeSendReady();
         break;
       }
@@ -1665,7 +1787,7 @@ class Orchestrator {
       case 'PeerTransportStatus': {
         const peer = String(data['peer_id']);
         this.peerStatusFrom.add(peer);
-        emit({
+        this.emit({
           event: 'peer_transport_status',
           peer,
           transport: String(data['transport']),
@@ -1683,7 +1805,7 @@ class Orchestrator {
           console.error(
             `server disconnecting us as a slow consumer: ${String(data['message'])}`,
           );
-          emit({
+          this.emit({
             event: 'error',
             message: `server disconnecting us as a slow consumer: ${String(data['message'])}`,
           });
@@ -1701,7 +1823,7 @@ class Orchestrator {
         }
         // Other server-reported errors are surfaced but non-fatal: the relay
         // floor (and the run window) decide the outcome.
-        emit({
+        this.emit({
           event: 'error',
           message: `server error: ${String(data['message'])} (${String(data['error_code'])})`,
         });
@@ -1767,7 +1889,7 @@ class Orchestrator {
     } catch (error) {
       // A single failed pair is not fatal: the p2p timeout resolves the
       // overall status and the relay floor still carries data.
-      emit({ event: 'error', message: `pairing with ${peer} failed: ${describe(error)}` });
+      this.emit({ event: 'error', message: `pairing with ${peer} failed: ${describe(error)}` });
     }
     const buffered = this.pendingSignals.get(peer);
     if (buffered !== undefined) {
@@ -1821,7 +1943,7 @@ class Orchestrator {
       );
       return;
     }
-    emit({ event: 'signal_received', from, kind: classifySignal(signal) });
+    this.emit({ event: 'signal_received', from, kind: classifySignal(signal) });
     if (!this.engine.isPaired(from)) {
       if (shouldBufferSignalForUnpairedPeer(this.expectedPeers, from)) {
         if (!tryBufferPlannedSignal(this.pendingSignals, from, signal)) {
@@ -1878,7 +2000,7 @@ class Orchestrator {
           throw new Error('signal does not match the matchbox PeerSignal convention');
       }
     } catch (error) {
-      emit({ event: 'error', message: `signal from ${from} failed: ${describe(error)}` });
+      this.emit({ event: 'error', message: `signal from ${from} failed: ${describe(error)}` });
     }
   }
 
@@ -1888,7 +2010,7 @@ class Orchestrator {
    */
   private onPairConnected(peer: string): void {
     if (noteCurrentPairConnected(this.connectedPairs, this.pairConnectedReported, peer)) {
-      emit({ event: 'p2p_pair_connected', peer });
+      this.emit({ event: 'p2p_pair_connected', peer });
     }
     if (this.config.exchange) {
       this.exchangeLedger.noteConnected(peer);
@@ -1929,7 +2051,7 @@ class Orchestrator {
         const diagnosticKey = `missing\0${peer}\0${label}`;
         if (!this.reportedExchangeDiagnostics.has(diagnosticKey)) {
           this.reportedExchangeDiagnostics.add(diagnosticKey);
-          emit({
+          this.emit({
             event: 'error',
             message: `open pair with ${peer} is missing channel ${label}`,
           });
@@ -1952,14 +2074,14 @@ class Orchestrator {
           const message =
             `data-channel exchange send to ${peer} on ${label} failed while channel was open; ` +
             `bufferedAmount=${channel.bufferedAmount}; will retry: ${describe(error)}`;
-          emit({ event: 'error', message });
+          this.emit({ event: 'error', message });
           console.error(message);
         }
         complete = false;
         continue;
       }
       this.exchangeLedger.noteSent(peer, label);
-      emit({ event: 'channel_message_sent', peer, label, text });
+      this.emit({ event: 'channel_message_sent', peer, label, text });
     }
     return complete;
   }
@@ -1988,9 +2110,9 @@ class Orchestrator {
     }
     this.sendFrame(clientFrame('TransportStatus', { transport: 'webrtc', connected }));
     this.transportStatus = connected;
-    emit({ event: 'transport_status_sent', transport: 'webrtc', connected });
+    this.emit({ event: 'transport_status_sent', transport: 'webrtc', connected });
     if (!connected) {
-      emit({ event: 'fallback_engaged' });
+      this.emit({ event: 'fallback_engaged' });
     }
   }
 
@@ -2051,7 +2173,7 @@ class Orchestrator {
     }
     this.relaySent = true;
     this.relaySendAt = null;
-    emit({ event: 'game_data_sent' });
+    this.emit({ event: 'game_data_sent' });
   }
 
   private sendSignal(to: string, kind: SignalKind, signal: Record<string, unknown>): void {
@@ -2065,7 +2187,7 @@ class Orchestrator {
         signal,
       }),
     );
-    emit({ event: 'signal_sent', to, kind });
+    this.emit({ event: 'signal_sent', to, kind });
   }
 
   private sendFrame(frame: string): void {
@@ -2167,8 +2289,15 @@ class Orchestrator {
 
   /** Post-run cleanup: close the socket (Chromium teardown reaps the rest). */
   private teardown(): void {
+    this.finished = true;
+    this.wakeTimer?.cancel();
+    this.wakeTimer = null;
+    this.releaseHandshakeFrames();
+    for (const peer of this.expectedPeers) this.engine.removePeer(peer);
+    for (const retained of this.bufferedFrames.splice(0)) retained.release();
     if (this.ws !== null) {
       this.ws.onclose = null;
+      this.ws.onmessage = null;
       try {
         this.ws.close();
       } catch {
