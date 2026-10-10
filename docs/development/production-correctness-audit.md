@@ -48,8 +48,8 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Initial; HTTP/2 route rejection recorded in F13 |
 | A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Initial; concurrent handshake retry-budget loss recorded in F15 |
 | A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10 |
-| A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial |
-| A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial |
+| A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; embedded receiver-loss rollback recorded in F18 |
+| A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; known receiver closure before response submission recorded in F18 |
 | A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial |
 | A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial |
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial |
@@ -955,4 +955,52 @@ Focused verification:
 ```bash
 (cd clients/browser && npm test && npm run typecheck && npm run format:check)
 cargo nextest run --manifest-path clients/native/Cargo.toml --lib -E 'test(exchange_receipts_require_the_peer_channel_and_zero_sequence)'
+```
+
+### F18 Embedded reconnect spends a token after response receiver closure
+
+**Player recovery defect; high confidence.** Issue
+[#858](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/858).
+Baseline: `d4fcdb2b`. A05/A06/A15.
+
+The public channel-based embedder path reserves baseline capacity, restores
+identity, and awaits its room snapshot builder. Closing the response receiver
+while that builder is paused still returns a successful reconnect on the
+baseline. The server consumes the old token even though receiver closure was
+already visible before submission. Dropping the receiver also loses the
+response. This differs from the documented unknown outcome after queue commit.
+
+`DeliveryPermit::Legacy` called Tokio's `OwnedPermit::send` and unconditionally
+reported an enqueue. Tokio deliberately permits sending after receiver close.
+The classified WebSocket queue checks its accepting state at permit commit.
+The repair retains a sender with the legacy permit and refuses submission
+when its receiver is already closed. The rejected permit releases capacity.
+All reserved-send callers share this check: initial room transitions,
+conditional targeted and room control delivery, and phased room transactions.
+Existing callers classify the refusal as a closed channel; transactions whose
+state already committed retain their existing degraded-delivery policy.
+
+The real reconnect-handler regression parks the database read inside the
+baseline builder, closes or drops the receiver, and then releases that read.
+It requires rejection, absent room membership and routing, no peer lifecycle
+announcement, restored temporary identity, no retained rotated credential,
+and a successful fresh-receiver retry with the original token. The baseline
+fails the rejection assertion in nextest run
+`fb690f09-cd2c-4f5b-9387-4dbba90be7ff`. A direct reserved-send matrix also fails
+against the baseline. It covers both queue types, immediate and awaited
+reservations, receiver close and drop, and exact healthy control receipts.
+The repaired final run passes both regressions and three existing controls for
+successful publication, capacity refusal, and lost post-commit responses.
+
+These are handler and queue histories, not physical socket writes or a
+`legacy-fullmesh` listener test. A receiver can still close after the final
+live-state check. That race and later response loss remain ambiguous, and
+applications still need fresh-join recovery after a committed response is lost.
+No public type, token format, wire field, or runtime dependency changes.
+
+Focused verification:
+
+```bash
+cargo nextest run --lib -E 'test(receiver_lost_during_reconnect_baseline_build)'
+cargo nextest run --lib -E 'test(reserved_control_detects_receiver_loss) | test(losing_unread_reconnected_baseline)'
 ```

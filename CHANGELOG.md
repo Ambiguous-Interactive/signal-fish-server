@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve embedded-server reconnect retry tokens when the response receiver closes before commit (#858).
 - Require valid peer and channel probes before reference clients report exchange success (#856).
 - Restart client exchange after peer reconnect or rejoin; duplicate announcements keep completed exchange (#851).
 - Preserve player handshake retry budgets when concurrent requests fill the application limit (#849).

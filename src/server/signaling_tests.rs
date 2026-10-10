@@ -4890,6 +4890,108 @@ async fn disconnect_registration_logs_metadata_without_credential_fragments() {
         .is_ok());
 }
 
+// Regression #858: receiver loss before baseline submission cannot spend the retry token.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn receiver_lost_during_reconnect_baseline_build_preserves_retry_token() {
+    for drop_receiver in [false, true] {
+        let server = create_test_server().await;
+        let mut fixture = setup_mesh_reconnect(&server, 16, 16, false).await;
+        let database = server
+            .database()
+            .as_any()
+            .downcast_ref::<InMemoryDatabase>()
+            .expect("in-memory database");
+        database.pause_next_get_room_players_for_test();
+        let reconnect_task = {
+            let server = Arc::clone(&server);
+            let token = fixture.token.clone();
+            let current = fixture.current;
+            let reconnecting = fixture.reconnecting;
+            let room_id = fixture.room_id;
+            tokio::spawn(async move {
+                server
+                    .handle_reconnect(&current, &reconnecting, &room_id, &token)
+                    .await
+            })
+        };
+        timeout(
+            Duration::from_secs(1),
+            database.wait_for_paused_get_room_players_for_test(),
+        )
+        .await
+        .expect("baseline builder holds its response reservation");
+        if drop_receiver {
+            drop(fixture.current_rx);
+        } else {
+            fixture.current_rx.close();
+        }
+        database.release_paused_get_room_players_for_test();
+        assert!(
+            !timeout(Duration::from_secs(2), reconnect_task)
+                .await
+                .expect("reconnect completes")
+                .expect("task lives"),
+            "receiver loss before commit must reject restore; drop_receiver={drop_receiver}"
+        );
+        let manager = server.reconnection_manager().expect("reconnection enabled");
+        manager
+            .validate_reconnection(&fixture.reconnecting, &fixture.room_id, &fixture.token)
+            .await
+            .expect("old token remains valid for retry");
+        assert!(!manager.has_pre_issued_token(&fixture.reconnecting).await);
+        assert!(server.connection_manager.has_client(&fixture.current));
+        assert!(!server.connection_manager.has_client(&fixture.reconnecting));
+        assert_eq!(server.get_client_room(&fixture.current).await, None);
+        assert!(!server
+            .message_coordinator
+            .routed_player_ids(&fixture.room_id)
+            .await
+            .expect("room routes")
+            .expect("in-memory routing snapshot")
+            .contains(&fixture.reconnecting));
+        assert!(
+            matches!(
+                fixture.existing_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ),
+            "a rejected restore must not announce PlayerReconnected"
+        );
+        assert!(!server
+            .database
+            .get_room_players(&fixture.room_id)
+            .await
+            .expect("room players")
+            .iter()
+            .any(|player| player.id == fixture.reconnecting));
+        let (retry, mut retry_rx) = register_client(&server).await;
+        server.set_client_protocol(&retry, v3_webrtc());
+        assert!(
+            server
+                .handle_reconnect(
+                    &retry,
+                    &fixture.reconnecting,
+                    &fixture.room_id,
+                    &fixture.token
+                )
+                .await
+        );
+        match recv(&mut retry_rx).await.as_ref() {
+            ServerMessage::Reconnected(payload) => {
+                assert_eq!(payload.player_id, fixture.reconnecting);
+                assert_ne!(
+                    payload
+                        .reconnection_token
+                        .as_deref()
+                        .expect("rotated token"),
+                    fixture.token
+                );
+            }
+            other => panic!("expected retry baseline, got {other:?}"),
+        }
+    }
+}
+
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn losing_unread_reconnected_baseline_requires_fresh_join_after_token_rotation() {
