@@ -448,6 +448,23 @@ export function shouldDeferSuccessAtRunDeadline(
   );
 }
 
+function isExchangeProbe(peer: string, label: string, text: string): boolean {
+  if (label !== RELIABLE_LABEL && label !== UNRELIABLE_LABEL) {
+    return false;
+  }
+  let payload: unknown;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    return false;
+  }
+  const probe = payload as Record<string, unknown>;
+  return probe['from'] === peer && probe['channel'] === label && probe['seq'] === 0;
+}
+
 /** Logical exchange debt survives transport teardown; receipts belong to an incarnation. */
 export class ExchangeLedger {
   private readonly obligations = new Set<string>();
@@ -733,7 +750,9 @@ class Orchestrator {
           if (!this.engine.isCurrentGeneration(peer, generation)) {
             return;
           }
-          this.exchangeLedger.noteReceived(peer, label);
+          if (this.config.exchange && isExchangeProbe(peer, label, text)) {
+            this.exchangeLedger.noteReceived(peer, label);
+          }
           emit({ event: 'channel_message', peer, label, text });
         });
       },
