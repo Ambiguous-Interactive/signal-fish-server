@@ -4950,11 +4950,9 @@ async fn receiver_lost_during_reconnect_baseline_build_preserves_retry_token() {
             .expect("room routes")
             .expect("in-memory routing snapshot")
             .contains(&fixture.reconnecting));
+        let peer_announcement = fixture.existing_rx.try_recv();
         assert!(
-            matches!(
-                fixture.existing_rx.try_recv(),
-                Err(mpsc::error::TryRecvError::Empty)
-            ),
+            matches!(peer_announcement, Err(mpsc::error::TryRecvError::Empty)),
             "a rejected restore must not announce PlayerReconnected"
         );
         assert!(!server
