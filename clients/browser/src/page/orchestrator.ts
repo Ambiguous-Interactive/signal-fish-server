@@ -114,8 +114,7 @@ const SEND_BUFFER_LIMIT_BYTES = 1_048_576;
 /** Defensive bounds for same-generation signals racing local pair creation. */
 const MAX_PENDING_SIGNALS_PER_PEER = 32;
 const MAX_PENDING_SIGNALS_TOTAL = 128;
-// Global across all physical links and generations; stale queued work keeps
-// its credits until the promise chain actually consumes it.
+// Stale work keeps credits until consumption, across all peers and generations.
 const MAX_PENDING_CHANNEL_MESSAGES = 256;
 const MAX_PENDING_CHANNEL_MESSAGE_BYTES = 1024 * 1024;
 /** A failure that terminates the run with a specific exit code. */
@@ -754,8 +753,7 @@ class Orchestrator {
       },
       onChannelMessage: (peer, generation, label, text, textBytes) => {
         if (this.finished) return;
-        // Admission must run in the browser callback, before the closure is
-        // retained by enqueue. Checks inside that closure cannot bound backlog.
+        // Reserve before enqueue retains the message closure.
         if (
           this.pendingChannelMessages >= MAX_PENDING_CHANNEL_MESSAGES ||
           textBytes > MAX_PENDING_CHANNEL_MESSAGE_BYTES - this.pendingChannelMessageBytes

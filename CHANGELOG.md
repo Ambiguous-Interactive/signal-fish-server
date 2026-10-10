@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Breaking:** Bound reference-client incoming messages and fail overloaded P2P links;
-  split payloads larger than 64 KiB (#878).
+  split payloads larger than 64 KiB and handle native receive-limit failures (#878).
 - Bound native reference-client channel announcements when a peer repeats required labels (#876).
 - Release native reference-client channel tasks when peers leave or the engine stops (#874).
 - **Breaking:** Reference clients now close unsupported remote data channels; use only

@@ -15,8 +15,7 @@ for (const fails of [false, true]) {
       consume = callback;
     },
   });
-  // Node also emits failed write callbacks as error events. The CLI owns this
-  // permanent handler so ordinary shutdown writes never crash the process.
+  // Node also emits failed write callbacks as error events.
   output.on('error', () => {});
   let settled = false;
   const delivery = writeAcknowledgedEventLine(output, '{"event":"channel_message"}');

@@ -382,8 +382,7 @@ export class Engine {
       if (link !== callbackLink || link.receiveFailed || link.channels.get(label) !== channel) {
         return;
       }
-      // Preflight before encoding/decoding so even rejected payloads have
-      // bounded application allocation. UTF-16 length bounds UTF-8 from below.
+      // Preflight allocations; UTF-16 length bounds UTF-8 length from below.
       const data = event.data;
       if (
         (typeof data === 'string' && data.length > MAX_CHANNEL_MESSAGE_BYTES) ||

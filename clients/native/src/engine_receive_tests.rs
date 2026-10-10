@@ -8,8 +8,7 @@ fn receive_budget_is_shared_across_links_and_releases_when_payloads_drop() {
         budget: engine.message_budget.clone(),
         rejected: Mutex::new(false),
     });
-    // The default SCTP maximum message size and internal message read buffer
-    // are 64 KiB. Test raw oversize here and decoded UTF-8 expansion over the wire.
+    // The default SCTP message cap prevents live raw-oversize delivery.
     assert!(links[0]
         .decode_and_reserve(&vec![b'x'; 64 * 1024 + 1])
         .is_none());
