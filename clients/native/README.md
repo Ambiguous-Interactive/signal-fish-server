@@ -133,6 +133,10 @@ finalized room requires a fresh session plan and new exchange evidence.
 Missed gameplay data is not replayed. The application must resync its own
 state; sender watermarks establish the post-restore delivery baseline.
 
+When another peer reconnects or rejoins with the same ID, `--exchange` requires
+fresh sends and receipts on both channels for that peer. Other peers retain
+their completed exchange. A transport rebuild alone retains exchange evidence.
+
 ## JSONL event contract
 
 One JSON object per stdout line, tagged by a snake_case `event` field. Per-client ordering is causal (a single

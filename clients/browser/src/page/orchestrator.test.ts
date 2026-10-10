@@ -72,6 +72,44 @@ assert(
   'a completed exchange must remain satisfied after peer departure',
 );
 
+// Regression #851: reset only the restored peer, including partial receipts.
+{
+  const restored = '00000000-0000-0000-0000-000000000002';
+  const retained = '00000000-0000-0000-0000-000000000003';
+  const ledger = new ExchangeLedger();
+  ledger.resetIncarnation(restored);
+  assert(ledger.unmetCriteria().length === 0, 'an unseen restore creates no exchange debt');
+  for (const peer of [restored, retained]) {
+    ledger.noteConnected(peer);
+    for (const label of ['reliable', 'unreliable']) {
+      ledger.noteSent(peer, label);
+      ledger.noteReceived(peer, label);
+    }
+  }
+  ledger.resetIncarnation(restored);
+  ledger.resetIncarnation(restored);
+  assert(
+    ledger.unmetCriteria().length === 2,
+    'a repeated restore retains both directions of debt',
+  );
+  for (const label of ['reliable', 'unreliable']) {
+    assert(!ledger.hasSent(restored, label), 'a restored peer needs each label sent again');
+    assert(ledger.hasSent(retained, label), 'other peers retain their completed exchange');
+    ledger.noteSent(restored, label);
+  }
+  assert(
+    ledger.unmetCriteria().length === 1,
+    'fresh sends do not satisfy missing fresh receipts',
+  );
+  ledger.noteReceived(restored, 'reliable');
+  assert(ledger.unmetCriteria().length === 1, 'both fresh labels are required');
+  ledger.noteReceived(restored, 'unreliable');
+  assert(
+    ledger.unmetCriteria().length === 0,
+    'fresh bidirectional traffic completes the exchange',
+  );
+}
+
 // Pins the room creator's explicit-`StartGame` gate against the documented
 // `all_ready` semantics (issue #447 F1 / issue #449) — the same scenarios as
 // the native `start_game_gate_reissues_after_membership_invalidation` pin.
@@ -304,3 +342,297 @@ assert(
 }
 
 console.error('ok - join handshake excludes credential tags from event and stderr diagnostics');
+
+// Regression #851: a peer restore needs fresh traffic for the same player ID.
+// Drive the real dispatcher; a generation-only rebuild keeps prior receipts.
+for (const [membershipEvent, departure] of [
+  ['PlayerReconnected', true],
+  ['PlayerJoined', true],
+  ['PlayerReconnected', false],
+  ['PlayerJoined', false],
+  [null, false],
+] as const) {
+  const peerRestored = membershipEvent !== null;
+  const originalSocket = globalThis.WebSocket;
+  const originalPc = globalThis.RTCPeerConnection;
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const originalError = console.error;
+  const originalDebug = console.debug;
+  const me = '00000000-0000-0000-0000-000000000001';
+  const peer = '00000000-0000-0000-0000-000000000002';
+  const events: Record<string, unknown>[] = [];
+  const channelSends: string[] = [];
+  const connections: PeerConnection[] = [];
+  let socket!: RestoreSocket;
+  let restoreSent = false;
+  let released = false;
+  let settled = false;
+  const originalNow = Date.now;
+  let virtualNow = originalNow();
+  let guardTimer: ReturnType<typeof setTimeout> | undefined;
+  const turn = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const plan = (generation: number) => ({
+    type: 'SessionPlan',
+    data: {
+      generation: `00000000-0000-0000-0000-${String(generation).padStart(12, '0')}`,
+      topology: 'mesh',
+      transport: 'webrtc',
+      fallback: 'relay',
+      ice_servers: [],
+      peers: [{ player_id: peer, initiate: true }],
+    },
+  });
+  class Channel {
+    readonly readyState = 'open';
+    readonly bufferedAmount = 0;
+    onopen: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    constructor(
+      readonly label: string,
+      readonly generation: number,
+    ) {}
+    send(_text: string): void {
+      channelSends.push(`${this.generation}:${this.label}`);
+    }
+    receive(): void {
+      this.onmessage?.({ data: `peer-${this.generation}-${this.label}` });
+    }
+  }
+  class PeerConnection {
+    readonly channels: Channel[] = [];
+    constructor(_config: unknown) {
+      connections.push(this);
+    }
+    createDataChannel(label: string): Channel {
+      const channel = new Channel(label, connections.length);
+      this.channels.push(channel);
+      return channel;
+    }
+    async createOffer(): Promise<{ type: string; sdp: string }> {
+      return { type: 'offer', sdp: 'test-sdp' };
+    }
+    async setLocalDescription(_description: unknown): Promise<void> {}
+    close(): void {}
+  }
+  class RestoreSocket {
+    static readonly OPEN = 1;
+    readonly readyState = 1;
+    readonly bufferedAmount = 0;
+    binaryType = 'arraybuffer';
+    onopen: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onclose: (() => void) | null = null;
+    constructor(_url: string) {
+      socket = this;
+      queueMicrotask(() => this.onopen?.());
+    }
+    deliver(frame: unknown): void {
+      this.onmessage?.({ data: JSON.stringify(frame) });
+    }
+    send(text: string): void {
+      const frame = JSON.parse(text) as { type: string; data?: Record<string, unknown> };
+      if (frame.type === 'Authenticate') {
+        queueMicrotask(() => {
+          this.deliver({ type: 'Authenticated', data: {} });
+          this.deliver({ type: 'ProtocolInfo', data: { protocol_version: 3 } });
+        });
+      } else if (frame.type === 'JoinRoom') {
+        queueMicrotask(() => {
+          this.deliver({
+            type: 'RoomJoined',
+            data: {
+              player_id: me,
+              room_id: me,
+              room_code: 'TEST',
+              lobby_state: 'finalized',
+              ready_players: [],
+              current_players: [
+                { id: me, epoch: 1, seq: 0 },
+                { id: peer, epoch: 1, seq: 0 },
+              ],
+            },
+          });
+          this.deliver(plan(1));
+        });
+      } else if (frame.type === 'Signal') {
+        const connection = connections[connections.length - 1];
+        queueMicrotask(() => {
+          for (const channel of connection?.channels ?? []) {
+            channel.onopen?.();
+            if (connections.length === 1) {
+              channel.receive();
+            }
+          }
+        });
+      } else if (frame.type === 'TransportStatus' && frame.data?.['connected'] === true) {
+        queueMicrotask(() =>
+          this.deliver({
+            type: 'PeerTransportStatus',
+            data: {
+              peer_id: peer,
+              transport: 'webrtc',
+              connected: true,
+            },
+          }),
+        );
+      }
+    }
+    close(): void {}
+  }
+  const config: RunConfig = {
+    serverUrl: 'ws://mock.invalid/v3/ws',
+    createRoom: true,
+    joinCode: null,
+    peers: 2,
+    maxPlayers: null,
+    expectTotalPeers: null,
+    leaveOnGameStart: false,
+    gameName: 'peer-restore',
+    playerName: 'test',
+    appId: 'test',
+    platform: 'test',
+    exchange: true,
+    relayPayload: null,
+    crippleIce: false,
+    p2pTimeoutSecs: 1,
+    runForSecs: 2,
+    successReleaseEnabled: true,
+    protocolVersion: 3,
+    supportedTopologies: ['mesh'],
+    supportedTransports: ['webrtc'],
+    gameDataFormat: 'json',
+    sdkVersion: 'test',
+    elapsedBeforeStartMs: 0,
+  };
+  try {
+    globalThis.WebSocket = RestoreSocket as unknown as typeof WebSocket;
+    globalThis.RTCPeerConnection = PeerConnection as unknown as typeof RTCPeerConnection;
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: {
+        __sf_emit: (line: string) => {
+          const event = JSON.parse(line) as Record<string, unknown>;
+          events.push(event);
+          const receipts = events.filter((item) => item['event'] === 'channel_message');
+          if (!restoreSent && receipts.length === 2) {
+            restoreSent = true;
+            queueMicrotask(() => {
+              if (peerRestored) {
+                if (departure) {
+                  socket.deliver({
+                    type: 'PlayerLeft',
+                    data: { player_id: peer, epoch: 1, final_seq: 0 },
+                  });
+                }
+                socket.deliver(
+                  membershipEvent === 'PlayerReconnected'
+                    ? { type: 'PlayerReconnected', data: { player_id: peer, epoch: 2 } }
+                    : {
+                        type: 'PlayerJoined',
+                        data: { player: { id: peer, epoch: 2, seq: 0 } },
+                      },
+                );
+              } else {
+                // Duplicate live membership retains the completed exchange.
+                socket.deliver({
+                  type: 'PlayerJoined',
+                  data: { player: { id: peer, epoch: 1, seq: 0 } },
+                });
+              }
+              socket.deliver(plan(2));
+            });
+          }
+        },
+        __sf_success_released: async () => released,
+      },
+    });
+    console.error = () => {};
+    console.debug = () => {};
+    Date.now = () => virtualNow;
+    const running = run(config).then((code) => {
+      settled = true;
+      return code;
+    });
+    const history = (async () => {
+      while (connections.length < 2 && !settled) {
+        await turn();
+      }
+      await turn();
+      assert(
+        connections.length === 2,
+        'the membership history must create replacement channels',
+      );
+      assert(
+        channelSends.join(',') ===
+          (peerRestored
+            ? '1:reliable,1:unreliable,2:reliable,2:unreliable'
+            : '1:reliable,1:unreliable'),
+        `restore=${peerRestored}: only a peer restore must resend both labels; got ${channelSends.join(',')}`,
+      );
+      // A host task turn drains the input chain. The virtual clock owns all
+      // deadlines, so host scheduling cannot race receipts against the linger.
+      released = true;
+      virtualNow += 100;
+      socket.deliver({ type: 'Pong' });
+      await turn();
+      virtualNow += 300;
+      socket.deliver({ type: 'Pong' });
+      await turn();
+      assert(
+        settled === !peerRestored,
+        'a restored peer must wait for both fresh receipt labels',
+      );
+      if (peerRestored) {
+        for (const channel of connections[1]?.channels ?? []) {
+          channel.receive();
+        }
+        await turn();
+        // The same epoch repeats after fresh traffic, with no new plan.
+        socket.deliver(
+          membershipEvent === 'PlayerReconnected'
+            ? { type: 'PlayerReconnected', data: { player_id: peer, epoch: 2 } }
+            : { type: 'PlayerJoined', data: { player: { id: peer, epoch: 2, seq: 0 } } },
+        );
+        await turn();
+        virtualNow += 300;
+        socket.deliver({ type: 'Pong' });
+        await turn();
+      }
+      assert(
+        settled,
+        'duplicate same-epoch membership must keep fresh exchange evidence and plan state',
+      );
+      return running;
+    })();
+    const bounded = new Promise<never>((_resolve, reject) => {
+      guardTimer = setTimeout(
+        () => reject(new Error('peer incarnation history exceeded its bound')),
+        5000,
+      );
+    });
+    const code = await Promise.race([history, bounded]);
+    assert(
+      code === 0,
+      `a restored peer must complete a fresh bidirectional exchange; code=${code}, events=${JSON.stringify(events)}`,
+    );
+    assert(
+      events.filter((event) => event['event'] === 'channel_message').length ===
+        (peerRestored ? 4 : 2),
+      'a restored peer must receive both fresh labels before success',
+    );
+  } finally {
+    clearTimeout(guardTimer);
+    socket?.onclose?.();
+    Date.now = originalNow;
+    globalThis.WebSocket = originalSocket;
+    globalThis.RTCPeerConnection = originalPc;
+    console.error = originalError;
+    console.debug = originalDebug;
+    if (originalWindow === undefined) {
+      Reflect.deleteProperty(globalThis, 'window');
+    } else {
+      Object.defineProperty(globalThis, 'window', originalWindow);
+    }
+  }
+}
+console.error('ok - restored peers require fresh browser exchange traffic');

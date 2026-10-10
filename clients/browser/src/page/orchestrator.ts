@@ -448,7 +448,7 @@ export function shouldDeferSuccessAtRunDeadline(
   );
 }
 
-/** Monotonic logical exchange debt and evidence per connected peer. */
+/** Logical exchange debt survives transport teardown; receipts belong to an incarnation. */
 export class ExchangeLedger {
   private readonly obligations = new Set<string>();
   private readonly sent = new Map<string, Set<string>>();
@@ -456,6 +456,12 @@ export class ExchangeLedger {
 
   noteConnected(peer: string): void {
     this.obligations.add(peer);
+  }
+
+  /** Keep the obligation, but require fresh traffic from a restored player. */
+  resetIncarnation(peer: string): void {
+    this.sent.delete(peer);
+    this.received.delete(peer);
   }
 
   hasSent(peer: string, label: string): boolean {
@@ -1329,8 +1335,15 @@ class Orchestrator {
         break;
       case 'PlayerJoined': {
         const player = data['player'] as Record<string, unknown>;
-        accountability.notePlayerJoined(player);
+        const freshIncarnation = accountability.notePlayerJoined(player);
+        if ((this.negotiatedVersion ?? 2) >= 3 && !freshIncarnation) {
+          break;
+        }
         const id = String(player['id']);
+        const returning = this.membersSeen.has(id) && !this.present.has(id);
+        if ((this.negotiatedVersion ?? 2) >= 3 || returning) {
+          this.exchangeLedger.resetIncarnation(id);
+        }
         this.present.add(id);
         this.membersSeen.add(id);
         // A joiner is always unready and no corrective broadcast fires, so a
@@ -1569,9 +1582,13 @@ class Orchestrator {
       }
       case 'PlayerReconnected': {
         const rawId = data['player_id'];
-        accountability.notePlayerReconnected(rawId, data['epoch']);
+        const freshIncarnation = accountability.notePlayerReconnected(rawId, data['epoch']);
+        if ((this.negotiatedVersion ?? 2) >= 3 && !freshIncarnation) {
+          break;
+        }
         const id = String(rawId);
         restoreReconnectedMember(this.present, this.membersSeen, id);
+        this.exchangeLedger.resetIncarnation(id);
         if (
           requireFinalizedMembershipPlan(
             this.pendingMembershipPlans,

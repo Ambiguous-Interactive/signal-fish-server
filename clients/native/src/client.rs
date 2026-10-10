@@ -2128,9 +2128,21 @@ impl Orchestrator<'_> {
                 self.start_game_gate = StartGameGate::default();
             }
             ServerMessage::PlayerJoined { player } => {
-                self.accountability
-                    .note_player_joined(&player)
+                let fresh_incarnation = self
+                    .accountability
+                    .note_player_joined_incarnation(&player)
                     .map_err(FatalError::protocol)?;
+                // Repeated epoch announcements carry no membership change.
+                if self.negotiated_version >= 3 && !fresh_incarnation {
+                    return Ok(());
+                }
+                // V2 has no epoch, so only an observed departure proves rejoin.
+                if (self.negotiated_version >= 3 && fresh_incarnation)
+                    || (self.members_seen.contains(&player.id)
+                        && !self.present.contains(&player.id))
+                {
+                    self.reset_peer_exchange_incarnation(player.id);
+                }
                 self.present.insert(player.id);
                 self.members_seen.insert(player.id);
                 // A joiner is always unready and no corrective broadcast
@@ -2380,17 +2392,15 @@ impl Orchestrator<'_> {
                 )));
             }
             ServerMessage::PlayerReconnected { player_id, epoch } => {
-                self.accountability
-                    .note_player_reconnected(player_id, epoch)
+                let fresh_incarnation = self
+                    .accountability
+                    .note_player_reconnected_incarnation(player_id, epoch)
                     .map_err(FatalError::protocol)?;
+                if self.negotiated_version >= 3 && !fresh_incarnation {
+                    return Ok(());
+                }
                 restore_reconnected_member(&mut self.present, &mut self.members_seen, player_id);
-                self.exchange_ledger.reset_incarnation(player_id);
-                self.exchange_reliable_ready_reported = false;
-                self.exchange_ready_reported = false;
-                self.exchange_released = self.cli.exchange_release_file.is_none();
-                self.unreliable_exchange_released =
-                    self.cli.unreliable_exchange_release_file.is_none();
-                self.p2p_rebuild_released = self.cli.p2p_rebuild_release_file.is_none();
+                self.reset_peer_exchange_incarnation(player_id);
                 if require_finalized_membership_plan(
                     &mut self.pending_membership_plans,
                     self.negotiated_version,
@@ -3063,6 +3073,16 @@ impl Orchestrator<'_> {
             |event| emit(&event),
         )
         .await
+    }
+
+    /// A returning member must exchange fresh traffic through any harness gates.
+    fn reset_peer_exchange_incarnation(&mut self, player_id: PlayerId) {
+        self.exchange_ledger.reset_incarnation(player_id);
+        self.exchange_reliable_ready_reported = false;
+        self.exchange_ready_reported = false;
+        self.exchange_released = self.cli.exchange_release_file.is_none();
+        self.unreliable_exchange_released = self.cli.unreliable_exchange_release_file.is_none();
+        self.p2p_rebuild_released = self.cli.p2p_rebuild_release_file.is_none();
     }
 
     /// Send `PlayerReady` once the expected member count is seated AND the
@@ -4222,6 +4242,205 @@ mod tests {
             let error = super::run_inner(&cli).await.unwrap_err();
             assert_eq!(error.code, EXIT_PROTOCOL_ERROR);
             assert!(error.message.contains(expected), "{}", error.message);
+        }
+    }
+
+    // Regression #851: a stable ID can return with a new membership incarnation.
+    #[tokio::test]
+    async fn returning_player_join_requires_fresh_exchange_without_resetting_other_peers() {
+        for version in [2, 3] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                tokio_tungstenite::accept_async(tcp).await.unwrap()
+            });
+            let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            let _server_ws = server.await.unwrap();
+            let cli = Cli::parse_from([
+                "reference-native",
+                "--server-url",
+                &url,
+                "--create-room",
+                "--exchange",
+                "--exchange-release-file",
+                "/held-exchange",
+                "--unreliable-exchange-release-file",
+                "/held-unreliable",
+                "--p2p-rebuild-release-file",
+                "/held-rebuild",
+                "--p2p-retry-count",
+                "1",
+            ]);
+            let me = PlayerId::from_u128(1);
+            let returning = PlayerId::from_u128(2);
+            let sibling = PlayerId::from_u128(3);
+            let mut state = fixture_orchestrator(&cli, ws, me);
+            state.negotiated_version = version;
+            state.accountability = DeliveryAccountability::new(version == 3);
+            let joined = |epoch: Option<u32>| ServerMessage::PlayerJoined {
+                player: serde_json::from_value(json!({
+                    "id": returning, "name": "returning", "is_authority": false,
+                    "is_ready": false, "connected_at": "2026-10-10T00:00:00Z",
+                    "connection_info": null, "epoch": epoch, "seq": epoch.map(|_| 0),
+                }))
+                .unwrap(),
+            };
+            state
+                .handle_server_message(joined((version == 3).then_some(1u32)))
+                .await
+                .unwrap();
+            for peer in [returning, sibling] {
+                state.exchange_ledger.note_connected(peer);
+                for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                    state.exchange_ledger.note_sent(peer, label);
+                    state.exchange_ledger.note_received(peer, label.to_string());
+                }
+            }
+            state.exchange_ready_reported = true;
+            state.exchange_reliable_ready_reported = true;
+            state.exchange_released = true;
+            state.unreliable_exchange_released = true;
+            state.p2p_rebuild_released = true;
+            state
+                .handle_server_message(joined((version == 3).then_some(1u32)))
+                .await
+                .unwrap();
+            if version == 3 {
+                state
+                    .handle_server_message(ServerMessage::PlayerReconnected {
+                        player_id: returning,
+                        epoch: Some(1),
+                    })
+                    .await
+                    .unwrap();
+            }
+            assert!(
+                state.exchange_ledger.unmet_criteria().is_empty(),
+                "duplicate live join keeps evidence"
+            );
+            assert!(state.exchange_ready_reported && state.exchange_reliable_ready_reported);
+            assert!(
+                state.exchange_released
+                    && state.unreliable_exchange_released
+                    && state.p2p_rebuild_released
+            );
+            state
+                .handle_server_message(ServerMessage::PlayerLeft {
+                    player_id: returning,
+                    epoch: (version == 3).then_some(1),
+                    final_seq: (version == 3).then_some(0),
+                })
+                .await
+                .unwrap();
+            assert!(
+                state.exchange_ledger.unmet_criteria().is_empty(),
+                "departure preserves completed logical debt"
+            );
+            state
+                .handle_server_message(joined((version == 3).then_some(2u32)))
+                .await
+                .unwrap();
+            assert!(
+                !state.exchange_ledger.has_sent(returning, RELIABLE_LABEL),
+                "v{version}: returning peer needs a fresh send"
+            );
+            assert!(
+                !state.exchange_ledger.received.contains_key(&returning),
+                "v{version}: returning peer needs fresh receipts"
+            );
+            assert!(state.exchange_ledger.obligations.contains(&returning));
+            assert!(!state.exchange_ready_reported && !state.exchange_reliable_ready_reported);
+            assert!(
+                !state.exchange_released
+                    && !state.unreliable_exchange_released
+                    && !state.p2p_rebuild_released
+            );
+            let expected = BTreeSet::from([returning, sibling]);
+            assert!(!state
+                .exchange_ledger
+                .label_complete(&expected, RELIABLE_LABEL));
+            for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                assert!(state.exchange_ledger.has_sent(sibling, label));
+                assert!(state.exchange_ledger.received[&sibling].contains(label));
+                state.exchange_ledger.note_sent(returning, label);
+                state
+                    .exchange_ledger
+                    .note_received(returning, label.to_string());
+            }
+            assert!(
+                state.exchange_ledger.unmet_criteria().is_empty(),
+                "fresh exchange settles the new incarnation"
+            );
+            if version == 3 {
+                state.lobby_state = Some(LobbyState::Finalized);
+                state.start_game_gate.snapshot([me, returning]);
+                state.start_game_gate.note_sent();
+                state
+                    .handle_server_message(ServerMessage::PlayerReconnected {
+                        player_id: returning,
+                        epoch: Some(2),
+                    })
+                    .await
+                    .unwrap();
+                assert!(
+                    state.exchange_ledger.unmet_criteria().is_empty(),
+                    "v{version}: duplicate reconnect must keep fresh exchange evidence"
+                );
+                assert!(
+                    state.pending_membership_plans.is_empty(),
+                    "duplicate reconnect must not await another plan"
+                );
+                // A reconnect can announce a new epoch without a PlayerLeft.
+                state.handle_server_message(joined(Some(3))).await.unwrap();
+                assert!(
+                    !state.exchange_ledger.has_sent(returning, RELIABLE_LABEL),
+                    "new epoch join must reset evidence while the member is present"
+                );
+                for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                    state.exchange_ledger.note_sent(returning, label);
+                    state
+                        .exchange_ledger
+                        .note_received(returning, label.to_string());
+                }
+                // The new incarnation's plan has completed before a duplicate arrives.
+                state.pending_membership_plans.clear();
+                state.start_game_gate.snapshot([me, returning]);
+                state.start_game_gate.note_sent();
+                state.handle_server_message(joined(Some(3))).await.unwrap();
+                state
+                    .handle_server_message(ServerMessage::PlayerReconnected {
+                        player_id: returning,
+                        epoch: Some(3),
+                    })
+                    .await
+                    .unwrap();
+                assert!(
+                    state.exchange_ledger.unmet_criteria().is_empty(),
+                    "repeated announced epoch must keep fresh evidence"
+                );
+                assert!(
+                    state.pending_membership_plans.is_empty(),
+                    "duplicate announcements must not await another plan"
+                );
+                assert!(state.start_game_gate.ready_players.contains(&returning));
+                assert!(state.start_game_gate.sent_since_invalidation);
+                state
+                    .handle_server_message(ServerMessage::PlayerReconnected {
+                        player_id: returning,
+                        epoch: Some(4),
+                    })
+                    .await
+                    .unwrap();
+                assert!(
+                    !state.exchange_ledger.has_sent(returning, RELIABLE_LABEL),
+                    "new reconnect epoch must reset evidence while the member is present"
+                );
+                for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                    assert!(state.exchange_ledger.has_sent(sibling, label));
+                    assert!(state.exchange_ledger.received[&sibling].contains(label));
+                }
+            }
         }
     }
 

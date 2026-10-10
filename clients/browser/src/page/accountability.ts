@@ -164,18 +164,18 @@ export class DeliveryAccountability {
     }
   }
 
-  notePlayerJoined(playerValue: unknown): void {
+  notePlayerJoined(playerValue: unknown): boolean {
     const player = parsePlayer(playerValue, 'PlayerJoined');
-    this.noteEpoch(player.id, player.epoch, player.seq, 'PlayerJoined');
+    return this.noteEpoch(player.id, player.epoch, player.seq, 'PlayerJoined');
   }
 
-  notePlayerReconnected(playerIdValue: unknown, epochValue: unknown): void {
+  notePlayerReconnected(playerIdValue: unknown, epochValue: unknown): boolean {
     const playerId = parsePlayerId(playerIdValue, 'PlayerReconnected.player_id');
     const epoch =
       epochValue === undefined || epochValue === null
         ? null
         : safeInteger(epochValue, 'PlayerReconnected.epoch', 1, MAX_U32);
-    this.noteEpoch(playerId, epoch, epoch === null ? null : 0, 'PlayerReconnected');
+    return this.noteEpoch(playerId, epoch, epoch === null ? null : 0, 'PlayerReconnected');
   }
 
   notePlayerLeft(playerIdValue: unknown, epochValue?: unknown, finalSeqValue?: unknown): void {
@@ -282,7 +282,7 @@ export class DeliveryAccountability {
     epoch: number | null,
     seq: number | null,
     source: string,
-  ): void {
+  ): boolean {
     if (this.protocolV3 && (epoch === null || seq === null)) {
       violation(`v3 ${source} omitted epoch/seq baseline for ${playerId}`);
     }
@@ -290,16 +290,17 @@ export class DeliveryAccountability {
       violation(`v2 ${source} exposed delivery baseline (${epoch}, ${seq}) for ${playerId}`);
     }
     if (epoch === null || seq === null) {
-      return;
+      // v2 has no incarnation discriminator; callers use membership.
+      return true;
     }
     const previous = this.senders.get(playerId);
     if (previous === undefined) {
       this.senders.set(playerId, { epoch, lastSeq: seq });
       this.staleSenders.delete(playerId);
-      return;
+      return true;
     }
     if (previous.epoch === epoch && !this.staleSenders.has(playerId)) {
-      return;
+      return false;
     }
     if (epoch <= previous.epoch) {
       violation(`${source} epoch ${epoch} for ${playerId} is not newer than ${previous.epoch}`);
@@ -310,13 +311,14 @@ export class DeliveryAccountability {
       this.announcedEpochs.set(playerId, announced);
     }
     if (announced.has(epoch)) {
-      return;
+      return false;
     }
     if ([...announced].some((announcedEpoch) => announcedEpoch >= epoch)) {
       violation(`${source} epoch ${epoch} for ${playerId} is not newer than announced epochs`);
     }
     announced.add(epoch);
     this.staleSenders.add(playerId);
+    return true;
   }
 
   /** Record one causally prior exact-gap report and its cumulative counters. */
