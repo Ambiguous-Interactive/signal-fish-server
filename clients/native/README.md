@@ -292,6 +292,15 @@ never skipped. The cell also asserts the **advertised** candidate set carries no
 `--ip-family` that silently became a no-op cannot pass on a dual-stack host that happens to select IPv6
 anyway.
 
+## Remote ICE input limits
+
+Each physical peer link admits at most 128 remote candidates and 64 KiB of
+candidate payload in total. Each payload must fit in 4,096 UTF-8 bytes, including
+JSON fields. The limits apply before and after the remote description is set.
+Rejected candidates emit an error without their content. They do not clear
+accepted candidates or close the peer link. Failed stack applications consume
+budget too. A replacement peer link receives a fresh budget.
+
 ## ICE socket selection
 
 `--ip-family` decides which families this client binds; two rules decide _which addresses_:

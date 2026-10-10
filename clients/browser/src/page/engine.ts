@@ -25,6 +25,12 @@ export const RELIABLE_LABEL = 'reliable';
 /** Label of the unordered, no-retransmit channel (movement / state). */
 export const UNRELIABLE_LABEL = 'unreliable';
 
+// Per physical link, including candidates already passed to the WebRTC stack.
+// Keep aligned with the native engine; draining the queue must not renew it.
+const MAX_REMOTE_CANDIDATES = 128;
+const MAX_REMOTE_CANDIDATE_BYTES = 64 * 1024;
+const MAX_CANDIDATE_PAYLOAD_BYTES = 4096;
+
 /** Callbacks from engine-owned browser event handlers to the orchestrator. */
 export interface EngineCallbacks {
   onLocalCandidate(peer: string, generation: number, candidateJson: string): void;
@@ -48,6 +54,8 @@ interface PeerLink {
   channels: Map<string, RTCDataChannel>;
   openLabels: Set<string>;
   pendingCandidates: RTCIceCandidateInit[];
+  remoteCandidateCount: number;
+  remoteCandidateBytes: number;
   remoteDescriptionSet: boolean;
   pairConnected: boolean;
 }
@@ -110,6 +118,8 @@ export class Engine {
       channels: new Map(),
       openLabels: new Set(),
       pendingCandidates: [],
+      remoteCandidateCount: 0,
+      remoteCandidateBytes: 0,
       remoteDescriptionSet: false,
       pairConnected: false,
     };
@@ -178,6 +188,22 @@ export class Engine {
    * clients, mirroring the native engine).
    */
   async handleRemoteCandidate(peer: string, candidatePayload: string): Promise<void> {
+    // UTF-16 length is a cheap lower bound on UTF-8 bytes. Reject oversized
+    // strings before encoding, so even the size check has bounded allocation.
+    if (candidatePayload.length > MAX_CANDIDATE_PAYLOAD_BYTES) {
+      throw new Error('remote ICE candidate payload exceeds 4096 bytes');
+    }
+    const payloadBytes = new TextEncoder().encode(candidatePayload).byteLength;
+    if (payloadBytes > MAX_CANDIDATE_PAYLOAD_BYTES) {
+      throw new Error('remote ICE candidate payload exceeds 4096 bytes');
+    }
+    const link = this.linkOf(peer, 'candidate');
+    if (
+      link.remoteCandidateCount >= MAX_REMOTE_CANDIDATES ||
+      payloadBytes > MAX_REMOTE_CANDIDATE_BYTES - link.remoteCandidateBytes
+    ) {
+      throw new Error('remote ICE candidate budget exhausted');
+    }
     let init: RTCIceCandidateInit;
     try {
       init = JSON.parse(candidatePayload) as RTCIceCandidateInit;
@@ -187,7 +213,8 @@ export class Engine {
       // nor sdpMLineIndex is rejected by the browser with a TypeError).
       init = { candidate: candidatePayload, sdpMLineIndex: 0 };
     }
-    const link = this.linkOf(peer, 'candidate');
+    link.remoteCandidateCount += 1;
+    link.remoteCandidateBytes += payloadBytes;
     if (link.remoteDescriptionSet) {
       await link.pc.addIceCandidate(init);
     } else {
