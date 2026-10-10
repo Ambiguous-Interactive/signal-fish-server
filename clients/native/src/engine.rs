@@ -501,12 +501,15 @@ impl Engine {
             .get_mut(&peer)
             .ok_or_else(|| anyhow!("candidate from unpaired peer {peer}"))?;
         if link.remote_candidate_count >= MAX_REMOTE_CANDIDATES
-            || candidate_payload.len() > MAX_REMOTE_CANDIDATE_BYTES - link.remote_candidate_bytes
+            || candidate_payload.len()
+                > MAX_REMOTE_CANDIDATE_BYTES.saturating_sub(link.remote_candidate_bytes)
         {
             return Err(anyhow!("remote ICE candidate budget exhausted"));
         }
-        link.remote_candidate_count += 1;
-        link.remote_candidate_bytes += candidate_payload.len();
+        link.remote_candidate_count = link.remote_candidate_count.saturating_add(1);
+        link.remote_candidate_bytes = link
+            .remote_candidate_bytes
+            .saturating_add(candidate_payload.len());
         if link.remote_description_set {
             let pc = link.pc.clone();
             pc.add_ice_candidate(init)

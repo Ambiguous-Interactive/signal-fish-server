@@ -56,7 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- Bound remote ICE candidate input in the native and browser reference clients (#861).
+- Limit remote ICE candidate count and payload size in the native and browser reference clients (#861).
 - Remove session credentials from logs and Debug output, and stop rejected-frame
   diagnostics from quoting client values (#836).
 - Reject weak tenant verification keys and forged connect tokens (#821).
