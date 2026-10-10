@@ -42,7 +42,7 @@ use webrtc::peer_connection::{
     RTCPeerConnectionIceEvent, RTCPeerConnectionState, RTCSessionDescription, RTCStatsReport,
     RTCStatsReportEntry, SettingEngineBuilder, StatsSelector,
 };
-use webrtc::runtime::{default_runtime, Runtime};
+use webrtc::runtime::{default_runtime, JoinHandle, Runtime};
 
 /// Label of the ordered, reliable data channel (commands / critical events).
 pub const RELIABLE_LABEL: &str = "reliable";
@@ -145,6 +145,24 @@ struct PeerLink {
     remote_candidate_bytes: usize,
     remote_description_set: bool,
     pair_connected: bool,
+    /// At most two admitted channel pollers, owned by this physical link.
+    channel_tasks: Vec<Box<dyn JoinHandle>>,
+}
+
+impl PeerLink {
+    fn stop_channel_tasks(&mut self) {
+        for task in self.channel_tasks.drain(..) {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for PeerLink {
+    fn drop(&mut self) {
+        // Runtime handles detach on drop. Explicit cancellation also covers
+        // failed pairing, cancelled teardown, and destruction of the engine.
+        self.stop_channel_tasks();
+    }
 }
 
 /// Address families this client may bind for ICE, and therefore the families
@@ -272,7 +290,8 @@ impl Engine {
 
     /// Close and forget a departed peer so a later directive can pair it anew.
     pub async fn remove_peer(&mut self, peer: PlayerId) -> Result<()> {
-        if let Some(link) = self.peers.remove(&peer) {
+        if let Some(mut link) = self.peers.remove(&peer) {
+            link.stop_channel_tasks();
             link.pc
                 .close()
                 .await
@@ -362,6 +381,7 @@ impl Engine {
             remote_candidate_bytes: 0,
             remote_description_set: false,
             pair_connected: false,
+            channel_tasks: Vec::with_capacity(2),
         };
         self.peers.insert(peer, link);
         let result = async {
@@ -385,7 +405,7 @@ impl Engine {
                 )
                 .await
                 .context("create unreliable data channel")?;
-            spawn_channel_event_loop(
+            let reliable_task = spawn_channel_event_loop(
                 &self.runtime,
                 &self.events,
                 peer,
@@ -393,7 +413,7 @@ impl Engine {
                 RELIABLE_LABEL.to_string(),
                 reliable.clone(),
             );
-            spawn_channel_event_loop(
+            let unreliable_task = spawn_channel_event_loop(
                 &self.runtime,
                 &self.events,
                 peer,
@@ -405,6 +425,7 @@ impl Engine {
                 .peers
                 .get_mut(&peer)
                 .ok_or_else(|| anyhow!("peer link removed while pairing"))?;
+            link.channel_tasks.extend([reliable_task, unreliable_task]);
             link.channels.insert(RELIABLE_LABEL.to_string(), reliable);
             link.channels
                 .insert(UNRELIABLE_LABEL.to_string(), unreliable);
@@ -418,7 +439,8 @@ impl Engine {
         }
         .await;
         if result.is_err() {
-            if let Some(link) = self.peers.remove(&peer) {
+            if let Some(mut link) = self.peers.remove(&peer) {
+                link.stop_channel_tasks();
                 let _ = link.pc.close().await;
             }
         }
@@ -550,14 +572,14 @@ impl Engine {
         link.channels.insert(label.clone(), channel.clone());
         // Poll only accepted channels, so refused channels cannot publish open,
         // message, or close callbacks under a selected channel's label.
-        spawn_channel_event_loop(
+        link.channel_tasks.push(spawn_channel_event_loop(
             &self.runtime,
             &self.events,
             peer,
             link.generation,
             label,
             channel,
-        );
+        ));
     }
 
     /// Record an open channel; returns `true` exactly once per peer, at the
@@ -1109,7 +1131,7 @@ fn spawn_channel_event_loop(
     generation: u64,
     label: String,
     channel: Arc<dyn DataChannel>,
-) {
+) -> Box<dyn JoinHandle> {
     let events = events.clone();
     runtime.spawn(Box::pin(async move {
         while let Some(event) = channel.poll().await {
@@ -1166,7 +1188,7 @@ fn spawn_channel_event_loop(
                 }
             }
         }
-    }));
+    }))
 }
 
 /// Convert the plan's ICE servers into webrtc-rs configuration entries.
@@ -1180,6 +1202,10 @@ fn convert_ice_servers(ice_servers: &[IceServer]) -> Vec<RTCIceServer> {
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "engine_task_tests.rs"]
+mod task_tests;
 
 #[cfg(test)]
 mod tests {

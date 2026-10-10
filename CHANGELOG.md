@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Release native reference-client channel tasks when peers leave or the engine stops (#874).
 - **Breaking:** Reference clients now close unsupported remote data channels; use only
   `reliable` and `unreliable` with these clients (#870).
 - Keep working reference-client data channels when a peer announces a duplicate channel label (#869).
