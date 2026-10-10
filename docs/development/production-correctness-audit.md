@@ -63,9 +63,9 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Pending |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
-| A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11 |
+| A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
 For each task, record reviewed functions and tests, unresolved hypotheses, and
 the exact scope of any successful experiment. Default, TLS, legacy-fullmesh,
@@ -918,3 +918,41 @@ The runtime command requires the server, native, and browser bundles plus
 Chromium; `scripts/run-browser-interop.sh` sets those prerequisites for hosted
 acceptance. This evidence does not certify arbitrary network failures, all
 client packages, or the remaining A20 boundaries.
+
+### F17 Reference clients count invalid payloads as exchange receipts
+
+**Client correctness defect; high confidence.** Issue
+[#856](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/856).
+Baseline: `f12b88fc`. A20/A22.
+
+Both shipped clients record a receipt whenever any text arrives on a required
+channel label. Their `--exchange` success decisions do not check the documented
+probe fields. Malformed JSON, another sender, a mismatched channel, or a wrong
+sequence can therefore satisfy a missing receive. The external process harness
+checks those fields separately; that stronger oracle does not repair the client
+runtime. The earlier browser restore fixture itself used non-JSON receipts and
+completed successfully. Its membership-reset evidence remains valid, but it
+provided no evidence of payload validation.
+
+The native real-handler regression fails on its first `not-json` receipt. The
+browser dispatcher regression fails because invalid receipts emit
+`success_criteria_met`. Both regressions send invalid payloads through the
+production handler before any valid receipt. The repair credits only a JSON
+object with the actual remote peer, the actual required channel, and numeric
+sequence zero. It preserves received-message events for all current traffic.
+Whitespace, key order, extra fields, and numeric zero spellings remain valid.
+The native history also rejects a valid probe from an old physical generation.
+Valid probes then complete both-label exchange in each client. The browser
+history retains reconnect, rejoin, duplicate-announcement, and physical-rebuild
+controls with valid payloads.
+
+This repair changes the reference clients' success decision, not server wire
+formats or delivery guarantees. It does not explain or close #853. The broader
+A20/A22 audit remains incomplete.
+
+Focused verification:
+
+```bash
+(cd clients/browser && npm test && npm run typecheck && npm run format:check)
+cargo nextest run --manifest-path clients/native/Cargo.toml --lib -E 'test(exchange_receipts_require_the_peer_channel_and_zero_sequence)'
+```

@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Require valid peer and channel probes before reference clients report exchange success (#856).
 - Restart client exchange after peer reconnect or rejoin; duplicate announcements keep completed exchange (#851).
 - Preserve player handshake retry budgets when concurrent requests fill the application limit (#849).
 - Accept HTTP/2 WebSocket connections on the supported signaling routes,

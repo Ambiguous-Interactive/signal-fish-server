@@ -88,6 +88,12 @@ connection counters survive; a recipient reconnect starts a new connection
 accounting lifetime from `sender_watermarks`. Thus the shared
 `game_data_received` event contract exposes only application-current payloads.
 
+With `--exchange`, receipts must contain the sending peer in `from`, the
+receiving channel in `channel`, and numeric `seq` zero. Only the required
+`reliable` and `unreliable` channels count. JSON whitespace, key order, and extra
+fields are allowed. Invalid traffic still emits `channel_message` and cannot
+satisfy the receive criterion.
+
 When a peer reconnects or rejoins, `--exchange` requires fresh sends and receipts on both
 data channels. Completed exchanges for other peers remain valid. A transport
 rebuild alone does not reset the exchange.

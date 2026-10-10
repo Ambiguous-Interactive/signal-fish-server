@@ -118,6 +118,13 @@ Consequently, `game_data_received` is emitted only for the current application
 incarnation. A trailing stale frame can be valid for wire accountability without
 becoming a JSONL application event.
 
+With `--exchange`, a receive counts only when its JSON object names the actual
+sending peer in `from`, names the receiving channel in `channel`, and has
+numeric `seq` zero. Only `reliable` and `unreliable` count. Whitespace, key order,
+and extra fields do not affect this check. Invalid payloads still emit
+`channel_message`; they leave the receive criterion unmet until a valid probe
+arrives or the run expires.
+
 ## Controlled restore
 
 Reconnect initiation is opt-in and intended for the conformance harness.

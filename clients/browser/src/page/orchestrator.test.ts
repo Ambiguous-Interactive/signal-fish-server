@@ -365,6 +365,7 @@ for (const [membershipEvent, departure] of [
   const connections: PeerConnection[] = [];
   let socket!: RestoreSocket;
   let restoreSent = false;
+  let invalidReceiptCount = 0;
   let released = false;
   let settled = false;
   const originalNow = Date.now;
@@ -394,8 +395,8 @@ for (const [membershipEvent, departure] of [
     send(_text: string): void {
       channelSends.push(`${this.generation}:${this.label}`);
     }
-    receive(): void {
-      this.onmessage?.({ data: `peer-${this.generation}-${this.label}` });
+    receive(text = JSON.stringify({ from: peer, channel: this.label, seq: 0 })): void {
+      this.onmessage?.({ data: text });
     }
   }
   class PeerConnection {
@@ -459,9 +460,6 @@ for (const [membershipEvent, departure] of [
         queueMicrotask(() => {
           for (const channel of connection?.channels ?? []) {
             channel.onopen?.();
-            if (connections.length === 1) {
-              channel.receive();
-            }
           }
         });
       } else if (frame.type === 'TransportStatus' && frame.data?.['connected'] === true) {
@@ -514,7 +512,7 @@ for (const [membershipEvent, departure] of [
           const event = JSON.parse(line) as Record<string, unknown>;
           events.push(event);
           const receipts = events.filter((item) => item['event'] === 'channel_message');
-          if (!restoreSent && receipts.length === 2) {
+          if (!restoreSent && receipts.length === invalidReceiptCount + 2) {
             restoreSent = true;
             queueMicrotask(() => {
               if (peerRestored) {
@@ -554,6 +552,41 @@ for (const [membershipEvent, departure] of [
       return code;
     });
     const history = (async () => {
+      while (connections.length < 1 && !settled) {
+        await turn();
+      }
+      await turn();
+      for (const channel of connections[0]?.channels ?? []) {
+        for (const text of [
+          'not-json',
+          'null',
+          '[]',
+          JSON.stringify({ from: me, channel: channel.label, seq: 0 }),
+          JSON.stringify({ from: peer, channel: 'other', seq: 0 }),
+          JSON.stringify({ from: peer, channel: channel.label, seq: 1 }),
+          JSON.stringify({ from: peer, channel: channel.label, seq: '0' }),
+          JSON.stringify({ from: peer, channel: channel.label, seq: false }),
+          JSON.stringify({ from: peer, channel: channel.label }),
+        ]) {
+          invalidReceiptCount += 1;
+          channel.receive(text);
+        }
+      }
+      await turn();
+      assert(
+        !events.some((event) => event['event'] === 'success_criteria_met'),
+        'invalid exchange payloads must not satisfy the real browser dispatcher',
+      );
+      assert(
+        events.filter((event) => event['event'] === 'channel_message').length ===
+          invalidReceiptCount,
+        'invalid traffic must remain visible in channel_message events',
+      );
+      for (const channel of connections[0]?.channels ?? []) {
+        channel.receive(
+          `{ "seq": -0.0, "channel": "${channel.label}", "from": "${peer}", "extra": true }`,
+        );
+      }
       while (connections.length < 2 && !settled) {
         await turn();
       }
@@ -617,7 +650,7 @@ for (const [membershipEvent, departure] of [
     );
     assert(
       events.filter((event) => event['event'] === 'channel_message').length ===
-        (peerRestored ? 4 : 2),
+        invalidReceiptCount + (peerRestored ? 4 : 2),
       'a restored peer must receive both fresh labels before success',
     );
   } finally {

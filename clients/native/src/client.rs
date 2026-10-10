@@ -273,6 +273,18 @@ fn is_coordinated_p2p_rebuild_attempt(
     rebuild_configured && retry_count > 0 && attempt == retry_count
 }
 
+fn is_exchange_probe(peer: PlayerId, label: &str, text: &str) -> bool {
+    if label != RELIABLE_LABEL && label != UNRELIABLE_LABEL {
+        return false;
+    }
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    payload.get("from").and_then(serde_json::Value::as_str) == Some(peer.to_string().as_str())
+        && payload.get("channel").and_then(serde_json::Value::as_str) == Some(label)
+        && payload.get("seq").and_then(serde_json::Value::as_f64) == Some(0.0)
+}
+
 /// Logical exchange obligations survive transport and membership teardown.
 /// Ordinary pair retries keep evidence; a room incarnation restore invalidates
 /// current members' receipts and requires a new bidirectional exchange.
@@ -2579,7 +2591,9 @@ impl Orchestrator<'_> {
             EngineEvent::ChannelMessage {
                 peer, label, text, ..
             } => {
-                self.exchange_ledger.note_received(peer, label.clone());
+                if self.cli.exchange && is_exchange_probe(peer, &label, &text) {
+                    self.exchange_ledger.note_received(peer, label.clone());
+                }
                 emit(&Event::ChannelMessage { peer, label, text });
             }
         }
@@ -4107,6 +4121,94 @@ mod tests {
             pong_deadline: None,
             pong_grace_applied: false,
         }
+    }
+
+    #[tokio::test]
+    async fn exchange_receipts_require_the_peer_channel_and_zero_sequence() {
+        use crate::engine::EngineEvent;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(tcp).await.unwrap()
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let _server_ws = server.await.unwrap();
+        let cli = Cli::parse_from([
+            "reference-native",
+            "--server-url",
+            &url,
+            "--create-room",
+            "--exchange",
+        ]);
+        let me = PlayerId::from_u128(1);
+        let peer = PlayerId::from_u128(2);
+        let mut state = fixture_orchestrator(&cli, ws, me);
+        state.engine.pair_with(peer, false, &[]).await.unwrap();
+        state.exchange_ledger.note_connected(peer);
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            state.exchange_ledger.note_sent(peer, label);
+            for text in [
+                "not-json".to_string(),
+                "null".to_string(),
+                "[]".to_string(),
+                json!({"from": me, "channel": label, "seq": 0}).to_string(),
+                json!({"from": peer, "channel": "other", "seq": 0}).to_string(),
+                json!({"from": peer, "channel": label, "seq": 1}).to_string(),
+                json!({"from": peer, "channel": label, "seq": "0"}).to_string(),
+                json!({"from": peer, "channel": label, "seq": false}).to_string(),
+                json!({"from": peer, "channel": label}).to_string(),
+            ] {
+                state
+                    .handle_engine_event(EngineEvent::ChannelMessage {
+                        peer,
+                        generation: 1,
+                        label: label.to_string(),
+                        text: text.clone(),
+                    })
+                    .await
+                    .unwrap();
+                assert!(
+                    !state
+                        .exchange_ledger
+                        .received
+                        .get(&peer)
+                        .is_some_and(|labels| labels.contains(label)),
+                    "invalid receipt: {text}"
+                );
+            }
+            let text = format!(
+                r#"{{ "seq": -0.0, "channel": "{label}", "from": "{peer}", "extra": true }}"#
+            );
+            state
+                .handle_engine_event(EngineEvent::ChannelMessage {
+                    peer,
+                    generation: 0,
+                    label: label.to_string(),
+                    text: text.clone(),
+                })
+                .await
+                .unwrap();
+            assert!(
+                !state
+                    .exchange_ledger
+                    .received
+                    .get(&peer)
+                    .is_some_and(|labels| labels.contains(label)),
+                "stale generation receipt"
+            );
+            state
+                .handle_engine_event(EngineEvent::ChannelMessage {
+                    peer,
+                    generation: 1,
+                    label: label.to_string(),
+                    text,
+                })
+                .await
+                .unwrap();
+        }
+        assert!(state.exchange_ledger.unmet_criteria().is_empty());
+        state.engine.remove_peer(peer).await.unwrap();
     }
 
     // Regression #819: runtime decoding has the same token privacy contract.
