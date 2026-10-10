@@ -95,25 +95,12 @@ pub const MAX_APP_ID_LENGTH: usize = 256;
 /// minute keeps a share of 1: that budget is trivially exhausted by any
 /// single admitted handshake, abuser or not.
 ///
-/// Memory bound of the per-source windows: a source only reaches the limiter
-/// through an admitted WebSocket connection, so distinct pair keys are
-/// bounded by the server's own recent connection churn (one window per
-/// source address seen, swept by the limiter cleanup task once expired) —
-/// the same order as the connection table itself, not attacker-multiplied
-/// beyond it.
+/// Each application window retains one timestamp per admitted resolution and
+/// one counter per admitted source. Expiry removes both. Rejected sources
+/// retain no counter, so the configured application ceiling bounds this state.
 #[must_use]
 pub fn source_rate_limit(app_limit: u32) -> u32 {
     (app_limit / 2).max(1)
-}
-
-/// Sliding-window key for one source's share of `app_id`'s budget.
-///
-/// NUL can never appear in an app ID (the log-safety gate rejects control
-/// characters before any limiter path), so this pair encoding is
-/// collision-free: an app key can never alias a (app, source) key of another
-/// app, and distinct sources of the same app never alias each other.
-fn source_window_key(app_id: &str, source: IpAddr) -> String {
-    format!("{app_id}\0{source}")
 }
 
 /// Whether an app ID can be accepted and logged safely.
@@ -204,6 +191,8 @@ pub struct AppIdAllowlist {
     /// idempotent-safe to request repeatedly but must only be spawned once;
     /// a reload can introduce the first rate-limited app after startup.
     cleanup_task_started: AtomicBool,
+    #[cfg(test)]
+    rate_limit_commit_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl AppIdAllowlist {
@@ -291,6 +280,8 @@ impl AppIdAllowlist {
             enforce: true,
             metrics,
             cleanup_task_started: AtomicBool::new(false),
+            #[cfg(test)]
+            rate_limit_commit_hook: None,
         };
 
         if has_rate_limited_app {
@@ -308,6 +299,8 @@ impl AppIdAllowlist {
             enforce: false,
             metrics: None,
             cleanup_task_started: AtomicBool::new(false),
+            #[cfg(test)]
+            rate_limit_commit_hook: None,
         }
     }
 
@@ -399,9 +392,8 @@ impl AppIdAllowlist {
     /// wire name does not imply proof of client identity.
     ///
     /// When the matched application configures an explicit
-    /// `rate_limit_per_minute`, admission spends the per-source (IP) share
-    /// first and the application-wide ceiling last, so a rejection can never
-    /// consume the application-wide budget (see `enforce_rate_limits_at`).
+    /// `rate_limit_per_minute`, admission charges the per-source (IP) share
+    /// and application ceiling atomically. A rejection consumes neither.
     ///
     /// This method is `async` for interface compatibility so that future
     /// implementations (e.g., database-backed auth) can perform I/O without
@@ -454,17 +446,7 @@ impl AppIdAllowlist {
         Ok(info.clone())
     }
 
-    /// Enforce the configured per-minute budget as two sliding windows.
-    ///
-    /// Both windows are probed before either commits, so a request either
-    /// window would reject is stamped nowhere — rejections stay free, exactly
-    /// as in the pre-split single-window contract (and an app-ceiling
-    /// rejection can no longer burn the source's own share). The commits then
-    /// run source share first and application-wide ceiling last: the worst
-    /// case is at most one self-tightening stamp in the offending source's
-    /// own window, reachable under a probe/commit race or an out-of-order
-    /// injected timestamp (the `resolve_app_id_at` seam does not sort the
-    /// deque), never a cross-source effect.
+    /// Enforce the configured per-minute budget and source share atomically.
     fn enforce_rate_limits_at(
         &self,
         app_id: &str,
@@ -472,28 +454,21 @@ impl AppIdAllowlist {
         limit: u32,
         now: Instant,
     ) -> Result<(), AuthError> {
-        let pair_key = source_window_key(app_id, source);
-        let share = source_rate_limit(limit);
-        if !self.rate_limiter.would_admit_at(&pair_key, share, now)
-            || !self.rate_limiter.would_admit_at(app_id, limit, now)
-        {
-            if let Some(metrics) = &self.metrics {
-                metrics.record_rate_limit_rejection(crate::metrics::RateLimitRejection::Auth);
-            }
-            return Err(AuthError::RateLimitExceeded);
-        }
-        self.check_rate_limit_at(&pair_key, share, now)?;
-        self.check_rate_limit_at(app_id, limit, now)
-    }
-
-    fn check_rate_limit_at(&self, key: &str, limit: u32, now: Instant) -> Result<(), AuthError> {
-        self.rate_limiter
-            .check_rate_limit_at(key, limit, now)
+        let outcome = self
+            .rate_limiter
+            .check_source_rate_limit_at(app_id, source, limit, source_rate_limit(limit), now)
             .inspect_err(|_| {
                 if let Some(metrics) = &self.metrics {
                     metrics.record_rate_limit_rejection(crate::metrics::RateLimitRejection::Auth);
                 }
-            })
+            });
+        #[cfg(test)]
+        if outcome.is_ok() {
+            if let Some(hook) = &self.rate_limit_commit_hook {
+                hook();
+            }
+        }
+        outcome
     }
 
     /// Build a default context for use when allowlist enforcement is disabled.
@@ -823,6 +798,63 @@ mod tests {
         assert!(matches!(result.unwrap_err(), AuthError::RateLimitExceeded));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn raced_app_ceiling_rejection_preserves_the_losing_sources_retry_budget() {
+        let mut entries = sample_entries();
+        entries.truncate(1);
+        entries[0].rate_limit_per_minute = Some(2);
+        let mut mw = AppIdAllowlist::new(entries).expect("valid allowlist");
+        let origin = Instant::now();
+        mw.enforce_rate_limits_at("game-1", source_for(0), 2, origin)
+            .expect("initial application stamp");
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let first = AtomicBool::new(true);
+        mw.rate_limit_commit_hook = Some(Arc::new(move || {
+            if first.swap(false, Ordering::AcqRel) {
+                entered_tx.send(()).expect("announce decision seam");
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release decision seam");
+            }
+        }));
+        let mw = Arc::new(mw);
+        let first_mw = Arc::clone(&mw);
+        let now = origin + Duration::from_secs(59);
+        let runtime = tokio::runtime::Handle::current();
+        let pending = std::thread::spawn(move || {
+            runtime.block_on(first_mw.resolve_app_id_at("game-1", source_for(1), now))
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first decision reached seam");
+        let competing = mw.resolve_app_id_at("game-1", source_for(2), now).await;
+        release_tx.send(()).expect("release first decision");
+        let pending = pending.join().expect("first decision returned");
+        assert_eq!(
+            usize::from(pending.is_ok()) + usize::from(competing.is_ok()),
+            1
+        );
+        for (source, outcome) in [(source_for(1), pending), (source_for(2), competing)] {
+            let source_charge = mw.rate_limiter.source_window_len("game-1", source);
+            if outcome.is_err() {
+                assert!(matches!(outcome, Err(AuthError::RateLimitExceeded)));
+                mw.resolve_app_id_at("game-1", source, origin + Duration::from_secs(60))
+                    .await
+                    .expect("the losing source can retry when the oldest app stamp expires");
+            }
+            assert_eq!(
+                source_charge,
+                usize::from(outcome.is_ok()),
+                "a rejected source must retain its complete retry budget"
+            );
+        }
+    }
+
     /// The split-budget contract (issue #502), data-driven over configured
     /// app ceilings: each source may spend at most its share (half the app
     /// budget, min 1) per window, total admissions never exceed the app
@@ -887,21 +919,12 @@ mod tests {
                 "limit {limit}: the app ceiling must reject once {limit} admissions are spent"
             );
 
-            // The rejected handshake consumed nothing in either window: the
-            // overflow source's share window was never even created, and the
-            // abuser's repeated retries add no stamps (they are refused by
-            // the source probe — its share is spent — before the app probe
-            // is even consulted; rejections are free, the pre-split
-            // single-window contract, now held across both dimensions).
             assert_eq!(
-                mw.rate_limiter
-                    .window_len(&source_window_key("limited", overflow)),
+                mw.rate_limiter.source_window_len("limited", overflow),
                 0,
                 "limit {limit}: an app-rejected handshake must not create the source window"
             );
-            let abuser_stamps_before = mw
-                .rate_limiter
-                .window_len(&source_window_key("limited", source_for(0)));
+            let abuser_stamps_before = mw.rate_limiter.source_window_len("limited", source_for(0));
             for _ in 0..3 {
                 assert!(matches!(
                     mw.resolve_app_id("limited", source_for(0)).await,
@@ -909,18 +932,14 @@ mod tests {
                 ));
             }
             assert_eq!(
-                mw.rate_limiter
-                    .window_len(&source_window_key("limited", source_for(0))),
+                mw.rate_limiter.source_window_len("limited", source_for(0)),
                 abuser_stamps_before,
                 "limit {limit}: rejected retries must not stamp the source window"
             );
         }
     }
 
-    /// Sources and apps key independent windows: one source exhausting its
-    /// share for one app leaves every other source AND every other app's
-    /// window untouched, and a pair key can never alias an app key (NUL is
-    /// unreachable inside an app ID — the log-safety gate rejects it).
+    /// Exhausting one source share leaves other sources and apps available.
     #[tokio::test]
     async fn source_and_app_windows_are_independent_and_alias_free() {
         let entries = vec![
@@ -1206,8 +1225,8 @@ mod tests {
         assert!(open.resolve_app_id("game-1", LOCALHOST).await.is_ok());
     }
 
-    /// Concurrent handshakes through the full resolution seam (probe-then-
-    /// commit across both windows) conserve the application ceiling exactly:
+    /// Concurrent handshakes through the full resolution seam conserve the
+    /// application ceiling and every source budget exactly:
     /// 8 sources × 2 racing `Authenticate`s against a ceiling of 4 admit
     /// exactly 4, and every one of the 12 rejections increments the auth
     /// rejection metrics exactly once.
@@ -1218,8 +1237,6 @@ mod tests {
             AppIdAllowlist::with_metrics(vec![entry("limited", Some(4))], metrics.clone())
                 .expect("unique app IDs"),
         );
-        // One frozen timestamp for every racer: this is the worst-case
-        // probe/commit race, where every probe sees the empty window.
         let now = Instant::now();
         let sources = distinct_sources(8);
         let barrier = Arc::new(tokio::sync::Barrier::new(16));
@@ -1242,6 +1259,14 @@ mod tests {
             if task.await.expect("handshake task must not panic") {
                 *admitted_per_source.entry(index / 2).or_insert(0u32) += 1;
             }
+        }
+
+        for (index, source) in sources.iter().enumerate() {
+            assert_eq!(
+                mw.rate_limiter.source_window_len("limited", *source),
+                admitted_per_source.get(&index).copied().unwrap_or(0) as usize,
+                "source {source}: rejected handshakes must not consume retry budget"
+            );
         }
 
         let snapshot = metrics.snapshot().await.rate_limiting;

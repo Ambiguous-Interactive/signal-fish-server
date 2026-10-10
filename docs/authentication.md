@@ -131,7 +131,10 @@ control-plane-signed credential is verified before admission.
   above, plus a per-source (IP) share of half that budget (at least one) — so
   one source that knows a configured `app_id` can never continuously exhaust
   the app's budget and lock out legitimate handshakes (issue #502). Rejected
-  handshakes consume no budget in either window. Note a single source can
+  app-ID resolutions consume no budget in either window, including concurrent
+  rejections. The server charges both limits in one decision. A successful
+  resolution still spends budget if later tenant credential verification fails.
+  Note a single source can
   therefore admit at most half of the advertised `per_minute` figure (for an
   entry limited to 1 per minute, the share is that single handshake); clients
   sharing one NAT egress share that source budget. A botnet spanning many

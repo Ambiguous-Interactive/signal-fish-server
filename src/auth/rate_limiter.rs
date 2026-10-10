@@ -2,13 +2,60 @@
 
 use super::error::AuthError;
 use dashmap::DashMap;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[derive(Default)]
+struct RateWindow {
+    timestamps: VecDeque<(Instant, Option<IpAddr>)>,
+    sources: HashMap<IpAddr, usize>,
+}
+
+impl RateWindow {
+    fn trim(&mut self, now: Instant, duration: Duration) {
+        while self
+            .timestamps
+            .front()
+            .is_some_and(|(stamp, _)| now.duration_since(*stamp) >= duration)
+        {
+            if let Some((_, Some(source))) = self.timestamps.pop_front() {
+                if let Some(count) = self.sources.get_mut(&source) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        self.sources.remove(&source);
+                    }
+                }
+            }
+        }
+    }
+
+    fn record(&mut self, now: Instant, source: Option<IpAddr>) {
+        /* Concurrent callers can sample the clock before acquiring this entry. */
+        if self
+            .timestamps
+            .back()
+            .is_some_and(|(stamp, _)| *stamp > now)
+        {
+            let index = self
+                .timestamps
+                .binary_search_by_key(&now, |(stamp, _)| *stamp)
+                .unwrap_or_else(|index| index);
+            self.timestamps.insert(index, (now, source));
+        } else {
+            self.timestamps.push_back((now, source));
+        }
+        if let Some(source) = source {
+            let count = self.sources.entry(source).or_default();
+            *count = count.saturating_add(1);
+        }
+    }
+}
+
 /// Sliding-window rate limiter backed by `DashMap`.
 ///
-/// Each application ID maps to a `VecDeque<Instant>` that records the
+/// Each application ID maps to one locked window that records the
 /// timestamps of recent requests. When `check_rate_limit` is called the
 /// window is trimmed to the last 60 seconds before comparing the count
 /// against the configured limit.
@@ -18,7 +65,7 @@ use std::time::{Duration, Instant};
 /// timestamp so time-driven behavior is testable deterministically (see
 /// `.llm/context-testing.md`, "Injectable time").
 pub struct InMemoryRateLimiter {
-    windows: DashMap<String, VecDeque<Instant>>,
+    windows: DashMap<String, RateWindow>,
     cleanup_interval: Duration,
     window_duration: Duration,
 }
@@ -53,52 +100,57 @@ impl InMemoryRateLimiter {
         limit_per_minute: u32,
         now: Instant,
     ) -> Result<(), AuthError> {
-        let window = self.window_duration;
+        self.check_windows_at(app_id, limit_per_minute, None, now)
+    }
 
+    /// Check and charge the application ceiling and its source share together.
+    /// A rejection records no timestamp in either dimension.
+    pub(crate) fn check_source_rate_limit_at(
+        &self,
+        app_id: &str,
+        source: IpAddr,
+        app_limit: u32,
+        source_limit: u32,
+        now: Instant,
+    ) -> Result<(), AuthError> {
+        self.check_windows_at(app_id, app_limit, Some((source, source_limit)), now)
+    }
+
+    fn check_windows_at(
+        &self,
+        app_id: &str,
+        app_limit: u32,
+        source_limit: Option<(IpAddr, u32)>,
+        now: Instant,
+    ) -> Result<(), AuthError> {
         let mut entry = self.windows.entry(app_id.to_owned()).or_default();
-        let timestamps = entry.value_mut();
-
-        // Trim expired entries from the front of the deque.
-        while let Some(&front) = timestamps.front() {
-            if now.duration_since(front) >= window {
-                timestamps.pop_front();
-            } else {
-                break;
-            }
-        }
-
-        if timestamps.len() >= limit_per_minute as usize {
+        let window = entry.value_mut();
+        window.trim(now, self.window_duration);
+        if window.timestamps.len() >= app_limit as usize
+            || source_limit.is_some_and(|(source, limit)| {
+                window.sources.get(&source).copied().unwrap_or(0) >= limit as usize
+            })
+        {
             return Err(AuthError::RateLimitExceeded);
         }
-
-        timestamps.push_back(now);
+        window.record(now, source_limit.map(|(source, _)| source));
         Ok(())
     }
 
-    /// Non-mutating admission probe: would [`Self::check_rate_limit_at`]
-    /// admit `key` right now? Unlike the check-and-stamp variant this never
-    /// creates the window entry and never records a timestamp, so callers can
-    /// gate a multi-window decision on every dimension before committing any
-    /// of them (rejected requests stay free). Not a reservation: a concurrent
-    /// commit can still fill the window between probe and commit.
-    pub(crate) fn would_admit_at(&self, key: &str, limit_per_minute: u32, now: Instant) -> bool {
-        self.windows
-            .get(key)
-            .map(|timestamps| {
-                let window = self.window_duration;
-                timestamps
-                    .iter()
-                    .filter(|stamp| now.duration_since(**stamp) < window)
-                    .count()
-                    < limit_per_minute as usize
-            })
-            .unwrap_or(true)
-    }
-
-    /// Current live stamp count for one window (test observation only).
     #[cfg(test)]
     pub(crate) fn window_len(&self, key: &str) -> usize {
-        self.windows.get(key).map(|entry| entry.len()).unwrap_or(0)
+        self.windows
+            .get(key)
+            .map(|entry| entry.timestamps.len())
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_window_len(&self, app_id: &str, source: IpAddr) -> usize {
+        self.windows
+            .get(app_id)
+            .and_then(|entry| entry.sources.get(&source).copied())
+            .unwrap_or(0)
     }
 
     /// Spawn a background task that periodically removes stale entries from
@@ -137,17 +189,9 @@ impl InMemoryRateLimiter {
     pub(crate) fn cleanup_at(&self, now: Instant) {
         let window = self.window_duration;
 
-        self.windows.retain(|_key, timestamps| {
-            // Trim expired entries.
-            while let Some(&front) = timestamps.front() {
-                if now.duration_since(front) >= window {
-                    timestamps.pop_front();
-                } else {
-                    break;
-                }
-            }
-            // Keep the entry only if there are remaining timestamps.
-            !timestamps.is_empty()
+        self.windows.retain(|_key, entry| {
+            entry.trim(now, window);
+            !entry.timestamps.is_empty()
         });
     }
 }
@@ -299,7 +343,86 @@ mod tests {
         keys.sort();
         assert_eq!(keys, ["live".to_owned(), "partial".to_owned()]);
         assert!(limiter.windows.get("stale").is_none());
-        assert_eq!(limiter.windows.get("partial").unwrap().len(), 1);
+        assert_eq!(limiter.windows.get("partial").unwrap().timestamps.len(), 1);
+    }
+
+    #[test]
+    fn out_of_order_admissions_release_capacity_at_each_timestamp_boundary() {
+        for sourced in [false, true] {
+            let limiter = InMemoryRateLimiter::new(Duration::from_secs(60));
+            let origin = Instant::now();
+            let first: IpAddr = "192.0.2.1".parse().unwrap();
+            let second: IpAddr = "192.0.2.2".parse().unwrap();
+            let admit = |source, now| {
+                if sourced {
+                    limiter.check_source_rate_limit_at("app", source, 2, 1, now)
+                } else {
+                    limiter.check_rate_limit_at("app", 2, now)
+                }
+            };
+            admit(first, origin + Duration::from_secs(1)).unwrap();
+            admit(second, origin).unwrap();
+            assert!(admit(second, origin + Duration::from_millis(59_999)).is_err());
+            admit(second, origin + Duration::from_secs(60))
+                .expect("the earlier timestamp expires even when recorded second");
+            assert!(admit(first, origin + Duration::from_secs(60)).is_err());
+            admit(first, origin + Duration::from_millis(61_001))
+                .expect("the later timestamp also expires independently");
+            assert_eq!(limiter.window_len("app"), 2);
+            if sourced {
+                assert_eq!(limiter.source_window_len("app", first), 1);
+                assert_eq!(limiter.source_window_len("app", second), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn source_window_cleanup_removes_expired_counters_and_preserves_live_apps() {
+        let limiter = InMemoryRateLimiter::new(Duration::from_secs(60));
+        let origin = Instant::now();
+        let first: IpAddr = "192.0.2.1".parse().unwrap();
+        let second: IpAddr = "192.0.2.2".parse().unwrap();
+        for (app, source, elapsed) in [("app", first, 0), ("app", second, 1), ("other", first, 2)] {
+            limiter
+                .check_source_rate_limit_at(
+                    app,
+                    source,
+                    2,
+                    1,
+                    origin + Duration::from_secs(elapsed),
+                )
+                .unwrap();
+        }
+        limiter.cleanup_at(origin + Duration::from_secs(60));
+        assert_eq!(limiter.window_len("app"), 1);
+        assert_eq!(limiter.source_window_len("app", first), 0);
+        assert_eq!(limiter.source_window_len("app", second), 1);
+        assert_eq!(limiter.source_window_len("other", first), 1);
+        limiter.cleanup_at(origin + Duration::from_secs(61));
+        assert!(!limiter.windows.contains_key("app"));
+        assert_eq!(limiter.source_window_len("other", first), 1);
+        limiter.cleanup_at(origin + Duration::from_secs(62));
+        assert!(limiter.windows.is_empty());
+    }
+
+    #[test]
+    fn zero_source_or_app_limit_rejects_without_a_charge() {
+        for (app_limit, source_limit) in [(0, 1), (1, 0)] {
+            let limiter = InMemoryRateLimiter::new(Duration::from_secs(60));
+            let source: IpAddr = "192.0.2.1".parse().unwrap();
+            assert!(matches!(
+                limiter.check_source_rate_limit_at(
+                    "app",
+                    source,
+                    app_limit,
+                    source_limit,
+                    Instant::now()
+                ),
+                Err(AuthError::RateLimitExceeded)
+            ));
+            assert_eq!(limiter.window_len("app"), 0);
+            assert_eq!(limiter.source_window_len("app", source), 0);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

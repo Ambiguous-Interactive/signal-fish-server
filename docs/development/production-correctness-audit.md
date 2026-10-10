@@ -46,7 +46,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | --- | --- | --- | --- |
 | A01 | `protocol/`, AsyncAPI, wire samples | Schema, errors, optional fields, v2/v3 projections, exhaustive operation mapping | Initial |
 | A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Initial; HTTP/2 route rejection recorded in F13 |
-| A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Pending |
+| A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Initial; concurrent handshake retry-budget loss recorded in F15 |
 | A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10 |
 | A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial |
 | A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial |
@@ -792,3 +792,51 @@ cargo nextest run --all-features --test mtls_token_binding_e2e -E 'test(http2_to
 This work does not certify arbitrary reverse proxies, browser token binding,
 HTTP/2 reconnect-response loss, or the rest of A02/A03. The broader audit stays
 open.
+
+### F15 — Concurrent handshake rejection consumes a source retry budget
+
+**Availability defect; high confidence.** Issue
+[#849](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/849).
+Baseline: `2dcc2726`. A03/A18. A prior capacity audit recorded the wasted
+source charge as a tolerated boundary. Its concurrent test proved the ceiling
+and rejection metrics, but did not test the rejected source's next retry.
+
+With an application ceiling of two and a source share of one, source A resolves
+at t=0. At t=59, source B probes both windows and charges its source. A test-only
+gate pauses B before its application charge. Source C takes the remaining
+application slot. B is rejected, but its source charge remains. At t=60, A's
+charge expires and the application has capacity; B's wasted charge still blocks
+its retry. The baseline regression fails with a rejected-source count of one
+instead of zero. A stronger run directly attempts B's t=60 retry and fails
+with `RateLimitExceeded`. This is a controlled resolver schedule, not a deployed
+incident.
+
+The repair stores application timestamps and typed source counters in one
+application window. Its entry lock covers expiry, both checks, and the charge.
+No rejection charges either dimension. Source counters are removed with their
+last expired timestamp; rejected sources create no counter. The source share,
+application ceiling, inclusive 60-second boundary, reload history, and one
+metric increment per rejection remain. Successful app-ID resolution still
+spends budget before later tenant credential verification, as documented.
+
+Concurrent callers can also sample the clock before taking the entry lock.
+The old append-only deque assumes timestamps arrive in order. An older stamp
+behind a newer stamp remains counted after its own expiry. The repair orders
+these arrivals. The out-of-order regression covers the public application-only
+method and the source-aware method, before, at, and after expiry. Restoring
+append-only insertion is its negative control. Cleanup uses the same expiry
+rule and removes source counters and empty application windows.
+
+The retained resolver gate runs after the atomic decision and outside its
+entry lock. The race oracle accepts either winning source, requires exactly
+one winner, compares each source's charges with its successful resolutions,
+and verifies the losing source can retry at t=60. The larger concurrent matrix
+also checks every source count against successful resolutions and retains its
+aggregate rejection-metric assertions. These tests do not certify every
+socket schedule, authenticated tenant policy, or other A03/A18 boundary.
+
+Focused verification:
+
+```bash
+cargo nextest run --lib -E 'test(auth::)'
+```
