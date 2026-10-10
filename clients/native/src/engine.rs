@@ -22,7 +22,8 @@
 //!
 //! The engine is owned and driven by the single orchestrator task. webrtc-rs's
 //! async peer handler and polled data channels never touch engine state directly;
-//! they forward through an unbounded [`EngineEvent`] channel back to the orchestrator.
+//! they forward through an [`EngineEvent`] channel back to the orchestrator.
+//! Message permits bound pending payloads without blocking lifecycle notifications.
 
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
@@ -34,7 +35,7 @@ use async_trait::async_trait;
 use clap::ValueEnum;
 use rtc::ice::{mdns::MulticastDnsMode, network_type::NetworkType, url::SchemeType, url::Url};
 use signal_fish_server::protocol::{IceServer, PlayerId};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore};
 use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelInit};
 use webrtc::peer_connection::{
     PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
@@ -54,6 +55,71 @@ pub const UNRELIABLE_LABEL: &str = "unreliable";
 const MAX_REMOTE_CANDIDATES: usize = 128;
 const MAX_REMOTE_CANDIDATE_BYTES: usize = 64 * 1024;
 const MAX_CANDIDATE_PAYLOAD_BYTES: usize = 4096;
+
+const MAX_CHANNEL_MESSAGE_BYTES: usize = 64 * 1024;
+const MAX_PENDING_CHANNEL_MESSAGES: usize = 256;
+const MAX_PENDING_CHANNEL_BYTES: usize = 1024 * 1024;
+
+struct MessageQueueBudget {
+    messages: Arc<Semaphore>,
+    bytes: Arc<Semaphore>,
+}
+
+impl Default for MessageQueueBudget {
+    fn default() -> Self {
+        Self {
+            messages: Arc::new(Semaphore::new(MAX_PENDING_CHANNEL_MESSAGES)),
+            bytes: Arc::new(Semaphore::new(MAX_PENDING_CHANNEL_BYTES)),
+        }
+    }
+}
+
+impl MessageQueueBudget {
+    fn reserve(&self, bytes: usize) -> Option<MessageQueuePermit> {
+        let message = self.messages.clone().try_acquire_owned().ok()?;
+        let bytes = self
+            .bytes
+            .clone()
+            .try_acquire_many_owned(u32::try_from(bytes).ok()?)
+            .ok()?;
+        Some(MessageQueuePermit {
+            _message: message,
+            _bytes: bytes,
+        })
+    }
+}
+
+/// Holds receive capacity until a message is handled or discarded.
+pub struct MessageQueuePermit {
+    _message: OwnedSemaphorePermit,
+    _bytes: OwnedSemaphorePermit,
+}
+
+#[cfg(test)]
+impl MessageQueuePermit {
+    pub(crate) fn for_test() -> Self {
+        MessageQueueBudget::default().reserve(0).unwrap()
+    }
+}
+
+struct ChannelReceiveAdmission {
+    budget: Arc<MessageQueueBudget>,
+    rejected: Mutex<bool>,
+}
+
+impl ChannelReceiveAdmission {
+    fn decode_and_reserve(&self, data: &[u8]) -> Option<(String, MessageQueuePermit)> {
+        if data.len() > MAX_CHANNEL_MESSAGE_BYTES {
+            return None;
+        }
+        let text = String::from_utf8_lossy(data);
+        if text.len() > MAX_CHANNEL_MESSAGE_BYTES {
+            return None;
+        }
+        let permit = self.budget.reserve(text.len())?;
+        Some((text.into_owned(), permit))
+    }
+}
 
 /// Notifications from webrtc-rs callbacks back to the orchestrator task.
 /// (No `Debug` derive: `RTCDataChannel` is not `Debug`.)
@@ -95,12 +161,20 @@ pub enum EngineEvent {
         generation: u64,
         label: String,
     },
-    /// A text message arrived on an open data channel.
+    /// A text message arrived on an open data channel. Keep `queue_permit`
+    /// until its text is consumed or discarded, including asynchronous output.
     ChannelMessage {
         peer: PlayerId,
         generation: u64,
         label: String,
         text: String,
+        queue_permit: MessageQueuePermit,
+    },
+    /// Receive limits failed; the orchestrator must retire this physical link.
+    ChannelReceiveRejected {
+        peer: PlayerId,
+        generation: u64,
+        label: String,
     },
 }
 
@@ -125,6 +199,9 @@ impl EngineEvent {
             }
             | Self::ChannelMessage {
                 peer, generation, ..
+            }
+            | Self::ChannelReceiveRejected {
+                peer, generation, ..
             } => (*peer, *generation),
         }
     }
@@ -139,6 +216,7 @@ struct PeerLink {
     channels: HashMap<String, Arc<dyn DataChannel>>,
     /// Shared with the callback so unread announcements retain at most two channels.
     channel_admission: Arc<Mutex<RequiredChannelAdmission>>,
+    receive_admission: Arc<ChannelReceiveAdmission>,
     /// Labels observed open so far; the pair is connected when both labels are in.
     open_labels: BTreeSet<String>,
     /// Remote ICE candidates cannot be applied before the remote description.
@@ -227,6 +305,7 @@ pub struct Engine {
     settings: EngineSettings,
     runtime: Arc<dyn Runtime>,
     events: mpsc::UnboundedSender<EngineEvent>,
+    message_budget: Arc<MessageQueueBudget>,
     peers: HashMap<PlayerId, PeerLink>,
     next_generation: u64,
     /// Routing answers for the current ICE endpoints, resolved once per set
@@ -254,6 +333,7 @@ impl Engine {
             settings,
             runtime,
             events,
+            message_budget: Arc::new(MessageQueueBudget::default()),
             peers: HashMap::new(),
             next_generation: 0,
             ice_route_sources: None,
@@ -352,6 +432,10 @@ impl Engine {
             setting_engine = setting_engine.with_network_types(vec![NetworkType::Tcp4]);
         }
         let channel_admission = Arc::new(Mutex::new(RequiredChannelAdmission::default()));
+        let receive_admission = Arc::new(ChannelReceiveAdmission {
+            budget: self.message_budget.clone(),
+            rejected: Mutex::new(false),
+        });
         let handler = Arc::new(PeerHandler {
             peer,
             generation,
@@ -381,6 +465,7 @@ impl Engine {
             channels: HashMap::new(),
             channel_admission: channel_admission.clone(),
             open_labels: BTreeSet::new(),
+            receive_admission: receive_admission.clone(),
             pending_candidates: Vec::new(),
             remote_candidate_count: 0,
             remote_candidate_bytes: 0,
@@ -422,6 +507,7 @@ impl Engine {
                 generation,
                 RELIABLE_LABEL.to_string(),
                 reliable.clone(),
+                receive_admission.clone(),
             );
             let unreliable_task = spawn_channel_event_loop(
                 &self.runtime,
@@ -430,6 +516,7 @@ impl Engine {
                 generation,
                 UNRELIABLE_LABEL.to_string(),
                 unreliable.clone(),
+                receive_admission,
             );
             let link = self
                 .peers
@@ -594,6 +681,7 @@ impl Engine {
             link.generation,
             label,
             channel,
+            link.receive_admission.clone(),
         ));
     }
 
@@ -1195,10 +1283,15 @@ fn spawn_channel_event_loop(
     generation: u64,
     label: String,
     channel: Arc<dyn DataChannel>,
+    admission: Arc<ChannelReceiveAdmission>,
 ) -> Box<dyn JoinHandle> {
     let events = events.clone();
     runtime.spawn(Box::pin(async move {
         while let Some(event) = channel.poll().await {
+            let mut rejected = admission.rejected.lock().await;
+            if *rejected {
+                break;
+            }
             match event {
                 DataChannelEvent::OnOpen => {
                     let _ = events.send(EngineEvent::ChannelOpen {
@@ -1208,13 +1301,32 @@ fn spawn_channel_event_loop(
                     });
                 }
                 DataChannelEvent::OnMessage(message) => {
-                    let text = String::from_utf8_lossy(&message.data).into_owned();
-                    let _ = events.send(EngineEvent::ChannelMessage {
-                        peer,
-                        generation,
-                        label: label.clone(),
-                        text,
-                    });
+                    let Some((text, queue_permit)) = admission.decode_and_reserve(&message.data)
+                    else {
+                        *rejected = true;
+                        let _ = events.send(EngineEvent::ChannelReceiveRejected {
+                            peer,
+                            generation,
+                            label: label.clone(),
+                        });
+                        drop(rejected);
+                        let _ = channel.close().await;
+                        break;
+                    };
+                    if events
+                        .send(EngineEvent::ChannelMessage {
+                            peer,
+                            generation,
+                            label: label.clone(),
+                            text,
+                            queue_permit,
+                        })
+                        .is_err()
+                    {
+                        drop(rejected);
+                        let _ = channel.close().await;
+                        break;
+                    }
                 }
                 DataChannelEvent::OnError => {
                     tracing::warn!(%peer, channel = %label, "data channel became unreadable");
@@ -1274,6 +1386,10 @@ mod task_tests;
 #[cfg(test)]
 #[path = "engine_admission_tests.rs"]
 mod admission_tests;
+
+#[cfg(test)]
+#[path = "engine_receive_tests.rs"]
+mod receive_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2392,6 +2508,12 @@ mod tests {
                 generation: stale_generation,
                 label: RELIABLE_LABEL.to_string(),
                 text: "stale".to_string(),
+                queue_permit: crate::engine::MessageQueuePermit::for_test(),
+            },
+            EngineEvent::ChannelReceiveRejected {
+                peer,
+                generation: stale_generation,
+                label: RELIABLE_LABEL.to_string(),
             },
         ];
         assert!(stale_events

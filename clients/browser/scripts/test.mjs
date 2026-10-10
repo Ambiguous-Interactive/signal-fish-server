@@ -6,6 +6,7 @@ for (const entryPoint of [
   'src/page/wire.test.ts',
   'src/page/orchestrator.test.ts',
   'src/cli/args.test.ts',
+  'src/cli/output.test.ts',
 ]) {
   const result = await build({
     entryPoints: [entryPoint],

@@ -24,8 +24,14 @@ import { fileURLToPath } from 'node:url';
 import { chromium, type BrowserServer, type Page } from 'playwright-core';
 
 import { deadlineAfterSeconds, scheduleDeadline } from '../shared/deadline.js';
-import { EXIT_HARD_TIMEOUT, EXIT_PROTOCOL_ERROR, type RunConfig } from '../shared/types.js';
+import {
+  EXIT_CONNECTION_ERROR,
+  EXIT_HARD_TIMEOUT,
+  EXIT_PROTOCOL_ERROR,
+  type RunConfig,
+} from '../shared/types.js';
 import { parseArgs, UsageError, USAGE, type CliOptions } from './args.js';
+import { writeAcknowledgedEventLine } from './output.js';
 
 const startedAtMs = Date.now();
 
@@ -40,24 +46,25 @@ function logError(message: string): void {
 let stdoutClosed = false;
 process.stdout.on('error', () => {
   stdoutClosed = true;
+  void exitWith(EXIT_CONNECTION_ERROR);
 });
 
-function writeEventLine(line: string): void {
-  if (stdoutClosed) {
-    return;
-  }
+async function writeEventLine(line: string): Promise<void> {
+  if (stdoutClosed) throw new Error('stdout is closed');
   try {
-    process.stdout.write(`${line}\n`);
+    await writeAcknowledgedEventLine(process.stdout, line);
   } catch (error) {
     stdoutClosed = true;
     logError(
       `stdout write failed (consumer closed?); suppressing all further events: ${String(error)}`,
     );
+    void exitWith(EXIT_CONNECTION_ERROR);
+    throw new Error('stdout event delivery failed');
   }
 }
 
 function emitEvent(event: Record<string, unknown>): void {
-  writeEventLine(JSON.stringify(event));
+  void writeEventLine(JSON.stringify(event)).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -106,7 +113,7 @@ async function exitWith(code: number): Promise<void> {
   shuttingDown = true;
   emitEvent({ event: 'exiting', code });
   await teardownBrowser();
-  process.exit(code);
+  process.exit(stdoutClosed && code === 0 ? EXIT_CONNECTION_ERROR : code);
 }
 
 /**
@@ -229,9 +236,8 @@ async function setupPage(options: CliOptions): Promise<Page> {
   });
   // The stdout bridge must exist before the page bundle (and any event) does.
   await page.exposeFunction('__sf_emit', (line: unknown) => {
-    if (typeof line === 'string') {
-      writeEventLine(line);
-    }
+    if (typeof line !== 'string') throw new Error('stdout event must be a string');
+    return writeEventLine(line);
   });
   await page.exposeFunction('__sf_success_released', () => {
     const releaseFile = options.successReleaseFile;

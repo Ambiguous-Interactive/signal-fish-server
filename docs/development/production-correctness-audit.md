@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Pending |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -1384,3 +1384,59 @@ continues that separate assessment. #870 remains open for full stack resource
 bounds and application message queues; #872 reset/reopen and #853 initial
 establishment remain unresolved. A bounded announcement queue does not prove
 total WebRTC memory safety.
+
+### F27 — Incoming data-channel messages grow client application backlogs
+
+Baseline: `4c006627`. A20. Finding: #878, under #870.
+
+Native channel pollers put every decoded message into an unbounded engine event
+queue. Browser callbacks retain every decoded message in the orchestrator's
+serialized promise chain. A channel-map bound does not bound those payloads.
+
+Red evidence: a real local native pair sends 257 ordered reliable messages
+while the receiver event queue is unread. The close marker ends observation;
+all 257 messages arrive in order, exceeding the expected 256-entry limit.
+The browser callback barrier also fails with 257 retained messages instead of
+256. A separate deferred-output control shows that releasing capacity before
+the browser's stdout bridge acknowledges delivery moves the backlog downstream.
+
+The repair limits each raw and decoded message to 64 KiB, and pending decoded
+messages to 256 entries and 1 MiB across peers and physical-link generations.
+Native events own count and byte permits until processing or discard. Both
+pollers share a serialized rejection latch. Browser callbacks reserve before
+queuing and release in `finally`, after stdout acknowledges the message line.
+The CLI acknowledges the write callback, including stream backpressure, and
+fails the run on stdout errors. Admission failure reports one terminal error,
+closes the failed link, and uses the existing relay-fallback path. Payload
+capacity does not prevent a terminal notification from entering the queue.
+
+Focused controls cover exact count and byte ceilings, empty messages, decoded
+UTF-8 expansion, both native channel pollers, retained old-generation messages,
+stale rejection callbacks, closed receivers, admitted FIFO traffic, fresh-link
+recovery, healthy-peer progress, deferred browser output, and output errors.
+The native fallback control checks the actual disconnected `TransportStatus`
+frame on the signaling socket. Browser controls check fallback after a connected
+pair fails. Existing live admission controls preserve both required channels.
+
+The first native oversized-wire experiment timed out without an application
+callback. rtc 0.21 defaults to a 65536-byte maximum SCTP message size and sizes
+its internal message read buffer to that limit, so that history
+does not test the application guard. The raw-size guard has a direct boundary
+control; a 22000-byte invalid UTF-8 binary message reaches the live callback
+and exceeds the decoded cap. An early concurrent test closed the sender before
+receipt and lost offered work. The corrected history waits for receive rejection
+before closure, then waits for both real polling handles to finish. Neither
+timeout was accepted as a passing observation or repaired by a longer deadline.
+
+**Migration:** Chunk reference-client messages above 64 KiB and consume output.
+Native library consumers must keep the message's `queue_permit` through handling
+and process `ChannelReceiveRejected` as a failed link. Server wire formats and
+opaque relay payloads do not change. Rust and .NET SDKs leave peer networking
+to the application. [Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355)
+tracks its mesh receive limits and reference-client compatibility.
+
+These controls bound decoded data-channel application traffic, not total
+WebRTC or process memory. Browser WebSocket input and ordinary diagnostic output
+have separate queue paths tracked in #879 that still need resource assessment. #870 remains
+open for those paths and stack retention. #872 reset/reopen and #853 initial
+establishment remain unresolved; the broader A20 audit is incomplete.

@@ -114,6 +114,10 @@ const SEND_BUFFER_LIMIT_BYTES = 1_048_576;
 /** Defensive bounds for same-generation signals racing local pair creation. */
 const MAX_PENDING_SIGNALS_PER_PEER = 32;
 const MAX_PENDING_SIGNALS_TOTAL = 128;
+// Global across all physical links and generations; stale queued work keeps
+// its credits until the promise chain actually consumes it.
+const MAX_PENDING_CHANNEL_MESSAGES = 256;
+const MAX_PENDING_CHANNEL_MESSAGE_BYTES = 1024 * 1024;
 /** A failure that terminates the run with a specific exit code. */
 class FatalError extends Error {
   readonly code: number;
@@ -634,6 +638,8 @@ class Orchestrator {
 
   // --- Serialized input processing (the "orchestrator task") ---
   private chain: Promise<void> = Promise.resolve();
+  private pendingChannelMessages = 0;
+  private pendingChannelMessageBytes = 0;
   private finishResolve: ((code: number) => void) | null = null;
   private finished = false;
 
@@ -736,25 +742,43 @@ class Orchestrator {
           }
         });
       },
-      onChannelClosed: (peer, generation, label) => {
+      onChannelClosed: (peer, generation, label, reason) => {
         this.enqueue(async () => {
           if (!this.engine.isCurrentGeneration(peer, generation)) {
             return;
           }
+          if (reason !== undefined) emit({ event: 'error', message: reason });
           emit({ event: 'channel_closed', peer, label });
           this.handlePeerTransportLoss(peer);
         });
       },
-      onChannelMessage: (peer, generation, label, text) => {
-        this.enqueue(async () => {
-          if (!this.engine.isCurrentGeneration(peer, generation)) {
-            return;
-          }
-          if (this.config.exchange && isExchangeProbe(peer, label, text)) {
-            this.exchangeLedger.noteReceived(peer, label);
-          }
-          emit({ event: 'channel_message', peer, label, text });
-        });
+      onChannelMessage: (peer, generation, label, text, textBytes) => {
+        if (this.finished) return;
+        // Admission must run in the browser callback, before the closure is
+        // retained by enqueue. Checks inside that closure cannot bound backlog.
+        if (
+          this.pendingChannelMessages >= MAX_PENDING_CHANNEL_MESSAGES ||
+          textBytes > MAX_PENDING_CHANNEL_MESSAGE_BYTES - this.pendingChannelMessageBytes
+        )
+          return false;
+        this.pendingChannelMessages += 1;
+        this.pendingChannelMessageBytes += textBytes;
+        this.enqueue(
+          async () => {
+            if (!this.engine.isCurrentGeneration(peer, generation)) {
+              return;
+            }
+            if (this.config.exchange && isExchangeProbe(peer, label, text)) {
+              this.exchangeLedger.noteReceived(peer, label);
+            }
+            await emit({ event: 'channel_message', peer, label, text }, true);
+          },
+          () => {
+            this.pendingChannelMessages -= 1;
+            this.pendingChannelMessageBytes -= textBytes;
+          },
+        );
+        return true;
       },
     });
   }
@@ -1089,15 +1113,19 @@ class Orchestrator {
    * timers run and the next wake is scheduled (the native loop's
    * `process_timers` + `next_wake` pattern).
    */
-  private enqueue(task: () => Promise<void>): void {
+  private enqueue(task: () => Promise<void>, release?: () => void): void {
     this.chain = this.chain
       .then(async () => {
-        if (this.finished) {
-          return;
+        try {
+          if (this.finished) {
+            return;
+          }
+          await task();
+          this.processTimers();
+          this.scheduleWake();
+        } finally {
+          release?.();
         }
-        await task();
-        this.processTimers();
-        this.scheduleWake();
       })
       .catch((error: unknown) => {
         this.fail(

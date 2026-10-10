@@ -106,6 +106,16 @@ rebuild alone does not reset the exchange.
 
 The client keeps the first data channel for each label in a peer connection.
 It closes duplicate channels so they cannot replace a working channel.
+Incoming data-channel messages are limited to 64 KiB of raw input and decoded
+UTF-8 text. The client retains at most 256 pending messages and 1 MiB of decoded
+text across all peers and connection generations. A message stays charged
+until stdout consumes its event line. A stdout failure ends the run with an error.
+The client reports an error and closes the affected P2P transport when a limit
+is exceeded. Other peers and
+signaling remain available. These limits cover the application queue, not the
+browser's internal WebRTC buffers. Binary messages use array buffers and decode
+as UTF-8 with replacement characters for invalid bytes.
+**Migration:** Split payloads larger than 64 KiB and keep consuming output.
 
 ## CLI reference
 

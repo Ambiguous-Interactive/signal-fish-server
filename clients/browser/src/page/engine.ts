@@ -30,14 +30,21 @@ export const UNRELIABLE_LABEL = 'unreliable';
 const MAX_REMOTE_CANDIDATES = 128;
 const MAX_REMOTE_CANDIDATE_BYTES = 64 * 1024;
 const MAX_CANDIDATE_PAYLOAD_BYTES = 4096;
+const MAX_CHANNEL_MESSAGE_BYTES = 64 * 1024;
 
 /** Callbacks from engine-owned browser event handlers to the orchestrator. */
 export interface EngineCallbacks {
   onLocalCandidate(peer: string, generation: number, candidateJson: string): void;
   onPcState(peer: string, generation: number, state: string): void;
   onChannelOpen(peer: string, generation: number, label: string): void;
-  onChannelClosed(peer: string, generation: number, label: string): void;
-  onChannelMessage(peer: string, generation: number, label: string, text: string): void;
+  onChannelClosed(peer: string, generation: number, label: string, reason?: string): void;
+  onChannelMessage(
+    peer: string,
+    generation: number,
+    label: string,
+    text: string,
+    textBytes: number,
+  ): boolean | void;
 }
 
 /** An ICE server entry from a `SessionPlan` (wire shape, camel-cased here). */
@@ -58,6 +65,7 @@ interface PeerLink {
   remoteCandidateBytes: number;
   remoteDescriptionSet: boolean;
   pairConnected: boolean;
+  receiveFailed: boolean;
 }
 
 /** The per-client WebRTC engine (single-threaded; owned by the orchestrator). */
@@ -122,6 +130,7 @@ export class Engine {
       remoteCandidateBytes: 0,
       remoteDescriptionSet: false,
       pairConnected: false,
+      receiveFailed: false,
     };
     this.peers.set(peer, link);
     this.registerPcHandlers(peer, link);
@@ -346,6 +355,7 @@ export class Engine {
     channel: RTCDataChannel,
   ): void {
     const label = channel.label;
+    channel.binaryType = 'arraybuffer';
     // A remotely announced channel may already be open at registration time
     // (the announce task and the open transition race); notify exactly once
     // either way so the open edge can never be missed.
@@ -354,6 +364,7 @@ export class Engine {
       const link = this.peers.get(peer);
       if (
         !openNotified &&
+        !callbackLink.receiveFailed &&
         channel.readyState === 'open' &&
         link === callbackLink &&
         link.channels.get(label) === channel
@@ -368,22 +379,63 @@ export class Engine {
     }
     channel.onmessage = (event: MessageEvent<unknown>) => {
       const link = this.peers.get(peer);
-      if (link !== callbackLink || link.channels.get(label) !== channel) {
+      if (link !== callbackLink || link.receiveFailed || link.channels.get(label) !== channel) {
+        return;
+      }
+      // Preflight before encoding/decoding so even rejected payloads have
+      // bounded application allocation. UTF-16 length bounds UTF-8 from below.
+      const data = event.data;
+      if (
+        (typeof data === 'string' && data.length > MAX_CHANNEL_MESSAGE_BYTES) ||
+        (data instanceof ArrayBuffer && data.byteLength > MAX_CHANNEL_MESSAGE_BYTES)
+      ) {
+        rejectMessage('incoming data-channel message exceeds 65536 bytes');
+        return;
+      }
+      if (typeof data !== 'string' && !(data instanceof ArrayBuffer)) {
+        rejectMessage('incoming data-channel message has an unsupported type');
         return;
       }
       const text =
-        typeof event.data === 'string'
-          ? event.data
-          : new TextDecoder().decode(event.data as ArrayBuffer);
-      this.callbacks.onChannelMessage(peer, callbackLink.generation, label, text);
+        typeof data === 'string'
+          ? data
+          : new TextDecoder('utf-8', { ignoreBOM: true }).decode(data);
+      const textBytes = new TextEncoder().encode(text).byteLength;
+      if (textBytes > MAX_CHANNEL_MESSAGE_BYTES) {
+        rejectMessage('incoming data-channel message exceeds 65536 bytes');
+        return;
+      }
+      if (
+        this.callbacks.onChannelMessage(
+          peer,
+          callbackLink.generation,
+          label,
+          text,
+          textBytes,
+        ) === false
+      ) {
+        rejectMessage('incoming data-channel message backlog exhausted');
+      }
     };
     // A required data channel can fail while the peer connection itself stays
     // `connected`. Treat close/error as a terminal pair signal so the
     // orchestrator reports relay fallback and permits a later plan to rebuild.
     let terminalNotified = false;
+    const rejectMessage = (reason: string) => {
+      if (callbackLink.receiveFailed) return;
+      callbackLink.receiveFailed = true;
+      terminalNotified = true;
+      this.callbacks.onChannelClosed(peer, callbackLink.generation, label, reason);
+      for (const required of callbackLink.channels.values()) required.close();
+    };
     const notifyClosed = () => {
       const link = this.peers.get(peer);
-      if (!terminalNotified && link === callbackLink && link.channels.get(label) === channel) {
+      if (
+        !terminalNotified &&
+        link === callbackLink &&
+        !link.receiveFailed &&
+        link.channels.get(label) === channel
+      ) {
         terminalNotified = true;
         this.callbacks.onChannelClosed(peer, callbackLink.generation, label);
       }
