@@ -1494,6 +1494,11 @@ racing join/reconnect and process-loss behavior versus documented limits.
 
 ### C1 authentication admission boundary review (2026-10-03)
 
+The tolerated source-charge race below is superseded by
+[F15 in the production correctness audit](production-correctness-audit.md#f15-concurrent-handshake-rejection-consumes-a-source-retry-budget).
+The earlier experiment established ceiling conservation, not rejected-source
+retry availability.
+
 At `d70867db` (main after #734), reviewed the resource-and-input-safety
 slice's unauthenticated-admission families across `src/auth/middleware.rs`,
 `src/auth/rate_limiter.rs`, the room-side budgets in `src/rate_limit.rs`,
