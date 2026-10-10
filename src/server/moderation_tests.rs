@@ -2442,6 +2442,23 @@ async fn ban_evicts_blocks_rejoin_and_lifts_on_unban() {
         .expect("room exists");
     assert!(room.is_banned(&target), "storage must record the ban");
 
+    // A kicked socket cannot join again. Use the arbitrary-id test seam to
+    // isolate ban policy for the same identity on a fresh transport.
+    server.unregister_client(&target).await;
+    let (fresh_sender, fresh_receiver) = mpsc::channel(8);
+    server.connect_client(target, fresh_sender).await;
+    target_rx = fresh_receiver;
+    let fresh_close = server
+        .connection_manager
+        .close_signal_for(&target)
+        .expect("fresh target transport exists");
+    assert_eq!(fresh_close.requested_reason(), None);
+    assert_eq!(
+        target_close_listener.requested_reason(),
+        Some(CloseReason::Kicked),
+        "fresh registration must not reset the old socket's terminal close"
+    );
+
     // The banned id cannot rejoin as a player...
     assert_eq!(
         join_with_password(&server, &target, &mut target_rx, "BAN001", "guest", None)
@@ -2490,6 +2507,11 @@ async fn ban_evicts_blocks_rejoin_and_lifts_on_unban() {
     join_with_password(&server, &target, &mut target_rx, "BAN001", "guest", None)
         .await
         .expect("unbanned id must be able to rejoin");
+    assert_eq!(fresh_close.requested_reason(), None);
+    assert_eq!(
+        target_close_listener.requested_reason(),
+        Some(CloseReason::Kicked)
+    );
 }
 
 #[tokio::test]

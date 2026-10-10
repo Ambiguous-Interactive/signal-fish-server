@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve reconnect retry tokens when the socket is marked for closure before the response commits (#867).
 - Keep reconnect snapshots within the outbound frame limit by retaining the fitting replay suffix (#864).
 - Keep reference-client P2P negotiation running after a buffered ICE candidate is rejected (#863).
 - Preserve embedded-server reconnect retry tokens when the response receiver closes before commit (#858).

@@ -86,6 +86,11 @@ and the client may never learn the replacement. Retrying the old token cannot
 recover that seat after the committed reconnect. The application must recover
 through a fresh join; the protocol has no receipt acknowledgement for rotation.
 
+If the server marks the socket for closure before response queue admission,
+it cancels the restore and preserves the old token. Open a fresh socket and
+retry within the reconnection window. This also applies when the response
+receiver closes before admission.
+
 ### Phase 2: Reconnect After a Disconnect
 
 When the WebSocket connection drops, open a new WebSocket to the server

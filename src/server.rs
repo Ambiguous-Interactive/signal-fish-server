@@ -3255,9 +3255,14 @@ impl InMemoryMessageCoordinator {
         player_id: PlayerId,
         permit: DeliveryPermit,
         message: Arc<ServerMessage>,
+        close: &ConnectionCloseSignal,
     ) -> DeliveryOutcome {
+        let Some(result) = close.commit_if_open(|| permit.send(message)) else {
+            self.record_canceled_delivery(player_id);
+            return DeliveryOutcome::Canceled;
+        };
         let stats = self.metrics.connection_delivery_stats(&player_id);
-        match permit.send(message) {
+        match result {
             Ok(outcome) => {
                 crate::coordination::record_queue_outcome(&self.metrics, stats.as_ref(), outcome)
             }
@@ -4975,7 +4980,8 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         // (1) wait for every pre-existing broadcast snapshot to finish, (2)
         // capture the sender watermarks, (3) queue `Reconnected`, and (4)
         // register the player into the room before later broadcasts can route.
-        let outcome = self.commit_initial_transition(player_id, permit, build_message());
+        let outcome =
+            self.commit_initial_transition(player_id, permit, build_message(), &delivery.close);
         if outcome == DeliveryOutcome::Delivered {
             let mut room_players = self.room_players.write().await;
             let mut clients = self.local_clients.write().await;
@@ -5068,7 +5074,8 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 // The armed guard accounts the released reservation.
                 return Ok(DeliveryOutcome::Canceled);
             }
-            let outcome = self.commit_initial_transition(player_id, permit, message);
+            let outcome =
+                self.commit_initial_transition(player_id, permit, message, &delivery.close);
             reservation_guard.defuse();
             outcome
         };

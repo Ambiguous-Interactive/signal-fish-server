@@ -2437,6 +2437,114 @@ async fn drain_gated_commit_refusal_accounts_the_reserved_baseline() {
         .expect("the refused reservation released its capacity slot");
 }
 
+/// A physical close pinned by the baseline builder must cancel registration
+/// before the reserved baseline and room route commit.
+#[tokio::test]
+async fn test_initial_registration_close_before_commit_cancels_baseline_and_route() {
+    for kind in [ControlQueueKind::Legacy, ControlQueueKind::Classified] {
+        for async_builder in [false, true] {
+            for close_before_commit in [false, true] {
+                let context = format!(
+                    "{kind:?}, async={async_builder}, close_before_commit={close_before_commit}"
+                );
+                let metrics = Arc::new(ServerMetrics::new());
+                let coordinator = InMemoryMessageCoordinator::with_delivery_policy(
+                    Duration::from_secs(30),
+                    Arc::clone(&metrics),
+                );
+                let room_id = RoomId::new_v4();
+                let player_id = PlayerId::new_v4();
+                let (delivery, _listener, mut receiver) = full_control_queue(kind);
+                receiver.pop_message("release the initial registration slot");
+                let capacity_probe = delivery.sender.clone();
+                let close = delivery.close.clone();
+                let builder_close = close.clone();
+                let build = move || {
+                    // Both builders run after the queue reservation succeeds.
+                    if close_before_commit {
+                        assert!(builder_close.request_close(CloseReason::Unregistered));
+                    }
+                    Arc::new(ServerMessage::Pong)
+                };
+                let outcome = if async_builder {
+                    coordinator
+                        .register_local_client_with_initial_message_async(
+                            player_id,
+                            room_id,
+                            delivery,
+                            &|| true,
+                            None,
+                            None,
+                            Box::new(move |_| Box::pin(async move { Ok(build()) })),
+                        )
+                        .await
+                } else {
+                    coordinator
+                        .register_local_client_with_initial_message(
+                            player_id,
+                            room_id,
+                            delivery,
+                            Box::new(build),
+                        )
+                        .await
+                }
+                .expect("registration resolves without a storage error");
+
+                assert_eq!(
+                    outcome,
+                    if close_before_commit {
+                        DeliveryOutcome::Canceled
+                    } else {
+                        DeliveryOutcome::Delivered
+                    },
+                    "{context}"
+                );
+                let routes = coordinator
+                    .routed_player_ids(&room_id)
+                    .await
+                    .expect("inspect registration routes")
+                    .expect("in-memory coordinator exposes routes");
+                if close_before_commit {
+                    assert!(routes.is_empty(), "{context}: no route may commit");
+                } else {
+                    // A close after commit cannot revoke its delivered result.
+                    assert!(close.request_close(CloseReason::Unregistered));
+                    assert_eq!(routes, vec![player_id], "{context}");
+                    assert!(matches!(
+                        receiver
+                            .pop_message("committed baseline survives later close")
+                            .as_ref(),
+                        ServerMessage::Pong
+                    ));
+                }
+                receiver.assert_empty(&context);
+                drop(
+                    capacity_probe
+                        .try_reserve_control(None)
+                        .expect("registration releases its reserved queue slot"),
+                );
+                assert_eq!(
+                    metrics.websocket_delivery_attempts.load(Ordering::Relaxed),
+                    1,
+                    "{context}: exactly one delivery attempt"
+                );
+                assert_eq!(
+                    metrics
+                        .websocket_deliveries_canceled
+                        .load(Ordering::Relaxed),
+                    u64::from(close_before_commit),
+                    "{context}: only a pre-commit close cancels the attempt"
+                );
+                assert_eq!(
+                    metrics.websocket_messages_dropped.load(Ordering::Relaxed),
+                    0,
+                    "{context}: a canceled registration is not message loss"
+                );
+            }
+        }
+    }
+}
+
 /// A failed baseline build releases the reserved frame after the attempt was
 /// counted, so the release must be accounted as a canceled delivery attempt.
 /// Red condition: the error propagated without resolving the attempt.

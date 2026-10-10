@@ -5202,6 +5202,144 @@ async fn receiver_lost_during_reconnect_baseline_build_preserves_retry_token() {
     }
 }
 
+// Regression #867: terminal close before baseline submission must preserve the retry token.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn socket_close_during_reconnect_baseline_build_preserves_retry_token() {
+    for (classified, correlated, reason) in [false, true].into_iter().flat_map(|classified| {
+        [false, true].into_iter().flat_map(move |correlated| {
+            [
+                crate::coordination::CloseReason::ActivityTimeout,
+                crate::coordination::CloseReason::SlowConsumer,
+                crate::coordination::CloseReason::Unregistered,
+            ]
+            .into_iter()
+            .map(move |reason| (classified, correlated, reason))
+        })
+    }) {
+        let server = create_test_server().await;
+        let mut fixture = setup_mesh_reconnect(&server, 16, 16, false).await;
+        let _classified_receiver = if classified {
+            server.connection_manager.remove_client(&fixture.current);
+            let (sender, receiver) = crate::coordination::outbound_queue::channel(16, 16);
+            fixture.current = server
+                .connection_manager
+                .register_classified_client(
+                    crate::coordination::DeliverySender::classified(sender),
+                    crate::coordination::ConnectionCloseSignal::detached(),
+                    next_addr(),
+                    server.instance_id,
+                )
+                .await
+                .expect("classified reconnect actor");
+            server.set_client_protocol(&fixture.current, v3_webrtc());
+            Some(receiver)
+        } else {
+            None
+        };
+        let operation_id = correlated.then(|| uuid::Uuid::from_u128(867));
+        let database = server
+            .database()
+            .as_any()
+            .downcast_ref::<InMemoryDatabase>()
+            .expect("in-memory database");
+        database.pause_next_get_room_players_for_test();
+        let reconnect_task = {
+            let server = Arc::clone(&server);
+            let token = fixture.token.clone();
+            let current = fixture.current;
+            let reconnecting = fixture.reconnecting;
+            let room_id = fixture.room_id;
+            tokio::spawn(async move {
+                server
+                    .handle_reconnect_operation(
+                        &current,
+                        &reconnecting,
+                        &room_id,
+                        &token,
+                        operation_id,
+                    )
+                    .await
+            })
+        };
+        timeout(
+            Duration::from_secs(1),
+            database.wait_for_paused_get_room_players_for_test(),
+        )
+        .await
+        .expect("baseline builder holds its response reservation");
+        // Capture the physical socket's signal after reassignment. The receiver
+        // remains live, as it does before a paused writer observes terminal close.
+        let close = server
+            .connection_manager
+            .close_signal_for(&fixture.reconnecting)
+            .expect("reassigned socket close signal");
+        assert!(close.request_close(reason));
+        assert_eq!(close.requested_reason(), Some(reason));
+        database.release_paused_get_room_players_for_test();
+        assert!(
+            !timeout(Duration::from_secs(2), reconnect_task)
+                .await
+                .expect("reconnect completes")
+                .expect("task lives"),
+            "terminal socket close before commit must reject restore; reason={reason:?}, classified={classified}, correlated={correlated}"
+        );
+        let manager = server.reconnection_manager().expect("reconnection enabled");
+        manager
+            .validate_reconnection(&fixture.reconnecting, &fixture.room_id, &fixture.token)
+            .await
+            .expect("old token remains valid for retry");
+        assert!(!manager.has_pre_issued_token(&fixture.reconnecting).await);
+        assert!(server.connection_manager.has_client(&fixture.current));
+        assert!(!server.connection_manager.has_client(&fixture.reconnecting));
+        assert_eq!(server.get_client_room(&fixture.current).await, None);
+        assert!(!server
+            .message_coordinator
+            .routed_player_ids(&fixture.room_id)
+            .await
+            .expect("room routes")
+            .expect("in-memory routing snapshot")
+            .contains(&fixture.reconnecting));
+        let peer_announcement = fixture.existing_rx.try_recv();
+        assert!(
+            matches!(peer_announcement, Err(mpsc::error::TryRecvError::Empty)),
+            "a rejected restore must not announce PlayerReconnected"
+        );
+        assert!(!server
+            .database
+            .get_room_players(&fixture.room_id)
+            .await
+            .expect("room players")
+            .iter()
+            .any(|player| player.id == fixture.reconnecting));
+        let (retry, mut retry_rx) = register_client(&server).await;
+        server.set_client_protocol(&retry, v3_webrtc());
+        assert!(
+            server
+                .handle_reconnect(
+                    &retry,
+                    &fixture.reconnecting,
+                    &fixture.room_id,
+                    &fixture.token
+                )
+                .await
+        );
+        match recv(&mut retry_rx).await.as_ref() {
+            ServerMessage::Reconnected(payload) => {
+                assert_eq!(payload.player_id, fixture.reconnecting);
+                assert_ne!(
+                    payload
+                        .reconnection_token
+                        .as_deref()
+                        .expect("rotated token"),
+                    fixture.token
+                );
+            }
+            other => panic!("expected retry baseline, got {other:?}"),
+        }
+    }
+}
+
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn losing_unread_reconnected_baseline_requires_fresh_join_after_token_rotation() {

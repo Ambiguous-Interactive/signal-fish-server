@@ -48,8 +48,8 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Initial; HTTP/2 route rejection recorded in F13 |
 | A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Initial; concurrent handshake retry-budget loss recorded in F15 |
 | A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10 |
-| A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; embedded receiver-loss rollback in F18; size-refusal rollback in F21 |
-| A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; known receiver closure before response submission in F18; aggregate replay bounds in F21 |
+| A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; embedded receiver-loss rollback in F18; size-refusal rollback in F21; known socket-close rollback in F22 |
+| A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
 | A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial |
 | A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial |
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial |
@@ -58,7 +58,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial |
 | A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial |
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
-| A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial; aggregate reconnect admission bound in F21 |
+| A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial; aggregate reconnect admission bound in F21; socket close before queue commit in F22 |
 | A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial |
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Pending |
@@ -1150,4 +1150,51 @@ Focused verification:
 ```bash
 cargo nextest run --test reconnection_replay_e2e -E 'test(frame_limit)'
 cargo nextest run --lib -E 'test(reconnect_replay_budget) | test(reconnect_oversized_snapshot_rolls_back_rotated_token_and_allows_retry)'
+```
+
+### F22 Known socket close before reconnect response commit consumes the retry token
+
+Confirmed defect. Issue [#867](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/867).
+Baseline: `7ac4e757`. A05/A06/A15.
+
+The production handler reassigns the socket identity before it builds the
+reconnect baseline. The writer closes the response queue only after it observes
+the socket close signal. A close pinned during that baseline build therefore
+left the queue accepting. The reconnect committed and consumed the original
+credential despite the already-terminal socket.
+
+The deterministic history pauses the database baseline builder after identity
+reassignment. It pins the actual socket close signal while keeping the response
+receiver alive, then resumes the builder. The baseline returned success on the
+old source. Red nextest run `accddd67` failed the restore-refusal assertion for
+`ActivityTimeout`.
+
+The repair holds the close watch read guard only during synchronous queue
+admission. A close that wins cancels admission; a commit that wins retains its
+existing semantics. The shared initial-transition seam covers reconnect,
+player join, and spectator join. The default coordinator fallback fences its
+send too. Neither guard spans asynchronous routing updates or a close request.
+The shutdown commit gate keeps its existing order. A canceled reserved attempt
+is counted once and releases its queue capacity.
+
+The reconnect control covers legacy and classified queues, direct and correlated
+requests, and activity timeout, slow consumer, and unregister close reasons.
+Each case checks transient-identity restoration, restored membership and route
+removal, no peer announcement, provisional-token removal, and a successful retry
+with the original token. Green nextest run `0f188b88` passed all twelve cases.
+The coordinator control covers synchronous and asynchronous builders on both
+queue types, with exact cancellation accounting, no baseline or route, and
+released capacity. Its positive cells retain a committed response after a later
+close. The fallback control also cancels a close pinned by its builder.
+
+This is a known server-close history before queue admission. It does not test
+physical partial writes, TLS, authenticated recovery, or unknown transport loss
+after admission. Queue commit still does not acknowledge client receipt. The
+broader A01–A22 audit and #853 remain open.
+
+Focused verification:
+
+```bash
+cargo nextest run --lib -E 'test(socket_close_during_reconnect_baseline_build_preserves_retry_token)'
+cargo nextest run --lib -E 'test(initial_registration_close_before_commit) | test(default_initial_registration)'
 ```
