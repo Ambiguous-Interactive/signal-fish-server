@@ -145,6 +145,59 @@ fn full_control_queue(
     }
 }
 
+// Regression #858: a reservation cannot hide known receiver loss at submission.
+#[tokio::test]
+async fn reserved_control_detects_receiver_loss_before_send() {
+    for kind in [ControlQueueKind::Legacy, ControlQueueKind::Classified] {
+        for wait_for_reservation in [false, true] {
+            for drop_receiver in [false, true] {
+                let context =
+                    format!("{kind:?}, wait={wait_for_reservation}, drop={drop_receiver}");
+                let (delivery, _listener, mut receiver) = full_control_queue(kind);
+                receiver.pop_message("drain the initial control");
+                let permit = if wait_for_reservation {
+                    delivery.sender.reserve_control(None).await
+                } else {
+                    delivery.sender.try_reserve_control(None)
+                }
+                .expect("reserve while receiver is live");
+                let mut receiver = Some(receiver);
+                if drop_receiver {
+                    drop(receiver.take());
+                } else {
+                    receiver.as_mut().expect("retained receiver").close();
+                }
+                assert!(
+                    permit.send(Arc::new(ServerMessage::Pong)).is_err(),
+                    "{context}: reject a known closed receiver"
+                );
+                if let Some(mut receiver) = receiver {
+                    receiver.assert_disconnected(&context);
+                }
+            }
+            let (delivery, _listener, mut receiver) = full_control_queue(kind);
+            receiver.pop_message("drain the positive control");
+            let permit = if wait_for_reservation {
+                delivery.sender.reserve_control(None).await
+            } else {
+                delivery.sender.try_reserve_control(None)
+            }
+            .expect("reserve positive control");
+            assert!(
+                permit
+                    .send(Arc::new(ServerMessage::Pong))
+                    .expect("live send")
+                    .enqueued
+            );
+            assert!(matches!(
+                receiver.pop_message("live receipt").as_ref(),
+                ServerMessage::Pong
+            ));
+            receiver.assert_empty("live receiver has exactly one receipt");
+        }
+    }
+}
+
 fn start_control_capacity_wait(
     case: ControlCapacityWait,
     coordinator: Arc<InMemoryMessageCoordinator>,

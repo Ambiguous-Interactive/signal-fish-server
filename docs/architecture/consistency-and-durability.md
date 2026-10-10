@@ -52,6 +52,12 @@ connection fails before the client receives the rotated token in
 protocol does not acknowledge receipt or retain the old token for retries
 after this commit. Applications must support recovery through a fresh join.
 
+The channel-based embedder path rejects a reserved response when receiver
+closure is already visible before submission. A rejected reconnect rolls back
+the restore and keeps the old token available until its window expires.
+Closure racing after the last live-state check can still lose a committed
+response; applications must retain the fresh-join recovery path.
+
 ## Additional disconnect/outage exposure bound
 
 `Reconnected.missed_events` contains bounded **control** replay only. It never

@@ -1025,7 +1025,10 @@ impl DeliverySender {
             DeliverySenderKind::Legacy(sender) => sender
                 .clone()
                 .try_reserve_owned()
-                .map(DeliveryPermit::Legacy)
+                .map(|permit| DeliveryPermit::Legacy {
+                    permit,
+                    sender: sender.clone(),
+                })
                 .map_err(|error| match error {
                     tokio::sync::mpsc::error::TrySendError::Full(_) => {
                         DeliveryReserveError::Full(None)
@@ -1060,7 +1063,10 @@ impl DeliverySender {
                 .clone()
                 .reserve_owned()
                 .await
-                .map(DeliveryPermit::Legacy)
+                .map(|permit| DeliveryPermit::Legacy {
+                    permit,
+                    sender: sender.clone(),
+                })
                 .map_err(|_| DeliveryReserveError::Closed),
             DeliverySenderKind::Classified { sender, generation } => sender
                 .reserve_control_scoped(*generation, room_id)
@@ -1117,7 +1123,10 @@ impl DeliverySender {
 
 #[derive(Debug)]
 pub(crate) enum DeliveryPermit {
-    Legacy(tokio::sync::mpsc::OwnedPermit<Arc<ServerMessage>>),
+    Legacy {
+        permit: tokio::sync::mpsc::OwnedPermit<Arc<ServerMessage>>,
+        sender: tokio::sync::mpsc::Sender<Arc<ServerMessage>>,
+    },
     Classified {
         permit: OutboundPermit,
         generation: u64,
@@ -1131,7 +1140,11 @@ impl DeliveryPermit {
         message: Arc<ServerMessage>,
     ) -> Result<QueueEnqueueOutcome, Arc<ServerMessage>> {
         match self {
-            Self::Legacy(permit) => {
+            Self::Legacy { permit, sender } => {
+                /* Tokio permits can send after receiver close; room commits must refuse known closure. */
+                if sender.is_closed() {
+                    return Err(message);
+                }
                 permit.send(message);
                 Ok(QueueEnqueueOutcome {
                     enqueued: true,
