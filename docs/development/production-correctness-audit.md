@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Pending |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -1061,3 +1061,44 @@ browser/native exchange and restore remain a separate runtime control.
 
 This finding does not establish deployed memory exhaustion, bound every WebRTC
 stack allocation, or explain #853. The broader A20 audit remains incomplete.
+
+### F20 Buffered ICE rejection stops negotiation and drops healthy candidates
+
+**Player connection defect; high confidence.** Issue
+[#863](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/863).
+Baseline: `9c2fb8fa`. A20.
+
+Both reference engines drain their pending candidate queue after applying the
+remote description. The first WebRTC stack rejection aborts that drain. The
+remaining candidates disappear, and the responder does not produce its SDP
+answer. A candidate received after the description only fails its own signal
+operation, so equivalent input has different recovery behavior by timing.
+
+Red-first browser engine and native real-SDP regressions reproduce the
+failure. Native failures report `ErrAttributeTooShortIceCandidate` on both
+offer and answer paths. The repair attempts all buffered candidates once in
+order and reports each rejected candidate with a fixed diagnostic. Candidate
+contents and external error text are omitted. Description and answer failures
+still propagate. Admission counts and byte budgets survive the drain.
+
+Browser controls cover empty and healthy queues, rejection first and middle,
+multiple rejections, later direct candidate failure and recovery, and no replay
+on repeated description. Native controls use actual SDP and remote-candidate
+statistics to prove that every healthy queued endpoint reaches the ICE stack
+on both paths, including after rejection, and later signaling stays usable.
+Existing candidate-budget regressions also pass. These histories do not prove
+that rejected candidates caused the initial setup failure in #853.
+
+Thirty frozen-baseline capture histories with both client streams retained
+passed in 100.441 seconds. They did not reproduce #853. That issue and the
+broader A20 audit remain open. The parallel A05/A06/A15 source review found an
+aggregate reconnect-replay size boundary tracked in
+[#864](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/864);
+it still needs a deterministic runtime reproduction.
+
+Focused verification:
+
+```bash
+npm test --prefix clients/browser
+cargo nextest run --manifest-path clients/native/Cargo.toml --lib -E 'test(buffered_candidate_rejection) | test(remote_candidate_)'
+```

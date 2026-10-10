@@ -289,7 +289,11 @@ export class Engine {
   private async flushPendingCandidates(link: PeerLink): Promise<void> {
     const pending = link.pendingCandidates.splice(0);
     for (const candidate of pending) {
-      await link.pc.addIceCandidate(candidate);
+      try {
+        await link.pc.addIceCandidate(candidate);
+      } catch {
+        console.error('The browser rejected a buffered ICE candidate.');
+      }
     }
   }
 

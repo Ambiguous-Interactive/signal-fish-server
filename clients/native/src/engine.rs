@@ -442,9 +442,9 @@ impl Engine {
         link.remote_description_set = true;
         let pending = std::mem::take(&mut link.pending_candidates);
         for candidate in pending {
-            pc.add_ice_candidate(candidate)
-                .await
-                .context("apply buffered remote candidate")?;
+            if pc.add_ice_candidate(candidate).await.is_err() {
+                tracing::warn!(%peer, "WebRTC stack rejected a buffered ICE candidate");
+            }
         }
         let answer = pc.create_answer(None).await.context("create answer")?;
         let sdp = answer.sdp.clone();
@@ -468,9 +468,9 @@ impl Engine {
         link.remote_description_set = true;
         let pending = std::mem::take(&mut link.pending_candidates);
         for candidate in pending {
-            pc.add_ice_candidate(candidate)
-                .await
-                .context("apply buffered remote candidate")?;
+            if pc.add_ice_candidate(candidate).await.is_err() {
+                tracing::warn!(%peer, "WebRTC stack rejected a buffered ICE candidate");
+            }
         }
         Ok(())
     }
@@ -1293,6 +1293,127 @@ mod tests {
         offerer.handle_answer(b, answer).await.unwrap();
         offerer.remove_peer(b).await.unwrap();
         answerer.remove_peer(a).await.unwrap();
+    }
+
+    // Real SDP and remote-candidate stats prove that a rejected queued
+    // candidate cannot prevent the answer or discard later valid candidates.
+    #[tokio::test]
+    async fn buffered_candidate_rejection_preserves_offer_negotiation() {
+        buffered_candidate_recovery(false).await;
+    }
+
+    #[tokio::test]
+    async fn buffered_candidate_rejection_preserves_answer_negotiation() {
+        buffered_candidate_recovery(true).await;
+    }
+
+    async fn buffered_candidate_recovery(answer_path: bool) {
+        const INVALID: &str = "candidate:invalid";
+        const FIRST: &str = "candidate:1 1 udp 2130706431 127.0.0.1 50001 typ host";
+        const SECOND: &str = "candidate:2 1 udp 2130706430 127.0.0.1 50002 typ host";
+        const LATER: &str = "candidate:3 1 udp 2130706429 127.0.0.1 50003 typ host";
+        for (case, candidates, expected_ports) in [
+            ("empty", vec![], BTreeSet::new()),
+            (
+                "normal",
+                vec![FIRST, SECOND],
+                BTreeSet::from([50001, 50002]),
+            ),
+            ("invalid only", vec![INVALID], BTreeSet::new()),
+            (
+                "invalid first",
+                vec![INVALID, FIRST, SECOND],
+                BTreeSet::from([50001, 50002]),
+            ),
+            (
+                "invalid middle",
+                vec![FIRST, INVALID, SECOND],
+                BTreeSet::from([50001, 50002]),
+            ),
+        ] {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let settings = mdns_disabled_settings();
+            let mut offerer = Engine::new(settings, tx.clone()).unwrap();
+            let mut answerer = Engine::new(settings, tx).unwrap();
+            let a = PlayerId::new_v4();
+            let b = PlayerId::new_v4();
+            let offer = offerer.pair_with(b, true, &[]).await.unwrap().unwrap();
+            answerer.pair_with(a, false, &[]).await.unwrap();
+            let (engine, peer, remote_sdp) = if answer_path {
+                let answer = answerer.handle_offer(a, offer).await.unwrap();
+                (&mut offerer, b, answer)
+            } else {
+                (&mut answerer, a, offer)
+            };
+            for candidate in &candidates {
+                engine
+                    .handle_remote_candidate(peer, candidate)
+                    .await
+                    .unwrap();
+            }
+            let admitted_bytes: usize = candidates.iter().map(|candidate| candidate.len()).sum();
+            if answer_path {
+                engine
+                    .handle_answer(peer, remote_sdp)
+                    .await
+                    .unwrap_or_else(|error| panic!("{case}: apply answer: {error:#}"));
+            } else {
+                let answer = engine
+                    .handle_offer(peer, remote_sdp)
+                    .await
+                    .unwrap_or_else(|error| panic!("{case}: produce answer: {error:#}"));
+                assert!(!answer.is_empty(), "{case}: responder produces an answer");
+                offerer.handle_answer(b, answer).await.unwrap();
+            }
+            let engine = if answer_path {
+                &mut offerer
+            } else {
+                &mut answerer
+            };
+            let link = &engine.peers[&peer];
+            assert!(link.remote_description_set, "{case}: description applied");
+            assert!(link.pending_candidates.is_empty(), "{case}: queue drained");
+            assert_eq!(
+                link.remote_candidate_count,
+                candidates.len(),
+                "{case}: admission count retained"
+            );
+            assert_eq!(
+                link.remote_candidate_bytes, admitted_bytes,
+                "{case}: admission bytes retained"
+            );
+            assert_eq!(
+                remote_candidate_ports(link).await,
+                expected_ports,
+                "{case}: all valid queued candidates reach the ICE stack"
+            );
+            assert!(
+                engine.handle_remote_candidate(peer, INVALID).await.is_err(),
+                "{case}: later invalid candidates remain isolated"
+            );
+            engine.handle_remote_candidate(peer, LATER).await.unwrap();
+            let mut expected_ports = expected_ports;
+            expected_ports.insert(50003);
+            assert_eq!(
+                remote_candidate_ports(&engine.peers[&peer]).await,
+                expected_ports,
+                "{case}: signaling continues after flush"
+            );
+            offerer.remove_peer(b).await.unwrap();
+            answerer.remove_peer(a).await.unwrap();
+        }
+    }
+
+    async fn remote_candidate_ports(link: &PeerLink) -> BTreeSet<u16> {
+        link.pc
+            .get_stats(std::time::Instant::now(), StatsSelector::None)
+            .await
+            .iter()
+            .filter_map(|entry| match entry {
+                RTCStatsReportEntry::RemoteCandidate(candidate) => Some(candidate.port),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Payload of the routing probes below. Its exact bytes are compared on
