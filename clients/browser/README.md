@@ -193,6 +193,10 @@ runner script's `console.log` grep (stdout purity); an eslint toolchain would ou
 Each physical peer link admits at most 128 remote candidates and 64 KiB of
 candidate payload in total. Each payload must fit in 4,096 UTF-8 bytes, including
 JSON fields. The limits apply before and after the remote description is set.
-Rejected candidates emit an error without their content. They do not clear
+Rejected candidates emit an error or diagnostic without their content. They do not clear
 accepted candidates or close the peer link. Failed stack applications consume
 budget too. A replacement peer link receives a fresh budget.
+
+A stack rejection of a buffered candidate reports a fixed diagnostic and does
+not stop SDP negotiation or later candidate application. Rejected candidates
+are not retried.

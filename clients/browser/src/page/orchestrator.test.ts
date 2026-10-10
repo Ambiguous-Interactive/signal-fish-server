@@ -1100,3 +1100,101 @@ console.error(
 console.error(
   'ok - remote ICE candidate admission bounds storage and preserves accepted signaling',
 );
+
+// A rejected buffered candidate must not stop SDP negotiation or discard later input.
+{
+  const originalPc = globalThis.RTCPeerConnection;
+  const connections: RecoveringCandidateConnection[] = [];
+  class RecoveringCandidateConnection {
+    readonly attempted: string[] = [];
+    localDescription: unknown = null;
+    constructor() {
+      connections.push(this);
+    }
+    async setRemoteDescription(_description: unknown): Promise<void> {}
+    async addIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {
+      this.attempted.push(candidate.candidate ?? '');
+      if (candidate.candidate === 'rejected-secret-candidate') {
+        throw new Error('stack rejected-secret-candidate');
+      }
+    }
+    async createAnswer(): Promise<RTCSessionDescriptionInit> {
+      return { type: 'answer', sdp: 'healthy-answer' };
+    }
+    async setLocalDescription(description: unknown): Promise<void> {
+      this.localDescription = description;
+    }
+    close(): void {}
+  }
+  const originalError = console.error;
+  const diagnostics: string[] = [];
+  try {
+    globalThis.RTCPeerConnection =
+      RecoveringCandidateConnection as unknown as typeof RTCPeerConnection;
+    console.error = (...args: unknown[]) => {
+      diagnostics.push(args.join(' '));
+    };
+    for (const path of ['offer', 'answer'] as const) {
+      for (const candidates of [
+        [],
+        ['healthy-first', 'healthy-last'],
+        ['rejected-secret-candidate', 'healthy-last'],
+        ['healthy-first', 'rejected-secret-candidate', 'healthy-last'],
+        ['rejected-secret-candidate', 'rejected-secret-candidate', 'healthy-last'],
+      ]) {
+        const engine = new Engine(false, {
+          onLocalCandidate: () => {},
+          onPcState: () => {},
+          onChannelOpen: () => {},
+          onChannelClosed: () => {},
+          onChannelMessage: () => {},
+        });
+        await engine.pairWith('peer', false, []);
+        const connection = connections[connections.length - 1]!;
+        for (const candidate of candidates)
+          await engine.handleRemoteCandidate('peer', candidate);
+        if (path === 'offer') {
+          const answer = await engine.handleOffer('peer', 'offer');
+          assert(
+            answer === 'healthy-answer' && connection.localDescription !== null,
+            'a rejected candidate must not prevent the answer',
+          );
+        } else {
+          await engine.handleAnswer('peer', 'answer');
+        }
+        assert(
+          connection.attempted.join(',') === candidates.join(','),
+          `${path}: attempt each buffered candidate once and preserve order`,
+        );
+        await engine.handleRemoteCandidate('peer', 'healthy-after-description');
+        assert(
+          connection.attempted.at(-1) === 'healthy-after-description',
+          'healthy candidates must still apply after description',
+        );
+        const attempts = connection.attempted.length;
+        let rejected = false;
+        try {
+          await engine.handleRemoteCandidate('peer', 'rejected-secret-candidate');
+        } catch {
+          rejected = true;
+        }
+        assert(rejected, 'direct stack rejection must still reach the caller');
+        await engine.handleAnswer('peer', 'repeat-answer');
+        assert(
+          connection.attempted.length === attempts + 1,
+          'a repeated description must not reapply buffered candidates',
+        );
+        engine.removePeer('peer');
+      }
+    }
+    assert(diagnostics.length === 8, 'report each buffered rejection once');
+    assert(
+      diagnostics.every((message) => !message.includes('secret')),
+      'buffered rejection diagnostics must omit candidate and stack error contents',
+    );
+  } finally {
+    globalThis.RTCPeerConnection = originalPc;
+    console.error = originalError;
+  }
+}
+console.error('ok - buffered ICE rejection preserves SDP negotiation and later candidates');
