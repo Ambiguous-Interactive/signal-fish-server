@@ -317,6 +317,12 @@ export class Engine {
       );
     };
     pc.ondatachannel = (event) => {
+      // This reference client uses exactly two channels. Reject extras before
+      // retaining their labels or installing callbacks, including large labels.
+      if (event.channel.label !== RELIABLE_LABEL && event.channel.label !== UNRELIABLE_LABEL) {
+        event.channel.close();
+        return;
+      }
       if (this.peers.get(peer) !== link) {
         return;
       }
@@ -374,11 +380,6 @@ export class Engine {
     // A required data channel can fail while the peer connection itself stays
     // `connected`. Treat close/error as a terminal pair signal so the
     // orchestrator reports relay fallback and permits a later plan to rebuild.
-    // Ignore application-defined extra channels: only this reference client's
-    // two protocol-required labels determine pair health.
-    if (label !== RELIABLE_LABEL && label !== UNRELIABLE_LABEL) {
-      return;
-    }
     let terminalNotified = false;
     const notifyClosed = () => {
       const link = this.peers.get(peer);

@@ -833,6 +833,10 @@ test('removed browser peer links cannot emit callbacks after the same peer is re
     constructor(label: string) {
       this.label = label;
     }
+    close(): void {
+      this.readyState = 'closed';
+      this.onclose?.();
+    }
   }
 
   class FakePeerConnection {

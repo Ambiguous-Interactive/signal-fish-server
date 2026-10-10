@@ -1019,13 +1019,55 @@ for (const [initiate, alreadyOpen] of [
       onChannelMessage: (_peer, _generation, label, text) => observed.push(`${label}:${text}`),
     });
     await engine.pairWith('peer', initiate, []);
-    for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL, 'extra']) {
+    // Regression #870: unsupported labels cannot consume channel slots or callbacks.
+    for (const phase of ['before-required', 'after-required']) {
+      if (phase === 'after-required') {
+        for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL]) {
+          if (engine.channel('peer', label) === undefined) {
+            connection?.ondatachannel?.({ channel: new DuplicateChannel(label) });
+          }
+        }
+      }
+      const before = observed.length;
+      const labels = [
+        '',
+        'Reliable',
+        'reliable\0',
+        '界'.repeat(4096),
+        ...Array.from({ length: 128 }, (_, index) => `optional-${index}`),
+      ];
+      for (const label of labels) {
+        const unsupported = new DuplicateChannel(label);
+        connection?.ondatachannel?.({ channel: unsupported });
+        assert(unsupported.readyState === 'closed', `${phase}: unsupported channel must close`);
+        assert(
+          engine.channel('peer', label) === undefined,
+          'unsupported label must not be retained',
+        );
+        assert(
+          unsupported.onopen === null &&
+            unsupported.onmessage === null &&
+            unsupported.onclose === null &&
+            unsupported.onerror === null,
+          'unsupported channel must have no engine callbacks',
+        );
+      }
+      await Promise.resolve();
+      // Required channels can notify opens in the second phase.
+      assert(
+        observed
+          .slice(before)
+          .every((event) => event === 'open:reliable' || event === 'open:unreliable'),
+        'unsupported channels must not publish events',
+      );
+    }
+    for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL]) {
       if (engine.channel('peer', label) === undefined) {
         connection?.ondatachannel?.({ channel: new DuplicateChannel(label) });
       }
     }
     await Promise.resolve();
-    for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL, 'extra']) {
+    for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL]) {
       const first = engine.channel('peer', label) as unknown as DuplicateChannel;
       assert(first !== undefined, 'first channel must exist');
       connection?.ondatachannel?.({ channel: first });
