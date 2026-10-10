@@ -2516,16 +2516,22 @@ mod tests {
                 .await
                 .expect("remote refusal closes the duplicate");
                 // No callbacks from the rejected channel remain after its close.
-                while let Ok(event) = events.try_recv() {
-                    assert!(
-                        !matches!(
-                            event,
-                            EngineEvent::ChannelOpen { .. }
-                                | EngineEvent::ChannelClosed { .. }
-                                | EngineEvent::ChannelMessage { .. }
+                loop {
+                    match events.try_recv() {
+                        Ok(event) => assert!(
+                            !matches!(
+                                event,
+                                EngineEvent::ChannelOpen { .. }
+                                    | EngineEvent::ChannelClosed { .. }
+                                    | EngineEvent::ChannelMessage { .. }
+                            ),
+                            "rejected channel must not publish callbacks"
                         ),
-                        "rejected channel must not publish callbacks"
-                    );
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            panic!("live engine event stream must stay connected")
+                        }
+                    }
                 }
                 assert_eq!(receiver.connected_pair_count(), 1);
             }
