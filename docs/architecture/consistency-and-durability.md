@@ -132,9 +132,9 @@ but permits no steady-rate admission. See the
 Control replay has a different contract:
 
 - `replay: "complete"` means the ring evicted no event after the recorded
-  server-side disconnect cursor;
-- `replay: "truncated"` means the bounded ring evicted at least one required
-  event;
+  server-side disconnect cursor and no retained event was omitted for size;
+- `replay: "truncated"` means the bounded ring evicted a required event or the
+  outbound frame limit removed older retained events;
 - `replay: "unavailable"` means event replay is disabled; and
 - in every v3 case, the `Reconnected` membership fields and
   `sender_watermarks` are the authoritative fresh baseline.

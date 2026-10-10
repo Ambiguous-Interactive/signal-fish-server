@@ -25,7 +25,7 @@ mod sending;
 mod token_binding;
 mod upgrade_rejection_log;
 
-pub(crate) use sending::RelayFrameCache;
+pub(crate) use sending::{project_reconnect_payload_for_v3, RelayFrameCache};
 
 /// Run an operation only while its exclusive deadline remains live.
 ///

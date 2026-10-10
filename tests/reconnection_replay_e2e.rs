@@ -19,7 +19,10 @@ mod websocket_test_helpers;
 
 use futures_util::{SinkExt, StreamExt};
 use signal_fish_server::config::AppRegistrationEntry;
-use signal_fish_server::protocol::{ClientMessage, PlayerId, ReplayStatus, RoomId, ServerMessage};
+use signal_fish_server::protocol::{
+    ClientMessage, GameDataEncoding, PlayerId, ReplayStatus, RoomId, RoomOperationRequest,
+    RoomOperationResult, ServerMessage, ROOM_OPERATION_IDS_CAPABILITY,
+};
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_route_v3};
 use std::sync::atomic::Ordering;
@@ -344,6 +347,216 @@ async fn churn_join_leave(
     .await;
     await_join_leave_cycle(observer, joined.player_id, "observer's churn broadcasts").await;
     joined.player_id
+}
+
+/// Issue #864: a count-bounded replay can exceed the socket's byte cap even
+/// though every live event and the current two-player snapshot fit it.
+async fn assert_accumulated_replay_fits_outbound_limit(correlated: bool, protocol_version: u16) {
+    const OUTBOUND_CAP: usize = 4096;
+    for encoding in [GameDataEncoding::Json, GameDataEncoding::MessagePack] {
+        let mut config = test_server_config();
+        config.max_message_size = 2048;
+        config.max_signal_bytes = 2048;
+        config.max_outbound_message_size = OUTBOUND_CAP;
+        config.max_connection_info_bytes = 64;
+        config.event_buffer_size = 128;
+        let (running_server, game_server) = start_server_with_config(config).await;
+        let addr = running_server.addr();
+        let mut anchor = connect(addr).await;
+        authenticate_v3(&mut anchor).await;
+        let joined_a = join_room(&mut anchor, "replay-game", None, "Anchor").await;
+        let mut dropper = connect(addr).await;
+        authenticate_v3(&mut dropper).await;
+        let joined_b = join_room(
+            &mut dropper,
+            "replay-game",
+            Some(joined_a.room_code.clone()),
+            "Dropper",
+        )
+        .await;
+        let token =
+            register_reconnect_token(&game_server, joined_b.player_id, joined_b.room_id).await;
+        let _ = dropper.close(None).await;
+
+        let mut expected = Vec::new();
+        for index in 0..20 {
+            let player_id = churn_join_leave(
+                addr,
+                &joined_a.room_code,
+                &format!("Churner{index:02}"),
+                &mut anchor,
+            )
+            .await;
+            expected.push((true, player_id));
+            expected.push((false, player_id));
+        }
+        let buffered = game_server
+            .reconnection_manager()
+            .expect("reconnection enabled")
+            .get_missed_events(&joined_b.room_id, 0)
+            .await;
+        assert!(
+            !buffered.truncated,
+            "the count ring must not cause truncation"
+        );
+        let buffered_bytes = serde_json::to_vec(&buffered.events).unwrap().len();
+        assert!(
+            buffered_bytes > OUTBOUND_CAP,
+            "the regression requires replay alone to exceed the frame cap: {buffered_bytes}"
+        );
+
+        let mut replacement = connect(addr).await;
+        send(
+            &mut replacement,
+            &ClientMessage::Authenticate {
+                app_id: APP_ID.to_string(),
+                connect_token: None,
+                sdk_version: None,
+                platform: None,
+                game_data_format: Some(encoding),
+                protocol_version: Some(protocol_version),
+                supported_transports: None,
+                supported_topologies: None,
+                requested_capabilities: correlated
+                    .then(|| vec![ROOM_OPERATION_IDS_CAPABILITY.to_string()]),
+            },
+        )
+        .await;
+        assert!(matches!(
+            next_server_message(&mut replacement).await,
+            ServerMessage::Authenticated { .. }
+        ));
+        let ServerMessage::ProtocolInfo(info) = next_server_message(&mut replacement).await else {
+            panic!("expected ProtocolInfo");
+        };
+        if correlated {
+            assert!(info
+                .capabilities
+                .contains(&ROOM_OPERATION_IDS_CAPABILITY.to_string()));
+        }
+        let operation_id = uuid::Uuid::from_u128(864);
+        let request = if correlated {
+            ClientMessage::RoomOperation {
+                operation_id,
+                operation: Box::new(RoomOperationRequest::Reconnect {
+                    player_id: joined_b.player_id,
+                    room_id: joined_b.room_id,
+                    auth_token: token,
+                }),
+            }
+        } else {
+            ClientMessage::Reconnect {
+                player_id: joined_b.player_id,
+                room_id: joined_b.room_id,
+                auth_token: token,
+            }
+        };
+        send(&mut replacement, &request).await;
+        let deadline = deadline_after(SERVER_MESSAGE_TIMEOUT);
+        let raw = loop {
+            let frame = tokio::time::timeout_at(deadline, replacement.next())
+                .await
+                .expect("reconnect frame deadline")
+                .expect("reconnect stream remains open")
+                .expect("reconnect socket succeeds");
+            match frame {
+                Message::Text(text) => break text,
+                Message::Ping(_) | Message::Pong(_) => continue,
+                other => panic!(
+                    "reconnect must deliver bounded JSON control frame: v{protocol_version}, correlated={correlated}, encoding={encoding:?}, buffered_bytes={buffered_bytes}, cap={OUTBOUND_CAP}, received={other:?}"
+                ),
+            }
+        };
+        assert!(
+            raw.len() <= OUTBOUND_CAP,
+            "reconnect frame exceeds cap: {}",
+            raw.len()
+        );
+        if protocol_version < 3 {
+            let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert!(
+                value["data"].get("replay").is_none(),
+                "v2 omits replay status"
+            );
+        }
+        let message: ServerMessage = serde_json::from_str(&raw).expect("JSON control frame");
+        let payload = match message {
+            ServerMessage::Reconnected(payload) if !correlated => payload,
+            ServerMessage::RoomOperationResult {
+                operation_id: actual_id,
+                result,
+            } if correlated => {
+                assert_eq!(actual_id, operation_id);
+                let RoomOperationResult::Reconnected(payload) = *result else {
+                    panic!("correlated reconnect must succeed: {result:?}");
+                };
+                payload
+            }
+            other => panic!("reconnect must succeed: {other:?}"),
+        };
+        assert_eq!(payload.player_id, joined_b.player_id);
+        assert_eq!(
+            payload.current_players.len(),
+            2,
+            "the live snapshot must remain intact"
+        );
+        assert!(payload
+            .current_players
+            .iter()
+            .any(|player| player.id == joined_a.player_id));
+        assert!(payload
+            .current_players
+            .iter()
+            .any(|player| player.id == joined_b.player_id));
+        assert_eq!(
+            payload.replay,
+            (protocol_version >= 3).then_some(ReplayStatus::Truncated)
+        );
+        let actual: Vec<_> = payload
+            .missed_events
+            .iter()
+            .map(|event| match event {
+                ServerMessage::PlayerJoined { player } => (true, player.id),
+                ServerMessage::PlayerLeft { player_id, .. } => (false, *player_id),
+                other => panic!("unexpected replay event: {other:?}"),
+            })
+            .collect();
+        assert!(
+            !actual.is_empty(),
+            "a fitting newest event must be replayed"
+        );
+        assert!(
+            actual.len() < expected.len(),
+            "oversized replay must lose events"
+        );
+        assert_eq!(
+            actual,
+            expected[expected.len() - actual.len()..],
+            "retain the newest ordered suffix"
+        );
+        send(&mut replacement, &ClientMessage::Ping).await;
+        assert!(matches!(
+            next_server_message(&mut replacement).await,
+            ServerMessage::Pong
+        ));
+        assert_message_conservation(&game_server.metrics()).await;
+        running_server.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn test_reconnect_accumulated_replay_fits_outbound_frame_limit() {
+    assert_accumulated_replay_fits_outbound_limit(false, 3).await;
+}
+
+#[tokio::test]
+async fn test_correlated_reconnect_accumulated_replay_fits_outbound_frame_limit() {
+    assert_accumulated_replay_fits_outbound_limit(true, 3).await;
+}
+
+#[tokio::test]
+async fn test_v2_reconnect_accumulated_replay_fits_outbound_frame_limit() {
+    assert_accumulated_replay_fits_outbound_limit(false, 2).await;
 }
 
 // ---------------------------------------------------------------------------

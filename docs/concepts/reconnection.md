@@ -188,13 +188,14 @@ host.
 }
 ```
 
-The `replay` field reports ring retention before recipient filtering. It is sent
+The `replay` field reports ring retention and outbound size truncation. It is sent
 only to clients that negotiated protocol v3 or higher (the v2 wire is
 unchanged — no `replay` key) and takes one of three values:
 
 - `complete` -- The ring evicted no event after the server's recorded
-  disconnect cursor.
-- `truncated` -- The bounded replay ring evicted events you needed, so
+  disconnect cursor, and the frame limit omitted no retained event.
+- `truncated` -- The replay ring evicted events you needed, or the outbound
+  frame limit removed older retained events, so
   `missed_events` is only a suffix of what happened. Discard any local
   room-membership bookkeeping and resync from the `Reconnected`
   snapshot fields (`current_players`, `lobby_state`, `ready_players`,
@@ -210,6 +211,15 @@ can be older than the snapshot. The server removes your own membership
 events and authority events that disagree with the current authority, even
 when `replay` is `complete`. The cursor is server-side and does not confirm
 receipt of the old socket's unread events.
+
+The server keeps the full snapshot and the largest fitting suffix of filtered
+history within `security.max_outbound_message_size`. V2 applies the same bound
+without a `replay` key. If the snapshot alone cannot fit, the server rejects the
+reconnect before queue admission and keeps the old token available for retry.
+Shrink the room snapshot before retrying. Configure sufficient frame limits
+before starting the server.
+Queue admission remains the commit point; a later socket failure can still
+lose the response and its rotated credential.
 
 The `sender_watermarks` field is also v3-only. It gives one authoritative
 `(epoch, seq)` baseline for every current room member, including the

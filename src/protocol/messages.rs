@@ -660,7 +660,8 @@ pub struct ReconnectedPayload {
     /// processing must precede snapshot replacement; older player metadata must
     /// not overwrite this payload's current state.
     pub missed_events: Vec<ServerMessage>,
-    /// Ring retention for `missed_events` (v3+ only). Populated only for a
+    /// Ring retention and outbound size truncation for `missed_events` (v3+ only).
+    /// Populated only for a
     /// recipient that negotiated protocol v3+; `None` — and absent from the
     /// wire via `skip_serializing_if`, keeping the v2 JSON and MessagePack
     /// bytes identical — otherwise. See [`ReplayStatus`] for the contract each
@@ -711,7 +712,7 @@ pub struct SenderWatermark {
     pub seq: u64,
 }
 
-/// Ring retention for `Reconnected.missed_events` (v3+ recipients only; the field
+/// Retained history for `Reconnected.missed_events` (v3+ recipients only; the field
 /// is absent on the v2 wire).
 ///
 /// Only room-uniform control events (`PlayerJoined`, `PlayerLeft`,
@@ -727,11 +728,13 @@ pub struct SenderWatermark {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplayStatus {
-    /// No event after the server's disconnect cursor was evicted. Recipient
+    /// No event after the server's disconnect cursor was evicted or omitted
+    /// for the outbound frame limit. Recipient
     /// filtering still applies; this is not a client-receipt guarantee.
     Complete,
-    /// Events were evicted from the bounded replay ring; `missed_events` is a
-    /// suffix. Resync from the `Reconnected` snapshot fields.
+    /// Events were evicted from the replay ring or older retained events were
+    /// omitted for the outbound frame limit. `missed_events` is a suffix.
+    /// Resync from the `Reconnected` snapshot fields.
     Truncated,
     /// Event replay is not active on this deployment (`event_buffer_size` 0);
     /// treat reconnection as a full resync from the snapshot.

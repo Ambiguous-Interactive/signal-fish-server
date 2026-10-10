@@ -1161,14 +1161,23 @@ server omits your own membership events and authority events that disagree
 with the current authority. The list can therefore be empty after filtering.
 High-rate data-path
 traffic (`GameData` / `Signal`) is deliberately not replayed. The companion
-`replay` field (v3+ recipients only) reports ring retention before this filtering —
-`complete` (no event after the server's disconnect cursor was evicted),
-`truncated` (the ring evicted an event the player needed, so
-`missed_events` is only a suffix), or `unavailable` (replay disabled,
+`replay` field (v3+ recipients only) reports retained history —
+`complete` (no event after the server's disconnect cursor was evicted or
+omitted for size), `truncated` (the ring evicted an event the player needed or
+the outbound frame limit removed older events, so `missed_events` is only a
+suffix), or `unavailable` (replay disabled,
 `event_buffer_size = 0`). v3+ recipients also receive
 `sender_watermarks`, the authoritative `(epoch, seq)` tail for every current
 room member, so they can re-baseline after skipped `GameData`. See
 [Reconnection Flow](#reconnection-flow).
+
+The server keeps the full snapshot and the largest fitting suffix of filtered
+history within `security.max_outbound_message_size`. This limit includes the
+rotated token and any operation-result envelope. Control frames use JSON even
+when game data uses a binary encoding. V2 uses the same size bound without a
+`replay` field. If the snapshot alone cannot fit, the server rejects the
+reconnect before queue admission and preserves the old token for retry.
+A later socket failure can still lose a committed response.
 
 Always replace local room state with the snapshot, including when `replay`
 is `complete`. You can ignore `missed_events`. If you process this historical
@@ -1465,8 +1474,8 @@ On successful reconnection, the server sends a `Reconnected` message with the cu
 Note: replayable **control** events (membership / lobby / authority
 transitions) broadcast while the player was disconnected are buffered in a
 bounded per-room replay ring. After recipient filtering, retained events appear
-in `Reconnected.missed_events`, with `replay` reporting ring retention
-(`complete` / `truncated` / `unavailable`). High-rate data-path traffic
+in `Reconnected.missed_events`, with `replay` reporting ring retention and
+outbound size truncation (`complete` / `truncated` / `unavailable`). High-rate data-path traffic
 (`GameData` / `Signal`) is **not** replayed, and a `truncated` or
 `unavailable` replay means control history is incomplete. v3 clients also use
 `sender_watermarks` from `Reconnected` to reset each current member's

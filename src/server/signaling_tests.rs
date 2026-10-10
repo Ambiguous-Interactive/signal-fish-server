@@ -4818,6 +4818,218 @@ async fn reconnect_baseline_delivery_failure_rolls_back_and_releases_claim_for_r
     );
 }
 
+// Issue #864: snapshot refusal runs inside the baseline builder, after token
+// rotation. It must unwind identity, membership, routing, and that fresh token.
+#[tokio::test]
+async fn reconnect_oversized_snapshot_rolls_back_rotated_token_and_allows_retry() {
+    for correlated in [false, true] {
+        let server = create_test_server_with_config(ServerConfig {
+            max_message_size: 2048,
+            max_signal_bytes: 2048,
+            max_outbound_message_size: 4096,
+            max_connection_info_bytes: 32,
+            ..ServerConfig::default()
+        })
+        .await;
+        let (existing, mut existing_rx) = register_client(&server).await;
+        let (reconnecting, _old_rx) = register_client(&server).await;
+        let (current, mut current_rx) = register_client(&server).await;
+        server.set_client_protocol(&current, v3_webrtc());
+        let identity = Arc::new(tokio::sync::RwLock::new(current));
+        let operation_id = correlated.then(|| uuid::Uuid::from_u128(864));
+        let room_id = create_db_room_with_max(&server, existing, 64).await;
+        server
+            .connection_manager
+            .assign_client_to_room(&existing, room_id)
+            .await;
+        let reconnecting_info = player_info(reconnecting, "Reconnecting");
+        server
+            .database
+            .add_player_to_room(&room_id, reconnecting_info.clone())
+            .await
+            .unwrap();
+        server
+            .connection_manager
+            .assign_client_to_room(&reconnecting, room_id)
+            .await;
+        let manager = server.reconnection_manager().expect("reconnection enabled");
+        let token = manager
+            .register_disconnection(
+                reconnecting,
+                room_id,
+                false,
+                Some(reconnecting_info),
+                server
+                    .connection_manager
+                    .game_data_epoch(&reconnecting)
+                    .unwrap_or(0),
+            )
+            .await;
+        server
+            .database
+            .remove_player_from_room(&room_id, &reconnecting)
+            .await
+            .unwrap();
+        server.connection_manager.remove_client(&reconnecting);
+        server
+            .message_coordinator
+            .unregister_local_client(&reconnecting)
+            .await
+            .unwrap();
+
+        // Legal membership count and short names: the fresh snapshot itself
+        // exceeds the byte cap, even with no replay events to omit.
+        let mut extra_peers = Vec::new();
+        for index in 0..40 {
+            let (peer, rx) = register_client(&server).await;
+            server
+                .database
+                .add_player_to_room(&room_id, player_info(peer, &format!("Peer{index:02}")))
+                .await
+                .unwrap();
+            server
+                .connection_manager
+                .assign_client_to_room(&peer, room_id)
+                .await;
+            extra_peers.push((peer, rx));
+        }
+        assert!(manager
+            .get_missed_events(&room_id, 0)
+            .await
+            .events
+            .is_empty());
+        assert!(!manager.has_pre_issued_token(&reconnecting).await);
+        assert!(
+            !server
+                .handle_reconnect_with_identity_operation(
+                    &current,
+                    &reconnecting,
+                    &room_id,
+                    &token,
+                    Arc::clone(&identity),
+                    operation_id,
+                )
+                .await,
+            "oversized snapshot must reject before the old token is consumed"
+        );
+        let failure = recv(&mut current_rx).await;
+        let failure = match failure.as_ref() {
+            ServerMessage::RoomOperationResult {
+                operation_id: actual_id,
+                result,
+            } if correlated => {
+                assert_eq!(Some(*actual_id), operation_id);
+                let crate::protocol::RoomOperationResult::ReconnectionFailed { error_code, .. } =
+                    result.as_ref()
+                else {
+                    panic!("expected correlated reconnect refusal: {result:?}");
+                };
+                error_code
+            }
+            ServerMessage::ReconnectionFailed { error_code, .. } if !correlated => error_code,
+            other => panic!("expected reconnect refusal: {other:?}"),
+        };
+        assert_eq!(failure, &ErrorCode::ReconnectionFailed);
+        assert_eq!(
+            *identity.read().await,
+            current,
+            "restore the socket identity"
+        );
+        assert!(server.connection_manager.has_client(&current));
+        assert!(!server.connection_manager.has_client(&reconnecting));
+        assert_eq!(server.get_client_room(&current).await, None);
+        assert!(!server
+            .database
+            .get_room_players(&room_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|player| player.id == reconnecting));
+        assert!(!server
+            .message_coordinator
+            .routed_player_ids(&room_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .contains(&reconnecting));
+        manager
+            .validate_reconnection(&reconnecting, &room_id, &token)
+            .await
+            .expect("old token remains usable");
+        assert!(
+            !manager.has_pre_issued_token(&reconnecting).await,
+            "discard the token rotated inside the rejected builder"
+        );
+        let peer_announcement = existing_rx.try_recv();
+        assert!(
+            matches!(peer_announcement, Err(mpsc::error::TryRecvError::Empty)),
+            "refused restore must not announce a reconnect"
+        );
+
+        for (peer, _rx) in extra_peers {
+            server
+                .database
+                .remove_player_from_room(&room_id, &peer)
+                .await
+                .unwrap();
+            server.connection_manager.remove_client(&peer);
+            server
+                .message_coordinator
+                .unregister_local_client(&peer)
+                .await
+                .unwrap();
+        }
+        assert!(
+            server
+                .handle_reconnect_with_identity_operation(
+                    &current,
+                    &reconnecting,
+                    &room_id,
+                    &token,
+                    Arc::clone(&identity),
+                    operation_id,
+                )
+                .await,
+            "retry the same token after the snapshot fits"
+        );
+        let success = recv(&mut current_rx).await;
+        let payload = match success.as_ref() {
+            ServerMessage::RoomOperationResult {
+                operation_id: actual_id,
+                result,
+            } if correlated => {
+                assert_eq!(Some(*actual_id), operation_id);
+                let crate::protocol::RoomOperationResult::Reconnected(payload) = result.as_ref()
+                else {
+                    panic!("expected correlated reconnect success: {result:?}");
+                };
+                payload
+            }
+            ServerMessage::Reconnected(payload) if !correlated => payload,
+            other => panic!("expected reconnect success: {other:?}"),
+        };
+        assert_eq!(payload.player_id, reconnecting);
+        assert_eq!(payload.current_players.len(), 2);
+        assert!(payload.missed_events.is_empty());
+        assert_ne!(
+            payload
+                .reconnection_token
+                .as_deref()
+                .expect("rotated token"),
+            token
+        );
+        assert_eq!(*identity.read().await, reconnecting);
+        assert!(manager.has_pre_issued_token(&reconnecting).await);
+        assert!(
+            manager
+                .validate_reconnection(&reconnecting, &room_id, &token)
+                .await
+                .is_err(),
+            "successful retry consumes the old token"
+        );
+    }
+}
+
 // Regression #836: disconnect metadata must not include a credential fragment.
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]

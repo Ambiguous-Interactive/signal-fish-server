@@ -15,6 +15,79 @@ use crate::coordination::{
 use super::session_policy::{membership_session_decision, ActiveSessionPlan};
 use super::{ClientLifecycle, EnhancedGameServer, PendingApplicationClaimRollback};
 
+/// Count the actual JSON wire bytes without allocating an aggregate frame.
+fn reconnect_json_size(value: &impl serde::Serialize) -> Result<usize, serde_json::Error> {
+    #[derive(Default)]
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .ok_or_else(|| std::io::Error::other("reconnect JSON size overflow"))?;
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter::default();
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.0)
+}
+
+fn reconnect_payload_mut(message: &mut ServerMessage) -> anyhow::Result<&mut ReconnectedPayload> {
+    match message {
+        ServerMessage::Reconnected(payload) => Ok(payload),
+        ServerMessage::RoomOperationResult { result, .. } => match result.as_mut() {
+            crate::protocol::RoomOperationResult::Reconnected(payload) => Ok(payload),
+            _ => anyhow::bail!("expected reconnect baseline"),
+        },
+        _ => anyhow::bail!("expected reconnect baseline"),
+    }
+}
+
+/// Preserve the fresh snapshot and the largest fitting suffix of replay.
+/// Controls use JSON regardless of negotiated game-data encoding. Size after
+/// recipient projection and correlation, including the rotated credential.
+/// Refuse an oversized snapshot before queue admission consumes the old token.
+fn bound_reconnect_baseline(
+    mut message: ServerMessage,
+    recipient_is_v3: bool,
+    max: usize,
+) -> anyhow::Result<ServerMessage> {
+    if recipient_is_v3 {
+        crate::websocket::project_reconnect_payload_for_v3(reconnect_payload_mut(&mut message)?);
+    }
+    if reconnect_json_size(&message)? <= max {
+        return Ok(message);
+    }
+    let payload = reconnect_payload_mut(&mut message)?;
+    let mut events = std::mem::take(&mut payload.missed_events);
+    if recipient_is_v3 && !events.is_empty() && payload.replay != Some(ReplayStatus::Unavailable) {
+        payload.replay = Some(ReplayStatus::Truncated);
+    }
+    let mut size = reconnect_json_size(&message)?;
+    if size > max {
+        anyhow::bail!("reconnect snapshot exceeds the outbound frame limit");
+    }
+    let mut retained = 0usize;
+    for event in events.iter().rev() {
+        // The empty array's brackets are in the baseline. Only subsequent
+        // entries add a comma. JSON escaping and UTF-8 are counted by serde.
+        let extra = reconnect_json_size(event)?.saturating_add(usize::from(retained > 0));
+        let Some(next_size) = size.checked_add(extra).filter(|size| *size <= max) else {
+            break;
+        };
+        size = next_size;
+        retained = retained.saturating_add(1);
+    }
+    events.drain(..events.len().saturating_sub(retained));
+    reconnect_payload_mut(&mut message)?.missed_events = events;
+    Ok(message)
+}
+
 struct ReconnectionClaimGuard {
     manager: Arc<ReconnectionManager>,
     claim: Option<ClaimedReconnection>,
@@ -1712,44 +1785,46 @@ impl EnhancedGameServer {
                             None
                         };
                         let missed_events = missed_events.events;
-                        Ok(Arc::new(
-                            (ServerMessage::Reconnected(Box::new(ReconnectedPayload {
-                                room_id: response_room_id,
-                                room_code: current_room.code.clone(),
-                                player_id: response_player_id,
-                                game_name: current_room.game_name.clone(),
-                                max_players: current_room.max_players,
-                                supports_authority: current_room.supports_authority,
-                                current_players: response_players,
-                                is_authority: current_room.authority_player
-                                    == Some(response_player_id),
-                                lobby_state: current_room.lobby_state.clone(),
-                                ready_players: response_ready_players,
-                                relay_type: current_room.relay_type.clone(),
-                                current_spectators: current_room.get_spectators(),
-                                // v3 ICE pre-gather (deferred refinement): empty —
-                                // and skipped on the wire — unless this reconnector passes
-                                // the pre-gather gate (its original credentials may have
-                                // expired while it was away), so v2 bytes are untouched. A
-                                // reconnect into a Finalized room gets fresh ICE from the
-                                // late-join SessionPlan below instead (never both).
-                                ice_servers: server
-                                    .pregather_ice_servers(&current_room, &response_player_id),
-                                missed_events,
-                                replay,
-                                sender_watermarks,
-                                // Rotate: the token just used was consumed with the
-                                // completed claim; the restored player gets a fresh one
-                                // for its NEXT unexpected disconnect (v3+ only).
-                                reconnection_token: server
-                                    .pre_issue_reconnection_token_for(
-                                        &response_player_id,
-                                        response_room_id,
-                                    )
-                                    .await,
-                            })))
-                            .correlate_room_operation(operation_id),
-                        ))
+                        let baseline = (ServerMessage::Reconnected(Box::new(ReconnectedPayload {
+                            room_id: response_room_id,
+                            room_code: current_room.code.clone(),
+                            player_id: response_player_id,
+                            game_name: current_room.game_name.clone(),
+                            max_players: current_room.max_players,
+                            supports_authority: current_room.supports_authority,
+                            current_players: response_players,
+                            is_authority: current_room.authority_player == Some(response_player_id),
+                            lobby_state: current_room.lobby_state.clone(),
+                            ready_players: response_ready_players,
+                            relay_type: current_room.relay_type.clone(),
+                            current_spectators: current_room.get_spectators(),
+                            // v3 ICE pre-gather (deferred refinement): empty —
+                            // and skipped on the wire — unless this reconnector passes
+                            // the pre-gather gate (its original credentials may have
+                            // expired while it was away), so v2 bytes are untouched. A
+                            // reconnect into a Finalized room gets fresh ICE from the
+                            // late-join SessionPlan below instead (never both).
+                            ice_servers: server
+                                .pregather_ice_servers(&current_room, &response_player_id),
+                            missed_events,
+                            replay,
+                            sender_watermarks,
+                            // Rotate: the token just used was consumed with the
+                            // completed claim; the restored player gets a fresh one
+                            // for its NEXT unexpected disconnect (v3+ only).
+                            reconnection_token: server
+                                .pre_issue_reconnection_token_for(
+                                    &response_player_id,
+                                    response_room_id,
+                                )
+                                .await,
+                        })))
+                        .correlate_room_operation(operation_id);
+                        Ok(Arc::new(bound_reconnect_baseline(
+                            baseline,
+                            recipient_is_v3,
+                            server.config().max_outbound_message_size,
+                        )?))
                     })
                 }),
             )
@@ -2317,3 +2392,7 @@ impl EnhancedGameServer {
         true
     }
 }
+
+#[cfg(test)]
+#[path = "reconnection_replay_tests.rs"]
+mod replay_budget_tests;

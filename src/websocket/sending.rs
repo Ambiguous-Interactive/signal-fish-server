@@ -1001,16 +1001,7 @@ pub(super) async fn send_single_message_ref(
                     .any(replayed_event_needs_v3_projection)) =>
         {
             let mut payload = payload.as_ref().clone();
-            strip_roster_v2_only_snapshot_metadata(
-                &mut payload.current_players,
-                &mut payload.current_spectators,
-            );
-            // Replayed room-uniform events are recorded verbatim from the
-            // live broadcast (where v2 recipients need the frozen shape), so
-            // the same projection applies to the nested copies.
-            for event in &mut payload.missed_events {
-                project_replayed_event_for_v3(event);
-            }
+            project_reconnect_payload_for_v3(&mut payload);
             send_text_message(
                 sender,
                 &ServerMessage::Reconnected(Box::new(payload)),
@@ -1465,6 +1456,17 @@ fn project_replayed_event_for_v3(event: &mut ServerMessage) {
     }
 }
 
+/// Apply the socket writer's v3 reconnect projection before admission sizing.
+pub(crate) fn project_reconnect_payload_for_v3(payload: &mut crate::protocol::ReconnectedPayload) {
+    strip_roster_v2_only_snapshot_metadata(
+        &mut payload.current_players,
+        &mut payload.current_spectators,
+    );
+    for event in &mut payload.missed_events {
+        project_replayed_event_for_v3(event);
+    }
+}
+
 /// Whether one nested replay event still needs the v3 projection (the mirror
 /// of [`project_replayed_event_for_v3`]; keep the two exhaustive in lockstep).
 fn replayed_event_needs_v3_projection(event: &ServerMessage) -> bool {
@@ -1557,13 +1559,7 @@ fn project_room_operation_result_for_v3(result: &mut RoomOperationResult) {
             );
         }
         RoomOperationResult::Reconnected(payload) => {
-            strip_roster_v2_only_snapshot_metadata(
-                &mut payload.current_players,
-                &mut payload.current_spectators,
-            );
-            for event in &mut payload.missed_events {
-                project_replayed_event_for_v3(event);
-            }
+            project_reconnect_payload_for_v3(payload);
         }
         RoomOperationResult::SpectatorJoined(payload) => {
             strip_roster_v2_only_snapshot_metadata(
