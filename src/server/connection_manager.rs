@@ -658,6 +658,7 @@ impl ConnectionManager {
                         if sent && acknowledged.await.is_ok() {
                             lifecycle.admission_pending.store(false, Ordering::Release);
                             admission.armed = false;
+                            drop(admission);
                             return;
                         }
                     }
