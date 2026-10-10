@@ -98,6 +98,9 @@ When a peer reconnects or rejoins, `--exchange` requires fresh sends and receipt
 data channels. Completed exchanges for other peers remain valid. A transport
 rebuild alone does not reset the exchange.
 
+The client keeps the first data channel for each label in a peer connection.
+It closes duplicate channels so they cannot replace a working channel.
+
 ## CLI reference
 
 The shared flag surface mirrors the native client's ([canonical reference](../native/README.md#cli-reference)):

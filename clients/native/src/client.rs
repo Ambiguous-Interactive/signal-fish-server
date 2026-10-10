@@ -2573,7 +2573,7 @@ impl Orchestrator<'_> {
                 channel,
                 ..
             } => {
-                self.engine.store_remote_channel(peer, label, channel);
+                self.engine.store_remote_channel(peer, label, channel).await;
             }
             EngineEvent::ChannelOpen { peer, label, .. } => {
                 emit(&Event::ChannelOpen {
