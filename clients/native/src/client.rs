@@ -2589,12 +2589,24 @@ impl Orchestrator<'_> {
                 self.handle_peer_transport_loss(peer).await?;
             }
             EngineEvent::ChannelMessage {
-                peer, label, text, ..
+                peer,
+                label,
+                text,
+                queue_permit,
+                ..
             } => {
                 if self.cli.exchange && is_exchange_probe(peer, &label, &text) {
                     self.exchange_ledger.note_received(peer, label.clone());
                 }
                 emit(&Event::ChannelMessage { peer, label, text });
+                drop(queue_permit);
+            }
+            EngineEvent::ChannelReceiveRejected { peer, label, .. } => {
+                emit(&Event::Error {
+                    message: format!("peer {peer} channel {label} exceeded receive limits"),
+                });
+                emit(&Event::ChannelClosed { peer, label });
+                self.handle_peer_transport_loss(peer).await?;
             }
         }
         Ok(())
@@ -3471,6 +3483,10 @@ fn keepalive_wake(next_ping_at: Instant, pong_deadline: Option<Instant>) -> Inst
 }
 
 #[cfg(test)]
+#[path = "client_receive_tests.rs"]
+mod receive_tests;
+
+#[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -4044,7 +4060,7 @@ mod tests {
         );
     }
 
-    fn fixture_orchestrator<'a>(
+    pub(super) fn fixture_orchestrator<'a>(
         cli: &'a Cli,
         ws: crate::wire::WsStream,
         my_id: PlayerId,
@@ -4165,6 +4181,7 @@ mod tests {
                         generation: 1,
                         label: label.to_string(),
                         text: text.clone(),
+                        queue_permit: crate::engine::MessageQueuePermit::for_test(),
                     })
                     .await
                     .unwrap();
@@ -4186,6 +4203,7 @@ mod tests {
                     generation: 0,
                     label: label.to_string(),
                     text: text.clone(),
+                    queue_permit: crate::engine::MessageQueuePermit::for_test(),
                 })
                 .await
                 .unwrap();
@@ -4203,6 +4221,7 @@ mod tests {
                     generation: 1,
                     label: label.to_string(),
                     text,
+                    queue_permit: crate::engine::MessageQueuePermit::for_test(),
                 })
                 .await
                 .unwrap();

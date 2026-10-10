@@ -1016,7 +1016,9 @@ for (const [initiate, alreadyOpen] of [
         engine.noteChannelOpen('peer', label);
       },
       onChannelClosed: (_peer, _generation, label) => observed.push(`close:${label}`),
-      onChannelMessage: (_peer, _generation, label, text) => observed.push(`${label}:${text}`),
+      onChannelMessage: (_peer, _generation, label, text) => {
+        observed.push(`${label}:${text}`);
+      },
     });
     await engine.pairWith('peer', initiate, []);
     // Regression #870: unsupported labels cannot consume channel slots or callbacks.
@@ -1347,3 +1349,326 @@ console.error(
   }
 }
 console.error('ok - buffered ICE rejection preserves SDP negotiation and later candidates');
+
+// Regression #870: remote message bursts must not retain unbounded promise work.
+for (const scenario of [
+  { name: 'count', data: '', count: 257, accepted: 256 },
+  { name: 'failed output', data: '', count: 2, accepted: 1, drains: 1, outputFailure: true },
+  { name: 'pending output count', data: '', count: 129, accepted: 256, drains: 2, held: true },
+  {
+    name: 'pending output bytes',
+    data: 'a'.repeat(65536),
+    count: 9,
+    accepted: 16,
+    drains: 2,
+    held: true,
+  },
+  { name: 'global peers', data: '', count: 257, accepted: 256, links: 2 },
+  { name: 'bytes', data: 'a'.repeat(65536), count: 17, accepted: 16 },
+  { name: 'text size', data: 'a'.repeat(65537), count: 2, accepted: 0 },
+  { name: 'Unicode size', data: '€'.repeat(21846), count: 2, accepted: 0 },
+  { name: 'binary size', data: new ArrayBuffer(65537), count: 2, accepted: 0 },
+  {
+    name: 'lossy binary size',
+    data: new Uint8Array(21846).fill(255).buffer,
+    count: 2,
+    accepted: 0,
+  },
+  { name: 'drained credits', data: '', count: 256, accepted: 768, drains: 3 },
+  {
+    name: 'retired generation credits',
+    data: '',
+    count: 256,
+    accepted: 256,
+    drains: 2,
+    replace: true,
+  },
+  {
+    name: 'binary boundary',
+    data: new Uint8Array(65536).fill(97).buffer,
+    count: 1,
+    accepted: 1,
+    drains: 1,
+  },
+]) {
+  const originalPc = globalThis.RTCPeerConnection;
+  const originalSocket = globalThis.WebSocket;
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const originalError = console.error;
+  const events: Record<string, unknown>[] = [];
+  const connections: BoundedConnection[] = [];
+  let socket: BoundedSocket | undefined;
+  let running: Promise<number> | undefined;
+  let releaseOutput: (() => void) | undefined;
+  let outputHeld = scenario.held === true;
+  const outputAck = new Promise<void>((resolve) => {
+    releaseOutput = resolve;
+  });
+  const peer = '00000000-0000-0000-0000-000000000002';
+  const me = '00000000-0000-0000-0000-000000000001';
+  const peerIds = [peer, '00000000-0000-0000-0000-000000000003'].slice(0, scenario.links ?? 1);
+  const turn = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+  class BoundedChannel {
+    readyState = 'open';
+    bufferedAmount = 0;
+    binaryType = 'blob';
+    onmessage: ((event: { data: unknown }) => void) | null = null;
+    onclose: (() => void) | null = null;
+    constructor(readonly label: string) {}
+    close(): void {
+      this.readyState = 'closed';
+      this.onclose?.();
+    }
+    send(): void {}
+  }
+  class BoundedConnection {
+    readonly channels: BoundedChannel[] = [];
+    constructor() {
+      connections.push(this);
+    }
+    createDataChannel(label: string): BoundedChannel {
+      const channel = new BoundedChannel(label);
+      this.channels.push(channel);
+      return channel;
+    }
+    async createOffer(): Promise<{ type: 'offer'; sdp: string }> {
+      return { type: 'offer', sdp: 'test' };
+    }
+    async setLocalDescription(): Promise<void> {}
+    close(): void {
+      for (const channel of this.channels) channel.close();
+    }
+  }
+  class BoundedSocket {
+    static readonly OPEN = 1;
+    readyState = 1;
+    bufferedAmount = 0;
+    onopen: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onclose: (() => void) | null = null;
+    constructor() {
+      socket = this;
+      queueMicrotask(() => this.onopen?.());
+    }
+    deliver(frame: unknown): void {
+      this.onmessage?.({ data: JSON.stringify(frame) });
+    }
+    send(text: string): void {
+      const frame = JSON.parse(text) as { type: string };
+      if (frame.type === 'Authenticate')
+        queueMicrotask(() => {
+          this.deliver({ type: 'Authenticated', data: {} });
+          this.deliver({ type: 'ProtocolInfo', data: { protocol_version: 3 } });
+        });
+      if (frame.type === 'JoinRoom')
+        queueMicrotask(() => {
+          this.deliver({
+            type: 'RoomJoined',
+            data: {
+              player_id: me,
+              room_id: me,
+              room_code: 'TEST',
+              lobby_state: 'finalized',
+              ready_players: [],
+              current_players: [
+                { id: me, epoch: 1, seq: 0 },
+                ...peerIds.map((id) => ({ id, epoch: 1, seq: 0 })),
+              ],
+            },
+          });
+          this.deliver({
+            type: 'SessionPlan',
+            data: {
+              generation: me,
+              topology: 'mesh',
+              transport: 'webrtc',
+              fallback: 'relay',
+              ice_servers: [],
+              peers: peerIds.map((player_id) => ({ player_id, initiate: true })),
+            },
+          });
+        });
+    }
+    close(): void {}
+  }
+  try {
+    globalThis.RTCPeerConnection = BoundedConnection as unknown as typeof RTCPeerConnection;
+    globalThis.WebSocket = BoundedSocket as unknown as typeof WebSocket;
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: {
+        __sf_emit: (line: string) => {
+          const event = JSON.parse(line) as Record<string, unknown>;
+          events.push(event);
+          if (outputHeld && event['event'] === 'channel_message') return outputAck;
+          if (scenario.outputFailure && event['event'] === 'channel_message')
+            return Promise.reject(new Error('consumer closed'));
+        },
+      },
+    });
+    console.error = () => {};
+    running = run({
+      serverUrl: 'ws://mock.invalid/v3/ws',
+      createRoom: true,
+      joinCode: null,
+      peers: peerIds.length + 1,
+      maxPlayers: null,
+      expectTotalPeers: null,
+      leaveOnGameStart: false,
+      gameName: 'bounded',
+      playerName: 'test',
+      appId: 'test',
+      platform: 'test',
+      exchange: scenario.outputFailure === true,
+      relayPayload: null,
+      crippleIce: false,
+      p2pTimeoutSecs: 10,
+      runForSecs: 120,
+      successReleaseEnabled: false,
+      protocolVersion: 3,
+      supportedTopologies: ['mesh'],
+      supportedTransports: ['webrtc'],
+      gameDataFormat: 'json',
+      sdkVersion: 'test',
+      elapsedBeforeStartMs: 0,
+    });
+    await turn();
+    let channels = connections.flatMap((connection) => connection.channels);
+    assert(
+      channels.length === peerIds.length * 2,
+      `${scenario.name}: the dispatcher creates both channels`,
+    );
+    for (let drain = 0; drain < (scenario.drains ?? 1); drain += 1) {
+      if (scenario.replace && drain === 0)
+        socket?.deliver({
+          type: 'SessionPlan',
+          data: {
+            generation: peer,
+            topology: 'mesh',
+            transport: 'webrtc',
+            fallback: 'relay',
+            ice_servers: [],
+            peers: [{ player_id: peer, initiate: true }],
+          },
+        });
+      for (let index = 0; index < scenario.count; index += 1) {
+        const channel = channels[index % channels.length];
+        channel?.onmessage?.({
+          data: scenario.outputFailure
+            ? JSON.stringify({ from: peer, channel: channel.label, seq: 0 })
+            : scenario.data,
+        });
+      }
+      await turn();
+      if (scenario.replace) channels = connections[connections.length - 1]?.channels ?? [];
+    }
+    if (scenario.held) {
+      assert(
+        events.filter((event) => event['event'] === 'channel_message').length === 1,
+        `${scenario.name}: only one message may enter an unacknowledged output bridge`,
+      );
+      assert(
+        channels.filter((channel) => channel.readyState === 'closed').length === 2,
+        `${scenario.name}: pending output must remain charged across separate browser tasks`,
+      );
+      outputHeld = false;
+      releaseOutput?.();
+      await turn();
+    }
+    const messages = events.filter((event) => event['event'] === 'channel_message');
+    assert(
+      messages.length === scenario.accepted,
+      `${scenario.name}: expected ${scenario.accepted} admitted messages, got ${messages.length}`,
+    );
+    const rejected = scenario.drains === undefined || scenario.held === true;
+    assert(
+      events.filter((event) => event['event'] === 'channel_closed').length ===
+        (rejected ? 1 : 0),
+      `${scenario.name}: overload must produce one terminal event despite both channel close callbacks`,
+    );
+    assert(
+      events.filter((event) => event['event'] === 'error').length ===
+        (rejected || scenario.outputFailure ? 1 : 0),
+      `${scenario.name}: overload must produce one explicit error`,
+    );
+    assert(
+      channels?.every((channel) => channel.binaryType === 'arraybuffer') === true,
+      `${scenario.name}: binary messages must be delivered as bounded array buffers`,
+    );
+    if (scenario.outputFailure) {
+      assert(
+        (await running) === 2,
+        'critical output failure must stop the run with a protocol error',
+      );
+      assert(
+        events.some(
+          (event) =>
+            event['event'] === 'error' &&
+            String(event['message']).includes('stdout event delivery failed'),
+        ),
+        'critical output failure must name the failed delivery',
+      );
+      assert(
+        !events.some((event) => event['event'] === 'success_criteria_met'),
+        'an exchange receipt with failed output cannot produce success',
+      );
+    }
+    if (rejected) {
+      if (peerIds.length === 1) {
+        assert(
+          events.some(
+            (event) =>
+              event['event'] === 'transport_status_sent' && event['connected'] === true,
+          ),
+          `${scenario.name}: overload must start from a connected pair`,
+        );
+        assert(
+          events.filter(
+            (event) =>
+              event['event'] === 'transport_status_sent' && event['connected'] === false,
+          ).length === 1,
+          `${scenario.name}: overload must report disconnected transport once`,
+        );
+        assert(
+          events.filter((event) => event['event'] === 'fallback_engaged').length === 1,
+          `${scenario.name}: overload must engage relay fallback once`,
+        );
+      }
+      assert(
+        channels.filter((channel) => channel.readyState === 'closed').length === 2,
+        `${scenario.name}: close both required channels`,
+      );
+      channels
+        .find((channel) => channel.readyState === 'closed')
+        ?.onmessage?.({ data: 'late' });
+      await turn();
+      assert(
+        events.filter((event) => event['event'] === 'channel_message').length ===
+          scenario.accepted,
+        `${scenario.name}: failed-link callbacks must stay fenced`,
+      );
+      if (scenario.links === 2) {
+        channels
+          .find((channel) => channel.readyState === 'open')
+          ?.onmessage?.({ data: 'healthy' });
+        await turn();
+        assert(
+          events.filter((event) => event['event'] === 'channel_message').length ===
+            scenario.accepted + 1,
+          'global overload must preserve healthy peer traffic after the backlog drains',
+        );
+      }
+    }
+  } finally {
+    outputHeld = false;
+    releaseOutput?.();
+    socket?.onclose?.();
+    await running;
+    globalThis.RTCPeerConnection = originalPc;
+    globalThis.WebSocket = originalSocket;
+    console.error = originalError;
+    if (originalWindow === undefined) Reflect.deleteProperty(globalThis, 'window');
+    else Object.defineProperty(globalThis, 'window', originalWindow);
+  }
+}
+console.error('ok - incoming channel messages have bounded frames and pending count/bytes');

@@ -16,6 +16,16 @@ It closes other remote labels without retaining them or starting callbacks.
 handling. This restriction belongs to these reference clients; the server
 continues to relay opaque signaling payloads.
 
+The client accepts at most 64 KiB per received data-channel message, measured
+as raw bytes and decoded UTF-8 text. Across all peers and link generations,
+pending messages retain at most 256 entries and 1 MiB of decoded text.
+Exceeding either limit reports an error and closes the failed P2P link through
+relay fallback. The limits bound the application backlog, not WebRTC stack memory.
+**Migration:** Split larger payloads into smaller messages and keep consuming
+output. Native library consumers must retain `EngineEvent::ChannelMessage`'s
+`queue_permit` until the message is handled or discarded, including output waits.
+Handle the new `EngineEvent::ChannelReceiveRejected` by retiring the failed link.
+
 ## Quick start
 
 One line from the repository root (build server → lint client → run the full suite):

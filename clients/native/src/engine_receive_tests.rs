@@ -1,0 +1,417 @@
+use super::*;
+
+#[test]
+fn receive_budget_is_shared_across_links_and_releases_when_payloads_drop() {
+    let (events, _receiver) = mpsc::unbounded_channel();
+    let engine = Engine::new(EngineSettings::default(), events).unwrap();
+    let links = [0, 1].map(|_| ChannelReceiveAdmission {
+        budget: engine.message_budget.clone(),
+        rejected: Mutex::new(false),
+    });
+    // The default SCTP message cap prevents live raw-oversize delivery.
+    assert!(links[0]
+        .decode_and_reserve(&vec![b'x'; 64 * 1024 + 1])
+        .is_none());
+    let mut held = Vec::new();
+    for index in 0..256 {
+        // Empty messages still occupy one count slot across both peer links.
+        held.push(links[index % 2].decode_and_reserve(b"").unwrap());
+    }
+    for link in &links {
+        assert!(link.decode_and_reserve(b"").is_none());
+    }
+    assert_eq!(engine.message_budget.bytes.available_permits(), 1024 * 1024);
+    drop(held);
+    assert_eq!(engine.message_budget.messages.available_permits(), 256);
+
+    let data = vec![b'x'; 64 * 1024];
+    let held: Vec<_> = (0..16)
+        .map(|index| links[index % 2].decode_and_reserve(&data).unwrap())
+        .collect();
+    for link in &links {
+        assert!(link.decode_and_reserve(b"x").is_none());
+    }
+    assert_eq!(
+        engine.message_budget.messages.available_permits(),
+        240,
+        "a failed byte reservation must return its count slot"
+    );
+    assert_eq!(engine.message_budget.bytes.available_permits(), 0);
+    drop(held);
+    assert_eq!(engine.message_budget.messages.available_permits(), 256);
+    assert_eq!(engine.message_budget.bytes.available_permits(), 1024 * 1024);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn simultaneous_live_channels_publish_one_terminal_receive_rejection() {
+    let pair = LivePair::connect().await;
+    let held: Vec<_> = (0..255)
+        .map(|_| pair.receiver.message_budget.reserve(0).unwrap())
+        .collect();
+    let reliable = pair
+        .sender
+        .channel(pair.receiver_id, RELIABLE_LABEL)
+        .unwrap();
+    let unreliable = pair
+        .sender
+        .channel(pair.receiver_id, UNRELIABLE_LABEL)
+        .unwrap();
+    tokio::join!(
+        async {
+            reliable.send_text("reliable-one").await.unwrap();
+        },
+        async {
+            unreliable.send_text("unreliable-one").await.unwrap();
+        }
+    );
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !*pair.receiver.peers[&pair.sender_id]
+            .receive_admission
+            .rejected
+            .lock()
+            .await
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("concurrent real messages reach the full receive queue");
+    reliable.close().await.unwrap();
+    unreliable.close().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !pair.receiver.peers[&pair.sender_id]
+            .channel_tasks
+            .iter()
+            .all(|task| task.is_finished())
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both real channel producers terminate");
+    let mut pair = pair;
+    let mut rejected = false;
+    let mut retained = Vec::new();
+    loop {
+        let event = match pair.receiver_events.try_recv() {
+            Ok(event) => event,
+            Err(mpsc::error::TryRecvError::Empty) => break,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                panic!("live engine must retain its event sender")
+            }
+        };
+        match event {
+            EngineEvent::ChannelMessage { queue_permit, .. } => {
+                assert!(
+                    !rejected,
+                    "the other channel must not publish after rejection"
+                );
+                retained.push(queue_permit);
+            }
+            EngineEvent::ChannelReceiveRejected { .. } => {
+                assert!(!rejected, "both channels share one terminal rejection");
+                rejected = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(rejected);
+    assert_eq!(retained.len(), 1);
+    assert_eq!(pair.receiver.message_budget.messages.available_permits(), 0);
+    drop(held);
+    drop(retained);
+    assert_eq!(
+        pair.receiver.message_budget.messages.available_permits(),
+        256
+    );
+    pair.cleanup().await;
+}
+
+struct LivePair {
+    sender: Engine,
+    receiver: Engine,
+    sender_events: mpsc::UnboundedReceiver<EngineEvent>,
+    receiver_events: mpsc::UnboundedReceiver<EngineEvent>,
+    sender_id: PlayerId,
+    receiver_id: PlayerId,
+}
+
+impl LivePair {
+    async fn connect() -> Self {
+        let (sender_tx, sender_events) = mpsc::unbounded_channel();
+        let (receiver_tx, receiver_events) = mpsc::unbounded_channel();
+        let settings = EngineSettings {
+            disable_mdns: true,
+            ..EngineSettings::default()
+        };
+        let mut pair = Self {
+            sender: Engine::new(settings, sender_tx).unwrap(),
+            receiver: Engine::new(settings, receiver_tx).unwrap(),
+            sender_events,
+            receiver_events,
+            sender_id: PlayerId::from_u128(0x123),
+            receiver_id: PlayerId::from_u128(0x456),
+        };
+        pair.negotiate().await;
+        pair
+    }
+
+    async fn negotiate(&mut self) {
+        let offer = self
+            .sender
+            .pair_with(self.receiver_id, true, &[])
+            .await
+            .unwrap()
+            .unwrap();
+        self.receiver
+            .pair_with(self.sender_id, false, &[])
+            .await
+            .unwrap();
+        let answer = self
+            .receiver
+            .handle_offer(self.sender_id, offer)
+            .await
+            .unwrap();
+        self.sender
+            .handle_answer(self.receiver_id, answer)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let mut sender_connected = false;
+            let mut receiver_connected = false;
+            while !sender_connected || !receiver_connected {
+                tokio::select! {
+                    event = self.sender_events.recv() => match event.unwrap() {
+                        EngineEvent::LocalCandidate { candidate_json, .. } => {
+                            self.receiver.handle_remote_candidate(self.sender_id, &candidate_json).await.unwrap();
+                        }
+                        EngineEvent::RemoteChannel { label, channel, .. } => {
+                            self.sender.store_remote_channel(self.receiver_id, label, channel).await;
+                        }
+                        EngineEvent::ChannelOpen { label, .. } => {
+                            sender_connected |= self.sender.note_channel_open(self.receiver_id, &label);
+                        }
+                        _ => {}
+                    },
+                    event = self.receiver_events.recv() => match event.unwrap() {
+                        EngineEvent::LocalCandidate { candidate_json, .. } => {
+                            self.sender.handle_remote_candidate(self.receiver_id, &candidate_json).await.unwrap();
+                        }
+                        EngineEvent::RemoteChannel { label, channel, .. } => {
+                            self.receiver.store_remote_channel(self.sender_id, label, channel).await;
+                        }
+                        EngineEvent::ChannelOpen { label, .. } => {
+                            receiver_connected |= self.receiver.note_channel_open(self.sender_id, &label);
+                        }
+                        _ => {}
+                    },
+                }
+            }
+        }).await.expect("local pair opens both required channels");
+    }
+
+    async fn cleanup(mut self) {
+        self.sender.remove_peer(self.receiver_id).await.unwrap();
+        self.receiver.remove_peer(self.sender_id).await.unwrap();
+    }
+}
+
+// Regression #878: unread application callbacks retain payloads without a bound.
+#[tokio::test]
+async fn unread_live_receive_queue_bounds_count_and_preserves_fifo() {
+    let mut pair = LivePair::connect().await;
+    let admitted = flood_until_rejected(&mut pair, 257, 16, false).await;
+    assert_eq!(admitted.len(), 256);
+
+    // Removing a link must not free payloads still owned by queued callbacks.
+    let old_generation = pair.receiver.peers[&pair.sender_id].generation;
+    pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+    pair.receiver.remove_peer(pair.sender_id).await.unwrap();
+    pair.negotiate().await;
+    assert_ne!(
+        old_generation,
+        pair.receiver.peers[&pair.sender_id].generation
+    );
+    let fresh = flood_until_rejected(&mut pair, 1, 16, false).await;
+    assert!(
+        fresh.is_empty(),
+        "stale queued payloads still consume the engine budget"
+    );
+    drop(admitted);
+
+    // Consuming the retained callbacks releases capacity for a fresh physical link.
+    pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+    pair.receiver.remove_peer(pair.sender_id).await.unwrap();
+    pair.negotiate().await;
+    let channel = pair
+        .sender
+        .channel(pair.receiver_id, RELIABLE_LABEL)
+        .unwrap();
+    channel.send_text("healthy-after-drain").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match pair.receiver_events.recv().await.unwrap() {
+                EngineEvent::ChannelMessage { text, .. } => {
+                    assert_eq!(text, "healthy-after-drain");
+                    break;
+                }
+                EngineEvent::ChannelReceiveRejected { .. } => {
+                    panic!("released capacity must allow healthy traffic")
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("healthy traffic resumes after queue drain");
+    pair.cleanup().await;
+}
+
+fn payload(index: usize, bytes: usize) -> String {
+    let mut text = format!("message-{index}");
+    text.extend(std::iter::repeat_n('x', bytes - text.len()));
+    text
+}
+
+async fn flood_until_rejected(
+    pair: &mut LivePair,
+    sent: usize,
+    bytes: usize,
+    binary: bool,
+) -> Vec<MessageQueuePermit> {
+    let channel = pair
+        .sender
+        .channel(pair.receiver_id, RELIABLE_LABEL)
+        .unwrap();
+    for index in 0..sent {
+        let result = if binary {
+            channel.send(vec![0xff; bytes].as_slice().into()).await
+        } else {
+            channel.send_text(&payload(index, bytes)).await
+        };
+        // A closed remote channel can refuse later sends in a long burst.
+        if let Err(error) = result {
+            assert!(
+                index > 0,
+                "first send failed: bytes={bytes}, binary={binary}, error={error}"
+            );
+            break;
+        }
+    }
+    let mut permits = Vec::new();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match pair.receiver_events.recv().await.unwrap() {
+                EngineEvent::ChannelMessage {
+                    peer,
+                    generation,
+                    label,
+                    text,
+                    queue_permit,
+                } => {
+                    assert_eq!(peer, pair.sender_id);
+                    assert_eq!(generation, pair.receiver.peers[&pair.sender_id].generation);
+                    assert_eq!(label, RELIABLE_LABEL);
+                    if binary {
+                        assert_eq!(text, "\u{fffd}".repeat(bytes));
+                    } else {
+                        assert_eq!(
+                            text,
+                            payload(permits.len(), bytes),
+                            "admitted messages preserve FIFO"
+                        );
+                    }
+                    permits.push(queue_permit);
+                }
+                EngineEvent::ChannelReceiveRejected {
+                    peer,
+                    generation,
+                    label,
+                } => {
+                    assert_eq!(peer, pair.sender_id);
+                    assert_eq!(generation, pair.receiver.peers[&pair.sender_id].generation);
+                    assert_eq!(label, RELIABLE_LABEL);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|error| panic!("receive overload missing: sent={sent}, bytes={bytes}, binary={binary}, admitted={}, error={error}", permits.len()));
+    let sender_generation = pair.sender.peers[&pair.receiver_id].generation;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let EngineEvent::ChannelClosed {
+                generation, label, ..
+            } = pair.sender_events.recv().await.unwrap()
+            {
+                if generation == sender_generation && label == RELIABLE_LABEL {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .expect("receive rejection closes the remote reliable channel");
+    // The rejection is the producer's terminal barrier, not a sleep-based oracle.
+    loop {
+        let event = match pair.receiver_events.try_recv() {
+            Ok(event) => event,
+            Err(mpsc::error::TryRecvError::Empty) => break,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                panic!("live engine must retain its event sender")
+            }
+        };
+        assert!(
+            !matches!(
+                event,
+                EngineEvent::ChannelMessage { .. } | EngineEvent::ChannelReceiveRejected { .. }
+            ),
+            "the overloaded link must stop publishing after one rejection"
+        );
+    }
+    permits
+}
+
+#[tokio::test]
+async fn unread_live_receive_queue_bounds_decoded_bytes_and_single_message_size() {
+    for (description, count, bytes, binary, expected) in [
+        ("byte budget", 129, 8192, false, 128),
+        ("exact single-message limit", 17, 64 * 1024, false, 16),
+        ("lossy UTF-8 expansion", 1, 22000, true, 0),
+    ] {
+        let mut pair = LivePair::connect().await;
+        let permits = flood_until_rejected(&mut pair, count, bytes, binary).await;
+        assert_eq!(permits.len(), expected, "{description}");
+        drop(permits);
+        pair.cleanup().await;
+    }
+}
+
+#[tokio::test]
+async fn dropped_receive_event_queue_stops_live_channel_producer() {
+    let mut pair = LivePair::connect().await;
+    let (_, replacement) = mpsc::unbounded_channel();
+    drop(std::mem::replace(&mut pair.receiver_events, replacement));
+    pair.sender
+        .channel(pair.receiver_id, RELIABLE_LABEL)
+        .unwrap()
+        .send_text("no-receiver")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let EngineEvent::ChannelClosed { label, .. } =
+                pair.sender_events.recv().await.unwrap()
+            {
+                if label == RELIABLE_LABEL {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .expect("a dropped application receiver closes the channel producer");
+    pair.cleanup().await;
+}

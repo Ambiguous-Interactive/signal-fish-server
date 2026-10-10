@@ -34,7 +34,7 @@ export function classifySignal(signal: unknown): SignalKind {
 declare global {
   interface Window {
     /** stdout bridge exposed by the CLI before the page bundle is injected. */
-    __sf_emit?: (line: string) => void;
+    __sf_emit?: (line: string) => void | Promise<void>;
     /** CLI-side release-file probe used only by deterministic test harnesses. */
     __sf_success_released?: () => Promise<boolean>;
   }
@@ -44,13 +44,20 @@ declare global {
  * Emit one event object as a JSONL stdout line. `event` must carry the
  * snake_case `event` tag as its first property (construction sites keep that
  * ordering so the emitted JSON matches the native client's field order).
- * Failures are swallowed: a torn-down bridge must never break the run.
+ * Ordinary teardown diagnostics absorb bridge errors. Required application
+ * delivery propagates errors and waits until stdout consumes the line.
  */
-export function emit(event: Record<string, unknown>): void {
+export async function emit(
+  event: Record<string, unknown>,
+  requireDelivery = false,
+): Promise<void> {
   try {
-    window.__sf_emit?.(JSON.stringify(event));
+    const bridge = window.__sf_emit;
+    if (bridge === undefined && requireDelivery)
+      throw new Error('stdout bridge is unavailable');
+    await bridge?.(JSON.stringify(event));
   } catch (error) {
-    // The bridge only fails during CLI teardown; stderr is still wired.
     console.error(`failed to emit stdout event: ${String(error)}`);
+    if (requireDelivery) throw new Error('stdout event delivery failed');
   }
 }
