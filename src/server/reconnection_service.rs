@@ -15,6 +15,79 @@ use crate::coordination::{
 use super::session_policy::{membership_session_decision, ActiveSessionPlan};
 use super::{ClientLifecycle, EnhancedGameServer, PendingApplicationClaimRollback};
 
+/// Count the actual JSON wire bytes without allocating an aggregate frame.
+fn reconnect_json_size(value: &impl serde::Serialize) -> Result<usize, serde_json::Error> {
+    #[derive(Default)]
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .ok_or_else(|| std::io::Error::other("reconnect JSON size overflow"))?;
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter::default();
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.0)
+}
+
+fn reconnect_payload_mut(message: &mut ServerMessage) -> anyhow::Result<&mut ReconnectedPayload> {
+    match message {
+        ServerMessage::Reconnected(payload) => Ok(payload),
+        ServerMessage::RoomOperationResult { result, .. } => match result.as_mut() {
+            crate::protocol::RoomOperationResult::Reconnected(payload) => Ok(payload),
+            _ => anyhow::bail!("expected reconnect baseline"),
+        },
+        _ => anyhow::bail!("expected reconnect baseline"),
+    }
+}
+
+/// Preserve the fresh snapshot and the largest fitting suffix of replay.
+/// Controls use JSON regardless of negotiated game-data encoding. Size after
+/// recipient projection and correlation, including the rotated credential.
+/// Refuse an oversized snapshot before queue admission consumes the old token.
+fn bound_reconnect_baseline(
+    mut message: ServerMessage,
+    recipient_is_v3: bool,
+    max: usize,
+) -> anyhow::Result<ServerMessage> {
+    if recipient_is_v3 {
+        crate::websocket::project_reconnect_payload_for_v3(reconnect_payload_mut(&mut message)?);
+    }
+    if reconnect_json_size(&message)? <= max {
+        return Ok(message);
+    }
+    let payload = reconnect_payload_mut(&mut message)?;
+    let mut events = std::mem::take(&mut payload.missed_events);
+    if recipient_is_v3 && !events.is_empty() && payload.replay != Some(ReplayStatus::Unavailable) {
+        payload.replay = Some(ReplayStatus::Truncated);
+    }
+    let mut size = reconnect_json_size(&message)?;
+    if size > max {
+        anyhow::bail!("reconnect snapshot exceeds the outbound frame limit");
+    }
+    let mut retained = 0;
+    for event in events.iter().rev() {
+        // The empty array's brackets are in the baseline. Only subsequent
+        // entries add a comma. JSON escaping and UTF-8 are counted by serde.
+        let extra = reconnect_json_size(event)?.saturating_add(usize::from(retained > 0));
+        let Some(next_size) = size.checked_add(extra).filter(|size| *size <= max) else {
+            break;
+        };
+        size = next_size;
+        retained += 1;
+    }
+    events.drain(..events.len() - retained);
+    reconnect_payload_mut(&mut message)?.missed_events = events;
+    Ok(message)
+}
+
 struct ReconnectionClaimGuard {
     manager: Arc<ReconnectionManager>,
     claim: Option<ClaimedReconnection>,
@@ -1712,44 +1785,46 @@ impl EnhancedGameServer {
                             None
                         };
                         let missed_events = missed_events.events;
-                        Ok(Arc::new(
-                            (ServerMessage::Reconnected(Box::new(ReconnectedPayload {
-                                room_id: response_room_id,
-                                room_code: current_room.code.clone(),
-                                player_id: response_player_id,
-                                game_name: current_room.game_name.clone(),
-                                max_players: current_room.max_players,
-                                supports_authority: current_room.supports_authority,
-                                current_players: response_players,
-                                is_authority: current_room.authority_player
-                                    == Some(response_player_id),
-                                lobby_state: current_room.lobby_state.clone(),
-                                ready_players: response_ready_players,
-                                relay_type: current_room.relay_type.clone(),
-                                current_spectators: current_room.get_spectators(),
-                                // v3 ICE pre-gather (deferred refinement): empty —
-                                // and skipped on the wire — unless this reconnector passes
-                                // the pre-gather gate (its original credentials may have
-                                // expired while it was away), so v2 bytes are untouched. A
-                                // reconnect into a Finalized room gets fresh ICE from the
-                                // late-join SessionPlan below instead (never both).
-                                ice_servers: server
-                                    .pregather_ice_servers(&current_room, &response_player_id),
-                                missed_events,
-                                replay,
-                                sender_watermarks,
-                                // Rotate: the token just used was consumed with the
-                                // completed claim; the restored player gets a fresh one
-                                // for its NEXT unexpected disconnect (v3+ only).
-                                reconnection_token: server
-                                    .pre_issue_reconnection_token_for(
-                                        &response_player_id,
-                                        response_room_id,
-                                    )
-                                    .await,
-                            })))
-                            .correlate_room_operation(operation_id),
-                        ))
+                        let baseline = (ServerMessage::Reconnected(Box::new(ReconnectedPayload {
+                            room_id: response_room_id,
+                            room_code: current_room.code.clone(),
+                            player_id: response_player_id,
+                            game_name: current_room.game_name.clone(),
+                            max_players: current_room.max_players,
+                            supports_authority: current_room.supports_authority,
+                            current_players: response_players,
+                            is_authority: current_room.authority_player == Some(response_player_id),
+                            lobby_state: current_room.lobby_state.clone(),
+                            ready_players: response_ready_players,
+                            relay_type: current_room.relay_type.clone(),
+                            current_spectators: current_room.get_spectators(),
+                            // v3 ICE pre-gather (deferred refinement): empty —
+                            // and skipped on the wire — unless this reconnector passes
+                            // the pre-gather gate (its original credentials may have
+                            // expired while it was away), so v2 bytes are untouched. A
+                            // reconnect into a Finalized room gets fresh ICE from the
+                            // late-join SessionPlan below instead (never both).
+                            ice_servers: server
+                                .pregather_ice_servers(&current_room, &response_player_id),
+                            missed_events,
+                            replay,
+                            sender_watermarks,
+                            // Rotate: the token just used was consumed with the
+                            // completed claim; the restored player gets a fresh one
+                            // for its NEXT unexpected disconnect (v3+ only).
+                            reconnection_token: server
+                                .pre_issue_reconnection_token_for(
+                                    &response_player_id,
+                                    response_room_id,
+                                )
+                                .await,
+                        })))
+                        .correlate_room_operation(operation_id);
+                        Ok(Arc::new(bound_reconnect_baseline(
+                            baseline,
+                            recipient_is_v3,
+                            server.config().max_outbound_message_size,
+                        )?))
                     })
                 }),
             )
@@ -2315,5 +2390,191 @@ impl EnhancedGameServer {
             "Player reconnected successfully"
         );
         true
+    }
+}
+
+#[cfg(test)]
+mod replay_budget_tests {
+    use super::*;
+    use crate::protocol::{LobbyState, RoomOperationResult};
+
+    fn replay_event(index: u128, v3: bool, name: String) -> ServerMessage {
+        ServerMessage::PlayerJoined {
+            player: PlayerInfo {
+                id: PlayerId::from_u128(10 + index),
+                name,
+                is_authority: false,
+                is_ready: false,
+                connected_at: None,
+                connection_info: None,
+                epoch: v3.then_some(1),
+                seq: v3.then_some(7),
+                region_id: "test".into(),
+            },
+        }
+    }
+
+    fn baseline(v3: bool, correlated: bool) -> ServerMessage {
+        let message = ServerMessage::Reconnected(Box::new(ReconnectedPayload {
+            room_id: RoomId::from_u128(1),
+            room_code: "BUDGET".into(),
+            player_id: PlayerId::from_u128(2),
+            game_name: "game".into(),
+            max_players: 4,
+            supports_authority: false,
+            current_players: Vec::new(),
+            is_authority: false,
+            lobby_state: LobbyState::Waiting,
+            ready_players: Vec::new(),
+            relay_type: "matchbox".into(),
+            current_spectators: Vec::new(),
+            ice_servers: Vec::new(),
+            missed_events: (0..3)
+                .map(|index| replay_event(index, v3, format!("{index}: 🐟\"\\\n")))
+                .collect(),
+            replay: v3.then_some(ReplayStatus::Complete),
+            sender_watermarks: Vec::new(),
+            reconnection_token: v3.then(|| "rotated-token".into()),
+        }));
+        if correlated {
+            ServerMessage::RoomOperationResult {
+                operation_id: crate::protocol::RoomOperationId::from_u128(3),
+                result: Box::new(match message {
+                    ServerMessage::Reconnected(payload) => {
+                        RoomOperationResult::Reconnected(payload)
+                    }
+                    _ => unreachable!(),
+                }),
+            }
+        } else {
+            message
+        }
+    }
+
+    fn wire_size(message: &ServerMessage) -> usize {
+        serde_json::to_vec(message).expect("wire JSON").len()
+    }
+
+    #[test]
+    fn reconnect_replay_budget_preserves_exact_boundary_and_largest_suffix() {
+        for (v3, correlated) in [(false, false), (true, false), (true, true)] {
+            let original = baseline(v3, correlated);
+            let full_size = wire_size(&original);
+            assert_eq!(reconnect_json_size(&original).unwrap(), full_size);
+            for cap in [full_size, full_size + 1] {
+                let complete = bound_reconnect_baseline(original.clone(), v3, cap).unwrap();
+                assert_eq!(
+                    serde_json::to_value(complete).unwrap(),
+                    serde_json::to_value(&original).unwrap()
+                );
+            }
+            let mut suffix = original.clone();
+            let payload = reconnect_payload_mut(&mut suffix).unwrap();
+            payload.missed_events.remove(0);
+            payload.replay = v3.then_some(ReplayStatus::Truncated);
+            let suffix_size = wire_size(&suffix);
+            for cap in [full_size - 1, suffix_size] {
+                let fitted = bound_reconnect_baseline(original.clone(), v3, cap).unwrap();
+                assert_eq!(
+                    serde_json::to_value(fitted).unwrap(),
+                    serde_json::to_value(&suffix).unwrap(),
+                    "v3={v3}, correlated={correlated}, cap={cap}"
+                );
+            }
+            let fitted = bound_reconnect_baseline(original, v3, suffix_size - 1).unwrap();
+            reconnect_payload_mut(&mut suffix)
+                .unwrap()
+                .missed_events
+                .remove(0);
+            assert_eq!(
+                serde_json::to_value(fitted).unwrap(),
+                serde_json::to_value(suffix).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn reconnect_replay_budget_preserves_empty_baseline_and_refuses_oversized_snapshot() {
+        for (v3, correlated) in [(false, false), (true, false), (true, true)] {
+            let mut original = baseline(v3, correlated);
+            reconnect_payload_mut(&mut original)
+                .unwrap()
+                .missed_events
+                .clear();
+            let size = wire_size(&original);
+            assert!(bound_reconnect_baseline(original.clone(), v3, size - 1).is_err());
+            let fitted = bound_reconnect_baseline(original.clone(), v3, size).unwrap();
+            assert_eq!(
+                serde_json::to_value(fitted).unwrap(),
+                serde_json::to_value(original).unwrap()
+            );
+        }
+        let mut unavailable = baseline(true, false);
+        let payload = reconnect_payload_mut(&mut unavailable).unwrap();
+        payload.missed_events.clear();
+        payload.replay = Some(ReplayStatus::Unavailable);
+        let size = wire_size(&unavailable);
+        let fitted = bound_reconnect_baseline(unavailable.clone(), true, size).unwrap();
+        assert_eq!(
+            serde_json::to_value(fitted).unwrap(),
+            serde_json::to_value(unavailable).unwrap()
+        );
+    }
+
+    #[test]
+    fn reconnect_replay_budget_keeps_no_history_when_newest_event_cannot_fit() {
+        for (v3, correlated) in [(false, false), (true, false), (true, true)] {
+            let mut original = baseline(v3, correlated);
+            let payload = reconnect_payload_mut(&mut original).unwrap();
+            payload
+                .missed_events
+                .push(replay_event(50, v3, "large".repeat(1000)));
+            let mut empty = original.clone();
+            let payload = reconnect_payload_mut(&mut empty).unwrap();
+            payload.missed_events.clear();
+            payload.replay = v3.then_some(ReplayStatus::Truncated);
+            let size = wire_size(&empty);
+            for cap in [size, size + 200] {
+                let fitted = bound_reconnect_baseline(original.clone(), v3, cap).unwrap();
+                assert_eq!(
+                    serde_json::to_value(fitted).unwrap(),
+                    serde_json::to_value(&empty).unwrap(),
+                    "must retain a suffix, never skip the oversized newest event"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reconnect_replay_budget_sizes_the_v3_wire_projection_before_truncation() {
+        for correlated in [false, true] {
+            let mut original = baseline(true, correlated);
+            let payload = reconnect_payload_mut(&mut original).unwrap();
+            let ServerMessage::PlayerJoined { mut player } = replay_event(1, true, "Peer".into())
+            else {
+                unreachable!();
+            };
+            player.connected_at = Some(chrono::Utc::now());
+            player.connection_info = Some(crate::protocol::ConnectionInfo::WebRTC {
+                sdp: Some("sdp".repeat(1000)),
+                ice_candidates: Vec::new(),
+            });
+            payload.current_players.push(player.clone());
+            payload
+                .missed_events
+                .push(ServerMessage::PlayerJoined { player });
+            let mut projected = original.clone();
+            crate::websocket::project_reconnect_payload_for_v3(
+                reconnect_payload_mut(&mut projected).unwrap(),
+            );
+            let cap = wire_size(&projected);
+            assert!(wire_size(&original) > cap);
+            let fitted = bound_reconnect_baseline(original, true, cap).unwrap();
+            assert_eq!(
+                serde_json::to_value(fitted).unwrap(),
+                serde_json::to_value(projected).unwrap(),
+                "v2-only metadata must not cause false truncation"
+            );
+        }
     }
 }

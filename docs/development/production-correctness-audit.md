@@ -48,8 +48,8 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Initial; HTTP/2 route rejection recorded in F13 |
 | A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Initial; concurrent handshake retry-budget loss recorded in F15 |
 | A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10 |
-| A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; embedded receiver-loss rollback recorded in F18 |
-| A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; known receiver closure before response submission recorded in F18 |
+| A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; embedded receiver-loss rollback in F18; size-refusal rollback in F21 |
+| A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; known receiver closure before response submission in F18; aggregate replay bounds in F21 |
 | A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial |
 | A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial |
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial |
@@ -58,7 +58,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial |
 | A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial |
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
-| A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial |
+| A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial; aggregate reconnect admission bound in F21 |
 | A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial |
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Pending |
@@ -1101,4 +1101,53 @@ Focused verification:
 ```bash
 npm test --prefix clients/browser
 cargo nextest run --manifest-path clients/native/Cargo.toml --lib -E 'test(buffered_candidate_rejection) | test(remote_candidate_)'
+```
+
+### F21 Aggregate reconnect replay exceeds the outbound frame limit
+
+**Player restore defect; high confidence.** Issue
+[#864](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/864).
+Baseline: `8c619e54`. A05/A06/A15.
+
+The replay ring bounds event count, but a `Reconnected` response combines the
+current snapshot, retained control history, and a rotated credential into one
+frame. The reconnect path committed queue admission without checking this
+aggregate size. The socket writer later rejected the frame with code 1009.
+This prevented room restore even when the live roster and each event fit the
+configured frame cap.
+
+Red-first real-socket histories used a valid 4096-byte outbound cap, a
+2048-byte inbound cap, and a 128-event ring. Twenty short-lived members joined
+and left while one member was disconnected. The live roster stayed small;
+retained replay alone was over 6400 JSON bytes. Direct v3, correlated v3, and
+direct v2 reconnects closed with `1009 outbound_message_too_large` before the
+repair. These tests negotiate both JSON and MessagePack game data; reconnect
+controls remain JSON.
+
+The repair applies the socket writer's recipient projection before sizing.
+It counts exact JSON bytes without allocating an aggregate frame, including
+the operation envelope and rotated credential. It preserves the full current
+snapshot and the largest fitting ordered suffix of filtered history. A byte
+omission reports `truncated` to v3 recipients; v2 gains no new field. If the
+snapshot alone cannot fit, the builder rejects before queue admission through
+the existing identity, membership, and credential rollback path.
+
+The three socket regressions pass after repair. They check frame bytes,
+intact roster, ordered nonempty suffix, honest status, and a subsequent Pong.
+Boundary controls compare the counting serializer with actual JSON, including
+UTF-8 and escaped characters. They check complete history at the exact cap,
+truncation one byte below it, the largest suffix at its exact cap, empty replay,
+an oversized newest event, and snapshot refusal. Direct and correlated
+lifecycle controls exercise refusal after credential preissue and retry.
+
+This repair does not make queue admission a physical delivery acknowledgement.
+A later socket failure can still lose a committed response or its rotated
+token. It does not finish the physical pre-commit or partial-write audit, #853,
+or the broader A01–A22 campaign.
+
+Focused verification:
+
+```bash
+cargo nextest run --test reconnection_replay_e2e -E 'test(frame_limit)'
+cargo nextest run --lib -E 'test(reconnect_replay_budget) | test(reconnect_oversized_snapshot_rolls_back_rotated_token_and_allows_retry)'
 ```
