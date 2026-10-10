@@ -41,7 +41,9 @@ description: >-
 7. Never add `Tests:` or `CI:` bullets. The changelog is release notes for
    users of the server; test pins, red-proof probes, and workflow changes
    are recorded in tests, PRs, and issues instead (issue #722).
-8. LENGTH LIMIT: one sentence per entry is the target; two sentences is the
+8. Keep entries adjacent within each section: do not insert blank lines between
+   entries. Preserve blank lines around section headings.
+9. LENGTH LIMIT: one sentence per entry is the target; two sentences is the
    hard maximum. Name the change and its externally visible effect. Keep
    mechanics (seam names, counter names, lock orders, red proofs, internal
    budgets) in docs, tests, and the ledger — never in the changelog.

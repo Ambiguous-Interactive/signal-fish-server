@@ -232,12 +232,13 @@ to relay (the server warns but still starts).
 
 ## Token binding
 
-Use HTTP/1.1 for token-binding v2. Its key derivation requires
-`Sec-WebSocket-Key`, which HTTP/2 extended CONNECT does not use. Required
-binding rejects an HTTP/2 upgrade without this handshake material.
+Token-binding v2 supports HTTP/1.1 GET and HTTP/2 extended CONNECT.
+HTTP/1.1 clients use `Sec-WebSocket-Key`. HTTP/2 clients send
+`x-signalfish-token-binding-key` as described below. Required binding refuses
+clients that omit the subprotocol or client key.
 
 Token binding v2 requires every JSON or binary client message to carry an HMAC
-under a connection key derived from both the WebSocket handshake key and a
+under a connection key derived from both a client key and a
 server-fresh challenge. One sequence covers both frame formats, so a proof
 cannot be replayed, reordered, or moved to another connection. Fingerprint mode
 additionally binds proofs and reconnect credentials to the authenticated mTLS
@@ -300,7 +301,7 @@ What it does and how to enable it:
   binding is enabled.
 
 > **Token binding requires TLS to authenticate.**
-> The connection key is derived from the WebSocket handshake key plus a
+> The connection key is derived from the client key plus a
 > server-fresh challenge. Over plaintext `ws://`, both inputs are visible on
 > the wire, so a passive observer can derive the key and forge every proof —
 > in that deployment proofs provide replay ordering only, not authentication.
@@ -318,8 +319,34 @@ The first server application message after a token-bound WebSocket upgrade is:
 {"type":"TokenBindingChallenge","data":{"version":2,"scheme":"server_nonce_hkdf_sha256","nonce":"BASE64_32_BYTES","first_sequence":1}}
 ```
 
-Base64-decode the 16-byte `Sec-WebSocket-Key` and the challenge's 32-byte
-`nonce`. Derive a 32-byte connection key with HKDF-SHA-256 using the handshake
+Select the client key for the WebSocket transport:
+
+| Transport | Client key |
+| --- | --- |
+| HTTP/1.1 GET | The existing `Sec-WebSocket-Key` header |
+| HTTP/2 extended CONNECT | The `x-signalfish-token-binding-key` application header |
+
+For HTTP/2, generate 16 random bytes with a cryptographic RNG for each new
+WebSocket stream and encode them with standard padded Base64. Send that value
+in `x-signalfish-token-binding-key`, and offer `signalfish.tokenbinding.v2` in
+`sec-websocket-protocol`. Do not send `Sec-WebSocket-Key`. Wait for a 200 response
+that selects the offered subprotocol, then read the challenge. The server does
+not send `Sec-WebSocket-Accept` on this transport. A reverse proxy must preserve
+the application header when it forwards extended CONNECT.
+
+The server requires exactly one client key header in total. It rejects repeated
+key headers, both key headers together, invalid Base64, and decoded keys that
+are not 16 bytes. It does not fall back to another header after invalid input.
+These checks apply when token binding is negotiated. Existing HTTP/1.1 clients
+need no changes.
+
+Browser WebSocket APIs cannot set this application header or expose the
+HTTP/1.1 handshake key. Token binding requires a client that can control and
+read its handshake material. The shipped browser and native reference clients
+do not currently implement token binding.
+
+Base64-decode the selected 16-byte client key and the challenge's 32-byte
+`nonce`. Derive a 32-byte connection key with HKDF-SHA-256 using the client
 key as input keying material, the nonce as the salt, and
 `signalfish.tokenbinding.v2/session-key` as the info value. Start at
 `first_sequence` and increment by exactly one after every accepted JSON **or**
@@ -370,7 +397,8 @@ with this shape (where `payload` is a MessagePack `bin` value):
 The sequence namespace is shared: for example, JSON sequence 1 followed by
 binary sequence 2 is valid; another JSON sequence 1 is not.
 
-Normative JSON golden vector (no fingerprint):
+Normative JSON golden vector (no fingerprint; the same client key bytes
+produce this vector on HTTP/1.1 and HTTP/2):
 
 - handshake key: `MDEyMzQ1Njc4OWFiY2RlZg==`
 - challenge nonce: `AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=`

@@ -46,6 +46,7 @@ description: >-
 - [ ] No `Tests:` or `CI:` bullets; test and CI work never appear in the changelog
 - [ ] Section choice is correct (`Added/Changed/Deprecated/Removed/Fixed/Security`)
 - [ ] Breaking changes use `**Breaking:**`
+- [ ] No blank lines separate entries within a section
 - [ ] No accidental edits to previously released sections
 - [ ] Wording is concise, specific, and externally meaningful
 - [ ] Entry is ONE sentence (two maximum): change plus externally visible

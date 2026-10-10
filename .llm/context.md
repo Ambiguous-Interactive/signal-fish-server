@@ -100,8 +100,9 @@ cargo fmt && cargo clippy --all-targets --all-features
 
 **Changelog gate (publication blocker)** -- user-visible changes need a
 `CHANGELOG.md` entry under `## [Unreleased]`, and only user-visible changes
-may appear there (issue #722): never write `Tests:`/`CI:` bullets; test
-pins, probes, and workflow work live in tests, PRs, and issues. The hosted
+may appear there (issue #722): never write `Tests:`/`CI:` bullets. Keep entries
+adjacent with no blank lines between entries within each section. Test pins,
+probes, and workflow work live in tests, PRs, and issues. The hosted
 `Doc Consistency` job and the pre-commit hook's `Changelog gate` +
 `Changelog content` checks enforce both directions, and Rust diffs confined
 to a file's trailing test module are internal (no entry). Gate rules,

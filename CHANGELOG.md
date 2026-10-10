@@ -11,18 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add `--print-config-evidence` to fingerprint loaded settings without exposing
   secrets and attach host config and binary evidence to external capacity runs (#776).
-
 - Add opt-in native reference-client reconnect controls that restore room
   and transport state, preserve player identity, and rotate the reconnect token (#741).
-
 - Metrics: new Prometheus gauges expose live rooms, seated occupants,
   pending publications and reconnections, retained replay state, and the
   maintenance-sweep count and last duration (#648).
-
 - Metrics: `GET /metrics/sessions` (and `/v1/metrics/sessions`) exposes one
   bounded, bearer-gated record per room — identity, lifecycle counts, close
   reason — for live and completed sessions (#708, #763).
-
 - Metrics: `/metrics/sessions` records now also report transport outcome,
   negotiated protocol versions, per-session traffic, and authority
   transfers, and the endpoint accepts `?since=<seq>` and
@@ -30,35 +26,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Accept HTTP/2 WebSocket connections on the supported signaling routes (#845).
-
+- Accept HTTP/2 WebSocket connections on the supported signaling routes,
+  including token-bound clients (#845, #846).
 - Preserve active HTTP responses during graceful shutdown (#843).
-
 - Use the official GHCR coturn image for the TURN profile to avoid Docker Hub
   pull limits (#841).
-
 - Clean up canceled client admission, log admission failures, and keep WebSocket
   connections tracked through cleanup after supervisor failures (#839).
   **Breaking:** Rust embedders must handle the new
   `RegisterClientError::AdmissionFailed` variant in exhaustive matches.
-
 - Keep live WebSocket connections tracked through teardown when their caller is
   canceled (#835).
-
 - Enforce reliable delivery deadlines while priority control traffic keeps the
   socket writer busy (#832).
-
 - Prevent duplicate delivery reports after a canceled socket write when the
   recipient resumes reading during teardown (#833).
-
 - Apply the configured write deadline to idle delivery reports so a stalled
   recipient cannot block the socket writer beyond that budget (#830).
-
 - Stop sending later gameplay frames after a canceled socket write when a player
   is kicked or rate limited (#827).
-
 - Reject signed connect-token claim arrays that do not match the documented JSON object format (#823).
-
 - Redact native and browser reference-client frame errors so malformed replies cannot
   expose room tokens (#819).
 
@@ -66,7 +53,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Remove session credentials from logs and Debug output, and stop rejected-frame
   diagnostics from quoting client values (#836).
-
 - Reject weak tenant verification keys and forged connect tokens (#821).
 
 ## [0.10.0] - 2026-10-06
@@ -81,7 +67,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refused before any room is touched, with the refusal naming
   `protocol.enable_message_pack_game_data` (the encoding ships enabled by
   default; the knob is opt-out).
-
 - Metrics: WebSocket egress bytes and outbound-queue posture gauges on the
   Prometheus endpoint (#648, #636 C2). `signal_fish_websocket_egress_bytes_total`
   counts the application payload bytes actually written to client sockets —
@@ -97,7 +82,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the egress counter covers the immediate-send path (admission refusals,
   the teardown final report flush, slow-consumer farewells, and
   min-protocol refusals) as well as the queued write leaf.
-
 - Capacity runner: a standalone, delivery-aware runner for the ARM capacity
   campaign (#648, #636 C2). It spawns the server binary as a separate
   process (or connects to an external endpoint), drives deterministic
@@ -118,14 +102,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the class can produce, per-recipient latency tails ride the summary, and
   the pressure cells cross-check the server's per-class outcome counters
   against the validated gap coverage.
-
 - Metrics: `websocket_shutdown_disconnects` counts every registered
   connection torn down with the server-initiated shutdown close (code 4000)
   (#727). The drain close fan-out and any close a drain superseded become
   observable on the Prometheus endpoint and the bounded `/metrics` snapshot
   without log scraping. A late WebSocket registration refused during a drain
   never registered, so it stays under `websocket_upgrades_rejected_draining`.
-
 - Security configuration: optional per-encoding game-data payload ceilings,
   `security.max_game_data_bytes` (#634). Each encoding (`json`,
   `message_pack`, `rkyv`, `protobuf`) can carry its own payload cap, checked
@@ -138,7 +120,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   negotiated v2 connections and when nothing is configured). Validation
   rejects dead config: a zero cap, a cap above `max_message_size`, or a block
   with no caps.
-
 - Reference clients: native and browser `--game-data-format
   <json|rkyv|protobuf>` (#627). The flag negotiates the encoding in
   `Authenticate`, validates it against the server's advertised
@@ -151,7 +132,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default `json` path is byte-identical. The browser client also accepts the
   `protobuf` token in its binary-envelope validator and emits opaque
   receipts (encoding token + base64 payload) with native parity.
-
 - Protocol: opaque game-data encodings `rkyv` and `protobuf` are negotiable on
   v2 and v3 behind the new opt-in knobs `protocol.enable_rkyv_game_data` and
   `protocol.enable_protobuf_game_data` (#627). Default off: the default
@@ -161,7 +141,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server never decodes them, and cross-format delivery reports
   `unsupported_format` instead of a JSON conversion. Existing per-sender and
   per-room byte budgets and the outbound size cap apply unchanged.
-
 - Protocol: `ProtocolInfo.implementation_version` on negotiated v3 — the
   exact server release (for example `0.9.2`) disclosed behind authentication,
   so a client can pin the deployment it tested against. Absent on negotiated
@@ -187,7 +166,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   JSON-speaking room-mate is applied as-is under a negotiated opaque
   `--game-data-format` (#741). The server's text relay lane is
   format-blind by design; the behavior is unchanged.
-
 - Security defaults: `security.max_connections_per_ip` now defaults to `64`
   instead of `24` (C1 config default coherence). Every seat of a fully
   occupied room registers from its source IP — players plus the
@@ -199,7 +177,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   headroom; deployments that pin the knob explicitly are unchanged. The
   library-facing `ServerConfig::default()` derives from the same function
   instead of a divergent hardcoded value.
-
 - Security: MessagePack game data nested deeper than 128 container levels
   now refuses on the JSON conversion path and on the token-bound binary
   envelope (#647, C1 parser boundaries). The conversion budget is an
@@ -209,7 +186,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exact report and advisory accounting. JSON already sat under serde_json's
   own 128-level limit, so both wire encodings are now symmetric; direct
   same-format relay is unchanged.
-
 - Session defaults: `session.default_topology` now defaults to `mesh` instead
   of `relay` (#729). v3 rooms attempt the richest peer-to-peer rung their
   members negotiated (mesh WebRTC first, then host), and any member that
@@ -217,11 +193,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   relay floor itself never closes, so fallback data flow is unchanged. Pin
   `session.default_topology: "relay"` to keep the previous relay-first
   behavior.
-
 - Observability: pending room creation now counts the room and creator at the
   atomic insert. Rollback, direct deletion, and abandoned-room repair count
   the creator leaving once, even when setup panics after insertion (#658).
-
 - Relay: mixed-protocol rooms (v2 + v3 recipients) serialize relayed game
   data once per message instead of once per cohort (#636). The second
   cohort's JSON frame reuses the first cohort's exact `head + data` bytes
@@ -255,7 +229,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   symlink loop, both previously misreported as absent and silently
   skipped — now names the path and fails; only a genuinely missing file
   stays an optional, tolerated source.
-
 - Configuration: a `SIGNAL_FISH__` environment override nested deeper than
   16 `__`-separated levels now fails with a named error instead of
   overflowing the stack and aborting the process (ARM-C041); the deepest
@@ -265,7 +238,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   environment iteration order behind a misleading warning (ARM-C042);
   canonical-vs-legacy alias pairs keep their documented canonical-wins
   resolution.
-
 - Reconnection: a panic in the owned reconnect transaction's unwind
   supervisor no longer strands the reserved reconnect claim. The supervisor
   body previously ran outside the transaction's panic guard, so a panic in
@@ -277,7 +249,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consumes the record (the one-time token stays spent), an uncommitted one
   is released for an immediate retry. Successful and ordinary panic
   recovery are unchanged (#738, ARM-C037).
-
 - Reference clients: the native and browser reference clients now apply the
   server's JSON downgrade notice instead of aborting the handshake. The
   server refuses an unsupported requested `game_data_format` with an error
@@ -290,13 +261,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request when the server negotiates v2, matching their v3-only opaque
   wire shape (#627). Reference-client documentation now matches the shipped
   pins and the opaque runtime mode (ARM-C033, ARM-C034).
-
 - Logging: the rejected-app-ID authentication warning no longer echoes the
   raw client-supplied ID. The ID is Debug-escaped, so control characters in
   a rejected app ID cannot forge operator-facing log lines. The rejection
   itself is unchanged: the connection still receives `INVALID_APP_ID` and
   closes.
-
 - Logging: the server warning for game data that cannot be converted for a
   recipient now follows the existing one-notice-per-sender-per-second
   advisory cadence and includes the suppressed count. Previously every
@@ -305,7 +274,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   missing-metadata error log gained the same encoding and reason fields the
   moved warning carried. Delivery reports, advisories, and drop counters
   are unchanged.
-
 - Metrics: a shutdown-drain flip that cancels a parked reconnect-baseline
   reservation is now counted in `websocket_deliveries_canceled` instead of
   `websocket_messages_dropped`, matching the conditional-delivery park, and
@@ -314,7 +282,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their counted delivery attempt as canceled too (#647). Queue capacity was
   always released; only the diagnostic attempt/outcome ledger was loose.
   Delivery behavior is unchanged.
-
 - Metrics: reserved room-transaction and conditional-broadcast frames released
   by a panic between reservation and commit are now counted in
   `websocket_deliveries_canceled` (#725). A commit-hook, phase-callback, or
@@ -322,7 +289,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently, while the same exits reached by an error or rejection each counted
   once. Delivery behavior is unchanged: no frame past the panic, recipient
   capacity released, and the room-event lane stays usable.
-
 - Rate limits: a socket whose error-reply budget is exhausted now always
   receives its semantic `4006 inbound_rate_limited` close, even when a
   reconnect identity swap rekeys the connection during the exhaustion
@@ -330,52 +296,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   map key. The authority kick's `4007 kicked` close follows the socket the
   same way, so a reconnect claim racing the eviction cannot lose the kicked
   close frame.
-
 - Relay: an old socket's in-flight game-data frame can no longer charge a
   restored player's relay byte budgets before its stamp rejects delivery.
   Relay admission now holds the sender's source lifecycle gate through both
   budget waits and stamp/enqueue, and releases it before backpressured
   fan-out (#686).
-
 - Prevent stale WebSocket Ping/Pong frames from keeping a restored player
   alive, and keep old error replies off the restored socket (#686).
-
 - Admission: an old socket cannot join a room, join as a spectator, or retry
   reconnect under a restored player's identity (#686).
-
 - Spectator leave: an old socket cannot send a leave failure to a restored
   player or detach a spectator role owned by another socket (#686).
-
 - WebSocket dispatch: an old socket cannot release restored authority, change
   lobby readiness, start a game, store peer metadata, relay a WebRTC signal,
   publish transport status, or charge the restored socket's Ping reply budget
   after reconnect (#686).
-
 - Moderation: an old socket cannot unban a player, transfer authority, change
   room access, or rotate the room code after the authority reconnects (#686).
-
 - Moderation: an old socket's kick or ban cannot target peers after the
   authority reconnects on a new socket (#647).
-
 - Relay: an old socket cannot send text or binary game data under a restored
   socket's player ID (#647).
-
 - Reconnect: a leave request from a removed socket no longer removes the
   restored player's room seat (#647).
-
 - Routing: a rejected stale terminal unroute preserves the player's newer
   room route or roomless response path (#647).
-
 - Reconnect: a failed restore no longer leaves an unrouted player as room
   authority when membership cleanup also fails (#647).
-
 - Moderation: concurrent kick and ban requests no longer deadlock when
   storage contains cross-room stale rows (#680).
-
 - Moderation: a kick now follows a disconnected seat through a racing
   reconnect, so a second disconnect cannot leave a fresh token that restores
   the kicked player (#647).
-
 - Database adapters now refuse protected room creation unless they can seal
   the room atomically. Server creation also refuses adapters without a pending
   room lifecycle, so unfinished rooms cannot become visible by default (#658).
@@ -405,43 +357,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Reconnect no longer restores peer metadata from the old socket. A Direct
   host must send its current endpoint again before peers can use it (#647).
-
 - Peer connection metadata from an old room seat can no longer overwrite the
   same player's new seat after a leave and rejoin (#647).
-
 - Room creation now fails if the server cannot store its configured spectator
   limit. It removes the unpublished room so a retry can use the same code (#647).
-
 - Room creation now fails and rolls back if the creator's requested name
   cannot be stored, instead of joining with the `Creator` placeholder (#647).
-
 - Room creation now stops before `RoomJoined` if shutdown drain starts while
   the creator response is being built (#647).
-
 - Reconnect rejects a saved player name already used by a seated player.
   The token remains valid for a retry while its window is open (#647).
-
 - Reconnect now releases its token and rolls back a restored seat if shutdown
   drain starts before the response is queued (#647).
-
 - Spectator joins now stop if shutdown drain starts while admission waits or
   while the join response is blocked (#647).
-
 - Room-code rotation waits for an in-flight spectator admission before it
   drops the old code. It also skips its own code or a busy candidate instead
   of waiting on another code lock while holding the old one (#647).
-
 - Spectator joins wait until room creation sets the configured spectator cap.
   A spectator can no longer enter a new room while its temporary unlimited
   value is visible (#647).
-
 - Fortress WASM interop: the negative control's non-vacuity floor now scales
   with the callback budget the run actually drove (>= 90%) instead of an
   absolute 600 that sat exactly at the one-admission-per-callback cap's
   theoretical maximum — a fully working control completing 598/600 sends on a
   loaded runner read as vacuous (#639). The harness self-test pins the
   run-744 shapes and both acceptance boundaries.
-
 - Devcontainer: every agent harness now launches the GitHub MCP server
   through the dotenv-aware `.devcontainer/github-mcp.sh` instead of the bare
   binary (`.vscode/mcp.json`, `.mcp.json`, `opencode.json`, and the Codex
@@ -451,7 +392,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer device-flows on every MCP call while a working key sits in
   `.env.local` (#496 family). Marker-owned Codex blocks migrate to the
   launcher idempotently; user-authored tables are untouched.
-
 - The bus loopback fan-out now honors `SequencedMessage::excluded_players`
   (issue #581). A room-broadcast relay re-broadcast skipped the listed
   players, so a future cross-instance bus no longer echoes a relayed frame
@@ -459,7 +399,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   semantics; the empty list keeps today's plain broadcast. Only the in-memory
   coordinator dispatches bus messages, and nothing external constructs them
   yet, so no observable single-instance behavior changes.
-
 - Protocol v2 server wire samples now cover every v2-visible `{type, data}`
   envelope server message:
   `AuthenticationError`, `RoomJoinFailed`, `RoomLeft`, `GameStarting`,
@@ -483,7 +422,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   class: no `[[profile.mutants.overrides]]` relief while nothing needs it, and
   no `sleep(...)` under `src/` at or past the mutants profile's 10 s budget.
   Production lease TTLs, renewal behavior, and lock order are unchanged.
-
 - Dependency hygiene: the direct `signature` dependency is gone. The
   `Signer`/`Verifier` traits now import through `ed25519-dalek`'s own
   re-exports, which are the exact trait versions the crate implements. A
@@ -491,7 +429,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the Dependabot `signature` 3 bump broke every sign/verify call site).
   `rustls` moved to 0.23.45 (RUSTSEC-2026-0285). No wire, config, or
   behavioral change.
-
 - Protocol v3 room snapshots no longer carry the server-internal
   `connected_at` join timestamp (issue #539, follow-up of #529). The write
   layer strips it from `RoomJoined`, `PlayerJoined`, `SpectatorJoined`,
@@ -595,7 +532,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `historySamplesDropped`; a response still oversized without history is
   replaced by the same fail-visible truncation marker the metrics snapshot
   uses.
-
 - Spectator fan-out slimming (issue #525, v3 only): the room-uniform
   `NewSpectatorJoined` and `SpectatorDisconnected` broadcasts no longer carry
   the full spectator roster to protocol-v3 connections. On v3 they are
@@ -851,7 +787,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the queue per delivery class. No behavior change; the pins fail if a
   refactor flattens the writer's control bypass or drops the batcher from
   the abandonment ledger.
-
 - Close-code attribution under racing close conditions is now documented and
   pinned: the first condition pinned wins the close code (only `4000
   server_shutdown` supersedes an earlier reason). A `4006` error-reply
@@ -859,7 +794,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   budget and counts its rejection, but the close frame keeps `4007`. The
   recipient-side undeliverable-format advisory is also spelled out as never
   charged against the `4006` budget (issue #396).
-
 - The inbound error-reply budget now charges every polite per-frame reply
   (issue #518). Before, only inbound messages counted, so a client could
   flood requests and receive unlimited free replies. The charged replies are:
@@ -873,7 +807,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default 3000) is spent, the server sends a farewell, closes with
   `4006 inbound_rate_limited`, and counts one rejection. The budget follows
   the physical socket across a reconnect identity swap.
-
 - The nightly `cargo-udeps` compile moved to a daily 07:00 UTC cohort
   (issue #512). Its result is informational (`continue-on-error`), so it no
   longer reruns on every covered pull request. `cargo-machete` stays on
@@ -1119,7 +1052,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enforcement is disarmed: an enforcing socket's endpoint default never
   governs, so it survives connect and the explicit `Authenticate` decides.
   Legacy open-mode behavior (refuse-and-close) is unchanged and pinned.
-
 - The release preflight no longer blocks every release (issue #512 follow-up
   to the issue #557 CI consolidation). `scripts/check-release-preflight.sh`
   required a completed successful `push` run of the workflow named "CI" at
@@ -1219,7 +1151,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `_failures_total` counters (issue #396). The game- and server-cap locks
   were counted; app-cap activity was invisible, so a storage stall on the
   app-cap lock could not alarm.
-
 - The application room-cap lock now keeps its lease renewed across the
   enforcement count read (issue #550 follow-up). The read previously ran
   before the renewal guard existed, so a stalled storage call could let the
@@ -1242,7 +1173,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only way back into the room is the fresh-join perimeter after an unban. The
   record itself is left intact, so a mid-window unban can still honor the
   credential. A red-first regression test pins the invariant.
-
 - The shipped Docker image no longer hard-disables the security gates via
   `ENV SIGNAL_FISH__SECURITY__REQUIRE_METRICS_AUTH=false` and
   `ENV SIGNAL_FISH__SECURITY__ENFORCE_APP_ID_ALLOWLIST=false`: every default
@@ -1294,7 +1224,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recipients. TLS client-auth errors now spell the mode in configuration
   grammar (`optional`/`require`) via `Display` instead of Rust `Debug`
   casing.
-
 - `TransferAuthority` now sequences its `AuthorityChanged` announcement
   through the room's event lane instead of delivering it after releasing the
   room mutation gate (issue #396). A departure of the freshly granted
@@ -1423,7 +1352,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   optional token binding or locking out required binding (issue #396).
 - `signal_fish_dashboard_cache_age_seconds` is absent until the dashboard cache's first successful
   refresh instead of reporting a misleading fresh-looking `0` (issue #396).
-
 - **Breaking (Rust API):** Reject safety-critical invalid settings passed directly to
   `EnhancedGameServer::new` before storage initialization or background-task startup, matching
   the runtime invariants enforced for file-loaded configuration; embedders must correct invalid
@@ -1854,7 +1782,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can be claimed only by the rustls-authenticated identity that received them;
   a mismatch is checked atomically without consuming the valid token (issue
   #347).
-
 - **Breaking:** Fail startup and `--validate-config` when TLS is enabled in
   configuration but the server binary was compiled without the `tls` Cargo
   feature, instead of silently serving plaintext HTTP. Newly prepared official
@@ -2502,7 +2429,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   empty rooms. Codes now come from one checked helper, the room ceiling is
   sized for the cells that need it, and the cells assert that players actually
   entered a room. All three run in the nightly load lane (issue #207).
-
 - Restore the weekly Firefox cell of the Fortress/Godot no-thread WASM
   interoperability gate, which had failed on every run since it was added. Two
   causes: Firefox's blocklist refuses a WebGL context without an accelerated
@@ -2527,7 +2453,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   incomplete WebRTC pair before the P2P deadline, allowing homogeneous clients
   to recover when packet loss leaves ICE connected but the SCTP data-channel
   handshake stalled.
-
 - Refresh the compatible runtime, TLS, parser, and test-tool dependency set
   while keeping Axum and the WebSocket test client on one aligned Tungstenite
   version. Remove the redundant production declaration of the test-only
@@ -2746,7 +2671,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Prometheus series and consistently distinguishes these WebSocket probes from
   application pings, and reflects the 24-connection default in examples and
   deployment guidance.
-
 - Added protocol-v3 delivery classes and exact gap accountability (P10.E2).
   JSON `GameData` now supports `reliable` (the default), keyed `latest`, and
   `volatile`; raw binary game data remains reliable. Per-connection data and
@@ -2828,7 +2752,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deliberately too large to enumerate. It shares the module's invariants and
   still fails the run on a violation (TLC exits non-zero under `-simulate`);
   everything else stays exhaustive and CI-gating.
-
 - Added the `DeliveryClasses` TLA+ model (`formal/tla/DeliveryClasses.tla` +
   `_Small.cfg`) — spec-first for the protocol-v3 P10.E2 delivery classes
   (reliable / latest / volatile). It pins the per-class accounting contract:
@@ -2847,7 +2770,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would falsely report live B2 and could write A3 before B2. The implementation
   instead appends the successor, preserves global queue order, and publishes an
   exact `DeliveryReport` gap on the priority control lane.
-
 - Added the `ControlPriorityDelivery` TLA+ model
   (`formal/tla/ControlPriorityDelivery.tla` + `_Small.cfg`) — spec-first for the
   protocol-v3 P10.E2 delivery revision (merged before the code). It pins the two
@@ -2864,7 +2786,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pinned `FALSE` in the checked config (green in the auto-globbed suite);
   `PerClassConservation`, `CtrlDropsAreLoud`, and `StalenessBounded` are also
   checked.
-
 - Added the `SenderPacingReaper` TLA+ model
   (`formal/tla/SenderPacingReaper.tla` + `_Small.cfg` / `_Boundary.cfg`) — the
   repo's first discrete-time (`now` + `Tick`) spec — formalizing BUG-2, the
@@ -2882,7 +2803,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rejects — so the strict `<` is the necessary floor
   (documented in `formal/README.md` and the check's comment, with the
   not-proven-sufficient margin caveat). No behavior change to the A2 check.
-
 - Added the `RoomLifecycleGC` TLA+ model (`formal/tla/RoomLifecycleGC.tla` +
   `_Small.cfg` / `_WindowBoundary.cfg`) formalizing the room garbage-collection
   contract behind the BUG-1 fix: a room whose members are active is never reaped
@@ -2891,7 +2811,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   constant reproduces the pre-fix behavior (both invariants violated) for
   non-vacuity; the checked configs pin it `FALSE` and are green in the
   auto-globbed `scripts/run-tla-model-check.sh` suite.
-
 - Added split-brain seeded-bug constants to two v3 TLA+ models, making the
   single-instance boundary of the relay/reconnect contracts (ARCH-10)
   executable: `SplitBrainStampBug` in `formal/tla/SequencedRelay.tla` (a second
@@ -2904,7 +2823,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counterexample trace. A new "Single-instance theorems (split brain / ARCH-10)"
   section in `formal/README.md` catalogs which invariants are single-instance
   theorems and states the LB room-affinity requirement.
-
 - Added protocol v3 (strictly additive; clamp `protocol.max_protocol_version` back to `2` —
   pure v2 — to disable, since v3 is now the current version): relayed `GameData` /
   `GameDataBinary` delivered to a v3 recipient carry a
@@ -2956,7 +2874,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model-based proptests — plus a `verification-nightly.yml` CI lane.
 - Added the mandatory `Ping` keepalive (with a `Pong` deadline) to both reference clients, a
   `bufferedAmount` guard and a distinct `SLOW_CONSUMER` arm to the browser reference client.
-
 - Added two WebSocket delivery config fields: `websocket.send_queue_capacity` (default `1024`
   messages; must be ≥ 1) bounds the per-connection outbound message queue — previously
   hard-derived as `batch_size * 4` (40) — and `websocket.slow_consumer_timeout_ms` (default

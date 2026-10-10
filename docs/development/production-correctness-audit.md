@@ -601,12 +601,10 @@ cargo nextest run --test http_header_timeout_e2e -E 'test(http2_extended_connect
 cargo nextest run --all-features --test http_header_timeout_e2e --test tls_deployment_boundaries_e2e -E 'test(http2_extended_connect)'
 ```
 
-Token-binding v2 remains a separate transport limit. Its derivation requires
-`Sec-WebSocket-Key`; extended CONNECT does not use that HTTP/1.1 handshake
-mechanism. Required binding must remain fail-closed. An HTTP/2 key contract and
-client interoperability are tracked in
-[#846](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/846).
-The deployment and configuration guides state this boundary.
+The route repair left token-binding v2 as a separate transport limit:
+extended CONNECT does not process the HTTP/1.1 `Sec-WebSocket-Key`.
+[#846](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/846)
+records that follow-up. The client-key contract and evidence below address it.
 
 This finding does not certify HTTP/2 reconnect loss, arbitrary reverse proxies,
 TLS shutdown, or the legacy listener. The broader A02 audit remains incomplete.
@@ -740,3 +738,57 @@ Use one reviewed repair PR per working session. Keep temporary logs and session
 notes under ignored `progress/`; keep durable results, regression tests, and
 issue links in the repository. Recheck relevant evidence after later changes
 invalidate a prior assumption.
+
+### F14 — Token-binding clients cannot use extended CONNECT
+
+**Status:** Repaired. Related issue
+[#846](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/846),
+A02/A03.
+
+The route repair in F13 accepts HTTP/2 WebSockets, but token-binding negotiation
+still requires the HTTP/1.1 handshake key. A real mTLS client negotiates `h2`
+through ALPN, offers the v2 binding subprotocol, and sends extended CONNECT with
+an application key and no `Sec-WebSocket-Key`. The baseline returns HTTP 400.
+This is a transport interoperability failure, not an authentication bypass.
+
+The repair accepts `x-signalfish-token-binding-key` as the explicit HTTP/2
+client input. It carries standard Base64 for 16 cryptographically random bytes
+per WebSocket stream. HTTP/1.1 clients retain their existing handshake input.
+The server requires exactly one key header across both names. It rejects
+repeated headers, competing sources, non-text values, invalid Base64, and keys
+of the wrong size. Invalid input cannot trigger a fallback to a second source.
+
+The v2 challenge, HKDF salt and info, signature domains, certificate proof,
+and shared JSON/binary sequence remain unchanged. Each stream receives a fresh
+32-byte server nonce. Clients derive a new key and restart their sequence when
+they open a new stream. The configuration recipe records the client and proxy
+contract, existing HTTP/1.1 compatibility, and browser API limitations.
+
+Three unit regressions fail against the baseline: application-key acceptance,
+ambiguous-key rejection, and invalid-input rejection without fallback. The
+repaired token-binding unit module passes all 21 cases, including the existing
+JSON and MessagePack goldens. The socket regression independently derives the
+client HKDF and pins the real listener boundary. All three HTTP/2 socket
+regressions and four selected HTTP/1.1 controls pass.
+
+The real listener histories verify `h2` ALPN, both production aliases, the
+selected subprotocol, absence of `Sec-WebSocket-Key` and
+`Sec-WebSocket-Accept`, signed authentication, room admission, and byte-exact
+binary gameplay relay to another player. A signed JSON Ping after the binary
+frame verifies the shared sequence frontier. Negative histories cover invalid
+signatures, correctly signed sequence gaps, missing proofs, missing or wrong
+certificate fingerprints, exact JSON proof replay, and binary sequence replay.
+Each authenticated negative starts with room admission and a valid binary
+payload plus signed Pong. Cross-stream replay reuses the TLS connection and
+client key, verifies different nonces and derived keys, and refuses the old
+proof. Missing and malformed client keys fail before upgrade.
+
+Focused runtime verification:
+
+```bash
+cargo nextest run --all-features --test mtls_token_binding_e2e -E 'test(http2_token_binding_)'
+```
+
+This work does not certify arbitrary reverse proxies, browser token binding,
+HTTP/2 reconnect-response loss, or the rest of A02/A03. The broader audit stays
+open.
