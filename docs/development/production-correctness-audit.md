@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Pending |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -1197,4 +1197,56 @@ Focused verification:
 ```bash
 cargo nextest run --lib -E 'test(socket_close_during_reconnect_baseline_build_preserves_retry_token)'
 cargo nextest run --lib -E 'test(initial_registration_close_before_commit) | test(default_initial_registration)'
+```
+
+### F23 — Duplicate data-channel labels replace a working channel
+
+Baseline: `4bb7fdad`. A20.
+
+Both reference clients store data channels by label. A peer can announce
+another channel with the same label in the same physical peer connection.
+The old implementation replaced the selected channel without resetting its
+open or exchange state. The browser then suppressed original-channel messages
+through its object-identity guards. Native events carried only the peer-link
+generation and label, so duplicate-channel events affected the selected pair.
+[#869](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/869)
+records this finding.
+
+The repair keeps the first accepted channel for each label. A repeated
+announcement of that same object is a no-op. A distinct duplicate closes
+without installing event handlers. Native remote-channel polling starts only
+after admission, so refusing storage also refuses its open, message, and close
+events. Retiring the physical link permits a fresh generation to accept new
+channels. Both locally created and remotely announced channels use this rule.
+
+This finding is separate from the initial browser/native establishment failure
+in #853. Twenty focused capture histories passed in nextest run `341866de`
+(82.258 seconds), with both event streams retained. Source edits overlapped the
+build, so this is not a frozen-baseline cohort. No new initial-establishment
+failure was captured. These passes do not explain or repair #853.
+
+Distinct optional labels still have no application-level channel-count bound.
+[#870](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/870)
+records that resource audit. The stack's effective limits and memory costs have
+not been measured. This repair does not certify that separate boundary.
+
+Browser and native regressions first failed when a duplicate replaced the first
+`reliable` channel. The green controls cover initiator and responder channels,
+required and optional labels, repeated original announcements, closed-label
+retention, and fresh-link reuse. The real native pair receives duplicate
+announcements in both directions and for both required labels. It checks
+original-message delivery, duplicate closure without client callbacks, and
+original-channel close delivery. Nextest run `89a19936` passed the two new
+regressions and the existing detached-statistics control. Browser tests,
+typecheck, formatting, and strict native lint pass. Hosted checks remain the
+publication gate.
+
+Focused verification:
+
+```bash
+npm --prefix clients/browser test
+cargo nextest run --locked --manifest-path clients/native/Cargo.toml --lib \
+  -E 'test(duplicate_remote_channels_preserve_first_channel) | test(live_duplicate_channels_do_not_publish_callbacks)'
+cargo nextest run --locked --manifest-path clients/native/Cargo.toml --lib \
+  -E 'test(detached_selected_pair_probe_observes_before_live_channel_closes)'
 ```

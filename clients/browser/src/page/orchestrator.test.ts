@@ -970,6 +970,113 @@ console.error(
   'ok - responder channel announcements retain initial messages and suppress duplicate or stale opens',
 );
 
+// Regression #869: a duplicate label must not replace a live protocol channel.
+for (const [initiate, alreadyOpen] of [
+  [false, false],
+  [false, true],
+  [true, false],
+  [true, true],
+] as const) {
+  const originalPc = globalThis.RTCPeerConnection;
+  let connection: DuplicateConnection | undefined;
+  const observed: string[] = [];
+  class DuplicateChannel {
+    readyState = alreadyOpen ? 'open' : 'connecting';
+    onopen: (() => void) | null = null;
+    onclose: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    constructor(readonly label: string) {}
+    close(): void {
+      this.readyState = 'closed';
+      this.onclose?.();
+    }
+  }
+  class DuplicateConnection {
+    ondatachannel: ((event: { channel: DuplicateChannel }) => void) | null = null;
+    constructor() {
+      connection = this;
+    }
+    createDataChannel(label: string): DuplicateChannel {
+      return new DuplicateChannel(label);
+    }
+    async createOffer(): Promise<{ sdp: string }> {
+      return { sdp: 'offer' };
+    }
+    async setLocalDescription(): Promise<void> {}
+    close(): void {}
+  }
+  try {
+    globalThis.RTCPeerConnection = DuplicateConnection as unknown as typeof RTCPeerConnection;
+    const engine = new Engine(false, {
+      onLocalCandidate: () => {},
+      onPcState: () => {},
+      onChannelOpen: (_peer, _generation, label) => {
+        observed.push(`open:${label}`);
+        engine.noteChannelOpen('peer', label);
+      },
+      onChannelClosed: (_peer, _generation, label) => observed.push(`close:${label}`),
+      onChannelMessage: (_peer, _generation, label, text) => observed.push(`${label}:${text}`),
+    });
+    await engine.pairWith('peer', initiate, []);
+    for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL, 'extra']) {
+      if (engine.channel('peer', label) === undefined) {
+        connection?.ondatachannel?.({ channel: new DuplicateChannel(label) });
+      }
+    }
+    await Promise.resolve();
+    for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL, 'extra']) {
+      const first = engine.channel('peer', label) as unknown as DuplicateChannel;
+      assert(first !== undefined, 'first channel must exist');
+      connection?.ondatachannel?.({ channel: first });
+      assert(first.readyState !== 'closed', 'repeat announcement must keep the original alive');
+      const duplicate = new DuplicateChannel(label);
+      connection?.ondatachannel?.({ channel: duplicate });
+      assert(
+        engine.channel('peer', label) === first,
+        `initiate=${initiate}: preserve first ${label}`,
+      );
+      assert(duplicate.readyState === 'closed', 'duplicate channel must close');
+      const before = observed.length;
+      duplicate.onopen?.();
+      duplicate.onmessage?.({ data: 'duplicate' });
+      duplicate.onclose?.();
+      duplicate.onerror?.();
+      await Promise.resolve();
+      assert(observed.length === before, 'duplicate events must not reach the orchestrator');
+      first.onmessage?.({ data: 'original' });
+      first.readyState = 'open';
+      first.onopen?.();
+      assert(observed.includes(`${label}:original`), 'original messages must remain visible');
+    }
+    const required = engine.channel('peer', RELIABLE_LABEL) as unknown as DuplicateChannel;
+    required?.onclose?.();
+    assert(observed.at(-1) === 'close:reliable', 'original required close must remain visible');
+    required.readyState = 'closed';
+    const afterClose = new DuplicateChannel(RELIABLE_LABEL);
+    connection?.ondatachannel?.({ channel: afterClose });
+    assert(afterClose.readyState === 'closed', 'closed original keeps its label reserved');
+    assert(
+      engine.channel('peer', RELIABLE_LABEL) === required,
+      'closed original stays selected',
+    );
+    engine.removePeer('peer');
+    await engine.pairWith('peer', false, []);
+    const replacement = new DuplicateChannel(RELIABLE_LABEL);
+    connection?.ondatachannel?.({ channel: replacement });
+    assert(
+      engine.channel('peer', RELIABLE_LABEL) === replacement,
+      'fresh link accepts the same label',
+    );
+    engine.removePeer('peer');
+  } finally {
+    globalThis.RTCPeerConnection = originalPc;
+  }
+}
+console.error(
+  'ok - duplicate remote labels preserve original initiator and responder channels',
+);
+
 // Regression #861: bound pre-description storage and post-description admission.
 {
   const originalPc = globalThis.RTCPeerConnection;

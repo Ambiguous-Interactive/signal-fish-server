@@ -320,6 +320,13 @@ export class Engine {
       if (this.peers.get(peer) !== link) {
         return;
       }
+      // Labels are application names, not unique WebRTC channel identifiers.
+      // Preserve the first channel, including locally created initiator channels.
+      const existing = link.channels.get(event.channel.label);
+      if (existing !== undefined) {
+        if (existing !== event.channel) event.channel.close();
+        return;
+      }
       // Responder path: store the channel BEFORE wiring its handlers so the
       // orchestrator's bookkeeping exists before any open/message callback.
       link.channels.set(event.channel.label, event.channel);

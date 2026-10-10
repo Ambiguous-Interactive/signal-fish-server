@@ -144,6 +144,10 @@ When another peer reconnects or rejoins with the same ID, `--exchange` requires
 fresh sends and receipts on both channels for that peer. Other peers retain
 their completed exchange. A transport rebuild alone retains exchange evidence.
 
+The client keeps the first data channel for each label in a peer connection.
+It closes duplicate channels so they cannot replace a working channel.
+Native library callers must now await `Engine::store_remote_channel`.
+
 ## JSONL event contract
 
 One JSON object per stdout line, tagged by a snake_case `event` field. Per-client ordering is causal (a single

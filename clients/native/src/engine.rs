@@ -335,7 +335,6 @@ impl Engine {
             generation,
             crippled: self.settings.crippled,
             events: self.events.clone(),
-            runtime: self.runtime.clone(),
         });
         let udp_addrs = session_udp_addrs(
             self.settings,
@@ -521,18 +520,40 @@ impl Engine {
         Ok(())
     }
 
-    /// Store a remotely announced data channel (responder path).
-    pub fn store_remote_channel(
+    /// Accept the first channel for a label and close distinct duplicates.
+    /// Accepted remote channels start polling after admission.
+    pub async fn store_remote_channel(
         &mut self,
         peer: PlayerId,
         label: String,
         channel: Arc<dyn DataChannel>,
     ) {
-        if let Some(link) = self.peers.get_mut(&peer) {
-            link.channels.insert(label, channel);
-        } else {
+        let Some(link) = self.peers.get_mut(&peer) else {
             tracing::warn!(%peer, "remote channel announced for unknown peer");
+            let _ = channel.close().await;
+            return;
+        };
+        // WebRTC labels are not unique. Preserve the first selected channel.
+        if let Some(existing) = link.channels.get(&label) {
+            if Arc::ptr_eq(existing, &channel) {
+                return;
+            }
+            if let Err(error) = channel.close().await {
+                tracing::warn!(%peer, %error, "failed to close duplicate data channel");
+            }
+            return;
         }
+        link.channels.insert(label.clone(), channel.clone());
+        // Poll only accepted channels, so refused channels cannot publish open,
+        // message, or close callbacks under a selected channel's label.
+        spawn_channel_event_loop(
+            &self.runtime,
+            &self.events,
+            peer,
+            link.generation,
+            label,
+            channel,
+        );
     }
 
     /// Record an open channel; returns `true` exactly once per peer, at the
@@ -707,7 +728,6 @@ struct PeerHandler {
     generation: u64,
     crippled: bool,
     events: mpsc::UnboundedSender<EngineEvent>,
-    runtime: Arc<dyn Runtime>,
 }
 
 #[async_trait]
@@ -770,17 +790,9 @@ impl PeerConnectionEventHandler for PeerHandler {
         let _ = self.events.send(EngineEvent::RemoteChannel {
             peer: self.peer,
             generation: self.generation,
-            label: label.clone(),
-            channel: channel.clone(),
-        });
-        spawn_channel_event_loop(
-            &self.runtime,
-            &self.events,
-            self.peer,
-            self.generation,
             label,
             channel,
-        );
+        });
     }
 }
 
@@ -2297,6 +2309,252 @@ mod tests {
         assert!(!engine.note_channel_open(peer, RELIABLE_LABEL));
     }
 
+    // Regression #869: remote announcements must not displace local or remote labels.
+    #[tokio::test]
+    async fn duplicate_remote_channels_preserve_first_channel() {
+        for initiate in [false, true] {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let mut engine = Engine::new(crippled_settings(IpFamily::Ipv4), tx).unwrap();
+            let peer = PlayerId::from_u128(0x869);
+            engine.pair_with(peer, initiate, &[]).await.unwrap();
+            let pc = engine.peers[&peer].pc.clone();
+            for label in [RELIABLE_LABEL, UNRELIABLE_LABEL, "extra"] {
+                let first = match engine.channel(peer, label) {
+                    Some(channel) => channel,
+                    None => {
+                        let channel = pc.create_data_channel(label, None).await.unwrap();
+                        engine
+                            .store_remote_channel(peer, label.to_string(), channel.clone())
+                            .await;
+                        channel
+                    }
+                };
+                engine
+                    .store_remote_channel(peer, label.to_string(), first.clone())
+                    .await;
+                assert_eq!(
+                    first.ready_state().await.unwrap(),
+                    rtc::data_channel::RTCDataChannelState::Connecting,
+                    "repeated original announcement must keep it alive"
+                );
+                let duplicate = pc.create_data_channel(label, None).await.unwrap();
+                engine
+                    .store_remote_channel(peer, label.to_string(), duplicate.clone())
+                    .await;
+                assert!(
+                    Arc::ptr_eq(&first, &engine.channel(peer, label).unwrap()),
+                    "initiate={initiate}: preserve first {label}"
+                );
+                assert!(
+                    !matches!(
+                        duplicate.ready_state().await,
+                        Ok(rtc::data_channel::RTCDataChannelState::Connecting)
+                    ),
+                    "duplicate must close"
+                );
+                first.close().await.unwrap();
+                let after_close = pc.create_data_channel(label, None).await.unwrap();
+                engine
+                    .store_remote_channel(peer, label.to_string(), after_close)
+                    .await;
+                assert!(
+                    Arc::ptr_eq(&first, &engine.channel(peer, label).unwrap()),
+                    "closed original keeps its label reserved"
+                );
+            }
+            engine.remove_peer(peer).await.unwrap();
+            engine.pair_with(peer, false, &[]).await.unwrap();
+            let replacement = engine.peers[&peer]
+                .pc
+                .create_data_channel(RELIABLE_LABEL, None)
+                .await
+                .unwrap();
+            engine
+                .store_remote_channel(peer, RELIABLE_LABEL.to_string(), replacement.clone())
+                .await;
+            assert!(
+                Arc::ptr_eq(&replacement, &engine.channel(peer, RELIABLE_LABEL).unwrap()),
+                "fresh physical link accepts the same label"
+            );
+            engine.remove_peer(peer).await.unwrap();
+        }
+    }
+
+    // Regression #869: rejected live channels must never publish pair callbacks.
+    #[tokio::test]
+    async fn live_duplicate_channels_do_not_publish_callbacks() {
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        let (b_tx, mut b_rx) = mpsc::unbounded_channel();
+        let mut a = Engine::new(mdns_disabled_settings(), a_tx).expect("engine A builds");
+        let mut b = Engine::new(mdns_disabled_settings(), b_tx).expect("engine B builds");
+        let a_id = PlayerId::from_u128(0xa);
+        let b_id = PlayerId::from_u128(0xb);
+
+        let offer = a
+            .pair_with(b_id, true, &[])
+            .await
+            .expect("A pairs")
+            .expect("initiator offer");
+        b.pair_with(a_id, false, &[])
+            .await
+            .expect("B pairs as responder");
+        let answer = b.handle_offer(a_id, offer).await.expect("B answers");
+        a.handle_answer(b_id, answer)
+            .await
+            .expect("A applies answer");
+
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let mut a_connected = false;
+            let mut b_connected = false;
+            let mut a_pc_connected = false;
+            while !a_connected || !b_connected {
+                tokio::select! {
+                    event = a_rx.recv() => match event.expect("A event channel stays open") {
+                        EngineEvent::LocalCandidate { candidate_json, .. } => {
+                            b.handle_remote_candidate(a_id, &candidate_json)
+                                .await
+                                .expect("B applies A candidate");
+                        }
+                        EngineEvent::RemoteChannel { label, channel, .. } => {
+                            a.store_remote_channel(b_id, label, channel).await;
+                        }
+                        EngineEvent::ChannelOpen { label, .. } => {
+                            a_connected |= a.note_channel_open(b_id, &label);
+                        }
+                        EngineEvent::PcState { state, .. } => {
+                            a_pc_connected |= state == RTCPeerConnectionState::Connected;
+                        }
+                        _ => {}
+                    },
+                    event = b_rx.recv() => match event.expect("B event channel stays open") {
+                        EngineEvent::LocalCandidate { candidate_json, .. } => {
+                            a.handle_remote_candidate(b_id, &candidate_json)
+                                .await
+                                .expect("A applies B candidate");
+                        }
+                        EngineEvent::RemoteChannel { label, channel, .. } => {
+                            b.store_remote_channel(a_id, label, channel).await;
+                        }
+                        EngineEvent::ChannelOpen { label, .. } => {
+                            b_connected |= b.note_channel_open(a_id, &label);
+                        }
+                        _ => {}
+                    },
+                }
+            }
+            assert!(a_pc_connected, "A peer connection must reach Connected");
+        })
+        .await
+        .expect("local peer pair connects");
+
+        for from_initiator in [true, false] {
+            let (sender, receiver, events, sender_peer, receiver_peer) = if from_initiator {
+                (&mut a, &mut b, &mut b_rx, b_id, a_id)
+            } else {
+                (&mut b, &mut a, &mut a_rx, a_id, b_id)
+            };
+            for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                let original = receiver.channel(receiver_peer, label).unwrap();
+                let duplicate = sender.peers[&sender_peer]
+                    .pc
+                    .create_data_channel(label, None)
+                    .await
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if let EngineEvent::RemoteChannel {
+                            label: announced,
+                            channel,
+                            ..
+                        } = events.recv().await.unwrap()
+                        {
+                            assert_eq!(announced, label);
+                            receiver
+                                .store_remote_channel(receiver_peer, announced, channel)
+                                .await;
+                            break;
+                        }
+                    }
+                    assert!(
+                        Arc::ptr_eq(&original, &receiver.channel(receiver_peer, label).unwrap()),
+                        "duplicate must not replace selected live channel"
+                    );
+                    sender
+                        .channel(sender_peer, label)
+                        .unwrap()
+                        .send_text("original-after-duplicate")
+                        .await
+                        .unwrap();
+                    loop {
+                        match events.recv().await.unwrap() {
+                            EngineEvent::ChannelMessage {
+                                label: received,
+                                text,
+                                ..
+                            } => {
+                                assert_eq!(received, label);
+                                assert_eq!(text, "original-after-duplicate");
+                                break;
+                            }
+                            EngineEvent::ChannelOpen { .. } | EngineEvent::ChannelClosed { .. } => {
+                                panic!("duplicate emitted a channel lifecycle callback")
+                            }
+                            _ => {}
+                        }
+                    }
+                })
+                .await
+                .expect("duplicate admission and original message complete");
+                // Wait until the remote refusal reaches the initiating handle.
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while let Some(event) = duplicate.poll().await {
+                        if matches!(event, DataChannelEvent::OnClose) {
+                            break;
+                        }
+                    }
+                })
+                .await
+                .expect("remote refusal closes the duplicate");
+                // No callbacks from the rejected channel remain after its close.
+                loop {
+                    match events.try_recv() {
+                        Ok(event) => assert!(
+                            !matches!(
+                                event,
+                                EngineEvent::ChannelOpen { .. }
+                                    | EngineEvent::ChannelClosed { .. }
+                                    | EngineEvent::ChannelMessage { .. }
+                            ),
+                            "rejected channel must not publish callbacks"
+                        ),
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            panic!("live engine event stream must stay connected")
+                        }
+                    }
+                }
+                assert_eq!(receiver.connected_pair_count(), 1);
+            }
+        }
+        a.channel(b_id, RELIABLE_LABEL)
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let EngineEvent::ChannelClosed { label, .. } = a_rx.recv().await.unwrap() {
+                    assert_eq!(label, RELIABLE_LABEL);
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("selected channel keeps its close callback");
+        a.remove_peer(b_id).await.unwrap();
+        b.remove_peer(a_id).await.unwrap();
+    }
+
     #[tokio::test]
     async fn detached_selected_pair_probe_observes_before_live_channel_closes() {
         let (a_tx, mut a_rx) = mpsc::unbounded_channel();
@@ -2333,7 +2591,7 @@ mod tests {
                                 .expect("B applies A candidate");
                         }
                         EngineEvent::RemoteChannel { label, channel, .. } => {
-                            a.store_remote_channel(b_id, label, channel);
+                            a.store_remote_channel(b_id, label, channel).await;
                         }
                         EngineEvent::ChannelOpen { label, .. } => {
                             a_connected |= a.note_channel_open(b_id, &label);
@@ -2350,7 +2608,7 @@ mod tests {
                                 .expect("A applies B candidate");
                         }
                         EngineEvent::RemoteChannel { label, channel, .. } => {
-                            b.store_remote_channel(a_id, label, channel);
+                            b.store_remote_channel(a_id, label, channel).await;
                         }
                         EngineEvent::ChannelOpen { label, .. } => {
                             b_connected |= b.note_channel_open(a_id, &label);

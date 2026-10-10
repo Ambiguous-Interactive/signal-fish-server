@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep working reference-client data channels when a peer announces a duplicate channel label (#869).
+  **Breaking:** Native client library callers must now await `Engine::store_remote_channel`.
 - Preserve reconnect retry tokens when the socket is marked for closure before the response commits (#867).
 - Keep reconnect snapshots within the outbound frame limit by retaining the fitting replay suffix (#864).
 - Keep reference-client P2P negotiation running after a buffered ICE candidate is rejected (#863).
