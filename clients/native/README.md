@@ -153,6 +153,9 @@ their completed exchange. A transport rebuild alone retains exchange evidence.
 
 The client keeps the first data channel for each label in a peer connection.
 It closes duplicate channels so they cannot replace a working channel.
+Remote callbacks queue at most one channel per required label on each physical
+link, even when the orchestrator has not read its events. Draining the queue or
+closing a selected channel does not permit another channel on that link.
 Native library callers must now await `Engine::store_remote_channel`.
 
 ## JSONL event contract

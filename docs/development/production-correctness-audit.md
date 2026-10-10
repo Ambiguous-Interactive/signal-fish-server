@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Pending |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -1345,3 +1345,42 @@ continues its separate resource assessment. #870 remains open for stack
 allocation and required-label announcement floods. #872 still owns SCTP
 reset completion and closed-stream reuse. This repair proves poller-owned
 channel release, not total WebRTC stack memory reclamation.
+
+### F26 — Required-label announcements grow the unread native queue
+
+Baseline: `009a45cb`. A20. Finding: #876, under #870.
+
+Native callback admission rejected unsupported labels but queued every
+`reliable` and `unreliable` announcement. The orchestrator rejected duplicates
+only after reading them. A stalled consumer could retain many channel objects
+despite the two-entry final map. The browser checks duplicates synchronously
+and has no equivalent announcement queue.
+
+The red regression creates real channels on an unconnected peer and invokes
+the native callback 32 times for each required label without draining events.
+The queue contains 64 announcements instead of two. This is retained-object
+evidence, not a measured process exhaustion incident.
+
+The repair shares two identity slots between callbacks and storage. Selection
+runs before queue admission. Initiator channels reserve their slots before
+offering. Repeated callbacks for the same object are ignored; distinct
+duplicates close without an event. Queue drain and selected-channel closure
+do not renew admission. Weak references preserve identity without retaining
+channel objects. A failed event send closes the unowned channel.
+
+Controls cover unread bursts for both roles across three physical generations,
+concurrent callbacks, repeated selected objects, closure before replacement,
+queue-receiver loss, direct admission, and retired-object release with the old
+handler still alive. The live bidirectional control waits for each sender's
+close event before verifying original required-channel delivery. It now forbids
+duplicate announcement events as well as duplicate lifecycle callbacks, and
+retains the distinct-stream workload check that excludes #872 reuse failures.
+
+The change affects only the native reference engine's announcement admission.
+No server wire or client API changes are required. Rust and .NET SDKs leave
+peer networking to the game. Godot delegates channels to its engine;
+[Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355)
+continues that separate assessment. #870 remains open for full stack resource
+bounds and application message queues; #872 reset/reopen and #853 initial
+establishment remain unresolved. A bounded announcement queue does not prove
+total WebRTC memory safety.
