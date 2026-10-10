@@ -793,7 +793,7 @@ This work does not certify arbitrary reverse proxies, browser token binding,
 HTTP/2 reconnect-response loss, or the rest of A02/A03. The broader audit stays
 open.
 
-### F15 — Concurrent handshake rejection consumes a source retry budget
+### F15 Concurrent handshake rejection consumes a source retry budget
 
 **Availability defect; high confidence.** Issue
 [#849](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/849).
