@@ -46,10 +46,10 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | --- | --- | --- | --- |
 | A01 | `protocol/`, AsyncAPI, wire samples | Schema, errors, optional fields, v2/v3 projections, exhaustive operation mapping | Initial |
 | A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Initial; HTTP/2 route rejection recorded in F13 |
-| A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Initial; concurrent handshake retry-budget loss recorded in F15 |
+| A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Initial; concurrent handshake retry-budget loss recorded in F15; signed-credential response-loss history in session 412 |
 | A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10 |
-| A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; embedded receiver-loss rollback in F18; size-refusal rollback in F21; known socket-close rollback in F22; stale expiry cleanup in F32 |
-| A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
+| A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; signed-credential response-loss history in session 412; embedded receiver-loss rollback in F18; size-refusal rollback in F21; known socket-close rollback in F22; stale expiry cleanup in F32 |
+| A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; signed-credential response-loss history in session 412; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
 | A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32 |
 | A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial |
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial |
@@ -1993,4 +1993,42 @@ of all timer-driver internals. The wider audit and campaign #826 remain open.
 cargo nextest run --lib -E 'test(oversized_cleanup_period_survives_a_delayed_first_tick) | test(deadline::tests)'
 cargo nextest run --lib -E 'test(cleanup_task_) | test(lease_renewal_) | test(draining_cleanup_task_)'
 cargo nextest run --test v3_relay_stats_e2e -E 'test(periodic_relay_stats)'
+```
+
+### Session 412 authenticated partial reconnect-response writes
+
+Baseline: `0ab34110`. A03/A05/A06/A15. The session 408 partial-write
+history used open sockets. It did not establish recovery with signed
+application credentials or tenant ownership checks.
+
+The extended history requires Ed25519 connect tokens for two allowlisted
+applications. A pre-auth join gets `MISSING_APP_ID`. A credential from another
+signer gets `CONNECT_TOKEN_INVALID`; a valid credential then completes both
+handshake replies. A socket authenticated for another application presents the
+legitimate player's reconnect token. It gets the non-enumerating
+`ROOM_NOT_FOUND` response, publishes no restored route, and leaves the pending
+record available. The legitimate application then reconnects with that same
+token. Temporarily bypassing the production room-owner check makes this test
+fail at the wrong-application refusal. The check is restored in the final tree.
+
+Each signed-credential history covers v2 `/ws` and v3 `/v3/ws`, with batching
+on and off, and complete, one-byte, or 32-byte response writes. Authentication
+finishes before the transport cut is armed. Both partial cells observe only
+an incomplete `Reconnected` frame before the client drops. The committed old
+token cannot be reused. The complete v3 control recovers with its rotated
+token; the other cells recover by joining with a fresh identity. Fresh joins
+preserve the room's application, exactly two seats, and no old membership.
+Every cell drains socket handlers and joins listener tasks on success,
+assertion failure, or timeout. The original open-socket history remains a
+separate control.
+
+These tests verify existing plain-TCP behavior. They do not establish TLS,
+client fingerprint binding, every kernel write history, or application receipt.
+No production defect was found in this scope. A03/A05/A06/A15 remain
+incomplete. Campaign #826 remains open. Rust, .NET, and Godot clients are unaffected: no server
+behavior, protocol, or client API changes. This is internal audit evidence and
+needs no changelog entry.
+
+```bash
+cargo nextest run --lib -E 'test(partial_reconnect) | test(test_reconnected_partial_transport_write)'
 ```
