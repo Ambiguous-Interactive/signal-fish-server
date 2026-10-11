@@ -48,9 +48,9 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Initial; HTTP/2 route rejection recorded in F13 |
 | A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Initial; concurrent handshake retry-budget loss recorded in F15 |
 | A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10 |
-| A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; embedded receiver-loss rollback in F18; size-refusal rollback in F21; known socket-close rollback in F22 |
+| A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; embedded receiver-loss rollback in F18; size-refusal rollback in F21; known socket-close rollback in F22; stale expiry cleanup in F32 |
 | A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
-| A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial |
+| A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32 |
 | A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial |
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial |
 | A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31 |
@@ -59,7 +59,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial |
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
 | A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial; aggregate reconnect admission bound in F21; socket close before queue commit in F22 |
-| A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial |
+| A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial; stale expiry cleanup in F32 |
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Pending |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
@@ -1676,3 +1676,62 @@ External validation remains open in
 and [Godot #356](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/356).
 The clients consume the existing terminal events. No schema migration is required.
 The broader A10 and A01–A22 audits remain incomplete.
+
+### F32 — Stale reconnect expiry cleanup deletes a fresh membership
+
+Confirmed defect. Issue [#890](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/890).
+Baseline: `471b6be8509e4f1397abfcd6f07609e20a75235c`. A05/A07/A16.
+
+`cleanup_expired_reconnections` snapshots expired, unclaimed records before
+removing their durable room seats. A fresh same-room join discards the pending
+record, but the sweep did not recheck that record or enter the room mutation
+lane. Its stale candidate could therefore remove the fresh seat and authority
+while leaving the live connection assigned to the room. The sweep then reported
+zero removals because the old record was already gone.
+
+The deterministic history reuses the established still-registered connection
+and pending-record residue boundary. Both joins deliver `RoomJoined`. The
+actual sweep is split at its candidate snapshot, then resumed after the fresh
+join. Red nextest run `6475f10a-f5fc-45de-a9f1-85a2a2b8d3ab` failed at
+`stale expiry must preserve the fresh seat`. This establishes that state
+transition; it does not establish a remote incident or every socket history.
+
+The repair enters the room mutation lane and excludes a currently routed
+player. It then rechecks the room, claim state, and deadline while holding the
+replay-state write lock through durable seat removal and record consumption.
+A replacement record cannot appear during that storage suspension. Failure or
+cancellation retains the record for retry. Existing public manager APIs stay
+available; the server sweep uses the guarded transaction.
+
+Final nextest run `92410296-7b1b-4b1f-af4e-e7cd09dd3acf` passed nine
+focused unit tests. The fresh-membership history checks its seat, explicitly
+claimed authority, readiness and game start, then disconnects and claims its
+new token. Other controls cover an expired replacement record in another room,
+unexpired and claimed records, wrong-room and missing candidates, replay and
+metric retention, replacement during suspended storage, failure, and
+cancellation. A paused membership restore proves same-room cleanup waits for
+the room lane, then removes its expired sibling after reconnect succeeds.
+Independent adversarial review found no remaining issues in this repair.
+
+After moving the unchanged reconnect tests to a separate test file, all 49
+owning reconnect-module and focused server tests passed. The formatted source
+reconstruction matches the original after removing five redundant test-only
+attributes. Strict all-target, all-feature Clippy and all 38 panic, timeout,
+and clock policy tests pass on the final layout.
+
+Focused reproduction:
+
+```bash
+cargo nextest run --lib -E 'test(stale_reconnection_expiry_snapshot) | test(expired_membership_cleanup)'
+cargo nextest run --lib -E 'test(reconnect_claim_survives_expiry_during_membership_restore)'
+```
+
+The storage operation runs under the replay-state lock. The shipped in-memory
+backend does not reenter the reconnection manager from that operation. This
+bounded experiment does not establish callback reentrancy for custom backends.
+
+External client acceptance is tracked in
+[Rust #287](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/287),
+[.NET #138](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/138),
+and [Godot #357](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/357).
+Their own validation remains separate from server regression and CI evidence.

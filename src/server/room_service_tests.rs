@@ -10989,6 +10989,159 @@ async fn join_into_full_room_classifies_as_room_full_not_creation_failed() {
     }
 }
 
+/// Issue #890: a stale maintenance snapshot must not delete a published fresh seat.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn stale_reconnection_expiry_snapshot_preserves_a_fresh_same_room_join() {
+    let server = create_test_server_with_config(ServerConfig {
+        reconnection_window: Duration::from_secs(1),
+        ..ServerConfig::default()
+    })
+    .await;
+    let (player, mut receiver) = register_client(&server, "127.0.0.1:48131".parse().unwrap()).await;
+    server.set_client_protocol(
+        &player,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![crate::protocol::Transport::Relay],
+            topologies: vec![crate::protocol::Topology::Relay],
+        },
+    );
+    let manager = server.reconnection_manager().unwrap();
+    let mut previous_token = None;
+    let mut candidates = Vec::new();
+    for admission in 0..2 {
+        server
+            .handle_join_room(
+                &player,
+                "expiry-rejoin".to_string(),
+                Some("EXP001".to_string()),
+                "player".to_string(),
+                Some(4),
+                Some(true),
+                None,
+                None,
+                None,
+            )
+            .await;
+        let token = drain_queued_messages(&mut receiver)
+            .iter()
+            .find_map(|message| match message.as_ref() {
+                ServerMessage::RoomJoined(payload) => payload.reconnection_token.clone(),
+                _ => None,
+            })
+            .expect("each successful admission supplies a reconnect token");
+        assert_ne!(
+            previous_token.as_ref(),
+            Some(&token),
+            "the fresh membership rotates its token"
+        );
+        previous_token = Some(token);
+        if admission == 0 {
+            let room_id = server.get_client_room(&player).await.unwrap();
+            server.leave_room_locked(&player, false).await;
+            manager
+                .register_disconnection(player, room_id, false, None, 0)
+                .await;
+            tokio::time::advance(Duration::from_secs(1) + Duration::from_nanos(1)).await;
+            candidates = manager.expired_cleanup_candidates().await;
+            assert_eq!(candidates, vec![(player, room_id)]);
+        }
+    }
+    assert!(!manager.has_pending_reconnection(&player).await);
+    server.handle_authority_request(&player, true).await;
+    drain_queued_messages(&mut receiver);
+    let room_id = server.get_client_room(&player).await.unwrap();
+    assert_eq!(
+        server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .authority_player,
+        Some(player)
+    );
+    assert_eq!(
+        server
+            .cleanup_expired_reconnection_candidates(candidates)
+            .await,
+        0
+    );
+    let room_id = server.get_client_room(&player).await.unwrap();
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        room.players.contains_key(&player),
+        "stale expiry must preserve the fresh seat"
+    );
+    assert_eq!(
+        room.authority_player,
+        Some(player),
+        "stale expiry must preserve authority"
+    );
+    server.handle_player_ready(&player).await;
+    drain_queued_messages(&mut receiver);
+    server.handle_start_game(&player).await;
+    assert!(
+        drain_queued_messages(&mut receiver)
+            .iter()
+            .any(|message| { matches!(message.as_ref(), ServerMessage::GameStarting { .. }) }),
+        "the fresh membership must still start gameplay after cleanup"
+    );
+    server.unregister_client(&player).await;
+    let claim = manager
+        .claim_reconnection(
+            &PlayerId::new_v4(),
+            &player,
+            &room_id,
+            &previous_token.unwrap(),
+        )
+        .await
+        .expect("the fresh token must claim after cleanup and the next disconnect");
+    assert!(manager.release_reconnection_claim(&claim).await);
+}
+
+/// Issue #890: player identity alone cannot authorize cleanup of a replacement record.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn stale_reconnection_expiry_snapshot_preserves_another_room_record() {
+    let server = create_test_server_with_config(ServerConfig {
+        reconnection_window: Duration::from_secs(1),
+        ..ServerConfig::default()
+    })
+    .await;
+    let manager = server.reconnection_manager().unwrap();
+    let player = PlayerId::new_v4();
+    let old_room = RoomId::new_v4();
+    let new_room = RoomId::new_v4();
+    manager
+        .register_disconnection(player, old_room, false, None, 0)
+        .await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    let candidates = manager.expired_cleanup_candidates().await;
+    assert_eq!(candidates, vec![(player, old_room)]);
+    manager
+        .register_disconnection(player, new_room, false, None, 1)
+        .await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(
+        server
+            .cleanup_expired_reconnection_candidates(candidates)
+            .await,
+        0
+    );
+    assert_eq!(
+        manager.pending_reconnection_room(&player).await,
+        Some(new_room)
+    );
+    assert_eq!(server.cleanup_expired_reconnections().await, 1);
+}
+
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn maintenance_cleanup_removes_expired_reconnections() {

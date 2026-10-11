@@ -4114,8 +4114,25 @@ async fn reconnect_claim_survives_expiry_during_membership_restore() {
     .expect("reconnect reaches membership write after claiming token");
 
     tokio::time::advance(Duration::from_secs(2)).await;
+    let mut cleanup = Box::pin(server.cleanup_expired_reconnections());
+    assert!(
+        futures_util::poll!(&mut cleanup).is_pending(),
+        "expiry cleanup must wait for the room's in-flight membership restore"
+    );
+    assert!(manager.has_pending_reconnection(&expired_sibling).await);
+    assert!(manager.has_pending_reconnection(&reconnecting).await);
+    assert!(manager
+        .rooms_with_active_reconnections()
+        .await
+        .contains(&room_id));
+
+    database.release_paused_add_player_for_test();
+    assert!(timeout(Duration::from_secs(2), reconnect_task)
+        .await
+        .expect("reconnect finishes")
+        .expect("task lives"));
     assert_eq!(
-        server.cleanup_expired_reconnections().await,
+        cleanup.await,
         1,
         "maintenance must remove the expired sibling but retain the claimed seat"
     );
@@ -4128,17 +4145,6 @@ async fn reconnect_claim_survives_expiry_during_membership_restore() {
         .expect("room exists")
         .players
         .contains_key(&expired_sibling));
-    assert!(manager.has_pending_reconnection(&reconnecting).await);
-    assert!(manager
-        .rooms_with_active_reconnections()
-        .await
-        .contains(&room_id));
-
-    database.release_paused_add_player_for_test();
-    assert!(timeout(Duration::from_secs(2), reconnect_task)
-        .await
-        .expect("reconnect finishes")
-        .expect("task lives"));
     match recv(&mut current_rx).await.as_ref() {
         ServerMessage::Reconnected(payload) => {
             assert_eq!(payload.player_id, reconnecting);
