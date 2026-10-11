@@ -629,10 +629,10 @@ export class StartGameGate {
 class Orchestrator {
   private readonly config: RunConfig;
   private readonly output = new EventOutput(
-    (line) => {
+    (line, terminal) => {
       const bridge = window.__sf_emit;
       if (bridge === undefined) throw new Error('stdout bridge is unavailable');
-      return bridge(line);
+      return bridge(line, terminal);
     },
     (error) =>
       this.failFatal(
@@ -651,6 +651,13 @@ class Orchestrator {
       if (requireDelivery) throw FatalError.connection('stdout event delivery failed');
     }
   }
+  /** Stop a suspended handler before it mutates a retired session. */
+  private assertActive(): void {
+    if (this.finished || this.handshakeFatal !== null) {
+      throw this.handshakeFatal ?? FatalError.connection('the client is stopping');
+    }
+  }
+
   private readonly engine: Engine;
   private ws: WebSocket | null = null;
   private myId = '';
@@ -1644,9 +1651,11 @@ class Orchestrator {
           }
         }
         for (const peer of peers) {
+          this.assertActive();
           const peerId = String(peer['player_id']);
           if (transport === 'webrtc' && added.delete(peerId)) {
             await this.establishPair(peerId, peer['initiate'] === true);
+            this.assertActive();
           }
         }
         if (this.expectedPeers.size === 0 || this.allExpectedPairsConnected()) {
@@ -1866,6 +1875,7 @@ class Orchestrator {
    * when told to, then drain any defensively buffered signals.
    */
   private async establishPair(peer: string, initiate: boolean): Promise<void> {
+    this.assertActive();
     if (peer === this.myId) {
       console.error(`server asked us to pair with ourselves (${peer}); ignoring`);
       return;
@@ -1883,10 +1893,12 @@ class Orchestrator {
     }
     try {
       const offerSdp = await this.engine.pairWith(peer, initiate, this.lastIceServers);
+      this.assertActive();
       if (offerSdp !== null) {
         this.sendSignal(peer, 'offer', { Offer: offerSdp });
       }
     } catch (error) {
+      this.assertActive();
       // A single failed pair is not fatal: the p2p timeout resolves the
       // overall status and the relay floor still carries data.
       this.emit({ event: 'error', message: `pairing with ${peer} failed: ${describe(error)}` });
@@ -1895,7 +1907,9 @@ class Orchestrator {
     if (buffered !== undefined) {
       this.pendingSignals.delete(peer);
       for (const signal of buffered) {
+        this.assertActive();
         await this.applySignal(peer, signal);
+        this.assertActive();
       }
     }
   }
@@ -1944,6 +1958,7 @@ class Orchestrator {
       return;
     }
     this.emit({ event: 'signal_received', from, kind: classifySignal(signal) });
+    this.assertActive();
     if (!this.engine.isPaired(from)) {
       if (shouldBufferSignalForUnpairedPeer(this.expectedPeers, from)) {
         if (!tryBufferPlannedSignal(this.pendingSignals, from, signal)) {
@@ -1962,6 +1977,7 @@ class Orchestrator {
    * error events but never abort the run (the relay floor stays live).
    */
   private async applySignal(from: string, signal: unknown): Promise<void> {
+    this.assertActive();
     const kind = classifySignal(signal);
     const payload = signal as Record<string, unknown>;
     try {
@@ -1972,6 +1988,7 @@ class Orchestrator {
             throw new Error('Offer payload is not a string');
           }
           const answerSdp = await this.engine.handleOffer(from, sdp);
+          this.assertActive();
           this.sendSignal(from, 'answer', { Answer: answerSdp });
           break;
         }
@@ -1981,6 +1998,7 @@ class Orchestrator {
             throw new Error('Answer payload is not a string');
           }
           await this.engine.handleAnswer(from, sdp);
+          this.assertActive();
           break;
         }
         case 'ice_candidate': {
@@ -1994,12 +2012,14 @@ class Orchestrator {
             throw new Error('IceCandidate payload is not a string');
           }
           await this.engine.handleRemoteCandidate(from, candidate);
+          this.assertActive();
           break;
         }
         case 'other':
           throw new Error('signal does not match the matchbox PeerSignal convention');
       }
     } catch (error) {
+      this.assertActive();
       this.emit({ event: 'error', message: `signal from ${from} failed: ${describe(error)}` });
     }
   }
@@ -2009,6 +2029,7 @@ class Orchestrator {
    * optional exchange, and check the all-pairs resolution condition.
    */
   private onPairConnected(peer: string): void {
+    this.assertActive();
     if (noteCurrentPairConnected(this.connectedPairs, this.pairConnectedReported, peer)) {
       this.emit({ event: 'p2p_pair_connected', peer });
     }
@@ -2041,8 +2062,10 @@ class Orchestrator {
    * until the channel itself reports `open` at the point of use.
    */
   private trySendExchange(peer: string): boolean {
+    this.assertActive();
     let complete = true;
     for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL]) {
+      this.assertActive();
       if (this.exchangeLedger.hasSent(peer, label)) {
         continue;
       }
@@ -2199,6 +2222,7 @@ class Orchestrator {
   }
 
   private sendRawFrame(frame: string | ArrayBuffer): void {
+    this.assertActive();
     if (this.ws === null || this.ws.readyState !== WebSocket.OPEN) {
       throw FatalError.connection('websocket is not open');
     }

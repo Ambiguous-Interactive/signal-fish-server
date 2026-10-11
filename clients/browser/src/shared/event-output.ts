@@ -8,14 +8,15 @@ export class EventOutput {
   private readonly backlog: Backlog;
   private readonly pending = new Set<Promise<void>>();
   private failure: Error | null = null;
-  private terminalSent = false;
+  private readonly terminalSlots = new Set<number>();
   private readonly failed = new AbortController();
 
   constructor(
-    private readonly write: (line: string) => void | Promise<void>,
+    private readonly write: (line: string, terminal?: boolean) => void | Promise<void>,
     private readonly onFailure: (error: Error) => void = () => {},
     maxCount = MAX_PENDING_OUTPUT_EVENTS,
     private readonly maxBytes = MAX_OUTPUT_BYTES,
+    private readonly terminalLimit = 1,
   ) {
     this.backlog = new Backlog(maxCount, maxBytes);
   }
@@ -58,11 +59,16 @@ export class EventOutput {
   }
 
   async terminal(event: Record<string, unknown>): Promise<void> {
-    if (this.terminalSent) return;
-    this.terminalSent = true;
-    const line = JSON.stringify(event);
+    await this.terminalLine(JSON.stringify(event));
+  }
+
+  async terminalLine(line: string, slot = 0): Promise<void> {
+    if (!Number.isSafeInteger(slot) || slot < 0 || slot >= this.terminalLimit)
+      throw new Error('invalid terminal event slot');
     if (utf8Bytes(line) + 1 > 4096) throw new Error('terminal event exceeds 4096 bytes');
-    await this.write(line);
+    if (this.terminalSlots.has(slot)) return;
+    this.terminalSlots.add(slot);
+    await this.write(line, true);
   }
 
   async flush(): Promise<void> {

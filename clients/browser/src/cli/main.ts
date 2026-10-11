@@ -31,7 +31,7 @@ import {
   type RunConfig,
 } from '../shared/types.js';
 import { parseArgs, UsageError, USAGE, type CliOptions } from './args.js';
-import { DiagnosticOutput, writeAcknowledgedEventLine } from './output.js';
+import { DiagnosticOutput, forwardPageEvent, writeAcknowledgedEventLine } from './output.js';
 import { EventOutput } from '../shared/event-output.js';
 
 const startedAtMs = Date.now();
@@ -71,10 +71,16 @@ async function writeEventLine(line: string): Promise<void> {
   }
 }
 
-const eventOutput = new EventOutput(writeEventLine, () => {
-  logError('stdout event delivery failed; the client stops');
-  void exitWith(EXIT_CONNECTION_ERROR);
-});
+const eventOutput = new EventOutput(
+  writeEventLine,
+  () => {
+    logError('stdout event delivery failed; the client stops');
+    void exitWith(EXIT_CONNECTION_ERROR);
+  },
+  undefined,
+  undefined,
+  2, // One page error and one CLI exiting line.
+);
 
 function emitEvent(event: Record<string, unknown>): void {
   void eventOutput.emit(event).catch(() => {});
@@ -262,10 +268,9 @@ async function setupPage(options: CliOptions): Promise<Page> {
     logError(`[page error] ${error.message}`);
   });
   // The stdout bridge must exist before the page bundle (and any event) does.
-  await page.exposeFunction('__sf_emit', (line: unknown) => {
-    if (typeof line !== 'string') throw new Error('stdout event must be a string');
+  await page.exposeFunction('__sf_emit', (line: unknown, terminal: unknown) => {
     if (shuttingDown) throw new Error('the client is stopping');
-    return eventOutput.emitLine(line);
+    return forwardPageEvent(eventOutput, line, terminal);
   });
   await page.exposeFunction('__sf_success_released', () => {
     const releaseFile = options.successReleaseFile;

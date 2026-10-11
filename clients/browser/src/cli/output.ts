@@ -1,6 +1,18 @@
 import type { Writable } from 'node:stream';
 import { EventOutput } from '../shared/event-output.js';
 
+/** Validate and forward an event from the page bridge. */
+export function forwardPageEvent(
+  output: EventOutput,
+  line: unknown,
+  terminal: unknown,
+): Promise<void> {
+  if (typeof line !== 'string') return Promise.reject(new Error('invalid page event line'));
+  if (terminal !== undefined && typeof terminal !== 'boolean')
+    return Promise.reject(new Error('invalid page terminal flag'));
+  return terminal === true ? output.terminalLine(line, 1) : output.emitLine(line);
+}
+
 /** Resolve only after the stream consumes the event line, including backpressure. */
 export function writeAcknowledgedEventLine(output: Writable, line: string): Promise<void> {
   return new Promise((resolve, reject) => {

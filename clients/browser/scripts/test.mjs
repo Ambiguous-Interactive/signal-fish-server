@@ -8,6 +8,7 @@ for (const entryPoint of [
   'src/page/events.test.ts',
   'src/page/orchestrator.test.ts',
   'src/page/ingress.test.ts',
+  'src/page/output-cancellation.test.ts',
   'src/cli/args.test.ts',
   'src/cli/output.test.ts',
 ]) {

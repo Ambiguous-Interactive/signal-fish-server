@@ -1468,10 +1468,15 @@ early membership arrays, phase transfer, streaming processing, and stdout
 acknowledgment. A binary view charges its backing buffer. Callback tasks have
 a separate 512-entry and 128 MiB signal budget. Fatal admission interrupts
 handshake output waits, stops later work, and closes the socket and peer links.
+Suspended pairing and signaling handlers check session and link identity before
+resuming native peer operations. Red controls reproduce a second peer and SDP
+mutations after teardown; the guarded histories stop both.
 
 Both page and CLI output reserve 256 events and 128 MiB serialized UTF-8 bytes,
 including newlines. This permits base64 expansion of a maximum-size opaque
-frame. One extra terminal event has a 4096-byte cap. CLI stderr retains at most
+frame. The page reserves one terminal error with a 4096-byte cap. Its bridge flag
+bypasses ordinary CLI admission. The CLI reserves distinct 4096-byte slots for
+that page error and its own `exiting` event. CLI stderr retains at most
 256 lines and 1 MiB; individual diagnostics truncate after 16000 UTF-16 units.
 Stream callbacks own credits through consumption. Output closure or overload
 fails the run with exit 3. Success flushes required output. Chromium teardown
@@ -1483,7 +1488,9 @@ Controls cover stalled authentication, room entry and baseline transfer;
 sequential early membership retention; exact frame/count/byte boundaries;
 small views with oversized backing buffers; stale callbacks; large snapshots;
 v2/v3 JSON and v3 rkyv/protobuf FIFO; actual Node stream backpressure, closure,
-capacity recovery, and the CLI diagnostic configuration. Real Chromium/native
+capacity recovery, and the CLI diagnostic configuration. A held Writable
+control proves the page error and CLI exit-code-2 event bypass a full ordinary
+queue in FIFO order without changing the exit decision. Real Chromium/native
 restore, v2 relay, both opaque relay formats, mid-handshake closure, and
 signal/reaper controls pass in run `7b330ada` (six tests, 15.912 s).
 
