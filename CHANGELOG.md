@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep cleanup and connection timers alive when large configured periods exceed the platform clock range (#897).
 - Reject generated room-code lengths that cannot fit room request or reply frames.
 - **Breaking:** Reject invalid token-binding subprotocol names at startup;
   use a valid ASCII HTTP token on the server and clients (#895).

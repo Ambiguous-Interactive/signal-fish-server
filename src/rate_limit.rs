@@ -735,11 +735,8 @@ impl RoomRateLimiter {
 
     /// Period of the background cleanup sweep.
     ///
-    /// Clamped to a 1-second floor. `time_window` is validated `> 0` at startup
-    /// (`validate_config_security`), but `RoomRateLimiter` is part of the public
-    /// API and may be constructed directly (tests, library embedders) with a
-    /// zero window, and `tokio::time::interval` panics on a zero period. Mirrors
-    /// the dashboard-cache `.max(..)` zero-guard.
+    /// Public embedders retain a one-second minimum cleanup cadence, including
+    /// when they construct a limiter with a zero window.
     fn cleanup_interval(&self) -> Duration {
         self.config.time_window.max(Duration::from_secs(1))
     }
@@ -751,16 +748,18 @@ impl RoomRateLimiter {
         let cleanup_interval = self.cleanup_interval();
         let rate_limiter = Arc::downgrade(&self);
         let runtime = tokio::runtime::Handle::try_current()?;
-        Ok(runtime.spawn(async move {
-            let mut interval = tokio::time::interval(cleanup_interval);
-            loop {
-                interval.tick().await;
-                let Some(rate_limiter) = rate_limiter.upgrade() else {
-                    break;
-                };
-                rate_limiter.cleanup_old_entries().await;
-            }
-        }))
+        Ok(runtime.spawn(Self::cleanup_task(rate_limiter, cleanup_interval)))
+    }
+
+    async fn cleanup_task(rate_limiter: std::sync::Weak<Self>, cleanup_interval: Duration) {
+        let mut interval = crate::deadline::interval(cleanup_interval);
+        loop {
+            interval.tick().await;
+            let Some(rate_limiter) = rate_limiter.upgrade() else {
+                break;
+            };
+            rate_limiter.cleanup_old_entries().await;
+        }
     }
 
     /// Get current stats for a player (for debugging/monitoring)
@@ -1626,9 +1625,6 @@ mod tests {
 
     #[test]
     fn cleanup_interval_clamps_zero_window_to_nonzero() {
-        // A zero `time_window` is rejected by config validation, but the limiter
-        // is publicly constructible; the cleanup interval must still be non-zero
-        // so the background `tokio::time::interval` can never panic.
         let config = RateLimitConfig {
             time_window: Duration::ZERO,
             ..create_test_config()
@@ -1648,6 +1644,64 @@ mod tests {
         }));
         assert!(result.is_ok());
         assert!(result.ok().is_some_and(|task| task.is_err()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn oversized_cleanup_period_survives_a_delayed_first_tick() {
+        use std::future::Future;
+        let limiter = Arc::new(RoomRateLimiter::new(RateLimitConfig {
+            time_window: Duration::MAX,
+            ..create_test_config()
+        }));
+        let player = Uuid::new_v4();
+        assert!(limiter.check_room_creation(&player).await.is_ok());
+        let cleanup =
+            RoomRateLimiter::cleanup_task(Arc::downgrade(&limiter), limiter.cleanup_interval());
+        tokio::pin!(cleanup);
+        let entries = limiter.entries.write().await;
+        crate::deadline::tests::park_before_first_tick(cleanup.as_mut()).await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        std::future::poll_fn(|cx| {
+            assert!(cleanup.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(
+            Arc::strong_count(&limiter),
+            2,
+            "first tick must reach the blocked sweep"
+        );
+        drop(entries);
+        std::future::poll_fn(|cx| {
+            assert!(cleanup.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(
+            Arc::strong_count(&limiter),
+            1,
+            "completed sweep must release its owner"
+        );
+        assert!(limiter.get_player_stats(&player).await.is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_task_does_not_keep_limiter_alive() {
+        let limiter = Arc::new(RoomRateLimiter::new(RateLimitConfig {
+            time_window: Duration::from_secs(1),
+            ..create_test_config()
+        }));
+        let weak = Arc::downgrade(&limiter);
+        let handle = Arc::clone(&limiter)
+            .start_cleanup_task()
+            .expect("runtime exists");
+        tokio::task::yield_now().await;
+        drop(limiter);
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("owner loss must stop cleanup")
+            .expect("cleanup must not panic");
+        assert!(weak.upgrade().is_none());
     }
 
     #[tokio::test(start_paused = true)]

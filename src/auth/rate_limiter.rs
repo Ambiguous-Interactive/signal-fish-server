@@ -160,23 +160,23 @@ impl InMemoryRateLimiter {
     pub fn start_cleanup_task(
         self: Arc<Self>,
     ) -> Result<tokio::task::JoinHandle<()>, tokio::runtime::TryCurrentError> {
-        // The limiter is public and may be embedded without the binary's
-        // configuration validation. Keep that path from silently killing its
-        // maintenance task on Tokio's zero-period panic.
+        /* Public embedders retain the one-second minimum cleanup cadence. */
         let interval = self.cleanup_interval.max(Duration::from_secs(1));
         let limiter = Arc::downgrade(&self);
         let runtime = tokio::runtime::Handle::try_current()?;
-        Ok(runtime.spawn(async move {
-            let mut tick = tokio::time::interval(interval);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tick.tick().await;
-                let Some(limiter) = limiter.upgrade() else {
-                    break;
-                };
-                limiter.cleanup();
-            }
-        }))
+        Ok(runtime.spawn(Self::cleanup_task(limiter, interval)))
+    }
+
+    async fn cleanup_task(limiter: std::sync::Weak<Self>, interval: Duration) {
+        let mut tick = crate::deadline::interval(interval);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            let Some(limiter) = limiter.upgrade() else {
+                break;
+            };
+            limiter.cleanup();
+        }
     }
 
     /// Remove entries whose sliding windows are completely empty (all
@@ -466,6 +466,26 @@ mod tests {
         );
 
         handle.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn oversized_cleanup_period_survives_a_delayed_first_tick() {
+        use std::future::Future;
+        let limiter = Arc::new(InMemoryRateLimiter::new(Duration::MAX));
+        limiter
+            .check_rate_limit_at("expired", 1, Instant::now() - Duration::from_secs(61))
+            .unwrap();
+        let cleanup = InMemoryRateLimiter::cleanup_task(Arc::downgrade(&limiter), Duration::MAX);
+        tokio::pin!(cleanup);
+        crate::deadline::tests::park_before_first_tick(cleanup.as_mut()).await;
+        assert_eq!(limiter.window_len("expired"), 1);
+        tokio::time::advance(Duration::from_millis(10)).await;
+        std::future::poll_fn(|cx| {
+            assert!(cleanup.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(limiter.window_len("expired"), 0);
     }
 
     #[tokio::test(start_paused = true)]
