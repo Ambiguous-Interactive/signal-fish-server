@@ -521,8 +521,16 @@ fn validate_token_binding(
         if binding.subprotocol != binding.subprotocol.trim() {
             anyhow::bail!(
                 "security.transport.token_binding.subprotocol must not carry leading or \
-                 trailing whitespace: no client offer can ever match '{}'",
-                binding.subprotocol.trim()
+                 trailing whitespace: no client offer can match the configured value"
+            );
+        }
+        if !crate::security::token_binding::token_binding_subprotocol_is_valid_token(
+            &binding.subprotocol,
+        ) {
+            anyhow::bail!(
+                "security.transport.token_binding.subprotocol must be a valid HTTP token: \
+                 use ASCII letters, digits, or !#$%&'*+-.^_`|~; separators, whitespace, \
+                 controls, and non-ASCII characters cannot be negotiated"
             );
         }
         if !crate::security::token_binding::token_binding_subprotocol_is_v2_compatible(
@@ -1222,10 +1230,77 @@ mod tests {
     }
 
     #[test]
+    fn enabled_token_binding_rejects_invalid_subprotocol_tokens() {
+        for subprotocol in [
+            "game,binding",
+            "game binding",
+            "game\tbinding",
+            "game\nbinding",
+            "game\rbinding",
+            "game\0binding",
+            "game\u{7f}binding",
+            "game.绑定",
+            "game(binding)",
+            "game<binding>",
+            "game@binding",
+            "game;binding",
+            "game:binding",
+            "game\\binding",
+            "game\"binding",
+            "game/binding",
+            "game[binding]",
+            "game?binding",
+            "game=binding",
+            "game{binding}",
+        ] {
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.security.transport.token_binding.enabled = true;
+            config.security.transport.token_binding.subprotocol = subprotocol.to_string();
+
+            let error = validate_config_security(&config)
+                .expect_err("WebSocket subprotocols must be HTTP tokens");
+            assert!(
+                error.to_string().contains("must be a valid HTTP token"),
+                "unexpected error for {subprotocol:?}: {error}"
+            );
+            assert!(
+                !error.to_string().contains(subprotocol),
+                "invalid token must not be echoed into diagnostics: {subprotocol:?}"
+            );
+        }
+    }
+
+    // Regression #895: each Latin-1 code point exercises an admitted ASCII
+    // byte or a rejected control/separator/non-ASCII character in an alias.
+    #[test]
+    fn token_binding_subprotocol_admission_covers_every_byte_class() {
+        const TOKEN_CHARACTERS: &str =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&'*+-.^_`|~";
+        for byte in u8::MIN..=u8::MAX {
+            let character = char::from(byte);
+            let mut config = Config::default();
+            config.security.require_metrics_auth = false;
+            config.security.transport.token_binding.enabled = true;
+            config.security.transport.token_binding.subprotocol = format!("game{character}binding");
+
+            let result = validate_config_security(&config);
+            assert_eq!(
+                result.is_ok(),
+                TOKEN_CHARACTERS.contains(character),
+                "wrong subprotocol admission for byte class {byte:#04x}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
     fn token_binding_subprotocol_alias_and_disabled_legacy_value_remain_compatible() {
         for (enabled, subprotocol) in [
+            (true, "signalfish.tokenbinding.v2"),
             (true, "example.game.token-binding"),
+            (true, "AZaz09!#$%&'*+-.^_`|~"),
             (false, "signalfish.tokenbinding.v1"),
+            (false, "game,binding\n绑定"),
         ] {
             let mut config = Config::default();
             config.security.require_metrics_auth = false;

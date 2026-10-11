@@ -243,6 +243,14 @@ mod constructor_validation_tests {
                 expected: "turn.static_auth_secret must be set",
             },
             InvalidConstructorCase {
+                name: "comma-bearing token-binding alias",
+                mutate: |inputs| {
+                    inputs.transport.token_binding.enabled = true;
+                    inputs.transport.token_binding.subprotocol = "game,binding".to_string();
+                },
+                expected: "token_binding.subprotocol must be a valid HTTP token",
+            },
+            InvalidConstructorCase {
                 name: "required token binding while disabled",
                 mutate: |inputs| inputs.transport.token_binding.required = true,
                 expected: "token_binding.required=true requires",

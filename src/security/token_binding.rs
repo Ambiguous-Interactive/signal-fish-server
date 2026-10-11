@@ -16,6 +16,33 @@ pub const TOKEN_BINDING_JSON_DOMAIN: &[u8] = b"signalfish.tokenbinding.v2\0json\
 pub const TOKEN_BINDING_BINARY_DOMAIN: &[u8] = b"signalfish.tokenbinding.v2\0binary\0";
 const TOKEN_BINDING_HKDF_INFO: &[u8] = b"signalfish.tokenbinding.v2/session-key";
 
+/// RFC 6455 subprotocol names use the HTTP token grammar (RFC 9110 `tchar`).
+/// Separators, whitespace, controls, and non-ASCII bytes cannot form a name.
+#[must_use]
+pub(crate) fn token_binding_subprotocol_is_valid_token(subprotocol: &str) -> bool {
+    !subprotocol.is_empty()
+        && subprotocol.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
 /// Whether a configured subprotocol name can carry the v2 wire contract.
 ///
 /// Deployments may use an application-specific alias, but names in Signal

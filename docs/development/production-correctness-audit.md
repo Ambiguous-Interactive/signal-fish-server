@@ -61,7 +61,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial; aggregate reconnect admission bound in F21; socket close before queue commit in F22 |
 | A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial; stale expiry cleanup in F32 |
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
-| A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Pending |
+| A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code and timer boundaries remain open in #896/#897 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
 | A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
@@ -1847,3 +1847,43 @@ Focused reproduction:
 ```bash
 cargo nextest run --lib -E 'test(test_reconnected_partial_transport_write_requires_fresh_join)'
 ```
+
+### F34 — Invalid binding aliases prevent negotiation
+
+Baseline: `8dd7656c`. A02/A03/A18. Finding:
+[#895](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/895).
+
+Enabled token binding accepted arbitrary nonempty names after trimming checks.
+The configured alias `game,binding` can never equal a client offer: the offer
+parser splits each header value at commas. Required binding rejects every
+connection; optional binding cannot select that alias. Spaces, separators,
+controls, and non-ASCII names also violate the WebSocket token grammar in
+[RFC 6455 section 4.1](https://www.rfc-editor.org/rfc/rfc6455#section-4.1).
+
+The shared startup and public-constructor gate now accepts only nonempty ASCII
+HTTP tokens. Negotiation applies the same grammar when validation is bypassed.
+Invalid values are not echoed into diagnostics. Disabled values remain inert,
+and the reserved namespace still accepts only exact `signalfish.tokenbinding.v2`.
+Operators must replace invalid names with a legal token on server and clients.
+
+Red validation admitted the comma alias on both construction paths: the new
+configuration rejection and public-constructor tests failed while compatibility
+passed. Green controls cover separators, controls, every Latin-1 byte class,
+all legal punctuation, disabled settings, and reserved versions. A negotiation
+control derives the key from the server challenge, verifies a signed Ping for
+custom aliases, and rejects replay. This is configuration and negotiation
+coverage; it does not certify every TLS or client connection history.
+
+External Rust at `da8f2d16` offers the unchanged default v2 token. .NET at
+`e467c871` constructs `ClientWebSocket` without a subprotocol offer. Godot at
+`db7d30f2` uses the default `WebSocketPeer` without setting supported protocols.
+Each client is unaffected: its current valid/default negotiation is unchanged,
+and no message, proof, or API shape changes. Custom integrations must follow
+the [configuration migration](../configuration.md#token-binding-subprotocol-names).
+
+The constructor sweep also found oversized generated-code/frame combinations
+([#896](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/896))
+and a missed-tick overflow candidate
+([#897](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/897)).
+They require their own runtime evidence and repairs. A18 and the broader
+A01–A22 audit remain incomplete.
