@@ -51,9 +51,10 @@
 //! 6. `two_peer_mesh_exchanges_over_live_webrtc` — the cross-platform smoke
 //!    cell: the smallest complete session (two clients) establishes a direct
 //!    host path and exchanges one message on both data channels. The remote
-//!    side may be reported as peer-reflexive when rtc omits its dynamically
-//!    learned registry entry; with no STUN or TURN configured, that remains a
-//!    direct path. CI runs this exact selector on Linux, Windows, and macOS.
+//!    side may be peer-reflexive when an inbound check learns its endpoint
+//!    before signaling registers the host candidate. The diagnostic reports
+//!    the actual nominated type and address. With no STUN or TURN configured,
+//!    that remains a direct path. CI runs this exact selector on Linux, Windows, and macOS.
 //! 7. `departed_connected_peer_keeps_unreliable_exchange_debt` — withholds the
 //!    unreliable half after both clients prove reliable exchange, terminates
 //!    one connected peer, and proves the survivor fails closed with the
@@ -66,7 +67,7 @@
 //!    `any` selects `127.0.0.1`), leaving the IPv6 bind/candidate/socket-key
 //!    branch unexercised by any live transport. Two members run with
 //!    `--ip-family ipv6`, so only IPv6 host candidates can be advertised, and
-//!    the pair must be host/host over a concrete dialable IPv6 address with
+//!    the nominated pair must be host to host or peer-reflexive over concrete IPv6 addresses with
 //!    the exact exchange on both channel labels and no relay fallback.
 //!    Signaling still runs over the harness server's IPv4 loopback listener,
 //!    so the IPv6 claim is about the WebRTC data path (ICE, DTLS, SCTP). A
@@ -122,10 +123,9 @@ use std::time::Duration;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use harness::{
-    advertised_candidate_addresses, advertised_candidates, event_tags, events_named, player_id_of,
-    scenario_window, single_event, spawn_client, spawn_client_with_windows, spawn_server,
-    spawn_server_with_extra_env, str_field, ClientProcess, ClientSpec, CLIENT_EXIT_TIMEOUT,
-    EVENT_TIMEOUT,
+    advertised_candidates, event_tags, events_named, player_id_of, scenario_window, single_event,
+    spawn_client, spawn_client_with_windows, spawn_server, spawn_server_with_extra_env, str_field,
+    ClientProcess, ClientSpec, CLIENT_EXIT_TIMEOUT, EVENT_TIMEOUT,
 };
 use serde_json::{json, Value};
 use signal_fish_reference_native::engine::{local_udp_addrs, EngineSettings, IpFamily};
@@ -1954,71 +1954,10 @@ fn require_ipv6_ice_interface() {
     }
 }
 
-/// The IP address a `selected_candidate_pair` field carries, or a loud failure.
-/// A missing/`null` address fails: it would otherwise let a run that never
-/// proved a concrete live path pass.
-fn selected_ip_address(event: &Value, field: &str, who: &str, failure_context: &str) -> IpAddr {
-    let raw = event.get(field).and_then(Value::as_str).unwrap_or_else(|| {
-        panic!("{who}: selected pair has no `{field}`: {event};\n{failure_context}")
-    });
-    raw.parse::<IpAddr>().unwrap_or_else(|error| {
-        panic!("{who}: `{field}` is not an IP address ({error}): {raw};\n{failure_context}")
-    })
-}
-
-fn selected_pair_is_exact_host_host(selected: &Value) -> bool {
-    ["local_candidate_type", "remote_candidate_type"]
-        .into_iter()
-        .all(|field| selected.get(field).and_then(Value::as_str) == Some("host"))
-}
-
-/// Assert this client's single selected pair is a direct host/host path toward
-/// the expected peer, and return its concrete local and remote addresses.
-fn assert_direct_host_path(
-    events: &[Value],
-    who: &str,
-    peer_id: &str,
-    failure_context: &str,
-) -> [IpAddr; 2] {
-    let selected = events_named(events, "selected_candidate_pair");
-    assert_eq!(
-        selected.len(),
-        1,
-        "{who}: expected exactly one `selected_candidate_pair` event, got {}: {selected:?}\n\
-         {failure_context}",
-        selected.len(),
-    );
-    let selected = selected[0];
-    assert_eq!(
-        str_field(selected, "peer"),
-        peer_id,
-        "{who}: the selected pair must belong to the planned peer"
-    );
-    assert!(
-        selected_pair_is_exact_host_host(selected),
-        "{who}: family-sensitive paths require exact host/host evidence: {selected};\n\
-         {failure_context}"
-    );
-    let addresses = [
-        selected_ip_address(selected, "local_candidate_address", who, failure_context),
-        selected_ip_address(selected, "remote_candidate_address", who, failure_context),
-    ];
-    for address in addresses {
-        assert!(
-            !address.is_unspecified() && !address.is_multicast(),
-            "{who}: the selected pair must use concrete unicast addresses, got {address}: {selected}"
-        );
-    }
-    addresses
-}
-
-/// Assert the cross-platform, no-STUN/no-TURN smoke cell selected a direct
-/// path. rtc can learn the remote host socket from an inbound connectivity
-/// check before its signaled candidate is registered, exposing that side as
-/// `prflx` with no address in rtc 0.21's public statistics. That shape is safe
-/// only for this baseline: both processes prove they advertised host-only
-/// candidates, and the cell configures neither STUN nor TURN. IPv6 and TURN
-/// assertions retain their exact address/type requirements.
+/// Assert the no-STUN/no-TURN baseline selected a direct path.
+/// Retain compatibility with legacy addressless peer-reflexive reports only
+/// for this baseline. Both processes must advertise host-only candidates.
+/// IPv6 requires concrete nominated IPv6 addresses. TURN requires relay/relay.
 fn assert_baseline_direct_path(
     events: &[Value],
     peer_events: &[Value],
@@ -2185,7 +2124,7 @@ fn missing_selected_pair_reports_fully_drained_process_and_ice_evidence() {
     assert!(context.contains("stderr sentinel"), "{context}");
 
     let failure = std::panic::catch_unwind(|| {
-        assert_direct_host_path(run.window(0), "c0", "peer-id", &context);
+        assert_ipv6_host_path(run.window(0), "c0", "peer-id", &context);
     })
     .expect_err("the missing selected pair must fail its real assertion path");
     let message = failure
@@ -2194,7 +2133,7 @@ fn missing_selected_pair_reports_fully_drained_process_and_ice_evidence() {
         .or_else(|| failure.downcast_ref::<&str>().copied())
         .expect("assertion panic must carry a string message");
     for required in [
-        "expected exactly one `selected_candidate_pair` event, got 0",
+        "expected one nominated pair, got 0",
         "client c0 exit code: 0",
         "local_candidate, player_left, exiting",
         "advertised local ICE candidates: [\"host 192.0.2.7:49152\"]",
@@ -2208,7 +2147,7 @@ fn missing_selected_pair_reports_fully_drained_process_and_ice_evidence() {
 }
 
 #[test]
-fn peer_reflexive_shape_is_accepted_only_by_baseline_direct_oracle() {
+fn addressless_peer_reflexive_shape_is_accepted_only_by_baseline_direct_oracle() {
     let local_events = vec![
         json!({
             "event": "local_candidate",
@@ -2243,8 +2182,8 @@ fn peer_reflexive_shape_is_accepted_only_by_baseline_direct_oracle() {
     );
 
     assert!(
-        !selected_pair_is_exact_host_host(&local_events[1]),
-        "the family-sensitive host/host oracle must reject missing remote evidence"
+        validate_ipv6_direct_path(&local_events, "peer-id").is_err(),
+        "the IPv6 oracle must reject this addressless legacy evidence"
     );
 }
 
@@ -2326,53 +2265,125 @@ fn baseline_direct_oracle_rejects_non_direct_or_incomplete_evidence() {
     }
 }
 
-/// Assert this client's single selected pair is host/host over concrete IPv6,
-/// toward the expected peer.
-///
-/// The address is not pinned to `::1`: a runner that also has a global IPv6
-/// interface binds it too, and either host candidate is a legitimate IPv6
-/// proof. What must hold is that the path is IPv6, direct (host/host, since no
-/// STUN or TURN is configured), and carried by an address a peer could actually
-/// dial — never unspecified, multicast, or link-local, whose scope ID the
-/// candidate wire cannot carry.
-fn assert_ipv6_host_path(events: &[Value], who: &str, peer_id: &str, failure_context: &str) {
-    for address in assert_direct_host_path(events, who, peer_id, failure_context) {
-        let IpAddr::V6(address) = address else {
-            panic!("{who}: the IPv6-only run selected an IPv4 candidate {address}");
+/// Require the nominated direct path and every advertisement to use dialable IPv6.
+/// A remote peer-reflexive candidate is legitimate when ICE learns its endpoint
+/// before signaling registers the host candidate. Its actual address is required.
+fn validate_ipv6_direct_path(events: &[Value], peer_id: &str) -> Result<(), String> {
+    let selected = events_named(events, "selected_candidate_pair");
+    if selected.len() != 1 {
+        return Err(format!(
+            "expected one nominated pair, got {}",
+            selected.len()
+        ));
+    }
+    let selected = selected[0];
+    if selected.get("peer").and_then(Value::as_str) != Some(peer_id) {
+        return Err("selected pair belongs to another peer".to_string());
+    }
+    if selected.get("local_candidate_type").and_then(Value::as_str) != Some("host")
+        || !matches!(
+            selected
+                .get("remote_candidate_type")
+                .and_then(Value::as_str),
+            Some("host" | "prflx")
+        )
+    {
+        return Err("selected IPv6 path must be host to host or peer-reflexive".to_string());
+    }
+    let require_ipv6 = |raw: Option<&str>, field: &str| -> Result<(), String> {
+        let raw = raw.ok_or_else(|| format!("missing {field}"))?;
+        let IpAddr::V6(address) = parse_concrete_unicast(raw, field)? else {
+            return Err(format!("{field} is not IPv6"));
         };
-        assert!(
-            !address.is_unspecified()
-                && !address.is_multicast()
-                && !address.is_unicast_link_local(),
-            "{who}: the selected pair must use concrete dialable IPv6 addresses, got {address}"
-        );
+        if address.is_unicast_link_local() {
+            return Err(format!("{field} cannot carry a link-local scope"));
+        }
+        Ok(())
+    };
+    for field in ["local_candidate_address", "remote_candidate_address"] {
+        require_ipv6(selected.get(field).and_then(Value::as_str), field)?;
+    }
+    let advertised = events_named(events, "local_candidate");
+    if advertised.is_empty() {
+        return Err("no advertised host candidates".to_string());
+    }
+    for candidate in advertised {
+        if candidate.get("candidate_type").and_then(Value::as_str) != Some("host") {
+            return Err("IPv6-only direct cell advertised a non-host candidate".to_string());
+        }
+        require_ipv6(
+            candidate.get("address").and_then(Value::as_str),
+            "advertised address",
+        )?;
+    }
+    Ok(())
+}
+
+fn assert_ipv6_host_path(events: &[Value], who: &str, peer_id: &str, failure_context: &str) {
+    validate_ipv6_direct_path(events, peer_id)
+        .unwrap_or_else(|error| panic!("{who}: {error};\n{failure_context}"));
+}
+
+/// Issue #892: a nominated peer-reflexive IPv6 path has real address evidence.
+#[test]
+fn ipv6_direct_oracle_accepts_exact_peer_reflexive_address_evidence() {
+    for remote_type in ["host", "prflx"] {
+        let events = vec![
+            json!({ "event": "local_candidate", "candidate_type": "host", "address": "::1" }),
+            json!({
+                "event": "selected_candidate_pair", "peer": "peer-id",
+                "local_candidate_type": "host", "remote_candidate_type": remote_type,
+                "local_candidate_address": "::1", "remote_candidate_address": "::1"
+            }),
+        ];
+        assert_ipv6_host_path(&events, "fixture", "peer-id", "exact nominated IPv6 path");
     }
 }
 
-/// Assert the *advertised* candidate set carries no IPv4 entry.
-///
-/// The selected pair alone cannot prove `--ip-family`: on a dual-stack host a
-/// regression that made the flag a no-op would still let ICE choose IPv6, and
-/// the cell would pass while proving nothing (issue #275, gap 2). What the
-/// flag actually controls is the *bind set*, and the advertised candidates are
-/// its observable image — one candidate per bound socket under the zero-STUN,
-/// zero-TURN configuration this scenario runs.
-fn assert_no_ipv4_candidate_advertised(events: &[Value], who: &str) {
-    let advertised = advertised_candidate_addresses(events, who);
-    assert!(
-        !advertised.is_empty(),
-        "{who}: the run advertised no local candidate, so there is nothing to \
-         prove the family of"
-    );
-    let ipv4: Vec<&IpAddr> = advertised
-        .iter()
-        .filter(|address| address.is_ipv4())
-        .collect();
-    assert!(
-        ipv4.is_empty(),
-        "{who}: --ip-family ipv6 must bind no IPv4 socket, but the run advertised \
-         {ipv4:?} among {advertised:?}"
-    );
+/// Issue #892: correct advertisements cannot substitute for selected-path evidence.
+#[test]
+fn ipv6_direct_oracle_rejects_incomplete_or_non_ipv6_evidence() {
+    let valid = vec![
+        json!({ "event": "local_candidate", "candidate_type": "host", "address": "::1" }),
+        json!({
+            "event": "selected_candidate_pair", "peer": "peer-id",
+            "local_candidate_type": "host", "remote_candidate_type": "prflx",
+            "local_candidate_address": "::1", "remote_candidate_address": "::1"
+        }),
+    ];
+    for (event, field, value) in [
+        (1, "remote_candidate_address", Value::Null),
+        (1, "local_candidate_address", Value::Null),
+        (1, "remote_candidate_address", json!("127.0.0.1")),
+        (1, "local_candidate_address", json!("127.0.0.1")),
+        (1, "remote_candidate_address", json!("::")),
+        (1, "remote_candidate_address", json!("ff02::1")),
+        (1, "remote_candidate_address", json!("fe80::1")),
+        (1, "remote_candidate_type", json!("srflx")),
+        (1, "remote_candidate_type", json!("relay")),
+        (1, "local_candidate_type", json!("prflx")),
+        (1, "peer", json!("another-peer")),
+        (0, "candidate_type", json!("relay")),
+        (0, "address", json!("127.0.0.1")),
+    ] {
+        let mut invalid = valid.clone();
+        invalid[event][field] = value.clone();
+        assert!(
+            validate_ipv6_direct_path(&invalid, "peer-id").is_err(),
+            "must reject {field}={value}"
+        );
+    }
+    for missing_event in [0, 1] {
+        let mut invalid = valid.clone();
+        invalid.remove(missing_event);
+        assert!(validate_ipv6_direct_path(&invalid, "peer-id").is_err());
+    }
+    let mut missing_address = valid.clone();
+    missing_address[1]
+        .as_object_mut()
+        .unwrap()
+        .remove("remote_candidate_address");
+    assert!(validate_ipv6_direct_path(&missing_address, "peer-id").is_err());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2540,7 +2551,6 @@ async fn ipv6_only_mesh_pair_exchanges_on_a_host_ipv6_path() {
         // ...over IPv6, with the exact exchange on both channel labels.
         let failure_context = run.selected_pair_failure_context(index);
         assert_ipv6_host_path(window, who, peer_id, &failure_context);
-        assert_no_ipv4_candidate_advertised(window, who);
         assert_exchange_sent_to(&run.logs[index], who, &peers);
         assert_exchange_received_from(&run.logs[index], who, &peers);
     }

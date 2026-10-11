@@ -251,34 +251,50 @@ impl EnhancedGameServer {
     /// Discard reconnect reservations whose window has closed, removing the
     /// room row each one was holding.
     ///
-    /// Unlike [`Self::cleanup_pending_durable_player_detaches`] this does not
-    /// take the room mutation gate, and does not need to: a candidate is
-    /// expired and unclaimed, expiry is monotonic, and `claim_reconnection`
-    /// refuses an expired record — so no reconnect can restore this membership
-    /// after the snapshot, and the removal can only ever delete a row whose
-    /// owner is already gone. The detach backlog takes the gate because its
-    /// candidates have no such proof: a live reconnect legitimately reclaims
-    /// one, and the gate is what orders that claim against this deletion.
+    /// The room mutation gate excludes fresh admissions. Revalidate the
+    /// expired record under the replay-state write lock, and keep that lock
+    /// through durable removal so a new disconnection cannot replace it.
     pub(crate) async fn cleanup_expired_reconnections(&self) -> usize {
         let Some(reconnection_manager) = &self.reconnection_manager else {
             return 0;
         };
 
+        self.cleanup_expired_reconnection_candidates(
+            reconnection_manager.expired_cleanup_candidates().await,
+        )
+        .await
+    }
+
+    pub(super) async fn cleanup_expired_reconnection_candidates(
+        &self,
+        candidates: Vec<(PlayerId, RoomId)>,
+    ) -> usize {
+        let Some(reconnection_manager) = &self.reconnection_manager else {
+            return 0;
+        };
         let mut count = 0_usize;
-        for (player_id, room_id) in reconnection_manager.expired_cleanup_candidates().await {
-            match self
-                .database
-                .remove_player_from_room(&room_id, &player_id)
+        for (player_id, room_id) in candidates {
+            let _guard = self
+                .message_coordinator
+                .lock_room_event_mutation(&room_id)
+                .await;
+            if self
+                .connection_manager
+                .current_relay_stamp_in_room(&player_id, &room_id)
+                .is_some()
+            {
+                continue;
+            }
+            match reconnection_manager
+                .cleanup_expired_membership(
+                    &player_id,
+                    &room_id,
+                    self.database.remove_player_from_room(&room_id, &player_id),
+                )
                 .await
             {
-                Ok(_) => {
-                    if reconnection_manager
-                        .remove_expired_reconnection(&player_id)
-                        .await
-                    {
-                        count = count.saturating_add(1);
-                    }
-                }
+                Ok(true) => count = count.saturating_add(1),
+                Ok(false) => {}
                 Err(error) => {
                     tracing::warn!(%player_id, %room_id, %error, "Failed durable cleanup for expired reconnection; retaining it for retry");
                 }

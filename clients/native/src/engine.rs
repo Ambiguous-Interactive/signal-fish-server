@@ -34,15 +34,17 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use clap::ValueEnum;
 use rtc::ice::{mdns::MulticastDnsMode, network_type::NetworkType, url::SchemeType, url::Url};
+use rtc::peer_connection::transport::RTCIceCandidatePair;
 use signal_fish_server::protocol::{IceServer, PlayerId};
 use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore};
 use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelInit};
 use webrtc::peer_connection::{
     PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
     RTCIceCandidateInit, RTCIceGatheringState, RTCIceServer, RTCIceTransportPolicy,
-    RTCPeerConnectionIceEvent, RTCPeerConnectionState, RTCSessionDescription, RTCStatsReport,
-    RTCStatsReportEntry, SettingEngineBuilder, StatsSelector,
+    RTCPeerConnectionIceEvent, RTCPeerConnectionState, RTCSessionDescription, SettingEngineBuilder,
 };
+#[cfg(test)]
+use webrtc::peer_connection::{RTCStatsReportEntry, StatsSelector};
 use webrtc::runtime::{default_runtime, JoinHandle, Runtime};
 
 /// Label of the ordered, reliable data channel (commands / critical events).
@@ -710,7 +712,7 @@ impl Engine {
             .cloned()
     }
 
-    /// Start a detached selected-pair stats probe for the current physical
+    /// Start a detached nominated-pair probe for the current physical
     /// link. Results use a dedicated channel so the orchestrator can arbitrate
     /// already-completed evidence at its soft deadline without consuming or
     /// reordering ordinary engine callbacks.
@@ -730,10 +732,16 @@ impl Engine {
             peer,
             generation,
             async move {
-                let report = pc
-                    .get_stats(std::time::Instant::now(), StatsSelector::None)
-                    .await;
-                selected_candidate_pair_from_report(&report)
+                let nominated = pc
+                    .sctp()
+                    .await?
+                    .transport()
+                    .ice_transport()
+                    .get_selected_candidate_pair()
+                    .await
+                    .ok()
+                    .flatten();
+                selected_candidate_pair_details(nominated.as_ref())
             },
         );
         true
@@ -758,58 +766,18 @@ fn spawn_selected_pair_probe(
     }));
 }
 
-fn selected_candidate_pair_from_report(report: &RTCStatsReport) -> Option<SelectedCandidatePair> {
-    let selected_pair_id = &report.transport()?.selected_candidate_pair_id;
-    let RTCStatsReportEntry::IceCandidatePair(pair) = report.get(selected_pair_id)? else {
-        return None;
-    };
-    // rtc 0.20 records raw ICE-agent IDs on the candidate-pair entry but
-    // prefixes the standalone candidate report IDs. Accept the direct ID
-    // first so this remains compatible if that internal mismatch is fixed.
-    let local_id = format!("RTCLocalIceCandidate_{}", pair.local_candidate_id);
-    let remote_id = format!("RTCRemoteIceCandidate_{}", pair.remote_candidate_id);
-    let RTCStatsReportEntry::LocalCandidate(local) = report
-        .get(&pair.local_candidate_id)
-        .or_else(|| report.get(&local_id))?
-    else {
-        return None;
-    };
-    let remote_entry = report
-        .get(&pair.remote_candidate_id)
-        .or_else(|| report.get(&remote_id));
-    if remote_entry.is_none() {
-        tracing::debug!(
-            candidate_id = %pair.remote_candidate_id,
-            "selected remote candidate is peer-reflexive and absent from rtc stats"
-        );
-    }
-    let (remote_candidate_type, remote_candidate_address) =
-        selected_remote_candidate_details(remote_entry)?;
+/// Read the nominated pair itself, including dynamically learned candidates.
+/// The statistics registry can omit a peer-reflexive remote candidate.
+fn selected_candidate_pair_details(
+    nominated: Option<&RTCIceCandidatePair>,
+) -> Option<SelectedCandidatePair> {
+    let pair = nominated?;
     Some(SelectedCandidatePair {
-        local_candidate_type: local.candidate_type.to_string(),
-        remote_candidate_type,
-        local_candidate_address: local.address.clone(),
-        remote_candidate_address,
+        local_candidate_type: pair.local().typ.to_string(),
+        remote_candidate_type: pair.remote().typ.to_string(),
+        local_candidate_address: Some(pair.local().address.clone()),
+        remote_candidate_address: Some(pair.remote().address.clone()),
     })
-}
-
-fn selected_remote_candidate_details(
-    entry: Option<&RTCStatsReportEntry>,
-) -> Option<(String, Option<String>)> {
-    match entry {
-        Some(RTCStatsReportEntry::RemoteCandidate(remote)) => {
-            Some((remote.candidate_type.to_string(), remote.address.clone()))
-        }
-        Some(_) => None,
-        // rtc 0.20 registers every signaled remote candidate synchronously,
-        // but not a peer-reflexive candidate learned from an inbound ICE
-        // check. A selected pair that exists alongside its local candidate yet
-        // permanently lacks only the remote entry is therefore the library's
-        // prflx shape. Its public stats API exposes no address for that shape,
-        // so preserve the uncertainty rather than inventing a host address;
-        // strict family assertions still fail on `None`.
-        None => Some(("prflx".to_string(), None)),
-    }
 }
 
 /// A local ICE candidate this client gathered and advertised to a peer.
@@ -836,15 +804,14 @@ pub struct GatheredCandidate {
 pub struct SelectedCandidatePair {
     pub local_candidate_type: String,
     pub remote_candidate_type: String,
-    /// Address the local stack reports for its side of the pair. `None` when
-    /// the stack redacts or omits it; the harness treats that as a failure
-    /// rather than a pass.
+    /// Actual local address from the nominated transport pair. The event
+    /// schema remains optional; family-sensitive consumers reject absence.
     pub local_candidate_address: Option<String>,
     /// Address reported for the remote side of the pair.
     pub remote_candidate_address: Option<String>,
 }
 
-/// Completion from one detached selected-pair statistics snapshot.
+/// Completion from one detached nominated-pair transport probe.
 pub struct SelectedPairProbeResult {
     pub peer: PlayerId,
     pub generation: u64,
@@ -1697,12 +1664,38 @@ mod tests {
         assert!(result.selected.is_some());
     }
 
+    /// Issue #892: report real nominated candidate types and addresses.
     #[test]
-    fn absent_selected_remote_stats_are_peer_reflexive() {
-        assert_eq!(
-            selected_remote_candidate_details(None),
-            Some(("prflx".to_string(), None))
-        );
+    fn nominated_pair_evidence_preserves_peer_reflexive_addresses_and_types() {
+        use webrtc::peer_connection::{RTCIceCandidate, RTCIceCandidateType};
+        assert!(selected_candidate_pair_details(None).is_none());
+        for (local_type, remote_type) in [
+            (RTCIceCandidateType::Host, RTCIceCandidateType::Host),
+            (RTCIceCandidateType::Host, RTCIceCandidateType::Prflx),
+            (RTCIceCandidateType::Relay, RTCIceCandidateType::Relay),
+            (RTCIceCandidateType::Srflx, RTCIceCandidateType::Prflx),
+        ] {
+            let pair = RTCIceCandidatePair::new(
+                RTCIceCandidate {
+                    typ: local_type,
+                    address: "::1".to_string(),
+                    ..RTCIceCandidate::default()
+                },
+                RTCIceCandidate {
+                    typ: remote_type,
+                    address: "2001:db8::7".to_string(),
+                    ..RTCIceCandidate::default()
+                },
+            );
+            let evidence = selected_candidate_pair_details(Some(&pair)).unwrap();
+            assert_eq!(evidence.local_candidate_type, local_type.to_string());
+            assert_eq!(evidence.remote_candidate_type, remote_type.to_string());
+            assert_eq!(evidence.local_candidate_address.as_deref(), Some("::1"));
+            assert_eq!(
+                evidence.remote_candidate_address.as_deref(),
+                Some("2001:db8::7")
+            );
+        }
     }
 
     /// Bind each candidate address and try to send [`ROUTE_PROBE`] to `server`,
@@ -3031,7 +3024,7 @@ mod tests {
             }
         })
         .await
-        .expect("connected pair eventually publishes detached stats evidence");
+        .expect("connected pair eventually publishes nominated transport evidence");
         assert!(!selected.local_candidate_type.is_empty());
         assert!(!selected.remote_candidate_type.is_empty());
 

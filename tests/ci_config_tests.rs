@@ -32270,10 +32270,16 @@ SIGNAL_FISH_SERVER_BIN="$GITHUB_WORKSPACE/target/debug/signal-fish-server${SERVE
         // The path is asserted to be direct IPv6 toward the planned peer.
         "fn assert_ipv6_host_path(",
         "assert_ipv6_host_path(window, who, peer_id, &failure_context);",
-        "fn selected_ip_address(event: &Value, field: &str, who: &str, failure_context: &str) -> IpAddr {",
-        "let IpAddr::V6(address) = address else {",
-        "selected_pair_is_exact_host_host(selected)",
-        r#"selected_ip_address(selected, "local_candidate_address", who, failure_context)"#,
+        "fn validate_ipv6_direct_path(events: &[Value], peer_id: &str) -> Result<(), String> {",
+        "validate_ipv6_direct_path(events, peer_id)",
+        r#"selected.get("peer").and_then(Value::as_str) != Some(peer_id)"#,
+        r#"selected.get("local_candidate_type").and_then(Value::as_str) != Some("host")"#,
+        r#".get("remote_candidate_type")"#,
+        r#"Some("host" | "prflx")"#,
+        "let IpAddr::V6(address) = parse_concrete_unicast(raw, field)? else {",
+        r#"for field in ["local_candidate_address", "remote_candidate_address"] {"#,
+        "require_ipv6(selected.get(field).and_then(Value::as_str), field)?;",
+        "address.is_unicast_link_local()",
         // ...carrying a real session on both labels, not the relay floor.
         "assert_exchange_sent_to(&run.logs[index], who, &peers);",
         "assert_exchange_received_from(&run.logs[index], who, &peers);",
@@ -32476,9 +32482,15 @@ fn test_ice_bind_set_and_advertised_candidate_oracles_are_pinned() {
 
     let interop = read_live_file(&root.join("clients/native/tests/interop_e2e.rs"));
     for required in [
-        "fn assert_no_ipv4_candidate_advertised(events: &[Value], who: &str) {",
-        "assert_no_ipv4_candidate_advertised(window, who);",
-        "advertised_candidate_addresses(events, who);",
+        "fn validate_ipv6_direct_path(events: &[Value], peer_id: &str) -> Result<(), String> {",
+        "assert_ipv6_host_path(window, who, peer_id, &failure_context);",
+        r#"let advertised = events_named(events, "local_candidate");"#,
+        "if advertised.is_empty() {",
+        "for candidate in advertised {",
+        r#"candidate.get("candidate_type").and_then(Value::as_str) != Some("host")"#,
+        r#"candidate.get("address").and_then(Value::as_str),"#,
+        r#""advertised address","#,
+        "let IpAddr::V6(address) = parse_concrete_unicast(raw, field)? else {",
     ] {
         assert!(
             interop.contains(required),

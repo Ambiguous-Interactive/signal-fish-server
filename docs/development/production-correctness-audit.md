@@ -48,9 +48,9 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Initial; HTTP/2 route rejection recorded in F13 |
 | A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Initial; concurrent handshake retry-budget loss recorded in F15 |
 | A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10 |
-| A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; embedded receiver-loss rollback in F18; size-refusal rollback in F21; known socket-close rollback in F22 |
+| A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; embedded receiver-loss rollback in F18; size-refusal rollback in F21; known socket-close rollback in F22; stale expiry cleanup in F32 |
 | A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
-| A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial |
+| A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32 |
 | A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial |
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial |
 | A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31 |
@@ -59,11 +59,11 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial |
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
 | A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial; aggregate reconnect admission bound in F21; socket close before queue commit in F22 |
-| A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial |
+| A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial; stale expiry cleanup in F32 |
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Pending |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -1676,3 +1676,114 @@ External validation remains open in
 and [Godot #356](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/356).
 The clients consume the existing terminal events. No schema migration is required.
 The broader A10 and A01–A22 audits remain incomplete.
+
+### F32 — Stale reconnect expiry cleanup deletes a fresh membership
+
+Confirmed defect. Issue [#890](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/890).
+Baseline: `471b6be8509e4f1397abfcd6f07609e20a75235c`. A05/A07/A16.
+
+`cleanup_expired_reconnections` snapshots expired, unclaimed records before
+removing their durable room seats. A fresh same-room join discards the pending
+record, but the sweep did not recheck that record or enter the room mutation
+lane. Its stale candidate could therefore remove the fresh seat and authority
+while leaving the live connection assigned to the room. The sweep then reported
+zero removals because the old record was already gone.
+
+The deterministic history reuses the established still-registered connection
+and pending-record residue boundary. Both joins deliver `RoomJoined`. The
+actual sweep is split at its candidate snapshot, then resumed after the fresh
+join. Red nextest run `6475f10a-f5fc-45de-a9f1-85a2a2b8d3ab` failed at
+`stale expiry must preserve the fresh seat`. This establishes that state
+transition; it does not establish a remote incident or every socket history.
+
+The repair enters the room mutation lane and excludes a currently routed
+player. It then rechecks the room, claim state, and deadline while holding the
+replay-state write lock through durable seat removal and record consumption.
+A replacement record cannot appear during that storage suspension. Failure or
+cancellation retains the record for retry. Existing public manager APIs stay
+available; the server sweep uses the guarded transaction.
+
+Final nextest run `92410296-7b1b-4b1f-af4e-e7cd09dd3acf` passed nine
+focused unit tests. The fresh-membership history checks its seat, explicitly
+claimed authority, readiness and game start, then disconnects and claims its
+new token. Other controls cover an expired replacement record in another room,
+unexpired and claimed records, wrong-room and missing candidates, replay and
+metric retention, replacement during suspended storage, failure, and
+cancellation. A paused membership restore proves same-room cleanup waits for
+the room lane, then removes its expired sibling after reconnect succeeds.
+Independent adversarial review found no remaining issues in this repair.
+
+After moving the unchanged reconnect tests to a separate test file, all 49
+owning reconnect-module and focused server tests passed. The formatted source
+reconstruction matches the original after removing five redundant test-only
+attributes. Strict all-target, all-feature Clippy and all 38 panic, timeout,
+and clock policy tests pass on the final layout.
+
+Focused reproduction:
+
+```bash
+cargo nextest run --lib -E 'test(stale_reconnection_expiry_snapshot) | test(expired_membership_cleanup)'
+cargo nextest run --lib -E 'test(reconnect_claim_survives_expiry_during_membership_restore)'
+```
+
+The storage operation runs under the replay-state lock. The shipped in-memory
+backend does not reenter the reconnection manager from that operation. This
+bounded experiment does not establish callback reentrancy for custom backends.
+
+External client acceptance is tracked in
+[Rust #287](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/287),
+[.NET #138](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/138),
+and [Godot #357](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/357).
+Their own validation remains separate from server regression and CI evidence.
+
+### F33 — Native selected-path diagnostics omit a learned remote address
+
+Confirmed diagnostic defect. Issue [#892](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/892).
+Baseline: `bb1936f2eebd5486a667397f88427e5921650476`. A20/A22.
+
+The hosted native IPv6 cell completed both channel exchanges, but one client
+reported a local IPv6 host and an addressless remote `prflx` candidate. The
+other client reported host/host IPv6. The strict family gate failed because
+that report did not prove the remote address family. Ten unchanged local
+attempts passed; they did not repair or explain away the hosted observation.
+
+The rtc 0.21 statistics registry records signaled remote candidates. A candidate
+learned from an inbound ICE check can remain nominated without an entry in that
+registry. A later signaled host at the same endpoint is a distinct candidate:
+the agent's equality rule includes candidate type. The old diagnostic inferred
+`prflx` from the missing registry entry and emitted a null address. The typed
+ICE transport API exposes the actual nominated pair, including its types and
+addresses. The repair reads that pair directly. It does not infer an address
+from advertisements, relabel a peer-reflexive candidate, or fabricate evidence
+when no pair is nominated.
+
+The IPv6 cell now requires a local host and a remote host or peer-reflexive
+candidate with two concrete dialable IPv6 addresses for the planned peer.
+Every local advertisement must be an IPv6 host. The prior host/host-only type
+rule rejected a legitimate direct peer-reflexive path even when its actual
+address was known. The deterministic red fixture supplied that exact address
+evidence and failed at the old host/host assertion. The revised oracle rejects
+missing or null addresses, IPv4, unspecified, multicast and link-local
+addresses, server-reflexive and relay types, another peer, missing nomination,
+and missing or non-host advertisements. The existing baseline alone retains
+compatibility with legacy addressless reports. TURN still requires relay/relay.
+Exchange, fallback, and deadline checks remain unchanged.
+
+Focused producer and IPv6 oracle tests pass. The producer preserves nominated
+candidate types and addresses, including peer-reflexive and relay types, and
+returns no evidence without nomination. These controls cover diagnostic and
+oracle semantics. They do not establish a new platform or capacity claim.
+
+Focused reproduction:
+
+```bash
+cargo test --manifest-path clients/native/Cargo.toml --locked --lib nominated_pair_evidence_preserves_peer_reflexive_addresses_and_types
+cargo test --manifest-path clients/native/Cargo.toml --locked --test interop_e2e ipv6_direct_oracle
+```
+
+All 19 native interop tests passed locally, including the live IPv6 cell.
+Strict native all-target Clippy and both owning CI acceptance guards pass.
+This changes only the native reference client's diagnostic event producer.
+The signaling wire format and server API remain unchanged. External Rust,
+.NET, and Godot clients are unaffected by F33; their acceptance issues above
+track the separate F32 server repair.

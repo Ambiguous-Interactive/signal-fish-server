@@ -129,10 +129,9 @@ pub enum Event {
     P2pPairConnected { peer: PlayerId },
     /// Both channels reopened for a coordinated PairRetry generation.
     P2pPairReconnected { peer: PlayerId },
-    /// Candidate types and addresses selected for the active ICE path. The
-    /// addresses are `null` when the local stack redacts or omits them; a
-    /// harness that asserts on the negotiated address family treats that as a
-    /// failure rather than a pass.
+    /// Actual candidate types and addresses of the nominated ICE transport pair.
+    /// Consumers must reject missing or `null` addresses when verifying the
+    /// negotiated address family.
     SelectedCandidatePair {
         peer: PlayerId,
         local_candidate_type: String,
