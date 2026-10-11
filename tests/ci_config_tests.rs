@@ -46,6 +46,65 @@ fn cargo_deny_available() -> bool {
 }
 
 #[test]
+fn browser_interop_retains_failure_diagnostics() {
+    let content = read_live_file(&repo_root().join(".github/workflows/browser-interop.yml"));
+    let documents = Yaml::load_from_str(&content).expect("valid browser workflow");
+    let job = documents[0]
+        .as_mapping_get("jobs")
+        .and_then(|jobs| jobs.as_mapping_get("interop"))
+        .expect("interop job");
+    let artifact_dir = job
+        .as_mapping_get("env")
+        .and_then(|env| env.as_mapping_get("SIGNAL_FISH_INTEROP_ARTIFACT_DIR"))
+        .and_then(Yaml::as_str)
+        .expect("browser failures need endpoint diagnostic capture");
+    let steps = job
+        .as_mapping_get("steps")
+        .and_then(Yaml::as_sequence)
+        .expect("interop steps");
+    let upload = steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("uses")
+                .and_then(Yaml::as_str)
+                .is_some_and(|uses| uses.starts_with("actions/upload-artifact@"))
+        })
+        .expect("browser failures need hosted artifacts");
+    assert_eq!(
+        upload.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("always()")
+    );
+    let settings = upload.as_mapping_get("with").expect("upload settings");
+    assert_eq!(
+        settings.as_mapping_get("path").and_then(Yaml::as_str),
+        Some(artifact_dir)
+    );
+    assert_eq!(
+        settings
+            .as_mapping_get("retention-days")
+            .and_then(Yaml::as_integer),
+        Some(14)
+    );
+    let run = steps
+        .iter()
+        .find_map(|step| {
+            let run = step.as_mapping_get("run").and_then(Yaml::as_str)?;
+            run.contains("bash scripts/run-browser-interop.sh")
+                .then_some(run)
+        })
+        .expect("interop runner");
+    assert!(
+        run.contains("set -euo pipefail"),
+        "log capture must retain the test failure"
+    );
+    assert!(run.contains("tee"), "retain the runner's failure output");
+    assert!(
+        !run.contains("|| true"),
+        "interop failure must fail the job"
+    );
+}
+
+#[test]
 fn token_binding_canonicalization_preserves_default_serde_json_features() {
     let manifest = read_file(&repo_root().join("Cargo.toml"));
     assert!(

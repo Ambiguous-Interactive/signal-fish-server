@@ -55,6 +55,8 @@ jobs:
   interop:
     name: Browser Client Interop (Linux)
     runs-on: ubuntu-latest
+    env:
+      SIGNAL_FISH_INTEROP_ARTIFACT_DIR: ${{ github.workspace }}/target/browser-interop
     # Worst case: 12 serialized scenarios x the suite's 240 s per-scenario
     # panic ceiling (SCENARIO_COUNT x SCENARIO_CEILING in
     # browser_interop_e2e.rs) = 48 min of
@@ -144,4 +146,32 @@ jobs:
         # Builds the server + native client, lints/typechecks/builds the
         # browser client, and runs the feature-gated browser interop cells
         # with SIGNAL_FISH_SERVER_BIN + SIGNAL_FISH_BROWSER_CLI exported.
-        run: bash scripts/run-browser-interop.sh
+        run: |
+          set -euo pipefail
+          mkdir -p "$SIGNAL_FISH_INTEROP_ARTIFACT_DIR"
+          bash scripts/run-browser-interop.sh 2>&1 | tee "$SIGNAL_FISH_INTEROP_ARTIFACT_DIR/runner.log"
+
+      - name: Capture browser interop build evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "$SIGNAL_FISH_INTEROP_ARTIFACT_DIR"
+          {
+            git rev-parse HEAD
+            uname -a
+            for binary in target/debug/signal-fish-server clients/native/target/debug/signal-fish-reference-native \
+              clients/browser/dist/cli.js clients/browser/dist/page.js; do
+              if [ -f "$binary" ]; then
+                sha256sum "$binary"
+              fi
+            done
+          } > "$SIGNAL_FISH_INTEROP_ARTIFACT_DIR/build-evidence.log"
+
+      - name: Upload browser interop diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: browser-interop-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/target/browser-interop
+          if-no-files-found: warn
+          retention-days: 14

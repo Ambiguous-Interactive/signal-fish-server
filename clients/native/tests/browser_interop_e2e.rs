@@ -106,7 +106,7 @@ use base64::Engine as _;
 /// Serializes the multi-process scenarios (see module docs).
 static SCENARIO_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Number of scenarios queueing behind [`SCENARIO_SERIAL`] (keep in sync with
-/// the `#[tokio::test]` functions in this file).
+/// the scenarios that acquire `SCENARIO_SERIAL` in this file).
 const SCENARIO_COUNT: u64 = 13;
 /// Generous ceiling for ONE scenario in a fully degraded run: server spawn
 /// (up to 3 attempts x 15 s health deadline = 45 s) plus one client wave
@@ -345,6 +345,48 @@ async fn native_restore_restarts_browser_bidirectional_exchange() {
     server.shutdown().await;
 }
 
+/// Collect every bounded client wait before the caller propagates a failure.
+async fn collect_client_outcomes<F: std::future::Future>(
+    waits: impl IntoIterator<Item = F>,
+) -> Vec<Result<F::Output, Box<dyn std::any::Any + Send>>> {
+    futures_util::future::join_all(
+        waits
+            .into_iter()
+            .map(|wait| std::panic::AssertUnwindSafe(wait).catch_unwind()),
+    )
+    .await
+}
+
+// Regression #889: an early creator failure must not cancel sibling evidence.
+#[tokio::test]
+async fn client_failure_collection_keeps_pending_sibling_results() {
+    let released = tokio::sync::Notify::new();
+    let outcomes = collect_client_outcomes((0..3).map(|index| {
+        let released = &released;
+        async move {
+            if index == 0 {
+                released.notify_one();
+                panic!("creator failed before sibling evidence arrived");
+            }
+            if index == 1 {
+                released.notified().await;
+                tokio::task::yield_now().await;
+            }
+            vec![json!({"event": "channel_message", "peer": index, "label": "reliable"})]
+        }
+    }))
+    .await;
+    assert_eq!(outcomes.len(), 3);
+    assert!(outcomes[0].is_err());
+    for (index, outcome) in outcomes.iter().enumerate().skip(1) {
+        assert_eq!(
+            outcome.as_ref().unwrap(),
+            &[json!({"event": "channel_message", "peer": index, "label": "reliable"})],
+            "retain the sibling's final event before propagating creator failure"
+        );
+    }
+}
+
 /// Spawn the server with the given default topology, run the 3-client flow
 /// (creator + 2 joiners by room code, per-client [`ClientConfig`]) to
 /// completion, assert every process exits 0, and return the event logs.
@@ -431,11 +473,36 @@ async fn run_three_clients(
     // releasing siblings one-by-one can therefore truncate a reliable tail or
     // erase its obligation. No client may depart until all three have proved
     // the full inbound/outbound matrix.
-    for client in &mut clients {
-        client
-            .await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)
-            .await;
+    // Read all endpoints together, and finish every wait before propagating
+    // failure. A failed creator must not discard the other endpoints' evidence.
+    let outcomes = collect_client_outcomes(
+        clients
+            .iter_mut()
+            .map(|client| client.await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)),
+    )
+    .await;
+    if outcomes.iter().any(Result::is_err) {
+        // Successful siblings are held at the shared barrier. Release them and
+        // drain every endpoint before propagating the original failed wait.
+        if let Err(error) = std::fs::write(&success_release_file, b"release") {
+            eprintln!("failed to release clients after barrier failure: {error}");
+        }
+        let _cleanup = collect_client_outcomes(
+            clients
+                .iter_mut()
+                .map(|client| client.drain_to_exit(CLIENT_EXIT_TIMEOUT)),
+        )
+        .await;
     }
+    assert!(
+        outcomes.iter().all(Result::is_ok),
+        "three-client success barrier failed;\n{}",
+        clients
+            .iter()
+            .map(|client| format!("--- {} ---\n{}", client.name, client.diagnostics()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     // The normal post-success linger is 250 ms. Staying alive beyond it proves
     // the browser page is actually held by the CLI release-file bridge rather
     // than merely emitting the new event and following the old exit path.
@@ -453,9 +520,16 @@ async fn run_three_clients(
     }
     std::fs::write(&success_release_file, b"release").expect("release successful clients together");
 
-    for client in &mut clients {
-        drain_expect_success(client).await;
-    }
+    let exits = collect_client_outcomes(clients.iter_mut().map(drain_expect_success)).await;
+    assert!(
+        exits.iter().all(Result::is_ok),
+        "three-client drain failed;\n{}",
+        clients
+            .iter()
+            .map(|client| format!("--- {} ---\n{}", client.name, client.diagnostics()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 
     let ids: Vec<String> = clients
         .iter()
@@ -466,12 +540,9 @@ async fn run_three_clients(
 
     ScenarioRun {
         ids,
-        // `ClientProcess` implements `Drop`, so take the log instead of
-        // moving the field out (the drained child is already reaped).
-        logs: clients
-            .into_iter()
-            .map(|mut client| std::mem::take(&mut client.events))
-            .collect(),
+        // Keep each original log until Drop persists its diagnostics. Moving
+        // it out would write empty event files for successful scenarios.
+        logs: clients.iter().map(|client| client.events.clone()).collect(),
     }
 }
 

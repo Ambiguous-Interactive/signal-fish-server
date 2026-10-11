@@ -337,11 +337,15 @@ impl ExchangeLedger {
                 ("sent to", self.sent.get(peer)),
                 ("received from", self.received.get(peer)),
             ] {
-                let complete = labels.is_some_and(|labels| {
-                    labels.contains(RELIABLE_LABEL) && labels.contains(UNRELIABLE_LABEL)
-                });
-                if !complete {
-                    unmet.push(format!("exchange incomplete ({direction} {peer})"));
+                let missing: Vec<&str> = [RELIABLE_LABEL, UNRELIABLE_LABEL]
+                    .into_iter()
+                    .filter(|label| !labels.is_some_and(|labels| labels.contains(*label)))
+                    .collect();
+                if !missing.is_empty() {
+                    unmet.push(format!(
+                        "exchange incomplete ({direction} {peer}; missing {})",
+                        missing.join(", ")
+                    ));
                 }
             }
         }
@@ -4149,6 +4153,38 @@ mod tests {
             next_ping_at: checked_deadline(tokio::time::Instant::now(), PING_INTERVAL),
             pong_deadline: None,
             pong_grace_applied: false,
+        }
+    }
+
+    // Regression #889: distinguish unreliable loss from reliable or send debt.
+    #[test]
+    fn exchange_debt_names_each_missing_channel() {
+        let peer = PlayerId::from_u128(2);
+        for direction in ["sent to", "received from"] {
+            for missing in [
+                &[RELIABLE_LABEL][..],
+                &[UNRELIABLE_LABEL][..],
+                &[RELIABLE_LABEL, UNRELIABLE_LABEL][..],
+            ] {
+                let mut ledger = ExchangeLedger::default();
+                ledger.note_connected(peer);
+                for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                    if direction != "sent to" || !missing.contains(&label) {
+                        ledger.note_sent(peer, label);
+                    }
+                    if direction != "received from" || !missing.contains(&label) {
+                        ledger.note_received(peer, label.to_string());
+                    }
+                }
+                assert_eq!(
+                    ledger.unmet_criteria(),
+                    [format!(
+                        "exchange incomplete ({direction} {peer}; missing {})",
+                        missing.join(", ")
+                    )],
+                    "{direction}: name exactly the missing channels"
+                );
+            }
         }
     }
 
