@@ -443,7 +443,20 @@ impl FatalError {
 /// Run the full client lifecycle; emits every stdout event except the final
 /// `exiting` (owned by `main`) and returns the exit code.
 pub async fn run(cli: &Cli) -> i32 {
-    match run_inner(cli).await {
+    let output = crate::event_output::stdout();
+    let result = tokio::select! {
+        result = run_inner(cli) => result,
+        reason = output.failed() => Err(FatalError::connection(reason)),
+    };
+    let result = match result {
+        Ok(code) => match tokio::time::timeout(Duration::from_secs(1), output.drained()).await {
+            Ok(Ok(())) => Ok(code),
+            Ok(Err(reason)) => Err(FatalError::connection(reason)),
+            Err(_) => Err(FatalError::connection("stdout flush timed out")),
+        },
+        Err(fatal) => Err(fatal),
+    };
+    match result {
         Ok(code) => code,
         Err(fatal) => {
             emit(&Event::Error {
