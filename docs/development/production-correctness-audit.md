@@ -45,11 +45,11 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | Task | Implementation and operations | Invariants and experiments | Status |
 | --- | --- | --- | --- |
 | A01 | `protocol/`, AsyncAPI, wire samples | Schema, errors, optional fields, v2/v3 projections, exhaustive operation mapping | Initial |
-| A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Initial; HTTP/2 route rejection recorded in F13 |
-| A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Initial; concurrent handshake retry-budget loss recorded in F15; signed-credential response-loss history in session 412 |
+| A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Initial; HTTP/2 route rejection recorded in F13; certificate-bound partial-write history in session 413 |
+| A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Initial; concurrent handshake retry-budget loss recorded in F15; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413 |
 | A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10 |
-| A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; signed-credential response-loss history in session 412; embedded receiver-loss rollback in F18; size-refusal rollback in F21; known socket-close rollback in F22; stale expiry cleanup in F32 |
-| A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; signed-credential response-loss history in session 412; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
+| A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; embedded receiver-loss rollback in F18; size-refusal rollback in F21; known socket-close rollback in F22; stale expiry cleanup in F32 |
+| A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
 | A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32 |
 | A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial |
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial |
@@ -58,7 +58,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial |
 | A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial |
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
-| A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial; aggregate reconnect admission bound in F21; socket close before queue commit in F22 |
+| A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial; certificate-bound partial-write history in session 413; aggregate reconnect admission bound in F21; socket close before queue commit in F22 |
 | A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial; stale expiry cleanup in F32; delayed first-tick overflow in F36 |
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
@@ -2031,4 +2031,54 @@ needs no changelog entry.
 
 ```bash
 cargo nextest run --lib -E 'test(partial_reconnect) | test(test_reconnected_partial_transport_write)'
+```
+
+### Session 413 certificate-bound partial reconnect-response writes
+
+Baseline: `9097cb7e`. A02/A03/A05/A06/A15. The plain signed-credential
+history did not verify TLS certificate identity after credential rotation.
+The existing mTLS history checked only the initial credential and first
+successful restore.
+
+The new history uses real TCP, rustls client and server handshakes, and the
+production `VerifiedClientCertificateAcceptor`. Both valid client certificates
+use the same application ID. Each connection signs its requests with the
+fresh server challenge and its own verified certificate fingerprint.
+An alternate valid certificate cannot restore the original player. The
+issuing certificate then restores that player with the same credential.
+
+The matrix covers v2 `/ws` and v3 `/v3/ws`, batching on and off, and complete,
+one-byte, or 32-byte response writes. The controlled `AsyncWrite` wrapper sits
+above TLS, after certificate verification. It accepts only the selected
+plaintext prefix and flushes that prefix through rustls before parking the
+remaining write. Partial cells read that prefix from the real TLS client and
+observe no further plaintext. The 32-byte cell identifies `Reconnected`.
+These are controlled plaintext submission histories, not TLS-record,
+packet-loss, or kernel-specific encrypted-write experiments.
+
+The history waits for the committed claim to disappear before dropping the
+restored socket. The original credential fails on a fresh socket with the
+issuing certificate. The complete v3 cell receives a different credential,
+refuses it from the alternate certificate, and restores the original player
+with the issuing certificate. Other cells recover through a fresh join,
+then disconnect and restore that new player with its new credential. The
+alternate certificate cannot spend that credential either. Every recovery
+checks the room route, exactly two database members, removal of any replaced
+identity, and gameplay delivery from the restored identity to the incumbent.
+Socket handlers drain and both listener tasks are joined after success,
+assertion failure, or the outer history deadline. Temporarily removing the
+certificate identity carry during connection reassignment makes the complete
+v3 cell fail at recovery with the rotated credential. The production carry
+is restored in the final tree.
+
+This scope verifies existing behavior. It does not verify HTTP/2 reconnect,
+TLS shutdown choreography, encrypted-record cuts, or every client recovery
+implementation. No production defect was found here. The wider audit and
+campaign #826 remain open. Rust, .NET, and Godot clients are unaffected:
+there are no server behavior, protocol, or client API changes. This internal
+verification change needs no changelog entry.
+
+```bash
+cargo nextest run --all-features --lib \
+  -E 'test(test_mtls_partial_reconnect) | test(partial_reconnect) | test(test_reconnected_partial_transport_write)'
 ```

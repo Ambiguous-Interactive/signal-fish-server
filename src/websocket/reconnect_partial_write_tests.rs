@@ -14,6 +14,9 @@ mod reconnect_partial_write {
     use tokio::sync::Notify;
     use tokio_tungstenite::WebSocketStream;
 
+    #[cfg(feature = "tls")]
+    include!("reconnect_tls_write_tests.rs");
+
     #[derive(Default)]
     struct WriteCut {
         remaining: AtomicUsize,
@@ -22,12 +25,12 @@ mod reconnect_partial_write {
         parked: Notify,
     }
 
-    struct CutStream {
-        socket: TcpStream,
+    struct CutStream<S = TcpStream> {
+        socket: S,
         cut: Arc<WriteCut>,
     }
 
-    impl AsyncRead for CutStream {
+    impl<S: AsyncRead + Unpin> AsyncRead for CutStream<S> {
         fn poll_read(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
@@ -37,7 +40,7 @@ mod reconnect_partial_write {
         }
     }
 
-    impl AsyncWrite for CutStream {
+    impl<S: AsyncWrite + Unpin> AsyncWrite for CutStream<S> {
         fn poll_write(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
@@ -48,7 +51,11 @@ mod reconnect_partial_write {
             }
             let remaining = self.cut.remaining.load(Ordering::Acquire);
             if remaining == 0 {
-                self.cut.parked.notify_one();
+                match Pin::new(&mut self.socket).poll_flush(cx) {
+                    Poll::Ready(Ok(())) => self.cut.parked.notify_one(),
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Pending => {}
+                }
                 return Poll::Pending;
             }
             self.cut.offered.fetch_max(bytes.len(), Ordering::AcqRel);
@@ -109,7 +116,9 @@ mod reconnect_partial_write {
         .expect("send application request");
     }
 
-    async fn receive(socket: &mut WebSocketStream<TcpStream>) -> ServerMessage {
+    async fn receive<S: AsyncRead + AsyncWrite + Unpin>(
+        socket: &mut WebSocketStream<S>,
+    ) -> ServerMessage {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let frame = tokio::time::timeout_at(deadline, socket.next())
