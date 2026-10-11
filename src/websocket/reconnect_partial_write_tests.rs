@@ -3,6 +3,8 @@
 #[cfg(signal_fish_repository_tests)]
 mod reconnect_partial_write {
     use super::*;
+    use base64::Engine as _;
+    use ed25519_dalek::{Signer, SigningKey};
     use std::future::IntoFuture;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -133,12 +135,62 @@ mod reconnect_partial_write {
             .0
     }
 
+    fn authentication_request(signing: &SigningKey, app_id: &str) -> ClientMessage {
+        let payload = serde_json::json!({
+            "app_id": app_id,
+            "exp": chrono::Utc::now().timestamp() + 300,
+            "nonce": "partial-write-control",
+        });
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).unwrap());
+        let signed = format!("sfct_v1.{encoded}");
+        let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(signing.sign(signed.as_bytes()).to_bytes());
+        ClientMessage::Authenticate {
+            app_id: app_id.into(),
+            connect_token: Some(format!("{signed}.{signature}")),
+            sdk_version: None,
+            platform: None,
+            game_data_format: None,
+            protocol_version: None,
+            supported_transports: None,
+            supported_topologies: None,
+            requested_capabilities: None,
+        }
+    }
+
+    async fn authenticate(
+        socket: &mut WebSocketStream<TcpStream>,
+        signing: &SigningKey,
+        app_id: &str,
+    ) {
+        send(socket, &authentication_request(signing, app_id)).await;
+        assert!(matches!(
+            receive(socket).await,
+            ServerMessage::Authenticated { .. }
+        ));
+        assert!(matches!(
+            receive(socket).await,
+            ServerMessage::ProtocolInfo(_)
+        ));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_authenticated_partial_reconnect_preserves_tenant_and_recovery() {
+        run_partial_reconnect_history(true).await;
+    }
+
     /// The writer accepts a strict frame prefix and then returns Pending.
     /// Unlike the full-frame relay control, the production write is unfinished
     /// when the peer drops. Only the v3 positive cell observes a rotated token.
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
     async fn test_reconnected_partial_transport_write_requires_fresh_join() {
+        run_partial_reconnect_history(false).await;
+    }
+
+    async fn run_partial_reconnect_history(authenticated: bool) {
         for (path, batching, prefix) in ["ws", "v3/ws"].into_iter().flat_map(|path| {
             [false, true].into_iter().flat_map(move |batching| {
                 [None, Some(1_usize), Some(32)].map(|prefix| (path, batching, prefix))
@@ -146,7 +198,50 @@ mod reconnect_partial_write {
         }) {
             let mut config = ServerConfig::default();
             config.websocket_config.enable_batching = batching;
-            let server = test_server_with_config(config).await;
+            config.app_id_allowlist_enabled = authenticated;
+            let signing = SigningKey::from_bytes(&[42; 32]);
+            let apps = if authenticated {
+                ["owner-app", "other-app"]
+                    .map(|app_id| crate::config::AppRegistrationEntry {
+                        app_id: app_id.into(),
+                        app_name: app_id.into(),
+                        max_rooms: None,
+                        max_players_per_room: None,
+                        rate_limit_per_minute: None,
+                        max_relay_bytes: None,
+                        require_connect_token: Some(true),
+                    })
+                    .to_vec()
+            } else {
+                Vec::new()
+            };
+            let server = EnhancedGameServer::new(
+                config,
+                crate::config::ProtocolConfig::default(),
+                crate::config::RelayTypeConfig::default(),
+                crate::config::SessionConfig::default(),
+                crate::config::TurnConfig::default(),
+                DatabaseConfig::InMemory,
+                crate::config::MetricsConfig::default(),
+                crate::config::CoordinationConfig::default(),
+                crate::config::TransportSecurityConfig::default(),
+                apps,
+            )
+            .await
+            .expect("construct partial-write server");
+            if authenticated {
+                server
+                    .install_connect_token_key(&crate::config::SecurityConfig {
+                        connect_token: Some(crate::config::ConnectTokenConfig {
+                            public_key: base64::engine::general_purpose::STANDARD
+                                .encode(signing.verifying_key()),
+                            public_key_path: None,
+                            required: true,
+                        }),
+                        ..crate::config::SecurityConfig::default()
+                    })
+                    .expect("install verification key");
+            }
             let normal_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = normal_listener.local_addr().unwrap();
             let router =
@@ -186,12 +281,43 @@ mod reconnect_partial_write {
                     password: None,
                     join_only: None,
                 };
+                if authenticated {
+                    // A pre-auth application request is terminal on this socket.
+                    let mut unauthenticated = connect(address).await;
+                    send(&mut unauthenticated, &join(None, "unauthenticated")).await;
+                    assert!(matches!(
+                        receive(&mut unauthenticated).await,
+                        ServerMessage::Error {
+                            error_code: Some(ErrorCode::MissingAppId),
+                            ..
+                        }
+                    ));
+                    drop(unauthenticated);
+                }
                 let mut incumbent = connect(address).await;
+                if authenticated {
+                    let rogue = SigningKey::from_bytes(&[43; 32]);
+                    send(&mut incumbent, &authentication_request(&rogue, "owner-app")).await;
+                    assert!(
+                        matches!(
+                            receive(&mut incumbent).await,
+                            ServerMessage::AuthenticationError {
+                                error_code: ErrorCode::ConnectTokenInvalid,
+                                ..
+                            }
+                        ),
+                        "the installed verification key must reject another signer"
+                    );
+                    authenticate(&mut incumbent, &signing, "owner-app").await;
+                }
                 send(&mut incumbent, &join(None, "incumbent")).await;
                 let ServerMessage::RoomJoined(room) = receive(&mut incumbent).await else {
                     panic!("incumbent joins");
                 };
                 let mut original = connect(address).await;
+                if authenticated {
+                    authenticate(&mut original, &signing, "owner-app").await;
+                }
                 send(
                     &mut original,
                     &join(Some(room.room_code.clone()), "recovering"),
@@ -202,6 +328,8 @@ mod reconnect_partial_write {
                 };
                 let player_id = joined.player_id;
                 let token = joined.reconnection_token.unwrap();
+                let owner_app = server.client_app_id(&player_id);
+                assert_eq!(owner_app.is_some(), authenticated);
                 let manager = server.reconnection_manager().unwrap();
                 drop(original);
                 while !manager.has_pending_reconnection(&player_id).await
@@ -209,16 +337,38 @@ mod reconnect_partial_write {
                 {
                     tokio::task::yield_now().await;
                 }
-                let mut recovering = connect_path(cut_address, path).await;
-                if let Some(prefix) = prefix {
-                    cut.remaining.store(prefix, Ordering::Release);
-                    cut.armed.store(true, Ordering::Release);
-                }
                 let reconnect = |auth_token| ClientMessage::Reconnect {
                     player_id,
                     room_id: room.room_id,
                     auth_token,
                 };
+                if authenticated {
+                    let mut intruder = connect(address).await;
+                    authenticate(&mut intruder, &signing, "other-app").await;
+                    send(&mut intruder, &reconnect(token.clone())).await;
+                    assert!(
+                        matches!(
+                            receive(&mut intruder).await,
+                            ServerMessage::ReconnectionFailed {
+                                error_code: ErrorCode::RoomNotFound,
+                                ..
+                            }
+                        ),
+                        "another signed application must not restore this player"
+                    );
+                    assert_eq!(server.get_client_room(&player_id).await, None);
+                    assert!(manager.has_pending_reconnection(&player_id).await);
+                    drop(intruder);
+                }
+                let mut recovering = connect_path(cut_address, path).await;
+                if authenticated {
+                    // Consume both handshake responses before arming the cut.
+                    authenticate(&mut recovering, &signing, "owner-app").await;
+                }
+                if let Some(prefix) = prefix {
+                    cut.remaining.store(prefix, Ordering::Release);
+                    cut.armed.store(true, Ordering::Release);
+                }
                 send(&mut recovering, &reconnect(token.clone())).await;
                 let rotated = if let Some(prefix) = prefix {
                     let mut bytes = vec![0; prefix];
@@ -272,6 +422,7 @@ mod reconnect_partial_write {
                         Some(rotated)
                     }
                 };
+                assert_eq!(server.client_app_id(&player_id), owner_app);
                 drop(recovering);
                 while !manager.has_pending_reconnection(&player_id).await
                     || server.get_client_room(&player_id).await.is_some()
@@ -284,6 +435,9 @@ mod reconnect_partial_write {
                     "the closed socket loses its routing assignment"
                 );
                 let mut retry = connect(address).await;
+                if authenticated {
+                    authenticate(&mut retry, &signing, "owner-app").await;
+                }
                 send(&mut retry, &reconnect(token)).await;
                 assert!(
                     matches!(
@@ -301,6 +455,7 @@ mod reconnect_partial_write {
                         matches!(receive(&mut retry).await, ServerMessage::Reconnected(payload)
                         if payload.player_id == player_id)
                     );
+                    assert_eq!(server.client_app_id(&player_id), owner_app);
                 } else {
                     send(
                         &mut retry,
@@ -313,6 +468,7 @@ mod reconnect_partial_write {
                     assert_eq!(fresh.room_id, room.room_id);
                     assert!(fresh.reconnection_token.is_some());
                     assert_ne!(fresh.player_id, player_id);
+                    assert_eq!(server.client_app_id(&fresh.player_id), owner_app);
                     assert_eq!(
                         server.get_client_room(&fresh.player_id).await,
                         Some(room.room_id)
