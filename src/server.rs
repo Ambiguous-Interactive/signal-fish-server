@@ -87,6 +87,52 @@ mod constructor_validation_tests {
     async fn constructor_rejects_invalid_runtime_inputs_before_initialization() {
         let cases = [
             InvalidConstructorCase {
+                name: "generated code exceeds inbound frame",
+                mutate: |inputs| inputs.protocol.room_code_length = 65_537,
+                expected: "protocol.room_code_length",
+            },
+            InvalidConstructorCase {
+                name: "generated code exceeds exact inbound code budget",
+                mutate: |inputs| inputs.protocol.room_code_length = 65_460,
+                expected: "protocol.room_code_length",
+            },
+            InvalidConstructorCase {
+                name: "generated code exceeds actual outbound metadata budget",
+                mutate: |inputs| {
+                    inputs.server.max_message_size = 500;
+                    inputs.server.max_outbound_message_size = 756;
+                    inputs.server.max_signal_bytes = 1;
+                    inputs.server.max_connection_info_bytes = 1;
+                    inputs.protocol.max_players_limit = 2;
+                    inputs.server.default_max_players = 2;
+                    inputs.protocol.room_code_length = 338;
+                },
+                expected: "security.max_outbound_message_size",
+            },
+            InvalidConstructorCase {
+                name: "generated code consumes inbound envelope",
+                mutate: |inputs| inputs.protocol.room_code_length = 65_536,
+                expected: "protocol.room_code_length",
+            },
+            InvalidConstructorCase {
+                name: "generated code exceeds outbound envelope budget",
+                mutate: |inputs| {
+                    inputs.server.max_message_size = 500;
+                    inputs.server.max_outbound_message_size = 756;
+                    inputs.server.max_signal_bytes = 1;
+                    inputs.server.max_connection_info_bytes = 1;
+                    inputs.protocol.max_players_limit = 2;
+                    inputs.server.default_max_players = 2;
+                    inputs.protocol.room_code_length = 400;
+                },
+                expected: "security.max_outbound_message_size",
+            },
+            InvalidConstructorCase {
+                name: "impossible generated code allocation",
+                mutate: |inputs| inputs.protocol.room_code_length = usize::MAX,
+                expected: "protocol.room_code_length",
+            },
+            InvalidConstructorCase {
                 name: "oversized event buffer",
                 mutate: |inputs| {
                     inputs.server.event_buffer_size =

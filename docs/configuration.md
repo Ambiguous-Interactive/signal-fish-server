@@ -135,7 +135,7 @@ Complete reference of all configuration options with environment variable overri
 | `SIGNAL_FISH__RATE_LIMIT__MAX_RELAY_BYTES` | `rate_limit.max_relay_bytes` | `268435456` | Per-sender game-data relay byte budget per window (sender-controlled payload bytes; must be > 0) |
 | `SIGNAL_FISH__RATE_LIMIT__MAX_ROOM_RELAY_BYTES` | `rate_limit.max_room_relay_bytes` | `1073741824` | Per-room aggregate game-data relay byte ceiling per window (sender-controlled payload bytes; must be > 0) |
 | `SIGNAL_FISH__PROTOCOL__MAX_GAME_NAME_LENGTH` | `protocol.max_game_name_length` | `64` | Max bytes (UTF-8) in a game name (must be > 0) |
-| `SIGNAL_FISH__PROTOCOL__ROOM_CODE_LENGTH` | `protocol.room_code_length` | `6` | Nonzero length of generated room codes |
+| `SIGNAL_FISH__PROTOCOL__ROOM_CODE_LENGTH` | `protocol.room_code_length` | `6` | Nonzero generated-code length; code and minimum room envelopes must fit both frame caps |
 | `SIGNAL_FISH__PROTOCOL__MAX_PLAYER_NAME_LENGTH` | `protocol.max_player_name_length` | `32` | Max bytes (UTF-8) in a player name (must be > 0) |
 | `SIGNAL_FISH__PROTOCOL__MAX_PLAYERS_LIMIT` | `protocol.max_players_limit` | `100` | Hard ceiling on players per room (must be > 0) |
 | `SIGNAL_FISH__PROTOCOL__ENABLE_MESSAGE_PACK_GAME_DATA` | `protocol.enable_message_pack_game_data` | `true` | Enable MessagePack game-data frames |
@@ -337,7 +337,21 @@ window.
 
 ```
 
-`room_code_length` must be greater than zero. When
+`room_code_length` must be greater than zero. The code plus the minimum
+JSON join request must fit `security.max_message_size`. The code plus the
+reserved JSON `RoomJoined` envelope must fit `security.max_outbound_message_size`.
+The request needs at least 77 bytes beyond the ASCII code for two one-byte
+names and required fields. The reply bound includes one player, required fields, and maximum widths of
+mandatory timestamps, counters, capacity, booleans, and lobby state.
+Longer names, optional request fields, additional players, credentials,
+and ICE entries need additional space. These startup bounds reject impossible
+combinations; the runtime frame limits still apply to each complete message.
+
+**Migration:** Startup and direct library construction now reject code lengths
+that consume required envelope space. Shorten `protocol.room_code_length` or
+increase the named frame cap. Keep additional space for your actual room
+contents and client request fields. The default six-character codes are
+unchanged. When
 `server.room_code_prefix` is configured, surrounding whitespace is trimmed,
 the prefix must contain only ASCII letters or digits, and it must be shorter
 than the total code length so at least one random character remains. Startup

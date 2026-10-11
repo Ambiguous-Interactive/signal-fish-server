@@ -30,7 +30,9 @@ pub struct ProtocolConfig {
     /// validation rejects it).
     #[serde(default = "default_max_game_name_length")]
     pub max_game_name_length: usize,
-    /// Length of room codes
+    /// Length in ASCII bytes of generated room codes. Startup and direct server
+    /// construction also require room request and reply envelope space within
+    /// the configured inbound and outbound frame caps.
     #[serde(default = "default_room_code_length")]
     pub room_code_length: usize,
     /// Maximum length in bytes for player names. Must be `> 0`: a zero cap

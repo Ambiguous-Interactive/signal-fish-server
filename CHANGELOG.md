@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject generated room-code lengths that cannot fit room request or reply frames.
 - **Breaking:** Reject invalid token-binding subprotocol names at startup;
   use a valid ASCII HTTP token on the server and clients (#895).
 - Name missing peer and channel exchanges in reference-client failure messages (#889).

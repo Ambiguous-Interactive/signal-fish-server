@@ -2085,3 +2085,122 @@ async fn test_idle_timeout_zero_disables_idle_enforcement() {
     );
     running_server.shutdown().await;
 }
+
+#[tokio::test]
+async fn generated_room_code_fits_create_and_join_frames() {
+    let protocol = signal_fish_server::config::ProtocolConfig {
+        room_code_length: 65_536 - 77,
+        ..test_protocol_config()
+    };
+    let server_config = ServerConfig {
+        room_code_prefix: Some("eu".into()),
+        ..test_server_config()
+    };
+    let running = start_test_server_with_config_and_protocol(server_config, protocol).await;
+    let (mut creator, mut creator_rx) = connect_client(running.addr(), "/v2/ws").await;
+    let (mut joiner, mut joiner_rx) = connect_client(running.addr(), "/v2/ws").await;
+    let created = send_and_receive(
+        &mut creator,
+        &mut creator_rx,
+        ClientMessage::JoinRoom {
+            game_name: "g".into(),
+            room_code: None,
+            player_name: "a".into(),
+            max_players: Some(2),
+            supports_authority: Some(true),
+            relay_transport: None,
+            password: None,
+            join_only: None,
+        },
+    )
+    .await
+    .expect("create generated room");
+    let ServerMessage::RoomJoined(payload) = created else {
+        panic!("expected generated room: {created:?}");
+    };
+    assert!(payload.room_code.starts_with("EU"));
+    let request = serde_json::json!({"type":"JoinRoom","data":{
+        "game_name":"g","room_code":payload.room_code,"player_name":"b"
+    }})
+    .to_string();
+    assert_eq!(
+        request.len(),
+        65_536,
+        "explicit join uses the exact inbound frame cap"
+    );
+    joiner
+        .send(Message::Text(request.into()))
+        .await
+        .expect("send explicit join");
+    let joined = receive_server_message(&mut joiner_rx).await;
+    assert!(
+        matches!(joined, ServerMessage::RoomJoined(_)),
+        "join must succeed"
+    );
+    creator.close().await.expect("close creator");
+    joiner.close().await.expect("close joiner");
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn generated_room_code_fits_tight_outbound_frames_in_both_versions() {
+    for (version, path) in [(2, "/ws"), (3, "/v3/ws")] {
+        let protocol = signal_fish_server::config::ProtocolConfig {
+            room_code_length: 217,
+            max_players_limit: 2,
+            ..test_protocol_config()
+        };
+        let config = ServerConfig {
+            default_max_players: 2,
+            max_message_size: 500,
+            max_outbound_message_size: 756,
+            max_signal_bytes: 1,
+            max_connection_info_bytes: 1,
+            ..test_server_config()
+        };
+        let server = create_test_server_with_config(config, protocol).await;
+        let router =
+            signal_fish_server::websocket::create_standalone_router("http://localhost:3000")
+                .with_state(server.clone());
+        let running = RunningTestServer::spawn(server, router).await;
+        let (mut sender, mut receiver) = connect_client(running.addr(), path).await;
+        let created = send_and_receive(
+            &mut sender,
+            &mut receiver,
+            ClientMessage::JoinRoom {
+                game_name: "g".into(),
+                room_code: None,
+                player_name: "p".into(),
+                max_players: Some(2),
+                supports_authority: Some(false),
+                relay_transport: None,
+                password: None,
+                join_only: None,
+            },
+        )
+        .await
+        .expect("generated creation fits tight outbound cap");
+        assert!(serde_json::to_vec(&created).unwrap().len() <= 756);
+        let ServerMessage::RoomJoined(payload) = created else {
+            panic!("expected RoomJoined: {created:?}");
+        };
+        assert_eq!(payload.room_code.len(), 217);
+        assert_eq!(payload.current_players.len(), 1);
+        assert!(!payload.supports_authority);
+        assert!(!payload.is_authority);
+        assert!(!payload.current_players[0].is_authority);
+        let player = &payload.current_players[0];
+        if version == 2 {
+            assert!(player.connected_at.is_some());
+            assert!(player.epoch.is_none());
+            assert!(payload.reconnection_token.is_none());
+        } else {
+            assert!(player.connected_at.is_none());
+            assert_eq!(player.epoch, Some(1));
+            assert_eq!(player.seq, Some(0));
+            assert_eq!(payload.reconnection_token.as_ref().unwrap().len(), 36);
+        }
+        sender.close().await.expect("close generated creator");
+        running.shutdown().await;
+    }
+}

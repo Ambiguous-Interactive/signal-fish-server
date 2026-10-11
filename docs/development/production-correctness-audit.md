@@ -1887,3 +1887,57 @@ and a missed-tick overflow candidate
 ([#897](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/897)).
 They require their own runtime evidence and repairs. A18 and the broader
 A01–A22 audit remain incomplete.
+
+### F35 — Generated room codes exceed signaling frames
+
+Baseline: `52807400`. A18/A09/A20. Finding:
+[#896](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/896).
+
+Shared startup and direct constructor validation accepted a generated-code
+length of 65,537 with the default 65,536-byte inbound frame cap. A real TCP
+server created that room and returned its code. The shortest explicit JSON
+join used 65,614 bytes. The production receive path rejected it before room
+admission. Both configuration rejection tests failed on the baseline.
+
+The shared gate now reserves the required JSON request and one-player reply
+envelopes before accepting code length. The request reserves 77 bytes for
+required fields and one-byte game and player names. The reply reserves the
+version-specific player metadata and configured relay label, including the
+maximum widths of mandatory timestamp, epoch, sequence, capacity, boolean, and lobby-state
+values. V2 carries its
+join timestamp. V3 carries epoch, sequence, and a UUID reconnect credential
+when reconnection is enabled. Validation checks each enabled version and
+configured label. Arithmetic does not overflow or allocate the configured
+code length, including `usize::MAX`.
+
+The exact inbound boundary permits a 65,459-byte prefixed code and a
+65,536-byte join request. A real create/join history receives both replies.
+A second real-socket control uses tight outbound limits on both protocol
+versions and checks mandatory player metadata. Configuration controls cover
+exact bounds, one byte over, envelopes larger than their caps, huge lengths,
+and both admission paths.
+
+Creation and regeneration share the server's validated code generator.
+Explicit joins use the same configured length validator. The database's
+standalone default generator uses six characters. Public low-level generator
+helpers remain caller-owned APIs without frame-cap inputs; callers must bound
+untrusted requested lengths before invoking them. The server never passes an
+unvalidated configuration length to these helpers.
+
+**Migration and client assessment:** Shorten rejected code lengths or increase
+the named frame cap. Keep room for actual names and optional fields. Valid
+custom lengths, prefixes, and default codes retain their wire shape. Rust,
+.NET, and Godot clients need no implementation changes: this repair changes
+server configuration admission, not client messages or negotiation.
+
+These bounds reserve one-player mandatory envelopes, not arbitrary room
+snapshots. Additional members, names, passwords, operation correlation,
+connection metadata, spectators, and ICE entries still consume frame space.
+The existing inbound and outbound guards remain authoritative for complete
+messages. A01–A22 and campaign #826 remain incomplete.
+
+```bash
+cargo nextest run --lib -E 'test(room_code_) | test(loaded_config_rejects_generated_code)'
+cargo nextest run --lib -E 'test(constructor_rejects_invalid_runtime_inputs_before_initialization)'
+cargo nextest run --test e2e_tests -E 'test(generated_room_code_fits)'
+```
