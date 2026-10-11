@@ -46,9 +46,9 @@ fn run_with_diagnostics(diagnostics: &DiagnosticOutput, run: impl FnOnce()) {
             }
         }
     }));
-    if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+    if let Err(_panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
         diagnostics.finish();
-        std::panic::resume_unwind(panic);
+        std::process::exit(101);
     }
 }
 
@@ -200,7 +200,11 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             };
             drop(held_stderr);
-            assert!(!status.success(), "{mode}: panic must fail the process");
+            assert_eq!(
+                status.code(),
+                Some(101),
+                "{mode}: panic must fail the process"
+            );
             if let Some(reader) = reader {
                 let bytes = String::from_utf8(reader.join().unwrap()).unwrap();
                 assert!(bytes.contains("native terminal panic"), "{bytes}");

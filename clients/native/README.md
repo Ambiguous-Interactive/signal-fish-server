@@ -64,7 +64,7 @@ The binary discards new diagnostics when the queue fills or stderr fails.
 Cached tracing span fields retain at most 4 KiB of text, including updates.
 CLI errors and panic diagnostics use the same bounded path. The owner waits
 at most one second for diagnostic output after runtime shutdown or before
-propagating a panic from main. Enabled `RUST_BACKTRACE` output uses the same
+a main-panic exit with code 101. Enabled `RUST_BACKTRACE` output uses the same
 record limits.
 
 **Migration:** Drain stderr continuously to retain diagnostics. Use stdout
@@ -251,6 +251,7 @@ until the pipe drains, closes, or the process exits.
 | `2` | Protocol error (app-ID handshake/join rejection, malformed frame), or a local pre-flight failure such as an `--ip-family` the host cannot serve. Exit 2 is **also** clap's default exit code for CLI-usage errors (unknown/missing flags); on that path the usage message goes to stderr and NO `exiting` event is emitted (the event stream never starts) |
 | `3` | Transport failure (connect failed, socket died mid-session) |
 | `4` | `--max-runtime-secs` watchdog fired (hard abort) |
+| `101` | Unexpected panic in main; stderr flush is limited to one second, and `exiting` may be absent |
 
 ## Signal payload convention (matchbox `PeerSignal`)
 

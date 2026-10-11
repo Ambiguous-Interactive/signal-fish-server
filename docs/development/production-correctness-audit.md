@@ -1591,7 +1591,7 @@ Cached span fields have a separate 4 KiB text limit across repeated updates.
 The tracing writer is a sink, with internal-error logging disabled: formatter
 or write errors cannot fall back to synchronous `eprintln!`. The binary routes
 CLI errors and panic hooks to the same worker. An outer unwind handler gives
-main-panic diagnostics one second to flush before resuming the panic. Enabled
+main-panic diagnostics one second to flush before exit 101. Enabled
 `RUST_BACKTRACE` output remains bounded, independent of `RUST_LIB_BACKTRACE`.
 WebRTC and RTC production log
 sources use the installed tracing/log subscriber; their direct print examples
