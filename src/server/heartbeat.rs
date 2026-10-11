@@ -183,7 +183,7 @@ mod tests {
         let server = create_test_server_with_config(ServerConfig {
             heartbeat_throttle: StdDuration::ZERO,
             max_connections_per_ip: 32,
-            max_message_size: 4,
+            max_message_size: 128,
             max_signal_bytes: 4,
             max_connection_info_bytes: 4,
             ..ServerConfig::default()
@@ -247,7 +247,7 @@ mod tests {
             .handle_game_data_binary(
                 &player_id,
                 GameDataEncoding::MessagePack,
-                Bytes::from_static(b"12345"),
+                Bytes::from(vec![b'1'; 129]),
             )
             .await;
 
