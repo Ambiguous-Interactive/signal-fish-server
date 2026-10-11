@@ -31,12 +31,25 @@ import {
   type RunConfig,
 } from '../shared/types.js';
 import { parseArgs, UsageError, USAGE, type CliOptions } from './args.js';
-import { writeAcknowledgedEventLine } from './output.js';
+import {
+  DiagnosticOutput,
+  forwardPageEvent,
+  stopOnOutputFailure,
+  writeAcknowledgedEventLine,
+} from './output.js';
+import { EventOutput } from '../shared/event-output.js';
 
 const startedAtMs = Date.now();
 
+const diagnosticOutput = new DiagnosticOutput(process.stderr, () => {
+  void exitWith(EXIT_CONNECTION_ERROR);
+});
+process.stderr.on('error', () => {
+  void exitWith(EXIT_CONNECTION_ERROR);
+});
+
 function logError(message: string): void {
-  process.stderr.write(`[signal-fish-reference-browser] ${message}\n`);
+  void diagnosticOutput.write(message).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -44,9 +57,11 @@ function logError(message: string): void {
 // ---------------------------------------------------------------------------
 
 let stdoutClosed = false;
-process.stdout.on('error', () => {
+process.stdout.on('error', (error) => {
   stdoutClosed = true;
-  void exitWith(EXIT_CONNECTION_ERROR);
+  stopOnOutputFailure(eventOutput, error, () => {
+    void exitWith(EXIT_CONNECTION_ERROR);
+  });
 });
 
 async function writeEventLine(line: string): Promise<void> {
@@ -55,16 +70,25 @@ async function writeEventLine(line: string): Promise<void> {
     await writeAcknowledgedEventLine(process.stdout, line);
   } catch (error) {
     stdoutClosed = true;
-    logError(
-      `stdout write failed (consumer closed?); suppressing all further events: ${String(error)}`,
-    );
-    void exitWith(EXIT_CONNECTION_ERROR);
-    throw new Error('stdout event delivery failed');
+    throw new Error(`stdout event delivery failed: ${String(error).slice(0, 512)}`);
   }
 }
 
+const eventOutput = new EventOutput(
+  writeEventLine,
+  (error) => {
+    stopOnOutputFailure(eventOutput, error, () => {
+      logError('stdout event delivery failed; the client stops');
+      void exitWith(EXIT_CONNECTION_ERROR);
+    });
+  },
+  undefined,
+  undefined,
+  2, // One terminal error and one CLI exiting line.
+);
+
 function emitEvent(event: Record<string, unknown>): void {
-  void writeEventLine(JSON.stringify(event)).catch(() => {});
+  void eventOutput.emit(event).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -111,9 +135,25 @@ async function exitWith(code: number): Promise<void> {
     return;
   }
   shuttingDown = true;
-  emitEvent({ event: 'exiting', code });
-  await teardownBrowser();
-  process.exit(stdoutClosed && code === 0 ? EXIT_CONNECTION_ERROR : code);
+  const finalEvent = eventOutput.terminal({ event: 'exiting', code });
+  let deliveryTimer: ReturnType<typeof setTimeout> | undefined;
+  const delivery = Promise.race([
+    Promise.allSettled([eventOutput.flush(), finalEvent]).then((results) =>
+      results.every((result) => result.status === 'fulfilled'),
+    ),
+    new Promise<never>((_resolve, reject) => {
+      deliveryTimer = setTimeout(
+        () => reject(new Error('stdout exit delivery timed out')),
+        1000,
+      );
+    }),
+  ]).then(
+    (delivered) => delivered,
+    () => false,
+  );
+  const [delivered] = await Promise.all([delivery, teardownBrowser()]);
+  clearTimeout(deliveryTimer);
+  process.exit((stdoutClosed || !delivered) && code === 0 ? EXIT_CONNECTION_ERROR : code);
 }
 
 /**
@@ -235,9 +275,9 @@ async function setupPage(options: CliOptions): Promise<Page> {
     logError(`[page error] ${error.message}`);
   });
   // The stdout bridge must exist before the page bundle (and any event) does.
-  await page.exposeFunction('__sf_emit', (line: unknown) => {
-    if (typeof line !== 'string') throw new Error('stdout event must be a string');
-    return writeEventLine(line);
+  await page.exposeFunction('__sf_emit', (line: unknown, terminal: unknown) => {
+    if (shuttingDown) throw new Error('the client is stopping');
+    return forwardPageEvent(eventOutput, line, terminal);
   });
   await page.exposeFunction('__sf_success_released', () => {
     const releaseFile = options.successReleaseFile;

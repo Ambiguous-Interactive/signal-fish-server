@@ -1,3 +1,5 @@
+import { EventOutput } from '../shared/event-output.js';
+
 // JSONL stdout event reporting (the client's primary output contract).
 //
 // The page never touches stdout itself: every event line is handed to the
@@ -34,28 +36,25 @@ export function classifySignal(signal: unknown): SignalKind {
 declare global {
   interface Window {
     /** stdout bridge exposed by the CLI before the page bundle is injected. */
-    __sf_emit?: (line: string) => void | Promise<void>;
+    __sf_emit?: (line: string, terminal?: boolean) => void | Promise<void>;
     /** CLI-side release-file probe used only by deterministic test harnesses. */
     __sf_success_released?: () => Promise<boolean>;
   }
 }
 
-/**
- * Emit one event object as a JSONL stdout line. `event` must carry the
- * snake_case `event` tag as its first property (construction sites keep that
- * ordering so the emitted JSON matches the native client's field order).
- * Ordinary teardown diagnostics absorb bridge errors. Required application
- * delivery propagates errors and waits until stdout consumes the line.
- */
+const output = new EventOutput((line) => {
+  const bridge = window.__sf_emit;
+  if (bridge === undefined) throw new Error('stdout bridge is unavailable');
+  return bridge(line);
+});
+
+/** Emit one bounded event and propagate required delivery failures. */
 export async function emit(
   event: Record<string, unknown>,
   requireDelivery = false,
 ): Promise<void> {
   try {
-    const bridge = window.__sf_emit;
-    if (bridge === undefined && requireDelivery)
-      throw new Error('stdout bridge is unavailable');
-    await bridge?.(JSON.stringify(event));
+    await output.emit(event);
   } catch (error) {
     console.error(`failed to emit stdout event: ${String(error)}`);
     if (requireDelivery) throw new Error('stdout event delivery failed');

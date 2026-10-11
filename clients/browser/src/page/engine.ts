@@ -151,7 +151,9 @@ export class Engine {
         this.registerChannelHandlers(peer, link, channel);
       }
       const offer = await pc.createOffer();
+      this.assertCurrentLink(peer, link);
       await pc.setLocalDescription(offer);
+      this.assertCurrentLink(peer, link);
       if (typeof offer.sdp !== 'string') {
         throw new Error(`createOffer for ${peer} produced no SDP`);
       }
@@ -172,10 +174,14 @@ export class Engine {
   async handleOffer(peer: string, sdp: string): Promise<string> {
     const link = this.linkOf(peer, 'offer');
     await link.pc.setRemoteDescription({ type: 'offer', sdp });
+    this.assertCurrentLink(peer, link);
     link.remoteDescriptionSet = true;
-    await this.flushPendingCandidates(link);
+    await this.flushPendingCandidates(peer, link);
+    this.assertCurrentLink(peer, link);
     const answer = await link.pc.createAnswer();
+    this.assertCurrentLink(peer, link);
     await link.pc.setLocalDescription(answer);
+    this.assertCurrentLink(peer, link);
     if (typeof answer.sdp !== 'string') {
       throw new Error(`createAnswer for ${peer} produced no SDP`);
     }
@@ -186,8 +192,10 @@ export class Engine {
   async handleAnswer(peer: string, sdp: string): Promise<void> {
     const link = this.linkOf(peer, 'answer');
     await link.pc.setRemoteDescription({ type: 'answer', sdp });
+    this.assertCurrentLink(peer, link);
     link.remoteDescriptionSet = true;
-    await this.flushPendingCandidates(link);
+    await this.flushPendingCandidates(peer, link);
+    this.assertCurrentLink(peer, link);
   }
 
   /**
@@ -295,9 +303,14 @@ export class Engine {
     return link;
   }
 
-  private async flushPendingCandidates(link: PeerLink): Promise<void> {
+  private assertCurrentLink(peer: string, link: PeerLink): void {
+    if (this.peers.get(peer) !== link) throw new Error('the peer link was retired');
+  }
+
+  private async flushPendingCandidates(peer: string, link: PeerLink): Promise<void> {
     const pending = link.pendingCandidates.splice(0);
     for (const candidate of pending) {
+      this.assertCurrentLink(peer, link);
       try {
         await link.pc.addIceCandidate(candidate);
       } catch {

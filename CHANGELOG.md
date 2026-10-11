@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Breaking:** Report failure and clean up the browser reference client when input or output backlogs fill;
+  drain stdout and stderr continuously and handle exit code 3 (#879).
 - **Breaking:** Bound reference-client incoming messages and fail overloaded P2P links;
   split payloads larger than 64 KiB and handle native receive-limit failures (#878).
 - Bound native reference-client channel announcements when a peer repeats required labels (#876).

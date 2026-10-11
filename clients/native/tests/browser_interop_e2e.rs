@@ -91,13 +91,13 @@ mod harness;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use futures_util::{FutureExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use harness::{
     events_named, player_id_of, scenario_window, single_event, spawn_browser_client, spawn_client,
     spawn_server, spawn_server_with_extra_env, str_field, ClientProcess, ClientSpec,
     CLIENT_EXIT_TIMEOUT, EVENT_TIMEOUT,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -107,7 +107,7 @@ use base64::Engine as _;
 static SCENARIO_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Number of scenarios queueing behind [`SCENARIO_SERIAL`] (keep in sync with
 /// the `#[tokio::test]` functions in this file).
-const SCENARIO_COUNT: u64 = 12;
+const SCENARIO_COUNT: u64 = 13;
 /// Generous ceiling for ONE scenario in a fully degraded run: server spawn
 /// (up to 3 attempts x 15 s health deadline = 45 s) plus one client wave
 /// hard-bounded by `--max-runtime-secs 90`, with the rest absorbing Chromium
@@ -1628,6 +1628,130 @@ async fn browser_cli_mid_handshake_close_single_error_exit_3() {
         "the stub never completes the app-ID handshake; the close must precede `authenticated`"
     );
     stub.await.expect("stub server task");
+}
+
+/// #879: a real Chromium page must stop when stdout stalls its receive loop.
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_cli_unread_stdout_bounds_websocket_backlog() {
+    let _serial = acquire_serial().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the stub listener");
+    let addr = listener.local_addr().expect("stub listener address");
+    let (start, ready) = tokio::sync::oneshot::channel();
+    let stub = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept browser connection");
+        let mut ws = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("upgrade browser socket");
+        let authenticate = ws
+            .next()
+            .await
+            .expect("Authenticate frame")
+            .expect("read Authenticate");
+        assert_eq!(
+            serde_json::from_str::<Value>(authenticate.to_text().expect("text Authenticate"))
+                .expect("parse Authenticate")["type"],
+            "Authenticate"
+        );
+        for frame in [
+            json!({"type": "Authenticated", "data": {}}),
+            json!({"type": "ProtocolInfo", "data": {"protocol_version": 3}}),
+        ] {
+            ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                frame.to_string().into(),
+            ))
+            .await
+            .expect("send auth reply");
+        }
+        let join = ws
+            .next()
+            .await
+            .expect("JoinRoom frame")
+            .expect("read JoinRoom");
+        assert_eq!(
+            serde_json::from_str::<Value>(join.to_text().expect("text JoinRoom"))
+                .expect("parse JoinRoom")["type"],
+            "JoinRoom"
+        );
+        let me = "00000000-0000-0000-0000-000000000001";
+        let peer = "00000000-0000-0000-0000-000000000002";
+        let baseline = json!({"type": "RoomJoined", "data": {
+            "player_id": me, "room_id": me, "room_code": "TEST", "lobby_state": "lobby",
+            "current_players": [{"id": me, "epoch": 1, "seq": 0}, {"id": peer, "epoch": 1, "seq": 0}],
+            "ready_players": []
+        }});
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+            baseline.to_string().into(),
+        ))
+        .await
+        .expect("send baseline");
+        ready
+            .await
+            .expect("consumer stops reading after the baseline");
+        let payload = "a".repeat(64 * 1024);
+        let mut sent = 0_u64;
+        for seq in 1..=512_u64 {
+            let frame = json!({"type": "GameData", "data": {"from_player": peer, "epoch": 1, "seq": seq, "data": payload}});
+            if ws
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    frame.to_string().into(),
+                ))
+                .await
+                .is_err()
+            {
+                break;
+            }
+            sent += 1;
+        }
+        /* The stub stays open so only the client can end this history. */
+        while let Some(frame) = ws.next().await {
+            match frame {
+                Ok(tokio_tungstenite::tungstenite::Message::Close(_)) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        sent
+    });
+    let workdir = tempfile::tempdir().expect("client workdir");
+    let url = format!("ws://{addr}/v3/ws");
+    let mut client = spawn_browser_client(
+        &ClientSpec {
+            name: "unread-output",
+            server_url: &url,
+            game_name: "bounded-output",
+            join_code: None,
+            peers: 2,
+            exchange: false,
+            relay_payload: None,
+            extra_args: &[],
+        },
+        workdir.path(),
+    );
+    client.await_event("room_joined", EVENT_TIMEOUT).await;
+    start.send(()).expect("release the frame burst");
+    let code = client.wait_without_stdout(Duration::from_secs(15)).await;
+    assert_eq!(
+        code,
+        3,
+        "unread output must fail before the 90-second watchdog;\n{}",
+        client.diagnostics()
+    );
+    assert!(
+        client
+            .stderr_text()
+            .contains("WebSocket receive backlog limit exceeded"),
+        "the receive backlog must own the failure;\n{}",
+        client.diagnostics()
+    );
+    let sent = tokio::time::timeout(Duration::from_secs(5), stub)
+        .await
+        .expect("stub sees client closure")
+        .expect("stub task");
+    assert!(
+        sent > 256,
+        "the stub must actually offer more than the pending-frame capacity, sent {sent}"
+    );
 }
 
 #[derive(Clone, Debug)]

@@ -2,9 +2,13 @@ import { build } from 'esbuild';
 
 for (const entryPoint of [
   'src/shared/deadline.test.ts',
+  'src/shared/backlog.test.ts',
   'src/page/accountability.test.ts',
   'src/page/wire.test.ts',
+  'src/page/events.test.ts',
   'src/page/orchestrator.test.ts',
+  'src/page/ingress.test.ts',
+  'src/page/output-cancellation.test.ts',
   'src/cli/args.test.ts',
   'src/cli/output.test.ts',
 ]) {

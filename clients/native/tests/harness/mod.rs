@@ -778,6 +778,21 @@ impl ClientProcess {
         Some(event)
     }
 
+    /// Reap without reading stdout to exercise a stalled event consumer.
+    pub async fn wait_without_stdout(&mut self, timeout: Duration) -> i32 {
+        let mut child = self.child.take().expect("client child already reaped");
+        let status = tokio::time::timeout(timeout, child.wait())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "client did not stop with unread stdout;\n{}",
+                    self.diagnostics()
+                )
+            })
+            .expect("reap the client with unread stdout");
+        status.code().expect("client exits without a signal")
+    }
+
     /// Drain every remaining event to EOF, reap the child, and return its exit
     /// code. All reads and the reap share one deadline.
     pub async fn drain_to_exit(&mut self, timeout: Duration) -> i32 {
