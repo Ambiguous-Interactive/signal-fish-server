@@ -56,6 +56,27 @@ cargo run -- --server-url ws://127.0.0.1:3536/v3/ws --create-room --peers 2 --ex
 stdout is a machine interface (one JSON event per line, see the event contract below); all logging goes to stderr
 (`RUST_LOG`, default `info`).
 
+The binary writes diagnostics on one thread outside Tokio. It admits at most
+256 records, including formatting and the in-flight write. Each record retains
+at most 4 KiB, for at most 1 MiB of admitted record storage. Oversized records
+end with `[truncated]` at a UTF-8 boundary. Embedded line breaks are escaped.
+The binary discards new diagnostics when the queue fills or stderr fails.
+Cached tracing span fields retain at most 4 KiB of text, including updates.
+CLI errors and panic diagnostics use the same bounded path. The owner waits
+at most one second for diagnostic output after runtime shutdown or before
+a main-panic exit with code 101. Enabled `RUST_BACKTRACE` output uses the same
+record limits. The hook captures at most one unsymbolicated panic stack.
+The worker resolves symbols, so slow symbolication cannot extend the flush
+wait. The 1 MiB bound covers record text; it excludes the standard library's
+captured-stack and symbol-resolution allocations.
+
+**Migration:** Drain stderr continuously to retain diagnostics. Use stdout
+JSONL and process exit codes for protocol outcomes. Diagnostic loss does not
+change those outcomes. The library leaves subscriber and panic-hook setup to
+its caller. A blocked OS write can retain one worker until the pipe closes or
+the process exits. These limits do not bound OS buffers, WebRTC stack memory,
+the number of live tracing spans, or allocations inside external formatters.
+
 ## CLI reference
 
 Exactly one of `--create-room` / `--join-code` is required; everything else has a default.
@@ -233,6 +254,7 @@ until the pipe drains, closes, or the process exits.
 | `2` | Protocol error (app-ID handshake/join rejection, malformed frame), or a local pre-flight failure such as an `--ip-family` the host cannot serve. Exit 2 is **also** clap's default exit code for CLI-usage errors (unknown/missing flags); on that path the usage message goes to stderr and NO `exiting` event is emitted (the event stream never starts) |
 | `3` | Transport failure (connect failed, socket died mid-session) |
 | `4` | `--max-runtime-secs` watchdog fired (hard abort) |
+| `101` | Unexpected panic in main; stderr flush is limited to one second, and `exiting` may be absent |
 
 ## Signal payload convention (matchbox `PeerSignal`)
 

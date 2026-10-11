@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep the native reference-client watchdog and failure exits active when stderr blocks or closes (#883).
+  Preserve bounded panic diagnostics and backtraces on exit code 101, with symbol resolution outside the exit deadline.
 - **Breaking:** Stop the native reference client on stdout failure and keep its watchdog active when stdout blocks;
   drain stdout continuously and handle exit code 3 (#882).
 - **Breaking:** Report failure and clean up the browser reference client when input or output backlogs fill;
