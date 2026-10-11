@@ -31,6 +31,7 @@ struct RuntimeServerValidation<'a> {
     max_game_data_bytes: Option<GameDataBytesLimits>,
     max_connections_per_ip: usize,
     max_connections: usize,
+    enable_reconnection: bool,
     reconnection_window: Duration,
     event_buffer_size: usize,
     heartbeat_throttle: Duration,
@@ -60,6 +61,7 @@ impl<'a> RuntimeServerValidation<'a> {
             max_game_data_bytes: config.security.max_game_data_bytes.clone(),
             max_connections_per_ip: config.security.max_connections_per_ip,
             max_connections: config.security.max_connections,
+            enable_reconnection: config.server.enable_reconnection,
             reconnection_window: Duration::from_secs(config.server.reconnection_window),
             event_buffer_size: config.server.event_buffer_size,
             heartbeat_throttle: Duration::from_secs(config.server.heartbeat_throttle_secs),
@@ -89,6 +91,7 @@ impl<'a> RuntimeServerValidation<'a> {
             max_game_data_bytes: config.max_game_data_bytes.clone(),
             max_connections_per_ip: config.max_connections_per_ip,
             max_connections: config.max_connections,
+            enable_reconnection: config.enable_reconnection,
             reconnection_window: config.reconnection_window,
             event_buffer_size: config.event_buffer_size,
             heartbeat_throttle: config.heartbeat_throttle,
@@ -624,13 +627,133 @@ fn validate_runtime_inputs(
     validate_app_registrations(allowed_apps)?;
     validate_token_binding(transport, built_in_tls_active)?;
     protocol.validate_room_code_generation(room_code_prefix)?;
+    validate_relay_labels(relay_types)?;
+    validate_room_code_frame_limits(
+        protocol,
+        server.max_message_size,
+        server.max_outbound_message_size,
+        relay_types,
+        server.enable_reconnection,
+    )?;
     session.validate()?;
     turn.validate()?;
     validate_metrics_cache_policy(metrics)?;
-    // Relay labels are echoed verbatim into room/peer protocol metadata; the
-    // same log-safe bounds apply on both the loaded-config and constructor
-    // paths so an embedder cannot bypass them.
-    validate_relay_labels(relay_types)?;
+    Ok(())
+}
+
+/*
+    These are necessary wire bounds, not maximum snapshot sizes. Even the
+    shortest legal join needs two nonempty names. Every successful join
+    returns the fixed RoomJoined fields and at least the joining player.
+*/
+const MIN_JOIN_ROOM_ENVELOPE_BYTES: usize =
+    br#"{"type":"JoinRoom","data":{"game_name":"g","room_code":"","player_name":"p"}}"#.len();
+
+fn reserved_room_joined_envelope(
+    version: u16,
+    relay_type: &str,
+    enable_reconnection: bool,
+    max_players: u8,
+) -> crate::protocol::ServerMessage {
+    use crate::protocol::{
+        LobbyState, PlayerId, PlayerInfo, RoomId, RoomJoinedPayload, ServerMessage,
+    };
+    ServerMessage::RoomJoined(Box::new(RoomJoinedPayload {
+        room_id: RoomId::nil(),
+        room_code: String::new(),
+        player_id: PlayerId::nil(),
+        game_name: "g".to_string(),
+        /*
+           Reserve the widest mandatory scalar values. Authority-disabled rooms
+           carry three false values; configured capacity bounds its digit width.
+           Finalized has the widest serialized lobby-state name.
+        */
+        max_players,
+        supports_authority: false,
+        current_players: vec![PlayerInfo {
+            id: PlayerId::nil(),
+            name: "p".to_string(),
+            is_authority: false,
+            is_ready: false,
+            /*
+               V2 keeps the runtime join timestamp. Reserve its widest supported
+               UTC representation; v3 strips it from roster snapshots.
+            */
+            connected_at: (version < 3).then_some(chrono::DateTime::<chrono::Utc>::MAX_UTC),
+            connection_info: None,
+            /*
+               V3 always carries both counters. Their widths can grow across
+               room switches and prior relay traffic, so reserve their maxima.
+            */
+            epoch: (version >= 3).then_some(u32::MAX),
+            seq: (version >= 3).then_some(u64::MAX),
+            region_id: String::new(),
+        }],
+        is_authority: false,
+        lobby_state: LobbyState::Finalized,
+        ready_players: vec![],
+        relay_type: relay_type.to_string(),
+        current_spectators: vec![],
+        ice_servers: vec![],
+        /*
+           ReconnectionToken mints Uuid::new_v4().to_string(): every token has
+           the same canonical UUID width, with no JSON escaping expansion.
+        */
+        reconnection_token: (version >= 3 && enable_reconnection)
+            .then(|| uuid::Uuid::nil().to_string()),
+    }))
+}
+
+fn validate_room_code_frame_limits(
+    protocol: &super::ProtocolConfig,
+    inbound_cap: usize,
+    outbound_cap: usize,
+    relay_types: &RelayTypeConfig,
+    enable_reconnection: bool,
+) -> anyhow::Result<()> {
+    /*
+       A deployment must serve the mandatory single-player response for every
+       accepted version and every configured label. Measure escaped JSON bytes,
+       not string lengths. Optional roster entries and ICE data are not promised.
+    */
+    let mut outbound_envelope = 0;
+    for version in protocol.min_protocol_version..=protocol.max_protocol_version {
+        for label in std::iter::once(&relay_types.default_relay_type)
+            .chain(relay_types.game_relay_mappings.values())
+        {
+            outbound_envelope = outbound_envelope.max(
+                serde_json::to_vec(&reserved_room_joined_envelope(
+                    version,
+                    label,
+                    enable_reconnection,
+                    protocol.max_players_limit,
+                ))?
+                .len(),
+            );
+        }
+    }
+    for (field, cap, envelope) in [
+        (
+            "security.max_message_size",
+            inbound_cap,
+            MIN_JOIN_ROOM_ENVELOPE_BYTES,
+        ),
+        (
+            "security.max_outbound_message_size",
+            outbound_cap,
+            outbound_envelope,
+        ),
+    ] {
+        if cap
+            .checked_sub(envelope)
+            .is_none_or(|available| protocol.room_code_length > available)
+        {
+            anyhow::bail!(
+                "protocol.room_code_length ({}) plus the reserved {}-byte room envelope exceeds {} ({}); shorten the code or increase the frame cap",
+                protocol.room_code_length, envelope, field, cap,
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1947,6 +2070,216 @@ mod tests {
     }
 
     #[test]
+    fn room_code_frame_limits_keep_exact_envelope_boundaries() {
+        let empty_join = serde_json::json!({"type":"JoinRoom","data":{
+            "game_name":"g","room_code":"","player_name":"p"
+        }});
+        let parsed: crate::protocol::ClientMessage =
+            serde_json::from_value(empty_join.clone()).unwrap();
+        assert!(matches!(
+            parsed,
+            crate::protocol::ClientMessage::JoinRoom { .. }
+        ));
+        assert_eq!(empty_join.to_string().len(), MIN_JOIN_ROOM_ENVELOPE_BYTES);
+        let relay_types = RelayTypeConfig::default();
+        let outbound_envelope = serde_json::to_vec(&reserved_room_joined_envelope(
+            3,
+            &relay_types.default_relay_type,
+            true,
+            super::super::ProtocolConfig::default().max_players_limit,
+        ))
+        .unwrap()
+        .len();
+        for (name, inbound, outbound, length, accepted) in [
+            (
+                "inbound exact",
+                100,
+                1000,
+                100 - MIN_JOIN_ROOM_ENVELOPE_BYTES,
+                true,
+            ),
+            (
+                "inbound one over",
+                100,
+                1000,
+                101 - MIN_JOIN_ROOM_ENVELOPE_BYTES,
+                false,
+            ),
+            ("outbound exact", 1000, outbound_envelope + 10, 10, true),
+            ("outbound one over", 1000, outbound_envelope + 10, 11, false),
+            ("inbound smaller than envelope", 1, 1000, 1, false),
+            ("outbound smaller than envelope", 1000, 1, 1, false),
+            (
+                "impossible allocation",
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+                false,
+            ),
+        ] {
+            let protocol = super::super::ProtocolConfig {
+                room_code_length: length,
+                ..Default::default()
+            };
+            let result =
+                validate_room_code_frame_limits(&protocol, inbound, outbound, &relay_types, true);
+            assert_eq!(result.is_ok(), accepted, "{name}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn room_code_frame_limits_reserve_authority_disabled_and_capacity_widths() {
+        let relay = RelayTypeConfig::default();
+        for (capacity, envelope) in [
+            (1, 539),
+            (9, 539),
+            (10, 540),
+            (99, 540),
+            (100, 541),
+            (255, 541),
+        ] {
+            let protocol = super::super::ProtocolConfig {
+                min_protocol_version: 3,
+                max_players_limit: capacity,
+                room_code_length: 10,
+                ..Default::default()
+            };
+            assert!(
+                validate_room_code_frame_limits(&protocol, 1000, envelope + 9, &relay, true)
+                    .is_err(),
+                "authority-disabled capacity {capacity} cannot fit below its envelope"
+            );
+            assert!(
+                validate_room_code_frame_limits(&protocol, 1000, envelope + 10, &relay, true)
+                    .is_ok(),
+                "authority-disabled capacity {capacity} fits at its envelope"
+            );
+        }
+    }
+
+    #[test]
+    fn room_code_frame_limits_cover_each_version_and_reconnection_policy() {
+        let relay = RelayTypeConfig::default();
+        for (version, reconnect, envelope) in [
+            (2, false, 486),
+            (2, true, 486),
+            (3, false, 481),
+            (3, true, 541),
+        ] {
+            let protocol = super::super::ProtocolConfig {
+                min_protocol_version: version,
+                max_protocol_version: version,
+                room_code_length: 10,
+                ..Default::default()
+            };
+            let message = serde_json::to_value(reserved_room_joined_envelope(
+                version,
+                &relay.default_relay_type,
+                reconnect,
+                protocol.max_players_limit,
+            ))
+            .unwrap();
+            let data = &message["data"];
+            let player = &data["current_players"][0];
+            assert_eq!(player.get("connected_at").is_some(), version == 2);
+            assert_eq!(player.get("epoch").is_some(), version == 3);
+            assert_eq!(player.get("seq").is_some(), version == 3);
+            assert_eq!(
+                data.get("reconnection_token").is_some(),
+                version == 3 && reconnect
+            );
+            assert_eq!(data["relay_type"], "matchbox");
+            assert_eq!(data["supports_authority"], false);
+            assert_eq!(data["is_authority"], false);
+            assert_eq!(player["is_authority"], false);
+            assert_eq!(data["max_players"], 100);
+            assert_eq!(data["lobby_state"], "finalized");
+            assert_eq!(
+                message.to_string().len(),
+                envelope,
+                "v{version}, reconnect={reconnect}"
+            );
+            assert!(validate_room_code_frame_limits(
+                &protocol,
+                1000,
+                envelope + 10,
+                &relay,
+                reconnect
+            )
+            .is_ok());
+            assert!(validate_room_code_frame_limits(
+                &protocol,
+                1000,
+                envelope + 9,
+                &relay,
+                reconnect
+            )
+            .is_err());
+        }
+
+        /*
+           Mixed deployments must reserve both wire shapes. Without a v3
+           token, the v2 timestamp makes its mandatory envelope larger.
+        */
+        let protocol = super::super::ProtocolConfig {
+            room_code_length: 10,
+            ..Default::default()
+        };
+        assert!(validate_room_code_frame_limits(&protocol, 1000, 491, &relay, false).is_err());
+        assert!(validate_room_code_frame_limits(&protocol, 1000, 496, &relay, false).is_ok());
+    }
+
+    #[test]
+    fn room_code_frame_limits_measure_configured_labels_as_escaped_json() {
+        let protocol = super::super::ProtocolConfig {
+            room_code_length: 10,
+            min_protocol_version: 3,
+            ..Default::default()
+        };
+        /*
+           This 8-byte label expands to 12 JSON bytes: quotes and backslashes
+           each need escaping. It is legal under the relay-label policy.
+        */
+        let escaped_label = "a\"b\\c\"d\\";
+        assert_eq!(escaped_label.len(), 8);
+        let mut relay = RelayTypeConfig::default();
+        relay
+            .game_relay_mappings
+            .insert("g".to_string(), escaped_label.to_string());
+        validate_relay_labels(&relay).unwrap();
+        assert!(validate_room_code_frame_limits(&protocol, 1000, 551, &relay, true).is_err());
+        assert!(validate_room_code_frame_limits(&protocol, 1000, 555, &relay, true).is_ok());
+        relay.default_relay_type = escaped_label.to_string();
+        relay.game_relay_mappings.clear();
+        assert!(validate_room_code_frame_limits(&protocol, 1000, 554, &relay, true).is_err());
+        assert!(validate_room_code_frame_limits(&protocol, 1000, 555, &relay, true).is_ok());
+    }
+
+    #[test]
+    fn loaded_config_rejects_generated_code_that_exceeds_outbound_envelope() {
+        let mut config = Config::default();
+        config.security.require_metrics_auth = false;
+        config.security.max_message_size = 500;
+        config.security.max_outbound_message_size = 756;
+        config.security.max_signal_bytes = 1;
+        config.security.max_connection_info_bytes = 1;
+        config.protocol.max_players_limit = 2;
+        config.server.default_max_players = 2;
+        config.protocol.room_code_length = 338;
+        let error = validate_config_security(&config).expect_err("reply envelope cannot fit");
+        assert!(
+            error.to_string().contains("protocol.room_code_length"),
+            "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("security.max_outbound_message_size"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn room_code_generation_config_rejects_unjoinable_codes() {
         struct Case {
             name: &'static str,
@@ -1956,6 +2289,24 @@ mod tests {
         }
 
         let cases = [
+            Case {
+                name: "code exceeds inbound frame",
+                length: 65_537,
+                prefix: None,
+                expected: "protocol.room_code_length",
+            },
+            Case {
+                name: "no space for inbound envelope",
+                length: 65_536,
+                prefix: Some("EU"),
+                expected: "protocol.room_code_length",
+            },
+            Case {
+                name: "impossible allocation",
+                length: usize::MAX,
+                prefix: None,
+                expected: "protocol.room_code_length",
+            },
             Case {
                 name: "zero total length",
                 length: 0,

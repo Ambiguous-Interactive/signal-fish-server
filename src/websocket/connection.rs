@@ -7328,13 +7328,9 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     async fn oversized_message_discovered_during_normal_close_flush_promotes_close_to_1009() {
         let server = test_server_with_config(ServerConfig {
-            max_message_size: 64,
-            max_signal_bytes: 64,
-            // Pairing-legal: the relay envelope headroom above the inbound
-            // cap; the 512-byte blob overflows it either way. The metadata
-            // cap is sized to the frame cap and the roster aggregate stays
-            // under the outbound cap (issue #524 guards).
-            max_outbound_message_size: 64 + crate::config::defaults::RELAY_ENVELOPE_HEADROOM_BYTES,
+            max_message_size: 256,
+            max_signal_bytes: 256,
+            max_outbound_message_size: 1024,
             max_connection_info_bytes: 3,
             ..ServerConfig::default()
         })
@@ -7345,7 +7341,7 @@ mod tests {
         tx.try_enqueue_data(crate::coordination::outbound_queue::OutboundData::new(
             Arc::new(ServerMessage::GameData {
                 from_player,
-                data: serde_json::json!({"blob": "x".repeat(512)}),
+                data: serde_json::json!({"blob": "x".repeat(2048)}),
                 seq: Some(1),
                 epoch: Some(1),
                 class: Some(crate::protocol::DeliveryClass::Reliable),
