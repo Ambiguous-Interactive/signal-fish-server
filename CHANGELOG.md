@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Name missing peer and channel exchanges in reference-client failure messages (#889).
 - Report the native reference client's actual nominated ICE path, including peer-reflexive addresses (#892).
 - Preserve fresh room memberships when expired reconnect cleanup resumes (#890).
 - Keep spectator rosters and reconnect replay correct after detach panic recovery (#887).

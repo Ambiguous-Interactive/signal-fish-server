@@ -1787,3 +1787,26 @@ This changes only the native reference client's diagnostic event producer.
 The signaling wire format and server API remain unchanged. External Rust,
 .NET, and Godot clients are unaffected by F33; their acceptance issues above
 track the separate F32 server repair.
+
+### Session 407 mesh exchange diagnostics
+
+Open issue [#889](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/889)
+records an initial three-player mesh failure with one missing inbound exchange.
+The retained creator tail did not identify the missing channel. The harness
+waited for the creator before reading the other clients. A creator failure
+therefore prevented collection of the other endpoint streams. Successful runs
+moved the logs before the process guard saved them, producing empty event files.
+The hosted workflow did not capture or upload those files.
+
+Reference-client failure messages now name missing labels for each peer and
+direction. The three-player harness collects all success waits before reporting
+failure and retains each endpoint's log for artifact persistence. The hosted
+browser job uploads endpoint logs, server diagnostics, runner output, and hashes
+of the built server, native client, and browser bundles on success or failure.
+
+This repairs diagnosis. It does not establish the cause of #889 or #853.
+Unreliable probes remain one-shot and can be lost. The existing deadlines,
+receipt validation, success barriers, and nonzero failure exits remain binding.
+The server protocol and external Rust, .NET, and Godot clients are unaffected:
+these changes apply only to reference-client failure text and its test harness.
+A20 and A22 remain incomplete.

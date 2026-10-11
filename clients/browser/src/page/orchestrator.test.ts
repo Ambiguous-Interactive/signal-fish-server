@@ -73,6 +73,32 @@ assert(
   'a completed exchange must remain satisfied after peer departure',
 );
 
+// Regression #889: report missing channels and their direction independently.
+for (const direction of ['sent to', 'received from']) {
+  for (const missing of [
+    [RELIABLE_LABEL],
+    [UNRELIABLE_LABEL],
+    [RELIABLE_LABEL, UNRELIABLE_LABEL],
+  ]) {
+    const ledger = new ExchangeLedger();
+    ledger.noteConnected(departedPeer);
+    for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL]) {
+      if (direction !== 'sent to' || !missing.includes(label))
+        ledger.noteSent(departedPeer, label);
+      if (direction !== 'received from' || !missing.includes(label)) {
+        ledger.noteReceived(departedPeer, label);
+      }
+    }
+    assert(
+      JSON.stringify(ledger.unmetCriteria()) ===
+        JSON.stringify([
+          `exchange incomplete (${direction} ${departedPeer}; missing ${missing.join(', ')})`,
+        ]),
+      `${direction}: missing ${missing.join(', ')} must name exactly the affected channels`,
+    );
+  }
+}
+
 // Regression #851: reset only the restored peer, including partial receipts.
 {
   const restored = '00000000-0000-0000-0000-000000000002';

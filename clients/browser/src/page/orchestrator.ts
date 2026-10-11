@@ -521,10 +521,13 @@ export class ExchangeLedger {
         ['received from', this.received.get(peer)],
       ];
       for (const [direction, labels] of directions) {
-        const complete =
-          labels !== undefined && labels.has(RELIABLE_LABEL) && labels.has(UNRELIABLE_LABEL);
-        if (!complete) {
-          unmet.push(`exchange incomplete (${direction} ${peer})`);
+        const missing = [RELIABLE_LABEL, UNRELIABLE_LABEL].filter(
+          (label) => labels?.has(label) !== true,
+        );
+        if (missing.length !== 0) {
+          unmet.push(
+            `exchange incomplete (${direction} ${peer}; missing ${missing.join(', ')})`,
+          );
         }
       }
     }
