@@ -170,10 +170,20 @@ Native library callers must now await `Engine::store_remote_channel`.
 
 ## JSONL event contract
 
-One JSON object per stdout line, tagged by a snake_case `event` field. Per-client ordering is causal (a single
-emitter task); events carry no timestamps. If the stdout consumer closes the pipe mid-run, the client never
-panics on the resulting `EPIPE`: the failure is logged to stderr once, further events are suppressed, and the
-process continues to its normal bounded exit.
+One JSON object per stdout line, tagged by a snake_case `event` field. Events
+keep causal order and carry no timestamps. Drain stdout continuously. The
+writer runs outside the async executor. Pending output is limited to 256 events
+and 128 MiB of serialized UTF-8, including the event being written and newlines.
+Two terminal lines have separate 4096-byte limits.
+
+**Migration:** A closed pipe or output overload now ends the process with exit
+code 3. The process requires output to flush before reporting success. Each
+final flush wait is limited to one second. The watchdog still exits with code 4
+when stdout is unread. A blocked or closed consumer can prevent the final
+`error` and `exiting` lines from arriving; always inspect the process exit code.
+Library callers must bound `event_output::stdout().drained()` and require
+successful flushing before their own successful exit. A blocked system write can retain one bounded writer thread
+until the pipe drains, closes, or the process exits.
 
 | Event | Fields | Emitted when |
 |-------|--------|--------------|

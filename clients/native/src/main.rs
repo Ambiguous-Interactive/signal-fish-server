@@ -10,7 +10,7 @@ use clap::Parser;
 use signal_fish_reference_native::cli::{Cli, RuntimeFlavor};
 use signal_fish_reference_native::client::{self, EXIT_HARD_TIMEOUT};
 use signal_fish_reference_native::deadline;
-use signal_fish_reference_native::events::{emit, Event};
+use signal_fish_reference_native::event_output;
 
 /// Build the tokio runtime per `--runtime`: the default multi-threaded
 /// flavor, or a single current-thread runtime for the starved-runtime
@@ -39,12 +39,10 @@ fn main() {
     let runtime = match build_runtime(cli.runtime) {
         Ok(runtime) => runtime,
         Err(error) => {
-            emit(&Event::Error {
-                message: format!("failed to start tokio runtime: {error}"),
-            });
-            emit(&Event::Exiting {
-                code: EXIT_HARD_TIMEOUT,
-            });
+            event_output::stdout().finish_blocking(
+                &format!("failed to start tokio runtime: {error}"),
+                EXIT_HARD_TIMEOUT,
+            );
             std::process::exit(EXIT_HARD_TIMEOUT);
         }
     };
@@ -53,29 +51,28 @@ fn main() {
     // and expiry is a hard abort with exit code 4. A duration beyond Tokio's
     // Instant range intentionally remains beyond this process's lifetime.
     let max_runtime = Duration::from_secs(cli.max_runtime_secs);
+    let output = event_output::stdout();
     let code = runtime.block_on(async {
-        match deadline::timeout(max_runtime, client::run(&cli)).await {
-            Ok(code) => code,
-            Err(_elapsed) => {
-                emit(&Event::Error {
-                    message: match &cli.success_release_file {
-                        Some(path) => format!(
-                            "--max-runtime-secs ({}) watchdog fired; hard abort; success release path: {}",
-                            cli.max_runtime_secs,
-                            path.display()
-                        ),
-                        None => format!(
-                            "--max-runtime-secs ({}) watchdog fired; hard abort",
-                            cli.max_runtime_secs
-                        ),
-                    },
-                });
-                EXIT_HARD_TIMEOUT
+        let (mut code, error) = tokio::select! {
+            reason = output.failed() => (client::EXIT_CONNECTION_ERROR, Some(reason.to_owned())),
+            result = deadline::timeout(max_runtime, client::run(&cli)) => match result {
+                Ok(code) => (code, None),
+                Err(_) => (EXIT_HARD_TIMEOUT, Some(format!("--max-runtime-secs ({}) watchdog fired; hard abort", cli.max_runtime_secs))),
+            },
+        };
+        if code != EXIT_HARD_TIMEOUT {
+            if let Err(reason) = tokio::time::timeout(Duration::from_secs(1), output.drained()).await.unwrap_or(Err("stdout flush timed out")) {
+                code = client::EXIT_CONNECTION_ERROR;
+                output.finish(Some(reason), code);
             }
         }
+        output.finish(error.as_deref(), code);
+        if !matches!(tokio::time::timeout(Duration::from_secs(1), output.drained()).await, Ok(Ok(()))) && code != EXIT_HARD_TIMEOUT {
+            code = client::EXIT_CONNECTION_ERROR;
+        }
+        code
     });
 
-    emit(&Event::Exiting { code });
     // Bounded teardown of any webrtc background tasks, then a deterministic
     // process exit (skipping destructors is fine after the explicit shutdown).
     runtime.shutdown_timeout(Duration::from_secs(2));

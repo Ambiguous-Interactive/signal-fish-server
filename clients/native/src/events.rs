@@ -6,9 +6,6 @@
 //! is emitted from the single orchestrator task, so lines never interleave and
 //! per-client ordering is causal.
 
-use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use serde::Serialize;
 use signal_fish_server::protocol::{
     DeliveryClass, DeliveryReportPayload, LobbyState, PlayerId, ReplayStatus, RoomId,
@@ -228,50 +225,12 @@ impl SignalKind {
     }
 }
 
-/// Set once a stdout write has failed (e.g. the consumer closed the pipe);
-/// every later [`emit`] becomes a no-op so the client can finish its bounded
-/// run instead of panicking on `EPIPE` the way `println!` would.
-static STDOUT_CLOSED: AtomicBool = AtomicBool::new(false);
-
-/// Emit one event line to stdout.
+/// Queue one event line for the bounded process writer.
 ///
-/// The locked stdout handle is held for the whole line (JSON + newline), so
-/// events from this process never interleave mid-line. This function never
-/// panics:
-///
-/// - Serialization of [`Event`] cannot realistically fail (no non-string map
-///   keys, no fallible impls); if it ever does, the failure is reported on
-///   stderr and the event is dropped.
-/// - A failed stdout write (typically `BrokenPipe` after the consumer hung
-///   up) is reported on stderr once and latches `STDOUT_CLOSED`: event
-///   emission shuts down gracefully while the client continues toward its
-///   configured exit frontier (`--run-for-secs` / `--max-runtime-secs`).
+/// The writer preserves causal order. Queue overload or write failure ends
+/// the client run with connection error 3. Callers must keep stdout drained.
 pub fn emit(event: &Event) {
-    if STDOUT_CLOSED.load(Ordering::Relaxed) {
-        return;
-    }
-    let line = match serde_json::to_string(event) {
-        Ok(line) => line,
-        Err(error) => {
-            tracing::error!(%error, ?event, "failed to serialize stdout event");
-            return;
-        }
-    };
-    if let Err(error) = write_event_line(&mut std::io::stdout().lock(), &line) {
-        STDOUT_CLOSED.store(true, Ordering::Relaxed);
-        tracing::error!(
-            %error,
-            "stdout write failed (consumer closed?); suppressing all further events"
-        );
-    }
-}
-
-/// Write one event line (JSON + trailing newline) and flush, surfacing any
-/// I/O failure (such as `BrokenPipe`) to the caller instead of panicking.
-fn write_event_line(target: &mut impl Write, line: &str) -> std::io::Result<()> {
-    target.write_all(line.as_bytes())?;
-    target.write_all(b"\n")?;
-    target.flush()
+    crate::event_output::stdout().emit(event);
 }
 
 #[cfg(test)]
@@ -580,37 +539,6 @@ mod tests {
         assert_eq!(value["address"], "10.254.124.2");
         assert_eq!(value["port"], 49160);
         assert_eq!(value["protocol"], "udp");
-    }
-
-    #[test]
-    fn write_event_line_appends_exactly_one_newline() {
-        let mut sink: Vec<u8> = Vec::new();
-        write_event_line(&mut sink, r#"{"event":"connected"}"#).expect("vec writes succeed");
-        assert_eq!(sink, b"{\"event\":\"connected\"}\n");
-        // A round-trip parse proves the line is consumable as JSONL.
-        let line = std::str::from_utf8(&sink).expect("utf8").trim_end();
-        let value: serde_json::Value = serde_json::from_str(line).expect("line parses");
-        assert_eq!(value["event"], "connected");
-    }
-
-    /// A writer that fails every write with `BrokenPipe` (a closed consumer).
-    struct BrokenPipeWriter;
-
-    impl std::io::Write for BrokenPipeWriter {
-        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
-        }
-    }
-
-    #[test]
-    fn write_event_line_surfaces_broken_pipe_instead_of_panicking() {
-        let error = write_event_line(&mut BrokenPipeWriter, r#"{"event":"connected"}"#)
-            .expect_err("a closed pipe must surface as an error");
-        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
     }
 
     #[test]

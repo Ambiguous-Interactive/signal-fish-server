@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Pending |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -1507,3 +1507,76 @@ These are application retention limits, not a 128 MiB process-memory promise.
 Decoded objects, Chromium WebSocket buffers, CDP and WebRTC stack retention
 remain separate resource boundaries. #870 and the wider A20 audit remain open.
 Issues #872 (reset/reopen) and #853 (initial establishment) remain unresolved.
+
+### F29 — Native stdout blocks the watchdog and hides required output failures
+
+Confirmed defect. Issue [#882](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/882).
+Baseline: `d467965d`. A20, under #870.
+
+The native emitter wrote and flushed stdout synchronously on the orchestrator
+executor. An unread pipe could block both the client and the binary watchdog.
+A closed pipe instead suppressed subsequent events while the run continued.
+
+The child-process history holds authentication after the connected event. A
+1 MiB downgrade notice fills unread stdout. Both runtime modes remain alive
+past an eight-second observation with a two-second watchdog on the old source.
+A second history closes stdout before a valid authentication reply. A third
+holds output after the room baseline and sends 512 ordered 64 KiB relay frames.
+The stub keeps its socket open, so an unrelated server close cannot end the run.
+Fixture frames are decoded with the production message types before use.
+
+The repair moves serialized JSONL writes to one process writer thread. Its
+queue admits at most 256 ordinary events and 128 MiB of serialized UTF-8,
+including newlines and the in-flight write. Bounded serialization refuses a
+line before it exceeds remaining byte capacity. Charges last through flush or
+failed-write cleanup. Overload and failed output end the run with connection
+error 3. The owner reserves two terminal lines of at most 4096 bytes each.
+Terminal events stay behind admitted ordinary events. Final flush waits are
+bounded to one second each, and successful exit requires required output to
+flush. The watchdog keeps exit code 4 when output is blocked.
+
+Held-writer controls pin in-flight count and byte boundaries, Unicode and JSON
+escaping, capacity renewal, FIFO output, reserved terminal slots, duplicate
+finish suppression, and write/flush failure. A broken system write cannot be
+canceled by Rust; one bounded process writer thread can remain blocked until
+the pipe drains, closes, or the process exits. This is an explicit library
+lifetime boundary. Stdout is a required output interface, so callers must drain
+it continuously and inspect the process exit code when terminal lines cannot
+arrive. See the native README migration note.
+
+The Rust, .NET, and Godot SDK README assessments show separate SDK/event and
+engine paths. They do not consume this native reference executable's stdout
+writer. Their wire schemas, negotiation, ordering, and reconnect rules do not
+change. Godot #355 remains its separate engine assessment. Browser output
+continues to use its own driver.
+
+This slice bounds native application-owned stdout retention and tests process
+liveness under real pipe pressure. It does not establish stderr, OS pipe,
+WebSocket, or WebRTC stack resource bounds; repair SCTP reset/reuse (#872); or
+explain initial browser channel establishment (#853). The broader A20/#870 and
+A01–A22 audits remain open.
+
+Focused verification:
+
+```bash
+cargo nextest run --locked --manifest-path clients/native/Cargo.toml --test output_e2e
+cargo nextest run --locked --manifest-path clients/native/Cargo.toml --lib -E 'test(event_output::tests)'
+```
+
+### F30 — Native synchronous stderr logging strands the watchdog
+
+Confirmed defect, open follow-up [#883](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/883).
+A20, under #870. Found during F29 from `d467965d` plus its stdout repair.
+
+A real native current-thread process uses a two-second watchdog. Stdout drains
+to `/dev/null`; stderr stays open and unread. A loopback WebSocket stub sends
+one valid `AuthenticationError` with `INVALID_APP_ID` and a 1 MiB error string,
+then keeps the connection open. The process remains alive after eight seconds
+and requires an external kill. The binary installs a synchronous stderr
+tracing writer, and `client::run` logs the complete fatal error on its executor.
+This history is independent of the stdout writer and remains unresolved.
+
+The follow-up owns diagnostic count, byte and record bounds, tracing fallback
+writes, shutdown/startup paths, both runtimes, and a permanent child-process
+regression. F29 makes no stderr or whole-client liveness claim. Keep #870 and
+A20 open.
