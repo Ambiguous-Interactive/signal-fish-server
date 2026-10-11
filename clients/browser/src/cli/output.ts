@@ -1,6 +1,14 @@
 import type { Writable } from 'node:stream';
 import { EventOutput } from '../shared/event-output.js';
 
+/** Reserve the error before CLI shutdown fences page callbacks. */
+export function stopOnOutputFailure(output: EventOutput, error: Error, stop: () => void): void {
+  void output
+    .terminalLine(JSON.stringify({ event: 'error', message: error.message.slice(0, 512) }), 1)
+    .catch(() => {});
+  stop();
+}
+
 /** Validate and forward an event from the page bridge. */
 export function forwardPageEvent(
   output: EventOutput,

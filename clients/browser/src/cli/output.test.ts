@@ -1,5 +1,5 @@
 import { Writable } from 'node:stream';
-import { forwardPageEvent, writeAcknowledgedEventLine } from './output.js';
+import { forwardPageEvent, stopOnOutputFailure, writeAcknowledgedEventLine } from './output.js';
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
@@ -190,7 +190,97 @@ console.error('ok - ordinary stdout writes stay bounded through consumption and 
 }
 console.error('ok - page terminal output bypasses the full ordinary CLI backlog');
 
+// The CLI may fence page callbacks as soon as its own output limit fails.
 {
+  const callbacks: Array<(error?: Error | null) => void> = [];
+  const lines: string[] = [];
+  let stopping = false;
+  let stopped = 0;
+  let exiting: Promise<void> | undefined;
+  const stream = new Writable({
+    highWaterMark: 1,
+    write(chunk, _encoding, callback) {
+      lines.push(String(chunk));
+      callbacks.push(callback);
+    },
+  });
+  stream.on('error', () => {});
+  const writer = new EventOutput(
+    (line) => writeAcknowledgedEventLine(stream, line),
+    (error) =>
+      stopOnOutputFailure(writer, error, () => {
+        stopping = true;
+        stopped += 1;
+        exiting = writer.terminal({ event: 'exiting', code: 3 });
+      }),
+    256,
+    128 * 1024 * 1024,
+    2,
+  );
+  const bridge = (line: string, terminal?: boolean) => {
+    if (stopping) return Promise.reject(new Error('the client is stopping'));
+    return forwardPageEvent(writer, line, terminal);
+  };
+  const observe = (delivery: Promise<void>) =>
+    delivery.then(
+      () => true,
+      () => false,
+    );
+  const ordinary = Array.from({ length: 256 }, () => observe(bridge('{"event":"ordinary"}')));
+  assert(!(await observe(bridge('{"event":"overflow"}'))), 'ordinary overflow starts shutdown');
+  assert(stopped === 1, 'the real ordinary failure callback stops the CLI once');
+  assert(
+    !(await observe(bridge('{"event":"error"}', true))),
+    'shutdown fences late page callbacks',
+  );
+  while (stream.writableLength > 0) {
+    callbacks.shift()?.();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  await exiting;
+  assert((await Promise.all(ordinary)).every(Boolean), 'drain all accepted ordinary lines');
+  assert(
+    lines[256] === '{"event":"error","message":"output backlog limit exceeded"}\n',
+    'the CLI reserves its own error before the page bridge closes',
+  );
+  assert(lines[257] === '{"event":"exiting","code":3}\n', 'the error precedes exiting');
+  assert(lines.length === 258, 'the fallback uses only the existing two terminal slots');
+  assert(
+    await observe(forwardPageEvent(writer, '{"event":"duplicate"}', true)),
+    'a late page error shares the fallback slot',
+  );
+  assert(stream.writableLength === 0, 'a duplicate page error cannot append after exiting');
+  stream.destroy();
+}
+console.error(
+  'ok - CLI output failure reserves an error before shutdown fences page callbacks',
+);
+
+{
+  const failureLines: string[] = [];
+  const failureWriter = new EventOutput(
+    (line) => {
+      failureLines.push(line);
+    },
+    undefined,
+    256,
+    128 * 1024 * 1024,
+    2,
+  );
+  let stopped = false;
+  stopOnOutputFailure(failureWriter, new Error('\u0000'.repeat(600)), () => {
+    stopped = true;
+    assert(failureLines.length === 1, 'reserve the failure line synchronously before stopping');
+  });
+  assert(stopped, 'reporting output failure stops without waiting for stdout');
+  assert(
+    (JSON.parse(failureLines[0] ?? '{}') as { message?: string }).message?.length === 512,
+    'clamp the failure message before serialization',
+  );
+  assert(
+    Buffer.byteLength(failureLines[0] ?? '', 'utf8') + 1 <= 4096,
+    'escaped errors stay within the terminal byte reserve',
+  );
   const flags: Array<boolean | undefined> = [];
   const lines: string[] = [];
   const output = new EventOutput((line, terminal) => {

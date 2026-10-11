@@ -1476,7 +1476,10 @@ Both page and CLI output reserve 256 events and 128 MiB serialized UTF-8 bytes,
 including newlines. This permits base64 expansion of a maximum-size opaque
 frame. The page reserves one terminal error with a 4096-byte cap. Its bridge flag
 bypasses ordinary CLI admission. The CLI reserves distinct 4096-byte slots for
-that page error and its own `exiting` event. CLI stderr retains at most
+a terminal error and its own `exiting` event. A CLI-owned stdout failure
+reserves the error before starting teardown; it does not wait for a later page
+callback. The page and CLI failure reports share the same error slot.
+CLI stderr retains at most
 256 lines and 1 MiB; individual diagnostics truncate after 16000 UTF-16 units.
 Stream callbacks own credits through consumption. Output closure or overload
 fails the run with exit 3. Success flushes required output. Chromium teardown

@@ -129,6 +129,7 @@ The page and CLI each retain at most 256 output events and 128 MiB of serialized
 UTF-8 bytes, including newlines. This allows a maximum-size opaque payload's
 base64 output. The page reserves one terminal error of up to 4096 bytes. The CLI admits
 that error in a separate slot and reserves one more 4096-byte `exiting` event.
+A CLI stdout failure uses the error slot before teardown starts.
 The CLI also bounds stderr to 256 pending lines and 1 MiB. It truncates each
 diagnostic after 16000 UTF-16 units. Callback tasks have a separate 512-entry
 limit and 128 MiB signal budget.

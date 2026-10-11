@@ -31,7 +31,12 @@ import {
   type RunConfig,
 } from '../shared/types.js';
 import { parseArgs, UsageError, USAGE, type CliOptions } from './args.js';
-import { DiagnosticOutput, forwardPageEvent, writeAcknowledgedEventLine } from './output.js';
+import {
+  DiagnosticOutput,
+  forwardPageEvent,
+  stopOnOutputFailure,
+  writeAcknowledgedEventLine,
+} from './output.js';
 import { EventOutput } from '../shared/event-output.js';
 
 const startedAtMs = Date.now();
@@ -52,9 +57,11 @@ function logError(message: string): void {
 // ---------------------------------------------------------------------------
 
 let stdoutClosed = false;
-process.stdout.on('error', () => {
+process.stdout.on('error', (error) => {
   stdoutClosed = true;
-  void exitWith(EXIT_CONNECTION_ERROR);
+  stopOnOutputFailure(eventOutput, error, () => {
+    void exitWith(EXIT_CONNECTION_ERROR);
+  });
 });
 
 async function writeEventLine(line: string): Promise<void> {
@@ -63,23 +70,21 @@ async function writeEventLine(line: string): Promise<void> {
     await writeAcknowledgedEventLine(process.stdout, line);
   } catch (error) {
     stdoutClosed = true;
-    logError(
-      `stdout write failed (consumer closed?); suppressing all further events: ${String(error)}`,
-    );
-    void exitWith(EXIT_CONNECTION_ERROR);
-    throw new Error('stdout event delivery failed');
+    throw new Error(`stdout event delivery failed: ${String(error).slice(0, 512)}`);
   }
 }
 
 const eventOutput = new EventOutput(
   writeEventLine,
-  () => {
-    logError('stdout event delivery failed; the client stops');
-    void exitWith(EXIT_CONNECTION_ERROR);
+  (error) => {
+    stopOnOutputFailure(eventOutput, error, () => {
+      logError('stdout event delivery failed; the client stops');
+      void exitWith(EXIT_CONNECTION_ERROR);
+    });
   },
   undefined,
   undefined,
-  2, // One page error and one CLI exiting line.
+  2, // One terminal error and one CLI exiting line.
 );
 
 function emitEvent(event: Record<string, unknown>): void {
@@ -133,7 +138,9 @@ async function exitWith(code: number): Promise<void> {
   const finalEvent = eventOutput.terminal({ event: 'exiting', code });
   let deliveryTimer: ReturnType<typeof setTimeout> | undefined;
   const delivery = Promise.race([
-    Promise.all([eventOutput.flush(), finalEvent]),
+    Promise.allSettled([eventOutput.flush(), finalEvent]).then((results) =>
+      results.every((result) => result.status === 'fulfilled'),
+    ),
     new Promise<never>((_resolve, reject) => {
       deliveryTimer = setTimeout(
         () => reject(new Error('stdout exit delivery timed out')),
@@ -141,7 +148,7 @@ async function exitWith(code: number): Promise<void> {
       );
     }),
   ]).then(
-    () => true,
+    (delivered) => delivered,
     () => false,
   );
   const [delivered] = await Promise.all([delivery, teardownBrowser()]);
