@@ -10,6 +10,7 @@ use clap::Parser;
 use signal_fish_reference_native::cli::{Cli, RuntimeFlavor};
 use signal_fish_reference_native::client::{self, EXIT_HARD_TIMEOUT};
 use signal_fish_reference_native::deadline;
+use signal_fish_reference_native::diagnostic_output::{BoundedFields, DiagnosticOutput};
 use signal_fish_reference_native::event_output;
 
 /// Build the tokio runtime per `--runtime`: the default multi-threaded
@@ -26,15 +27,37 @@ fn build_runtime(flavor: RuntimeFlavor) -> std::io::Result<tokio::runtime::Runti
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let diagnostics = DiagnosticOutput::stderr();
+    let panic_diagnostics = diagnostics.clone();
+    std::panic::set_hook(Box::new(move |info| {
+        panic_diagnostics.emit(format_args!("{info}"))
+    }));
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            if error.use_stderr() {
+                diagnostics.emit(format_args!("{error}"));
+                diagnostics.finish();
+            } else {
+                let _result = error.print();
+            }
+            std::process::exit(error.exit_code());
+        }
+    };
 
     tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
+        .log_internal_errors(false)
+        .fmt_fields(BoundedFields)
+        .event_format(diagnostics.clone())
+        .with_writer(std::io::sink)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_unset| tracing_subscriber::EnvFilter::new("info")),
         )
-        .init();
+        .try_init()
+        .unwrap_or_else(|error| {
+            diagnostics.emit(format_args!("failed to start diagnostics: {error}"))
+        });
 
     let runtime = match build_runtime(cli.runtime) {
         Ok(runtime) => runtime,
@@ -43,6 +66,7 @@ fn main() {
                 &format!("failed to start tokio runtime: {error}"),
                 EXIT_HARD_TIMEOUT,
             );
+            diagnostics.finish();
             std::process::exit(EXIT_HARD_TIMEOUT);
         }
     };
@@ -76,5 +100,6 @@ fn main() {
     // Bounded teardown of any webrtc background tasks, then a deterministic
     // process exit (skipping destructors is fine after the explicit shutdown).
     runtime.shutdown_timeout(Duration::from_secs(2));
+    diagnostics.finish();
     std::process::exit(code);
 }

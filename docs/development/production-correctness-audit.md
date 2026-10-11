@@ -1565,7 +1565,7 @@ cargo nextest run --locked --manifest-path clients/native/Cargo.toml --lib -E 't
 
 ### F30 — Native synchronous stderr logging strands the watchdog
 
-Confirmed defect, open follow-up [#883](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/883).
+Confirmed defect, repaired in this slice [#883](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/883).
 A20, under #870. Found during F29 from `d467965d` plus its stdout repair.
 
 A real native current-thread process uses a two-second watchdog. Stdout drains
@@ -1574,9 +1574,44 @@ one valid `AuthenticationError` with `INVALID_APP_ID` and a 1 MiB error string,
 then keeps the connection open. The process remains alive after eight seconds
 and requires an external kill. The binary installs a synchronous stderr
 tracing writer, and `client::run` logs the complete fatal error on its executor.
-This history is independent of the stdout writer and remains unresolved.
+This history is independent of the stdout writer. Both runtime modes reproduce
+the eight-second stall with the corrected permanent regression on `ef68e7e1`.
 
-The follow-up owns diagnostic count, byte and record bounds, tracing fallback
-writes, shutdown/startup paths, both runtimes, and a permanent child-process
-regression. F29 makes no stderr or whole-client liveness claim. Keep #870 and
-A20 open.
+The binary now admits at most 256 diagnostic records, including formatting,
+queued work, and the in-flight write. Each record reserves at most 4 KiB,
+so admitted record storage is at most 1 MiB. A full or failed queue discards
+new diagnostics. Long records end with `[truncated]` at a UTF-8 boundary;
+embedded line breaks are escaped. The worker alone writes and flushes stderr.
+Shutdown waits at most one second outside Tokio. Required stdout failure
+semantics and protocol exit codes remain unchanged.
+
+The default tracing formatter builds an unbounded thread-local string before
+`MakeWriter` runs. The repair formats directly into admitted bounded records.
+Cached span fields have a separate 4 KiB text limit across repeated updates.
+The tracing writer is a sink, with internal-error logging disabled: formatter
+or write errors cannot fall back to synchronous `eprintln!`. The binary routes
+CLI errors and panic hooks to the same worker. WebRTC and RTC production log
+sources use the installed tracing/log subscriber; their direct print examples
+are documentation, not runtime calls. Library callers own their subscribers.
+
+Permanent child-process controls keep stdout healthy and stderr unread or
+closed. They require the complete fatal error and exit 2, sustained Ping/Pong
+diagnostic production followed by watchdog exit 4 in both runtime modes,
+and bounded CLI-error exit before runtime startup. Unit controls hold a write
+in flight, saturate formatting/queue admission, release capacity, fail writes,
+check UTF-8 and record boundaries, and bound cached span updates.
+
+**Migration and client assessment:** Drain stderr for complete diagnostics.
+Use stdout and exit codes for outcomes. Rust and .NET SDKs use separate library
+event paths; Godot uses its engine path. None consumes the native CLI's stderr,
+and server wire behavior is unchanged. Godot's separate assessment remains
+[Godot #355](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/355).
+
+One blocked OS write can retain one worker until pipe/process closure. This
+slice does not bound OS buffers, WebRTC stack memory, live span count, or
+external formatter allocations. Keep #870 and A20 open.
+
+```bash
+cargo nextest run --locked --manifest-path clients/native/Cargo.toml --test output_e2e -E 'test(stderr)'
+cargo nextest run --locked --manifest-path clients/native/Cargo.toml --lib -E 'test(diagnostic_output::tests)'
+```

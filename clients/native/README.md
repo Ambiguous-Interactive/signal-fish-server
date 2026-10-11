@@ -56,6 +56,22 @@ cargo run -- --server-url ws://127.0.0.1:3536/v3/ws --create-room --peers 2 --ex
 stdout is a machine interface (one JSON event per line, see the event contract below); all logging goes to stderr
 (`RUST_LOG`, default `info`).
 
+The binary writes diagnostics on one thread outside Tokio. It admits at most
+256 records, including formatting and the in-flight write. Each record retains
+at most 4 KiB, for at most 1 MiB of admitted record storage. Oversized records
+end with `[truncated]` at a UTF-8 boundary. Embedded line breaks are escaped.
+The binary discards new diagnostics when the queue fills or stderr fails.
+Cached tracing span fields retain at most 4 KiB of text, including updates.
+CLI errors and panic diagnostics use the same bounded path. The owner waits
+at most one second for diagnostic output after runtime shutdown.
+
+**Migration:** Drain stderr continuously to retain diagnostics. Use stdout
+JSONL and process exit codes for protocol outcomes. Diagnostic loss does not
+change those outcomes. The library leaves subscriber and panic-hook setup to
+its caller. A blocked OS write can retain one worker until the pipe closes or
+the process exits. These limits do not bound OS buffers, WebRTC stack memory,
+the number of live tracing spans, or allocations inside external formatters.
+
 ## CLI reference
 
 Exactly one of `--create-room` / `--join-code` is required; everything else has a default.
