@@ -65,7 +65,10 @@ Cached tracing span fields retain at most 4 KiB of text, including updates.
 CLI errors and panic diagnostics use the same bounded path. The owner waits
 at most one second for diagnostic output after runtime shutdown or before
 a main-panic exit with code 101. Enabled `RUST_BACKTRACE` output uses the same
-record limits.
+record limits. The hook captures at most one unsymbolicated panic stack.
+The worker resolves symbols, so slow symbolication cannot extend the flush
+wait. The 1 MiB bound covers record text; it excludes the standard library's
+captured-stack and symbol-resolution allocations.
 
 **Migration:** Drain stderr continuously to retain diagnostics. Use stdout
 JSONL and process exit codes for protocol outcomes. Diagnostic loss does not

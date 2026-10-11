@@ -662,7 +662,13 @@ mod tests {
     /// worst-case-sized records serializes within the `/metrics/sessions`
     /// budget. Without this pin, raising either cap independently silently
     /// turns every scrape into the truncation marker.
+    // This full-capacity serialization workload checks a byte budget, not a
+    // memory-safety property. On main, Miri's remaining lane spent over 18
+    // minutes here before its 45-minute job timeout (run 38105255789).
+    // Keep the full workload in native/ASan tests; ordinary record/snapshot
+    // tests still exercise the same safe serialization path under Miri.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn full_caps_of_worst_case_records_fit_the_response_budget() {
         let records = SessionRecords::new();
         let worst_case_room = || {

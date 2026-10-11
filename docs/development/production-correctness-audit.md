@@ -1579,7 +1579,7 @@ the eight-second stall with the corrected permanent regression on `ef68e7e1`.
 
 The binary now admits at most 256 diagnostic records, including formatting,
 queued work, and the in-flight write. Each record reserves at most 4 KiB,
-so admitted record storage is at most 1 MiB. A full or failed queue discards
+so admitted record text storage is at most 1 MiB. A full or failed queue discards
 new diagnostics. Long records end with `[truncated]` at a UTF-8 boundary;
 embedded line breaks are escaped. The worker alone writes and flushes stderr.
 Shutdown waits at most one second outside Tokio. Required stdout failure
@@ -1593,6 +1593,9 @@ or write errors cannot fall back to synchronous `eprintln!`. The binary routes
 CLI errors and panic hooks to the same worker. An outer unwind handler gives
 main-panic diagnostics one second to flush before exit 101. Enabled
 `RUST_BACKTRACE` output remains bounded, independent of `RUST_LIB_BACKTRACE`.
+The hook admits at most one unsymbolicated stack. Symbol resolution runs on
+the worker, and truncation stops cooperative formatters. Captured-stack and
+symbol-resolution allocations are outside the record-text bound.
 WebRTC and RTC production log
 sources use the installed tracing/log subscriber; their direct print examples
 are documentation, not runtime calls. Library callers own their subscribers.
@@ -1604,8 +1607,12 @@ and bounded CLI-error exit before runtime startup. Unit controls hold a write
 in flight, saturate formatting/queue admission, release capacity, fail writes,
 check UTF-8 and record boundaries, and bound cached span updates. A separate
 child-process panic control delays a healthy stderr reader behind a queued
-backlog, requires complete admitted records and enabled backtrace text, and
+backlog, requires complete admitted records and the panic frame in enabled
+backtrace text, and
 checks unread and closed stderr. Its prior-hook control loses the panic text.
+A held worker formatter proves the flush wait expires before formatting
+finishes. A cooperative formatter control fails under the prior truncation
+behavior because it still walks the entire discarded tail.
 
 **Migration and client assessment:** Drain stderr for complete diagnostics.
 Use stdout and exit codes for outcomes. Rust and .NET SDKs use separate library

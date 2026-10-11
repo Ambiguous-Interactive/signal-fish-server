@@ -79,6 +79,7 @@ struct State {
     pending: usize,
     dropped: u64,
     stopped: bool,
+    backtrace_admitted: bool,
 }
 
 #[derive(Default)]
@@ -91,7 +92,14 @@ struct Shared {
 #[derive(Clone)]
 pub struct DiagnosticOutput {
     shared: Arc<Shared>,
-    sender: mpsc::SyncSender<String>,
+    sender: mpsc::SyncSender<Message>,
+}
+
+enum Message {
+    Text(String),
+    Backtrace(std::backtrace::Backtrace, bool),
+    #[cfg(test)]
+    HeldFormatter(mpsc::Sender<()>, mpsc::Receiver<()>),
 }
 
 impl DiagnosticOutput {
@@ -102,12 +110,30 @@ impl DiagnosticOutput {
 
     fn new(mut writer: impl Write + Send + 'static) -> Self {
         let shared = Arc::new(Shared::default());
-        let (sender, receiver) = mpsc::sync_channel::<String>(MAX_RECORDS);
+        let (sender, receiver) = mpsc::sync_channel::<Message>(MAX_RECORDS);
         let worker_shared = Arc::clone(&shared);
         let worker = std::thread::Builder::new()
             .name("diagnostic-output".into())
             .spawn(move || {
-                for record in &receiver {
+                for message in &receiver {
+                    let record = match message {
+                        Message::Text(text) => text,
+                        Message::Backtrace(backtrace, full) => {
+                            let mut record = Record::buffer();
+                            let _result = if full {
+                                record.write_fmt(format_args!("stack backtrace:\n{backtrace:#}"))
+                            } else {
+                                record.write_fmt(format_args!("stack backtrace:\n{backtrace}"))
+                            };
+                            record.completed_text()
+                        }
+                        #[cfg(test)]
+                        Message::HeldFormatter(started, release) => {
+                            started.send(()).unwrap();
+                            release.recv().unwrap();
+                            "formatter released\n".into()
+                        }
+                    };
                     let result = writer
                         .write_all(record.as_bytes())
                         .and_then(|()| writer.flush());
@@ -155,7 +181,7 @@ impl DiagnosticOutput {
         }
         state.pending = state.pending.saturating_add(1);
         Some(Record {
-            output: self.clone(),
+            output: Some(self.clone()),
             text: String::with_capacity(MAX_RECORD_BYTES),
             truncated: false,
             trailing_newline: false,
@@ -166,6 +192,38 @@ impl DiagnosticOutput {
     pub fn emit(&self, message: fmt::Arguments<'_>) {
         if let Some(mut record) = self.record() {
             let _result = record.write_fmt(message);
+        }
+    }
+
+    /// Capture at most one unsymbolicated panic stack; resolve symbols only on
+    /// the diagnostic worker, where slow symbolication cannot delay exit.
+    pub fn emit_backtrace(&self, full: bool) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.stopped || state.pending >= MAX_RECORDS || state.backtrace_admitted {
+            state.dropped = state.dropped.saturating_add(1);
+            return;
+        }
+        state.pending = state.pending.saturating_add(1);
+        state.backtrace_admitted = true;
+        drop(state);
+        let message = Message::Backtrace(std::backtrace::Backtrace::force_capture(), full);
+        self.send(message);
+    }
+
+    fn send(&self, message: Message) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.stopped || self.sender.try_send(message).is_err() {
+            state.pending = state.pending.saturating_sub(1);
+            state.dropped = state.dropped.saturating_add(1);
+            self.shared.flushed.notify_all();
         }
     }
 
@@ -186,7 +244,7 @@ impl DiagnosticOutput {
 }
 
 struct Record {
-    output: DiagnosticOutput,
+    output: Option<DiagnosticOutput>,
     text: String,
     truncated: bool,
     trailing_newline: bool,
@@ -195,7 +253,7 @@ struct Record {
 impl fmt::Write for Record {
     fn write_str(&mut self, text: &str) -> fmt::Result {
         if self.truncated {
-            return Ok(());
+            return Err(fmt::Error);
         }
         for character in text.chars() {
             if self.trailing_newline {
@@ -227,33 +285,38 @@ impl fmt::Write for Record {
             }
             self.text.push_str(piece);
         }
-        Ok(())
+        if self.truncated {
+            Err(fmt::Error)
+        } else {
+            Ok(())
+        }
     }
 }
 
-impl Drop for Record {
-    fn drop(&mut self) {
+impl Record {
+    fn buffer() -> Self {
+        Self {
+            output: None,
+            text: String::with_capacity(MAX_RECORD_BYTES),
+            truncated: false,
+            trailing_newline: false,
+        }
+    }
+
+    fn completed_text(&mut self) -> String {
         if self.truncated {
             self.text.push_str(TRUNCATED);
         } else {
             self.text.push('\n');
         }
-        let mut state = self
-            .output
-            .shared
-            .state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if state.stopped
-            || self
-                .output
-                .sender
-                .try_send(std::mem::take(&mut self.text))
-                .is_err()
-        {
-            state.pending = state.pending.saturating_sub(1);
-            state.dropped = state.dropped.saturating_add(1);
-            self.output.shared.flushed.notify_all();
+        std::mem::take(&mut self.text)
+    }
+}
+
+impl Drop for Record {
+    fn drop(&mut self) {
+        if let Some(output) = self.output.take() {
+            output.send(Message::Text(self.completed_text()));
         }
     }
 }
@@ -272,11 +335,11 @@ where
         event: &tracing::Event<'_>,
     ) -> fmt::Result {
         if let Some(mut record) = self.record() {
-            format().with_ansi(false).format_event(
+            let _result = format().with_ansi(false).format_event(
                 context,
                 format::Writer::new(&mut record),
                 event,
-            )?;
+            );
         }
         Ok(())
     }
@@ -347,17 +410,36 @@ mod tests {
             "界".repeat(MAX_RECORD_BYTES).as_str(),
         ] {
             let mut record = output.record().unwrap();
-            record.write_str(text).unwrap();
+            let _result = record.write_str(text);
             assert!(record.text.len() <= MAX_RECORD_BYTES - TRUNCATED.len());
             assert!(record.text.capacity() <= MAX_RECORD_BYTES);
             assert!(!record.text.contains(['\n', '\r']));
             let length = record.text.len();
             if record.truncated {
-                record.write_str("must not grow").unwrap();
+                assert!(record.write_str("must not grow").is_err());
                 assert_eq!(record.text.len(), length);
             }
         }
         output.finish();
+    }
+
+    #[test]
+    fn truncation_stops_cooperative_formatters_instead_of_walking_the_tail() {
+        struct LongDisplay(std::sync::atomic::AtomicUsize);
+        impl fmt::Display for LongDisplay {
+            fn fmt(&self, writer: &mut fmt::Formatter<'_>) -> fmt::Result {
+                for _ in 0..1_000_000 {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    writer.write_str("frame\n")?;
+                }
+                Ok(())
+            }
+        }
+        let display = LongDisplay(std::sync::atomic::AtomicUsize::new(0));
+        let output = DiagnosticOutput::new(std::io::sink());
+        output.emit(format_args!("{display}"));
+        output.finish();
+        assert!(display.0.load(std::sync::atomic::Ordering::Relaxed) < MAX_RECORD_BYTES);
     }
 
     #[test]
@@ -418,6 +500,48 @@ mod tests {
                 assert!(std::str::from_utf8(fields.fields.as_bytes()).is_ok());
             });
         });
+    }
+
+    #[test]
+    fn repeated_panics_admit_only_one_captured_stack() {
+        let (started, wait_started) = mpsc::channel();
+        let (release, wait_release) = mpsc::channel();
+        let output = DiagnosticOutput::new(HeldWriter {
+            started,
+            release: wait_release,
+            bytes: Arc::new(Mutex::new(Vec::new())),
+        });
+        output.emit(format_args!("hold worker"));
+        wait_started.recv_timeout(Duration::from_secs(5)).unwrap();
+        output.emit_backtrace(false);
+        output.emit_backtrace(true);
+        {
+            let state = output.shared.state.lock().unwrap();
+            assert_eq!(state.pending, 2);
+            assert_eq!(state.dropped, 1);
+        }
+        release.send(()).unwrap();
+        wait_started.recv_timeout(Duration::from_secs(5)).unwrap();
+        release.send(()).unwrap();
+        output.finish();
+        assert_eq!(output.shared.state.lock().unwrap().pending, 0);
+    }
+
+    #[test]
+    fn slow_backtrace_formatting_cannot_extend_the_finish_deadline() {
+        let output = DiagnosticOutput::new(std::io::sink());
+        let (started, wait_started) = mpsc::channel();
+        let (release, wait_release) = mpsc::channel();
+        output.shared.state.lock().unwrap().pending = 1;
+        output.send(Message::HeldFormatter(started, wait_release));
+        wait_started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let start = std::time::Instant::now();
+        output.finish();
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert_eq!(output.shared.state.lock().unwrap().pending, 1);
+        release.send(()).unwrap();
+        output.finish();
+        assert_eq!(output.shared.state.lock().unwrap().pending, 0);
     }
 
     #[test]

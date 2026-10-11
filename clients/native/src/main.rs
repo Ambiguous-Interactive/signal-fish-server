@@ -36,14 +36,7 @@ fn run_with_diagnostics(diagnostics: &DiagnosticOutput, run: impl FnOnce()) {
     std::panic::set_hook(Box::new(move |info| {
         panic_diagnostics.emit(format_args!("{info}"));
         if let Some(style) = std::env::var_os("RUST_BACKTRACE").filter(|value| value != "0") {
-            let backtrace = std::backtrace::Backtrace::force_capture();
-            if backtrace.status() == std::backtrace::BacktraceStatus::Captured {
-                if style == "full" {
-                    panic_diagnostics.emit(format_args!("stack backtrace:\n{backtrace:#}"));
-                } else {
-                    panic_diagnostics.emit(format_args!("stack backtrace:\n{backtrace}"));
-                }
-            }
+            panic_diagnostics.emit_backtrace(style == "full");
         }
     }));
     if let Err(_panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
@@ -213,6 +206,12 @@ mod tests {
                     expect_backtrace,
                     "{bytes}"
                 );
+                if expect_backtrace {
+                    assert!(
+                        bytes.contains("terminal_panics_flush_healthy_stderr"),
+                        "{bytes}"
+                    );
+                }
                 assert_eq!(
                     bytes.lines().count(),
                     if expect_backtrace { 66 } else { 65 }
