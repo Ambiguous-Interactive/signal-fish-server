@@ -312,7 +312,7 @@ impl LeaseRenewalGuard {
             .unwrap_or(ttl);
         let task_handle = handle.clone();
         let renewal = tokio::spawn(async move {
-            let mut ticks = tokio::time::interval(interval);
+            let mut ticks = crate::deadline::interval(interval);
             ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
             ticks.tick().await; // `interval` fires its first tick immediately; skip it.
             loop {

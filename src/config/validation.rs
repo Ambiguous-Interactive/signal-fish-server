@@ -2364,10 +2364,7 @@ mod tests {
         }
     }
 
-    /// A zero `server.room_cleanup_interval` is rejected: it is fed to
-    /// `tokio::time::interval`, which panics on a zero period, silently killing
-    /// the maintenance sweep (room/client/token/lock reaping) and leaking memory
-    /// unboundedly while the process keeps serving. Fail fast at startup instead.
+    /// Startup requires a positive room-maintenance cadence.
     #[test]
     fn zero_room_cleanup_interval_is_rejected() {
         let mut config = Config::default();
@@ -2382,9 +2379,7 @@ mod tests {
         );
     }
 
-    /// A zero `rate_limit.time_window` is rejected: it is the period of the
-    /// rate-limiter's cleanup `interval` (panics on zero) and the width of every
-    /// rate-limit window (zero ⇒ every check resets the window ⇒ limits disabled).
+    /// Startup requires a positive rate-limit accounting window.
     #[test]
     fn zero_rate_limit_time_window_is_rejected() {
         let mut config = Config::default();

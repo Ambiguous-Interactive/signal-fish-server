@@ -1708,7 +1708,8 @@ async fn handle_socket_supervised(
         let server_for_ping = server.clone();
         let effective_player_id_for_ping = Arc::clone(&effective_player_id);
         supervision.background_tasks[0] = Some(tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_secs(server_ping_interval_secs));
+            let mut ticker =
+                crate::deadline::interval(Duration::from_secs(server_ping_interval_secs));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let initial_state = *probe_states.borrow();
             let mut consumed_generation = initial_state.inbound_generation;
@@ -1887,7 +1888,7 @@ async fn handle_socket_supervised(
         let mut stats_task_close = stats_task_close;
         supervision.background_tasks[1] = Some(tokio::spawn(async move {
             let mut ticker =
-                tokio::time::interval(Duration::from_secs(delivery_stats_interval_secs));
+                crate::deadline::interval(Duration::from_secs(delivery_stats_interval_secs));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             // An interval's first tick resolves immediately; consume it so
             // frames arrive one full interval after the connection starts.

@@ -12502,6 +12502,55 @@ async fn test_distributed_lock_cleanup_counters_are_wired() {
         .expect("cleanup task should not panic");
 }
 
+/// Issue #897: Tokio can yield before polling the immediate cleanup tick.
+#[tokio::test(start_paused = true)]
+async fn oversized_cleanup_period_survives_a_delayed_first_tick() {
+    let server = create_test_server_with_config(ServerConfig {
+        room_cleanup_interval: Duration::MAX,
+        ..ServerConfig::default()
+    })
+    .await;
+    let (parked_tx, parked_rx) = tokio::sync::oneshot::channel();
+    let resume = Arc::new(Notify::new());
+    let shutdown = Arc::new(Notify::new());
+    let task = tokio::spawn({
+        let server = Arc::clone(&server);
+        let resume = Arc::clone(&resume);
+        let shutdown = Arc::clone(&shutdown);
+        async move {
+            let cleanup = server.cleanup_task_until(shutdown.notified());
+            tokio::pin!(cleanup);
+            crate::deadline::tests::park_before_first_tick(cleanup.as_mut()).await;
+            parked_tx.send(()).unwrap();
+            resume.notified().await;
+            cleanup.await;
+        }
+    });
+
+    parked_rx
+        .await
+        .expect("cleanup must park before its first tick");
+    assert_eq!(
+        server
+            .metrics
+            .distributed_lock_cleanup_runs
+            .load(Ordering::Relaxed),
+        0
+    );
+    tokio::time::advance(Duration::from_millis(10)).await;
+    resume.notify_one();
+    tokio::task::yield_now().await;
+    shutdown.notify_one();
+    task.await.expect("delayed cleanup must not panic");
+    assert_eq!(
+        server
+            .metrics
+            .distributed_lock_cleanup_runs
+            .load(Ordering::Relaxed),
+        1
+    );
+}
+
 /// A failed creator name write must refuse and roll back the unpublished room.
 /// The requested code must be available for a later successful creation.
 #[tokio::test(start_paused = true)]

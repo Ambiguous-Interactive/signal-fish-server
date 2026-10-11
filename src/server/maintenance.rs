@@ -456,12 +456,7 @@ impl EnhancedGameServer {
 
     /// Cleanup task variant that exits when `shutdown` resolves.
     pub async fn cleanup_task_until(self: &Arc<Self>, shutdown: impl Future<Output = ()>) {
-        // Clamp to a 1s floor: `room_cleanup_interval` is validated `> 0` at
-        // startup (`validate_config_security`), but guard here too because the
-        // server is constructible directly via the public API, and
-        // `tokio::time::interval` panics on a zero period (mirrors the
-        // dashboard-cache `.max(..)` zero-guard).
-        let mut interval = tokio::time::interval(
+        let mut interval = crate::deadline::interval(
             self.config
                 .room_cleanup_interval
                 .max(std::time::Duration::from_secs(1)),

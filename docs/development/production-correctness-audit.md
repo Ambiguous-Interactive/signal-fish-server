@@ -59,9 +59,9 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial |
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
 | A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial; aggregate reconnect admission bound in F21; socket close before queue commit in F22 |
-| A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial; stale expiry cleanup in F32 |
+| A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial; stale expiry cleanup in F32; delayed first-tick overflow in F36 |
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
-| A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code and timer boundaries remain open in #896/#897 |
+| A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
 | A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
@@ -1940,4 +1940,57 @@ messages. A01–A22 and campaign #826 remain incomplete.
 cargo nextest run --lib -E 'test(room_code_) | test(loaded_config_rejects_generated_code)'
 cargo nextest run --lib -E 'test(constructor_rejects_invalid_runtime_inputs_before_initialization)'
 cargo nextest run --test e2e_tests -E 'test(generated_room_code_fits)'
+```
+
+### F36 — Delayed first cleanup ticks overflow accepted periods
+
+**Availability defect; high confidence.** Baseline: `b1d0de7e`. A16/A18.
+Finding: [#897](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/897).
+
+`Duration::MAX` passes the server constructor and both public limiter
+constructors. Tokio 1.53.2 checks ordinary interval advancement, but its
+missed-tick calculation adds the period without checking the platform clock
+range. A first tick more than five milliseconds late enters that calculation.
+
+The retained experiment exhausts the normal cooperative task budget, polls
+the production cleanup future until its first tick suspends, then advances
+the paused clock by ten milliseconds. All three old paths panic with
+`overflow when adding duration to instant`: `EnhancedGameServer` cleanup,
+room rate-limit cleanup, and application rate-limit cleanup. The limiter
+futures are the same private functions passed to the public spawn methods;
+there is no replacement timer or cleanup implementation in the experiment.
+This establishes the runtime branch, rather than assuming an OS preemption.
+
+The shared periodic timer now checks deadline arithmetic for Burst, Delay,
+and Skip. It keeps the immediate first tick, the five-millisecond tolerance,
+and each caller's missed-tick policy. A deadline outside the clock range
+stays pending and can still be cancelled. Skip computes the phase remainder
+as a full duration, without narrowing total elapsed nanoseconds to `u64`.
+Zero limiter periods retain their existing one-second floors.
+
+The sweep replaces all six production interval sites: both limiters, room
+maintenance, lease renewal, WebSocket Ping, and RelayStats. Lease renewal and
+both connection tasks still consume the immediate tick before waiting their
+first full period. No configuration is silently shortened or rejected.
+There are no protocol, default, or client API changes. Rust, .NET, and Godot
+clients need no implementation changes because their messages and timer
+configuration interfaces are unchanged.
+
+The repaired runtime controls establish a completed server sweep and shutdown,
+a completed application-limiter sweep, and room-limiter sweep admission and
+owner release. Other controls compare cadence directly with Tokio under
+Burst/Delay/Skip and late polls, preserve cancelled-tick deadlines, bound
+repeated waits after overflow, check near-clock-limit arithmetic, and check
+Skip remainders wider than `u64` nanoseconds without requiring a platform to
+represent a 634-year instant. Existing owner-loss, drain, lease-renewal, Ping,
+and RelayStats controls cover ordinary behavior.
+
+The failing histories were captured on Linux ARM64 with paused Tokio time.
+They do not reproduce every OS scheduling history or establish the safety
+of all timer-driver internals. The wider audit and campaign #826 remain open.
+
+```bash
+cargo nextest run --lib -E 'test(oversized_cleanup_period_survives_a_delayed_first_tick) | test(deadline::tests)'
+cargo nextest run --lib -E 'test(cleanup_task_) | test(lease_renewal_) | test(draining_cleanup_task_)'
+cargo nextest run --test v3_relay_stats_e2e -E 'test(periodic_relay_stats)'
 ```
