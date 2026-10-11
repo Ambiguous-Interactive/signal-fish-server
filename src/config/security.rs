@@ -389,6 +389,8 @@ pub struct TokenBindingConfig {
     #[serde(default)]
     pub require_client_fingerprint: bool,
     /// Name of the WebSocket subprotocol clients must advertise.
+    /// When enabled, this must be one nonempty ASCII HTTP token. Spaces,
+    /// commas, other separators, controls, and non-ASCII characters are invalid.
     #[serde(default = "default_token_binding_subprotocol")]
     pub subprotocol: String,
     /// Signing scheme used for per-frame proofs.

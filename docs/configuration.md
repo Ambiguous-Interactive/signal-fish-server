@@ -603,6 +603,21 @@ forward compatibility, and removed legacy keys
 (`security.require_websocket_auth`, `security.authorized_apps`,
 `turn.mode`) are normalized or ignored by the loader.
 
+### Token-binding subprotocol names
+
+When token binding is enabled, `security.transport.token_binding.subprotocol`
+must be one nonempty ASCII HTTP token, as required by
+[RFC 6455](https://www.rfc-editor.org/rfc/rfc6455#section-4.1).
+Letters, digits, and HTTP token punctuation are valid. Spaces, commas, other
+separators, controls, and non-ASCII characters are invalid. Startup and library
+construction reject invalid names. The default is `signalfish.tokenbinding.v2`;
+custom names such as `game.binding-v2` are valid.
+
+If an existing configuration uses an invalid name, replace it with a valid
+token on both the server and clients. The server does not trim or rewrite names.
+Names in the reserved `signalfish.tokenbinding.` namespace must remain exactly
+`signalfish.tokenbinding.v2`.
+
 ## Next Steps
 
 - [Application identification](authentication.md) - Configure the public app-ID allowlist

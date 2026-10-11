@@ -307,11 +307,13 @@ pub(super) fn negotiate_token_binding(
         return Ok(None);
     }
 
-    if !crate::security::token_binding::token_binding_subprotocol_is_v2_compatible(&cfg.subprotocol)
+    if !crate::security::token_binding::token_binding_subprotocol_is_valid_token(&cfg.subprotocol)
+        || !crate::security::token_binding::token_binding_subprotocol_is_v2_compatible(
+            &cfg.subprotocol,
+        )
     {
         tracing::error!(
-            subprotocol = %cfg.subprotocol,
-            "Reserved token-binding subprotocol does not match the v2 wire contract"
+            "Token-binding subprotocol is invalid or does not match the v2 wire contract"
         );
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1216,5 +1218,57 @@ mod tests {
             .err()
             .map(|response| response.status());
         assert_eq!(rejection_status, Some(StatusCode::INTERNAL_SERVER_ERROR));
+    }
+
+    #[test]
+    fn custom_token_binding_alias_negotiates_and_verifies_proofs() {
+        for alias in ["game.binding-v2", "AZaz09!#$%&'*+-.^_`|~"] {
+            let config = crate::config::TokenBindingConfig {
+                enabled: true,
+                subprotocol: alias.to_string(),
+                ..crate::config::TokenBindingConfig::default()
+            };
+            let mut headers = HeaderMap::new();
+            let key = "MDEyMzQ1Njc4OWFiY2RlZg==";
+            headers.insert(SEC_WEBSOCKET_KEY, key.parse().unwrap());
+            headers.append(SEC_WEBSOCKET_PROTOCOL, "ordinary.protocol".parse().unwrap());
+            headers.append(SEC_WEBSOCKET_PROTOCOL, alias.parse().unwrap());
+            let offer = client_token_binding_offer(&headers, alias);
+            assert_eq!(offer, TokenBindingProtocolOffer::Supported, "{alias}");
+            let handshake = negotiate_token_binding(
+                &config,
+                offer == TokenBindingProtocolOffer::Supported,
+                &headers,
+                None,
+            )
+            .unwrap()
+            .expect("a valid custom alias negotiates binding");
+            let nonce = BASE64_STANDARD.decode(&handshake.challenge.nonce).unwrap();
+            let secret = derive_server_nonce_secret(key, &nonce).unwrap();
+            let raw = signed_client_message(secret.as_ref(), &ClientMessage::Ping, 1, None);
+            assert!(matches!(
+                parse_client_message(&raw, Some(&handshake)),
+                Ok(ClientMessage::Ping)
+            ));
+            assert!(parse_client_message(&raw, Some(&handshake)).is_err());
+        }
+    }
+
+    #[test]
+    fn negotiation_refuses_invalid_aliases_even_when_validation_is_bypassed() {
+        for alias in ["game,binding", "game binding", "game\nbinding", "game.绑定"] {
+            for client_offered in [false, true] {
+                let config = crate::config::TokenBindingConfig {
+                    enabled: true,
+                    subprotocol: alias.to_string(),
+                    ..crate::config::TokenBindingConfig::default()
+                };
+                let rejection =
+                    negotiate_token_binding(&config, client_offered, &HeaderMap::new(), None)
+                        .err()
+                        .expect("an invalid server alias fails before client negotiation");
+                assert_eq!(rejection.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        }
     }
 }
