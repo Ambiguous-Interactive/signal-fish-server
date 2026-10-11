@@ -100,7 +100,7 @@ impl EventOutput {
         max_bytes: usize,
     ) -> Self {
         let shared = Arc::new(Shared::default());
-        let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(max_events + 2);
+        let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(max_events.saturating_add(2));
         let worker_shared = Arc::clone(&shared);
         let worker = std::thread::Builder::new()
             .name("event-output".into())

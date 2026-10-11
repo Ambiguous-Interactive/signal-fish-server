@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Breaking:** Stop the native reference client on output failure and keep its watchdog active when stdout blocks;
+- **Breaking:** Stop the native reference client on stdout failure and keep its watchdog active when stdout blocks;
   drain stdout continuously and handle exit code 3 (#882).
 - **Breaking:** Report failure and clean up the browser reference client when input or output backlogs fill;
   drain stdout and stderr continuously and handle exit code 3 (#879).
