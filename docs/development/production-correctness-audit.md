@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Pending |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -1735,3 +1735,55 @@ External client acceptance is tracked in
 [.NET #138](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/138),
 and [Godot #357](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/357).
 Their own validation remains separate from server regression and CI evidence.
+
+### F33 — Native selected-path diagnostics omit a learned remote address
+
+Confirmed diagnostic defect. Issue [#892](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/892).
+Baseline: `bb1936f2eebd5486a667397f88427e5921650476`. A20/A22.
+
+The hosted native IPv6 cell completed both channel exchanges, but one client
+reported a local IPv6 host and an addressless remote `prflx` candidate. The
+other client reported host/host IPv6. The strict family gate failed because
+that report did not prove the remote address family. Ten unchanged local
+attempts passed; they did not repair or explain away the hosted observation.
+
+The rtc 0.21 statistics registry records signaled remote candidates. A candidate
+learned from an inbound ICE check can remain nominated without an entry in that
+registry. A later signaled host at the same endpoint is a distinct candidate:
+the agent's equality rule includes candidate type. The old diagnostic inferred
+`prflx` from the missing registry entry and emitted a null address. The typed
+ICE transport API exposes the actual nominated pair, including its types and
+addresses. The repair reads that pair directly. It does not infer an address
+from advertisements, relabel a peer-reflexive candidate, or fabricate evidence
+when no pair is nominated.
+
+The IPv6 cell now requires a local host and a remote host or peer-reflexive
+candidate with two concrete dialable IPv6 addresses for the planned peer.
+Every local advertisement must be an IPv6 host. The prior host/host-only type
+rule rejected a legitimate direct peer-reflexive path even when its actual
+address was known. The deterministic red fixture supplied that exact address
+evidence and failed at the old host/host assertion. The revised oracle rejects
+missing or null addresses, IPv4, unspecified, multicast and link-local
+addresses, server-reflexive and relay types, another peer, missing nomination,
+and missing or non-host advertisements. The existing baseline alone retains
+compatibility with legacy addressless reports. TURN still requires relay/relay.
+Exchange, fallback, and deadline checks remain unchanged.
+
+Focused producer and IPv6 oracle tests pass. The producer preserves nominated
+candidate types and addresses, including peer-reflexive and relay types, and
+returns no evidence without nomination. These controls cover diagnostic and
+oracle semantics. They do not establish a new platform or capacity claim.
+
+Focused reproduction:
+
+```bash
+cargo test --manifest-path clients/native/Cargo.toml --locked --lib nominated_pair_evidence_preserves_peer_reflexive_addresses_and_types
+cargo test --manifest-path clients/native/Cargo.toml --locked --test interop_e2e ipv6_direct_oracle
+```
+
+All 19 native interop tests passed locally, including the live IPv6 cell.
+Strict native all-target Clippy and both owning CI acceptance guards pass.
+This changes only the native reference client's diagnostic event producer.
+The signaling wire format and server API remain unchanged. External Rust,
+.NET, and Godot clients are unaffected by F33; their acceptance issues above
+track the separate F32 server repair.

@@ -224,7 +224,7 @@ until the pipe drains, closes, or the process exits.
 | `signal_sent` | `to`, `kind` | Outbound `Signal` relayed (`kind` ∈ `offer`/`answer`/`ice_candidate`/`pair_retry`/`other`) |
 | `signal_received` | `from`, `kind` | Inbound `Signal` arrived (emitted even when `--cripple-ice` then drops it) |
 | `ice_candidate_dropped` | `from` | Native-only `--drop-ice-from` discarded this peer's inbound candidate after `signal_received` made the signaling hop observable. The older shared `--cripple-ice` contract remains unchanged and does not emit this event |
-| `local_candidate` | `peer`, `candidate_type`, `address`, `port`, `protocol` | Native-only: a gathered local ICE candidate was advertised to `peer`, reported after the relay so the set describes what the remote side can see. `candidate_type` ∈ `host`/`srflx`/`prflx`/`relay`. The relay-only TURN cell requires every entry to be `relay`, and the IPv6 cell requires no entry of the other family; without it, a session that gathers nothing reports only "no candidate pairs" |
+| `local_candidate` | `peer`, `candidate_type`, `address`, `port`, `protocol` | Native-only: a gathered local ICE candidate was advertised to `peer`, reported after the relay so the set describes what the remote side can see. `candidate_type` ∈ `host`/`srflx`/`prflx`/`relay`. The relay-only TURN cell requires every entry to be `relay`, and the IPv6 cell requires every entry to be an IPv6 host; without it, a session that gathers nothing reports only "no candidate pairs" |
 | `pc_state` | `peer`, `state` | RTCPeerConnection state transition (informational) |
 | `channel_open` | `peer`, `label` | One data channel reached open (`label` ∈ `reliable`/`unreliable`) |
 | `channel_closed` | `peer`, `label` | A required data channel closed or became unreadable; the unusable pair is removed and relay fallback remains live |
@@ -232,7 +232,7 @@ until the pipe drains, closes, or the process exits.
 | `channel_message` | `peer`, `label`, `text` | A data-channel text message arrived |
 | `p2p_pair_connected` | `peer` | BOTH channels toward `peer` are open |
 | `p2p_pair_reconnected` | `peer` | BOTH channels reopened for a coordinated PairRetry generation |
-| `selected_candidate_pair` | `peer`, `local_candidate_type`, `remote_candidate_type`, `local_candidate_address`, `remote_candidate_address` | Native-only selected ICE pair after both channels open. Exchange is not delayed while the stack's eventually consistent statistics snapshot catches up, but a connected physical link cannot satisfy clean-exit criteria until this event is emitted. The local TURN gate requires both candidate types to be `relay`, and the IPv6 cell requires both addresses to be concrete dialable IPv6. Either address is `null` when the stack redacts or omits it — including rtc 0.21's omitted registry entry for a dynamically learned `prflx` remote candidate — and a harness asserting on the family must treat that as a failure |
+| `selected_candidate_pair` | `peer`, `local_candidate_type`, `remote_candidate_type`, `local_candidate_address`, `remote_candidate_address` | Native-only nominated ICE pair after both channels open. The client reads the transport pair directly, including the actual type and address of a learned `prflx` remote candidate. Exchange proceeds while the probe runs, but clean exit requires this event. TURN requires both types to be `relay`. IPv6 requires a local `host`, a remote `host` or `prflx`, and two concrete dialable IPv6 addresses. Missing or `null` address evidence fails the IPv6 gate |
 | `exchange_ready` | — | Harness-only barrier: every planned pair is open and local ICE gathering is complete, while `--exchange-release-file` still holds application exchange |
 | `exchange_reliable_ready` | — | Loss-harness barrier: every planned pair has sent and received its exact reliable exchange, while `--unreliable-exchange-release-file` still holds the unreliable half |
 | `transport_status_sent` | `transport`, `connected` | An overall `TransportStatus` state change went out under the transport-fallback contract |
@@ -333,18 +333,20 @@ The browser cells live in [`tests/browser_interop_e2e.rs`](tests/browser_interop
 Scenario 6 is the smallest complete live WebRTC cell: two real clients negotiate a direct host path and
 exchange exact messages on both SCTP channel labels. With no STUN or TURN configured, rtc may learn the
 remote host socket from an inbound connectivity check before its signaled candidate is registered, so that
-side is honestly reported as `prflx` with no address. The family-agnostic baseline accepts that shape only
+side is reported with its actual nominated `prflx` type and address. For legacy diagnostic compatibility,
+the family-agnostic baseline also accepts an addressless peer-reflexive report only
 when both clients advertised non-empty host-only UDP candidate sets. CI runs the selector on Linux on every
 push and pull request, and on Windows and macOS on the daily cron cohort (see [Platform
 coverage](#platform-coverage)).
 
 Scenario 8 is the IPv6 cell: both clients run with `--ip-family ipv6`, so only IPv6 host candidates can be
-advertised, and the assertions require a host/host pair of concrete dialable IPv6 addresses plus the exact
+advertised. The nominated pair must have a local host and a remote host or peer-reflexive candidate, with
+two concrete dialable IPv6 addresses plus the exact
 exchange on both channel labels. It shares the file's scenario-serialization guard, so it never overlaps another
 multi-process cell. Signaling still runs over the harness server's IPv4 loopback listener, so the IPv6 claim is
 about the WebRTC data path (ICE, DTLS, SCTP), not the WebSocket. Its precondition applies the client's own
 interface-selection rule, so a runner that cannot serve IPv6 fails the cell with an actionable message; it is
-never skipped. The cell also asserts the **advertised** candidate set carries no IPv4 entry, so a
+never skipped. The cell also requires every **advertised** candidate to be an IPv6 host, so a
 `--ip-family` that silently became a no-op cannot pass on a dual-stack host that happens to select IPv6
 anyway.
 

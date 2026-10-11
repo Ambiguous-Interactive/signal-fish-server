@@ -1291,8 +1291,8 @@ struct Orchestrator<'a> {
     /// connectivity but retains this set so the fresh generation is not
     /// misreported as a second logical pair.
     pair_connected_reported: BTreeSet<PlayerId>,
-    /// Connected physical links whose authoritative selected ICE-pair
-    /// statistics have not reached the wrapper snapshot yet.
+    /// Connected physical links whose nominated ICE-pair transport probe
+    /// has not delivered evidence to the wrapper yet.
     selected_pair_evidence: SelectedPairEvidence,
     /// Peers whose previous generation was discarded for a coordinated retry
     /// and whose replacement is not connected yet. This blocks success during
