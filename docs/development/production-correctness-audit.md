@@ -53,7 +53,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial |
 | A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial |
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial |
-| A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Pending |
+| A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31 |
 | A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial |
 | A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial |
 | A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial |
@@ -1628,3 +1628,51 @@ external formatter allocations. Keep #870 and A20 open.
 cargo nextest run --locked --manifest-path clients/native/Cargo.toml --test output_e2e -E 'test(stderr)'
 cargo nextest run --locked --manifest-path clients/native/Cargo.toml --lib -E 'test(diagnostic_output::tests)'
 ```
+
+### F31 — Spectator detach recovery loses terminal events
+
+Baseline: `c411ee51`. A10. Finding:
+[#887](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/887).
+
+**Invariant:** A committed spectator removal completes the local role transition
+and publishes its terminal acknowledgement, room roster event, and replay entry,
+subject to drain and connection closure. Recovery must keep the room event order
+and advance the delivery generation once.
+
+The existing detach panic controls checked storage, local role, and generation.
+They did not check notifications. Red-first controls at both injected completion
+points received zero terminal room events. A coordinator registration panic
+after the local generation change also made the old compensation advance the
+generation twice. These are recovery-path failures; no ordinary request that
+causes such a panic has been established.
+
+The repair completes local state inside the original room and lifecycle guards.
+It separates the local generation change from coordinator registration and keeps
+the exact advanced handle for one retry. An exhausted error or panic closes the
+connection; the captured room departure event still proceeds through the
+ordinary FIFO publication and replay path. The missing-room branch uses the same
+completion rule. The obsolete marker-based compensation is removed.
+
+Permanent controls check both original panic points, coordinator panics before
+and after registration, retryable errors, and exhausted errors or panics. They
+require the correlated acknowledgement through the advanced classified handle,
+one room event and replay entry, one generation change, clean stored/local
+roles, and a working rejoin. Exhausted publication closes the connection and
+queues no stale acknowledgement. A missing-room control checks the same
+correlated exit. A barrier-driven cancellation history checks exact leave-before-
+join order in live room events and replay; drain controls suppress notifications
+while storage converges.
+
+These controls cover handler and queue behavior. They do not prove physical
+socket receipt, unrelated publication-panic recovery, or the full A10 lifecycle.
+
+```bash
+cargo nextest run --lib -E 'test(server::spectator_service::tests)'
+```
+
+External validation remains open in
+[Rust #286](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/286),
+[.NET #137](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/137),
+and [Godot #356](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/356).
+The clients consume the existing terminal events. No schema migration is required.
+The broader A10 and A01–A22 audits remain incomplete.

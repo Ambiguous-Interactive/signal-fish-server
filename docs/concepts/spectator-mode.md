@@ -198,6 +198,13 @@ The server confirms with a `SpectatorLeft` response:
 }
 ```
 
+After the server removes the stored spectator entry, a recovered panic during
+local detach completion still completes the leave. The server sends the same
+confirmation and room notification, and records the notification for reconnect replay. Shutdown drain
+can suppress these messages as it does for an ordinary detach.
+If the server cannot publish the updated delivery handle after one retry, it
+closes the spectator connection and still publishes the room notification.
+
 ## When Spectator Join Fails
 
 If the room does not exist, admission input is invalid, the shared
