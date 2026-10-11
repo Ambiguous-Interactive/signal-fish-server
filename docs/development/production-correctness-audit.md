@@ -1590,7 +1590,10 @@ The default tracing formatter builds an unbounded thread-local string before
 Cached span fields have a separate 4 KiB text limit across repeated updates.
 The tracing writer is a sink, with internal-error logging disabled: formatter
 or write errors cannot fall back to synchronous `eprintln!`. The binary routes
-CLI errors and panic hooks to the same worker. WebRTC and RTC production log
+CLI errors and panic hooks to the same worker. An outer unwind handler gives
+main-panic diagnostics one second to flush before resuming the panic. Enabled
+`RUST_BACKTRACE` output remains bounded, independent of `RUST_LIB_BACKTRACE`.
+WebRTC and RTC production log
 sources use the installed tracing/log subscriber; their direct print examples
 are documentation, not runtime calls. Library callers own their subscribers.
 
@@ -1599,7 +1602,10 @@ closed. They require the complete fatal error and exit 2, sustained Ping/Pong
 diagnostic production followed by watchdog exit 4 in both runtime modes,
 and bounded CLI-error exit before runtime startup. Unit controls hold a write
 in flight, saturate formatting/queue admission, release capacity, fail writes,
-check UTF-8 and record boundaries, and bound cached span updates.
+check UTF-8 and record boundaries, and bound cached span updates. A separate
+child-process panic control delays a healthy stderr reader behind a queued
+backlog, requires complete admitted records and enabled backtrace text, and
+checks unread and closed stderr. Its prior-hook control loses the panic text.
 
 **Migration and client assessment:** Drain stderr for complete diagnostics.
 Use stdout and exit codes for outcomes. Rust and .NET SDKs use separate library

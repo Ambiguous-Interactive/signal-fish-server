@@ -63,7 +63,9 @@ end with `[truncated]` at a UTF-8 boundary. Embedded line breaks are escaped.
 The binary discards new diagnostics when the queue fills or stderr fails.
 Cached tracing span fields retain at most 4 KiB of text, including updates.
 CLI errors and panic diagnostics use the same bounded path. The owner waits
-at most one second for diagnostic output after runtime shutdown.
+at most one second for diagnostic output after runtime shutdown or before
+propagating a panic from main. Enabled `RUST_BACKTRACE` output uses the same
+record limits.
 
 **Migration:** Drain stderr continuously to retain diagnostics. Use stdout
 JSONL and process exit codes for protocol outcomes. Diagnostic loss does not
