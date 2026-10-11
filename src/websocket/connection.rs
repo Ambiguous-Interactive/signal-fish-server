@@ -3250,6 +3250,8 @@ async fn handle_socket_supervised(
 
 #[cfg(test)]
 mod tests {
+    include!("reconnect_partial_write_tests.rs");
+
     use super::*;
     use crate::database::DatabaseConfig;
     use crate::protocol::{ClientMessage, ServerMessage};

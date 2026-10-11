@@ -1810,3 +1810,40 @@ receipt validation, success barriers, and nonzero failure exits remain binding.
 The server protocol and external Rust, .NET, and Godot clients are unaffected:
 these changes apply only to reference-client failure text and its test harness.
 A20 and A22 remain incomplete.
+
+### Session 408 partial reconnect-response writes
+
+Baseline: `40165ca6`. A05/A06/A15. The session 383 response-loss relay reads a
+complete upstream frame before cutting delivery. It does not establish a
+partial write by the production WebSocket writer.
+
+The new history serves the real router over TCP through a test `AsyncWrite`
+wrapper. After the replacement socket upgrades, the wrapper accepts only one
+or 32 bytes of its first response, then parks the remaining write. The client
+reads that exact prefix before dropping the socket. The 32-byte cell verifies
+the `Reconnected` frame header, declared payload length, and payload prefix.
+The client cannot decode a complete response. The partial v3 response does not
+give the application its rotated credential.
+
+The history waits for real socket cleanup and pending reconnect state. The old
+credential fails. A fresh join restores the room and player name with a new
+identity, exactly two members, and no old route or membership. The complete
+v3 response control instead receives the rotated credential and restores the
+original identity. The complete v2 response omits the credential and uses a
+fresh join after disconnect. Replacement sockets cover the standalone v2 `/ws` route
+and v3 `/v3/ws` route with batching enabled and disabled. Every cell drains
+socket handlers and joins listener tasks, including assertion failure and
+timeout paths.
+
+This is a controlled partial transport-write history, not a new production bug.
+It verifies the existing queue-commit contract: a consumed token does not
+become reusable when a later write is incomplete. It does not certify every
+kernel write schedule, TLS, authenticated recovery, or application receipt.
+The server API, protocol, and external Rust, .NET, and Godot clients are
+unchanged. A05, A06, A15, and campaign #826 remain incomplete.
+
+Focused reproduction:
+
+```bash
+cargo nextest run --lib -E 'test(test_reconnected_partial_transport_write_requires_fresh_join)'
+```
