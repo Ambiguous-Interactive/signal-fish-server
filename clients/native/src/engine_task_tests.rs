@@ -1,5 +1,58 @@
 use super::*;
 
+// Regression #905: a stopped WebRTC driver must retire its required channels.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ended_channel_streams_publish_one_close_unless_receive_rejected() {
+    for close_peer in [true, false] {
+        for receive_rejected in [false, true] {
+            let mut pair = super::receive_tests::LivePair::connect().await;
+            let link = &pair.receiver.peers[&pair.sender_id];
+            let generation = link.generation;
+            *link.receive_admission.rejected.lock().await = receive_rejected;
+            if close_peer {
+                // Keep the engine generation present while the stack ends its
+                // event streams. This represents an unexpected driver stop.
+                link.pc.close().await.unwrap();
+            } else {
+                for channel in link.channels.values() {
+                    channel.close().await.unwrap();
+                }
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !link.channel_tasks.iter().all(|task| task.is_finished()) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("terminal streams stop both required channel pollers");
+
+            let mut closed = BTreeSet::new();
+            while let Ok(event) = pair.receiver_events.try_recv() {
+                if let EngineEvent::ChannelClosed {
+                    peer,
+                    generation: event_generation,
+                    label,
+                } = event
+                {
+                    assert_eq!(peer, pair.sender_id);
+                    assert_eq!(event_generation, generation);
+                    assert!(closed.insert(label), "one terminal event per channel");
+                }
+            }
+            assert_eq!(
+                closed,
+                if receive_rejected {
+                    BTreeSet::new()
+                } else {
+                    BTreeSet::from([RELIABLE_LABEL.to_owned(), UNRELIABLE_LABEL.to_owned()])
+                },
+                "close_peer={close_peer}, receive_rejected={receive_rejected}"
+            );
+            pair.cleanup().await;
+        }
+    }
+}
+
 // Regression #874: retired pollers must release channels without stack OnClose.
 #[tokio::test]
 async fn retired_peer_pollers_release_unconnected_channels() {

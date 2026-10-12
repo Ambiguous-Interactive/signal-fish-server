@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -2166,4 +2166,55 @@ and the wider A01–A22 audit remain open.
 ```bash
 cargo nextest run --all-features --lib \
   -E 'test(test_encrypted_tls_record_loss_preserves_bound_reconnect_and_gameplay_recovery)'
+```
+
+### F37 — Native remote shutdown leaves required channels open
+
+Baseline: `79a15aee`. A20. Finding:
+[#905](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/905).
+
+A real native pair opens both required channels, then one engine removes its
+peer. With locked webrtc/rtc 0.21.0, the remaining engine receives no required
+channel closure within five seconds. The red nextest run `c1b9eb11` fails after
+successful establishment. The old runtime aborts its driver before queued
+shutdown writes can reliably leave the socket. The old RTC channel handler
+also omits closure fan-out when remote DTLS closes. This delays the reference
+client's existing relay fallback and link cleanup.
+
+The native manifest now requires published webrtc/rtc 0.21.1. The lockfile
+updates their coordinated RTC packages without unrelated dependency changes.
+The release gives the driver a bounded shutdown flush and closes channels on
+remote DTLS shutdown ([RTC repair](https://github.com/webrtc-rs/rtc/pull/262),
+[release backport](https://github.com/webrtc-rs/rtc/pull/272)). It also ends
+application event streams when a driver stops. That new EOF path exposed a second integration defect: retaining an
+engine generation and closing its live stack stops both pollers without any
+`ChannelClosed` event. The separate red control on 0.21.1 observes an empty
+closure set instead of the two required labels.
+
+The engine now treats channel EOF, error, and closure as terminal. It publishes
+one `ChannelClosed` per producer and stops polling. A receive-limit rejection
+or missing application receiver returns through its existing terminal path;
+EOF cannot publish another event after shared rejection. The orchestrator's
+existing generation fence discards terminal callbacks from retired links.
+
+The live remote-close history passes in both directions. It checks exact peer,
+label, and generation identity, unique close events, producer completion, empty
+peer maps after cleanup, newer generations on the same engine and player IDs,
+and fresh reliable/unreliable delivery in both directions. A four-cell live
+matrix covers EOF and ordinary channel closure, each with and without shared
+receive rejection. The orchestrator control covers closure and receive
+rejection: each reports `TransportStatus{webrtc,false}`, keeps the planned peer
+obligation, and preserves a newer generation from an old terminal callback.
+
+This is a native reference-client repair. Server wire messages and defaults do
+not change. Current Rust and .NET SDKs leave peer networking to the application;
+Godot uses its own `WebRTCMultiplayerPeer`. These clients need no changes for
+this repair. Graceful shutdown packets remain best effort on a lossy network;
+these controls do not prove prompt detection of packet loss or process death.
+The 0.21.1 reset code still permits premature SID reuse and lacks complete reset
+replay handling. Keep #872, #870, #853, #889, and the wider A20/#826 audit open.
+
+```bash
+cargo nextest run --locked --manifest-path clients/native/Cargo.toml --lib \
+  -E 'test(remote_peer_close_) | test(ended_channel_streams_) | test(channel_termination_)'
 ```
