@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Preserve negotiated delivery modes when native reference clients send replies on remote data channels (#911).
+- Preserve negotiated delivery modes when native reference clients send replies on peer-opened data channels (#911).
 - **Breaking:** Reject incorrect required-channel delivery modes in the native and browser reference clients;
   custom peers must use ordered unlimited-retry `reliable` and unordered zero-retry `unreliable` channels
   without lifetime limits (#911).

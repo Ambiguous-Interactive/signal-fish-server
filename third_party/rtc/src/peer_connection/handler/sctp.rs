@@ -1220,9 +1220,56 @@ mod tests {
                     .server_conn
                     .open_stream(1, PayloadProtocolIdentifier::Dcep)
                     .unwrap();
-                let mut dc_ctx = DataChannelHandlerContext::new(now);
-                let mut channels = DataChannelRegistry::new();
-                let mut stats = RTCStatsAccumulator::new();
+                let mut pc = crate::peer_connection::RTCPeerConnectionBuilder::new()
+                    .build(now)
+                    .unwrap();
+                let default_sctp =
+                    std::mem::replace(&mut pc.pipeline_context.sctp_handler_context, ctx);
+                // Stage decrypted SCTP output at its normal pipeline seam. This
+                // isolates the refusal from ICE/DTLS while using the public read
+                // entrypoint and the actual PeerConnection handler pump.
+                for (stream_id, label, mode) in [
+                    (2, "reliable", ChannelType::Reliable),
+                    (4, "unreliable", ChannelType::PartialReliableRexmitUnordered),
+                ] {
+                    pc.pipeline_context
+                        .sctp_handler_context
+                        .sctp_transport
+                        .sctp_associations
+                        .get_mut(&ch)
+                        .unwrap()
+                        .open_stream(stream_id, PayloadProtocolIdentifier::Dcep)
+                        .unwrap();
+                    established
+                        .server_conn
+                        .open_stream(stream_id, PayloadProtocolIdentifier::Dcep)
+                        .unwrap();
+                    let wire = Message::DataChannelOpen(DataChannelOpen {
+                        channel_type: mode,
+                        priority: CHANNEL_PRIORITY_NORMAL,
+                        reliability_parameter: 0,
+                        label: label.as_bytes().to_vec(),
+                        protocol: Vec::new(),
+                    })
+                    .marshal()
+                    .unwrap();
+                    pc.pipeline_context
+                        .sctp_handler_context
+                        .read_outs
+                        .push_back(TaggedRTCMessageInternal {
+                            now,
+                            transport: TransportContext::default(),
+                            message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(
+                                DataChannelMessage {
+                                    association_handle: ch.0,
+                                    stream_id,
+                                    ppi: PayloadProtocolIdentifier::Dcep,
+                                    payload: BytesMut::from(&wire[..]),
+                                    negotiated: false,
+                                },
+                            )),
+                        });
+                }
                 let wire = Message::DataChannelOpen(DataChannelOpen {
                     channel_type,
                     priority: CHANNEL_PRIORITY_NORMAL,
@@ -1232,6 +1279,48 @@ mod tests {
                 })
                 .marshal()
                 .unwrap();
+                for _ in 0..2 {
+                    pc.pipeline_context
+                        .sctp_handler_context
+                        .read_outs
+                        .push_back(TaggedRTCMessageInternal {
+                            now,
+                            transport: TransportContext::default(),
+                            message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(
+                                DataChannelMessage {
+                                    association_handle: ch.0,
+                                    stream_id: 1,
+                                    ppi: PayloadProtocolIdentifier::Dcep,
+                                    payload: BytesMut::from(&wire[..]),
+                                    negotiated: false,
+                                },
+                            )),
+                        });
+                }
+                // The handler-level refusal is logged and contained by pump_reads.
+                // It must never propagate to the public PeerConnection caller.
+                pc.handle_read(shared::TaggedBytesMut {
+                    now,
+                    transport: TransportContext::default(),
+                    message: BytesMut::new(),
+                })
+                .expect("stream refusal must not fail the PeerConnection caller");
+                for stream_id in [2, 4] {
+                    let id = pc.data_channels.handle_of_stream(&stream_id).unwrap();
+                    assert_eq!(
+                        pc.data_channel(id).unwrap().ready_state(),
+                        crate::data_channel::RTCDataChannelState::Open
+                    );
+                }
+                assert!(pc.data_channels.handle_of_stream(&1).is_none());
+                let mut ctx =
+                    std::mem::replace(&mut pc.pipeline_context.sctp_handler_context, default_sctp);
+                let mut dc_ctx = std::mem::replace(
+                    &mut pc.pipeline_context.datachannel_handler_context,
+                    DataChannelHandlerContext::new(now),
+                );
+                let mut channels = std::mem::take(&mut pc.data_channels);
+                let mut stats = RTCStatsAccumulator::new();
                 {
                     let mut handler = DataChannelHandler::new(
                         &mut dc_ctx,
@@ -1241,28 +1330,23 @@ mod tests {
                         RTCDtlsRole::Server,
                         None,
                     );
-                    let message = || TaggedRTCMessageInternal {
-                        now,
-                        transport: TransportContext::default(),
-                        message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(DataChannelMessage {
-                            association_handle: ch.0,
-                            stream_id: 1,
-                            ppi: PayloadProtocolIdentifier::Dcep,
-                            payload: BytesMut::from(&wire[..]),
-                            negotiated: false,
-                        })),
-                    };
-                    assert!(handler.handle_read(message()).is_err());
-                    // Late announcements are suppressed while reset is pending.
-                    assert!(handler.handle_read(message()).is_ok());
-                    assert!(handler.poll_event().is_none());
-                    assert!(handler.poll_read().is_none());
-                    let mut sctp = SctpHandler::new(&mut ctx, SCTP_PIPELINE_READ_BACKLOG_LIMIT);
-                    let reject = handler
-                        .poll_write()
-                        .expect("rejected physical stream must reset");
-                    sctp.handle_write(reject).unwrap();
-                    assert!(handler.poll_write().is_none(), "no ACK or repeated resets");
+                    let mut sctp = SctpHandler::new(&mut ctx, 0);
+                    let mut resets = 0;
+                    while let Some(message) = handler.poll_write() {
+                        assert!(
+                            !matches!(&message.message,
+                            RTCMessageInternal::Dtls(DTLSMessage::Sctp(channel)) if channel.stream_id == 1),
+                            "refused stream must send no DCEP ACK or payload"
+                        );
+                        if matches!(
+                            &message.message,
+                            RTCMessageInternal::Dtls(DTLSMessage::SctpStreamReject { .. })
+                        ) {
+                            resets += 1;
+                        }
+                        sctp.handle_write(message).unwrap();
+                    }
+                    assert_eq!(resets, 1, "one reset and no invalid-channel ACK");
                 }
                 assert!(channels.handle_of_stream(&1).is_none());
                 assert!(
@@ -1277,17 +1361,16 @@ mod tests {
                 );
                 let mut completed = false;
                 for _ in 0..8 {
-                    let mut sctp = SctpHandler::new(&mut ctx, SCTP_PIPELINE_READ_BACKLOG_LIMIT);
+                    let mut sctp = SctpHandler::new(&mut ctx, 0);
                     while let Some(msg) = sctp.poll_write() {
-                        if let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = msg.message {
-                            if let Some((peer_ch, DatagramEvent::AssociationEvent(event))) =
+                        if let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = msg.message
+                            && let Some((peer_ch, DatagramEvent::AssociationEvent(event))) =
                                 established
                                     .server_ep
                                     .handle(now, client_addr(), None, raw.freeze())
-                            {
-                                assert_eq!(peer_ch, established.server_ch);
-                                established.server_conn.handle_event(event);
-                            }
+                        {
+                            assert_eq!(peer_ch, established.server_ch);
+                            established.server_conn.handle_event(event);
                         }
                     }
                     for raw in drain_transmits(&mut established.server_conn, now) {
@@ -1315,6 +1398,73 @@ mod tests {
                     completed,
                     "reset completes for {channel_type:?} parameter {parameter}"
                 );
+                // Both existing required streams must still carry actual SCTP
+                // messages in both directions after the unrelated stream reset.
+                for stream_id in [2, 4] {
+                    let conn = ctx.sctp_transport.sctp_associations.get_mut(&ch).unwrap();
+                    conn.stream(stream_id)
+                        .unwrap()
+                        .write_sctp(
+                            now,
+                            &Bytes::from_static(b"healthy-out"),
+                            PayloadProtocolIdentifier::String,
+                        )
+                        .unwrap();
+                    for raw in drain_transmits(conn, now) {
+                        if let Some((_, DatagramEvent::AssociationEvent(event))) =
+                            established.server_ep.handle(now, client_addr(), None, raw)
+                        {
+                            established.server_conn.handle_event(event);
+                        }
+                    }
+                    // Consume the reliable DCEP ACK, then the game payload.
+                    let peer = &mut established.server_conn;
+                    loop {
+                        let chunks = peer
+                            .stream(stream_id)
+                            .unwrap()
+                            .read_sctp()
+                            .unwrap()
+                            .unwrap();
+                        if chunks.ppi == PayloadProtocolIdentifier::String {
+                            assert_eq!(&chunks.to_payload(64).unwrap()[..], b"healthy-out");
+                            break;
+                        }
+                    }
+                    peer.stream(stream_id)
+                        .unwrap()
+                        .write_sctp(
+                            now,
+                            &Bytes::from_static(b"healthy-in"),
+                            PayloadProtocolIdentifier::String,
+                        )
+                        .unwrap();
+                    let mut sctp = SctpHandler::new(&mut ctx, 0);
+                    let packets = drain_transmits(peer, now);
+                    for raw in packets {
+                        sctp.handle_read(raw_read(now, raw)).unwrap();
+                    }
+                    let inbound = sctp.poll_read().expect("healthy inbound message");
+                    assert!(
+                        matches!(&inbound.message, RTCMessageInternal::Dtls(DTLSMessage::Sctp(message))
+                        if message.stream_id == stream_id && &message.payload[..] == b"healthy-in")
+                    );
+                    let expected_id = channels.handle_of_stream(&stream_id).unwrap();
+                    let mut handler = DataChannelHandler::new(
+                        &mut dc_ctx,
+                        &mut channels,
+                        &mut stats,
+                        None,
+                        RTCDtlsRole::Server,
+                        None,
+                    );
+                    handler.handle_read(inbound).unwrap();
+                    assert!(matches!(handler.poll_read().unwrap().message,
+                        RTCMessageInternal::Dtls(DTLSMessage::DataChannel(crate::peer_connection::message::internal::ApplicationMessage {
+                            data_channel_id,
+                            data_channel_event: DataChannelEvent::Message(payload),
+                        })) if data_channel_id == expected_id && payload.is_string && &payload.data[..] == b"healthy-in"));
+                }
                 ctx.sctp_transport
                     .sctp_associations
                     .get_mut(&ch)

@@ -197,3 +197,7 @@ debug = 1
 
 [profile.dev.package."*"]
 debug = 0
+
+# Apply the repository's no-unsafe policy to the qualified source copy.
+[lints.rust]
+unsafe_code = "forbid"
