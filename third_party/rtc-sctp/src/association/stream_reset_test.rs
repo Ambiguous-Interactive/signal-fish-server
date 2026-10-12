@@ -198,14 +198,37 @@ fn stream_reset_new_data_before_final_ack_survives() -> Result<()> {
         a.stream(1)?
             .write_sctp(now, &Bytes::from_static(b"first new generation DATA"), ppi)?;
         let new_data = transmitted_data(&a.gather_outbound(now).0).remove(0);
-        let old_ack = b.peer_last_tsn;
         b.handle_data(&new_data)?;
         b.handle_data(&new_data)?; // duplicate cannot consume the window twice
         assert_eq!(b.deferred_reset_data.len(), 1);
         assert_eq!(
-            b.peer_last_tsn, old_ack,
-            "future generation must not be ACKed into old stream"
+            b.create_selective_ack_chunk().cumulative_tsn_ack,
+            new_data.tsn,
+            "accepted held DATA must be acknowledged before reset completion"
         );
+        let sack = b
+            .gather_outbound(now)
+            .0
+            .iter()
+            .flat_map(|raw| Packet::unmarshal(raw).unwrap().chunks)
+            .find_map(|c| {
+                c.as_any()
+                    .downcast_ref::<ChunkSelectiveAck>()
+                    .map(|s| ChunkSelectiveAck {
+                        cumulative_tsn_ack: s.cumulative_tsn_ack,
+                        advertised_receiver_window_credit: s.advertised_receiver_window_credit,
+                        gap_ack_blocks: s.gap_ack_blocks.clone(),
+                        duplicate_tsn: s.duplicate_tsn.clone(),
+                    })
+            })
+            .expect("held DATA must emit an actual SACK before the final reset ACK");
+        a.handle_sack(&sack, now + Duration::from_millis(1))?;
+        assert!(
+            a.inflight_queue.is_empty(),
+            "held payload must not exhaust its zero-retry budget"
+        );
+        a.handle_timeout(now + Duration::from_secs(2));
+        assert!(transmitted_data(&a.gather_outbound(now + Duration::from_secs(2)).0).is_empty());
         assert!(!b.streams.get(&1).unwrap().reassembly_queue.is_readable());
         for p in final_ack {
             for c in p.chunks {
@@ -215,11 +238,37 @@ fn stream_reset_new_data_before_final_ack_survives() -> Result<()> {
             }
         }
         assert!(b.deferred_reset_data.is_empty());
+        let reopened_credit = b
+            .gather_outbound(now)
+            .0
+            .iter()
+            .flat_map(|raw| Packet::unmarshal(raw).unwrap().chunks)
+            .find_map(|c| {
+                c.as_any()
+                    .downcast_ref::<ChunkSelectiveAck>()
+                    .map(|s| ChunkSelectiveAck {
+                        cumulative_tsn_ack: s.cumulative_tsn_ack,
+                        advertised_receiver_window_credit: s.advertised_receiver_window_credit,
+                        gap_ack_blocks: s.gap_ack_blocks.clone(),
+                        duplicate_tsn: s.duplicate_tsn.clone(),
+                    })
+            })
+            .expect("released metadata must advertise its restored receive window");
+        assert!(
+            reopened_credit.advertised_receiver_window_credit
+                > sack.advertised_receiver_window_credit
+        );
         assert_eq!(
             b.stream(1)?.read_sctp()?.unwrap().to_payload(100)?.freeze(),
             Bytes::from_static(b"first new generation DATA")
         );
         assert_eq!(b.peer_last_tsn, new_data.tsn);
+        assert!(b.stream(1)?.read_sctp()?.is_none());
+        b.handle_data(&new_data)?;
+        assert!(
+            b.stream(1)?.read_sctp()?.is_none(),
+            "late duplicates must not deliver a second copy"
+        );
     }
     Ok(())
 }
@@ -657,5 +706,267 @@ fn stream_reset_stopped_reader_retries_deferred_incoming_reset() -> Result<()> {
         "closing a reader must not wait forever for an impossible read"
     );
     assert!(b.streams.get(&1).unwrap().incoming_reset_complete);
+    Ok(())
+}
+
+#[test]
+fn stream_reset_busy_response_retries_same_request_sequence() -> Result<()> {
+    let (mut a, _) = reset_pair();
+    let now = Instant::now();
+    a.send_reset_request(now, 1)?;
+    let original = reset_requests(&mut a, now).remove(0);
+    let rsn = request(&original).reconfig_request_sequence_number;
+    a.handle_reconfig_param(
+        &response(rsn, ReconfigResult::ErrorRequestAlreadyInProgress),
+        &mut vec![],
+        now,
+    )?;
+    assert!(
+        a.reconfigs.contains_key(&rsn),
+        "busy peer must retain the same request sequence"
+    );
+    a.open_stream(2, PayloadProtocolIdentifier::Binary)?;
+    a.send_reset_request(now, 2)?;
+    assert!(
+        reset_requests(&mut a, now).is_empty(),
+        "a second reset cannot bypass the busy request"
+    );
+    assert_eq!(a.reconfigs.len(), 1);
+    assert!(
+        !a.reconfig_in_progress,
+        "busy retries retain the normal retransmission error budget"
+    );
+    let at = a
+        .poll_timeout()
+        .expect("busy response keeps retry timer armed");
+    a.handle_timeout(at);
+    let retransmit = reset_requests(&mut a, at).remove(0);
+    assert_eq!(request(&retransmit), request(&original));
+    Ok(())
+}
+
+#[test]
+fn stream_reset_held_forward_tsn_discards_incomplete_but_keeps_complete_data() -> Result<()> {
+    for unordered in [false, true] {
+        for complete in [false, true] {
+            let (_, mut b) = reset_pair();
+            b.streams.get_mut(&1).unwrap().incoming_reset_complete = true;
+            let head = b.peer_last_tsn.wrapping_add(1);
+            let d = ChunkPayloadData {
+                tsn: head,
+                stream_identifier: 1,
+                unordered,
+                beginning_fragment: true,
+                ending_fragment: complete,
+                user_data: Bytes::from_static(b"held head"),
+                ..Default::default()
+            };
+            b.handle_data(&d)?;
+            assert_eq!(b.create_selective_ack_chunk().cumulative_tsn_ack, head);
+            let forward = ChunkForwardTsn {
+                new_cumulative_tsn: head.wrapping_add(1),
+                streams: if unordered {
+                    vec![]
+                } else {
+                    vec![ChunkForwardTsnStream {
+                        identifier: 1,
+                        sequence: 0,
+                    }]
+                },
+            };
+            b.handle_forward_tsn(&forward)?;
+            assert_eq!(
+                b.deferred_reset_data.len(),
+                usize::from(complete),
+                "forwarding must remove incomplete saved fragments only"
+            );
+            b.unregister_stream(1, AssociationError::Reset);
+            b.release_reset_data();
+            if complete {
+                let held = b.stream(1)?.read_sctp()?.unwrap();
+                assert_eq!(
+                    held.to_payload(100)?.freeze(),
+                    Bytes::from_static(b"held head")
+                );
+            } else {
+                assert!(
+                    !b.streams.contains_key(&1),
+                    "abandoned fragments must not reserve the freed SID"
+                );
+            }
+            let next = ChunkPayloadData {
+                tsn: forward.new_cumulative_tsn.wrapping_add(1),
+                stream_identifier: 1,
+                stream_sequence_number: 1,
+                unordered,
+                beginning_fragment: true,
+                ending_fragment: true,
+                user_data: Bytes::from_static(b"after abandonment"),
+                ..Default::default()
+            };
+            b.handle_data(&next)?;
+            assert_eq!(
+                b.stream(1)?.read_sctp()?.unwrap().to_payload(100)?.freeze(),
+                Bytes::from_static(b"after abandonment")
+            );
+            assert!(b.deferred_reset_data.is_empty());
+            assert_eq!(b.deferred_reset_bytes, 0);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn stream_reset_held_forward_tsn_without_data_preserves_ordered_ssn() -> Result<()> {
+    let (_, mut b) = reset_pair();
+    b.streams.get_mut(&1).unwrap().incoming_reset_complete = true;
+    let skip = b.peer_last_tsn.wrapping_add(1);
+    b.handle_forward_tsn(&ChunkForwardTsn {
+        new_cumulative_tsn: skip,
+        streams: vec![ChunkForwardTsnStream {
+            identifier: 1,
+            sequence: 0,
+        }],
+    })?;
+    b.unregister_stream(1, AssociationError::Reset);
+    b.release_reset_data();
+    assert!(
+        !b.streams.contains_key(&1),
+        "a forwarded SSN marker must not reopen or reserve the SID"
+    );
+    assert!(b.accept_stream().is_none());
+    b.open_stream(1, PayloadProtocolIdentifier::Binary)?;
+    b.handle_data(&ChunkPayloadData {
+        tsn: skip.wrapping_add(1),
+        stream_identifier: 1,
+        stream_sequence_number: 1,
+        beginning_fragment: true,
+        ending_fragment: true,
+        user_data: Bytes::from_static(b"first received new message"),
+        ..Default::default()
+    })?;
+    assert_eq!(
+        b.stream(1)?.read_sctp()?.unwrap().to_payload(100)?.freeze(),
+        Bytes::from_static(b"first received new message")
+    );
+    Ok(())
+}
+
+#[test]
+fn stream_reset_pending_old_drain_forwards_future_ordered_queue() -> Result<()> {
+    for future_id in [1, 2] {
+        let (a, mut b) = reset_pair();
+        let now = Instant::now();
+        let old_tsn = b.peer_last_tsn.wrapping_add(1);
+        b.handle_data(&ChunkPayloadData {
+            tsn: old_tsn,
+            stream_identifier: 1,
+            beginning_fragment: true,
+            ending_fragment: true,
+            user_data: Bytes::from_static(b"old final message"),
+            ..Default::default()
+        })?;
+        b.streams.get_mut(&1).unwrap().outgoing_reset_complete = true;
+        let p = Box::new(ParamOutgoingResetRequest {
+            reconfig_request_sequence_number: a.my_next_rsn,
+            reconfig_response_sequence_number: b.my_next_rsn.wrapping_sub(1),
+            sender_last_tsn: old_tsn,
+            stream_identifiers: if future_id == 1 { vec![1] } else { vec![] },
+        }) as Box<dyn Param>;
+        b.handle_reconfig_param(&p, &mut vec![], now)?;
+        assert!(!b.streams.get(&1).unwrap().incoming_reset_complete);
+        let head = old_tsn.wrapping_add(1);
+        if future_id == 1 {
+            b.handle_data(&ChunkPayloadData {
+                tsn: head,
+                stream_identifier: future_id,
+                beginning_fragment: true,
+                ending_fragment: false,
+                user_data: Bytes::from_static(b"incomplete future"),
+                ..Default::default()
+            })?;
+        }
+        b.handle_forward_tsn(&ChunkForwardTsn {
+            new_cumulative_tsn: head.wrapping_add(1),
+            streams: vec![ChunkForwardTsnStream {
+                identifier: future_id,
+                sequence: 0,
+            }],
+        })?;
+        if future_id == 1 {
+            assert_eq!(
+                b.deferred_reset_reassembly
+                    .get(&future_id)
+                    .unwrap()
+                    .next_ssn,
+                1,
+                "future ordered progress must not wait for the old application's drain"
+            );
+        } else {
+            assert_eq!(
+                b.reset_ssn_markers.get(&future_id),
+                Some(&1),
+                "a future SID without DATA must save its ordered progress lazily"
+            );
+        }
+        b.handle_data(&ChunkPayloadData {
+            tsn: head.wrapping_add(2),
+            stream_identifier: future_id,
+            stream_sequence_number: 1,
+            beginning_fragment: true,
+            ending_fragment: true,
+            user_data: Bytes::from_static(b"future complete message"),
+            ..Default::default()
+        })?;
+        {
+            let mut old = b.stream(1)?;
+            assert_eq!(
+                old.read_sctp()?.unwrap().to_payload(100)?.freeze(),
+                Bytes::from_static(b"old final message")
+            );
+            assert!(old.read_sctp()?.is_none());
+        }
+        assert_eq!(
+            b.stream(future_id)?
+                .read_sctp()?
+                .unwrap()
+                .to_payload(100)?
+                .freeze(),
+            Bytes::from_static(b"future complete message")
+        );
+        assert!(b.stream(future_id)?.read_sctp()?.is_none());
+    }
+    Ok(())
+}
+
+#[test]
+fn stream_reset_held_fragments_cross_tsn_wrap() -> Result<()> {
+    for unordered in [false, true] {
+        let (_, mut b) = reset_pair();
+        b.peer_last_tsn = u32::MAX - 1;
+        b.streams.get_mut(&1).unwrap().incoming_reset_complete = true;
+        for (tsn, beginning, ending, data) in [
+            (u32::MAX, true, false, b"head".as_slice()),
+            (0, false, true, b"tail".as_slice()),
+        ] {
+            b.handle_data(&ChunkPayloadData {
+                tsn,
+                stream_identifier: 1,
+                unordered,
+                beginning_fragment: beginning,
+                ending_fragment: ending,
+                user_data: Bytes::copy_from_slice(data),
+                ..Default::default()
+            })?;
+        }
+        assert_eq!(b.create_selective_ack_chunk().cumulative_tsn_ack, 0);
+        b.unregister_stream(1, AssociationError::Reset);
+        b.release_reset_data();
+        assert_eq!(
+            b.stream(1)?.read_sctp()?.unwrap().to_payload(100)?.freeze(),
+            Bytes::from_static(b"headtail")
+        );
+        assert!(b.stream(1)?.read_sctp()?.is_none());
+    }
     Ok(())
 }

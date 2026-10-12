@@ -2364,15 +2364,16 @@ It also discarded outgoing requests on `InProgress` and applied duplicate
 requests to a reused stream. Each transition has a deterministic failing control
 against the published behavior.
 
-The repair reserves a stream until both reset directions complete. It retries
-`InProgress` without exhausting the error budget and validates peer request
-sequences. Duplicate requests replay the cached response without touching a new
-stream. Reciprocal requests follow queued outgoing data. Deferred incoming
-resets resume after data drains, the reader stops, or cumulative TSN advances. New-generation DATA
-that arrives before the final acknowledgment stays within a bounded buffer.
-RTC applies the old channel's payloads and stream events in read order before
-admitting the reopened channel. Generation-bound SCTP handles and event cleanup
-prevent an old reader or notification from touching the new stream.
+The repair reserves a stream until both reset directions complete. It retries `InProgress` without
+exhausting the error budget, retries a temporary busy response with the same sequence number, and
+validates peer request sequences. Duplicate requests replay the cached response without touching a
+new stream. Reciprocal requests follow queued outgoing data. Deferred incoming resets resume after
+data drains, the reader stops, or cumulative TSN advances. New-generation DATA that arrives before
+the final acknowledgment stays within a bounded buffer. Transport acknowledgment continues while
+generation delivery waits. Hidden reassembly applies forward-TSN abandonment before the new channel
+is exposed. RTC applies the old channel's payloads and stream events in read order before admitting
+the reopened channel. Generation-bound SCTP handles and event cleanup prevent an old reader or
+notification from touching the new stream.
 
 The native regression creates and refuses channels sequentially in both
 directions. Each direction offers empty and long Unicode labels, 16 distinct
@@ -2393,7 +2394,7 @@ This reference-engine repair changes no server message or external SDK API.
 The broad WebRTC resource audit #870, unexplained establishment failures #853
 and #889, published-package qualification #912, and campaign #826 stay open.
 
-The focused SCTP gate passes 29 reset controls, including 15 new cases and 14
+The focused SCTP gate passes 34 reset controls, including 20 new cases and 14
 retained upstream controls. The corrected native sequential test loses three
 of 18 optional OPENs against the unpatched dependency; the patched history
 preserves every offered OPEN, required traffic, and actual stream reuse.

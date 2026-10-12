@@ -22,13 +22,19 @@ Incoming request sequences start at the peer's initial TSN and wrap at 32 bits.
 The last response is cached. Duplicate requests replay that response without
 changing the current stream generation. Stale and future sequences are refused.
 InProgress retains and retries the outgoing request without consuming the
-reset retransmission error budget. Denied resets keep the SID reserved and
-permit an explicit retry.
+reset retransmission error budget. A busy receiver retains the same request
+sequence for retry with the normal retransmission error budget.
+Denied resets keep the SID reserved and permit an explicit retry.
 
 DATA for a new stream generation can arrive before the final reset response.
-The receiver saves it until the old stream is removed. The receive window
-charges payload and retained metadata. TSN lookup rejects duplicates without
-a linear scan. The receiver then admits saved DATA in TSN order.
+The receiver acknowledges it at once and saves its reassembly separately until
+the old stream is removed. The receive window charges payload and all retained
+chunk headers and queue metadata. TSN lookup rejects duplicates without a
+linear scan. FORWARD TSN removes abandoned incomplete saved messages and keeps
+complete received messages. A FWD TSN beyond a pending reset boundary updates
+the held future generation even before the old reader drains. Ordered progress with no saved DATA uses one small
+marker per SID, applied when an actual stream is opened. A marker does not
+reserve the freed SID or emit a stream-open event.
 FORWARD TSN, application reads, and local read shutdown retry deferred resets.
 No stream-close event is emitted before both reset directions complete.
 Stream handles bind to a generation. An old read loop cannot consume a new
@@ -36,7 +42,8 @@ stream after its final read completes a reset. Closed SIDs leave the accept queu
 Queued notifications from the old stream are removed before its close event.
 
 Changed upstream files: `src/association/mod.rs`, `stream.rs`, `timer.rs`,
-and `association_test.rs`.
+and `association_test.rs`. `src/queue/reassembly_queue.rs` uses wrapping TSN
+adjacency for ordered and unordered fragmented messages.
 `src/endpoint/endpoint_test.rs` uses negotiated request sequences and verifies
 SID reservation until reciprocal acknowledgment in its old-message controls.
 The added `stream_reset_test.rs` contains deterministic
@@ -46,7 +53,8 @@ metadata limits, denied requests, retries, and outgoing fragment ordering.
 These controls qualify the local repair. They do not claim full RFC 6525 support
 for parameter types that upstream does not implement.
 The procedures follow [RFC 6525](https://www.rfc-editor.org/rfc/rfc6525.html),
-sections 5.1.1, 5.2.1, 5.2.2, and 5.2.7.
+sections 5.1.1, 5.2.1, 5.2.2, and 5.2.7. Transport acknowledgment follows
+[RFC 9260](https://www.rfc-editor.org/rfc/rfc9260.html), section 6.2.
 
 Remove the vendored package and path patches after a published release passes
 these controls and the RTC/native close-and-reopen controls.

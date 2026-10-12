@@ -187,6 +187,10 @@ pub struct Association {
     reconfig_in_progress: bool,
     deferred_reset_data: HashMap<u32, ChunkPayloadData>,
     deferred_reset_bytes: usize,
+    deferred_reset_reassembly: HashMap<StreamId, ReassemblyQueue>,
+    // One small marker per SID; repeated resets replace it. Stream IDs are
+    // 16-bit, so peer-driven skipped generations cannot grow this unbounded.
+    reset_ssn_markers: HashMap<StreamId, u16>,
     reconfigs: HashMap<u32, ChunkReconfig>,
     reconfig_requests: HashMap<u32, ParamOutgoingResetRequest>,
 
@@ -296,6 +300,8 @@ impl Default for Association {
             reconfig_in_progress: false,
             deferred_reset_data: HashMap::default(),
             deferred_reset_bytes: 0,
+            deferred_reset_reassembly: HashMap::default(),
+            reset_ssn_markers: HashMap::default(),
             reconfigs: HashMap::default(),
             reconfig_requests: HashMap::default(),
 
@@ -747,6 +753,10 @@ impl Association {
             debug!("[{}] closing association..", self.side);
 
             self.close_all_timers();
+            self.deferred_reset_data.clear();
+            self.deferred_reset_reassembly.clear();
+            self.reset_ssn_markers.clear();
+            self.deferred_reset_bytes = 0;
 
             for si in self.streams.keys().cloned().collect::<Vec<u16>>() {
                 self.unregister_stream(si, reason.clone());
@@ -877,10 +887,16 @@ impl Association {
             });
             debug!("[{}] unregister_stream {}", self.side, stream_identifier);
             self.events.push_back(Event::AssociationLost {
-                reason,
+                reason: reason.clone(),
                 id: stream_identifier,
             });
             s.state = RecvSendState::Closed;
+            if self.state() == AssociationState::Established
+                && matches!(reason, AssociationError::Reset)
+                && let Some(next_ssn) = s.deferred_reset_next_ssn
+            {
+                self.reset_ssn_markers.insert(stream_identifier, next_ssn);
+            }
         }
     }
 
@@ -1368,9 +1384,9 @@ impl Association {
             d.unordered,
         );
         self.stats.inc_datas();
-        // A peer may reuse its SID and send the new generation before the
-        // final reset response reaches us. Keep those DATA chunks out of the
-        // old reassembly queue and cumulative ACK until both directions finish.
+        // A peer may reuse its SID before the final reset response reaches
+        // us. Accept and acknowledge its DATA at the transport layer, while
+        // keeping its reassembly separate from the reserved old generation.
         let waiting_for_reset = self
             .streams
             .get(&d.stream_identifier)
@@ -1381,14 +1397,44 @@ impl Association {
                     && sna32gt(d.tsn, p.sender_last_tsn)
             });
         if waiting_for_reset {
+            let queue_cost = if self
+                .deferred_reset_reassembly
+                .contains_key(&d.stream_identifier)
+            {
+                0
+            } else {
+                Self::deferred_queue_cost()
+            };
             if self.payload_queue.can_push(d, self.peer_last_tsn)
                 && !self.deferred_reset_data.contains_key(&d.tsn)
-                && Self::deferred_data_cost(d) <= self.get_my_receiver_window_credit() as usize
+                && Self::deferred_data_cost(d) + queue_cost
+                    <= self.get_my_receiver_window_credit() as usize
             {
-                self.deferred_reset_bytes += Self::deferred_data_cost(d);
+                let next_ssn = self
+                    .streams
+                    .get(&d.stream_identifier)
+                    .and_then(|s| s.deferred_reset_next_ssn)
+                    .or_else(|| self.reset_ssn_markers.get(&d.stream_identifier).copied())
+                    .unwrap_or(0);
+                let queue = self
+                    .deferred_reset_reassembly
+                    .entry(d.stream_identifier)
+                    .or_insert_with(|| {
+                        let mut q = ReassemblyQueue::new(d.stream_identifier);
+                        q.next_ssn = next_ssn;
+                        q
+                    });
+                queue.push(d.clone());
+                self.deferred_reset_bytes += Self::deferred_data_cost(d) + queue_cost;
                 self.deferred_reset_data.insert(d.tsn, d.clone());
+                self.payload_queue.push(d.clone(), self.peer_last_tsn);
             }
-            return Ok(vec![]);
+            // ACK accepted DATA, duplicates, and the current receive window
+            // even while the application cannot access the new generation.
+            self.ack_state = AckState::Immediate;
+            self.timers.stop(Timer::Ack);
+            self.awake_write_loop();
+            return self.handle_peer_last_tsn_and_acknowledgement(true);
         }
 
         let can_push = self.payload_queue.can_push(d, self.peer_last_tsn);
@@ -1634,16 +1680,42 @@ impl Association {
             self.peer_last_tsn = self.peer_last_tsn.wrapping_add(1);
         }
 
+        for q in self.deferred_reset_reassembly.values_mut() {
+            q.forward_tsn_for_unordered(c.new_cumulative_tsn);
+        }
+
         // Report new peer_last_tsn value and abandoned largest SSN value to
         // corresponding streams so that the abandoned chunks can be removed
         // from the reassemblyQueue.
         for forwarded in &c.streams {
-            if let Some(s) = self.streams.get_mut(&forwarded.identifier) {
+            let id = forwarded.identifier;
+            // A crossing FWD TSN can belong to the future generation while
+            // the old application still holds readable data. A FWD TSN at or
+            // below the reset boundary advances only the old generation.
+            let future_generation = self
+                .streams
+                .get(&id)
+                .is_some_and(|s| s.incoming_reset_complete)
+                || self.reconfig_requests.values().any(|p| {
+                    (p.stream_identifiers.is_empty() || p.stream_identifiers.contains(&id))
+                        && sna32gt(c.new_cumulative_tsn, p.sender_last_tsn)
+                });
+            if future_generation {
+                if let Some(q) = self.deferred_reset_reassembly.get_mut(&id) {
+                    q.forward_tsn_for_ordered(forwarded.sequence);
+                }
+                if let Some(s) = self.streams.get_mut(&id) {
+                    s.deferred_reset_next_ssn = Some(forwarded.sequence.wrapping_add(1));
+                } else {
+                    self.reset_ssn_markers
+                        .insert(id, forwarded.sequence.wrapping_add(1));
+                }
+            }
+            if let Some(s) = self.streams.get_mut(&id) {
                 s.handle_forward_tsn_for_ordered(forwarded.sequence);
                 if s.reassembly_queue.is_readable() {
-                    self.events.push_back(Event::Stream(StreamEvent::Readable {
-                        id: s.stream_identifier,
-                    }));
+                    self.events
+                        .push_back(Event::Stream(StreamEvent::Readable { id }));
                 }
             }
         }
@@ -1661,6 +1733,21 @@ impl Association {
             }
         }
 
+        let retained: FxHashSet<_> = self
+            .deferred_reset_reassembly
+            .values()
+            .flat_map(|q| {
+                q.ordered
+                    .iter()
+                    .chain(q.unordered.iter())
+                    .flat_map(|message| message.chunks.iter())
+                    .chain(q.unordered_chunks.iter())
+            })
+            .map(|d| d.tsn)
+            .collect();
+        self.deferred_reset_data
+            .retain(|tsn, _| retained.contains(tsn));
+        self.refresh_deferred_reset_accounting();
         self.handle_peer_last_tsn_and_acknowledgement(false)
     }
 
@@ -1800,27 +1887,70 @@ impl Association {
     }
 
     fn deferred_data_cost(d: &ChunkPayloadData) -> usize {
-        // Charge retained metadata and map capacity as well as payload. Empty
-        // or tiny DATA cannot grow this queue without consuming window credit.
-        std::mem::size_of::<ChunkPayloadData>() + 32 + d.user_data.len()
+        // Charge all three retained chunk headers and map capacity as well as the
+        // shared payload. Tiny DATA must also consume receive window credit.
+        3 * std::mem::size_of::<ChunkPayloadData>() + 96 + d.user_data.len()
     }
 
-    /// Admit saved DATA only after removing the old generation.
+    fn deferred_queue_cost() -> usize {
+        std::mem::size_of::<ReassemblyQueue>() + 64
+    }
+
+    /// Install already acknowledged DATA after removing the old generation.
+    /// Replaying handle_data would reject TSNs that transport already accepted.
     fn release_reset_data(&mut self) {
-        let pending = std::mem::take(&mut self.deferred_reset_data);
-        let (mut ready, waiting): (Vec<_>, Vec<_>) = pending
-            .into_values()
-            .partition(|d| !self.streams.contains_key(&d.stream_identifier));
-        self.deferred_reset_bytes = waiting.iter().map(Self::deferred_data_cost).sum();
-        self.deferred_reset_data = waiting.into_iter().map(|d| (d.tsn, d)).collect();
-        // Hash iteration must not reorder fragments across the TSN wrap.
-        ready.sort_by_key(|d| d.tsn.wrapping_sub(self.peer_last_tsn));
-        for d in ready {
-            match self.handle_data(&d) {
-                Ok(packets) => self.control_queue.extend(packets),
-                Err(err) => debug!("[{}] deferred reset DATA failed: {:?}", self.side, err),
+        let ready: Vec<_> = self
+            .deferred_reset_reassembly
+            .keys()
+            .copied()
+            .filter(|id| !self.streams.contains_key(id))
+            .collect();
+        let released = !ready.is_empty();
+        for id in ready {
+            let Some(queue) = self.deferred_reset_reassembly.remove(&id) else {
+                continue;
+            };
+            self.deferred_reset_data
+                .retain(|_, d| d.stream_identifier != id);
+            if queue.ordered.is_empty()
+                && queue.unordered.is_empty()
+                && queue.unordered_chunks.is_empty()
+            {
+                // All held fragments were abandoned. Preserve ordered progress
+                // without emitting an Open event or reserving the now-free SID.
+                if queue.next_ssn != 0 {
+                    self.reset_ssn_markers.insert(id, queue.next_ssn);
+                }
+                continue;
+            }
+            if self.get_or_create_stream(id).is_some()
+                && let Some(s) = self.streams.get_mut(&id)
+            {
+                s.reassembly_queue = queue;
+                if s.reassembly_queue.is_readable() {
+                    self.events.push_back(Event::DatagramReceived);
+                    self.events
+                        .push_back(Event::Stream(StreamEvent::Readable { id }));
+                }
             }
         }
+        self.refresh_deferred_reset_accounting();
+        if released {
+            // Removing retained metadata reopens receive credit. Advertise it
+            // without waiting for the sender to probe a stale small window.
+            self.ack_state = AckState::Immediate;
+            self.timers.stop(Timer::Ack);
+            self.awake_write_loop();
+        }
+    }
+
+    fn refresh_deferred_reset_accounting(&mut self) {
+        self.deferred_reset_bytes = self
+            .deferred_reset_data
+            .values()
+            .map(Self::deferred_data_cost)
+            .sum::<usize>()
+            + self.deferred_reset_reassembly.len() * Self::deferred_queue_cost();
     }
 
     fn reset_response(&self, rsn: u32, result: ReconfigResult) -> Packet {
@@ -1869,8 +1999,8 @@ impl Association {
                 return Ok(());
             }
             match p.result {
-                ReconfigResult::InProgress => {
-                    self.reconfig_in_progress = true;
+                ReconfigResult::InProgress | ReconfigResult::ErrorRequestAlreadyInProgress => {
+                    self.reconfig_in_progress = p.result == ReconfigResult::InProgress;
                     self.timers.stop(Timer::Reconfig);
                     self.timers
                         .start(Timer::Reconfig, now, self.rto_mgr.get_rto());
@@ -2340,6 +2470,9 @@ impl Association {
             default_payload_type,
         );
 
+        if let Some(next_ssn) = self.reset_ssn_markers.remove(&stream_identifier) {
+            s.reassembly_queue.next_ssn = next_ssn;
+        }
         s.generation = self.next_stream_generation;
         self.next_stream_generation = self.next_stream_generation.wrapping_add(1);
 

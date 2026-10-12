@@ -3086,13 +3086,45 @@ mod tests {
             })
             .await
             .expect("selected channel keeps its close callback");
+            let a_generation = a.peers[&b_id].generation;
+            let b_generation = b.peers[&a_id].generation;
             a.remove_peer(b_id).await.unwrap();
             b.remove_peer(a_id).await.unwrap();
             assert_eq!(a.connected_pair_count(), 0);
             assert_eq!(b.connected_pair_count(), 0);
-            // Retired-link callbacks must not satisfy fresh-link setup barriers.
-            while a_rx.try_recv().is_ok() {}
-            while b_rx.try_recv().is_ok() {}
+            // Verify each retired-link callback before starting fresh-link barriers.
+            for (events, peer, generation) in [
+                (&mut a_rx, b_id, a_generation),
+                (&mut b_rx, a_id, b_generation),
+            ] {
+                loop {
+                    match events.try_recv() {
+                        Ok(event) => {
+                            assert_eq!(event.peer_generation(), (peer, generation));
+                            match event {
+                                EngineEvent::ChannelClosed { label, .. } => assert!(
+                                    matches!(label.as_str(), RELIABLE_LABEL | UNRELIABLE_LABEL),
+                                    "only selected required channels may close during teardown"
+                                ),
+                                EngineEvent::PcState { state, .. } => {
+                                    assert_eq!(state, RTCPeerConnectionState::Closed);
+                                }
+                                EngineEvent::LocalCandidate { candidate_json, .. } => {
+                                    assert!(!candidate_json.is_empty());
+                                }
+                                EngineEvent::IceGatheringComplete { .. } => {}
+                                _ => panic!(
+                                    "teardown must not emit channel admission or game callbacks"
+                                ),
+                            }
+                        }
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            panic!("engine event stream stays connected for fresh pairing")
+                        }
+                    }
+                }
+            }
         }
     }
 

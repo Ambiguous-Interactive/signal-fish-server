@@ -180,7 +180,7 @@ impl Chunks {
                 //   used by the receiver to reassemble the message.  This means that the
                 //   TSNs for each fragment of a fragmented user message MUST be strictly
                 //   sequential.
-                if c.tsn != last_tsn + 1 {
+                if c.tsn != last_tsn.wrapping_add(1) {
                     // mid or end fragment is missing
                     return false;
                 }
@@ -305,7 +305,7 @@ impl ReassemblyQueue {
             }
 
             // Check if contiguous in TSN
-            if c.tsn != last_tsn + 1 {
+            if c.tsn != last_tsn.wrapping_add(1) {
                 start_idx = -1;
                 continue;
             }
