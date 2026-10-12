@@ -683,7 +683,7 @@ jobs:
         if: steps.dep-relevance.outputs.relevant == 'true'
         env:
           RUSTUP_TOOLCHAIN: ${{ steps.deny-msrv.outputs.version }}
-        run: cargo deny --log-level warn --manifest-path third_party/rtc/Cargo.toml --all-features check --config clients/native/deny.toml
+        run: cargo deny --log-level warn --manifest-path third_party/rtc/Cargo.toml --config clients/native/deny.toml --all-features check
       - name: Run cargo-deny (fuzz package)
         if: steps.dep-relevance.outputs.relevant == 'true'
         env:

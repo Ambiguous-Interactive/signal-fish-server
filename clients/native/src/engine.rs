@@ -2833,7 +2833,14 @@ mod tests {
             for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
                 let channel = sender.peers[&sender_peer]
                     .pc
-                    .create_data_channel(label, None)
+                    .create_data_channel(
+                        label,
+                        Some(RTCDataChannelInit {
+                            ordered: label == RELIABLE_LABEL,
+                            max_retransmits: (label == UNRELIABLE_LABEL).then_some(0),
+                            ..RTCDataChannelInit::default()
+                        }),
+                    )
                     .await
                     .unwrap();
                 duplicates.push((label, channel));
