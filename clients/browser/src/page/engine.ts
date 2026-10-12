@@ -339,9 +339,18 @@ export class Engine {
       );
     };
     pc.ondatachannel = (event) => {
-      // This reference client uses exactly two channels. Reject extras before
-      // retaining their labels or installing callbacks, including large labels.
-      if (event.channel.label !== RELIABLE_LABEL && event.channel.label !== UNRELIABLE_LABEL) {
+      // Require the same delivery modes as our locally created channels.
+      // Reject invalid announcements before retaining labels or callbacks.
+      const channel = event.channel;
+      const requiredMode =
+        channel.maxPacketLifeTime === null &&
+        ((channel.label === RELIABLE_LABEL &&
+          channel.ordered === true &&
+          channel.maxRetransmits === null) ||
+          (channel.label === UNRELIABLE_LABEL &&
+            channel.ordered === false &&
+            channel.maxRetransmits === 0));
+      if (!requiredMode) {
         event.channel.close();
         return;
       }

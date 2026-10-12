@@ -73,6 +73,10 @@ cargo fmt --check
 echo "==> Linting the reference client (clippy, zero warnings)"
 cargo clippy --locked --all-targets -- -D warnings
 
+echo "==> Verifying the local RTC channel-mode repair"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib remote_dcep_
+
 echo "==> Running the reference-client test suite (unit + multi-process interop)"
 SIGNAL_FISH_SERVER_BIN="${SERVER_BIN}" cargo test --locked "${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"}"
 

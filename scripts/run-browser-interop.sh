@@ -108,6 +108,9 @@ echo "==> Installing the Chromium headless shell (playwright-core, lockfile-pinn
 # forbids unpinned npx execution. No-op when the browser is already cached.
 "${BROWSER_DIR}/node_modules/.bin/playwright-core" install chromium-headless-shell
 
+echo "==> Verifying real browser channel delivery modes"
+(cd "${BROWSER_DIR}" && npm run test:channel-modes)
+
 echo "==> Running the browser interop cells (feature browser-interop)"
 (cd "${NATIVE_DIR}" && \
     SIGNAL_FISH_SERVER_BIN="${SERVER_BIN}" \

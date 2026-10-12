@@ -45,6 +45,7 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "clients/native/**"
+      - "third_party/rtc/**"
       - "scripts/run-webrtc-interop.sh"
       - "scripts/read-toml-string.sh"
       - ".github/workflows/webrtc-interop.yml"

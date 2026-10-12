@@ -17,6 +17,7 @@
     "prebuild": "npm test",
     "build": "node scripts/build.mjs",
     "test": "node scripts/test.mjs",
+    "test:channel-modes": "node scripts/test-channel-modes.mjs",
     "typecheck": "tsc -p tsconfig.page.json && tsc -p tsconfig.cli.json",
     "format": "prettier --write .",
     "format:check": "prettier --check ."

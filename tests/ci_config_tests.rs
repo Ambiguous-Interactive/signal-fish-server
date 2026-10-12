@@ -9812,7 +9812,7 @@ fn test_cargo_deny_audits_use_pinned_native_binary() {
         }
         assert_eq!(
             audit_count,
-            if workflow == "ci.yml" { 5 } else { 1 },
+            if workflow == "ci.yml" { 6 } else { 1 },
             "{workflow}: audit coverage"
         );
     }
@@ -21341,6 +21341,10 @@ fn test_dependabot_cargo_directories_cover_every_automated_package() {
     // interoperability cell is requalified.
     const EXCLUDED_FIXTURES: &[(&str, &str)] = &[
         (
+            "third_party/rtc/Cargo.toml",
+            "published RTC source with a qualified local patch; remove after issue #912",
+        ),
+        (
             "clients/fortress/Cargo.toml",
             "native exact-release Fortress interoperability fixture",
         ),
@@ -21485,6 +21489,14 @@ fn test_dependabot_npm_directories_cover_every_locked_package() {
 fn test_workflow_consumed_configuration_paths_trigger_validation() {
     let root = repo_root();
     let cases = [
+        (
+            ".github/workflows/webrtc-interop.yml",
+            vec!["third_party/rtc/**"],
+        ),
+        (
+            ".github/workflows/browser-interop.yml",
+            vec!["third_party/rtc/**"],
+        ),
         (
             ".github/workflows/actionlint.yml",
             vec![".github/actionlint.yaml"],

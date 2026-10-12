@@ -6,6 +6,7 @@ for (const entryPoint of [
   'src/page/accountability.test.ts',
   'src/page/wire.test.ts',
   'src/page/events.test.ts',
+  'src/page/engine.test.ts',
   'src/page/orchestrator.test.ts',
   'src/page/ingress.test.ts',
   'src/page/output-cancellation.test.ts',

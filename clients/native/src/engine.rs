@@ -649,7 +649,7 @@ impl Engine {
         label: String,
         channel: Arc<dyn DataChannel>,
     ) {
-        if label != RELIABLE_LABEL && label != UNRELIABLE_LABEL {
+        if !required_channel_delivery_mode(&label, channel.as_ref()).await {
             let _ = channel.close().await;
             return;
         }
@@ -921,7 +921,7 @@ impl PeerConnectionEventHandler for PeerHandler {
         };
         // Refuse unsupported channels before the unbounded orchestrator queue.
         // They need no retained label, polling task, or application callbacks.
-        if label != RELIABLE_LABEL && label != UNRELIABLE_LABEL {
+        if !required_channel_delivery_mode(&label, channel.as_ref()).await {
             let _ = channel.close().await;
             return;
         }
@@ -945,6 +945,20 @@ impl PeerConnectionEventHandler for PeerHandler {
             }
         }
     }
+}
+
+// Labels do not establish ordering or reliability. Refuse invalid modes before
+// reserving a required label or publishing any application callback. A closed
+// channel's failed property read also fails admission.
+async fn required_channel_delivery_mode(label: &str, channel: &dyn DataChannel) -> bool {
+    let (ordered, retransmits) = match label {
+        RELIABLE_LABEL => (true, None),
+        UNRELIABLE_LABEL => (false, Some(0)),
+        _ => return false,
+    };
+    matches!(channel.ordered().await, Ok(value) if value == ordered)
+        && matches!(channel.max_retransmits().await, Ok(value) if value == retransmits)
+        && matches!(channel.max_packet_life_time().await, Ok(None))
 }
 
 fn candidate_to_wire_json(mut candidate: RTCIceCandidateInit) -> Result<String> {
@@ -2542,7 +2556,17 @@ mod tests {
                 let first = match engine.channel(peer, label) {
                     Some(channel) => channel,
                     None => {
-                        let channel = pc.create_data_channel(label, None).await.unwrap();
+                        let channel = pc
+                            .create_data_channel(
+                                label,
+                                Some(RTCDataChannelInit {
+                                    ordered: label == RELIABLE_LABEL,
+                                    max_retransmits: (label == UNRELIABLE_LABEL).then_some(0),
+                                    ..RTCDataChannelInit::default()
+                                }),
+                            )
+                            .await
+                            .unwrap();
                         engine
                             .store_remote_channel(peer, label.to_string(), channel.clone())
                             .await;
@@ -2557,7 +2581,17 @@ mod tests {
                     rtc::data_channel::RTCDataChannelState::Connecting,
                     "repeated original announcement must keep it alive"
                 );
-                let duplicate = pc.create_data_channel(label, None).await.unwrap();
+                let duplicate = pc
+                    .create_data_channel(
+                        label,
+                        Some(RTCDataChannelInit {
+                            ordered: label == RELIABLE_LABEL,
+                            max_retransmits: (label == UNRELIABLE_LABEL).then_some(0),
+                            ..RTCDataChannelInit::default()
+                        }),
+                    )
+                    .await
+                    .unwrap();
                 engine
                     .store_remote_channel(peer, label.to_string(), duplicate.clone())
                     .await;
@@ -2573,7 +2607,17 @@ mod tests {
                     "duplicate must close"
                 );
                 first.close().await.unwrap();
-                let after_close = pc.create_data_channel(label, None).await.unwrap();
+                let after_close = pc
+                    .create_data_channel(
+                        label,
+                        Some(RTCDataChannelInit {
+                            ordered: label == RELIABLE_LABEL,
+                            max_retransmits: (label == UNRELIABLE_LABEL).then_some(0),
+                            ..RTCDataChannelInit::default()
+                        }),
+                    )
+                    .await
+                    .unwrap();
                 engine
                     .store_remote_channel(peer, label.to_string(), after_close)
                     .await;
@@ -2654,7 +2698,17 @@ mod tests {
             ));
         }
         for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
-            let channel = pc.create_data_channel(label, None).await.unwrap();
+            let channel = pc
+                .create_data_channel(
+                    label,
+                    Some(RTCDataChannelInit {
+                        ordered: label == RELIABLE_LABEL,
+                        max_retransmits: (label == UNRELIABLE_LABEL).then_some(0),
+                        ..RTCDataChannelInit::default()
+                    }),
+                )
+                .await
+                .unwrap();
             handler.on_data_channel(channel.clone()).await;
             let EngineEvent::RemoteChannel {
                 label: announced,
@@ -3062,3 +3116,7 @@ mod tests {
         b.remove_peer(a_id).await.expect("B closes");
     }
 }
+
+#[cfg(test)]
+#[path = "channel_admission_tests.rs"]
+mod channel_admission_tests;
