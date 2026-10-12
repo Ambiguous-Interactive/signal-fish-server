@@ -23,6 +23,7 @@ mod reconnect_partial_write {
         armed: AtomicBool,
         offered: AtomicUsize,
         parked: Notify,
+        captured: std::sync::Mutex<Vec<u8>>,
     }
 
     struct CutStream<S = TcpStream> {
@@ -63,6 +64,11 @@ mod reconnect_partial_write {
                 Pin::new(&mut self.socket).poll_write(cx, &bytes[..bytes.len().min(remaining)]);
             if let Poll::Ready(Ok(written)) = &result {
                 self.cut.remaining.fetch_sub(*written, Ordering::AcqRel);
+                self.cut
+                    .captured
+                    .lock()
+                    .unwrap()
+                    .extend_from_slice(&bytes[..*written]);
             }
             result
         }

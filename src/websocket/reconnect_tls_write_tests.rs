@@ -1,5 +1,5 @@
-// Controlled plaintext AsyncWrite prefixes above a real TLS handshake. These
-// histories do not establish TLS-record or kernel-specific write boundaries.
+// Reconnect response loss above TLS and inside encrypted records on real TCP.
+// Neither seam establishes a particular kernel write history.
 #[cfg(test)]
 mod tls_write_history {
     use super::*;
@@ -244,19 +244,28 @@ mod tls_write_history {
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
     async fn test_mtls_partial_reconnect_preserves_certificate_and_gameplay_recovery() {
-        run_mtls_partial_reconnect_history(false).await;
+        run_mtls_partial_reconnect_history(false, false).await;
     }
 
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
     async fn test_signed_mtls_partial_reconnect_preserves_tenant_certificate_and_gameplay() {
-        run_mtls_partial_reconnect_history(true).await;
+        run_mtls_partial_reconnect_history(true, false).await;
     }
 
-    async fn run_mtls_partial_reconnect_history(signed: bool) {
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_encrypted_tls_record_loss_preserves_bound_reconnect_and_gameplay_recovery() {
+        run_mtls_partial_reconnect_history(true, true).await;
+    }
+
+    async fn run_mtls_partial_reconnect_history(signed: bool, encrypted: bool) {
         for (path, batching, prefix) in ["ws", "v3/ws"].into_iter().flat_map(|path| {
             [false, true].into_iter().flat_map(move |batching| {
-                [None, Some(1_usize), Some(32)].map(|prefix| (path, batching, prefix))
+                [None, Some(1_usize), Some(5), Some(32)]
+                    .into_iter()
+                    .filter(move |prefix| encrypted || *prefix != Some(5))
+                    .map(move |prefix| (path, batching, prefix))
             })
         }) {
             let mut config = ServerConfig::default();
@@ -331,7 +340,11 @@ mod tls_write_history {
             let normal_server =
                 axum_server::from_tcp_rustls(normal.into_std().unwrap(), tls.clone())
                     .unwrap()
-                    .map(crate::security::VerifiedClientCertificateAcceptor::new);
+                    .map(|rustls| {
+                        crate::security::VerifiedClientCertificateAcceptor::new(
+                            rustls.acceptor(crate::websocket::ConfiguredAcceptor),
+                        )
+                    });
             let normal_task = tokio::spawn(
                 normal_server.serve(
                     router
@@ -342,15 +355,46 @@ mod tls_write_history {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let cut_address = listener.local_addr().unwrap();
             let cut = Arc::new(WriteCut::default());
-            let cut_server = axum_server::from_tcp_rustls(listener.into_std().unwrap(), tls)
-                .unwrap()
-                .map(|inner| TlsCutAcceptor {
-                    inner: crate::security::VerifiedClientCertificateAcceptor::new(inner),
-                    cut: Arc::clone(&cut),
-                });
-            let cut_task = tokio::spawn(
-                cut_server.serve(router.into_make_service_with_connect_info::<SocketAddr>()),
-            );
+            let mut cut_task = if encrypted {
+                let cut = Arc::clone(&cut);
+                tokio::spawn(async move {
+                    // This relay sees ciphertext only. The production TLS
+                    // acceptor, certificate projection, and writer are intact.
+                    let (client, _) = listener.accept().await.unwrap();
+                    let upstream = TcpStream::connect(address).await.unwrap();
+                    let (mut client_read, client_write) = client.into_split();
+                    let (mut upstream_read, mut upstream_write) = upstream.into_split();
+                    let mut client_write = CutStream {
+                        socket: client_write,
+                        cut,
+                    };
+                    tokio::select! {
+                        result = tokio::io::copy(&mut client_read, &mut upstream_write) => {
+                            result.unwrap();
+                        }
+                        result = tokio::io::copy(&mut upstream_read, &mut client_write) => {
+                            result.unwrap();
+                        }
+                    }
+                    // Either EOF tears down both TCP directions, including
+                    // a writer parked with an incomplete record.
+                })
+            } else {
+                let cut_server = axum_server::from_tcp_rustls(listener.into_std().unwrap(), tls)
+                    .unwrap()
+                    .map(|inner| TlsCutAcceptor {
+                        inner: crate::security::VerifiedClientCertificateAcceptor::new(
+                            inner.acceptor(crate::websocket::ConfiguredAcceptor),
+                        ),
+                        cut: Arc::clone(&cut),
+                    });
+                tokio::spawn(async move {
+                    cut_server
+                        .serve(router.into_make_service_with_connect_info::<SocketAddr>())
+                        .await
+                        .unwrap();
+                })
+            };
             let history = async {
                 let join = |code, name: &str| ClientMessage::JoinRoom {
                     game_name: "tls-write-history".into(),
@@ -407,7 +451,55 @@ mod tls_write_history {
                 recovering
                     .send(&reconnect(joined.player_id, old.clone()))
                     .await;
-                let rotated = if let Some(prefix) = prefix {
+                let rotated = if let Some(prefix) = prefix.filter(|_| encrypted) {
+                    cut.parked.notified().await;
+                    let bytes = cut.captured.lock().unwrap().clone();
+                    assert_eq!(bytes.len(), prefix);
+                    // Peek through the client TLS stream without consuming
+                    // any ciphertext. Queue admission alone is not receipt.
+                    let mut arrived = vec![0; prefix];
+                    loop {
+                        let count = recovering
+                            .socket
+                            .get_ref()
+                            .get_ref()
+                            .0
+                            .peek(&mut arrived)
+                            .await
+                            .unwrap();
+                        assert!(
+                            count > 0,
+                            "relay closed before the encrypted prefix arrived"
+                        );
+                        if count == prefix {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                    assert_eq!(
+                        arrived, bytes,
+                        "the real TLS client received the exact prefix"
+                    );
+                    assert_eq!(bytes[0], 23, "TLS application-data record");
+                    if prefix >= 5 {
+                        assert_eq!(&bytes[1..3], &[3, 3], "TLS legacy record version");
+                        let record_length = usize::from(u16::from_be_bytes([bytes[3], bytes[4]]));
+                        assert!(
+                            5 + record_length > prefix,
+                            "the TLS record must remain incomplete"
+                        );
+                    }
+                    assert_eq!(cut.remaining.load(Ordering::Acquire), 0);
+                    assert!(cut.offered.load(Ordering::Acquire) > prefix);
+                    let decoded =
+                        tokio::time::timeout(Duration::from_millis(20), recovering.socket.next())
+                            .await;
+                    assert!(
+                        decoded.is_err(),
+                        "an incomplete encrypted record must not publish Reconnected"
+                    );
+                    None
+                } else if let Some(prefix) = prefix {
                     let mut bytes = vec![0; prefix];
                     recovering
                         .socket
@@ -610,9 +702,16 @@ mod tls_write_history {
                 )
                 .await;
             normal_task.abort();
-            cut_task.abort();
             let _ = normal_task.await;
-            let _ = cut_task.await;
+            if encrypted && matches!(&result, Ok(Ok(()))) {
+                tokio::time::timeout(Duration::from_secs(1), &mut cut_task)
+                    .await
+                    .expect("ciphertext relay must close both directions")
+                    .expect("ciphertext relay must not panic");
+            } else {
+                cut_task.abort();
+                let _ = cut_task.await;
+            }
             assert_eq!(remaining, 0, "TLS history leaked handlers");
             match result {
                 Ok(Ok(())) => {}
