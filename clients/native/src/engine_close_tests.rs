@@ -57,7 +57,14 @@ async fn remote_peer_close_retires_both_required_channels() {
         })
         .await
         .expect("closed channels release both event producers");
-        while let Ok(event) = events.try_recv() {
+        loop {
+            let event = match events.try_recv() {
+                Ok(event) => event,
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    panic!("the remaining engine must retain its event sender")
+                }
+            };
             assert!(
                 !matches!(event, EngineEvent::ChannelClosed { .. }),
                 "finished producers cannot leave duplicate close callbacks"

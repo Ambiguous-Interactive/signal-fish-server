@@ -162,6 +162,10 @@ fn test_ci_dependency_detection_classifies_cargo_npm_and_mixed_changes() {
         ),
         ("browser-tests", "Cargo.lock\nclients/browser/tests/deep/control.js\n", true),
         ("native-tests", "Cargo.lock\nclients/native/tests/interop.rs\n", true),
+        ("native-extracted-tests", "Cargo.lock\nclients/native/src/engine_tests.rs\n", true),
+        ("native-extracted-test", "Cargo.lock\nclients/native/src/engine_test.rs\n", true),
+        ("native-nested-tests", "Cargo.lock\nclients/native/src/engine/tests.rs\n", true),
+        ("native-runtime", "Cargo.lock\nclients/native/src/engine.rs\n", false),
         ("fortress-tests", "Cargo.lock\nclients/fortress/tests/multiprocess.rs\n", true),
         ("wasm-tests", "Cargo.lock\nclients/fortress-wasm/tests/deep/control.rs\n", true),
         ("fortress-fixture", "Cargo.lock\nclients/fortress/src/main.rs\n", true),
@@ -216,13 +220,12 @@ fn test_ci_dep_detect_internal_paths_match_script() {
     let script = read_live_file(&root.join("scripts/check-doc-consistency.sh"));
 
     // Both the CI dep-detect case statement and the script's is_internal_path()
-    // must classify the same directory prefixes as internal. Extract the
-    // directory-glob patterns from each and verify they match.
+    // must classify the same directory and test-source patterns as internal.
     //
     // The script uses patterns like: .github/*|.githooks/*|...
     // The CI uses patterns like:     .github/*|.githooks/*|...
-    // We verify the shared directory prefixes are present in both.
-    let shared_directory_prefixes = [
+    // We verify the shared internal patterns are present in both.
+    let shared_internal_patterns = [
         ".github/*",
         ".githooks/*",
         ".devcontainer/*",
@@ -233,6 +236,9 @@ fn test_ci_dep_detect_internal_paths_match_script() {
         "tests/*",
         "clients/browser/tests/*",
         "clients/native/tests/*",
+        "clients/native/src/*_tests.rs",
+        "clients/native/src/*_test.rs",
+        "clients/native/src/*/tests.rs",
         "clients/fortress/tests/*",
         "clients/fortress-wasm/tests/*",
         "clients/fortress/src/*",
@@ -244,7 +250,7 @@ fn test_ci_dep_detect_internal_paths_match_script() {
         "docs/development/*",
     ];
 
-    for prefix in shared_directory_prefixes {
+    for prefix in shared_internal_patterns {
         assert!(
             script.contains(prefix),
             "scripts/check-doc-consistency.sh is_internal_path() must contain '{prefix}'."

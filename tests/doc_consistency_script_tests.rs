@@ -328,6 +328,33 @@ fn evaluate_script_case(case: ScriptCase) -> Option<String> {
     }
 }
 
+#[test]
+fn native_extracted_test_modules_are_internal_but_runtime_stays_in_scope() {
+    for (path, expected_exit) in [
+        ("clients/native/src/engine_close_tests.rs", 0),
+        ("clients/native/src/engine_task_tests.rs", 0),
+        ("clients/native/src/engine_test.rs", 0),
+        ("clients/native/src/nested/receive_tests.rs", 0),
+        ("clients/native/src/engine/tests.rs", 0),
+        ("clients/native/src/nested/engine/tests.rs", 0),
+        ("clients/native/src/engine.rs", 1),
+        ("clients/native/src/engine_tests.rs.bak", 1),
+        ("clients/native/src/tests/runtime.rs", 1),
+        ("clients/native/src/nested/tests/runtime.rs", 1),
+    ] {
+        let (exit, output) = run_checker_with_fixture(&[], &[], &["--changed-files", path]);
+        assert_eq!(exit, expected_exit, "{path}: {output}");
+        assert!(
+            output.contains(if expected_exit == 0 {
+                "No non-internal changed files detected"
+            } else {
+                "non-internal changes without CHANGELOG"
+            }),
+            "{path}: {output}"
+        );
+    }
+}
+
 fn evaluate_script_cases_in_batches(cases: Vec<ScriptCase>) -> Vec<String> {
     let parallelism = thread::available_parallelism()
         .map(usize::from)

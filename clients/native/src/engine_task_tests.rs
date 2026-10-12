@@ -27,7 +27,14 @@ async fn ended_channel_streams_publish_one_close_unless_receive_rejected() {
             .expect("terminal streams stop both required channel pollers");
 
             let mut closed = BTreeSet::new();
-            while let Ok(event) = pair.receiver_events.try_recv() {
+            loop {
+                let event = match pair.receiver_events.try_recv() {
+                    Ok(event) => event,
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        panic!("the retained receiver engine must retain its event sender")
+                    }
+                };
                 if let EngineEvent::ChannelClosed {
                     peer,
                     generation: event_generation,
