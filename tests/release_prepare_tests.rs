@@ -320,6 +320,80 @@ fn assert_release_files_unchanged(fixture: &Fixture, before: &[(&str, String)]) 
     }
 }
 
+fn assert_release_files_synchronized(
+    fixture: &Fixture,
+    previous: &str,
+    expected: &str,
+    release_date: &str,
+    note: &str,
+) {
+    let cargo_toml = read(fixture.root.join("Cargo.toml"));
+    assert!(cargo_toml.contains(&format!("version = \"{expected}\"")));
+    assert!(cargo_toml.contains("description = \"Fixture marker 9.9.9\""));
+    let fuzz_manifest = read(fixture.root.join("fuzz/Cargo.toml"));
+    assert!(fuzz_manifest.contains(&format!(
+        "  version = '{expected}' # preserve this formatting"
+    )));
+    assert!(fuzz_manifest.contains("[[package.metadata.fixture]]\nversion = \"1.2.3\""));
+
+    for lock in ["Cargo.lock", "clients/native/Cargo.lock", "fuzz/Cargo.lock"] {
+        let contents = read(fixture.root.join(lock));
+        assert!(
+            contents.contains(&format!(
+                "name = \"signal-fish-server\"\nversion = \"{expected}\""
+            )),
+            "{lock} did not receive {expected}:\n{contents}"
+        );
+        assert!(contents.contains("name = \"example\"\nversion = \"9.9.9\""));
+    }
+
+    let docs = read(fixture.root.join("docs/library-usage.md"));
+    assert_eq!(docs.matches(expected).count(), 2);
+    assert!(!docs.contains(previous));
+    assert_eq!(
+        read(fixture.root.join("docs/getting-started.md")),
+        format!(
+            "https://raw.githubusercontent.com/Ambiguous-Interactive/signal-fish-server/v{expected}/config.example.json\n"
+        )
+    );
+    assert_eq!(
+        read(fixture.root.join(".llm/context.md")),
+        format!(
+            "# Context\n\n- **Version:** {expected}\n\n\
+             [v2 client sample](code-samples/protocol/v2-client-messages.jsonl)\n\
+             [v2 server sample](code-samples/protocol/v2-server-messages.jsonl)\n\
+             [v3 client sample](code-samples/protocol/v3-client-messages.jsonl)\n\
+             [v3 server sample](code-samples/protocol/v3-server-messages.jsonl)\n"
+        )
+    );
+
+    // The canonical v3 sample must disclose the new release exactly where
+    // the contract requires it (tests/protocol_samples.rs pins it to
+    // CARGO_PKG_VERSION), while the unrelated decoy version survives.
+    let v3_sample = read(
+        fixture
+            .root
+            .join(".llm/code-samples/protocol/v3-server-messages.jsonl"),
+    );
+    assert!(
+        v3_sample.contains(&format!("\"implementation_version\": \"{expected}\"")),
+        "v3 sample did not disclose {expected}:\n{v3_sample}"
+    );
+    assert!(v3_sample.contains("\"recommended_version\": \"1.2.3\""));
+
+    let changelog = read(fixture.root.join("CHANGELOG.md"));
+    assert!(changelog.contains(&format!(
+        "## [Unreleased]\n\n## [{expected}] - {release_date}\n\n### Added"
+    )));
+    assert!(changelog.contains(note));
+    assert!(changelog.contains(&format!(
+        "[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v{expected}...HEAD"
+    )));
+    assert!(changelog.contains(&format!(
+        "[{expected}]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v{previous}...v{expected}"
+    )));
+}
+
 #[test]
 fn prepare_release_applies_every_semver_bump_and_synchronizes_release_files() {
     for (bump, expected, release_date) in [
@@ -335,71 +409,13 @@ fn prepare_release_applies_every_semver_bump_and_synchronizes_release_files() {
             String::from_utf8_lossy(&output.stderr)
         );
 
-        let cargo_toml = read(fixture.root.join("Cargo.toml"));
-        assert!(cargo_toml.contains(&format!("version = \"{expected}\"")));
-        assert!(cargo_toml.contains("description = \"Fixture marker 9.9.9\""));
-        let fuzz_manifest = read(fixture.root.join("fuzz/Cargo.toml"));
-        assert!(fuzz_manifest.contains(&format!(
-            "  version = '{expected}' # preserve this formatting"
-        )));
-        assert!(fuzz_manifest.contains("[[package.metadata.fixture]]\nversion = \"1.2.3\""));
-
-        for lock in ["Cargo.lock", "clients/native/Cargo.lock", "fuzz/Cargo.lock"] {
-            let contents = read(fixture.root.join(lock));
-            assert!(
-                contents.contains(&format!(
-                    "name = \"signal-fish-server\"\nversion = \"{expected}\""
-                )),
-                "{lock} did not receive {expected}:\n{contents}"
-            );
-            assert!(contents.contains("name = \"example\"\nversion = \"9.9.9\""));
-        }
-
-        let docs = read(fixture.root.join("docs/library-usage.md"));
-        assert_eq!(docs.matches(expected).count(), 2);
-        assert!(!docs.contains("1.2.3"));
-        assert_eq!(
-            read(fixture.root.join("docs/getting-started.md")),
-            format!(
-                "https://raw.githubusercontent.com/Ambiguous-Interactive/signal-fish-server/v{expected}/config.example.json\n"
-            )
+        assert_release_files_synchronized(
+            &fixture,
+            "1.2.3",
+            expected,
+            release_date,
+            "- Preserve categorized notes.",
         );
-        assert_eq!(
-            read(fixture.root.join(".llm/context.md")),
-            format!(
-                "# Context\n\n- **Version:** {expected}\n\n\
-                 [v2 client sample](code-samples/protocol/v2-client-messages.jsonl)\n\
-                 [v2 server sample](code-samples/protocol/v2-server-messages.jsonl)\n\
-                 [v3 client sample](code-samples/protocol/v3-client-messages.jsonl)\n\
-                 [v3 server sample](code-samples/protocol/v3-server-messages.jsonl)\n"
-            )
-        );
-
-        // The canonical v3 sample must disclose the new release exactly where
-        // the contract requires it (tests/protocol_samples.rs pins it to
-        // CARGO_PKG_VERSION), while the unrelated decoy version survives.
-        let v3_sample = read(
-            fixture
-                .root
-                .join(".llm/code-samples/protocol/v3-server-messages.jsonl"),
-        );
-        assert!(
-            v3_sample.contains(&format!("\"implementation_version\": \"{expected}\"")),
-            "v3 sample did not disclose {expected}:\n{v3_sample}"
-        );
-        assert!(v3_sample.contains("\"recommended_version\": \"1.2.3\""));
-
-        let changelog = read(fixture.root.join("CHANGELOG.md"));
-        assert!(changelog.contains(&format!(
-            "## [Unreleased]\n\n## [{expected}] - {release_date}\n\n### Added"
-        )));
-        assert!(changelog.contains("- Preserve categorized notes."));
-        assert!(changelog.contains(&format!(
-            "[Unreleased]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v{expected}...HEAD"
-        )));
-        assert!(changelog.contains(&format!(
-            "[{expected}]: https://github.com/Ambiguous-Interactive/signal-fish-server/compare/v1.2.3...v{expected}"
-        )));
     }
 }
 
@@ -449,7 +465,8 @@ fn prepare_release_rejects_invalid_inputs_before_mutating_files() {
         vec!["--bump", "patch", "--date", "0000-01-01"],
         vec!["--bump", "patch", "--date", "2026-13-01"],
         vec!["--bump", "patch", "--date", "2026-01-00"],
-        vec!["--date", RELEASE_DATE],
+        vec!["--bump"],
+        vec!["--bump", ""],
     ] {
         let fixture = Fixture::new("1.2.3");
         let before = read(fixture.root.join("Cargo.toml"));
@@ -905,12 +922,29 @@ fn release_lockfile_discovery_and_rewrite_distinguish_path_registry_and_lookalik
 
 #[test]
 fn prepare_release_rolls_back_every_file_when_postflight_fails() {
-    let fixture = Fixture::new("1.2.3");
-    let before = release_file_snapshot(&fixture);
-    let fake_cargo = fixture.root.join("fail-postflight-cargo.sh");
-    let counter = fixture.root.join("cargo-call-count");
-    write(&counter, "0\n");
-    write(
+    for (version, note, bump) in [
+        ("1.2.3", "- Preserve categorized notes.", "patch"),
+        ("1.2.3", "- Preserve categorized notes.", "auto"),
+        (
+            "0.10.0",
+            "- **Breaking:** Replace the public contract.",
+            "auto",
+        ),
+        (
+            "1.2.3",
+            "- **Breaking:** Replace the public contract.",
+            "auto",
+        ),
+    ] {
+        let fixture = Fixture::new(version);
+        let changelog =
+            read(fixture.root.join("CHANGELOG.md")).replace("- Preserve categorized notes.", note);
+        write(&fixture.root.join("CHANGELOG.md"), &changelog);
+        let before = release_file_snapshot(&fixture);
+        let fake_cargo = fixture.root.join("fail-postflight-cargo.sh");
+        let counter = fixture.root.join("cargo-call-count");
+        write(&counter, "0\n");
+        write(
         &fake_cargo,
         &format!(
             "#!/usr/bin/env bash\nset -euo pipefail\ncount=$(cat '{}')\ncount=$((count + 1))\nprintf '%s\\n' \"$count\" > '{}'\n[ \"$count\" -le 3 ]\n",
@@ -918,29 +952,58 @@ fn prepare_release_rolls_back_every_file_when_postflight_fails() {
             counter.display()
         ),
     );
-    let mut permissions = fs::metadata(&fake_cargo)
-        .expect("fake Cargo metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&fake_cargo, permissions).expect("make fake Cargo executable");
+        let mut permissions = fs::metadata(&fake_cargo)
+            .expect("fake Cargo metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_cargo, permissions).expect("make fake Cargo executable");
 
-    let output =
-        fixture.run_with_cargo_bin(&["--bump", "patch", "--date", RELEASE_DATE], &fake_cargo);
+        let output =
+            fixture.run_with_cargo_bin(&["--bump", bump, "--date", RELEASE_DATE], &fake_cargo);
 
-    assert!(
-        !output.status.success(),
-        "postflight failure unexpectedly passed"
-    );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("restored every release file"));
-    assert_release_files_unchanged(&fixture, &before);
+        assert!(
+            !output.status.success(),
+            "postflight failure unexpectedly passed"
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("restored every release file"));
+        assert_release_files_unchanged(&fixture, &before);
+    }
 }
 
 #[test]
 fn prepare_release_rejects_semver_arithmetic_overflow() {
-    let fixture = Fixture::new("9223372036854775807.0.0");
-    let output = fixture.run(&["--bump", "major", "--date", RELEASE_DATE]);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Cannot safely increment"));
+    for (version, note, bump) in [
+        (
+            "9223372036854775807.0.0",
+            "- Preserve categorized notes.",
+            "major",
+        ),
+        (
+            "1.2.9223372036854775807",
+            "- Preserve categorized notes.",
+            "auto",
+        ),
+        (
+            "0.9223372036854775807.0",
+            "- **Breaking:** Replace the public contract.",
+            "auto",
+        ),
+        (
+            "9223372036854775807.0.0",
+            "- **Breaking:** Replace the public contract.",
+            "auto",
+        ),
+    ] {
+        let fixture = Fixture::new(version);
+        let changelog =
+            read(fixture.root.join("CHANGELOG.md")).replace("- Preserve categorized notes.", note);
+        write(&fixture.root.join("CHANGELOG.md"), &changelog);
+        let before = release_file_snapshot(&fixture);
+        let output = fixture.run(&["--bump", bump, "--date", RELEASE_DATE]);
+        assert!(!output.status.success(), "{version} {bump} overflow passed");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Cannot safely increment"));
+        assert_release_files_unchanged(&fixture, &before);
+    }
 }
 
 #[test]
@@ -961,6 +1024,53 @@ fn prepare_release_rejects_cargo_version_without_matching_latest_release_before_
         String::from_utf8_lossy(&output.stderr)
     );
     assert_release_files_unchanged(&fixture, &before);
+}
+
+#[test]
+fn prepare_release_auto_selects_the_minimum_safe_bump() {
+    for (version, note, expected) in [
+        ("0.10.0", "- Preserve categorized notes.", "0.10.1"),
+        ("1.2.3", "- Preserve categorized notes.", "1.2.4"),
+        (
+            "0.10.0",
+            "- **Breaking (Rust API):** Replace the public contract.",
+            "0.11.0",
+        ),
+        (
+            "1.2.3",
+            "- **Breaking:** Replace the public contract.",
+            "2.0.0",
+        ),
+        (
+            "1.2.3",
+            "- **Breaking**: Replace the public contract.",
+            "2.0.0",
+        ),
+        (
+            "1.2.3",
+            "- Document the `**Breaking:**` compatibility label.",
+            "1.2.4",
+        ),
+    ] {
+        for explicit_auto in [false, true] {
+            let fixture = Fixture::new(version);
+            let changelog = read(fixture.root.join("CHANGELOG.md"))
+                .replace("- Preserve categorized notes.", note);
+            write(&fixture.root.join("CHANGELOG.md"), &changelog);
+            let arguments = if explicit_auto {
+                vec!["--bump", "auto", "--date", RELEASE_DATE]
+            } else {
+                vec!["--date", RELEASE_DATE]
+            };
+            let output = fixture.run(&arguments);
+            assert!(
+                output.status.success(),
+                "{version} {note:?} auto={explicit_auto} failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_release_files_synchronized(&fixture, version, expected, RELEASE_DATE, note);
+        }
+    }
 }
 
 #[test]

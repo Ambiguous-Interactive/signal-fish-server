@@ -10,13 +10,14 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: "Semantic-version component to increment"
+        description: "Version bump (auto selects the minimum safe bump from release notes)"
         type: choice
         options:
+          - auto
           - patch
           - minor
           - major
-        default: patch
+        default: auto
       dry_run:
         description: "Validate and print the release diff without opening a pull request"
         type: boolean

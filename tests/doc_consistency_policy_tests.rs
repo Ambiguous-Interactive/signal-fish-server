@@ -264,6 +264,7 @@ fn test_ci_dep_detect_internal_paths_match_script() {
     // Standalone internal files that both should recognize.
     let shared_standalone_files = [
         "Cargo.lock",
+        "docs/releasing.md",
         "PLAN.md",
         "AGENTS.md",
         "CLAUDE.md",

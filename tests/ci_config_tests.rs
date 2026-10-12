@@ -6811,17 +6811,24 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
     let prepare = extract_workflow_job_block(&workflow, "prepare")
         .expect("prepare-release.yml must define the prepare job");
 
+    let on = extract_yaml_mapping_block(&workflow, "on", 0)
+        .expect("prepare-release.yml must define workflow triggers");
+    let dispatch = extract_yaml_mapping_block(&on, "workflow_dispatch", 2)
+        .expect("prepare-release.yml must support manual dispatch");
+    let inputs = extract_yaml_mapping_block(&dispatch, "inputs", 4)
+        .expect("prepare-release.yml must define dispatch inputs");
+    let bump = extract_yaml_mapping_block(&inputs, "bump", 6)
+        .expect("prepare-release.yml must define the bump input");
+    assert_eq!(extract_yaml_field_values(&bump, "type"), ["choice"]);
+    assert_eq!(extract_yaml_field_values(&bump, "default"), ["auto"]);
+    assert_eq!(
+        extract_yaml_field_values(&bump, "options"),
+        ["auto", "patch", "minor", "major"]
+    );
+
     assert!(workflow.contains("name: Prepare Release"));
     assert!(workflow.contains("workflow_dispatch:"));
-    for required in [
-        "bump:",
-        "type: choice",
-        "- patch",
-        "- minor",
-        "- major",
-        "dry_run:",
-        "cancel-in-progress: false",
-    ] {
+    for required in ["dry_run:", "cancel-in-progress: false"] {
         assert!(
             workflow.contains(required),
             "prepare-release.yml must contain `{required}` so a maintainer can choose a safe, \
@@ -25042,7 +25049,7 @@ fn test_pre_commit_changelog_gate_classification_and_verdicts_when_pwsh_availabl
                     "src/server_tests.rs", "src/main_test.rs", "src/server/tests.rs",
                     "docs/ci-cd-testing.md", "docs/test-analysis.md", "docs/git-hooks-guide.md",
                     "docs/hooks-quick-reference.md", "docs/pre-commit-hooks-summary.md",
-                    "docs/development.md", "docs/development/arm-capacity-audit.md",
+                    "docs/development.md", "docs/development/arm-capacity-audit.md", "docs/releasing.md",
                     "Cargo.lock", "PLAN.md", "AGENTS.md", "CLAUDE.md",
                     "pre-push.txt", "pre-commit.txt", "logs_2025.zip",
                     ".markdownlint.yaml", ".lychee.toml", ".lycheecache", ".typos.toml", ".yamllint.yml",
@@ -25064,7 +25071,7 @@ fn test_pre_commit_changelog_gate_classification_and_verdicts_when_pwsh_availabl
                     "clients/fortress-other/src/main.rs", "clients/fortress-wasm-extra/src/lib.rs",
                     "clients/fortress/src_like/main.rs", "clients/fortress-wasm/src_like/lib.rs",
                     "clients/fortress/Src/main.rs", "clients/fortress-wasm/Src/lib.rs",
-                    "Cargo.toml", "README.md", "docs/guide.md", "docs/library-usage.md",
+                    "Cargo.toml", "README.md", "docs/guide.md", "docs/library-usage.md", "docs/releasing-guide.md",
                     "Dockerfile", "docker-compose.yml", "config.example.json", "LICENSE"
                 )
                 foreach ($path in $nonInternal) {
@@ -33156,6 +33163,7 @@ const SHARED_INTERNAL_PATH_PATTERNS: &[&str] = &[
     "docs/hooks-*",
     "docs/pre-commit-*",
     "docs/development.md",
+    "docs/releasing.md",
     ".markdownlint*",
     ".lychee.toml",
     ".lycheecache",
@@ -33272,6 +33280,16 @@ const INTERNAL_PATH_CLASSIFICATION_CASES: &[(&str, bool, &str)] = &[
         "pre-commit docs are internal",
     ),
     ("docs/development.md", true, "development doc is internal"),
+    (
+        "docs/releasing.md",
+        true,
+        "release maintainer runbook is internal",
+    ),
+    (
+        "docs/releasing-guide.md",
+        false,
+        "only the exact release runbook is internal",
+    ),
     (
         "docs/hooks-quick-reference.md",
         true,

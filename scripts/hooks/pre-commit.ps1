@@ -61,7 +61,7 @@ $script:ChangelogInternalPathGlobs = [string[]]@(
     "clients/native/src/*_tests.rs", "clients/native/src/*_test.rs", "clients/native/src/*/tests.rs",
     # CI/infrastructure docs
     "docs/ci-cd-*", "docs/test-*", "docs/git-hooks-*", "docs/hooks-*", "docs/pre-commit-*",
-    "docs/development.md", "docs/development/*",
+    "docs/development.md", "docs/development/*", "docs/releasing.md",
     # Standalone internal files
     "Cargo.lock", "PLAN.md", "AGENTS.md", "CLAUDE.md", "pre-push.txt", "pre-commit.txt", "logs_*.zip",
     # Linter and tool config
