@@ -35073,6 +35073,21 @@ fn test_mutation_workflow_is_periodic_not_per_pr() {
         "the baseline job must skip only through the verified-head guard outcome \
          (`!cancelled()` keeps the guard failure fail-open)"
     );
+    let mutants = jobs
+        .as_mapping_get("mutants")
+        .expect("mutation workflow must define the mutants job");
+    assert_eq!(
+        mutants.as_mapping_get("needs").and_then(Yaml::as_str),
+        Some("baseline"),
+        "every shard must wait for the exact unmutated baseline"
+    );
+    assert_eq!(
+        mutants.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("${{ !cancelled() && needs.baseline.result == 'success' }}"),
+        "manual dispatch skips the schedule-only verified-head guard; shards \
+         must override implicit success() across that skipped ancestor while \
+         requiring a successful baseline and refusing cancellation"
+    );
 }
 
 /// Count the mutants `cargo mutants --list` generates for the current config, or

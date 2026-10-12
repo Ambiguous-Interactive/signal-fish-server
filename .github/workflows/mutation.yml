@@ -143,6 +143,9 @@ jobs:
   mutants:
     name: cargo-mutants (protocol logic) shard ${{ matrix.shard }}/43
     needs: baseline
+    # Manual dispatch skips the schedule-only guard. Override implicit success()
+    # across that ancestor, but run shards only after a successful baseline.
+    if: ${{ !cancelled() && needs.baseline.result == 'success' }}
     runs-on: ubuntu-latest
     # Per-shard timeout. With the warm shared cache + --in-place there is no cold
     # dependency build, so a shard is well under 5 min; 10 min is generous

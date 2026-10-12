@@ -2293,3 +2293,12 @@ processes with unchanged histories, assertions, deadlines, and cleanup. The
 focused mutation-profile matrix passes 24/24; its slowest cell takes 1.309 seconds.
 TLS matrices are unchanged. This is verification maintenance, not a gameplay
 repair. The broader A01–A22 campaign remains open.
+
+The first hosted rerun passes all 1,444 baseline tests in 9.520 seconds, but
+manual dispatch exposes a skipped-ancestor gate defect
+[#910](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/910).
+The scheduled guard is skipped, which suppresses every shard through implicit
+`success()`. Shards now explicitly require a successful baseline and no
+cancellation. The existing workflow contract test fails before this repair and
+passes after it. Duplicate scheduled heads still skip both baseline and shards.
+The full mutation matrix must pass on the final PR head.
