@@ -101,7 +101,8 @@ debug = 1
 [profile.dev.package."*"]
 debug = 0
 
-# Keep the qualified local RTC DCEP and SCTP stream reset repairs.
+# Keep the qualified local RTC, SCTP, and wrapper lifecycle repairs.
 [patch.crates-io]
+webrtc = { path = "../../third_party/webrtc" }
 rtc = { path = "../../third_party/rtc" }
 rtc-sctp = { path = "../../third_party/rtc-sctp" }

@@ -39,3 +39,12 @@ The reset delta changes `src/data_channel/internal.rs`, `mod.rs`,
 `src/peer_connection/message/internal.rs`. The retained controls cover stream
 reservation, closing state, late data, and old/new generation event ordering.
 Qualify both packages before removing their patches.
+
+The channel statistics patch retains all live summaries and the 64 most recently
+closed summaries per peer connection. Older closed details are removed; lifetime
+opened and closed totals remain cumulative. Duplicate closure notifications do
+not refresh or recreate a retired summary. Both stream closure and DCEP timeout
+use this policy. Regression histories cover ordered and legacy stream events,
+DTLS shutdown, timeout/reset, active records, and closure order.
+See [#919](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/919).
+Published replacement qualification in #912 must retain these controls.

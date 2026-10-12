@@ -28,14 +28,14 @@ pub(crate) use rtp_stream::inbound::InboundRtpStreamAccumulator;
 pub(crate) use rtp_stream::outbound::OutboundRtpStreamAccumulator;
 pub(crate) use transport::TransportStatsAccumulator;
 
-use crate::data_channel::RTCDataChannelId;
+use crate::data_channel::{RTCDataChannelId, RTCDataChannelState};
 use crate::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
 use crate::rtp_transceiver::{PayloadType, RTCRtpTransceiverId, SSRC};
 use crate::statistics::StatsSelector;
 use crate::statistics::report::{RTCStatsReport, RTCStatsReportEntry};
 use ice::CandidatePairStats;
 use sctp::StreamId;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 /// Master statistics accumulator for a peer connection.
@@ -77,8 +77,11 @@ pub(crate) struct RTCStatsAccumulator {
     /// Codec stats keyed by codec ID.
     pub(crate) codecs: HashMap<String, CodecStatsAccumulator>,
 
-    /// Data channel stats keyed by channel ID.
+    /// Live data channel stats and the 64 most recently closed summaries, keyed by handle.
     pub(crate) data_channels: HashMap<RTCDataChannelId, DataChannelStatsAccumulator>,
+
+    /// Closure order is independent of creation order and stream-id reuse.
+    closed_data_channels: VecDeque<RTCDataChannelId>,
 
     /// Inbound RTP stream accumulators keyed by SSRC.
     pub(crate) inbound_rtp_streams: HashMap<SSRC, InboundRtpStreamAccumulator>,
@@ -521,6 +524,25 @@ impl RTCStatsAccumulator {
             })
     }
 
+    /// Close an existing summary and retain only the 64 most recent closures.
+    /// Live summaries and lifetime peer-connection totals are never evicted.
+    /// A duplicate close, including one whose summary was evicted, is a no-op.
+    pub(crate) fn mark_data_channel_closed(&mut self, id: RTCDataChannelId) {
+        let Some(channel) = self.data_channels.get_mut(&id) else {
+            return;
+        };
+        if channel.state == RTCDataChannelState::Closed {
+            return;
+        }
+        channel.on_state_changed(RTCDataChannelState::Closed);
+        self.closed_data_channels.push_back(id);
+        if self.closed_data_channels.len() > 64
+            && let Some(oldest) = self.closed_data_channels.pop_front()
+        {
+            self.data_channels.remove(&oldest);
+        }
+    }
+
     /// Records the SCTP stream identifier a data channel was assigned.
     ///
     /// The accumulator is keyed by the channel's handle, which exists from creation, but
@@ -850,5 +872,53 @@ impl RTCStatsAccumulator {
 
         // Remove codecs that are not referenced
         self.codecs.retain(|id, _| referenced.contains(id));
+    }
+}
+
+#[cfg(test)]
+mod closed_data_channel_tests {
+    use super::*;
+
+    #[test]
+    fn closed_statistics_history_uses_closure_order_and_duplicate_closes_do_not_refresh_it() {
+        let mut stats = RTCStatsAccumulator::new();
+        for id in 0..70 {
+            let channel = stats.get_or_create_data_channel(id, "label", "protocol");
+            channel.on_message_sent(id + 1);
+            channel.on_message_received(id + 2);
+            channel.on_state_changed(RTCDataChannelState::Open);
+        }
+        // Live channels need not be open. Neither connecting nor closing is history.
+        stats.data_channels.get_mut(&68).unwrap().state = RTCDataChannelState::Connecting;
+        stats.data_channels.get_mut(&69).unwrap().state = RTCDataChannelState::Closing;
+        // Close in reverse creation order, so history must not use handle order.
+        for id in (0..68).rev() {
+            stats.mark_data_channel_closed(id);
+            stats.mark_data_channel_closed(id);
+        }
+        assert_eq!(stats.data_channels.len(), 66);
+        assert_eq!(stats.closed_data_channels.len(), 64);
+        for id in 0..64 {
+            let summary = stats.data_channels.get(&id).unwrap();
+            assert_eq!(summary.state, RTCDataChannelState::Closed);
+            assert_eq!(summary.messages_sent, 1);
+            assert_eq!(summary.bytes_sent, (id + 1) as u64);
+            assert_eq!(summary.messages_received, 1);
+            assert_eq!(summary.bytes_received, (id + 2) as u64);
+        }
+        for id in 64..68 {
+            assert!(!stats.data_channels.contains_key(&id));
+            stats.mark_data_channel_closed(id);
+        }
+        stats.mark_data_channel_closed(999);
+        // Closing another channel must still evict the earliest actual closure.
+        stats.mark_data_channel_closed(68);
+        assert!(!stats.data_channels.contains_key(&63));
+        assert!(stats.data_channels.contains_key(&0));
+        assert_eq!(
+            stats.data_channels.get(&69).unwrap().state,
+            RTCDataChannelState::Closing
+        );
+        assert_eq!(stats.closed_data_channels.len(), 64);
     }
 }

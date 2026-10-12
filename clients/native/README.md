@@ -201,6 +201,11 @@ Remote callbacks queue at most one channel per required label on each physical
 link, even when the orchestrator has not read its events. Draining the queue or
 closing a selected channel does not permit another channel on that link.
 Native library callers must now await `Engine::store_remote_channel`.
+The native RTC stack retains all live channel statistics and the 64 most recently
+closed channel summaries per peer connection. Older closed summaries disappear
+from `get_stats`; lifetime opened and closed counters remain cumulative.
+The wrapper discards undeliverable channel events after terminal closure.
+These bounds do not establish a limit on the entire WebRTC stack's memory.
 
 ## JSONL event contract
 

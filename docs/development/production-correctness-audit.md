@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -2412,3 +2412,70 @@ sequential-reopen controls pass on the final patch. Formatting and strict native
 lint pass. Strict standalone vendor test lint still reports pre-existing upstream
 warnings; library lint and the consumer's strict gate pass. Hosted qualification
 and exact-head review remain required before merging.
+
+### F41 — Closed native channels retain lifetime statistics and event queues
+
+Baseline: `ba8867af`. A20. Finding:
+[#919](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/919).
+Resource follow-up: [#870](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/870).
+
+The RTC registry releases closed streams for reuse, but its statistics map keeps
+labels and protocol strings under monotonic channel handles. Repeated channel
+refusal therefore grows retained state beyond the concurrent stream limit.
+Four real-handler controls fail at 65 closed summaries plus two live channels.
+They cover ordered stream-close input, legacy close events, DTLS shutdown, and
+DCEP timeout followed by reset. This is deterministic retained-state evidence,
+not a measured production process-memory incident.
+
+The statistics accumulator now retains all live records and the 64 most recently
+closed summaries. Lifetime opened and closed totals remain cumulative. Duplicate
+closure does not refresh history or recreate evicted records. A delayed-reset
+control expires 96 channels before physical closure; reset completion neither
+recreates the oldest summaries nor repeats closure events or accounting.
+An independent control closes channels in reverse creation order and checks
+that eviction follows closure order.
+
+The WebRTC wrapper has a separate retained-event map. Its per-channel queue cap
+does not bound the number of retired handles. When callback admission drops a
+refused channel, its receiver disappears; queued open and close events can
+remain forever. The qualified local wrapper patch releases undeliverable events
+at terminal closure and rejects late events for retired, unregistered handles.
+It preserves pre-registration events while the core channel exists and preserves
+message-before-close ordering for registered slow readers. Disconnected sender
+entries are pruned during driver flush. Refusal adds no polling task.
+
+The native sequential history offers 82 optional channels in each direction on
+one physical link, then repeats with fresh links. It observes each remote OPEN
+before that summary can age out, keeps at most 66 channel summaries, preserves
+both live required-channel records, and requires exact lifetime open counts.
+The stream identifiers must demonstrate reuse. Existing duplicate refusal,
+required reliable/unreliable traffic, callback exclusion, and cleanup remain
+part of the history. The focused live history passes in 5.417 seconds (nextest
+run `89d8836d`). The wrapper's 23 driver controls pass, including 4,096 orphan
+generations, pre-registration delivery, late callbacks, lifted open-event queues,
+and registered unread message-before-close order. The baseline retired-handle
+control fails at its first undeliverable event. RTC handler controls pass 14/14
+and the separate closure-order accumulator control passes. Independent review
+corrected a stale registration observation and lifted-event queue resurrection;
+its final source review has no remaining findings. Hosted verification and
+exact-head review remain required.
+
+The closed-history bound changes `get_stats` results for older closed channels;
+the native README and patch notes state this explicitly. No signaling message
+or external SDK API changes. The Rust SDK uses an application-owned WebRTC
+driver, .NET supplies signaling and relay, and Godot owns its engine WebRTC
+stack. Those implementations do not consume this local wrapper patch.
+
+Source provenance and published-replacement controls are recorded in
+`third_party/webrtc/PATCH.md` and `third_party/rtc/PATCH.md`.
+All three local patches must pass qualification before returning to published
+packages under #912. This finding does not bound simultaneous channel admission,
+all WebRTC stack buffers, browser/CDP retention, or whole-process memory.
+Keep #870 and the wider A01–A22 campaign open.
+
+```bash
+cargo test --locked --manifest-path third_party/rtc/Cargo.toml --lib statistics
+cargo test --locked --manifest-path third_party/webrtc/Cargo.toml --lib peer_connection::driver::tests
+cargo nextest run --locked --manifest-path clients/native/Cargo.toml --lib \
+  -E 'test(live_refused_channels_reopen_and_recover_on_fresh_link)'
+```

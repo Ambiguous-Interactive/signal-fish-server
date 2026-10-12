@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Bound native reference-client memory retained by closed data channels (#919).
+
 ## [0.11.0] - 2026-10-12
 
 ### Added

@@ -107,9 +107,7 @@ impl<'a> DataChannelHandler<'a> {
         }
         let channel_id = dc.id;
         self.stats.peer_connection.on_data_channel_closed();
-        if let Some(dc_stats) = self.stats.data_channels.get_mut(&channel_id) {
-            dc_stats.on_state_changed(RTCDataChannelState::Closed);
-        }
+        self.stats.mark_data_channel_closed(channel_id);
         if let Some(transport) = transport {
             self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
                 now,
@@ -663,8 +661,8 @@ impl<'a>
 
                 self.stats.peer_connection.on_data_channel_closed();
                 self.stats
-                    .get_or_create_data_channel(id, &dc.label, &dc.protocol)
-                    .on_state_changed(RTCDataChannelState::Closed);
+                    .get_or_create_data_channel(id, &dc.label, &dc.protocol);
+                self.stats.mark_data_channel_closed(id);
 
                 dc.close_emitted = true;
                 self.ctx.event_outs.push_back(TaggedRTCEventInternal {
@@ -1368,5 +1366,257 @@ mod tests {
                 .any(|e| matches!(e, DataChannelEvent::Message(_))),
             "a buffered message must never be delivered after the timeout"
         );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum StatisticsClosePath {
+        StreamRead,
+        StreamEvent,
+        Dtls,
+        Timeout,
+    }
+
+    // Reuse one wire stream with monotonically increasing application handles.
+    // Drive the production open/close paths, including timeout followed by reset.
+    fn closed_statistics_history(path: StatisticsClosePath) {
+        let now = Instant::now();
+        let mut ctx = DataChannelHandlerContext::new(now);
+        let mut channels = DataChannelRegistry::new();
+        let mut stats = RTCStatsAccumulator::new();
+        let mut closed = Vec::new();
+        let mut active = Vec::new();
+        if !matches!(path, StatisticsClosePath::Dtls) {
+            for stream in [3, 5] {
+                active.push(channels.insert(negotiated_channel(stream)));
+            }
+        }
+        for index in 0..96 {
+            let mut channel = if matches!(path, StatisticsClosePath::Timeout) {
+                in_band_channel(1)
+            } else {
+                negotiated_channel(1)
+            };
+            channel.label = format!("{index}:{}", "魚".repeat(1024));
+            channel.protocol = format!("protocol-{index}");
+            let id = channels.insert(channel);
+            if let Some(previous) = closed.last() {
+                assert!(id > *previous, "stream reuse must not reuse stats IDs");
+            }
+            closed.push(id);
+            {
+                let mut handler = DataChannelHandler::new(
+                    &mut ctx,
+                    &mut channels,
+                    &mut stats,
+                    Some(Duration::from_millis(1)),
+                    RTCDtlsRole::Server,
+                    None,
+                );
+                handler
+                    .handle_event(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::SCTPHandshakeComplete(0),
+                    })
+                    .unwrap();
+                match path {
+                    StatisticsClosePath::StreamRead => {
+                        handler.handle_read(TaggedRTCMessageInternal {
+                            now, transport: TransportContext::default(),
+                            message: RTCMessageInternal::Dtls(DTLSMessage::SctpStreamEvent(
+                                crate::peer_connection::message::internal::SctpStreamEvent::Closed(0, 1),
+                            )),
+                        }).unwrap();
+                    }
+                    StatisticsClosePath::StreamEvent => {
+                        handler
+                            .handle_event(TaggedRTCEventInternal {
+                                now,
+                                event: RTCEventInternal::SCTPStreamClosed(0, 1),
+                            })
+                            .unwrap();
+                    }
+                    StatisticsClosePath::Dtls => {
+                        handler
+                            .handle_event(TaggedRTCEventInternal {
+                                now,
+                                event: RTCEventInternal::DTLSClosed,
+                            })
+                            .unwrap();
+                    }
+                    StatisticsClosePath::Timeout => {
+                        handler
+                            .handle_timeout(now + Duration::from_secs(1))
+                            .unwrap();
+                        handler
+                            .handle_timeout(now + Duration::from_secs(2))
+                            .unwrap();
+                        handler
+                            .handle_event(TaggedRTCEventInternal {
+                                now,
+                                event: RTCEventInternal::SCTPStreamClosed(0, 1),
+                            })
+                            .unwrap();
+                    }
+                }
+                // A duplicate terminal notification must not recount or refresh history.
+                handler
+                    .handle_event(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::SCTPStreamClosed(0, 1),
+                    })
+                    .unwrap();
+            }
+            assert!(
+                !channels.stream_id_in_use(&1),
+                "closed stream can be reused"
+            );
+            assert_eq!(stats.peer_connection.data_channels_closed, index + 1);
+            assert!(
+                stats.data_channels.len() <= 64 + active.len(),
+                "{path:?}: closed summaries grow across stream reuse: {}",
+                stats.data_channels.len()
+            );
+            ctx.read_outs.clear();
+            ctx.write_outs.clear();
+            ctx.event_outs.clear();
+        }
+        if matches!(path, StatisticsClosePath::Dtls) {
+            for stream in [3, 5] {
+                active.push(channels.insert(negotiated_channel(stream)));
+            }
+            DataChannelHandler::new(
+                &mut ctx,
+                &mut channels,
+                &mut stats,
+                None,
+                RTCDtlsRole::Server,
+                None,
+            )
+            .handle_event(TaggedRTCEventInternal {
+                now,
+                event: RTCEventInternal::SCTPHandshakeComplete(0),
+            })
+            .unwrap();
+        }
+        assert_eq!(stats.data_channels.len(), 66);
+        let expected_opened = if matches!(path, StatisticsClosePath::Timeout) {
+            2
+        } else {
+            98
+        };
+        assert_eq!(stats.peer_connection.data_channels_opened, expected_opened);
+        let report = stats.snapshot(now);
+        for (index, id) in closed.into_iter().enumerate() {
+            let entry = report.get(&format!("RTCDataChannel_{id}"));
+            if index < 32 {
+                assert!(entry.is_none(), "oldest closed summary must be evicted");
+            } else {
+                let Some(crate::statistics::report::RTCStatsReportEntry::DataChannel(summary)) =
+                    entry
+                else {
+                    panic!("recent closed summary must remain");
+                };
+                assert_eq!(summary.state, RTCDataChannelState::Closed);
+                assert_eq!(summary.label, format!("{index}:{}", "魚".repeat(1024)));
+                assert_eq!(summary.protocol, format!("protocol-{index}"));
+            }
+        }
+        for id in active {
+            let Some(crate::statistics::report::RTCStatsReportEntry::DataChannel(summary)) =
+                report.get(&format!("RTCDataChannel_{id}"))
+            else {
+                panic!("live channel summary must survive closed history eviction");
+            };
+            assert_eq!(summary.state, RTCDataChannelState::Open);
+        }
+    }
+
+    #[test]
+    fn stream_read_closure_bounds_statistics_history() {
+        closed_statistics_history(StatisticsClosePath::StreamRead);
+    }
+
+    #[test]
+    fn stream_event_closure_bounds_statistics_history() {
+        closed_statistics_history(StatisticsClosePath::StreamEvent);
+    }
+
+    #[test]
+    fn dtls_closure_bounds_statistics_history() {
+        closed_statistics_history(StatisticsClosePath::Dtls);
+    }
+
+    #[test]
+    fn dcep_timeout_bounds_statistics_history() {
+        closed_statistics_history(StatisticsClosePath::Timeout);
+    }
+
+    #[test]
+    fn reset_after_evicted_timeout_does_not_recreate_statistics_or_recount_closure() {
+        let now = Instant::now();
+        let mut ctx = DataChannelHandlerContext::new(now);
+        let (mut channels, _) = registry(
+            (0..96)
+                .map(|index| in_band_channel(index * 2 + 1))
+                .collect(),
+        );
+        let mut stats = RTCStatsAccumulator::new();
+        {
+            let mut handler = DataChannelHandler::new(
+                &mut ctx,
+                &mut channels,
+                &mut stats,
+                Some(Duration::from_millis(1)),
+                RTCDtlsRole::Server,
+                None,
+            );
+            handler
+                .handle_event(TaggedRTCEventInternal {
+                    now,
+                    event: RTCEventInternal::SCTPHandshakeComplete(0),
+                })
+                .unwrap();
+            handler
+                .handle_timeout(now + Duration::from_secs(1))
+                .unwrap();
+        }
+        assert_eq!(
+            channels.values().count(),
+            96,
+            "reset reservations remain live"
+        );
+        assert_eq!(stats.data_channels.len(), 64);
+        let retained: HashSet<_> = stats.data_channels.keys().copied().collect();
+        assert_eq!(ctx.event_outs.len(), 96);
+        ctx.event_outs.clear();
+        {
+            let mut handler = DataChannelHandler::new(
+                &mut ctx,
+                &mut channels,
+                &mut stats,
+                None,
+                RTCDtlsRole::Server,
+                None,
+            );
+            for index in 0..96 {
+                handler
+                    .handle_event(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::SCTPStreamClosed(0, index * 2 + 1),
+                    })
+                    .unwrap();
+            }
+        }
+        assert_eq!(
+            stats.data_channels.keys().copied().collect::<HashSet<_>>(),
+            retained
+        );
+        assert_eq!(stats.peer_connection.data_channels_closed, 96);
+        assert_eq!(stats.peer_connection.data_channels_opened, 0);
+        assert!(
+            ctx.event_outs.is_empty(),
+            "timeout already emitted every close"
+        );
+        assert_eq!(channels.values().count(), 0);
     }
 }

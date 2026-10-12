@@ -73,6 +73,14 @@ cargo fmt --check
 echo "==> Linting the reference client (clippy, zero warnings)"
 cargo clippy --locked --all-targets -- -D warnings
 
+echo "==> Verifying WebRTC channel event retention"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/webrtc/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib peer_connection::driver::tests
+
+echo "==> Verifying RTC channel statistics retention"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib statistics
+
 echo "==> Verifying the local RTC channel-mode repair"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib remote_dcep_
