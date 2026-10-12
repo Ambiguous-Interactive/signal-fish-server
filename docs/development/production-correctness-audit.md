@@ -54,7 +54,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial |
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial |
 | A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31 |
-| A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial |
+| A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38 |
 | A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial |
 | A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial |
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
@@ -2241,3 +2241,55 @@ replay handling. Keep #872, #870, #853, #889, and the wider A20/#826 audit open.
 cargo nextest run --locked --manifest-path clients/native/Cargo.toml --lib \
   -E 'test(remote_peer_close_) | test(ended_channel_streams_) | test(channel_termination_)'
 ```
+
+### F38 — A hostless departure retains the obsolete client plan
+
+Issue [#907](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/907).
+Baseline: `82efc9a8`. A11. This repairs a documented recovery exception; it is
+not a claim that the old branch violated its explicit silence contract.
+
+A Direct session starts with one usable host endpoint. The host replaces its
+metadata with an unusable address and port through `ProvideConnectionInfo`.
+Another member leaves. Departure recovery finds no eligible host and removes
+the stored plan, but sends no replacement. Remaining clients can retain their
+last authoritative host, endpoint, and peer obligations. A downgraded reconnect
+already has empty peers; that weaker history does not establish this failure.
+
+The regression invokes the production metadata and leave handlers, observes
+`PlayerLeft`, then requires a fresh Relay/Relay reset. It fails on the old
+branch waiting for that plan (run `640a7a83`). This is a controlled in-process
+history with real coordinator queues, not an observed remote incident or a
+TCP client experiment.
+
+Departure recovery now shares the membership decision used by finalized joins
+and reconnects. Its exact-membership transaction publishes one fresh relay
+generation and removes sticky state in the same commit hook. The reset clears
+host, Direct endpoint, peers, and ICE servers. It does not mint TURN credentials
+or count as replacement-host election. Pure v2 survivors receive no v3 frames.
+The ended session stays on relay; the selection ladder does not run again.
+Routing rejection retains the old stored state for later recovery.
+
+Final focused controls pass (run `9d366d12`), and all 83 session-policy tests
+pass (run `b9332373`). These include existing replacement-host, capability,
+TURN, and ordinary-departure controls. Strict all-target, all-feature lint
+passes. Independent review found and corrected a stale host-failover scenario
+note. Hosted verification and external client acceptance are separate gates.
+
+The protocol and handoff guide now state this terminal reset instead of the
+silence exception. Current Rust, .NET, and Godot handlers accept authoritative
+relay resets. Their acceptance tests remain separate work in
+[Rust #288](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/288),
+[.NET #141](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/141),
+and [Godot #358](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/358).
+No wire schema or v2 behavior changes. These client issues remain open until
+their own tests prove this trigger's cleanup and recovery.
+
+Session CI repair [#908](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/908)
+addresses a separate mutation-baseline timeout. Each old TCP reconnect test ran
+twelve independent histories within a ten-second per-test limit. The signed
+matrix timed out at 10.003 seconds in hosted job `114695185811` and at 10.021
+seconds in a focused local run. All twenty-four cells now have independent test
+processes with unchanged histories, assertions, deadlines, and cleanup. The
+focused mutation-profile matrix passes 24/24; its slowest cell takes 1.309 seconds.
+TLS matrices are unchanged. This is verification maintenance, not a gameplay
+repair. The broader A01–A22 campaign remains open.

@@ -145,7 +145,8 @@ trickle and `TransportStatus` reporting proceed as before.
 - **The relay floor never closed.** While the new WebRTC edges are being re-established, Dave and Carol can keep
   exchanging `GameData` over the relay (the universal `fallback`). Failover never interrupts the session's data
   path.
-- **If no member qualifies**, no plan is re-issued — the session is over and the relay floor carries the room. For
+- **If no member qualifies**, the server sends every remaining v3 member an explicit Relay/Relay reset with a
+  fresh generation and no host, endpoint, peers, or ICE servers. The session ends and the room stays on relay. For
   example, if the only other member were a relay-only member (possible only through a reconnect with downgraded
   capabilities — new seat-fills into a running session are rejected with `ROOM_SESSION_INCOMPATIBLE`), the server
   would not name it host of a session it cannot run.

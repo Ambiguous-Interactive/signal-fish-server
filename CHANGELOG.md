@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Clear stale peer plans and Direct endpoints when no remaining player can host the session (#907).
 - Switch the native reference client to relay fallback when a remote peer closes or its channel driver stops (#905).
 - Keep cleanup and connection timers alive when large configured periods exceed the platform clock range (#897).
 - Reject generated room-code lengths that cannot fit room request or reply frames.
