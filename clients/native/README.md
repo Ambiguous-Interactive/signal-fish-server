@@ -22,6 +22,13 @@ It closes other remote labels without retaining them or starting callbacks.
 handling. This restriction belongs to these reference clients; the server
 continues to relay opaque signaling payloads.
 
+The native build uses qualified local RTC and SCTP source patches.
+A closed channel retains its stream ID until both reset directions finish.
+Completed stream IDs can be reused; late duplicate resets do not close a new channel.
+The patch scope and removal criteria are in
+[RTC patch notes](../../third_party/rtc/PATCH.md) and
+[SCTP patch notes](../../third_party/rtc-sctp/PATCH.md).
+
 The client accepts at most 64 KiB per received data-channel message, measured
 as raw bytes and decoded UTF-8 text. Across all peers and link generations,
 pending messages retain at most 256 entries and 1 MiB of decoded text.

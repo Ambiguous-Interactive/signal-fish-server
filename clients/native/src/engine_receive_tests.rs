@@ -44,7 +44,7 @@ fn receive_budget_is_shared_across_links_and_releases_when_payloads_drop() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn simultaneous_live_channels_publish_one_terminal_receive_rejection() {
-    let pair = LivePair::connect().await;
+    let mut pair = LivePair::connect().await;
     let held: Vec<_> = (0..255)
         .map(|_| pair.receiver.message_budget.reserve(0).unwrap())
         .collect();
@@ -76,8 +76,48 @@ async fn simultaneous_live_channels_publish_one_terminal_receive_rejection() {
     })
     .await
     .expect("concurrent real messages reach the full receive queue");
-    reliable.close().await.unwrap();
-    unreliable.close().await.unwrap();
+    // Pin completed remote refusal before local cleanup. Overflow already
+    // closes its channel, so that sender handle can be gone by cleanup time.
+    let remotely_closed = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let EngineEvent::ChannelClosed {
+                peer,
+                generation,
+                label,
+            } = pair.sender_events.recv().await.unwrap()
+            {
+                assert_eq!(peer, pair.receiver_id);
+                assert_eq!(generation, pair.sender.peers[&pair.receiver_id].generation);
+                assert!(matches!(label.as_str(), RELIABLE_LABEL | UNRELIABLE_LABEL));
+                break label;
+            }
+        }
+    })
+    .await
+    .expect("overflow closes its channel on the sender");
+    for (label, channel) in [(RELIABLE_LABEL, reliable), (UNRELIABLE_LABEL, unreliable)] {
+        if label == remotely_closed {
+            assert!(
+                matches!(
+                    channel.ready_state().await,
+                    Err(webrtc::error::Error::ErrDataChannelClosed)
+                ),
+                "the observed remote close has removed its sender handle"
+            );
+            assert!(
+                matches!(
+                    channel.close().await,
+                    Err(webrtc::error::Error::ErrDataChannelClosed)
+                ),
+                "cleanup may encounter only the confirmed terminal closure"
+            );
+        } else {
+            channel
+                .close()
+                .await
+                .expect("the other channel accepts local cleanup");
+        }
+    }
     tokio::time::timeout(Duration::from_secs(15), async {
         while !pair.receiver.peers[&pair.sender_id]
             .channel_tasks
@@ -89,7 +129,6 @@ async fn simultaneous_live_channels_publish_one_terminal_receive_rejection() {
     })
     .await
     .expect("both real channel producers terminate");
-    let mut pair = pair;
     let mut rejected = false;
     let mut retained = Vec::new();
     loop {

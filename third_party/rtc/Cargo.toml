@@ -201,3 +201,6 @@ debug = 0
 # Apply the repository's no-unsafe policy to the qualified source copy.
 [lints.rust]
 unsafe_code = "forbid"
+
+[patch.crates-io]
+rtc-sctp = { path = "../rtc-sctp" }

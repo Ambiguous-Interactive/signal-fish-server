@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -2351,3 +2351,64 @@ The external Rust SDK uses an application-owned `WebRtcDriver`. The .NET SDK
 provides signaling and relay APIs. Godot owns its `WebRTCMultiplayerPeer`.
 This reference-engine change does not alter those SDKs or the signaling schema.
 Keep #872, #870, #853, #889, and the wider A20/#826 audit open.
+
+### F40 — Native stream reuse races unfinished SCTP resets
+
+Baseline: `ee52a96b`. A20. Finding:
+[#872](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/872).
+
+The sequential refusal history reopened streams before the prior reset finished.
+RTC emitted stream closure immediately after requesting a reset. SCTP removed
+streams on the incoming reset before its outgoing reset was acknowledged.
+It also discarded outgoing requests on `InProgress` and applied duplicate
+requests to a reused stream. Each transition has a deterministic failing control
+against the published behavior.
+
+The repair reserves a stream until both reset directions complete. It retries `InProgress` without
+exhausting the error budget, retries a temporary busy response with the same sequence number, and
+validates peer request sequences. Duplicate requests replay the cached response without touching a
+new stream. Reciprocal requests follow queued outgoing data. Deferred incoming resets resume after
+data drains, the reader stops, or cumulative TSN advances. New-generation DATA that arrives before
+the final acknowledgment stays within a bounded buffer. Transport acknowledgment continues while
+generation delivery waits. Hidden reassembly applies forward-TSN abandonment before the new channel
+is exposed. RTC applies the old channel's payloads and stream events in read order before admitting
+the reopened channel. Generation-bound SCTP handles and event cleanup prevent an old reader or
+notification from touching the new stream.
+
+Outgoing forward-TSN reports remain within an outstanding reset's TSN boundary.
+Their stream sequence entries cover only that interval. Once the reset succeeds,
+the sender retires that stream's old cached sequence and ignores abandoned old
+DATA when updating the new generation. This prevents an old high sequence from
+skipping freshly reopened ordered messages. Other streams can still send DATA.
+A fence with no retransmittable DATA pauses blocked forward recovery. Terminal
+reset responses resume recovery so a lost first forward report can be retried.
+
+The native regression creates and refuses channels sequentially in both
+directions. Each direction offers empty and long Unicode labels, 16 distinct
+optional labels, and repeated required-label duplicates. Receiver statistics
+prove that streams are actually reused. Required-channel traffic, callback
+exclusion, teardown, and a fresh-link repetition remain part of the history.
+The existing distinct-stream admission control stays separate.
+
+Both source patches use qualified copies of the pinned published packages.
+Registry versions for other dependencies remain unchanged. CI runs the focused
+reset controls, native suite, browser interoperability, and security checks for
+all tracked graphs. Provenance and removal criteria are in
+`third_party/rtc/PATCH.md` and `third_party/rtc-sctp/PATCH.md`.
+
+The Rust SDK owns no WebRTC stack; applications provide `WebRtcDriver`. The .NET
+SDK provides signaling and relay. Godot uses its engine's WebRTC implementation.
+This reference-engine repair changes no server message or external SDK API.
+The broad WebRTC resource audit #870, unexplained establishment failures #853
+and #889, published-package qualification #912, and campaign #826 stay open.
+
+The focused SCTP gate passes 36 reset controls, including 22 new cases and 14
+retained upstream controls. The corrected native sequential test loses three
+of 18 optional OPENs against the unpatched dependency; the patched history
+preserves every offered OPEN, required traffic, and actual stream reuse.
+The earlier failed sender-statistics oracle was corrected and is not evidence
+for this defect. The RTC owning-module gate passes 27 controls. Both native admission and
+sequential-reopen controls pass on the final patch. Formatting and strict native
+lint pass. Strict standalone vendor test lint still reports pre-existing upstream
+warnings; library lint and the consumer's strict gate pass. Hosted qualification
+and exact-head review remain required before merging.

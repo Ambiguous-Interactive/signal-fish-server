@@ -1,6 +1,7 @@
 use crate::data_channel::RTCDataChannelId;
 use crate::data_channel::message::RTCDataChannelMessage;
 use crate::media_stream::track::MediaStreamTrackId;
+use crate::peer_connection::event::RTCEventInternal;
 use bytes::BytesMut;
 use datachannel::data_channel::DataChannelMessage;
 use interceptor::Packet;
@@ -13,6 +14,8 @@ pub(crate) enum DataChannelEvent {
     Open,
     Message(RTCDataChannelMessage),
     Close,
+    BufferedAmountLow,
+    BufferedAmountHigh,
 }
 
 #[derive(Debug, Clone)]
@@ -33,9 +36,38 @@ pub(crate) enum STUNMessage {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) enum SctpStreamEvent {
+    Closed(usize, sctp::StreamId),
+    BufferReleased(usize, sctp::StreamId, usize),
+    BufferedAmountLow(usize, sctp::StreamId),
+    BufferedAmountHigh(usize, sctp::StreamId),
+}
+
+impl From<SctpStreamEvent> for RTCEventInternal {
+    fn from(event: SctpStreamEvent) -> Self {
+        match event {
+            SctpStreamEvent::Closed(association, stream) => {
+                Self::SCTPStreamClosed(association, stream)
+            }
+            SctpStreamEvent::BufferReleased(association, stream, bytes) => {
+                Self::SCTPBufferReleased(association, stream, bytes)
+            }
+            SctpStreamEvent::BufferedAmountLow(association, stream) => {
+                Self::SCTPBufferedAmountLow(association, stream)
+            }
+            SctpStreamEvent::BufferedAmountHigh(association, stream) => {
+                Self::SCTPBufferedAmountHigh(association, stream)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) enum DTLSMessage {
     Raw(BytesMut),
     Sctp(DataChannelMessage),
+    // Ordered stream notification, tied to the generation before the next OPEN.
+    SctpStreamEvent(SctpStreamEvent),
     // Local control for an existing, remotely opened SCTP stream. It carries
     // no wire message and must precede the channel's ACK and application data.
     SctpStreamConfig {
@@ -76,9 +108,14 @@ impl RTCMessageInternal {
             RTCMessageInternal::Dtls(msg) => match msg {
                 DTLSMessage::Raw(bytes) => bytes.len(),
                 DTLSMessage::Sctp(dcm) => dcm.payload.len(),
-                DTLSMessage::SctpStreamConfig { .. } | DTLSMessage::SctpStreamReject { .. } => 0,
+                DTLSMessage::SctpStreamConfig { .. }
+                | DTLSMessage::SctpStreamReject { .. }
+                | DTLSMessage::SctpStreamEvent(_) => 0,
                 DTLSMessage::DataChannel(app_msg) => match &app_msg.data_channel_event {
-                    DataChannelEvent::Open | DataChannelEvent::Close => 0,
+                    DataChannelEvent::Open
+                    | DataChannelEvent::Close
+                    | DataChannelEvent::BufferedAmountLow
+                    | DataChannelEvent::BufferedAmountHigh => 0,
                     DataChannelEvent::Message(rtc_dcm) => rtc_dcm.data.len(),
                 },
             },

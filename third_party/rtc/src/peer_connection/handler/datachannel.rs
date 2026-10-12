@@ -96,7 +96,12 @@ impl<'a> DataChannelHandler<'a> {
     /// The event names the channel by handle, as every application-facing event does; the
     /// stream id was only how SCTP referred to it. A channel already closed by handshake timeout
     /// has already fired `OnClose` and been counted, so it is not announced twice.
-    fn announce_closed(&mut self, now: Instant, dc: RTCDataChannelInternal) {
+    fn announce_closed(
+        &mut self,
+        now: Instant,
+        dc: RTCDataChannelInternal,
+        transport: Option<TransportContext>,
+    ) {
         if dc.close_emitted {
             return;
         }
@@ -105,12 +110,23 @@ impl<'a> DataChannelHandler<'a> {
         if let Some(dc_stats) = self.stats.data_channels.get_mut(&channel_id) {
             dc_stats.on_state_changed(RTCDataChannelState::Closed);
         }
-        self.ctx.event_outs.push_back(TaggedRTCEventInternal {
-            now,
-            event: RTCEventInternal::RTCPeerConnectionEvent(RTCPeerConnectionEvent::OnDataChannel(
-                RTCDataChannelEvent::OnClose(channel_id),
-            )),
-        });
+        if let Some(transport) = transport {
+            self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
+                now,
+                transport,
+                message: RTCMessageInternal::Dtls(DTLSMessage::DataChannel(ApplicationMessage {
+                    data_channel_id: channel_id,
+                    data_channel_event: DataChannelEvent::Close,
+                })),
+            });
+        } else {
+            self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                now,
+                event: RTCEventInternal::RTCPeerConnectionEvent(
+                    RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnClose(channel_id)),
+                ),
+            });
+        }
     }
 
     /// Emit the `DataChannelEvent::Open` application message and record the
@@ -168,6 +184,52 @@ impl<'a>
         let now = msg.now;
         self.ctx.observe(now);
 
+        if let RTCMessageInternal::Dtls(DTLSMessage::SctpStreamEvent(event)) = &msg.message {
+            if let crate::peer_connection::message::internal::SctpStreamEvent::Closed(
+                association_handle,
+                stream_id,
+            ) = event
+            {
+                self.ctx
+                    .rejected_streams
+                    .remove(&(*association_handle, *stream_id));
+                if let Some(dc) = self.data_channels.remove_by_stream(stream_id) {
+                    self.announce_closed(now, dc, Some(msg.transport));
+                }
+                return Ok(());
+            }
+            let notification = match event {
+                crate::peer_connection::message::internal::SctpStreamEvent::BufferedAmountLow(
+                    _,
+                    stream_id,
+                ) => Some((*stream_id, DataChannelEvent::BufferedAmountLow)),
+                crate::peer_connection::message::internal::SctpStreamEvent::BufferedAmountHigh(
+                    _,
+                    stream_id,
+                ) => Some((*stream_id, DataChannelEvent::BufferedAmountHigh)),
+                _ => None,
+            };
+            if let Some((stream_id, data_channel_event)) = notification {
+                if let Some(data_channel_id) = self.data_channels.handle_of_stream(&stream_id) {
+                    self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
+                        now,
+                        transport: msg.transport,
+                        message: RTCMessageInternal::Dtls(DTLSMessage::DataChannel(
+                            ApplicationMessage {
+                                data_channel_id,
+                                data_channel_event,
+                            },
+                        )),
+                    });
+                }
+                return Ok(());
+            }
+            return self.handle_event(TaggedRTCEventInternal {
+                now,
+                event: event.clone().into(),
+            });
+        }
+
         if let RTCMessageInternal::Dtls(DTLSMessage::Sctp(message)) = msg.message {
             debug!(
                 "recv SCTP DataChannelMessage from {:?}",
@@ -189,8 +251,12 @@ impl<'a>
             let opened = if let Some(data_channel_internal) =
                 self.data_channels.get_by_stream_mut(&stream_id)
             {
-                // A closed channel is terminal: ignore any late DCEP or user data.
-                if data_channel_internal.ready_state == RTCDataChannelState::Closed {
+                // Retiring channels still reserve their SID, but must not
+                // retain late DCEP or application data while reset completes.
+                if matches!(
+                    data_channel_internal.ready_state,
+                    RTCDataChannelState::Closing | RTCDataChannelState::Closed
+                ) {
                     return Ok(());
                 }
 
@@ -504,7 +570,7 @@ impl<'a>
                     .rejected_streams
                     .remove(&(association_handle, stream_id));
                 if let Some(dc) = self.data_channels.remove_by_stream(&stream_id) {
-                    self.announce_closed(now, dc);
+                    self.announce_closed(now, dc, None);
                 }
             }
 
@@ -513,7 +579,7 @@ impl<'a>
             RTCEventInternal::DTLSClosed => {
                 self.ctx.rejected_streams.clear();
                 for dc in self.data_channels.drain() {
-                    self.announce_closed(now, dc);
+                    self.announce_closed(now, dc, None);
                 }
                 self.ctx.event_outs.push_back(TaggedRTCEventInternal {
                     now,
@@ -997,6 +1063,42 @@ mod tests {
                 .any(|e| matches!(e, DataChannelEvent::Open)),
             "no open event may fire for a closed channel"
         );
+    }
+
+    #[test]
+    fn stream_reset_closing_channel_discards_late_ack_and_payload() {
+        let now = Instant::now();
+        let mut ctx = DataChannelHandlerContext::new(now);
+        let mut dc = in_band_channel(1);
+        dc.dial(0).unwrap();
+        dc.close().unwrap();
+        let (mut channels, handles) = registry(vec![dc]);
+        let mut stats = RTCStatsAccumulator::new();
+        let mut handler = DataChannelHandler::new(
+            &mut ctx,
+            &mut channels,
+            &mut stats,
+            None,
+            RTCDtlsRole::Server,
+            None,
+        );
+        for message in [ack(0, 1), data_message(0, 1, b"late-game-payload")] {
+            handler
+                .handle_read(TaggedRTCMessageInternal {
+                    now,
+                    transport: TransportContext::default(),
+                    message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(message)),
+                })
+                .unwrap();
+        }
+        assert!(handler.poll_read().is_none());
+        let dc = channels.get_mut(&handles[0]).unwrap();
+        assert_eq!(dc.ready_state, RTCDataChannelState::Closing);
+        assert!(
+            dc.data_channel.as_mut().unwrap().poll_read().is_none(),
+            "closing channels must not retain late application data"
+        );
+        assert!(channels.stream_id_in_use(&1), "reset still owns the SID");
     }
 
     /// An in-band channel whose ACK never arrives must time out: it transitions

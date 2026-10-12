@@ -139,6 +139,20 @@ impl<'a> EndpointHandler<'a> {
             DataChannelEvent::Close => {
                 self.handle_datachannel_close(now, transport_context, message.data_channel_id)
             }
+            DataChannelEvent::BufferedAmountLow | DataChannelEvent::BufferedAmountHigh => {
+                let event = if message.data_channel_event == DataChannelEvent::BufferedAmountLow {
+                    RTCDataChannelEvent::OnBufferedAmountLow(message.data_channel_id)
+                } else {
+                    RTCDataChannelEvent::OnBufferedAmountHigh(message.data_channel_id)
+                };
+                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                    now,
+                    event: RTCEventInternal::RTCPeerConnectionEvent(
+                        RTCPeerConnectionEvent::OnDataChannel(event),
+                    ),
+                });
+                Ok(())
+            }
         }
     }
 

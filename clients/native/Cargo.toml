@@ -101,6 +101,7 @@ debug = 1
 [profile.dev.package."*"]
 debug = 0
 
-# RTC 0.21.1 loses remote DCEP delivery settings; keep the scoped repair local.
+# Keep the qualified local RTC DCEP and SCTP stream reset repairs.
 [patch.crates-io]
 rtc = { path = "../../third_party/rtc" }
+rtc-sctp = { path = "../../third_party/rtc-sctp" }

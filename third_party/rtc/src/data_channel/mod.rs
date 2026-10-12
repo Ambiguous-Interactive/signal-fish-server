@@ -406,7 +406,7 @@ impl RTCDataChannel<'_> {
     /// Closes the data channel.
     ///
     /// Moves the channel to `Closing` and starts the DCEP/SCTP teardown. Closing a channel that
-    /// is already `Closed` is a no-op and succeeds.
+    /// is already `Closing` or `Closed` is a no-op and succeeds.
     ///
     /// # Errors
     ///
@@ -414,7 +414,10 @@ impl RTCDataChannel<'_> {
     /// peer connection any more.
     pub fn close(&mut self) -> Result<()> {
         if let Some(dc) = self.peer_connection.data_channels.get_mut(&self.id) {
-            if dc.ready_state == RTCDataChannelState::Closed {
+            if matches!(
+                dc.ready_state,
+                RTCDataChannelState::Closing | RTCDataChannelState::Closed
+            ) {
                 return Ok(());
             }
             dc.ready_state = RTCDataChannelState::Closing;
