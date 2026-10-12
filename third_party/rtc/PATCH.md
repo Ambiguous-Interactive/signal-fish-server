@@ -20,7 +20,7 @@ The repair preserves remote DCEP ordering, retry limits, and lifetime limits.
 Partial-mode parameters must fit the WebRTC API's 16-bit properties.
 Reliable modes ignore the irrelevant reliability parameter.
 The responder configures its outgoing SCTP stream before acknowledging a
-remote channel. Refused channels reset their SCTP stream before returning.
+remote channel. Refused channels request a reset of their SCTP stream.
 The changed upstream files and regression evidence are recorded in audit
 [#911](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/911).
 
