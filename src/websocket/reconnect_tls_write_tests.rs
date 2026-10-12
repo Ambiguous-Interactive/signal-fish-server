@@ -54,7 +54,12 @@ mod tls_write_history {
     }
 
     impl BoundSocket {
-        async fn connect(address: SocketAddr, path: &str, identity: u16) -> Self {
+        async fn connect(
+            address: SocketAddr,
+            path: &str,
+            identity: u16,
+            credentials: Option<(&SigningKey, &str)>,
+        ) -> Self {
             let certificate =
                 CertificateDer::from_pem_file(fixture(&format!("client-{identity}-cert.pem")))
                     .unwrap();
@@ -108,8 +113,23 @@ mod tls_write_history {
                 fingerprint,
                 sequence: challenge["data"]["first_sequence"].as_u64().unwrap(),
             };
-            bound
-                .send(&ClientMessage::Authenticate {
+            let authentication = if let Some((signing, app)) = credentials {
+                // A rejected signer must not prevent a valid signed retry on
+                // this same certificate-bound connection.
+                let wrong_signer = SigningKey::from_bytes(&[43; 32]);
+                bound
+                    .send(&authentication_request(&wrong_signer, app))
+                    .await;
+                assert!(matches!(
+                    receive(&mut bound.socket).await,
+                    ServerMessage::AuthenticationError {
+                        error_code: ErrorCode::ConnectTokenInvalid,
+                        ..
+                    }
+                ));
+                authentication_request(signing, app)
+            } else {
+                ClientMessage::Authenticate {
                     app_id: "tls-history".into(),
                     connect_token: None,
                     sdk_version: None,
@@ -119,8 +139,9 @@ mod tls_write_history {
                     supported_transports: None,
                     supported_topologies: None,
                     requested_capabilities: None,
-                })
-                .await;
+                }
+            };
+            bound.send(&authentication).await;
             assert!(matches!(
                 receive(&mut bound.socket).await,
                 ServerMessage::Authenticated { .. }
@@ -174,9 +195,65 @@ mod tls_write_history {
         ));
     }
 
+    async fn reject_other_application(
+        server: &Arc<EnhancedGameServer>,
+        address: SocketAddr,
+        signing: &SigningKey,
+        player: PlayerId,
+        room: crate::protocol::RoomId,
+        token: &str,
+    ) {
+        // Keep the certificate identical to the owner so only the tenant
+        // gate can refuse this otherwise valid credential.
+        let mut attacker =
+            BoundSocket::connect(address, "v3/ws", 101, Some((signing, "other-app"))).await;
+        attacker
+            .send(&ClientMessage::Reconnect {
+                player_id: player,
+                room_id: room,
+                auth_token: token.into(),
+            })
+            .await;
+        assert!(
+            matches!(
+                receive(&mut attacker.socket).await,
+                ServerMessage::ReconnectionFailed {
+                    error_code: ErrorCode::RoomNotFound,
+                    ..
+                }
+            ),
+            "a signed tenant with the issuing certificate cannot restore another tenant"
+        );
+        assert!(server.get_client_room(&player).await.is_none());
+        assert!(
+            server
+                .reconnection_manager()
+                .unwrap()
+                .has_pending_reconnection(&player)
+                .await
+        );
+        assert!(!server
+            .database()
+            .get_room_players(&room)
+            .await
+            .unwrap()
+            .iter()
+            .any(|member| member.id == player));
+    }
+
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
     async fn test_mtls_partial_reconnect_preserves_certificate_and_gameplay_recovery() {
+        run_mtls_partial_reconnect_history(false).await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn test_signed_mtls_partial_reconnect_preserves_tenant_certificate_and_gameplay() {
+        run_mtls_partial_reconnect_history(true).await;
+    }
+
+    async fn run_mtls_partial_reconnect_history(signed: bool) {
         for (path, batching, prefix) in ["ws", "v3/ws"].into_iter().flat_map(|path| {
             [false, true].into_iter().flat_map(move |batching| {
                 [None, Some(1_usize), Some(32)].map(|prefix| (path, batching, prefix))
@@ -184,6 +261,24 @@ mod tls_write_history {
         }) {
             let mut config = ServerConfig::default();
             config.websocket_config.enable_batching = batching;
+            config.app_id_allowlist_enabled = signed;
+            let signing = SigningKey::from_bytes(&[42; 32]);
+            let credentials = signed.then_some((&signing, "tls-history"));
+            let apps = if signed {
+                ["tls-history", "other-app"]
+                    .map(|app| crate::config::AppRegistrationEntry {
+                        app_id: app.into(),
+                        app_name: app.into(),
+                        max_rooms: None,
+                        max_players_per_room: None,
+                        rate_limit_per_minute: None,
+                        max_relay_bytes: None,
+                        require_connect_token: Some(true),
+                    })
+                    .to_vec()
+            } else {
+                vec![]
+            };
             let transport = crate::config::TransportSecurityConfig {
                 tls: crate::config::TlsServerConfig {
                     enabled: true,
@@ -210,10 +305,23 @@ mod tls_write_history {
                 Default::default(),
                 Default::default(),
                 transport,
-                vec![],
+                apps,
             )
             .await
             .unwrap();
+            if signed {
+                server
+                    .install_connect_token_key(&crate::config::SecurityConfig {
+                        connect_token: Some(crate::config::ConnectTokenConfig {
+                            public_key: base64::engine::general_purpose::STANDARD
+                                .encode(signing.verifying_key()),
+                            public_key_path: None,
+                            required: true,
+                        }),
+                        ..Default::default()
+                    })
+                    .unwrap();
+            }
             let router = super::super::super::super::routes::create_standalone_router(
                 "http://localhost:3000",
             )
@@ -254,12 +362,14 @@ mod tls_write_history {
                     password: None,
                     join_only: None,
                 };
-                let mut incumbent = BoundSocket::connect(address, "v3/ws", 101).await;
+                let mut incumbent = BoundSocket::connect(address, "v3/ws", 101, credentials).await;
                 incumbent.send(&join(None, "incumbent")).await;
                 let ServerMessage::RoomJoined(room) = receive(&mut incumbent.socket).await else {
                     panic!("incumbent baseline")
                 };
-                let mut original = BoundSocket::connect(address, "v3/ws", 101).await;
+                let original_owner =
+                    signed.then(|| server.client_app_context(&room.player_id).unwrap().id);
+                let mut original = BoundSocket::connect(address, "v3/ws", 101, credentials).await;
                 original
                     .send(&join(Some(room.room_code.clone()), "recovering"))
                     .await;
@@ -274,10 +384,22 @@ mod tls_write_history {
                 };
                 drop(original);
                 wait_disconnected(&server, &joined.player_id).await;
-                let mut attacker = BoundSocket::connect(address, "v3/ws", 102).await;
+                if signed {
+                    reject_other_application(
+                        &server,
+                        address,
+                        &signing,
+                        joined.player_id,
+                        room.room_id,
+                        &old,
+                    )
+                    .await;
+                }
+                let mut attacker = BoundSocket::connect(address, "v3/ws", 102, credentials).await;
                 reject(&mut attacker, &reconnect(joined.player_id, old.clone())).await;
                 drop(attacker);
-                let mut recovering = BoundSocket::connect(cut_address, path, 101).await;
+                let mut recovering =
+                    BoundSocket::connect(cut_address, path, 101, credentials).await;
                 if let Some(prefix) = prefix {
                     cut.remaining.store(prefix, Ordering::Release);
                     cut.armed.store(true, Ordering::Release);
@@ -298,11 +420,23 @@ mod tls_write_history {
                     assert_eq!(cut.remaining.load(Ordering::Acquire), 0);
                     assert!(cut.offered.load(Ordering::Acquire) > prefix);
                     if prefix == 32 {
+                        let payload_length = match bytes[1] & 0x7f {
+                            126 => usize::from(u16::from_be_bytes([bytes[2], bytes[3]])),
+                            127 => usize::try_from(u64::from_be_bytes(
+                                bytes[2..10].try_into().unwrap(),
+                            ))
+                            .unwrap(),
+                            length => usize::from(length),
+                        };
                         let header = match bytes[1] & 0x7f {
                             126 => 4,
                             127 => 10,
                             _ => 2,
                         };
+                        assert!(
+                            header + payload_length > prefix,
+                            "prefix must leave an incomplete frame"
+                        );
                         assert!(std::str::from_utf8(&bytes[header..])
                             .unwrap()
                             .starts_with("{\"type\":\"Reconnected\""));
@@ -346,10 +480,22 @@ mod tls_write_history {
                 }
                 drop(recovering);
                 wait_disconnected(&server, &joined.player_id).await;
-                let mut retry = BoundSocket::connect(address, "v3/ws", 101).await;
+                let mut retry = BoundSocket::connect(address, "v3/ws", 101, credentials).await;
                 reject(&mut retry, &reconnect(joined.player_id, old)).await;
                 let (mut recovered, restored_id) = if let Some(rotated) = rotated {
-                    let mut attacker = BoundSocket::connect(address, "v3/ws", 102).await;
+                    if signed {
+                        reject_other_application(
+                            &server,
+                            address,
+                            &signing,
+                            joined.player_id,
+                            room.room_id,
+                            &rotated,
+                        )
+                        .await;
+                    }
+                    let mut attacker =
+                        BoundSocket::connect(address, "v3/ws", 102, credentials).await;
                     reject(&mut attacker, &reconnect(joined.player_id, rotated.clone())).await;
                     drop(attacker);
                     retry.send(&reconnect(joined.player_id, rotated)).await;
@@ -372,14 +518,27 @@ mod tls_write_history {
                     let fresh_token = fresh.reconnection_token.unwrap();
                     drop(retry);
                     wait_disconnected(&server, &fresh.player_id).await;
-                    let mut attacker = BoundSocket::connect(address, "v3/ws", 102).await;
+                    if signed {
+                        reject_other_application(
+                            &server,
+                            address,
+                            &signing,
+                            fresh.player_id,
+                            room.room_id,
+                            &fresh_token,
+                        )
+                        .await;
+                    }
+                    let mut attacker =
+                        BoundSocket::connect(address, "v3/ws", 102, credentials).await;
                     reject(
                         &mut attacker,
                         &reconnect(fresh.player_id, fresh_token.clone()),
                     )
                     .await;
                     drop(attacker);
-                    let mut recovered = BoundSocket::connect(address, "v3/ws", 101).await;
+                    let mut recovered =
+                        BoundSocket::connect(address, "v3/ws", 101, credentials).await;
                     recovered
                         .send(&reconnect(fresh.player_id, fresh_token))
                         .await;
@@ -391,6 +550,20 @@ mod tls_write_history {
                     assert_eq!(payload.room_id, room.room_id);
                     (recovered, fresh.player_id)
                 };
+                if signed {
+                    let owner = server.client_app_context(&restored_id).unwrap().id;
+                    assert_eq!(Some(owner), original_owner);
+                    assert_eq!(
+                        server
+                            .database()
+                            .get_room("tls-write-history", &room.room_code)
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .application_id,
+                        Some(owner)
+                    );
+                }
                 assert_eq!(
                     server.get_client_room(&restored_id).await,
                     Some(room.room_id)
