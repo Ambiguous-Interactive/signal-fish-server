@@ -2375,6 +2375,12 @@ is exposed. RTC applies the old channel's payloads and stream events in read ord
 the reopened channel. Generation-bound SCTP handles and event cleanup prevent an old reader or
 notification from touching the new stream.
 
+Outgoing forward-TSN reports remain within an outstanding reset's TSN boundary.
+Their stream sequence entries cover only that interval. Once the reset succeeds,
+the sender retires that stream's old cached sequence and ignores abandoned old
+DATA when updating the new generation. This prevents an old high sequence from
+skipping freshly reopened ordered messages. Other streams can still send DATA.
+
 The native regression creates and refuses channels sequentially in both
 directions. Each direction offers empty and long Unicode labels, 16 distinct
 optional labels, and repeated required-label duplicates. Receiver statistics
@@ -2394,7 +2400,7 @@ This reference-engine repair changes no server message or external SDK API.
 The broad WebRTC resource audit #870, unexplained establishment failures #853
 and #889, published-package qualification #912, and campaign #826 stay open.
 
-The focused SCTP gate passes 34 reset controls, including 20 new cases and 14
+The focused SCTP gate passes 35 reset controls, including 21 new cases and 14
 retained upstream controls. The corrected native sequential test loses three
 of 18 optional OPENs against the unpatched dependency; the patched history
 preserves every offered OPEN, required traffic, and actual stream reuse.

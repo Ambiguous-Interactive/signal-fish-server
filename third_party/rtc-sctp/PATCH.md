@@ -35,6 +35,16 @@ complete received messages. A FWD TSN beyond a pending reset boundary updates
 the held future generation even before the old reader drains. Ordered progress with no saved DATA uses one small
 marker per SID, applied when an actual stream is opened. A marker does not
 reserve the freed SID or emit a stream-open event.
+Outgoing FORWARD TSN is capped at an outstanding reset's sender TSN boundary.
+The capped stream list is reconstructed from only the abandoned DATA through
+that boundary, so abandonment on another SID cannot carry an old reset SID's
+SSN into its next generation. Reset acknowledgment retires the old cached SSN
+and fences old unacknowledged DATA through that boundary. The fence is removed
+when the cumulative SACK catches up. After reset acknowledgment, forwarding
+resumes through the newest abandoned TSN. DATA on other SIDs can still be sent
+while a reset waits; their abandonment beyond the boundary waits for the reset
+response. The paired wire control withholds SACKs and the final reset ACK,
+uses old SSN5, and verifies genuine new SSN0 abandonment followed by SSN1 delivery.
 FORWARD TSN, application reads, and local read shutdown retry deferred resets.
 No stream-close event is emitted before both reset directions complete.
 Stream handles bind to a generation. An old read loop cannot consume a new

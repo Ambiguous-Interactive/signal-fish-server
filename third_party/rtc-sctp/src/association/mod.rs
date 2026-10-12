@@ -227,6 +227,9 @@ pub struct Association {
     /// ignores the per-stream list for them (it advances by `new_cumulative_tsn`
     /// alone), so reporting them was pure waste.
     fwd_tsn_stream_map: FxHashMap<u16, u16>,
+    /// Successful reset boundaries whose DATA has not yet been cumulatively ACKed.
+    /// Prevent old abandoned chunks from restoring a retired generation's SSN.
+    retired_reset_tsns: FxHashMap<StreamId, u32>,
 
     pub(crate) rto_mgr: RtoManager,
     timers: TimerTable,
@@ -329,6 +332,7 @@ impl Default for Association {
             advanced_peer_tsn_ack_point: 0,
             use_forward_tsn: false,
             fwd_tsn_stream_map: FxHashMap::default(),
+            retired_reset_tsns: FxHashMap::default(),
 
             rto_mgr: RtoManager::default(),
             timers: TimerTable::default(),
@@ -753,6 +757,7 @@ impl Association {
             debug!("[{}] closing association..", self.side);
 
             self.close_all_timers();
+            self.retired_reset_tsns.clear();
             self.deferred_reset_data.clear();
             self.deferred_reset_reassembly.clear();
             self.reset_ssn_markers.clear();
@@ -1587,6 +1592,8 @@ impl Association {
         self.process_fast_retransmission(d.cumulative_tsn_ack, htna, cum_tsn_ack_point_advanced)?;
 
         if self.use_forward_tsn {
+            self.retired_reset_tsns
+                .retain(|_, boundary| sna32gt(*boundary, self.cumulative_tsn_ack_point));
             // RFC 3758 Sec 3.5 C1
             if sna32lt(
                 self.advanced_peer_tsn_ack_point,
@@ -1868,6 +1875,10 @@ impl Association {
                 .and_then(|p| p.as_any().downcast_ref::<ParamOutgoingResetRequest>())
             {
                 for id in &p.stream_identifiers {
+                    self.fwd_tsn_stream_map.remove(id);
+                    if sna32gt(p.sender_last_tsn, self.cumulative_tsn_ack_point) {
+                        self.retired_reset_tsns.insert(*id, p.sender_last_tsn);
+                    }
                     if let Some(s) = self.streams.get_mut(id) {
                         s.outgoing_reset_complete = true;
                         s.sequence_number = 0;
@@ -1882,6 +1893,9 @@ impl Association {
                 self.timers.stop(Timer::Reconfig);
             }
             self.release_reset_data();
+            if self.use_forward_tsn {
+                self.advance_peer_ack_point();
+            }
             self.awake_write_loop();
         }
     }
@@ -2816,6 +2830,9 @@ impl Association {
                 self.cumulative_tsn_ack_point,
             ) {
                 let fwd_tsn = self.create_forward_tsn();
+                if sna32lte(fwd_tsn.new_cumulative_tsn, self.cumulative_tsn_ack_point) {
+                    return raw_packets;
+                }
                 if let Ok(raw) = self.marshal_control_chunk(&fwd_tsn) {
                     raw_packets.push(raw);
                 } else {
@@ -2996,7 +3013,13 @@ impl Association {
             }
             let (unordered, si, ssn) = (c.unordered, c.stream_identifier, c.stream_sequence_number);
             self.advanced_peer_tsn_ack_point = tsn;
-            self.note_abandoned_for_forward_tsn(unordered, si, ssn);
+            if self
+                .retired_reset_tsns
+                .get(&si)
+                .is_none_or(|floor| sna32gt(tsn, *floor))
+            {
+                self.note_abandoned_for_forward_tsn(unordered, si, ssn);
+            }
             tsn = tsn.wrapping_add(1);
         }
         if sna32gt(
@@ -3421,12 +3444,9 @@ impl Association {
     /// chunks (it advances purely by `new_cumulative_tsn`). Keeps the greatest
     /// SSN seen per stream, which is the value RFC 3758 C4 requires to report.
     ///
-    /// A stream's entry may briefly outlive the chunk that set it (until the
-    /// window closes and the map is cleared), so a stale SSN can be re-reported;
-    /// that is safe because the receiver only advances a stream forward and the
-    /// SSN always corresponds to a really-abandoned chunk. The `u16` SSN compare
-    /// (`sna16lt`) is sound because the window span is bounded by rwnd — a
-    /// stream cannot lap the full 65536-sequence space before the window closes.
+    /// Cached entries may outlive their abandoned chunks until the forward window
+    /// closes. Reset completion explicitly retires the old generation's entry;
+    /// `advance_peer_ack_point` fences any old chunks still awaiting a SACK.
     fn note_abandoned_for_forward_tsn(&mut self, unordered: bool, si: u16, ssn: u16) {
         if unordered {
             return;
@@ -3459,15 +3479,77 @@ impl Association {
         // rescan `(cumulative_tsn_ack_point, advanced_peer_tsn_ack_point]` with
         // a per-TSN hashmap probe on every FORWARD-TSN — that scan was O(rwnd)
         // (~1000 probes/call for a 1 MB window) and dominated the send profile.
+        // An SSN carries no generation on the wire. Until a reset is acknowledged,
+        // never combine its old SSNs with a cumulative TSN beyond its boundary,
+        // even when another SID has abandoned newer DATA. The receiver could
+        // otherwise apply those old SSNs to the reset stream's next generation.
+        let boundary = self
+            .reconfigs
+            .values()
+            .filter_map(|c| {
+                c.param_a
+                    .as_ref()?
+                    .as_any()
+                    .downcast_ref::<ParamOutgoingResetRequest>()
+                    .map(|p| p.sender_last_tsn)
+            })
+            .fold(self.advanced_peer_tsn_ack_point, |current, reset| {
+                if sna32lt(reset, current) {
+                    reset
+                } else {
+                    current
+                }
+            });
         let mut fwd_tsn = ChunkForwardTsn {
-            new_cumulative_tsn: self.advanced_peer_tsn_ack_point,
+            new_cumulative_tsn: boundary,
             streams: Vec::with_capacity(self.fwd_tsn_stream_map.len()),
         };
-        for (si, ssn) in &self.fwd_tsn_stream_map {
-            fwd_tsn.streams.push(ChunkForwardTsnStream {
-                identifier: *si,
-                sequence: *ssn,
-            });
+        if boundary != self.advanced_peer_tsn_ack_point {
+            // Rare reset path: the incremental maximum may include DATA above
+            // the fence, so reconstruct only the capped forward window.
+            let mut streams = FxHashMap::default();
+            for tsn in &self.inflight_queue.sorted {
+                if sna32lte(*tsn, self.cumulative_tsn_ack_point) || sna32gt(*tsn, boundary) {
+                    continue;
+                }
+                let Some(c) = self.inflight_queue.get(*tsn) else {
+                    continue;
+                };
+                if c.unordered
+                    || !c.abandoned()
+                    || self
+                        .retired_reset_tsns
+                        .get(&c.stream_identifier)
+                        .is_some_and(|floor| sna32lte(*tsn, *floor))
+                {
+                    continue;
+                }
+                streams
+                    .entry(c.stream_identifier)
+                    .and_modify(|ssn| {
+                        if sna16lt(*ssn, c.stream_sequence_number) {
+                            *ssn = c.stream_sequence_number;
+                        }
+                    })
+                    .or_insert(c.stream_sequence_number);
+            }
+            fwd_tsn
+                .streams
+                .extend(
+                    streams
+                        .into_iter()
+                        .map(|(identifier, sequence)| ChunkForwardTsnStream {
+                            identifier,
+                            sequence,
+                        }),
+                );
+        } else {
+            fwd_tsn.streams.extend(self.fwd_tsn_stream_map.iter().map(
+                |(&identifier, &sequence)| ChunkForwardTsnStream {
+                    identifier,
+                    sequence,
+                },
+            ));
         }
         // `trace!` evaluates its arguments lazily, so the stream list is only
         // formatted when trace logging is enabled -- no per-FORWARD-TSN string

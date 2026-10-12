@@ -970,3 +970,161 @@ fn stream_reset_held_fragments_cross_tsn_wrap() -> Result<()> {
     }
     Ok(())
 }
+
+// The real sender's incremental FWD map must not carry an old SSN across reset.
+#[test]
+fn stream_reset_forward_map_generation_boundary_on_wire() -> Result<()> {
+    for (old_data_delivered, fresh_zero_delivered) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let (mut a, mut b) = reset_pair();
+        let now = Instant::now();
+        let ppi = PayloadProtocolIdentifier::Binary;
+        a.open_stream(2, ppi)?;
+        b.open_stream(2, ppi)?;
+        // Establish a genuinely nonzero old SSN using sent, read and SACKed DATA.
+        for _ in 0..5 {
+            a.stream(1)?
+                .write_sctp(now, &Bytes::from_static(b"old"), ppi)?;
+            for d in transmitted_data(&a.gather_outbound(now).0) {
+                b.handle_data(&d)?;
+            }
+            assert!(b.stream(1)?.read_sctp()?.is_some());
+            a.handle_sack(&b.create_selective_ack_chunk(), now)?;
+        }
+        a.stream(1)?
+            .set_reliability_params(false, ReliabilityType::Timed, 1)?;
+        a.stream(1)?
+            .write_sctp(now, &Bytes::from_static(b"old SSN five"), ppi)?;
+        let old = transmitted_data(&a.gather_outbound(now).0).remove(0);
+        assert_eq!(old.stream_sequence_number, 5);
+        if old_data_delivered {
+            b.handle_data(&old)?;
+            assert!(b.stream(1)?.read_sctp()?.is_some());
+        }
+        // Withhold every further SACK: reset success is independent of sender cumACK.
+        a.send_reset_request(now, 1)?;
+        let outgoing = reset_requests(&mut a, now).remove(0);
+        let boundary = request(&outgoing).sender_last_tsn;
+        let mut replies = b.handle_reconfig(&outgoing, now)?;
+        a.stream(2)?
+            .set_reliability_params(false, ReliabilityType::Timed, 1)?;
+        a.stream(2)?
+            .write_sctp(now, &Bytes::from_static(b"other SID abandoned"), ppi)?;
+        let other = transmitted_data(&a.gather_outbound(now).0).remove(0);
+        assert!(sna32gt(other.tsn, boundary));
+        let later = now + Duration::from_secs(2);
+        if !old_data_delivered {
+            a.handle_timeout(later);
+            let forwarded = a.gather_outbound(later).0;
+            let fwd = forwarded
+                .iter()
+                .flat_map(|raw| Packet::unmarshal(raw).unwrap().chunks)
+                .find_map(|c| c.as_any().downcast_ref::<ChunkForwardTsn>().cloned())
+                .unwrap();
+            assert_eq!(
+                fwd.new_cumulative_tsn, boundary,
+                "pending reset must fence the association-wide FWD boundary"
+            );
+            assert_eq!(
+                fwd.streams.len(),
+                1,
+                "other SID above the fence must not be skipped"
+            );
+            assert_eq!(fwd.streams[0].identifier, 1);
+            assert_eq!(fwd.streams[0].sequence, 5);
+            replies.extend(b.handle_forward_tsn(&fwd)?);
+        }
+        for packet in replies {
+            for c in packet.chunks {
+                if let Some(c) = c.as_any().downcast_ref::<ChunkReconfig>() {
+                    a.handle_reconfig(c, later)?;
+                }
+            }
+        }
+        let reciprocal = reset_requests(&mut b, later).remove(0);
+        let final_ack = a.handle_reconfig(&reciprocal, later)?;
+        assert!(!a.streams.contains_key(&1));
+        if old_data_delivered {
+            a.handle_timeout(later);
+        }
+        assert!(a.retired_reset_tsns.contains_key(&1));
+        a.open_stream(1, ppi)?
+            .set_reliability_params(false, ReliabilityType::Timed, 1)?;
+        a.stream(1)?
+            .write_sctp(later, &Bytes::from_static(b"fresh zero"), ppi)?;
+        let raw = a.gather_outbound(later).0;
+        let fresh = transmitted_data(&raw).remove(0);
+        assert_eq!(fresh.stream_sequence_number, 0);
+        if fresh_zero_delivered {
+            b.handle_data(&fresh)?; // before final reset ACK: held new generation
+        }
+        // Retransmitted FWD state after reset must retain only the other SID.
+        a.will_send_forward_tsn = true;
+        let forwarded = a.gather_outbound(later).0;
+        let fwd = forwarded
+            .iter()
+            .flat_map(|raw| Packet::unmarshal(raw).unwrap().chunks)
+            .find_map(|c| c.as_any().downcast_ref::<ChunkForwardTsn>().cloned())
+            .unwrap();
+        assert_eq!(fwd.new_cumulative_tsn, other.tsn);
+        assert!(
+            fwd.streams.iter().all(|s| s.identifier != 1),
+            "old abandoned chunks and cached SSNs must not re-enter the new generation"
+        );
+        b.handle_forward_tsn(&fwd)?;
+        let future = later + Duration::from_secs(10);
+        a.handle_timeout(future); // abandon genuine SSN0 in the new generation
+        let raw = a.gather_outbound(future).0;
+        let fresh_fwd = raw
+            .iter()
+            .flat_map(|raw| Packet::unmarshal(raw).unwrap().chunks)
+            .find_map(|c| c.as_any().downcast_ref::<ChunkForwardTsn>().cloned())
+            .unwrap();
+        assert_eq!(fresh_fwd.new_cumulative_tsn, fresh.tsn);
+        assert_eq!(
+            fresh_fwd
+                .streams
+                .iter()
+                .find(|s| s.identifier == 1)
+                .unwrap()
+                .sequence,
+            0
+        );
+        b.handle_forward_tsn(&fresh_fwd)?;
+        a.stream(1)?
+            .set_reliability_params(false, ReliabilityType::Reliable, 0)?;
+        a.stream(1)?
+            .write_sctp(future, &Bytes::from_static(b"fresh one"), ppi)?;
+        let next = transmitted_data(&a.gather_outbound(future).0).remove(0);
+        assert_eq!(next.stream_sequence_number, 1);
+        b.handle_data(&next)?;
+        for packet in final_ack {
+            for c in packet.chunks {
+                if let Some(c) = c.as_any().downcast_ref::<ChunkReconfig>() {
+                    b.handle_reconfig(c, later)?;
+                }
+            }
+        }
+        let expected: &[&[u8]] = if fresh_zero_delivered {
+            &[b"fresh zero", b"fresh one"]
+        } else {
+            &[b"fresh one"]
+        };
+        for &expected in expected {
+            assert_eq!(
+                b.stream(1)?
+                    .read_sctp()?
+                    .unwrap()
+                    .to_payload(100)?
+                    .freeze()
+                    .as_ref(),
+                expected
+            );
+        }
+        assert!(b.stream(1)?.read_sctp()?.is_none());
+        a.handle_sack(&b.create_selective_ack_chunk(), future)?;
+        assert!(a.retired_reset_tsns.is_empty());
+    }
+    Ok(())
+}

@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Keep native reference-client channels usable through repeated close/reopen, delayed resets, and buffered delivery (#872).
+- Preserve native channel reopening and ordered payload delivery through repeated or delayed stream resets (#872).
 - Preserve negotiated delivery modes when native reference clients send replies on peer-opened data channels (#911).
 - **Breaking:** Reject incorrect required-channel delivery modes in the native and browser reference clients;
   custom peers must use ordered unlimited-retry `reliable` and unordered zero-retry `unreliable` channels
