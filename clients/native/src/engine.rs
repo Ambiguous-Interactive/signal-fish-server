@@ -2740,6 +2740,16 @@ mod tests {
     // Regression #869: rejected live channels must never publish pair callbacks.
     #[tokio::test]
     async fn live_duplicate_channels_do_not_publish_callbacks() {
+        live_refused_channel_history(false).await;
+    }
+
+    // Regression #872: every close is followed by a new open on the same link.
+    #[tokio::test]
+    async fn live_refused_channels_reopen_and_recover_on_fresh_link() {
+        live_refused_channel_history(true).await;
+    }
+
+    async fn live_refused_channel_history(sequential: bool) {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
             .with_test_writer()
@@ -2751,151 +2761,193 @@ mod tests {
         let a_id = PlayerId::from_u128(0xa);
         let b_id = PlayerId::from_u128(0xb);
 
-        let offer = a
-            .pair_with(b_id, true, &[])
-            .await
-            .expect("A pairs")
-            .expect("initiator offer");
-        b.pair_with(a_id, false, &[])
-            .await
-            .expect("B pairs as responder");
-        let answer = b.handle_offer(a_id, offer).await.expect("B answers");
-        a.handle_answer(b_id, answer)
-            .await
-            .expect("A applies answer");
+        for _ in 0..if sequential { 2 } else { 1 } {
+            let offer = a
+                .pair_with(b_id, true, &[])
+                .await
+                .expect("A pairs")
+                .expect("initiator offer");
+            b.pair_with(a_id, false, &[])
+                .await
+                .expect("B pairs as responder");
+            let answer = b.handle_offer(a_id, offer).await.expect("B answers");
+            a.handle_answer(b_id, answer)
+                .await
+                .expect("A applies answer");
 
-        tokio::time::timeout(std::time::Duration::from_secs(15), async {
-            let mut a_connected = false;
-            let mut b_connected = false;
-            let mut a_pc_connected = false;
-            while !a_connected || !b_connected {
-                tokio::select! {
-                    event = a_rx.recv() => match event.expect("A event channel stays open") {
-                        EngineEvent::LocalCandidate { candidate_json, .. } => {
-                            b.handle_remote_candidate(a_id, &candidate_json)
-                                .await
-                                .expect("B applies A candidate");
-                        }
-                        EngineEvent::RemoteChannel { label, channel, .. } => {
-                            a.store_remote_channel(b_id, label, channel).await;
-                        }
-                        EngineEvent::ChannelOpen { label, .. } => {
-                            a_connected |= a.note_channel_open(b_id, &label);
-                        }
-                        EngineEvent::PcState { state, .. } => {
-                            a_pc_connected |= state == RTCPeerConnectionState::Connected;
-                        }
-                        _ => {}
-                    },
-                    event = b_rx.recv() => match event.expect("B event channel stays open") {
-                        EngineEvent::LocalCandidate { candidate_json, .. } => {
-                            a.handle_remote_candidate(b_id, &candidate_json)
-                                .await
-                                .expect("A applies B candidate");
-                        }
-                        EngineEvent::RemoteChannel { label, channel, .. } => {
-                            b.store_remote_channel(a_id, label, channel).await;
-                        }
-                        EngineEvent::ChannelOpen { label, .. } => {
-                            b_connected |= b.note_channel_open(a_id, &label);
-                        }
-                        _ => {}
-                    },
+            tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                let mut a_connected = false;
+                let mut b_connected = false;
+                let mut a_pc_connected = false;
+                while !a_connected || !b_connected {
+                    tokio::select! {
+                        event = a_rx.recv() => match event.expect("A event channel stays open") {
+                            EngineEvent::LocalCandidate { candidate_json, .. } => {
+                                b.handle_remote_candidate(a_id, &candidate_json)
+                                    .await
+                                    .expect("B applies A candidate");
+                            }
+                            EngineEvent::RemoteChannel { label, channel, .. } => {
+                                a.store_remote_channel(b_id, label, channel).await;
+                            }
+                            EngineEvent::ChannelOpen { label, .. } => {
+                                a_connected |= a.note_channel_open(b_id, &label);
+                            }
+                            EngineEvent::PcState { state, .. } => {
+                                a_pc_connected |= state == RTCPeerConnectionState::Connected;
+                            }
+                            _ => {}
+                        },
+                        event = b_rx.recv() => match event.expect("B event channel stays open") {
+                            EngineEvent::LocalCandidate { candidate_json, .. } => {
+                                a.handle_remote_candidate(b_id, &candidate_json)
+                                    .await
+                                    .expect("A applies B candidate");
+                            }
+                            EngineEvent::RemoteChannel { label, channel, .. } => {
+                                b.store_remote_channel(a_id, label, channel).await;
+                            }
+                            EngineEvent::ChannelOpen { label, .. } => {
+                                b_connected |= b.note_channel_open(a_id, &label);
+                            }
+                            _ => {}
+                        },
+                    }
                 }
-            }
-            assert!(a_pc_connected, "A peer connection must reach Connected");
-        })
-        .await
-        .expect("local peer pair connects");
+                assert!(a_pc_connected, "A peer connection must reach Connected");
+            })
+            .await
+            .expect("local peer pair connects");
 
-        for from_initiator in [true, false] {
-            let (sender, receiver, events, sender_peer, receiver_peer) = if from_initiator {
-                (&mut a, &mut b, &mut b_rx, b_id, a_id)
-            } else {
-                (&mut b, &mut a, &mut a_rx, a_id, b_id)
-            };
-            // Allocate the whole offered workload before closure. rtc 0.21
-            // can lose a new OPEN on a just-closed/reused SID (#872), which
-            // would invalidate this admission oracle before the receiver runs.
-            let mut extras = Vec::new();
-            for label in [String::new(), "界".repeat(4096)]
-                .into_iter()
-                .chain((0..16).map(|index| format!("optional-{index}")))
-            {
-                let channel = sender.peers[&sender_peer]
+            for from_initiator in [true, false] {
+                let (sender, receiver, events, sender_peer, receiver_peer) = if from_initiator {
+                    (&mut a, &mut b, &mut b_rx, b_id, a_id)
+                } else {
+                    (&mut b, &mut a, &mut a_rx, a_id, b_id)
+                };
+                let prior_stats: BTreeSet<_> = receiver.peers[&receiver_peer]
                     .pc
-                    .create_data_channel(&label, None)
+                    .get_stats(std::time::Instant::now(), StatsSelector::None)
+                    .await
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        RTCStatsReportEntry::DataChannel(channel) => Some(channel.stats.id.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                // The admission control offers distinct streams as one workload.
+                // The reset control waits for each refusal before creating its successor.
+                let mut offered_ids = Vec::new();
+                let mut extras = Vec::new();
+                for label in [String::new(), "界".repeat(4096)]
+                    .into_iter()
+                    .chain((0..16).map(|index| format!("optional-{index}")))
+                {
+                    let channel = if sequential {
+                        None
+                    } else {
+                        let channel = sender.peers[&sender_peer]
+                            .pc
+                            .create_data_channel(&label, None)
+                            .await
+                            .unwrap();
+                        offered_ids.push(channel.id());
+                        Some(channel)
+                    };
+                    extras.push((label, channel));
+                }
+                let mut duplicates = Vec::new();
+                for label in (0..if sequential { 4 } else { 1 })
+                    .flat_map(|_| [RELIABLE_LABEL, UNRELIABLE_LABEL])
+                {
+                    let init = RTCDataChannelInit {
+                        ordered: label == RELIABLE_LABEL,
+                        max_retransmits: (label == UNRELIABLE_LABEL).then_some(0),
+                        ..RTCDataChannelInit::default()
+                    };
+                    let channel = if sequential {
+                        None
+                    } else {
+                        let channel = sender.peers[&sender_peer]
+                            .pc
+                            .create_data_channel(label, Some(init.clone()))
+                            .await
+                            .unwrap();
+                        offered_ids.push(channel.id());
+                        Some(channel)
+                    };
+                    duplicates.push((label, init, channel));
+                }
+                for (label, extra) in extras {
+                    let extra = match extra {
+                        Some(extra) => extra,
+                        None => {
+                            let channel = sender.peers[&sender_peer]
+                                .pc
+                                .create_data_channel(&label, None)
+                                .await
+                                .unwrap();
+                            offered_ids.push(channel.id());
+                            channel
+                        }
+                    };
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        loop {
+                            let event = extra
+                                .poll()
+                                .await
+                                .expect("optional channel emits close before ending");
+                            if matches!(event, DataChannelEvent::OnClose) {
+                                break;
+                            }
+                        }
+                    })
+                    .await
+                    .expect("remote refusal closes unsupported channel");
+                    assert!(receiver.channel(receiver_peer, &label).is_none());
+                }
+                sender
+                    .channel(sender_peer, RELIABLE_LABEL)
+                    .unwrap()
+                    .send_text("required-after-unsupported")
                     .await
                     .unwrap();
-                extras.push((label, channel));
-            }
-            let mut duplicates = Vec::new();
-            for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
-                let channel = sender.peers[&sender_peer]
-                    .pc
-                    .create_data_channel(
-                        label,
-                        Some(RTCDataChannelInit {
-                            ordered: label == RELIABLE_LABEL,
-                            max_retransmits: (label == UNRELIABLE_LABEL).then_some(0),
-                            ..RTCDataChannelInit::default()
-                        }),
-                    )
-                    .await
-                    .unwrap();
-                duplicates.push((label, channel));
-            }
-            let offered_ids: Vec<_> = extras
-                .iter()
-                .map(|(_, channel)| channel.id())
-                .chain(duplicates.iter().map(|(_, channel)| channel.id()))
-                .collect();
-            for (label, extra) in extras {
                 tokio::time::timeout(Duration::from_secs(5), async {
                     loop {
-                        let event = extra
-                            .poll()
-                            .await
-                            .expect("optional channel emits close before ending");
-                        if matches!(event, DataChannelEvent::OnClose) {
-                            break;
+                        match events.recv().await.unwrap() {
+                            EngineEvent::ChannelMessage { label, text, .. } => {
+                                assert_eq!(label, RELIABLE_LABEL);
+                                assert_eq!(text, "required-after-unsupported");
+                                break;
+                            }
+                            EngineEvent::RemoteChannel { .. } => {
+                                panic!("refused channel announcement entered application queue")
+                            }
+                            EngineEvent::ChannelOpen { .. } | EngineEvent::ChannelClosed { .. } => {
+                                panic!("unsupported channel reached application queue")
+                            }
+                            _ => {}
                         }
                     }
                 })
                 .await
-                .expect("remote refusal closes unsupported channel");
-                assert!(receiver.channel(receiver_peer, &label).is_none());
-            }
-            sender
-                .channel(sender_peer, RELIABLE_LABEL)
-                .unwrap()
-                .send_text("required-after-unsupported")
-                .await
-                .unwrap();
-            tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    match events.recv().await.unwrap() {
-                        EngineEvent::ChannelMessage { label, text, .. } => {
-                            assert_eq!(label, RELIABLE_LABEL);
-                            assert_eq!(text, "required-after-unsupported");
-                            break;
+                .expect("required traffic survives unsupported channel burst");
+                assert_eq!(receiver.peers[&receiver_peer].channels.len(), 2);
+                for (label, init, duplicate) in duplicates {
+                    let duplicate = match duplicate {
+                        Some(duplicate) => duplicate,
+                        None => {
+                            let channel = sender.peers[&sender_peer]
+                                .pc
+                                .create_data_channel(label, Some(init))
+                                .await
+                                .unwrap();
+                            offered_ids.push(channel.id());
+                            channel
                         }
-                        EngineEvent::RemoteChannel { .. } => {
-                            panic!("refused channel announcement entered application queue")
-                        }
-                        EngineEvent::ChannelOpen { .. } | EngineEvent::ChannelClosed { .. } => {
-                            panic!("unsupported channel reached application queue")
-                        }
-                        _ => {}
-                    }
-                }
-            })
-            .await
-            .expect("required traffic survives unsupported channel burst");
-            assert_eq!(receiver.peers[&receiver_peer].channels.len(), 2);
-            for (label, duplicate) in duplicates {
-                let original = receiver.channel(receiver_peer, label).unwrap();
-                tokio::time::timeout(Duration::from_secs(5), async {
+                    };
+                    let original = receiver.channel(receiver_peer, label).unwrap();
+                    tokio::time::timeout(Duration::from_secs(5), async {
                     // Callback admission closes duplicates without an orchestrator
                     // event. The sender's close is the remote refusal barrier.
                     loop {
@@ -2937,69 +2989,111 @@ mod tests {
                 })
                 .await
                 .unwrap_or_else(|error| panic!("duplicate history timed out: from_initiator={from_initiator}, label={label}: {error}"));
-                // No callbacks from the rejected channel remain after its close.
-                loop {
-                    match events.try_recv() {
-                        Ok(event) => assert!(
-                            !matches!(
-                                event,
-                                EngineEvent::RemoteChannel { .. }
-                                    | EngineEvent::ChannelOpen { .. }
-                                    | EngineEvent::ChannelClosed { .. }
-                                    | EngineEvent::ChannelMessage { .. }
+                    // No callbacks from the rejected channel remain after its close.
+                    loop {
+                        match events.try_recv() {
+                            Ok(event) => assert!(
+                                !matches!(
+                                    event,
+                                    EngineEvent::RemoteChannel { .. }
+                                        | EngineEvent::ChannelOpen { .. }
+                                        | EngineEvent::ChannelClosed { .. }
+                                        | EngineEvent::ChannelMessage { .. }
+                                ),
+                                "rejected channel must not publish callbacks"
                             ),
-                            "rejected channel must not publish callbacks"
-                        ),
-                        Err(mpsc::error::TryRecvError::Empty) => break,
-                        Err(mpsc::error::TryRecvError::Disconnected) => {
-                            panic!("live engine event stream must stay connected")
+                            Err(mpsc::error::TryRecvError::Empty) => break,
+                            Err(mpsc::error::TryRecvError::Disconnected) => {
+                                panic!("live engine event stream must stay connected")
+                            }
                         }
                     }
+                    assert_eq!(receiver.connected_pair_count(), 1);
                 }
-                assert_eq!(receiver.connected_pair_count(), 1);
+                if sequential {
+                    // The sender can be refused before ACK and never get an open
+                    // stats record. The receiver records each accepted wire OPEN.
+                    let stats = receiver.peers[&receiver_peer]
+                        .pc
+                        .get_stats(std::time::Instant::now(), StatsSelector::None)
+                        .await;
+                    let optional_streams: Vec<_> = stats
+                        .iter()
+                        .filter_map(|entry| match entry {
+                            RTCStatsReportEntry::DataChannel(channel)
+                                if channel.label != RELIABLE_LABEL
+                                    && channel.label != UNRELIABLE_LABEL
+                                    && !prior_stats.contains(&channel.stats.id) =>
+                            {
+                                Some(channel.data_channel_identifier)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(
+                        optional_streams.len(),
+                        18,
+                        "receiver observes every optional OPEN"
+                    );
+                    assert!(
+                        optional_streams
+                            .iter()
+                            .copied()
+                            .collect::<BTreeSet<_>>()
+                            .len()
+                            < 18,
+                        "reset history must actually reuse wire streams"
+                    );
+                } else {
+                    let stats = sender.peers[&sender_peer]
+                        .pc
+                        .get_stats(std::time::Instant::now(), StatsSelector::None)
+                        .await;
+                    let mut offered_streams = BTreeSet::new();
+                    for id in offered_ids {
+                        let stats_id = format!("RTCDataChannel_{id}");
+                        let stream = stats
+                            .iter()
+                            .find_map(|entry| match entry {
+                                RTCStatsReportEntry::DataChannel(channel)
+                                    if channel.stats.id == stats_id =>
+                                {
+                                    Some(channel.data_channel_identifier)
+                                }
+                                _ => None,
+                            })
+                            .expect("offered channel has assigned SCTP stream stats");
+                        assert!(
+                            offered_streams.insert(stream),
+                            "admission workload must use distinct SCTP streams"
+                        );
+                    }
+                    assert_eq!(offered_streams.len(), 20);
+                }
             }
-            let stats = sender.peers[&sender_peer]
-                .pc
-                .get_stats(std::time::Instant::now(), StatsSelector::None)
-                .await;
-            let mut offered_streams = BTreeSet::new();
-            for id in offered_ids {
-                let stats_id = format!("RTCDataChannel_{id}");
-                let stream = stats
-                    .iter()
-                    .find_map(|entry| match entry {
-                        RTCStatsReportEntry::DataChannel(channel)
-                            if channel.stats.id == stats_id =>
-                        {
-                            Some(channel.data_channel_identifier)
-                        }
-                        _ => None,
-                    })
-                    .expect("offered channel has assigned SCTP stream stats");
-                assert!(
-                    offered_streams.insert(stream),
-                    "admission workload must use distinct SCTP streams (#872)"
-                );
-            }
-            assert_eq!(offered_streams.len(), 20);
-        }
-        a.channel(b_id, RELIABLE_LABEL)
-            .unwrap()
-            .close()
+            a.channel(b_id, RELIABLE_LABEL)
+                .unwrap()
+                .close()
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let EngineEvent::ChannelClosed { label, .. } = a_rx.recv().await.unwrap() {
+                        assert_eq!(label, RELIABLE_LABEL);
+                        break;
+                    }
+                }
+            })
             .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if let EngineEvent::ChannelClosed { label, .. } = a_rx.recv().await.unwrap() {
-                    assert_eq!(label, RELIABLE_LABEL);
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("selected channel keeps its close callback");
-        a.remove_peer(b_id).await.unwrap();
-        b.remove_peer(a_id).await.unwrap();
+            .expect("selected channel keeps its close callback");
+            a.remove_peer(b_id).await.unwrap();
+            b.remove_peer(a_id).await.unwrap();
+            assert_eq!(a.connected_pair_count(), 0);
+            assert_eq!(b.connected_pair_count(), 0);
+            // Retired-link callbacks must not satisfy fresh-link setup barriers.
+            while a_rx.try_recv().is_ok() {}
+            while b_rx.try_recv().is_ok() {}
+        }
     }
 
     #[tokio::test]

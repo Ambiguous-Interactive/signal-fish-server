@@ -37,6 +37,7 @@ on:
       - "clients/browser/**"
       - "clients/native/**"
       - "third_party/rtc/**"
+      - "third_party/rtc-sctp/**"
       - "scripts/run-browser-interop.sh"
       - "scripts/read-toml-string.sh"
       - ".github/workflows/browser-interop.yml"

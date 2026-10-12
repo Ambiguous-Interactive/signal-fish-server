@@ -684,6 +684,11 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: ${{ steps.deny-msrv.outputs.version }}
         run: cargo deny --log-level warn --manifest-path third_party/rtc/Cargo.toml --config clients/native/deny.toml --all-features check
+      - name: Run cargo-deny (patched SCTP library tests)
+        if: steps.dep-relevance.outputs.relevant == 'true'
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.deny-msrv.outputs.version }}
+        run: cargo deny --log-level warn --manifest-path third_party/rtc-sctp/Cargo.toml --config clients/native/deny.toml --all-features check
       - name: Run cargo-deny (fuzz package)
         if: steps.dep-relevance.outputs.relevant == 'true'
         env:
@@ -762,6 +767,9 @@ jobs:
       - name: Run cargo-audit (patched RTC library tests)
         if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         run: cargo audit --file third_party/rtc/Cargo.lock
+      - name: Run cargo-audit (patched SCTP library tests)
+        if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
+        run: cargo audit --file third_party/rtc-sctp/Cargo.lock
       - name: Run cargo-audit (fuzz package)
         if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         run: cargo audit --file fuzz/Cargo.lock

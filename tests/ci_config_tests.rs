@@ -21341,6 +21341,10 @@ fn test_dependabot_cargo_directories_cover_every_automated_package() {
     // interoperability cell is requalified.
     const EXCLUDED_FIXTURES: &[(&str, &str)] = &[
         (
+            "third_party/rtc-sctp/Cargo.toml",
+            "published SCTP source with a qualified local stream-reset patch; issue #872",
+        ),
+        (
             "third_party/rtc/Cargo.toml",
             "published RTC source with a qualified local patch; remove after issue #912",
         ),
@@ -21491,11 +21495,11 @@ fn test_workflow_consumed_configuration_paths_trigger_validation() {
     let cases = [
         (
             ".github/workflows/webrtc-interop.yml",
-            vec!["third_party/rtc/**"],
+            vec!["third_party/rtc/**", "third_party/rtc-sctp/**"],
         ),
         (
             ".github/workflows/browser-interop.yml",
-            vec!["third_party/rtc/**"],
+            vec!["third_party/rtc/**", "third_party/rtc-sctp/**"],
         ),
         (
             ".github/workflows/actionlint.yml",
@@ -32010,6 +32014,7 @@ fn test_native_client_platform_matrix_live_smoke_and_ipv6_proof_are_pinned() {
             "rust-toolchain.toml",
             "clients/native/**",
             "third_party/rtc/**",
+            "third_party/rtc-sctp/**",
             "scripts/run-webrtc-interop.sh",
             "scripts/read-toml-string.sh",
             ".github/workflows/webrtc-interop.yml",
@@ -32081,6 +32086,8 @@ fn test_native_client_platform_matrix_live_smoke_and_ipv6_proof_are_pinned() {
         suite_commands,
         vec![
             r#"cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \"#,
+            r#"cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \"#,
+            r#"cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \"#,
             r#"SIGNAL_FISH_SERVER_BIN="${SERVER_BIN}" cargo test --locked "${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"}""#
         ],
         "the interop runner must run the WHOLE client suite as exactly one \

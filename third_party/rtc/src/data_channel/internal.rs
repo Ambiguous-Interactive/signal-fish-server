@@ -206,9 +206,11 @@ impl RTCDataChannelInternal {
     pub(crate) fn close(&mut self) -> Result<()> {
         if let Some(data_channel) = self.data_channel.as_mut() {
             data_channel.close()?;
+            self.ready_state = RTCDataChannelState::Closing;
+        } else {
+            self.ready_state = RTCDataChannelState::Closed;
         }
         self.handshake_deadline = None;
-        self.ready_state = RTCDataChannelState::Closed;
         Ok(())
     }
 }
@@ -220,6 +222,37 @@ mod tests {
     use datachannel::message::Message;
     use datachannel::message::message_channel_open::{ChannelType, DataChannelOpen};
     use shared::marshal::Marshal;
+
+    #[test]
+    fn stream_reset_local_close_stays_closing_and_repeated_close_queues_one_reset() -> Result<()> {
+        let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
+        let mut dc = RTCDataChannelInternal::new(DataChannelParameters {
+            negotiated: Some(0),
+            ..Default::default()
+        });
+        dc.dial(0)?;
+        while dc.data_channel.as_mut().unwrap().poll_write().is_some() {}
+        let id = pc.data_channels.insert(dc);
+        pc.data_channel(id).unwrap().close()?;
+        assert_eq!(
+            pc.data_channel(id).unwrap().ready_state(),
+            RTCDataChannelState::Closing
+        );
+        pc.data_channel(id).unwrap().close()?;
+        let dc = pc
+            .data_channels
+            .get_mut(&id)
+            .unwrap()
+            .data_channel
+            .as_mut()
+            .unwrap();
+        assert!(dc.poll_write().is_some(), "first close requests reset");
+        assert!(
+            dc.poll_write().is_none(),
+            "repeated close requests no second reset"
+        );
+        Ok(())
+    }
 
     #[test]
     fn remote_dcep_delivery_modes_preserve_properties_and_reciprocal_config() -> Result<()> {
