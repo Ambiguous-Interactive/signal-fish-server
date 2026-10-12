@@ -340,7 +340,11 @@ mod tls_write_history {
             let normal_server =
                 axum_server::from_tcp_rustls(normal.into_std().unwrap(), tls.clone())
                     .unwrap()
-                    .map(crate::security::VerifiedClientCertificateAcceptor::new);
+                    .map(|rustls| {
+                        crate::security::VerifiedClientCertificateAcceptor::new(
+                            rustls.acceptor(crate::websocket::ConfiguredAcceptor),
+                        )
+                    });
             let normal_task = tokio::spawn(
                 normal_server.serve(
                     router
@@ -379,7 +383,9 @@ mod tls_write_history {
                 let cut_server = axum_server::from_tcp_rustls(listener.into_std().unwrap(), tls)
                     .unwrap()
                     .map(|inner| TlsCutAcceptor {
-                        inner: crate::security::VerifiedClientCertificateAcceptor::new(inner),
+                        inner: crate::security::VerifiedClientCertificateAcceptor::new(
+                            inner.acceptor(crate::websocket::ConfiguredAcceptor),
+                        ),
                         cut: Arc::clone(&cut),
                     });
                 tokio::spawn(async move {
