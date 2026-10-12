@@ -2206,6 +2206,29 @@ receive rejection. The orchestrator control covers closure and receive
 rejection: each reports `TransportStatus{webrtc,false}`, keeps the planned peer
 obligation, and preserves a newer generation from an old terminal callback.
 
+Hosted verification exposed an inconsistent netem oracle. It allowed status
+transitions but counted fallback events and cumulative transport metrics as
+one final state per client. The eight-player mesh failed with one fallback
+instead of zero. An isolated Docker trace confirms two clients report
+`true → false → true` between `exchange_ready` and
+`exchange_reliable_ready`. The deliberate pair rebuild closes the old remote
+DTLS link before its WebSocket retry marker can arrive. Both clients recover
+before fresh reliable exchange, while all clients remain held before exit.
+
+The oracle now matches each false report to one ordered fallback event. It
+permits transient loss only in the rebuild window and requires recovery before
+the reliable proof. It freezes sender status histories at the success barrier,
+settles every room peer's full history, and requires exact ordered fan-out.
+Both cumulative transport metrics count the validated transitions. The
+production control-plane budget also counts every status report. Final graph,
+fresh channel payloads, relay payloads, errors, and message conservation retain
+their exact checks. Pure negative controls reject missing, duplicate, reordered,
+early, late, or unrecovered reports. Hosted netem cells now retain endpoint
+event streams in separate artifacts for each matrix cell.
+The repaired eight-player cell passes with 31 real qdisc drops and 476 exact
+signal events. Three clients exercise transient fallback and recover before
+the reliable proof; this is not a clean run that omits the failing history.
+
 This is a native reference-client repair. Server wire messages and defaults do
 not change. Current Rust and .NET SDKs leave peer networking to the application;
 Godot uses its own `WebRTCMultiplayerPeer`. These clients need no changes for
