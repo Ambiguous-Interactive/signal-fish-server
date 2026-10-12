@@ -891,11 +891,17 @@ for (const alreadyOpen of [false, true]) {
   const messages: string[] = [];
   let connected = 0;
   class RemoteChannel {
+    readonly ordered: boolean;
+    readonly maxRetransmits: number | null;
+    readonly maxPacketLifeTime = null;
     readyState = alreadyOpen ? 'open' : 'connecting';
     bufferedAmount = 0;
     onopen: (() => void) | null = null;
     onmessage: ((event: { data: string }) => void) | null = null;
-    constructor(readonly label: string) {}
+    constructor(readonly label: string) {
+      this.ordered = label !== UNRELIABLE_LABEL;
+      this.maxRetransmits = label === UNRELIABLE_LABEL ? 0 : null;
+    }
   }
   class ResponderConnection {
     ondatachannel: ((event: { channel: RemoteChannel }) => void) | null = null;
@@ -1007,12 +1013,18 @@ for (const [initiate, alreadyOpen] of [
   let connection: DuplicateConnection | undefined;
   const observed: string[] = [];
   class DuplicateChannel {
+    readonly ordered: boolean;
+    readonly maxRetransmits: number | null;
+    readonly maxPacketLifeTime = null;
     readyState = alreadyOpen ? 'open' : 'connecting';
     onopen: (() => void) | null = null;
     onclose: (() => void) | null = null;
     onerror: (() => void) | null = null;
     onmessage: ((event: { data: string }) => void) | null = null;
-    constructor(readonly label: string) {}
+    constructor(readonly label: string) {
+      this.ordered = label !== UNRELIABLE_LABEL;
+      this.maxRetransmits = label === UNRELIABLE_LABEL ? 0 : null;
+    }
     close(): void {
       this.readyState = 'closed';
       this.onclose?.();

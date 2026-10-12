@@ -26,7 +26,17 @@ async fn required_channel_announcements_are_bounded_before_queue_drain() {
             }
             for index in 0..32 {
                 for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
-                    let channel = pc.create_data_channel(label, None).await.unwrap();
+                    let channel = pc
+                        .create_data_channel(
+                            label,
+                            Some(RTCDataChannelInit {
+                                ordered: label == RELIABLE_LABEL,
+                                max_retransmits: (label == UNRELIABLE_LABEL).then_some(0),
+                                ..RTCDataChannelInit::default()
+                            }),
+                        )
+                        .await
+                        .unwrap();
                     handler.on_data_channel(channel.clone()).await;
                     if !initiate && index == 0 {
                         first.insert(label.to_string(), channel);
@@ -51,7 +61,17 @@ async fn required_channel_announcements_are_bounded_before_queue_drain() {
             if !initiate {
                 // A direct caller must not steal an unread callback's selection.
                 for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
-                    let channel = pc.create_data_channel(label, None).await.unwrap();
+                    let channel = pc
+                        .create_data_channel(
+                            label,
+                            Some(RTCDataChannelInit {
+                                ordered: label == RELIABLE_LABEL,
+                                max_retransmits: (label == UNRELIABLE_LABEL).then_some(0),
+                                ..RTCDataChannelInit::default()
+                            }),
+                        )
+                        .await
+                        .unwrap();
                     engine
                         .store_remote_channel(peer, label.into(), channel.clone())
                         .await;
@@ -78,7 +98,17 @@ async fn required_channel_announcements_are_bounded_before_queue_drain() {
                     &engine.channel(peer, label).unwrap()
                 ));
                 first[label].close().await.unwrap();
-                let duplicate = pc.create_data_channel(label, None).await.unwrap();
+                let duplicate = pc
+                    .create_data_channel(
+                        label,
+                        Some(RTCDataChannelInit {
+                            ordered: label == RELIABLE_LABEL,
+                            max_retransmits: (label == UNRELIABLE_LABEL).then_some(0),
+                            ..RTCDataChannelInit::default()
+                        }),
+                    )
+                    .await
+                    .unwrap();
                 handler.on_data_channel(duplicate.clone()).await;
                 assert_closed(&duplicate).await;
             }
@@ -125,7 +155,14 @@ async fn concurrent_required_announcements_select_one_channel_per_label() {
             channels.push(
                 engine.peers[&peer]
                     .pc
-                    .create_data_channel(label, None)
+                    .create_data_channel(
+                        label,
+                        Some(RTCDataChannelInit {
+                            ordered: label == RELIABLE_LABEL,
+                            max_retransmits: (label == UNRELIABLE_LABEL).then_some(0),
+                            ..RTCDataChannelInit::default()
+                        }),
+                    )
                     .await
                     .unwrap(),
             );
@@ -183,7 +220,14 @@ async fn required_announcements_close_when_event_receiver_is_gone() {
         for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
             let channel = engine.peers[&peer]
                 .pc
-                .create_data_channel(label, None)
+                .create_data_channel(
+                    label,
+                    Some(RTCDataChannelInit {
+                        ordered: label == RELIABLE_LABEL,
+                        max_retransmits: (label == UNRELIABLE_LABEL).then_some(0),
+                        ..RTCDataChannelInit::default()
+                    }),
+                )
                 .await
                 .unwrap();
             handler.on_data_channel(channel.clone()).await;

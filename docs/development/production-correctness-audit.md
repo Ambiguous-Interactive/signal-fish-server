@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -2302,3 +2302,52 @@ The scheduled guard is skipped, which suppresses every shard through implicit
 cancellation. The existing workflow contract test fails before this repair and
 passes after it. Duplicate scheduled heads still skip both baseline and shards.
 The full mutation matrix must pass on the final PR head.
+
+### F39 — Required data-channel labels admit incorrect delivery modes
+
+Baseline: `6326d6a1`. A20. Finding:
+[#911](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/911).
+
+Both reference engines accepted required channels by label alone. A peer could
+announce unordered or partially reliable `reliable` channels, or ordered or
+unlimited-retry `unreliable` channels. These modes change gameplay delivery.
+The native callback fails the negative control before repair (run `47bec625`).
+The browser callback and real Chromium probe also fail against the baseline.
+
+Both admission boundaries now check the negotiated properties before storing
+a channel or publishing callbacks. `reliable` requires ordered delivery and
+no retry or lifetime limit. `unreliable` requires unordered delivery, zero
+retries, and no lifetime limit. Refused channels close without occupying the
+required label. A valid follow-up can supply that label. Custom peers must use
+these settings; the README files document this compatibility change.
+
+A real native connection exposed a second defect in published RTC 0.21.1.
+Remote acceptance discarded the DCEP retry and lifetime properties. It also
+left responder SCTP streams at their ordered, reliable defaults. A repaired
+getter alone would therefore report a mode that outgoing packets did not use.
+The native live positive control failed before the dependency repair (run
+`6799e1b7`). The signaling server does not interpret these opaque RTC settings.
+
+The native client now uses a local copy of the published RTC package, with
+registry transitive dependencies unchanged. The patch preserves remote
+properties, rejects partial-mode values above the API's 16-bit range, configures
+responder streams before acknowledgment, and resets refused streams. Real SCTP
+controls cover all six DCEP modes, unordered DATA flags, abandonment under
+packet loss, duplicate announcements, and rejected-stream reset and reuse.
+The focused dependency controls pass 3/3. Native callback and live controls
+pass 6/6 (run `344495b6`), including correct follow-up, traffic on both required
+channels, duplicate admission, shutdown, and teardown. Browser controls pass
+72 mode/timing cases and seven real Chromium refusal cells.
+
+Independent review found no remaining issues in this patch. CI runs its focused
+library controls and scans its separate lockfile with the existing security
+policy. Source provenance and removal criteria are in `third_party/rtc/PATCH.md`.
+Return to a registry release only after it passes these controls; track that
+work in [#912](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/912).
+This does not repair the separate native repeated-reset failure in
+[#872](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/872).
+
+The external Rust SDK uses an application-owned `WebRtcDriver`. The .NET SDK
+provides signaling and relay APIs. Godot owns its `WebRTCMultiplayerPeer`.
+This reference-engine change does not alter those SDKs or the signaling schema.
+Keep #872, #870, #853, #889, and the wider A20/#826 audit open.

@@ -11,6 +11,10 @@ Design rationale (real browser vs Node WebRTC stacks, page/CLI split, mDNS postu
 feature-gated cells) lives in [ADR-0005](../../docs/adr/0005-browser-reference-client.md).
 
 The reference engine accepts only `reliable` and `unreliable` data channels.
+`reliable` must be ordered with no retry or packet lifetime limit.
+`unreliable` must be unordered with `maxRetransmits: 0` and no packet lifetime limit.
+The engine closes channels with other delivery settings before admission.
+**Migration:** Custom peers must use these settings for the required labels.
 It closes other remote labels without retaining them or starting callbacks.
 **Migration:** Applications that need extra channels must own their channel
 handling. This restriction belongs to these reference clients; the server

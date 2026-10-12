@@ -823,6 +823,9 @@ test('a changed generation rebuilds both asymmetric pair endpoints', () => {
 
 test('removed browser peer links cannot emit callbacks after the same peer is re-paired', async () => {
   class FakeDataChannel {
+    readonly ordered: boolean;
+    readonly maxRetransmits: number | null;
+    readonly maxPacketLifeTime = null;
     readonly label: string;
     readyState = 'connecting';
     onopen: (() => void) | null = null;
@@ -832,6 +835,8 @@ test('removed browser peer links cannot emit callbacks after the same peer is re
 
     constructor(label: string) {
       this.label = label;
+      this.ordered = label !== UNRELIABLE_LABEL;
+      this.maxRetransmits = label === UNRELIABLE_LABEL ? 0 : null;
     }
     close(): void {
       this.readyState = 'closed';

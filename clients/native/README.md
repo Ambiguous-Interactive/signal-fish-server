@@ -10,6 +10,10 @@ Design rationale (standalone crate, direct webrtc-rs, path-dependency type reuse
 [ADR-0004](../../docs/adr/0004-native-reference-client.md).
 
 The reference engine accepts only `reliable` and `unreliable` data channels.
+`reliable` must be ordered with no retry or packet lifetime limit.
+`unreliable` must be unordered with `maxRetransmits: 0` and no packet lifetime limit.
+The engine closes channels with other delivery settings before admission.
+**Migration:** Custom peers must use these settings for the required labels.
 The engine cancels their polling tasks when it removes a peer or stops.
 A remote close or a stopped channel event stream triggers link cleanup and
 relay fallback. Network loss still follows the configured P2P deadlines.
