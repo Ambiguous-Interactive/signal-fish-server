@@ -45,11 +45,11 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | Task | Implementation and operations | Invariants and experiments | Status |
 | --- | --- | --- | --- |
 | A01 | `protocol/`, AsyncAPI, wire samples | Schema, errors, optional fields, v2/v3 projections, exhaustive operation mapping | Initial |
-| A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Initial; HTTP/2 route rejection recorded in F13; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414 |
-| A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Initial; concurrent handshake retry-budget loss recorded in F15; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414 |
+| A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Initial; HTTP/2 route rejection recorded in F13; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415 |
+| A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Initial; concurrent handshake retry-budget loss recorded in F15; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415 |
 | A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10 |
-| A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; embedded receiver-loss rollback in F18; size-refusal rollback in F21; known socket-close rollback in F22; stale expiry cleanup in F32 |
-| A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
+| A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; embedded receiver-loss rollback in F18; size-refusal rollback in F21; known socket-close rollback in F22; stale expiry cleanup in F32 |
+| A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
 | A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32 |
 | A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial |
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial |
@@ -58,7 +58,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial |
 | A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial |
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
-| A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; aggregate reconnect admission bound in F21; socket close before queue commit in F22 |
+| A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; aggregate reconnect admission bound in F21; socket close before queue commit in F22 |
 | A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial; stale expiry cleanup in F32; delayed first-tick overflow in F36 |
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
@@ -2125,4 +2125,45 @@ Campaign #826 and the wider A01–A22 audit remain open.
 ```bash
 cargo nextest run --all-features --lib \
   -E 'test(test_signed_mtls_partial_reconnect) | test(test_mtls_partial_reconnect)'
+```
+
+### Session 415 encrypted TLS-record reconnect response loss
+
+Baseline: `0c76b5cd`. A02/A03/A05/A06/A15. The prior TLS histories cut
+plaintext above TLS. They did not establish recovery after the client received
+an incomplete encrypted record.
+
+A TCP relay now forwards traffic into the unchanged production TLS acceptor.
+It sees ciphertext only. After signed, certificate-bound authentication
+finishes, it forwards exactly 1, 5, or 32 bytes of the next response and parks
+the remaining write. The shared write-cut fixture captures only the forwarded
+prefix. A non-consuming peek at the client's TCP socket proves exact receipt.
+The record starts with TLS application-data framing; the 5-byte and 32-byte
+cells verify that the declared record extends beyond the received prefix.
+Polling the real TLS WebSocket client publishes no decoded response.
+
+Sixteen cells cover v2 `/ws` and v3 `/v3/ws`, batching on and off, and complete
+response controls beside the three encrypted cuts. The history waits for the
+original reconnect claim to complete before dropping the client. The relay
+then closes both TCP directions. The committed old token fails; complete v3
+controls use the rotated token. Other cells recover through a fresh join,
+then disconnect and restore with the fresh credential. Wrong-tenant and
+wrong-certificate refusals preserve the legitimate pending seat. Recovery
+retains the original application owner, exactly two members, the restored
+route, and gameplay delivery to the incumbent. Each cell drains all handlers
+and verifies successful relay completion. Temporarily bypassing the
+production claim token comparison makes the first encrypted-cut cell fail
+at old-token refusal. The comparison and full matrix are restored in the
+final tree.
+
+No production defect was found in this scope. This is internal audit evidence;
+server behavior, protocol, configuration, and client APIs are unchanged.
+Rust, .NET, and Godot clients need no changes. No changelog entry is needed.
+The relay does not prove production writer backpressure, HTTP/2 reconnect,
+TLS shutdown choreography, or kernel-specific write histories. Campaign #826
+and the wider A01–A22 audit remain open.
+
+```bash
+cargo nextest run --all-features --lib \
+  -E 'test(test_encrypted_tls_record_loss_preserves_bound_reconnect_and_gameplay_recovery)'
 ```
