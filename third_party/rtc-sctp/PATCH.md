@@ -43,7 +43,14 @@ and fences old unacknowledged DATA through that boundary. The fence is removed
 when the cumulative SACK catches up. After reset acknowledgment, forwarding
 resumes through the newest abandoned TSN. DATA on other SIDs can still be sent
 while a reset waits; their abandonment beyond the boundary waits for the reset
-response. The paired wire control withholds SACKs and the final reset ACK,
+response. If only abandoned DATA remains beyond a fence that cannot advance
+the cumulative ACK, T3 pauses while RECONFIG handles the local wait. Live DATA
+retains ordinary retransmission and congestion behavior. A terminal reset
+response resumes forward recovery and rearms an idle T3 timer, preserving any
+existing deadline and the current RTO. A control holds InProgress beyond the
+published T3 retry budget, loses the first lifted FWD after success or denial,
+and verifies retransmission and cumulative acknowledgment.
+The paired wire control withholds SACKs and the final reset ACK,
 uses old SSN5, and verifies genuine new SSN0 abandonment followed by SSN1 delivery.
 FORWARD TSN, application reads, and local read shutdown retry deferred resets.
 No stream-close event is emitted before both reset directions complete.

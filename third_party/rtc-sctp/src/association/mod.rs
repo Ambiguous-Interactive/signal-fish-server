@@ -542,6 +542,29 @@ impl Association {
     /// no-op and therefore are safe.
     pub fn handle_timeout(&mut self, now: Instant) {
         for &timer in &Timer::VALUES {
+            // A reset fence is local flow control, not DATA loss. With no live
+            // DATA left and no permitted FWD progress, RECONFIG owns recovery.
+            // Preserve ordinary T3 behavior whenever DATA can still retransmit.
+            if timer == Timer::T3RTX
+                && self
+                    .timers
+                    .get(timer)
+                    .is_some_and(|deadline| deadline <= now)
+                && self.use_forward_tsn
+                && sna32gt(
+                    self.advanced_peer_tsn_ack_point,
+                    self.cumulative_tsn_ack_point,
+                )
+                && sna32lte(self.forward_tsn_boundary(), self.cumulative_tsn_ack_point)
+                && !self.inflight_queue.sorted.iter().any(|tsn| {
+                    self.inflight_queue
+                        .get(*tsn)
+                        .is_some_and(ChunkPayloadData::is_outstanding)
+                })
+            {
+                self.timers.stop(timer);
+                continue;
+            }
             let (expired, failure, n_rtos) = self.timers.is_expired_with_error_count(
                 timer,
                 now,
@@ -1867,7 +1890,7 @@ impl Association {
 
     /// Complete only the outgoing direction. The SID remains reserved until
     /// the peer's outgoing direction has also reset and all readable data drained.
-    fn acknowledge_reset(&mut self, rsn: u32) {
+    fn acknowledge_reset(&mut self, rsn: u32, now: Instant) {
         if let Some(c) = self.reconfigs.remove(&rsn) {
             if let Some(p) = c
                 .param_a
@@ -1893,10 +1916,35 @@ impl Association {
                 self.timers.stop(Timer::Reconfig);
             }
             self.release_reset_data();
-            if self.use_forward_tsn {
-                self.advance_peer_ack_point();
-            }
+            self.resume_forward_tsn_recovery(now);
             self.awake_write_loop();
+        }
+    }
+
+    /// A terminal reset response lifts the FWD fence. Recovery may have paused
+    /// or exhausted while waiting; preserve any existing (including due) deadline.
+    fn resume_forward_tsn_recovery(&mut self, now: Instant) {
+        if self.use_forward_tsn {
+            self.advance_peer_ack_point();
+            if sna32gt(
+                self.advanced_peer_tsn_ack_point,
+                self.cumulative_tsn_ack_point,
+            ) {
+                let idle = self.timers.get(Timer::T3RTX).is_none();
+                if idle
+                    || !self.inflight_queue.sorted.iter().any(|tsn| {
+                        self.inflight_queue
+                            .get(*tsn)
+                            .is_some_and(ChunkPayloadData::is_outstanding)
+                    })
+                {
+                    // The live peer lifted local flow control. Abandoned-DATA
+                    // recovery gets a fresh budget, including at its final retry.
+                    self.timers.reset_retrans(Timer::T3RTX);
+                }
+                self.timers
+                    .start_if_idle(Timer::T3RTX, now, self.rto_mgr.get_rto());
+            }
         }
     }
 
@@ -2003,7 +2051,7 @@ impl Association {
                 return Ok(());
             }
             self.peer_next_rsn = Some(rsn.wrapping_add(1));
-            self.acknowledge_reset(p.reconfig_response_sequence_number);
+            self.acknowledge_reset(p.reconfig_response_sequence_number, now);
             self.reconfig_requests.insert(rsn, p.clone());
             self.reset_streams_if_any(p, true, reply)?;
             Ok(())
@@ -2020,7 +2068,7 @@ impl Association {
                         .start(Timer::Reconfig, now, self.rto_mgr.get_rto());
                 }
                 ReconfigResult::SuccessNop | ReconfigResult::SuccessPerformed => {
-                    self.acknowledge_reset(rsn)
+                    self.acknowledge_reset(rsn, now)
                 }
                 _ => {
                     // A denied reset must not release the SID or emit a close
@@ -2041,6 +2089,7 @@ impl Association {
                     if self.reconfigs.is_empty() {
                         self.timers.stop(Timer::Reconfig);
                     }
+                    self.resume_forward_tsn_recovery(now);
                     self.awake_write_loop();
                 }
             }
@@ -3469,22 +3518,8 @@ impl Association {
         self.fwd_tsn_stream_map.is_empty()
     }
 
-    /// create_forward_tsn generates ForwardTSN chunk.
-    /// This method will be be called if use_forward_tsn is set to false.
-    fn create_forward_tsn(&self) -> ChunkForwardTsn {
-        // RFC 3758 Sec 3.5 C4: report, once per ordered stream, the greatest
-        // stream-sequence-number among abandoned chunks in the forward-TSN
-        // window. This is maintained incrementally in `fwd_tsn_stream_map` (see
-        // its declaration and the two C2 loops that feed it), so we no longer
-        // rescan `(cumulative_tsn_ack_point, advanced_peer_tsn_ack_point]` with
-        // a per-TSN hashmap probe on every FORWARD-TSN — that scan was O(rwnd)
-        // (~1000 probes/call for a 1 MB window) and dominated the send profile.
-        // An SSN carries no generation on the wire. Until a reset is acknowledged,
-        // never combine its old SSNs with a cumulative TSN beyond its boundary,
-        // even when another SID has abandoned newer DATA. The receiver could
-        // otherwise apply those old SSNs to the reset stream's next generation.
-        let boundary = self
-            .reconfigs
+    fn forward_tsn_boundary(&self) -> u32 {
+        self.reconfigs
             .values()
             .filter_map(|c| {
                 c.param_a
@@ -3499,7 +3534,24 @@ impl Association {
                 } else {
                     current
                 }
-            });
+            })
+    }
+
+    /// create_forward_tsn generates ForwardTSN chunk.
+    /// This method will be be called if use_forward_tsn is set to false.
+    fn create_forward_tsn(&self) -> ChunkForwardTsn {
+        // RFC 3758 Sec 3.5 C4: report, once per ordered stream, the greatest
+        // stream-sequence-number among abandoned chunks in the forward-TSN
+        // window. This is maintained incrementally in `fwd_tsn_stream_map` (see
+        // its declaration and the two C2 loops that feed it), so we no longer
+        // rescan `(cumulative_tsn_ack_point, advanced_peer_tsn_ack_point]` with
+        // a per-TSN hashmap probe on every FORWARD-TSN — that scan was O(rwnd)
+        // (~1000 probes/call for a 1 MB window) and dominated the send profile.
+        // An SSN carries no generation on the wire. Until a reset is acknowledged,
+        // never combine its old SSNs with a cumulative TSN beyond its boundary,
+        // even when another SID has abandoned newer DATA. The receiver could
+        // otherwise apply those old SSNs to the reset stream's next generation.
+        let boundary = self.forward_tsn_boundary();
         let mut fwd_tsn = ChunkForwardTsn {
             new_cumulative_tsn: boundary,
             streams: Vec::with_capacity(self.fwd_tsn_stream_map.len()),

@@ -2380,6 +2380,8 @@ Their stream sequence entries cover only that interval. Once the reset succeeds,
 the sender retires that stream's old cached sequence and ignores abandoned old
 DATA when updating the new generation. This prevents an old high sequence from
 skipping freshly reopened ordered messages. Other streams can still send DATA.
+A fence with no retransmittable DATA pauses blocked forward recovery. Terminal
+reset responses resume recovery so a lost first forward report can be retried.
 
 The native regression creates and refuses channels sequentially in both
 directions. Each direction offers empty and long Unicode labels, 16 distinct
@@ -2400,7 +2402,7 @@ This reference-engine repair changes no server message or external SDK API.
 The broad WebRTC resource audit #870, unexplained establishment failures #853
 and #889, published-package qualification #912, and campaign #826 stay open.
 
-The focused SCTP gate passes 35 reset controls, including 21 new cases and 14
+The focused SCTP gate passes 36 reset controls, including 22 new cases and 14
 retained upstream controls. The corrected native sequential test loses three
 of 18 optional OPENs against the unpatched dependency; the patched history
 preserves every offered OPEN, required traffic, and actual stream reuse.

@@ -1128,3 +1128,108 @@ fn stream_reset_forward_map_generation_boundary_on_wire() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn stream_reset_fence_resumes_forward_recovery_after_long_wait() -> Result<()> {
+    for (result, old_sack_received) in [
+        (ReconfigResult::SuccessPerformed, true),
+        (ReconfigResult::Denied, true),
+        (ReconfigResult::SuccessPerformed, false),
+        (ReconfigResult::Denied, false),
+    ] {
+        let (mut a, mut b) = reset_pair();
+        let ppi = PayloadProtocolIdentifier::Binary;
+        let now = Instant::now();
+        a.stream(1)?
+            .set_reliability_params(false, ReliabilityType::Timed, 1)?;
+        a.stream(1)?
+            .write_sctp(now, &Bytes::from_static(b"old reader held"), ppi)?;
+        let old = transmitted_data(&a.gather_outbound(now).0).remove(0);
+        b.handle_data(&old)?;
+        if old_sack_received {
+            a.handle_sack(&b.create_selective_ack_chunk(), now)?;
+        }
+        a.send_reset_request(now, 1)?;
+        let outgoing = reset_requests(&mut a, now).remove(0);
+        let rsn = request(&outgoing).reconfig_request_sequence_number;
+        for packet in b.handle_reconfig(&outgoing, now)? {
+            for c in packet.chunks {
+                if let Some(c) = c.as_any().downcast_ref::<ChunkReconfig>() {
+                    a.handle_reconfig(c, now)?;
+                }
+            }
+        }
+        assert!(a.reconfig_in_progress);
+        a.open_stream(2, ppi)?
+            .set_reliability_params(false, ReliabilityType::Timed, 1)?;
+        b.open_stream(2, ppi)?;
+        a.stream(2)?
+            .write_sctp(now, &Bytes::from_static(b"lost other SID"), ppi)?;
+        let missing = transmitted_data(&a.gather_outbound(now).0).remove(0);
+        let mut at = now;
+        let mut paused_rto = None;
+        for turn in 0..if old_sack_received { 8 } else { 5 } {
+            // beyond the published five-expiry T3 budget
+            at = a
+                .timers
+                .get(Timer::T3RTX)
+                .unwrap_or(at + Duration::from_secs(60));
+            a.handle_timeout(at);
+            let raw = a.gather_outbound(at).0;
+            for c in raw
+                .iter()
+                .flat_map(|raw| Packet::unmarshal(raw).unwrap().chunks)
+            {
+                if let Some(fwd) = c.as_any().downcast_ref::<ChunkForwardTsn>() {
+                    assert!(!old_sack_received);
+                    assert_eq!(
+                        fwd.new_cumulative_tsn, old.tsn,
+                        "pending reset caps recovery at old boundary despite a withheld SACK"
+                    );
+                }
+            }
+            if turn == 0 {
+                paused_rto = Some((a.rto_mgr.get_rto(), a.cwnd));
+            } else if old_sack_received {
+                assert_eq!(
+                    Some((a.rto_mgr.get_rto(), a.cwnd)),
+                    paused_rto,
+                    "local reset wait must not back off DATA RTO or shrink cwnd"
+                );
+            }
+            a.handle_reconfig_param(&response(rsn, ReconfigResult::InProgress), &mut vec![], at)?;
+        }
+        let preserved_deadline = a.timers.get(Timer::T3RTX);
+        a.handle_reconfig_param(&response(rsn, result), &mut vec![], at)?;
+        if let Some(deadline) = preserved_deadline {
+            assert_eq!(
+                a.timers.get(Timer::T3RTX),
+                Some(deadline),
+                "reset response preserves existing T3 deadline"
+            );
+        }
+        let first = a.gather_outbound(at).0;
+        let parse_fwd = |raw: &[Bytes]| {
+            raw.iter()
+                .flat_map(|raw| Packet::unmarshal(raw).unwrap().chunks)
+                .find_map(|c| c.as_any().downcast_ref::<ChunkForwardTsn>().cloned())
+        };
+        let released =
+            parse_fwd(&first).expect("lifting reset fence sends outstanding forward debt");
+        assert_eq!(released.new_cumulative_tsn, missing.tsn);
+        // Lose that first released FWD. Recovery must have a live, usable timer.
+        let retry_at = a
+            .timers
+            .get(Timer::T3RTX)
+            .expect("reset completion must rearm forward recovery");
+        a.handle_timeout(retry_at);
+        let retried =
+            parse_fwd(&a.gather_outbound(retry_at).0).expect("lost lifted FWD must retransmit");
+        assert_eq!(retried.new_cumulative_tsn, missing.tsn);
+        b.handle_forward_tsn(&retried)?;
+        a.handle_sack(&b.create_selective_ack_chunk(), retry_at)?;
+        assert!(a.inflight_queue.is_empty());
+        assert!(a.timers.get(Timer::T3RTX).is_none());
+    }
+    Ok(())
+}
