@@ -168,7 +168,11 @@ must still expose a validated endpoint — a member that cannot run the session
 a session it cannot run. The authority preference passes the same filter; among
 qualifying members the rule is unchanged (authority preferred, else earliest
 joiner, smaller-UUID tie-break). If **no** member qualifies, the stored plan is
-dropped and the relay floor carries the room. Direct endpoints are repeated on
+removed in the same transaction that publishes an explicit Relay/Relay reset
+to every remaining v3 member.
+The reset clears the host, endpoint, peers, and ICE servers with a fresh generation.
+It does not count as a host re-plan or mint TURN credentials. The room stays on
+the relay floor. Direct endpoints are repeated on
 full late-join/reconnect/failover plan refreshes. An endpoint update by itself
 never changes the session's sticky topology or transport; a room finalized to
 relay is not upgraded mid-game.

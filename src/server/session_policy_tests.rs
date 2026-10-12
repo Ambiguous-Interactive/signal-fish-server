@@ -3256,12 +3256,188 @@ async fn host_failover_replan_filters_peer_lists_to_session_capable_members() {
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
-async fn host_departure_with_no_electable_member_drops_plan_without_replan() {
+async fn departure_after_last_direct_endpoint_loss_resets_authoritative_plan() {
+    // Regression #907: ending a host session must clear surviving Direct obligations.
+    let cfg = SessionConfig {
+        default_topology: Topology::Host,
+        enable_webrtc: false,
+        enable_direct: true,
+        ..SessionConfig::default()
+    };
+    let server = create_server_with_session_and_turn(cfg, enabled_turn()).await;
+    let (host, mut host_rx) = register_client(&server).await;
+    let (survivor, mut survivor_rx) = register_client(&server).await;
+    let (departing, mut departing_rx) = register_client(&server).await;
+    let direct = NegotiatedProtocol {
+        version: 3,
+        transports: vec![Transport::Relay, Transport::Direct],
+        topologies: vec![Topology::Relay, Topology::Host],
+    };
+    for player in [&host, &survivor, &departing] {
+        server.set_client_protocol(player, direct.clone());
+    }
+    let room_id = finalized_db_room_with(
+        &server,
+        host,
+        &[(survivor, "Survivor"), (departing, "Departing")],
+    )
+    .await;
+    publish_room_members(&server, &room_id, &[host, survivor, departing]).await;
+    server
+        .handle_provide_connection_info(
+            &host,
+            ConnectionInfo::Direct {
+                host: "192.0.2.10".to_string(),
+                port: 7777,
+            },
+        )
+        .await;
+    let members = server.database.get_room_players(&room_id).await.unwrap();
+    server
+        .emit_session_plan(&room_id, &finalized("host-game", members, Some(host)))
+        .await;
+    let initial = expect_plan(&mut survivor_rx, "survivor").await;
+    assert_eq!(initial.transport, Transport::Direct);
+    assert_eq!(initial.peers.len(), 1);
+    assert_eq!(initial.peers[0].player_id, host);
+    assert!(initial.direct_endpoint.is_some());
+    let _ = expect_plan(&mut host_rx, "host").await;
+    let _ = expect_plan(&mut departing_rx, "departing").await;
+    let before = server.metrics.snapshot().await.transport;
+
+    server
+        .handle_provide_connection_info(
+            &host,
+            ConnectionInfo::Direct {
+                host: "0.0.0.0".to_string(),
+                port: 0,
+            },
+        )
+        .await;
+    server.leave_room(&departing).await;
+    let mut reset_generation = None;
+    for (rx, who) in [(&mut host_rx, "host"), (&mut survivor_rx, "survivor")] {
+        assert!(
+            matches!(recv(rx).await.as_ref(), ServerMessage::PlayerLeft { player_id, .. } if *player_id == departing)
+        );
+        let reset = expect_plan(rx, who).await;
+        assert_ne!(reset.generation, initial.generation);
+        if let Some(generation) = reset_generation {
+            assert_eq!(reset.generation, generation);
+        }
+        reset_generation = Some(reset.generation);
+        assert_eq!(reset.topology, Topology::Relay);
+        assert_eq!(reset.transport, Transport::Relay);
+        assert_eq!(reset.host, None);
+        assert_eq!(reset.direct_endpoint, None);
+        assert!(reset.peers.is_empty());
+        assert!(reset.ice_servers.is_empty());
+        assert_eq!(reset.fallback, Transport::Relay);
+        assert_silent(rx).await;
+    }
+    assert!(server.active_session_plan(&room_id).is_none());
+    let after = server.metrics.snapshot().await.transport;
+    assert_eq!(
+        after.session_replans_emitted,
+        before.session_replans_emitted
+    );
+    assert_eq!(
+        after.turn_credentials_issued,
+        before.turn_credentials_issued
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn host_departure_with_only_v2_survivor_ends_session_without_v3_frames() {
+    let server = create_server_with_session(host_config()).await;
+    let (host, _host_rx) = register_client(&server).await;
+    let (legacy, mut legacy_rx) = register_client(&server).await;
+    server.set_client_protocol(&host, v3_webrtc());
+    let room_id = finalized_db_room_with(&server, host, &[(legacy, "Legacy")]).await;
+    publish_room_members(&server, &room_id, &[host, legacy]).await;
+    server.active_session_plans.insert(
+        room_id,
+        ActiveSessionPlan {
+            topology: Topology::Host,
+            transport: Transport::WebRtc,
+            host: Some(host),
+        },
+    );
+    server
+        .database
+        .remove_player_from_room(&room_id, &host)
+        .await
+        .unwrap();
+    unpublish_room_member(&server, &host).await;
+    server
+        .handle_session_member_departure(&room_id, &host)
+        .await;
+    assert!(server.active_session_plan(&room_id).is_none());
+    assert_silent(&mut legacy_rx).await;
+    assert_eq!(
+        server
+            .metrics
+            .session_replans_emitted
+            .load(Ordering::Relaxed),
+        0
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn rejected_relay_reset_retains_active_plan_until_publication() {
+    let server = create_server_with_session(host_config()).await;
+    let (survivor, mut survivor_rx) = register_client(&server).await;
+    server.set_client_protocol(&survivor, v3_relay_only());
+    let room_id = RoomId::new_v4();
+    publish_room_members(&server, &room_id, &[survivor]).await;
+    let stored = ActiveSessionPlan {
+        topology: Topology::Host,
+        transport: Transport::WebRtc,
+        host: Some(PlayerId::new_v4()),
+    };
+    server.active_session_plans.insert(room_id, stored);
+    let members = server.session_members_from(&[player_info(survivor, "Survivor", false)]);
+    server
+        .message_coordinator
+        .fail_room_transactions_with_routing_changed_for_test(1);
+    for rejected in [true, false] {
+        let guard = server
+            .message_coordinator
+            .lock_room_event_mutation(&room_id)
+            .await;
+        server
+            .replan_host_session(&room_id, stored, None, members.clone(), guard)
+            .await;
+        if rejected {
+            assert_eq!(server.active_session_plan(&room_id), Some(stored));
+            assert_silent(&mut survivor_rx).await;
+        } else {
+            let reset = expect_plan(&mut survivor_rx, "survivor").await;
+            assert_eq!(reset.topology, Topology::Relay);
+            assert_eq!(reset.transport, Transport::Relay);
+            assert!(server.active_session_plan(&room_id).is_none());
+            assert_silent(&mut survivor_rx).await;
+        }
+    }
+    assert_eq!(
+        server
+            .metrics
+            .session_replans_emitted
+            .load(Ordering::Relaxed),
+        0
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn host_departure_with_no_electable_member_resets_plan_without_replan() {
     // No remaining member can run the stored host+webrtc session (one pure v2
-    // member, one v3 relay-only member): the stored entry is REMOVED, nobody
-    // receives a SessionPlan (the v3 relay-only member would have received one
-    // if emission wrongly proceeded), and `session_replans_emitted` does NOT
-    // move — no re-plan happened; the relay floor carries the room.
+    // member, one v3 relay-only member): the stored entry is removed, nobody
+    // receives a replacement host plan. The v3 relay-only member receives an
+    // explicit relay reset; v2 stays silent. `session_replans_emitted` does not
+    // move because the session ends.
     let server = create_server_with_session(host_config()).await;
     let (host, mut host_rx) = register_client(&server).await;
     let (legacy, mut legacy_rx) = register_client(&server).await;
@@ -3317,6 +3493,13 @@ async fn host_departure_with_no_electable_member_drops_plan_without_replan() {
         "dropping the plan is NOT a re-plan event"
     );
     assert_silent(&mut legacy_rx).await;
+    let reset = expect_plan(&mut relay_only_rx, "relay_only").await;
+    assert_eq!(reset.topology, Topology::Relay);
+    assert_eq!(reset.transport, Transport::Relay);
+    assert_eq!(reset.host, None);
+    assert_eq!(reset.direct_endpoint, None);
+    assert!(reset.peers.is_empty());
+    assert!(reset.ice_servers.is_empty());
     assert_silent(&mut relay_only_rx).await;
     assert_silent(&mut host_rx).await;
 }
@@ -3500,13 +3683,12 @@ async fn non_host_departure_heals_present_but_unpairable_host() {
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
-async fn departure_with_unpairable_host_and_no_qualifier_drops_plan() {
+async fn departure_with_unpairable_host_and_no_qualifier_resets_plan() {
     // The widened gate's no-qualifier arm: the stored host is a member but
     // downgraded to relay-only, and the only other member (a v2 client) then
     // departs. `host_invalid` fires, no remaining member can run the session,
-    // so the stored entry is REMOVED, nothing is emitted (the v3 ex-host gets
-    // no plan), and `session_replans_emitted` does not move — the relay floor
-    // carries the room.
+    // so the stored entry is removed and the v3 ex-host receives an explicit
+    // relay reset. `session_replans_emitted` does not move.
     let server = create_server_with_session(host_config()).await;
     let (host, mut host_rx) = register_client(&server).await;
     let (legacy, mut legacy_rx) = register_client(&server).await;
@@ -3553,6 +3735,11 @@ async fn departure_with_unpairable_host_and_no_qualifier_drops_plan() {
         replans_before,
         "dropping the plan is NOT a re-plan event"
     );
+    let reset = expect_plan(&mut host_rx, "downgraded host").await;
+    assert_eq!(reset.topology, Topology::Relay);
+    assert_eq!(reset.transport, Transport::Relay);
+    assert_eq!(reset.host, None);
+    assert!(reset.peers.is_empty());
     assert_silent(&mut host_rx).await;
     assert_silent(&mut legacy_rx).await;
 }
@@ -5117,7 +5304,7 @@ async fn replan_prefers_electable_authority_over_earliest_joiner() {
     let stored = ActiveSessionPlan {
         topology: Topology::Host,
         transport: Transport::WebRtc,
-        host: Some(early), // old host being re-planned; value is irrelevant here
+        host: Some(PlayerId::new_v4()), // the former host has departed
     };
     server.active_session_plans.insert(room_id, stored);
 

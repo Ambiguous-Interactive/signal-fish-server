@@ -1808,7 +1808,9 @@ discovery, authenticate it as a network identity, or prove it reachable.
   must also expose a usable endpoint (a member that cannot run the session is never named host of a
   session it
   cannot run); among those the rule is authority preferred, else earliest joiner, smaller-UUID tie-break. If no
-  member qualifies, no plan is re-issued — the session is over and the relay floor carries the room. A host
+  member qualifies, the server ends the session and sends every remaining v3 member an explicit
+  Relay/Relay plan with no host, endpoint, peers, or ICE servers. This reset has a fresh generation;
+  the room stays on the relay floor. A host
   departure itself is still signaled by `PlayerLeft` (with the v3 terminal
   watermark; its v2 projection remains byte-for-byte frozen).
 - **Late join / reconnect into a finalized room.** Every current v3 member receives a complete, tailored plan.

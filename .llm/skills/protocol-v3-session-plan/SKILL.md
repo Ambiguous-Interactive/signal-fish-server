@@ -76,9 +76,13 @@ Per path:
   reconnect or losing a usable Direct endpoint) — capability-aware: only v3
   members supporting the sticky pair are electable, and Direct candidates must
   additionally expose a validated endpoint (the authority preference passes the
-  same filter). If none qualifies the stored entry is dropped with no
-  emission and no `session_replans_emitted` increment. Topology/transport are
-  sticky for the session lifetime.
+  same filter). If none qualifies, the session ends: publish an explicit
+  Relay/Relay reset to every remaining v3 member and remove the stored entry
+  in the same publication hook. The reset has a fresh generation and clears
+  host, endpoint, peers, and ICE servers. It mints no TURN credentials and does
+  not increment `session_replans_emitted`. If only v2 members remain, remove
+  the entry without emitting v3 frames. Topology/transport remain sticky until
+  the session ends; the selection ladder is not re-run.
 
 ## Peer lists are capability-filtered on both sides (`plan_for`)
 

@@ -1142,9 +1142,10 @@ impl EnhancedGameServer {
     /// [`choose_session_plan`], needs no filter because `all_support` already
     /// guarantees every member's capability there.
     ///
-    /// If **no** member qualifies, the session is over: the stored entry is
-    /// removed, nothing is emitted, and `session_replans_emitted` does NOT
-    /// move (no re-plan happened) — the relay floor carries the room.
+    /// If **no** member qualifies, the session ends: the exact publication
+    /// removes its stored entry and sends every remaining v3 member an
+    /// explicit Relay/Relay reset. The reset clears all connection obligations
+    /// with a fresh generation and does not move `session_replans_emitted`.
     ///
     /// Otherwise the stored entry is rewritten in the exact publication hook,
     /// one
@@ -1165,47 +1166,18 @@ impl EnhancedGameServer {
         members: Vec<SessionMember>,
         room_event_guard: RoomEventMutationGuard,
     ) {
-        // Capability gate (see doc comment): electable ⊆ members.
-        let electable: Vec<SessionMember> = members
-            .iter()
-            .filter(|member| stored.supported_by(member))
-            .cloned()
-            .collect();
-        // The authority preference passes through the SAME gate, so an
-        // authority that cannot run the session is neither preferred nor
-        // electable (`elect_host` would also drop an id absent from the
-        // filtered slice; filtering here keeps the rule explicit).
-        let electable_authority =
-            authority.filter(|id| electable.iter().any(|member| member.player_id == *id));
-
-        let Some(new_host) = elect_host(electable_authority, &electable) else {
-            // Nobody can run the stored session: it is over. Drop the entry and
-            // emit nothing — deliberately NOT counted as a re-plan event.
-            self.active_session_plans.remove(room_id);
-            tracing::info!(
-                %room_id,
-                topology = ?stored.topology,
-                transport = ?stored.transport,
-                "No remaining member can host the active session; dropped the stored plan \
-                 (the relay floor carries the room)"
-            );
-            return;
-        };
-
-        let updated = ActiveSessionPlan {
-            host: Some(new_host),
-            ..stored
-        };
-
+        let resolved = membership_session_decision(Some(stored), authority, members);
+        let decision = resolved.decision;
+        let updated = resolved.active_plan_update;
+        let is_replan = resolved.is_replan;
         tracing::info!(
             %room_id,
-            %new_host,
-            topology = ?updated.topology,
-            transport = ?updated.transport,
-            "Re-elected active session host; re-emitting session plans"
+            host = ?decision.host,
+            topology = ?decision.topology,
+            transport = ?decision.transport,
+            "Publishing the repaired session plan"
         );
 
-        let decision = updated.decision_with(members);
         self.observe_mixed_path_members(room_id, &decision);
         // Wall clock (durable record): TURN credentials carry absolute
         // expiry instants the client sees; capture once per emission.
@@ -1227,6 +1199,17 @@ impl EnhancedGameServer {
                 RoomRecipientMessages::in_order(member.player_id, messages)
             })
             .collect();
+        // Pure v2 survivors cannot receive the reset. There is no wire
+        // publication to commit, so end the stored session under this gate.
+        if recipient_messages
+            .iter()
+            .all(|batch| batch.messages.is_empty())
+        {
+            if updated == Some(None) {
+                self.active_session_plans.remove(room_id);
+            }
+            return;
+        }
         let expected_members: Vec<_> = decision
             .members
             .iter()
@@ -1250,8 +1233,16 @@ impl EnhancedGameServer {
                             recipient_messages,
                             Box::new(move || {
                                 Box::pin(async move {
-                                    active_session_plans.insert(room_id, updated);
-                                    metrics_for_commit.increment_session_replans_emitted();
+                                    if let Some(updated) = updated {
+                                        if let Some(plan) = updated {
+                                            active_session_plans.insert(room_id, plan);
+                                        } else {
+                                            active_session_plans.remove(&room_id);
+                                        }
+                                    }
+                                    if is_replan {
+                                        metrics_for_commit.increment_session_replans_emitted();
+                                    }
                                     Ok(true)
                                 })
                             }),
