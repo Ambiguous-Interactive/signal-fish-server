@@ -180,6 +180,7 @@ INTERNAL_PATHS=(
     "docs/hooks-quick-reference.md"
     "docs/pre-commit-hooks-summary.md"
     "docs/development.md"
+    "docs/releasing.md"
     "docs/development/arm-capacity-audit.md"
     # Tool configuration files
     "clippy.toml"
@@ -235,6 +236,7 @@ NON_INTERNAL_PATHS=(
     # User-facing docs
     "README.md"
     "docs/guide.md"
+    "docs/releasing-guide.md"
     "docs/library-usage.md"
     "docs/testing-guide.md"
     # Deployment artifacts

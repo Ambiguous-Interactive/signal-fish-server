@@ -8,14 +8,21 @@ resolve to the same tagged commit.
 
 Run the **Prepare Release** workflow from the default branch:
 
-1. Choose `patch`, `minor`, or `major` from the `bump` dropdown. Use `dry_run`
-   first when you only want to validate and inspect the generated diff.
+1. Keep `bump` set to `auto` to select a bump from the unreleased notes.
+   It selects `patch` for compatible changes, `minor` for breaking changes
+   before 1.0, and `major` for breaking changes from 1.0 onward. You can
+   choose `patch`, `minor`, or `major` explicitly; incompatible choices fail.
+   Use `dry_run` first to validate and inspect the generated diff.
 2. The workflow computes the next version from `Cargo.toml`, updates the root
    package and every tracked lockfile that embeds it, synchronizes public dependency
    examples and project metadata, and moves `[Unreleased]` into an exact
    `## [X.Y.Z] - YYYY-MM-DD` changelog section with corrected comparison links.
 3. Review and merge the generated `release/vX.Y.Z` pull request only after its
    normal CI and documentation workflows pass on the exact release commit.
+
+Automatic selection uses the bold `**Breaking:**` or
+`**Breaking (scope):**` declarations in `[Unreleased]`. Maintainers must label
+breaking changes in the notes; the workflow does not infer them from source.
 
 The non-dry-run path requires the secret `AUTO_COMMIT_APP_PRIVATE_KEY` plus one
 GitHub App identifier. The preferred identifier is the repository variable
@@ -41,7 +48,7 @@ from a clean default-branch checkout, inspect the diff, and open the release PR
 normally:
 
 ```bash
-bash scripts/prepare-release.sh --bump patch
+bash scripts/prepare-release.sh --bump auto
 ```
 
 Do not create or move the version tag by hand for the normal manual path. Run

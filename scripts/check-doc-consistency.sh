@@ -896,7 +896,7 @@ is_internal_path() {
         src/*_tests.rs|src/*_test.rs|src/*/tests.rs|clients/native/src/*_tests.rs|clients/native/src/*_test.rs|clients/native/src/*/tests.rs)
             return 0
             ;;
-        docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md|docs/development/*)
+        docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md|docs/development/*|docs/releasing.md)
             return 0
             ;;
         Cargo.lock|PLAN.md|AGENTS.md|CLAUDE.md|pre-push.txt|pre-commit.txt|logs_*.zip)

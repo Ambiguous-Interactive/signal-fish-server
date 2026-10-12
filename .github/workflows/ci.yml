@@ -531,7 +531,7 @@ jobs:
                 # Standalone compatibility fixture sources (publish = false).
                 clients/fortress/src/*|clients/fortress-wasm/src/*|clients/fortress-wasm/harness.mjs|clients/fortress-wasm/project/main.gd) ;;
                 src/*_tests.rs|src/*_test.rs|src/*/tests.rs|clients/native/src/*_tests.rs|clients/native/src/*_test.rs|clients/native/src/*/tests.rs) ;;
-                docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md|docs/development/*|docs/quickstart.md) ;;
+                docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md|docs/development/*|docs/releasing.md|docs/quickstart.md) ;;
                 .markdownlint*|.lychee.toml|.lycheecache|.typos.toml|.yamllint.yml) ;;
                 .gitignore|.dockerignore) ;;
                 PLAN.md|AGENTS.md|CLAUDE.md|pre-push.txt) ;;

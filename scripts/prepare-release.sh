@@ -10,15 +10,16 @@ set -euo pipefail
 
 usage() {
     cat <<'USAGE'
-Usage: scripts/prepare-release.sh --bump <major|minor|patch> [--date YYYY-MM-DD]
+Usage: scripts/prepare-release.sh [--bump <auto|major|minor|patch>] [--date YYYY-MM-DD]
 
 Options:
-  --bump  Required semantic-version component to increment.
+  --bump  Version increment. Defaults to auto: patch for nonbreaking notes,
+          minor for breaking notes at 0.x, major for breaking notes at 1.x or later.
   --date  UTC release date. Defaults to today's UTC date.
 USAGE
 }
 
-BUMP=""
+BUMP="auto"
 RELEASE_DATE=""
 
 while [ "$#" -gt 0 ]; do
@@ -54,9 +55,9 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$BUMP" in
-    major|minor|patch) ;;
+    auto|major|minor|patch) ;;
     *)
-        echo "ERROR: --bump must be one of: major, minor, patch." >&2
+        echo "ERROR: --bump must be one of: auto, major, minor, patch." >&2
         exit 2
         ;;
 esac
@@ -228,6 +229,43 @@ fi
 
 IFS=. read -r CURRENT_MAJOR CURRENT_MINOR CURRENT_PATCH <<< "$CURRENT_VERSION"
 
+UNRELEASED_BODY=$(awk '
+    /^## \[Unreleased\]$/ { in_unreleased = 1; next }
+    in_unreleased && /^## \[/ { exit }
+    in_unreleased { print }
+' CHANGELOG.md)
+if ! grep -Eq '^### (Added|Changed|Deprecated|Removed|Fixed|Security)$' <<< "$UNRELEASED_BODY" \
+    || ! grep -Eq '^[[:space:]]*[-*][[:space:]]+' <<< "$UNRELEASED_BODY"; then
+    echo "ERROR: CHANGELOG.md [Unreleased] must contain categorized release notes before preparation." >&2
+    exit 1
+fi
+
+# Categorized notes declare compatibility. Auto selects the minimum safe
+# increment. Reject explicit increments below the compatibility floor before
+# mutation. Breaking changes require a minor release during 0.x development
+# and a major release once 1.0 ships.
+if grep -Eq '^[[:space:]]*([-*][[:space:]]+)?\*\*Breaking([[:space:]]+\([^*]+\))?(:\*\*|\*\*:)' \
+    <<< "$UNRELEASED_BODY"; then
+    if [ "$BUMP" = "auto" ]; then
+        if [ "$CURRENT_MAJOR" = "0" ]; then
+            BUMP="minor"
+        else
+            BUMP="major"
+        fi
+    fi
+    if [ "$CURRENT_MAJOR" = "0" ] && [ "$BUMP" = "patch" ]; then
+        echo "ERROR: CHANGELOG.md [Unreleased] contains a breaking change; version $CURRENT_VERSION requires a minor or major bump, not patch." >&2
+        exit 1
+    elif [ "$CURRENT_MAJOR" != "0" ] && [ "$BUMP" != "major" ]; then
+        echo "ERROR: CHANGELOG.md [Unreleased] contains a breaking change; version $CURRENT_VERSION requires a major bump, not $BUMP." >&2
+        exit 1
+    fi
+fi
+
+if [ "$BUMP" = "auto" ]; then
+    BUMP="patch"
+fi
+
 # Bash arithmetic is signed 64-bit on the supported runners. Fail closed before
 # incrementing instead of wrapping a syntactically valid (but extreme) semver.
 increment_component() {
@@ -312,34 +350,6 @@ for manifest in "${TRACKED_MANIFESTS[@]}"; do
     "$PREPARE_RELEASE_CARGO_BIN" metadata --locked --format-version 1 \
         --manifest-path "$manifest" >/dev/null
 done
-
-UNRELEASED_BODY=$(awk '
-    /^## \[Unreleased\]$/ { in_unreleased = 1; next }
-    in_unreleased && /^## \[/ { exit }
-    in_unreleased { print }
-' CHANGELOG.md)
-if ! grep -Eq '^### (Added|Changed|Deprecated|Removed|Fixed|Security)$' <<< "$UNRELEASED_BODY" \
-    || ! grep -Eq '^[[:space:]]*[-*][[:space:]]+' <<< "$UNRELEASED_BODY"; then
-    echo "ERROR: CHANGELOG.md [Unreleased] must contain categorized release notes before preparation." >&2
-    exit 1
-fi
-
-# A maintainer still chooses the release increment, but the categorized notes
-# are the authoritative compatibility declaration. Fail before mutation when a
-# breaking release would otherwise be assigned a version that permits existing
-# dependents to accept it as compatible. During initial 0.x development SemVer
-# permits breaking changes in a minor release; once 1.0 ships they require a
-# major release.
-if grep -Eq '^[[:space:]]*([-*][[:space:]]+)?\*\*Breaking([[:space:]]+\([^*]+\))?(:\*\*|\*\*:)' \
-    <<< "$UNRELEASED_BODY"; then
-    if [ "$CURRENT_MAJOR" = "0" ] && [ "$BUMP" = "patch" ]; then
-        echo "ERROR: CHANGELOG.md [Unreleased] contains a breaking change; version $CURRENT_VERSION requires a minor or major bump, not patch." >&2
-        exit 1
-    elif [ "$CURRENT_MAJOR" != "0" ] && [ "$BUMP" != "major" ]; then
-        echo "ERROR: CHANGELOG.md [Unreleased] contains a breaking change; version $CURRENT_VERSION requires a major bump, not $BUMP." >&2
-        exit 1
-    fi
-fi
 
 replace_root_package_version() {
     local file="$1"
