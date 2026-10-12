@@ -58,6 +58,7 @@ $script:ChangelogInternalPathGlobs = [string[]]@(
     "clients/fortress-wasm/harness.mjs", "clients/fortress-wasm/project/main.gd",
     # Test-only Rust sources
     "src/*_tests.rs", "src/*_test.rs", "src/*/tests.rs",
+    "clients/native/src/*_tests.rs", "clients/native/src/*_test.rs", "clients/native/src/*/tests.rs",
     # CI/infrastructure docs
     "docs/ci-cd-*", "docs/test-*", "docs/git-hooks-*", "docs/hooks-*", "docs/pre-commit-*",
     "docs/development.md", "docs/development/*",

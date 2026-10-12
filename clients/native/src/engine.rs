@@ -1257,7 +1257,7 @@ fn spawn_channel_event_loop(
         while let Some(event) = channel.poll().await {
             let mut rejected = admission.rejected.lock().await;
             if *rejected {
-                break;
+                return;
             }
             match event {
                 DataChannelEvent::OnOpen => {
@@ -1278,7 +1278,7 @@ fn spawn_channel_event_loop(
                         });
                         drop(rejected);
                         let _ = channel.close().await;
-                        break;
+                        return;
                     };
                     if events
                         .send(EngineEvent::ChannelMessage {
@@ -1292,29 +1292,14 @@ fn spawn_channel_event_loop(
                     {
                         drop(rejected);
                         let _ = channel.close().await;
-                        break;
+                        return;
                     }
                 }
                 DataChannelEvent::OnError => {
                     tracing::warn!(%peer, channel = %label, "data channel became unreadable");
-                    if label == RELIABLE_LABEL || label == UNRELIABLE_LABEL {
-                        let _ = events.send(EngineEvent::ChannelClosed {
-                            peer,
-                            generation,
-                            label: label.clone(),
-                        });
-                    }
-                }
-                DataChannelEvent::OnClose => {
-                    if label == RELIABLE_LABEL || label == UNRELIABLE_LABEL {
-                        let _ = events.send(EngineEvent::ChannelClosed {
-                            peer,
-                            generation,
-                            label: label.clone(),
-                        });
-                    }
                     break;
                 }
+                DataChannelEvent::OnClose => break,
                 DataChannelEvent::OnClosing
                 | DataChannelEvent::OnBufferedAmountLow
                 | DataChannelEvent::OnBufferedAmountHigh => {}
@@ -1330,6 +1315,18 @@ fn spawn_channel_event_loop(
                     );
                 }
             }
+        }
+        /*
+            Driver shutdown can end streams without OnClose. Shared receive
+            rejection already publishes the link's terminal event.
+        */
+        let rejected = admission.rejected.lock().await;
+        if !*rejected && (label == RELIABLE_LABEL || label == UNRELIABLE_LABEL) {
+            let _ = events.send(EngineEvent::ChannelClosed {
+                peer,
+                generation,
+                label,
+            });
         }
     }))
 }
@@ -1357,6 +1354,10 @@ mod admission_tests;
 #[cfg(test)]
 #[path = "engine_receive_tests.rs"]
 mod receive_tests;
+
+#[cfg(test)]
+#[path = "engine_close_tests.rs"]
+mod close_tests;
 
 #[cfg(test)]
 mod tests {

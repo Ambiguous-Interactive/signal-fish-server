@@ -144,6 +144,12 @@ INTERNAL_PATHS=(
     "src/server_tests.rs"
     "src/main_test.rs"
     "src/server/tests.rs"
+    "clients/native/src/engine_close_tests.rs"
+    "clients/native/src/engine_task_tests.rs"
+    "clients/native/src/engine_test.rs"
+    "clients/native/src/nested/receive_tests.rs"
+    "clients/native/src/engine/tests.rs"
+    "clients/native/src/nested/engine/tests.rs"
     # Formal verification tree
     "formal/model.tla"
     # Standalone internal files
@@ -203,6 +209,9 @@ NON_INTERNAL_PATHS=(
     # Production source code
     "src/main.rs"
     "clients/native/src/client.rs"
+    "clients/native/src/engine.rs"
+    "clients/native/src/engine_tests.rs.bak"
+    "clients/native/src/nested/tests/runtime.rs.bak"
     "clients/native/src/tests/runtime.rs"
     "clients/native/src/nested/tests/runtime.rs"
     "clients/native/tests_like/runtime.rs"

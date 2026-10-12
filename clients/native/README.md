@@ -1,7 +1,7 @@
 # signal-fish-reference-native
 
 A **native Rust reference client** for the Signal Fish protocol v3 with a **real WebRTC stack**
-([webrtc-rs](https://github.com/webrtc-rs/webrtc) 0.21: actual ICE gathering, DTLS handshakes, and SCTP data
+([webrtc-rs](https://github.com/webrtc-rs/webrtc) 0.21.1: actual ICE gathering, DTLS handshakes, and SCTP data
 channels). It exists for **conformance and reference** — executable documentation of the client side of
 [`docs/protocol.md`](../../docs/protocol.md) and the engine of the in-repo multi-process interop suite. It is
 **not a product**: no automatic reconnection, no game loop, no API stability promises.
@@ -11,6 +11,8 @@ Design rationale (standalone crate, direct webrtc-rs, path-dependency type reuse
 
 The reference engine accepts only `reliable` and `unreliable` data channels.
 The engine cancels their polling tasks when it removes a peer or stops.
+A remote close or a stopped channel event stream triggers link cleanup and
+relay fallback. Network loss still follows the configured P2P deadlines.
 It closes other remote labels without retaining them or starting callbacks.
 **Migration:** Applications that need extra channels must own their channel
 handling. This restriction belongs to these reference clients; the server

@@ -893,7 +893,7 @@ is_internal_path() {
         clients/fortress/src/*|clients/fortress-wasm/src/*|clients/fortress-wasm/harness.mjs|clients/fortress-wasm/project/main.gd)
             return 0
             ;;
-        src/*_tests.rs|src/*_test.rs|src/*/tests.rs)
+        src/*_tests.rs|src/*_test.rs|src/*/tests.rs|clients/native/src/*_tests.rs|clients/native/src/*_test.rs|clients/native/src/*/tests.rs)
             return 0
             ;;
         docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md|docs/development/*)

@@ -322,6 +322,7 @@ jobs:
           do
             cleanup_netem
             trap cleanup_netem EXIT
+            export SIGNAL_FISH_MULTIPROCESS_EVIDENCE_DIR="${RUNNER_TEMP}/webrtc-netem/${test_name}"
             cargo nextest run --profile ci --locked --all-features \
               --test webrtc_mesh_budget_e2e --run-ignored all \
               -E "test($test_name)" \
@@ -340,6 +341,16 @@ jobs:
             tc qdisc show dev lo
             exit 1
           fi
+      - name: Upload WebRTC netem evidence
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: webrtc-netem-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            webrtc-matrix-output.txt
+            ${{ runner.temp }}/webrtc-netem/**
+          retention-days: 30
+          if-no-files-found: warn
       - name: Build the server binary
         if: ${{ !cancelled() }}
         shell: bash

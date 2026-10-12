@@ -90,6 +90,8 @@ The following paths are classified as internal (no CHANGELOG entry required):
 
 - **Dot-directories:** `.github/`, `.githooks/`, `.devcontainer/`, `.config/`, `.vscode/`, `.claude/`, `.llm/`
 - **Dev/build directories:** `scripts/`, `tests/`, `test-fixtures/`, `target/`, `progress/`
+- **Extracted Rust tests:** `*_tests.rs`, `*_test.rs`, and nested `tests.rs`
+  under `src/` or `clients/native/src/`; these files contain test code only.
 - **Standalone files:** `Cargo.lock`, `PLAN.md`, `AGENTS.md`, `pre-push.txt`, `logs_*.zip`
 - **Lint/tool configs:** `.markdownlint*`, `.lychee.toml`, `.lycheecache`, `.typos.toml`, `.yamllint.yml`
 - **VCS/Docker ignores:** `.gitignore`, `.dockerignore`
@@ -107,6 +109,7 @@ When adding a new internal path category, update all of:
 - `is_internal_path()` in `scripts/check-doc-consistency.sh`
 - `$script:ChangelogInternalPathGlobs` in `scripts/hooks/pre-commit.ps1`
 - The test fixture at `.github/test-fixtures/test-doc-consistency.sh`
+- The dependency-only classification in `.github/workflows/ci.yml`
 
 `tests/doc_consistency_policy_tests.rs` locks the hook/checker lists in
 lockstep.

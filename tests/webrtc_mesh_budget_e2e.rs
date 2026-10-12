@@ -219,6 +219,222 @@ fn held_window<'a>(events: &'a [Value], who: &str) -> &'a [Value] {
     events
 }
 
+fn assert_own_transport_history(
+    window: &[Value],
+    expected_connected: bool,
+    allow_rebuild: bool,
+    who: &str,
+) -> Vec<bool> {
+    let rebuild_window = window
+        .iter()
+        .position(|event| event_name(event) == Some("exchange_ready"))
+        .zip(
+            window
+                .iter()
+                .position(|event| event_name(event) == Some("exchange_reliable_ready")),
+        );
+    let mut states = Vec::new();
+    let mut fallback_pending = false;
+    for (index, event) in window.iter().enumerate() {
+        match event_name(event) {
+            Some("transport_status_sent") => {
+                assert!(
+                    !fallback_pending,
+                    "{who}: false transport report lacks its fallback event"
+                );
+                assert_eq!(string_field(event, "transport", who), "webrtc");
+                let connected = event
+                    .get("connected")
+                    .and_then(Value::as_bool)
+                    .unwrap_or_else(|| {
+                        panic!("{who}: own transport status lacks connected: {event}")
+                    });
+                if !connected && allow_rebuild {
+                    assert!(rebuild_window.is_some_and(|(start, end)| start < index && index < end), "{who}: fallback transport report is outside the coordinated rebuild window");
+                }
+                fallback_pending = !connected;
+                states.push(connected);
+            }
+            Some("fallback_engaged") => {
+                assert!(
+                    fallback_pending,
+                    "{who}: fallback event lacks its preceding false transport report"
+                );
+                if allow_rebuild {
+                    assert!(
+                        rebuild_window.is_some_and(|(start, end)| start < index && index < end),
+                        "{who}: fallback event is outside the coordinated rebuild window"
+                    );
+                }
+                fallback_pending = false;
+            }
+            Some("exchange_reliable_ready") if allow_rebuild => {
+                assert!(
+                    !fallback_pending && states.last() == Some(&true),
+                    "{who}: fresh reliable exchange completed before transport recovery"
+                );
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        !fallback_pending,
+        "{who}: false transport report lacks its fallback event"
+    );
+    assert_eq!(
+        states.last(),
+        Some(&expected_connected),
+        "{who}: final own transport status"
+    );
+    assert!(
+        states.windows(2).all(|pair| pair[0] != pair[1]),
+        "{who}: duplicate own transport status: {states:?}"
+    );
+    if !allow_rebuild {
+        assert_eq!(
+            states.len(),
+            1,
+            "{who}: status transitions require the retry-enabled netem scenario"
+        );
+    }
+    states
+}
+
+#[test]
+fn transport_history_accepts_exact_clean_fallback_and_rebuild_reports() {
+    let connected =
+        json!({"event":"transport_status_sent", "transport":"webrtc", "connected":true});
+    let disconnected =
+        json!({"event":"transport_status_sent", "transport":"webrtc", "connected":false});
+    let fallback = json!({"event":"fallback_engaged"});
+    for (label, events, expected, rebuild, states) in [
+        ("clean", vec![connected.clone()], true, false, vec![true]),
+        (
+            "relay",
+            vec![disconnected.clone(), fallback.clone()],
+            false,
+            false,
+            vec![false],
+        ),
+        (
+            "rebuild",
+            vec![
+                connected.clone(),
+                json!({"event":"exchange_ready"}),
+                disconnected,
+                fallback,
+                connected,
+                json!({"event":"exchange_reliable_ready"}),
+            ],
+            true,
+            true,
+            vec![true, false, true],
+        ),
+    ] {
+        assert_eq!(
+            assert_own_transport_history(&events, expected, rebuild, label),
+            states
+        );
+    }
+}
+
+#[test]
+fn transport_history_rejects_missing_duplicate_and_out_of_phase_reports() {
+    let connected =
+        json!({"event":"transport_status_sent", "transport":"webrtc", "connected":true});
+    let disconnected =
+        json!({"event":"transport_status_sent", "transport":"webrtc", "connected":false});
+    let fallback = json!({"event":"fallback_engaged"});
+    let ready = json!({"event":"exchange_ready"});
+    let reliable = json!({"event":"exchange_reliable_ready"});
+    for (label, events, expected, rebuild) in [
+        ("missing fallback", vec![disconnected.clone()], false, false),
+        (
+            "duplicate status",
+            vec![connected.clone(), connected.clone()],
+            true,
+            false,
+        ),
+        (
+            "duplicate fallback",
+            vec![disconnected.clone(), fallback.clone(), fallback.clone()],
+            false,
+            false,
+        ),
+        (
+            "fallback before false report",
+            vec![fallback.clone(), disconnected.clone()],
+            false,
+            false,
+        ),
+        (
+            "late rebuild fallback",
+            vec![
+                connected.clone(),
+                ready.clone(),
+                reliable.clone(),
+                disconnected.clone(),
+                fallback.clone(),
+                connected.clone(),
+            ],
+            true,
+            true,
+        ),
+        (
+            "early rebuild fallback",
+            vec![
+                disconnected.clone(),
+                fallback.clone(),
+                connected.clone(),
+                ready.clone(),
+                reliable.clone(),
+            ],
+            true,
+            true,
+        ),
+        (
+            "recovery after reliable exchange",
+            vec![
+                connected.clone(),
+                ready.clone(),
+                disconnected.clone(),
+                fallback.clone(),
+                reliable.clone(),
+                connected.clone(),
+            ],
+            true,
+            true,
+        ),
+        (
+            "missing rebuild recovery",
+            vec![connected.clone(), ready, disconnected, fallback, reliable],
+            true,
+            true,
+        ),
+        (
+            "clean transient",
+            vec![
+                connected.clone(),
+                json!({"event":"exchange_ready"}),
+                json!({"event":"transport_status_sent", "transport":"webrtc", "connected":false}),
+                json!({"event":"fallback_engaged"}),
+                connected,
+                json!({"event":"exchange_reliable_ready"}),
+            ],
+            true,
+            false,
+        ),
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| assert_own_transport_history(
+                &events, expected, rebuild, label
+            ))
+            .is_err(),
+            "{label}: invalid transport history must fail"
+        );
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ExchangeGateFiles<'a> {
     exchange: Option<&'a Path>,
@@ -891,11 +1107,8 @@ fn assert_client_barrier(
         "{who}: errors in the held {} event window: {barrier_errors:?}",
         scenario.label()
     );
-    assert_eq!(
-        events_named(window, "fallback_engaged").len(),
-        usize::from(!expected_connected),
-        "{who}: fallback count must match its WebRTC connectivity"
-    );
+    let own_states =
+        assert_own_transport_history(window, expected_connected, scenario.uses_netem(), who);
     assert_eq!(
         events_named(window, "exchange_ready").len(),
         usize::from(scenario.uses_netem()),
@@ -1021,35 +1234,6 @@ fn assert_client_barrier(
         None,
     );
 
-    let statuses = events_named(window, "transport_status_sent");
-    assert!(!statuses.is_empty(), "{who}: no own transport status");
-    let own_states: Vec<bool> = statuses
-        .iter()
-        .map(|status| {
-            assert_eq!(string_field(status, "transport", who), "webrtc");
-            status
-                .get("connected")
-                .and_then(Value::as_bool)
-                .unwrap_or_else(|| panic!("{who}: own transport status lacks connected: {status}"))
-        })
-        .collect();
-    assert_eq!(
-        own_states.last(),
-        Some(&expected_connected),
-        "{who}: final own transport status"
-    );
-    assert!(
-        own_states.windows(2).all(|states| states[0] != states[1]),
-        "{who}: duplicate own transport status: {own_states:?}"
-    );
-    if !scenario.uses_netem() {
-        assert_eq!(
-            own_states.len(),
-            1,
-            "{who}: status transitions require the retry-enabled netem scenario"
-        );
-    }
-
     let mut peer_statuses = BTreeMap::<&str, Vec<bool>>::new();
     for peer_status in events_named(window, "peer_transport_status") {
         assert_eq!(
@@ -1121,8 +1305,9 @@ fn assert_client_barrier(
 
     let signal_count = events_named(window, "signal_sent").len();
     assert!(
-        signal_count < signal_budget,
-        "{who}: emitted {signal_count} signals plus one TransportStatus, exceeding production control-plane budget {signal_budget}"
+        signal_count + own_states.len() <= signal_budget,
+        "{who}: emitted {signal_count} signals plus {} TransportStatus reports, exceeding production control-plane budget {signal_budget}",
+        own_states.len()
     );
     signal_count
 }
@@ -1491,6 +1676,22 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
         })
         .collect();
     let barrier_total_signals: usize = barrier_signal_counts.iter().sum();
+    let barrier_status_histories: Vec<Vec<bool>> = clients
+        .iter()
+        .map(|client| {
+            events_named(
+                success_window(&client.events, &client.name),
+                "transport_status_sent",
+            )
+            .iter()
+            .map(|event| {
+                event["connected"]
+                    .as_bool()
+                    .expect("own transport status has a connected state")
+            })
+            .collect()
+        })
+        .collect();
     let id_indexes: BTreeMap<&str, usize> = ids
         .iter()
         .enumerate()
@@ -1506,15 +1707,23 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
             expected_inbound_signals[target_index] += 1;
         }
     }
-    let event_settlement = join_all(clients.iter_mut().zip(expected_inbound_signals).map(
-        |(client, inbound_signals)| async move {
-            let mut expected = vec![("peer_transport_status", scenario.players - 1)];
-            if scenario.crippled_ordinal().is_none() {
-                expected.push(("signal_received", inbound_signals));
-            }
-            client.await_event_counts(&expected, EVENT_DEADLINE).await;
-        },
-    ));
+    let total_statuses: usize = barrier_status_histories.iter().map(Vec::len).sum();
+    let event_settlement = join_all(
+        clients
+            .iter_mut()
+            .zip(expected_inbound_signals)
+            .enumerate()
+            .map(|(index, (client, inbound_signals))| {
+                let peer_status_count = total_statuses - barrier_status_histories[index].len();
+                async move {
+                    let mut expected = vec![("peer_transport_status", peer_status_count)];
+                    if scenario.crippled_ordinal().is_none() {
+                        expected.push(("signal_received", inbound_signals));
+                    }
+                    client.await_event_counts(&expected, EVENT_DEADLINE).await;
+                }
+            }),
+    );
     let signal_settlement = wait_for_exact_signal_ledger(
         server.port,
         u64::try_from(barrier_total_signals).expect("signal total fits u64"),
@@ -1528,6 +1737,42 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
 
     let mut per_client_signals = Vec::with_capacity(scenario.players);
     for (index, (client, id)) in clients.iter().zip(&ids).enumerate() {
+        let window = held_window(&client.events, &client.name);
+        let expected_connected =
+            !expected_connected_peers(id, &all_ids, host_id, scenario.topology, fault).is_empty();
+        let own_history = assert_own_transport_history(
+            window,
+            expected_connected,
+            scenario.uses_netem(),
+            &client.name,
+        );
+        assert_eq!(
+            own_history, barrier_status_histories[index],
+            "{}: own status ledger changed after the success barrier",
+            client.name
+        );
+        let mut peer_histories = BTreeMap::<&str, Vec<bool>>::new();
+        for event in events_named(window, "peer_transport_status") {
+            peer_histories
+                .entry(string_field(event, "peer", &client.name))
+                .or_default()
+                .push(
+                    event["connected"]
+                        .as_bool()
+                        .expect("peer status has a connected state"),
+                );
+        }
+        let expected_histories: BTreeMap<&str, Vec<bool>> = ids
+            .iter()
+            .zip(&barrier_status_histories)
+            .filter(|(peer, _)| *peer != id)
+            .map(|(peer, history)| (peer.as_str(), history.clone()))
+            .collect();
+        assert_eq!(
+            peer_histories, expected_histories,
+            "{}: each peer must receive every source status change exactly once and in order",
+            client.name
+        );
         per_client_signals.push(assert_client_barrier(
             client,
             id,
@@ -1589,23 +1834,22 @@ async fn run_webrtc_scenario(scenario: WebRtcScenario) {
         assert_pairwise_candidate_drop_ledger(&clients, &ids, pair);
     }
     let held_metrics = fetch_prometheus_text(server.port).await;
-    let expected_connected_clients = ids
+    let expected_establishments = barrier_status_histories
         .iter()
-        .filter(|id| {
-            !expected_connected_peers(id, &all_ids, host_id, scenario.topology, fault).is_empty()
-        })
+        .flatten()
+        .filter(|connected| **connected)
         .count();
-    let expected_fallbacks = scenario.players - expected_connected_clients;
+    let expected_fallbacks = total_statuses - expected_establishments;
     assert_eq!(
         sample_value(&held_metrics, "signal_fish_transport_p2p_established_total"),
-        u64::try_from(expected_connected_clients).expect("player count fits u64"),
-        "{} P2P-established client count",
+        u64::try_from(expected_establishments).expect("status count fits u64"),
+        "{} P2P-established status transition count",
         scenario.label()
     );
     assert_eq!(
         sample_value(&held_metrics, "signal_fish_transport_relay_fallback_total"),
         u64::try_from(expected_fallbacks).expect("fallback count fits u64"),
-        "{} relay-fallback client count",
+        "{} relay-fallback status transition count",
         scenario.label()
     );
     assert_eq!(
