@@ -1,0 +1,1 @@
+{"tick":120,"entities":[{"id":1,"position":[-40.5,1.5,-0.0],"velocity":[0.125,-0.5,2.25],"health":100,"ammo":30,"active":false},{"id":2,"position":[-37.25,1.5,-2.75],"velocity":[0.125,-0.5,2.25],"health":90,"ammo":29,"active":true}],"map":"training-yard"}
