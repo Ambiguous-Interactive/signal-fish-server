@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -2591,3 +2591,37 @@ Server messages, SDK behavior, and default retry count stay unchanged. Rust and
 separate mesh adapter. The reference-only extension remains opt-in; no SDK
 change or migration is required. This history does not identify the causes of
 issues #853 or #889, qualify every retry/loss history, or complete A20 or #826.
+
+### F44 Browser exits before authoritative peer-link replacement settles
+
+Finding: [#925](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/925).
+Baseline `196e812c`. This continues A20 recovery coverage under #826.
+
+A new session-plan generation replaces a retained browser peer's physical link.
+The browser clears its pending wait while retaining completed logical exchange
+receipts and peer status. Its success criteria can then pass and close the new
+connection before either required channel opens. The native endpoint already
+keeps this replacement pending until formation, timeout, or peer removal.
+
+A controlled dispatcher history drives the real browser orchestrator and engine.
+It completes the original exchange, applies a new authoritative generation,
+releases the success barrier, and advances past the exit linger while the new
+channels remain closed. The baseline fails at `success must wait for an
+authoritative replacement link`. The repair keeps the replacement pending.
+The same history covers both offerer roles, old-channel closure before a retry,
+fresh retry budgets, and completion through channel opening, deadline expiry,
+or peer departure. Logical exchange receipts remain intact.
+
+The browser README states the replacement wait. No signaling schema, server
+behavior, or external SDK code changes. The Rust and .NET SDKs supply signaling
+without this browser process. Godot uses its own engine adapter and has no
+reference-client exit barrier. Current SDK READMEs were inspected at `da8f2d16`,
+`e467c871`, and `db7d30f2`. No client migration is required.
+
+This controlled exit failure does not identify the initial formation causes in
+issues #853 or #889. Captured real mesh and restore runs remain separate evidence.
+The repaired real Chromium mesh and native restore controls pass in nextest run
+`ddc61788-b50b-4037-9f3e-401e03e4d97c` (3.931 and 3.494 seconds). Browser
+suite, typecheck, formatting, root strict lint, and document checks pass.
+Broader A01–A22 coverage remains incomplete. Hosted CI and exact-head review are
+required before delivery.
