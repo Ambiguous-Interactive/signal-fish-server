@@ -1527,7 +1527,7 @@ class Orchestrator {
         const id = String(player['id']);
         const returning = this.membersSeen.has(id) && !this.present.has(id);
         if ((this.negotiatedVersion ?? 2) >= 3 || returning) {
-          this.exchangeLedger.resetIncarnation(id);
+          this.resetPeerIncarnation(id);
         }
         this.present.add(id);
         this.membersSeen.add(id);
@@ -1779,7 +1779,7 @@ class Orchestrator {
         }
         const id = String(rawId);
         restoreReconnectedMember(this.present, this.membersSeen, id);
-        this.exchangeLedger.resetIncarnation(id);
+        this.resetPeerIncarnation(id);
         if (
           requireFinalizedMembershipPlan(
             this.pendingMembershipPlans,
@@ -1884,6 +1884,7 @@ class Orchestrator {
    */
   private async establishPair(peer: string, initiate: boolean): Promise<void> {
     this.assertActive();
+    if (this.pendingMembershipPlans.has(peer)) return;
     if (peer === this.myId) {
       console.error(`server asked us to pair with ourselves (${peer}); ignoring`);
       return;
@@ -1921,6 +1922,11 @@ class Orchestrator {
         this.assertActive();
       }
     }
+  }
+
+  private resetPeerIncarnation(peer: string): void {
+    this.exchangeLedger.resetIncarnation(peer);
+    if (this.expectedPeers.has(peer)) this.prepareRetainedPairReplacement(peer);
   }
 
   private removePairObligation(peer: string): void {
@@ -1966,6 +1972,7 @@ class Orchestrator {
    * peer is not paired yet).
    */
   private async handleSignal(from: string, generation: string, signal: unknown): Promise<void> {
+    if (this.pendingMembershipPlans.has(from)) return;
     if (!isCurrentSessionGeneration(this.currentSessionGeneration, generation)) {
       console.debug(
         `discarding signal from ${from} for stale/unknown generation ${generation}`,

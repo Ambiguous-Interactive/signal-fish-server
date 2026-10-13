@@ -371,7 +371,7 @@ assert(
 
 console.error('ok - join handshake excludes credential tags from event and stderr diagnostics');
 
-// Regression #851: a peer restore needs fresh traffic for the same player ID.
+// Regressions #851/#937: a restored peer needs fresh traffic from a fresh link.
 // Drive the real dispatcher; a generation-only rebuild keeps prior receipts.
 for (const [membershipEvent, departure] of [
   ['PlayerReconnected', true],
@@ -521,7 +521,7 @@ for (const [membershipEvent, departure] of [
     relayPayload: null,
     crippleIce: false,
     p2pTimeoutSecs: 1,
-    p2pRetryCount: 0,
+    p2pRetryCount: 2,
     runForSecs: 2,
     successReleaseEnabled: true,
     protocolVersion: 3,
@@ -564,6 +564,19 @@ for (const [membershipEvent, departure] of [
                 socket.deliver({
                   type: 'PlayerJoined',
                   data: { player: { id: peer, epoch: 1, seq: 0 } },
+                });
+              }
+              if (peerRestored) {
+                for (const channel of connections[0]?.channels ?? []) channel.receive();
+                for (const signal of [{ PairRetry: 1 }, { IceCandidate: 'old-candidate' }]) {
+                  socket.deliver({
+                    type: 'Signal',
+                    data: { from: peer, generation: plan(1).data.generation, signal },
+                  });
+                }
+                socket.deliver({
+                  type: 'NewPeer',
+                  data: { peer_id: peer, you_initiate: true },
                 });
               }
               socket.deliver(plan(2));
@@ -630,6 +643,11 @@ for (const [membershipEvent, departure] of [
             ? '1:reliable,1:unreliable,2:reliable,2:unreliable'
             : '1:reliable,1:unreliable'),
         `restore=${peerRestored}: only a peer restore must resend both labels; got ${channelSends.join(',')}`,
+      );
+      assert(
+        events.filter((event) => event['event'] === 'channel_message').length ===
+          invalidReceiptCount + 2,
+        `${membershipEvent}, departure=${departure}: old-link callbacks cannot become fresh receipts`,
       );
       // A host task turn drains the input chain. The virtual clock owns all
       // deadlines, so host scheduling cannot race receipts against the linger.

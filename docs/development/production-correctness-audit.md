@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -2721,3 +2721,48 @@ without the reference-process event stream. Godot (`2a74de36`) owns a separate
 engine adapter. This fix changes reference-process JSONL reporting only;
 server messages and SDK contracts stay unchanged. No SDK migration is needed.
 A20 and the broader #826 audit remain incomplete.
+
+### F47 Fresh peer epochs retain old physical links until the plan
+
+Finding: [#937](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/937).
+Baseline `587bbf6a`. A20.
+
+Both reference clients clear exchange labels on fresh `PlayerJoined` and
+`PlayerReconnected` announcements. Without a preceding departure, the old
+physical link remains current until `SessionPlan`. A queued old-channel message
+processed between those controls can satisfy the new incarnation's receipt
+obligation. The browser also exposes that stale traffic as `channel_message`.
+A departure already retires the link and closes this window.
+
+The browser dispatcher baseline fails the old-link receipt assertion after a
+fresh reconnect without departure. The native dispatcher baseline fails the
+same assertion after a fresh join. The repair retires the physical link when
+membership invalidates exchange evidence. It preserves logical obligations
+and fences queued callbacks with the existing physical generation checks.
+While finalized v3 membership awaits its plan, signals, compatibility pairing
+directives, and native automatic retries cannot recreate the old link. The
+replacement plan clears that wait and installs the new physical generation.
+
+Browser controls cover join and reconnect, with and without departure, both
+receipt labels, old retry/candidate signals, an intervening `NewPeer`, duplicate
+epochs, and fresh replacement traffic. A generation-only replacement retains
+completed exchange evidence. Native controls also verify the unaffected peer,
+automatic retry suppression, duplicate epochs, and replacement receipts through
+the real engine event dispatcher. Four focused native controls pass in nextest
+run `bf667caa-6f2f-4203-8c3d-2a6e84d34b12`. The real Chromium/native restore
+control passes in run `ba5a8cf3-3536-4464-9270-bc0e0d731b91` (4.102 seconds).
+It verifies fresh bidirectional traffic after actual socket loss and restore;
+the controlled histories isolate the window without a prior departure. These
+histories do not measure the frequency of that window on live networks.
+Root and native strict lint, browser tests, typecheck, build, and document
+checks pass.
+
+Rust (`da8f2d16`) and .NET (`e467c871`) SDKs own signaling without these reference
+WebRTC engines. Their wire contract is unchanged. Godot (`2a74de36`) owns a
+separate mesh adapter that drops links on changed plans but does not subscribe
+to remote incarnation announcements. Its intervening engine behavior remains
+unproved and has a runtime assessment in
+[Godot #364](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/364).
+No SDK migration is required by this reference-client repair. This finding
+does not identify the initial formation failures in #853/#889 or complete A20
+or #826. Hosted CI and final-head review remain delivery gates.
