@@ -6,7 +6,12 @@ function assert(condition: boolean, message: string): void {
 }
 
 // Regression #921: drive real dispatch and engine callbacks in both server-assigned roles.
-for (const initiate of [false, true]) {
+for (const [initiate, closeBeforeRetry] of [
+  [false, false],
+  [true, false],
+  [false, true],
+  [true, true],
+] as const) {
   const originalSocket = globalThis.WebSocket;
   const originalPc = globalThis.RTCPeerConnection;
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
@@ -204,6 +209,10 @@ for (const initiate of [false, true]) {
         connections.length === 2 && first?.closed === true,
         'retry must replace the incomplete physical link',
       );
+      assert(
+        !events.some((e) => e['event'] === 'transport_status_sent'),
+        'an incomplete retry must not resolve fallback before its deadline',
+      );
       now += 400;
       socket.deliver({ type: 'Pong' });
       await turn();
@@ -233,6 +242,11 @@ for (const initiate of [false, true]) {
         events.filter((e) => e['event'] === 'channel_message').length === 2,
         'replacement exchanges both labels',
       );
+      // UDP channel close can arrive before the retry marker on the signaling socket.
+      if (closeBeforeRetry) {
+        replacement?.channels[0]?.close();
+        await turn();
+      }
       // A completed link can join a peer's coordinated rebuild. Preserve logical exchange evidence.
       signal({ PairRetry: 2 });
       await turn();

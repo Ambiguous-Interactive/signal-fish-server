@@ -117,7 +117,7 @@ keeps the server-assigned offerer role and emits `p2p_pair_reconnected` when bot
 channels reopen. An active retry must finish or reach its P2P deadline before
 success. Retries do not extend an existing establishment window. A connected
 peer can request a coordinated rebuild with a new window after the old window
-ends. Use this extension only with peers that support it.
+ends, even if its old channel closes before the retry marker arrives. Use this extension only with peers that support it.
 
 The client keeps the first data channel for each label in a peer connection.
 It closes duplicate channels so they cannot replace a working channel.

@@ -2516,9 +2516,12 @@ maximum 255). Valid new attempts replace only the current planned peer's link,
 preserve its offerer role, and run before later signaling. Duplicate or older
 attempts do nothing. Departures and new session generations clear attempt
 history. The engine's existing callback generation fences exclude retired output.
-An incomplete retry cannot reopen an expired establishment window or extend an
+A peer that never connected cannot reopen an expired establishment window or extend an
 active window. A connected peer can join a coordinated rebuild after that window.
-Success waits for an active retry to connect or expire. Logical exchange receipts
+A retained successful-formation bit survives physical close within that session
+generation, so an earlier channel-close callback cannot hide the later retry
+marker. A new close-before-marker control fails before this addition and passes
+in both roles after it. Success waits for an active retry to connect or expire. Logical exchange receipts
 survive a physical rebuild, as documented before this repair.
 
 The final dispatcher histories cover both roles, deadline expiry, stale and
@@ -2530,7 +2533,15 @@ channels, emits one logical pair connection and one physical reconnection, and
 completes the exact reliable and unreliable logical exchange with no errors.
 Browser sends can precede the rebuild; this control does not claim fresh
 bidirectional payloads on every replacement channel. The native sends are held
-until its replacement opens.
+until its replacement opens. The final real control uses a zero-second browser
+establishment window and passes in 3.617 seconds (run
+`25657d76-5a28-4939-93a7-e85032e4b6c6`). It settles both original browser probes
+before requesting the close. An earlier unsynchronized version lost a queued
+old-link reliable probe during teardown; that version is excluded as a recovery
+oracle. A retry that opens after its wait expires still emits the physical
+reconnection event. Reviewer feedback also produced a red control for premature
+fallback publication: retry cleanup now retires physical state without resolving
+the transport decision before its deadline.
 
 The Rust, .NET, and Godot SDKs are unaffected: this change accepts a reference-only
 opt-in extension and adds no new outgoing retry signals, server schema, or default

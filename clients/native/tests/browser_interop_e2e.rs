@@ -153,6 +153,8 @@ async fn native_retry_rebuilds_browser_link_before_gameplay() {
                 success.to_str().unwrap(),
                 "--p2p-retry-count",
                 "2",
+                "--p2p-timeout-secs",
+                "0",
             ],
         },
         workdir.path(),
@@ -181,8 +183,15 @@ async fn native_retry_rebuilds_browser_link_before_gameplay() {
         workdir.path(),
     );
     let (native_setup, browser_setup) = tokio::join!(
-        std::panic::AssertUnwindSafe(native.await_event("exchange_ready", EVENT_TIMEOUT))
-            .catch_unwind(),
+        std::panic::AssertUnwindSafe(async {
+            native.await_event("exchange_ready", EVENT_TIMEOUT).await;
+            // Settle the browser's one-shot probes before closing the old link.
+            // A physical rebuild preserves logical exchange receipts.
+            while events_named(&native.events, "channel_message").len() < 2 {
+                native.await_event("channel_message", EVENT_TIMEOUT).await;
+            }
+        })
+        .catch_unwind(),
         std::panic::AssertUnwindSafe(browser.await_event("p2p_pair_connected", EVENT_TIMEOUT))
             .catch_unwind(),
     );

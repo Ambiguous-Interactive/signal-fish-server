@@ -713,7 +713,7 @@ class Orchestrator {
   private currentSessionGeneration: string | null = null;
   private readonly expectedPeers = new Set<string>();
   private readonly pairRoles = new Map<string, boolean>();
-  private readonly pairRetryAttempts = new Map<string, number>();
+  private readonly pairRetryState = new Map<string, { attempt: number; connected: boolean }>();
   private readonly retryingPairs = new Set<string>();
   private readonly connectedPairs = new Set<string>();
   private readonly pairConnectedReported = new Set<string>();
@@ -1925,7 +1925,7 @@ class Orchestrator {
   private removePairObligation(peer: string): void {
     this.expectedPeers.delete(peer);
     this.pairRoles.delete(peer);
-    this.pairRetryAttempts.delete(peer);
+    this.pairRetryState.delete(peer);
     this.retryingPairs.delete(peer);
     this.connectedPairs.delete(peer);
     this.pairConnectedReported.delete(peer);
@@ -1936,13 +1936,18 @@ class Orchestrator {
     this.engine.removePeer(peer);
   }
 
-  /** Tear down an unusable P2P link while retaining its planned obligation. */
-  private handlePeerTransportLoss(peer: string): void {
+  /** Retire physical state without publishing an interim transport decision. */
+  private retirePeerLink(peer: string): void {
     this.connectedPairs.delete(peer);
     this.pendingExchangePeers.delete(peer);
     this.reportedExchangeDiagnostics.delete(peer);
     this.pendingSignals.delete(peer);
     this.engine.removePeer(peer);
+  }
+
+  /** Tear down an unusable P2P link while retaining its planned obligation. */
+  private handlePeerTransportLoss(peer: string): void {
+    this.retirePeerLink(peer);
     if (this.webrtcPlanSeen) {
       this.resolveTransportStatus();
     }
@@ -1950,13 +1955,9 @@ class Orchestrator {
 
   /** Retire one retained physical link for a newer authoritative generation. */
   private prepareRetainedPairReplacement(peer: string): void {
-    this.pairRetryAttempts.delete(peer);
+    this.pairRetryState.delete(peer);
     this.retryingPairs.delete(peer);
-    this.connectedPairs.delete(peer);
-    this.pendingExchangePeers.delete(peer);
-    this.reportedExchangeDiagnostics.delete(peer);
-    this.pendingSignals.delete(peer);
-    this.engine.removePeer(peer);
+    this.retirePeerLink(peer);
   }
 
   /**
@@ -2048,14 +2049,19 @@ class Orchestrator {
           if (!this.expectedPeers.has(from) || initiate === undefined) {
             throw new Error('PairRetry from an unplanned peer');
           }
-          if (attempt <= (this.pairRetryAttempts.get(from) ?? 0)) break;
-          const incomplete = !this.connectedPairs.has(from);
+          const previous = this.pairRetryState.get(from);
+          if (attempt <= (previous?.attempt ?? 0)) break;
           const deadline = this.p2pDeadline;
           const windowOpen = deadline !== null && Date.now() < deadline;
-          if (incomplete && !windowOpen) break;
-          this.pairRetryAttempts.set(from, attempt);
+          // A peer can close the old data channel before its marker reaches
+          // the signaling socket. Remember successful formation in this generation.
+          if (!windowOpen && previous?.connected !== true) break;
+          this.pairRetryState.set(from, {
+            attempt,
+            connected: previous?.connected ?? false,
+          });
           this.retryingPairs.add(from);
-          this.handlePeerTransportLoss(from);
+          this.retirePeerLink(from);
           await this.establishPair(from, initiate);
           // A retry cannot extend an active establishment window for any peer.
           if (windowOpen) this.p2pDeadline = deadline;
@@ -2076,7 +2082,12 @@ class Orchestrator {
    */
   private onPairConnected(peer: string): void {
     this.assertActive();
-    const retried = this.retryingPairs.delete(peer);
+    this.pairRetryState.set(peer, {
+      attempt: this.pairRetryState.get(peer)?.attempt ?? 0,
+      connected: true,
+    });
+    const retryPending = this.retryingPairs.delete(peer);
+    const retried = retryPending || (this.pairRetryState.get(peer)?.attempt ?? 0) > 0;
     if (noteCurrentPairConnected(this.connectedPairs, this.pairConnectedReported, peer)) {
       this.emit({ event: 'p2p_pair_connected', peer });
     } else if (retried) {
