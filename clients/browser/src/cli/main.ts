@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 
 import { chromium, type BrowserServer, type Page } from 'playwright-core';
 
-import { deadlineAfterSeconds, scheduleDeadline } from '../shared/deadline.js';
+import { deadlineAfterSeconds, monotonicNowMs, scheduleDeadline } from '../shared/deadline.js';
 import {
   EXIT_CONNECTION_ERROR,
   EXIT_HARD_TIMEOUT,
@@ -39,7 +39,7 @@ import {
 } from './output.js';
 import { EventOutput } from '../shared/event-output.js';
 
-const startedAtMs = Date.now();
+const startedAtMs = monotonicNowMs();
 
 const diagnosticOutput = new DiagnosticOutput(process.stderr, () => {
   void exitWith(EXIT_CONNECTION_ERROR);
@@ -309,7 +309,7 @@ async function main(): Promise<void> {
   // The watchdog is the binary's no-hang guarantee: it bounds EVERYTHING,
   // Chromium launch included, and expiry is a hard abort with exit code 4.
   const watchdog = scheduleDeadline(
-    deadlineAfterSeconds(Date.now(), options.maxRuntimeSecs),
+    deadlineAfterSeconds(monotonicNowMs(), options.maxRuntimeSecs),
     () => {
       emitEvent({
         event: 'error',
@@ -324,7 +324,7 @@ async function main(): Promise<void> {
     const page = await setupPage(options);
     const config: RunConfig = {
       ...options.config,
-      elapsedBeforeStartMs: Date.now() - startedAtMs,
+      elapsedBeforeStartMs: monotonicNowMs() - startedAtMs,
     };
     code = await page.evaluate((runConfig) => {
       type Runner = (config: RunConfig) => Promise<number>;

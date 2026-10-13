@@ -150,3 +150,50 @@ assert(canceledQueueDrained, 'cancel must remove the outstanding timer chunk');
 assert(!canceledFired, 'a canceled deadline must never fire');
 
 console.error('ok - browser deadlines remain exact and host timer delays stay bounded');
+
+// A page clock can start after the CLI clock; only the elapsed duration crosses origins.
+assert(
+  deadlineAfterSeconds(-5_000, 10) === 5_000,
+  'startup elapsed time can place the page run base before its clock origin',
+);
+
+// Drive the production timer host with independent wall and elapsed clocks.
+for (const wallStep of [-60_000, 60_000]) {
+  const originalWallNow = Date.now;
+  const originalElapsedNow = performance.now;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const timers: Array<{ callback: () => void; delay: number }> = [];
+  let elapsed = 1_234.9;
+  let wall = originalWallNow();
+  let fired = false;
+  try {
+    Date.now = () => wall;
+    performance.now = () => elapsed;
+    globalThis.setTimeout = ((callback: () => void, delay: number) => {
+      timers.push({ callback, delay });
+      return timers.length;
+    }) as unknown as typeof setTimeout;
+    globalThis.clearTimeout = (() => {}) as typeof clearTimeout;
+    const timer = scheduleDeadline(2_234, () => {
+      fired = true;
+    });
+    assert(timers[0]?.delay === 1_000, 'default timer uses elapsed milliseconds');
+    wall += wallStep;
+    elapsed += 500;
+    timers[0]?.callback();
+    assert(!fired, `wall step ${wallStep} cannot fire an early timer callback`);
+    assert(timers[1]?.delay === 500, 'early callbacks retain the remaining elapsed wait');
+    wall -= wallStep * 2;
+    elapsed += 500;
+    timers[1]?.callback();
+    assert(fired, `wall step ${wallStep} cannot postpone the elapsed deadline`);
+    timer.cancel();
+  } finally {
+    Date.now = originalWallNow;
+    performance.now = originalElapsedNow;
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+}
+console.error('ok - default deadline scheduling ignores forward and backward clock steps');

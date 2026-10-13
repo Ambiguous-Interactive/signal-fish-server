@@ -13,8 +13,13 @@ export interface ScheduledDeadline {
   cancel(): void;
 }
 
+/** Whole milliseconds on the local monotonic clock, independent of wall-clock steps. */
+export function monotonicNowMs(): number {
+  return Math.floor(performance.now());
+}
+
 const defaultTimeoutHost: TimeoutHost = {
-  now: Date.now,
+  now: monotonicNowMs,
   setTimeout(callback, delayMs) {
     return setTimeout(callback, delayMs);
   },

@@ -110,6 +110,11 @@ rebuild alone does not reset the exchange. When a new session plan replaces an
 established link, the client waits for its replacement channels to open or the
 P2P deadline to expire before success. Peer departure clears that wait.
 
+Run, P2P, keepalive, exchange, relay, and exit waits use elapsed time. System
+clock adjustments do not shorten or extend these waits or the CLI watchdog.
+The CLI passes its elapsed startup time to the page, which has its own clock
+origin.
+
 Set `--p2p-retry-count N` on both reference clients to enable the `PairRetry`
 signal extension. The browser accepts peer-requested attempt numbers from 1
 through N (maximum 255). It does not schedule retries itself. The default is 0
