@@ -22,6 +22,7 @@ const config: RunConfig = {
   relayPayload: null,
   crippleIce: false,
   p2pTimeoutSecs: 10,
+  p2pRetryCount: 0,
   runForSecs: 120,
   successReleaseEnabled: false,
   protocolVersion: 3,

@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -2490,3 +2490,61 @@ cargo test --locked --manifest-path third_party/webrtc/Cargo.toml --lib peer_con
 cargo nextest run --locked --manifest-path clients/native/Cargo.toml --lib \
   -E 'test(live_refused_channels_reopen_and_recover_on_fresh_link)'
 ```
+
+### F42 Browser reference clients cannot join native peer-link retries
+
+Tracking: [#921](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/921).
+Baseline: `d2f2abcf`. A20.
+
+The native reference client can opt into `PairRetry` signaling before it
+rebuilds a planned physical link. The browser had neither a matching option nor
+a retry handler. It classified the marker as an unknown signal and applied the
+following Offer to its old peer connection. Ordinary interoperability uses no
+retry extension and does not expose this gap.
+
+A dispatcher history fails at the first incomplete-link replacement in both
+server-assigned roles. A real Chromium/browser-host and native-initiator history
+holds the native exchange, opens the initial pair, then requests its reserved
+retry. The baseline fails after 31.922 seconds in run
+`47c133b5-73e0-43c2-b434-cc26308ac915`: the browser reports an unknown signal and
+neither endpoint completes the replacement. A CLI adapter removes only the
+unsupported retry option for this baseline run; its page and engine are unchanged.
+The baseline also separately rejects the new CLI option before room admission.
+
+The repair adds explicit browser opt-in with `--p2p-retry-count` (default 0,
+maximum 255). Valid new attempts replace only the current planned peer's link,
+preserve its offerer role, and run before later signaling. Duplicate or older
+attempts do nothing. Departures and new session generations clear attempt
+history. The engine's existing callback generation fences exclude retired output.
+A peer that never connected cannot reopen an expired establishment window or extend an
+active window. A connected peer can join a coordinated rebuild after that window.
+A retained successful-formation bit survives physical close within that session
+generation, so an earlier channel-close callback cannot hide the later retry
+marker. A new close-before-marker control fails before this addition and passes
+in both roles after it. Success waits for an active retry to connect or expire. Logical exchange receipts
+survive a physical rebuild, as documented before this repair.
+
+The final dispatcher histories cover both roles, deadline expiry, stale and
+unplanned markers, invalid attempts, duplicate suppression, callback retirement,
+new-generation budgets, and exit behavior. The real retry history passes in
+2.697 seconds; ordinary browser/native room restore also passes in 2.549 seconds
+(run `8631ed70-c6ac-43ee-bbf9-15df67f07a9c`). Each retry endpoint opens four
+channels, emits one logical pair connection and one physical reconnection, and
+completes the exact reliable and unreliable logical exchange with no errors.
+Browser sends can precede the rebuild; this control does not claim fresh
+bidirectional payloads on every replacement channel. The native sends are held
+until its replacement opens. The final real control uses a zero-second browser
+establishment window and passes in 3.617 seconds (run
+`25657d76-5a28-4939-93a7-e85032e4b6c6`). It settles both original browser probes
+before requesting the close. An earlier unsynchronized version lost a queued
+old-link reliable probe during teardown; that version is excluded as a recovery
+oracle. A retry that opens after its wait expires still emits the physical
+reconnection event. Reviewer feedback also produced a red control for premature
+fallback publication: retry cleanup now retires physical state without resolving
+the transport decision before its deadline.
+
+The Rust, .NET, and Godot SDKs are unaffected: this change accepts a reference-only
+opt-in extension and adds no new outgoing retry signals, server schema, or default
+peer traffic. Their current mesh guides and signaling boundaries were inspected
+at `da8f2d16`, `e467c871`, and `db7d30f2`, respectively. This result does not
+identify the initial cause of #853 or #889. Those issues and A20 remain open.

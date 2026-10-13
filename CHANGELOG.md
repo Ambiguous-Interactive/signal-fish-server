@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Restore browser/native peer links through opt-in retries without early fallback or lost close events (#921).
 - Bound native closed-channel memory and preserve messages queued before channel registration (#919).
 
 ## [0.11.0] - 2026-10-12

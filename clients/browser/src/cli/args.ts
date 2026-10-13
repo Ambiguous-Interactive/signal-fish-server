@@ -62,6 +62,7 @@ Options:
   --exchange                    Send one message per channel per open pair
   --relay-payload <TEXT>        Send GameData {"relay_msg": TEXT} after GameStarting
   --cripple-ice                 Drop ALL outbound and inbound IceCandidate signals
+  --p2p-retry-count <N>         Accept peer-requested link retries, 0-255 [default: 0]
   --p2p-timeout-secs <S>        WebRTC establishment window [default: 15]
   --run-for-secs <S>            Soft cap: exit 1 if criteria unmet [default: 30]
   --max-runtime-secs <S>        Hard watchdog: abort with exit 4 [default: 60]
@@ -95,6 +96,7 @@ export function parseArgs(argv: string[]): CliOptions | null {
     '--platform',
     '--relay-payload',
     '--p2p-timeout-secs',
+    '--p2p-retry-count',
     '--run-for-secs',
     '--max-runtime-secs',
     '--success-release-file',
@@ -244,6 +246,9 @@ export function parseArgs(argv: string[]): CliOptions | null {
     throw new UsageError('--game-data-format rkyv|protobuf requires --protocol-version 3');
   }
 
+  const p2pRetryCount = numberFlag('--p2p-retry-count', 0);
+  if (p2pRetryCount > 255) throw new UsageError('--p2p-retry-count must be from 0 to 255');
+
   const config: RunConfig = {
     serverUrl,
     createRoom,
@@ -262,6 +267,7 @@ export function parseArgs(argv: string[]): CliOptions | null {
     relayPayload: flags.has('--relay-payload') ? stringFlag('--relay-payload', '') : null,
     crippleIce: flags.get('--cripple-ice') === true,
     p2pTimeoutSecs: numberFlag('--p2p-timeout-secs', 15),
+    p2pRetryCount,
     runForSecs: numberFlag('--run-for-secs', 30),
     successReleaseEnabled: flags.has('--success-release-file'),
     protocolVersion,

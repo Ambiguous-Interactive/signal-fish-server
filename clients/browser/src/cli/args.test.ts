@@ -193,3 +193,34 @@ for (const value of ['rkyv', 'protobuf'] as const) {
   ]);
   assert(v3Opaque !== null, 'opaque + v3 must parse cleanly');
 }
+
+// Regression #921: retries stay opt-in and use the native u8 attempt range.
+assert(normal?.config.p2pRetryCount === 0, 'peer retries must default off');
+for (const value of ['0', '1', '2', '255']) {
+  const options = parseArgs([
+    '--server-url',
+    'ws://127.0.0.1/v3/ws',
+    '--create-room',
+    '--p2p-retry-count',
+    value,
+  ]);
+  assert(
+    options?.config.p2pRetryCount === Number(value),
+    `retry count ${value} must remain exact`,
+  );
+}
+for (const value of ['-1', '1.5', '256', '9007199254740992', '1e0']) {
+  let rejected = false;
+  try {
+    parseArgs([
+      '--server-url',
+      'ws://127.0.0.1/v3/ws',
+      '--create-room',
+      '--p2p-retry-count',
+      value,
+    ]);
+  } catch (error) {
+    rejected = error instanceof UsageError;
+  }
+  assert(rejected, `retry count ${value} must be rejected`);
+}
