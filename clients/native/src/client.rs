@@ -586,6 +586,7 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         expected_peers: BTreeSet::new(),
         pair_roles: BTreeMap::new(),
         pair_retry_attempts: BTreeMap::new(),
+        formed_pairs: BTreeSet::new(),
         connected_pairs: BTreeSet::new(),
         pair_connected_reported: BTreeSet::new(),
         selected_pair_evidence: SelectedPairEvidence::default(),
@@ -1287,6 +1288,9 @@ struct Orchestrator<'a> {
     pair_roles: BTreeMap<PlayerId, bool>,
     /// Latest coordinated retry attempt applied per peer.
     pair_retry_attempts: BTreeMap<PlayerId, u8>,
+    /// Peers that formed in the current authoritative generation, even if
+    /// their old channel closes before a remote retry marker arrives.
+    formed_pairs: BTreeSet<PlayerId>,
     /// Peers whose current generation has both channels open. Drives the
     /// `--exchange` obligations and transport-fallback resolution.
     connected_pairs: BTreeSet<PlayerId>,
@@ -2659,6 +2663,7 @@ impl Orchestrator<'_> {
         self.p2p_reconnected_pairs.remove(&peer);
         self.ice_gathering_complete.remove(&peer);
         self.pair_retry_attempts.remove(&peer);
+        self.formed_pairs.remove(&peer);
         self.retrying_pairs.insert(peer);
         self.pending_pair_directives.remove(&peer);
         self.pending_signals.remove(&peer);
@@ -2749,13 +2754,16 @@ impl Orchestrator<'_> {
     /// responder processes it and installs its fresh peer connection before
     /// the initiator's new Offer arrives.
     async fn request_pair_retry(&mut self, peer: PlayerId, attempt: u8) -> Result<(), FatalError> {
-        self.send_signal(peer, SignalKind::PairRetry, json!({ "PairRetry": attempt }))
-            .await?;
-        self.rebuild_pair(peer, attempt).await
+        self.rebuild_pair(peer, attempt, true).await
     }
 
     /// Apply a local or remote retry exactly once per attempt number.
-    async fn rebuild_pair(&mut self, peer: PlayerId, attempt: u8) -> Result<(), FatalError> {
+    async fn rebuild_pair(
+        &mut self,
+        peer: PlayerId,
+        attempt: u8,
+        notify_peer: bool,
+    ) -> Result<(), FatalError> {
         if self
             .pair_retry_attempts
             .get(&peer)
@@ -2768,13 +2776,24 @@ impl Orchestrator<'_> {
             attempt,
             self.cli.p2p_retry_count,
         );
-        if self.p2p_deadline.is_none() && !coordinated_rebuild {
-            tracing::debug!(%peer, attempt, "ignoring pair retry after the original P2P window");
-            return Ok(());
-        }
         let initiate = *self.pair_roles.get(&peer).ok_or_else(|| {
             FatalError::protocol(format!("pair retry from unplanned peer {peer}"))
         })?;
+        let now = Instant::now();
+        let window_open = self
+            .p2p_deadline
+            .is_some_and(|deadline| !deadline.is_due(now));
+        let formed = self.formed_pairs.contains(&peer);
+        if !window_open && !formed && !coordinated_rebuild {
+            tracing::debug!(%peer, attempt, "ignoring pair retry after the original P2P window");
+            return Ok(());
+        }
+        if !window_open && formed {
+            self.p2p_deadline = Some(Deadline::after(
+                now,
+                Duration::from_secs(self.cli.p2p_timeout_secs),
+            ));
+        }
         self.pair_retry_attempts.insert(peer, attempt);
         self.retrying_pairs.insert(peer);
         self.selected_pair_evidence.clear(peer);
@@ -2786,6 +2805,12 @@ impl Orchestrator<'_> {
         // of an already observed debt.
         self.pending_signals.remove(&peer);
         self.pending_pair_directives.remove(&peer);
+        // Decide once before the marker write. The window may expire while
+        // that write awaits; a published marker still needs a local rebuild.
+        if notify_peer {
+            self.send_signal(peer, SignalKind::PairRetry, json!({ "PairRetry": attempt }))
+                .await?;
+        }
         self.engine.remove_peer(peer).await.map_err(|error| {
             FatalError::connection(format!(
                 "close incomplete peer connection {peer}: {error:#}"
@@ -2841,6 +2866,7 @@ impl Orchestrator<'_> {
         self.expected_peers.remove(&peer);
         self.pair_roles.remove(&peer);
         self.pair_retry_attempts.remove(&peer);
+        self.formed_pairs.remove(&peer);
         self.connected_pairs.remove(&peer);
         self.pair_connected_reported.remove(&peer);
         self.selected_pair_evidence.clear(peer);
@@ -2938,7 +2964,7 @@ impl Orchestrator<'_> {
             SignalKind::PairRetry => match signal.get("PairRetry").and_then(|value| value.as_u64())
             {
                 Some(attempt) if attempt > 0 && attempt <= u64::from(self.cli.p2p_retry_count) => {
-                    self.rebuild_pair(from, attempt as u8)
+                    self.rebuild_pair(from, attempt as u8, false)
                         .await
                         .map_err(|error| anyhow::anyhow!(error.message))
                 }
@@ -2966,14 +2992,10 @@ impl Orchestrator<'_> {
     async fn on_pair_connected(&mut self, peer: PlayerId) -> Result<(), FatalError> {
         self.selected_pair_evidence.require(peer);
         self.start_selected_pair_probe(peer);
-        let coordinated_reconnect = self.retrying_pairs.contains(&peer)
-            && self.pair_retry_attempts.get(&peer).is_some_and(|attempt| {
-                is_coordinated_p2p_rebuild_attempt(
-                    self.cli.p2p_rebuild_release_file.is_some(),
-                    *attempt,
-                    self.cli.p2p_retry_count,
-                )
-            });
+        self.formed_pairs.insert(peer);
+        // Replacement channels can open after the retry wait has expired.
+        let coordinated_reconnect = self.pair_connected_reported.contains(&peer)
+            && self.pair_retry_attempts.contains_key(&peer);
         if note_current_pair_connected(
             &mut self.connected_pairs,
             &mut self.pair_connected_reported,
@@ -3498,6 +3520,10 @@ fn harness_aware_base_wake(
 fn keepalive_wake(next_ping_at: Instant, pong_deadline: Option<Instant>) -> Instant {
     pong_deadline.unwrap_or(next_ping_at)
 }
+
+#[cfg(test)]
+#[path = "client_retry_tests.rs"]
+mod retry_tests;
 
 #[cfg(test)]
 #[path = "client_receive_tests.rs"]
@@ -4115,6 +4141,7 @@ mod tests {
             expected_peers: BTreeSet::new(),
             pair_roles: BTreeMap::new(),
             pair_retry_attempts: BTreeMap::new(),
+            formed_pairs: BTreeSet::new(),
             connected_pairs: BTreeSet::new(),
             pair_connected_reported: BTreeSet::new(),
             selected_pair_evidence: SelectedPairEvidence::default(),
