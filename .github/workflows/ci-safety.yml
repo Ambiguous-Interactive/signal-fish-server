@@ -239,7 +239,7 @@ jobs:
 
       - name: Upload Miri output
         if: always()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: miri-output-${{ matrix.lane.name }}
           path: miri-output.txt
@@ -349,7 +349,7 @@ jobs:
           tail -n 200 asan-output.txt
       - name: Upload AddressSanitizer output
         if: always()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: asan-output
           path: asan-output.txt

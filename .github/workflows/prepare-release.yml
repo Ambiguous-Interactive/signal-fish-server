@@ -223,7 +223,7 @@ jobs:
 
       - name: Upload release preparation recovery patch
         if: ${{ failure() && !cancelled() && !inputs.dry_run && steps.recovery.outcome == 'success' }}
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: release-prepare-recovery-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/release-prepare/

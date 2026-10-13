@@ -161,7 +161,7 @@ jobs:
         run: bash scripts/run-fortress-wasm-interop.sh
       - name: Upload failure evidence
         if: failure()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: fortress-wasm-${{ matrix.browser }}-failure-${{ github.run_id }}
           path: |
@@ -186,7 +186,7 @@ jobs:
         with:
           toolchain: 1.94.0
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2.87.22
+        uses: taiki-e/install-action@v2.87.27
         with:
           tool: cargo-deny@0.20.2
       - name: Run cargo-deny

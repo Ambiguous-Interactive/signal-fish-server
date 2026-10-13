@@ -78,7 +78,7 @@ jobs:
         run: timeout --signal=TERM --kill-after=30s 15m bash scripts/run-turn-interop.sh
       - name: Upload TURN diagnostics on failure
         if: ${{ always() && !success() }}
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: turn-interop-diagnostics-${{ github.run_id }}
           path: target/turn-interop/
