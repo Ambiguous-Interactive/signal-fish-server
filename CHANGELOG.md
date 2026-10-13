@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Discard old native and browser peer-link traffic when a fresh room membership arrives (#937).
 - Report native and browser reference-client recovery when new session plans
   replace established peer links, even after the connection wait expires (#930).
 - Keep browser reference-client connection and run deadlines stable when the system clock changes (#929).

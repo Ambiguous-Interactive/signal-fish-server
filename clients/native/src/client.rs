@@ -2177,7 +2177,7 @@ impl Orchestrator<'_> {
                     || (self.members_seen.contains(&player.id)
                         && !self.present.contains(&player.id))
                 {
-                    self.reset_peer_exchange_incarnation(player.id);
+                    self.reset_peer_exchange_incarnation(player.id).await;
                 }
                 self.present.insert(player.id);
                 self.members_seen.insert(player.id);
@@ -2436,7 +2436,7 @@ impl Orchestrator<'_> {
                     return Ok(());
                 }
                 restore_reconnected_member(&mut self.present, &mut self.members_seen, player_id);
-                self.reset_peer_exchange_incarnation(player_id);
+                self.reset_peer_exchange_incarnation(player_id).await;
                 if require_finalized_membership_plan(
                     &mut self.pending_membership_plans,
                     self.negotiated_version,
@@ -2701,6 +2701,9 @@ impl Orchestrator<'_> {
         initiate: bool,
         generation: PairGeneration,
     ) -> Result<(), FatalError> {
+        if self.pending_membership_plans.contains_key(&peer) {
+            return Ok(());
+        }
         if peer == self.my_id {
             tracing::warn!(%peer, "server asked us to pair with ourselves; ignoring");
             return Ok(());
@@ -2767,6 +2770,9 @@ impl Orchestrator<'_> {
         attempt: u8,
         notify_peer: bool,
     ) -> Result<(), FatalError> {
+        if self.pending_membership_plans.contains_key(&peer) {
+            return Ok(());
+        }
         if self
             .pair_retry_attempts
             .get(&peer)
@@ -2891,6 +2897,9 @@ impl Orchestrator<'_> {
         generation: SessionGeneration,
         signal: serde_json::Value,
     ) -> Result<(), FatalError> {
+        if self.pending_membership_plans.contains_key(&from) {
+            return Ok(());
+        }
         if !is_current_session_generation(self.current_session_generation, generation) {
             tracing::debug!(
                 %from,
@@ -3142,8 +3151,11 @@ impl Orchestrator<'_> {
     }
 
     /// A returning member must exchange fresh traffic through any harness gates.
-    fn reset_peer_exchange_incarnation(&mut self, player_id: PlayerId) {
+    async fn reset_peer_exchange_incarnation(&mut self, player_id: PlayerId) {
         self.exchange_ledger.reset_incarnation(player_id);
+        if self.expected_peers.contains(&player_id) {
+            self.prepare_retained_pair_replacement(player_id).await;
+        }
         self.exchange_reliable_ready_reported = false;
         self.exchange_ready_reported = false;
         self.exchange_released = self.cli.exchange_release_file.is_none();
