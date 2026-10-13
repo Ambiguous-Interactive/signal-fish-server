@@ -157,7 +157,7 @@ const RESTORE_SCENARIO_CEILING_SECS: u64 = 2 * (45 + 45) + (45 + 90);
 /// two-wave ceiling by every scenario).
 const SERIAL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(
     2 * LATE_JOIN_SCENARIO_CEILING_SECS
-        + 9 * STANDARD_SCENARIO_CEILING_SECS
+        + 10 * STANDARD_SCENARIO_CEILING_SECS
         + DEPARTURE_SCENARIO_CEILING_SECS
         + UNSUPPORTED_FORMAT_WAVE_SECS
         + RESTORE_SCENARIO_CEILING_SECS,
@@ -3564,4 +3564,145 @@ async fn room_restore_during_server_drain_fails_closed_with_bounded_exit() {
     assert!(events_named(&native.events, "reconnected").is_empty());
     assert!(events_named(&native.events, "success_criteria_met").is_empty());
     server.shutdown().await;
+}
+
+/// Regression #923: only the initiator needs a local rebuild gate.
+#[tokio::test]
+async fn native_remote_retry_rebuilds_a_formed_peer_without_a_local_gate() {
+    let _serial = acquire_serial().await;
+    let server = spawn_server("host").await;
+    let url = server.v3_ws_url();
+    let workdir = tempfile::tempdir().unwrap();
+    let rebuild = workdir.path().join("rebuild");
+    let exchange = workdir.path().join("exchange");
+    let success = workdir.path().join("success");
+    let mut receiver = spawn_client(
+        &ClientSpec {
+            name: "retry-receiver",
+            server_url: &url,
+            game_name: "native-remote-retry",
+            join_code: None,
+            peers: 2,
+            exchange: true,
+            relay_payload: None,
+            extra_args: &[
+                "--p2p-retry-count",
+                "1",
+                "--p2p-timeout-secs",
+                "0",
+                "--exchange-release-file",
+                exchange.to_str().unwrap(),
+                "--success-release-file",
+                success.to_str().unwrap(),
+            ],
+        },
+        workdir.path(),
+    );
+    let joined = receiver.await_event("room_created", EVENT_TIMEOUT).await;
+    let code = str_field(&joined, "room_code").to_string();
+    let mut sender = spawn_client(
+        &ClientSpec {
+            name: "retry-sender",
+            server_url: &url,
+            game_name: "native-remote-retry",
+            join_code: Some(&code),
+            peers: 2,
+            exchange: true,
+            relay_payload: None,
+            extra_args: &[
+                "--p2p-retry-count",
+                "1",
+                "--p2p-rebuild-release-file",
+                rebuild.to_str().unwrap(),
+                "--exchange-release-file",
+                exchange.to_str().unwrap(),
+                "--success-release-file",
+                success.to_str().unwrap(),
+            ],
+        },
+        workdir.path(),
+    );
+    tokio::join!(
+        receiver.await_event("exchange_ready", EVENT_TIMEOUT),
+        sender.await_event("exchange_ready", EVENT_TIMEOUT),
+    );
+    let sender_plan = single_event(&sender.events, "session_plan", &sender.name);
+    assert_eq!(sender_plan["peers"][0]["initiate"], true);
+    assert_eq!(
+        single_event(&receiver.events, "session_plan", &receiver.name)["peers"][0]["initiate"],
+        false
+    );
+    std::fs::write(&rebuild, b"rebuild").unwrap();
+    use futures_util::FutureExt;
+    let (receiver_retry, sender_retry) = tokio::join!(
+        std::panic::AssertUnwindSafe(receiver.await_event("p2p_pair_reconnected", EVENT_TIMEOUT))
+            .catch_unwind(),
+        std::panic::AssertUnwindSafe(sender.await_event("p2p_pair_reconnected", EVENT_TIMEOUT))
+            .catch_unwind(),
+    );
+    assert!(
+        receiver_retry.is_ok() && sender_retry.is_ok(),
+        "remote retry failed; receiver: {}; sender: {}",
+        receiver.diagnostics(),
+        sender.diagnostics()
+    );
+    for client in [&receiver, &sender] {
+        assert_eq!(
+            events_named(&client.events, "channel_open").len(),
+            4,
+            "{}",
+            client.diagnostics()
+        );
+        assert!(events_named(&client.events, "channel_message_sent").is_empty());
+    }
+    std::fs::write(&exchange, b"exchange").unwrap();
+    tokio::join!(
+        receiver.await_event("success_criteria_met", EVENT_TIMEOUT),
+        sender.await_event("success_criteria_met", EVENT_TIMEOUT),
+    );
+    for client in [&receiver, &sender] {
+        assert_eq!(events_named(&client.events, "p2p_pair_connected").len(), 1);
+        assert_eq!(
+            events_named(&client.events, "p2p_pair_reconnected").len(),
+            1
+        );
+        assert_eq!(
+            events_named(&client.events, "channel_message_sent").len(),
+            2
+        );
+        let messages = events_named(&client.events, "channel_message");
+        assert_eq!(messages.len(), 2, "{}", client.diagnostics());
+        let remote = player_id_of(
+            &if client.name == receiver.name {
+                &sender
+            } else {
+                &receiver
+            }
+            .events,
+            "retry peer",
+        );
+        let labels: BTreeSet<_> = messages
+            .iter()
+            .map(|message| {
+                assert_eq!(str_field(message, "peer"), remote);
+                let payload: Value = serde_json::from_str(str_field(message, "text")).unwrap();
+                assert_eq!(payload["from"], remote);
+                assert_eq!(payload["channel"], message["label"]);
+                assert_eq!(payload["seq"], 0);
+                str_field(message, "label")
+            })
+            .collect();
+        assert_eq!(labels, BTreeSet::from([RELIABLE, UNRELIABLE]));
+        assert!(
+            events_named(&client.events, "error").is_empty(),
+            "{}",
+            client.diagnostics()
+        );
+    }
+    std::fs::write(&success, b"success").unwrap();
+    let (receiver_exit, sender_exit) = tokio::join!(
+        receiver.drain_to_exit(CLIENT_EXIT_TIMEOUT),
+        sender.drain_to_exit(CLIENT_EXIT_TIMEOUT),
+    );
+    assert_eq!((receiver_exit, sender_exit), (0, 0));
 }

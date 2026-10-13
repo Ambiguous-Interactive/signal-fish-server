@@ -2548,3 +2548,46 @@ opt-in extension and adds no new outgoing retry signals, server schema, or defau
 peer traffic. Their current mesh guides and signaling boundaries were inspected
 at `da8f2d16`, `e467c871`, and `db7d30f2`, respectively. This result does not
 identify the initial cause of #853 or #889. Those issues and A20 remain open.
+
+### F43 Native formed peers refuse remote link retries after the initial wait
+
+**High gameplay impact; confirmed on the native reference endpoint.** Issue
+[#923](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/923).
+Baseline `af582cd6`. This continues A20 recovery coverage under #826.
+
+A native peer accepts an in-budget `PairRetry` after its original establishment
+window only when its own local rebuild harness is configured. A remote
+initiator can retire its connection while a receiver keeps the old connection.
+The receiver also refuses the marker when the old channel closes first.
+
+The dispatcher control drives the real native engine in both glare roles.
+Both current-link channel-open callbacks establish the planned pair, a
+zero-second window expires, and a current-generation retry arrives. Baseline
+nextest run `b25f7d01-cf46-4707-8e5d-b1eb9a21ac85` fails at the missing attempt.
+The repaired control also checks close-before-marker, stale and unplanned
+signals, invalid and duplicate attempts, expired never-formed links, retained
+exchange debt, an unchanged active deadline, and authoritative replacement.
+
+A real two-native host-star history holds exchange until replacement. Only the
+joining initiator has a rebuild gate. The creator uses a zero-second initial
+wait and no gate. Baseline run `3b55e386-283c-464a-a33f-58528ef0dcc3` fails after
+31.081 seconds while awaiting pair recovery. The repaired history passes
+in 2.208 seconds (`7cae9805-320a-4a0b-b41f-6bcde92127b5`): four channel opens per
+endpoint, one logical pair event, one physical recovery event, then exactly one
+message per required label in both directions, and two zero exits.
+
+The repair retains formation only within the current authoritative generation.
+It survives physical loss, and departure or authoritative replacement clears
+it. A formed receiver accepts newer in-budget attempts without a local gate.
+An existing window stays fixed; a new wait uses the configured timeout. The
+retained attempt also reports replacement recovery after that wait expires.
+The first real fixture read `room_joined` for a code; that event has no code.
+After correcting it to `room_created`, the real test exposed a separate
+missing recovery event after the zero-second wait cleared the retry-wait set.
+Those intermediate failures are not the original physical refusal proof.
+
+Server messages, SDK behavior, and default retry count stay unchanged. Rust and
+.NET SDKs provide signaling without this native WebRTC backend. Godot uses its
+separate mesh adapter. The reference-only extension remains opt-in; no SDK
+change or migration is required. This history does not identify the causes of
+issues #853 or #889, qualify every retry/loss history, or complete A20 or #826.

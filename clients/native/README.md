@@ -308,7 +308,13 @@ unknown generation are discarded.
   signaling relay before the fresh Offer, so both endpoints discard the old
   generation while retaining the server-authored glare role. The default is
   zero because this coordination extension is only safe when both endpoints
-  implement it; matchbox/browser interoperability must not assume that.
+  implement it; general interoperability must not assume that.
+- A peer that formed in the current server generation can accept a newer
+  in-budget remote retry after its original window expires, including when
+  the old channel closes before the marker arrives. The receiver needs no
+  local rebuild gate. A fresh retry wait is bounded by `--p2p-timeout-secs`;
+  an active window stays fixed. A late replacement still reports recovery.
+  Departure and a new server generation clear this formation history.
 - The overall WebRTC status resolves when every currently expected pair is connected or at
   `--p2p-timeout-secs`. `connected: true` iff **at least one** pair is connected; a zero-pair resolution also
   emits `fallback_engaged`.
