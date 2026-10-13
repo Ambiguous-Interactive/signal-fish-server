@@ -127,7 +127,8 @@ pub enum Event {
     },
     /// Both channels (`reliable` + `unreliable`) are open toward `peer`.
     P2pPairConnected { peer: PlayerId },
-    /// Both channels reopened for a coordinated PairRetry generation.
+    /// Both channels reopened for a retained logical pair, after PairRetry or
+    /// an authoritative plan replacement, including after the P2P deadline.
     P2pPairReconnected { peer: PlayerId },
     /// Actual candidate types and addresses of the nominated ICE transport pair.
     /// Consumers must reject missing or `null` addresses when verifying the

@@ -109,6 +109,11 @@ data channels. Completed exchanges for other peers remain valid. A transport
 rebuild alone does not reset the exchange. When a new session plan replaces an
 established link, the client waits for its replacement channels to open or the
 P2P deadline to expire before success. Peer departure clears that wait.
+A retained logical pair emits `p2p_pair_reconnected` once when both replacement
+channels open, after a retry or a new authoritative plan, even after the P2P
+deadline. Timeout alone emits no recovery event. First formation emits only
+`p2p_pair_connected`. Departure clears this history, so rejoining creates a new
+obligation.
 
 Run, P2P, keepalive, exchange, relay, and exit waits use elapsed time. System
 clock adjustments do not shorten or extend these waits or the CLI watchdog.
@@ -120,8 +125,8 @@ signal extension. The browser accepts peer-requested attempt numbers from 1
 through N (maximum 255). It does not schedule retries itself. The default is 0
 (disabled). Repeated or older attempts do not rebuild a link. A fresh session
 plan generation or peer departure clears the attempt history. Each replacement
-keeps the server-assigned offerer role and emits `p2p_pair_reconnected` when both
-channels reopen. An active retry must finish or reach its P2P deadline before
+keeps the server-assigned offerer role. An active retry must finish or reach its
+P2P deadline before
 success. Retries do not extend an existing establishment window. A connected
 peer can request a coordinated rebuild with a new window after the old window
 ends, even if its old channel closes before the retry marker arrives. Use this extension only with peers that support it.

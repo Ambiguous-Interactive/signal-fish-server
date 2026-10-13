@@ -2087,11 +2087,12 @@ class Orchestrator {
       attempt: this.pairRetryState.get(peer)?.attempt ?? 0,
       connected: true,
     });
-    const retryPending = this.retryingPairs.delete(peer);
-    const retried = retryPending || (this.pairRetryState.get(peer)?.attempt ?? 0) > 0;
+    // The engine reports formation once per physical link. Logical formation
+    // survives authoritative replacements and expired retry waits.
+    this.retryingPairs.delete(peer);
     if (noteCurrentPairConnected(this.connectedPairs, this.pairConnectedReported, peer)) {
       this.emit({ event: 'p2p_pair_connected', peer });
-    } else if (retried) {
+    } else {
       this.emit({ event: 'p2p_pair_reconnected', peer });
     }
     if (this.config.exchange) {

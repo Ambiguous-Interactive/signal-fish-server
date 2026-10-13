@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Report native and browser reference-client recovery when new session plans
+  replace established peer links, even after the connection wait expires (#930).
 - Keep browser reference-client connection and run deadlines stable when the system clock changes (#929).
 - Keep browser reference clients running until replacement peer links connect or time out (#925).
 - Restore native peer links through opt-in remote retries after the original connection wait expires (#923).
