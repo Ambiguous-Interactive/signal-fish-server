@@ -19,6 +19,10 @@ Git dependencies remain prohibited.
 The driver releases undeliverable event queues after channel closure.
 It preserves messages queued before registration while the core channel exists,
 and preserves message-before-close ordering for registered slow receivers.
+A live-handle marker records each processed OPEN and retires on CLOSE.
+The driver preserves the full acknowledged first burst until registration.
+Only an announced channel with a dropped receiver uses the 256-event orphan cap.
+Markers do not retain closed handles.
 Events for a retired, unregistered handle cannot recreate a retained queue.
 Disconnected event senders are removed during the next driver flush.
 No additional channel polling task is needed for a refused announcement.

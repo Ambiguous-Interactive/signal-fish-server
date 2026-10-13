@@ -43,7 +43,7 @@ use rtc::shared::ifaces::ifaces;
 use rtc::shared::{FourTuple, TaggedBytesMut, TransportContext, TransportProtocol};
 use rtc::{rtcp, rtp};
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::io::IoSliceMut;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
@@ -90,13 +90,11 @@ pub(crate) const APPLICATION_TO_DRIVER_EVENT_CHANNEL_CAPACITY: usize = 256;
 /// of the channel permanently wrong. Overflow here is [webrtc#858](https://github.com/webrtc-rs/webrtc/issues/858).
 pub(crate) const DRIVER_TO_DATA_CHANNEL_EVENT_CHANNEL_CAPACITY: usize = 256;
 
-/// How many events may stay retained for a channel that has no registered receiver.
+/// How many events may stay retained after an announced channel loses its receiver.
 ///
-/// Retention covers a registration that is still in flight, which is resolved by the very
-/// next `poll_events` — one `poll_reads` pass of events, far below this. The cap exists for
-/// the state that never resolves: an application that dropped its `DataChannel` without
-/// closing the stream, whose events would otherwise accumulate for the life of the
-/// connection. See [`Driver::flush_pending_data_channel_events`].
+/// A channel whose OnOpen has not been processed retains all acknowledged messages
+/// until registration. Only known announced channels with a dropped receiver use
+/// this cap. See [`Driver::flush_pending_data_channel_events`].
 const MAX_UNREGISTERED_PENDING_DATA_CHANNEL_EVENTS: usize =
     DRIVER_TO_DATA_CHANNEL_EVENT_CHANNEL_CAPACITY;
 
@@ -241,13 +239,11 @@ enum StageOutcome {
 ///   the peer to tell. The flush after registration delivers it; the `OnOpen` path
 ///   lifts retained events out first so the open still precedes them.
 ///
-///   Those two states are indistinguishable from here — `DataChannelImpl::drop`
-///   unregisters the sender without closing the SCTP stream, so a dropped channel looks
-///   exactly like one whose registration is still in flight. They are told apart by
-///   consequence rather than by prediction: see
-///   [`Driver::deliver_data_channel_event`] checks core handle ownership. Events
-///   for a retired handle and terminal events with no receiver are discarded.
-///   Live unregistered channels are bounded and never report back-pressure.
+///   The driver records processed OnOpen registration for each live handle.
+///   Its flush preserves pending registrations and caps announced channels with
+///   dropped receivers. Core ownership rejects late events after retirement;
+///   terminal events with no receiver discard the undeliverable queue.
+///   Neither unregistered state reports back-pressure.
 ///
 /// Anything already retained for the channel goes first, or a later event would
 /// overtake an earlier one — W3C queues `message` and `close` as tasks on the same
@@ -286,12 +282,31 @@ fn stage_data_channel_event(
     }
 }
 
+// Only existing core handles can be announced. Closing always retires the
+// marker, including refused callbacks and events with no live receiver.
+fn update_announced_data_channels(
+    announced: &mut HashSet<RTCDataChannelId>,
+    event: &RTCDataChannelEvent,
+    channel_exists: bool,
+) {
+    match event {
+        RTCDataChannelEvent::OnOpen(id) if channel_exists => {
+            announced.insert(*id);
+        }
+        RTCDataChannelEvent::OnClose(id) => {
+            announced.remove(id);
+        }
+        _ => {}
+    }
+}
+
 /// Retry everything retained in `pending`, and report whether a *registered* consumer is
 /// still behind. See [`Driver::flush_pending_data_channel_events`] for why only a
 /// registered consumer may report back-pressure.
 fn flush_staged_data_channel_events(
     senders: &HashMap<RTCDataChannelId, Sender<DataChannelEvent>>,
     pending: &mut HashMap<RTCDataChannelId, VecDeque<DataChannelEvent>>,
+    announced: &HashSet<RTCDataChannelId>,
 ) -> bool {
     let mut blocked = false;
     for (channel_id, queued) in pending.iter_mut() {
@@ -303,11 +318,13 @@ fn flush_staged_data_channel_events(
                 queued.clear();
                 continue;
             }
-            // Registration in flight, or the channel is gone. Keep what fits: a
-            // registration that is coming lands on the very next `poll_events`, so the
-            // cap is only ever reached by a channel nobody will register again. Either
-            // way this channel does not hold the drain.
-            if queued.len() > MAX_UNREGISTERED_PENDING_DATA_CHANNEL_EVENTS {
+            // Missing receivers are distinguishable by whether OnOpen registration
+            // was processed. Keep the complete first burst for registration in flight;
+            // cap only an announced channel whose receiver was dropped. Neither
+            // state holds other channels' drain.
+            if announced.contains(channel_id)
+                && queued.len() > MAX_UNREGISTERED_PENDING_DATA_CHANNEL_EVENTS
+            {
                 let dropped = queued.len() - MAX_UNREGISTERED_PENDING_DATA_CHANNEL_EVENTS;
                 queued.truncate(MAX_UNREGISTERED_PENDING_DATA_CHANNEL_EVENTS);
                 warn!(
@@ -540,6 +557,9 @@ pub(crate) struct PeerConnectionDriver<A = SocketAddr> {
     /// Every variant goes in here, not just `OnMessage`: lifecycle events share the queue, so
     /// retaining uniformly is what preserves their order relative to the data around them.
     pending_data_channel_events: HashMap<RTCDataChannelId, VecDeque<DataChannelEvent>>,
+    // One marker per live channel whose OnOpen registration was processed.
+    // Terminal events retire markers; monotonic handles never leave tombstones.
+    announced_data_channels: HashSet<RTCDataChannelId>,
     /// The addresses as the application configured them, held **unresolved** and re-resolved on
     /// every bind by [`resolve_bind_addrs`].
     ///
@@ -609,6 +629,7 @@ where
             turn_gathering_complete: false,
             pending_ice_configuration: None,
             pending_data_channel_events: HashMap::new(),
+            announced_data_channels: HashSet::new(),
             udp_addrs,
             tcp_addrs,
             mdns_mode,
@@ -1342,6 +1363,11 @@ where
                         core.data_channel(channel_id).is_some()
                     };
 
+                    update_announced_data_channels(
+                        &mut self.announced_data_channels,
+                        &evt,
+                        data_channel_exist,
+                    );
                     if data_channel_exist {
                         let (evt_tx, evt_rx) =
                             channel(DRIVER_TO_DATA_CHANNEL_EVENT_CHANNEL_CAPACITY);
@@ -1379,6 +1405,9 @@ where
                 // retain-and-retry path and in the same order: a retained `OnClose` must not
                 // overtake messages that preceded it, which W3C's task-queue ordering
                 // requires.
+                if matches!(evt, RTCDataChannelEvent::OnClose(_)) {
+                    update_announced_data_channels(&mut self.announced_data_channels, &evt, false);
+                }
                 let event = match evt {
                     RTCDataChannelEvent::OnOpen(_) => DataChannelEvent::OnOpen,
                     RTCDataChannelEvent::OnError(_) => DataChannelEvent::OnError,
@@ -1905,14 +1934,13 @@ where
     ///
     /// A channel with no registered sender never gates the drain. Its events are kept,
     /// so the pre-registration case in [`stage_data_channel_event`] still delivers once
-    /// `OnOpen` registers the channel, but they are bounded and report no back-pressure.
-    /// The reason is that a sender is absent in two states that cannot be told apart
-    /// here: registration still in flight, and the application having dropped its
+    /// `OnOpen` registers the channel. The announced-handle set distinguishes a
+    /// pending registration from an application that dropped its
     /// `DataChannel` (`DataChannelImpl::drop` unregisters it without closing the SCTP
     /// stream). Reporting `true` for the second state would stop `poll_reads` from ever
     /// calling `drain_core_data` again, stalling every data channel on the connection
-    /// and driving `a_rwnd` to zero — so an unregistered channel is bounded instead of
-    /// trusted, and only a registered-but-full consumer can hold the drain.
+    /// and driving `a_rwnd` to zero. Only announced channels with missing receivers
+    /// are capped; only a registered-but-full consumer can hold the drain.
     async fn flush_pending_data_channel_events(&mut self) -> bool {
         // Drop can miss its try_lock while another task holds this map.
         // Remove disconnected senders even when there are no pending events.
@@ -1925,8 +1953,11 @@ where
             return false;
         }
 
-        let blocked =
-            flush_staged_data_channel_events(&senders, &mut self.pending_data_channel_events);
+        let blocked = flush_staged_data_channel_events(
+            &senders,
+            &mut self.pending_data_channel_events,
+            &self.announced_data_channels,
+        );
 
         self.inner
             .data_channel_delivery_blocked
@@ -2393,12 +2424,29 @@ mod tests {
     fn orphan_channel_churn_retires_terminal_events() {
         let senders = HashMap::new();
         let mut pending = HashMap::new();
+        let mut announced = HashSet::new();
         for id in 0..4096 {
+            update_announced_data_channels(&mut announced, &RTCDataChannelEvent::OnOpen(id), true);
             stage_data_channel_event(&senders, &mut pending, id, DataChannelEvent::OnOpen, true);
             stage_data_channel_event(&senders, &mut pending, id, test_message(1), true);
-            assert!(!flush_staged_data_channel_events(&senders, &mut pending));
+            assert!(!flush_staged_data_channel_events(
+                &senders,
+                &mut pending,
+                &announced
+            ));
             stage_data_channel_event(&senders, &mut pending, id, DataChannelEvent::OnClose, true);
-            assert!(!flush_staged_data_channel_events(&senders, &mut pending));
+            assert!(!flush_staged_data_channel_events(
+                &senders,
+                &mut pending,
+                &announced
+            ));
+            update_announced_data_channels(
+                &mut announced,
+                &RTCDataChannelEvent::OnClose(id),
+                false,
+            );
+            update_announced_data_channels(&mut announced, &RTCDataChannelEvent::OnOpen(id), false);
+            assert!(announced.is_empty(), "retired handle retains a marker");
             assert!(pending.is_empty(), "retired handle {id} retains events");
         }
     }
@@ -2422,7 +2470,8 @@ mod tests {
         )]);
         assert!(!flush_staged_data_channel_events(
             &HashMap::new(),
-            &mut pending
+            &mut pending,
+            &HashSet::new()
         ));
         assert!(pending.is_empty());
     }
@@ -2466,13 +2515,17 @@ mod tests {
         stage_data_channel_event(&senders, &mut pending, 0, test_message(1), true);
         stage_data_channel_event(&senders, &mut pending, 0, test_message(2), true);
         stage_data_channel_event(&senders, &mut pending, 0, DataChannelEvent::OnClose, true);
-        assert!(flush_staged_data_channel_events(&senders, &mut pending));
+        assert!(flush_staged_data_channel_events(
+            &senders,
+            &mut pending,
+            &HashSet::new()
+        ));
         for byte in [1, 2] {
             match rx.try_recv().unwrap() {
                 DataChannelEvent::OnMessage(msg) => assert_eq!(&msg.data[..], &[byte]),
                 other => panic!("expected message, got {other:?}"),
             }
-            flush_staged_data_channel_events(&senders, &mut pending);
+            flush_staged_data_channel_events(&senders, &mut pending, &HashSet::new());
         }
         assert!(matches!(rx.try_recv(), Ok(DataChannelEvent::OnClose)));
         assert!(pending.is_empty());
@@ -2608,12 +2661,20 @@ mod tests {
         );
 
         let senders = HashMap::new();
-        assert!(!flush_staged_data_channel_events(&senders, &mut pending));
+        assert!(!flush_staged_data_channel_events(
+            &senders,
+            &mut pending,
+            &HashSet::new()
+        ));
 
         // Retained for a registration that may still be in flight ...
         assert_eq!(2, pending.get(&0).map(|q| q.len()).unwrap_or(0));
         // ... but repeated flushes keep reporting "not blocked", so the drain runs on.
-        assert!(!flush_staged_data_channel_events(&senders, &mut pending));
+        assert!(!flush_staged_data_channel_events(
+            &senders,
+            &mut pending,
+            &HashSet::new()
+        ));
     }
 
     /// A registered consumer that is genuinely full still holds the drain — the
@@ -2630,12 +2691,60 @@ mod tests {
         let mut pending = HashMap::new();
         pending.insert(channel_id, VecDeque::from(vec![test_message(2)]));
 
-        assert!(flush_staged_data_channel_events(&senders, &mut pending));
+        assert!(flush_staged_data_channel_events(
+            &senders,
+            &mut pending,
+            &HashSet::new()
+        ));
         assert_eq!(1, pending.get(&channel_id).map(|q| q.len()).unwrap_or(0));
     }
 
     /// Events retained before registration are delivered once the sender appears, and
     /// the flush then reports unblocked.
+    #[test]
+    fn preregistration_burst_survives_early_flush_and_preserves_order() {
+        // Exercise the helper sequence used when core OnOpen waits for poll_events:
+        // stage DATA, flush at the listener, then register and restage behind OnOpen.
+        let count = MAX_UNREGISTERED_PENDING_DATA_CHANNEL_EVENTS * 2 + 1;
+        let mut senders = HashMap::new();
+        let mut pending = HashMap::new();
+        for index in 0..count {
+            let event = DataChannelEvent::OnMessage(RTCDataChannelMessage {
+                is_string: false,
+                data: bytes::BytesMut::from(&(index as u32).to_le_bytes()[..]),
+            });
+            stage_data_channel_event(&senders, &mut pending, 0, event, true);
+        }
+        assert!(!flush_staged_data_channel_events(
+            &senders,
+            &mut pending,
+            &HashSet::new()
+        ));
+        assert_eq!(pending.get(&0).unwrap().len(), count);
+        let (tx, mut rx) = channel::<DataChannelEvent>(count + 1);
+        senders.insert(0, tx);
+        let retained = pending.remove(&0).unwrap();
+        let outcome =
+            stage_data_channel_event(&senders, &mut pending, 0, DataChannelEvent::OnOpen, true);
+        restage_retained_data_channel_events(&mut pending, 0, retained, outcome);
+        assert!(!flush_staged_data_channel_events(
+            &senders,
+            &mut pending,
+            &HashSet::new()
+        ));
+        assert!(matches!(rx.try_recv(), Ok(DataChannelEvent::OnOpen)));
+        for index in 0..count {
+            match rx.try_recv().unwrap() {
+                DataChannelEvent::OnMessage(message) => {
+                    assert_eq!(&message.data[..], &(index as u32).to_le_bytes())
+                }
+                other => panic!("expected message {index}, got {other:?}"),
+            }
+        }
+        assert!(pending.is_empty());
+        assert!(rx.try_recv().is_err());
+    }
+
     #[test]
     fn retained_events_are_delivered_once_the_channel_registers() {
         let channel_id = 0;
@@ -2647,13 +2756,21 @@ mod tests {
 
         // No sender yet: kept, and not blocking.
         let mut senders = HashMap::new();
-        assert!(!flush_staged_data_channel_events(&senders, &mut pending));
+        assert!(!flush_staged_data_channel_events(
+            &senders,
+            &mut pending,
+            &HashSet::new()
+        ));
 
         // Registration lands; the next flush drains them in order.
         let (tx, mut rx) =
             channel::<DataChannelEvent>(DRIVER_TO_DATA_CHANNEL_EVENT_CHANNEL_CAPACITY);
         senders.insert(channel_id, tx);
-        assert!(!flush_staged_data_channel_events(&senders, &mut pending));
+        assert!(!flush_staged_data_channel_events(
+            &senders,
+            &mut pending,
+            &HashSet::new()
+        ));
         assert!(pending.is_empty());
 
         for expected in [1u8, 2] {
@@ -2678,7 +2795,11 @@ mod tests {
         );
 
         let senders = HashMap::new();
-        assert!(!flush_staged_data_channel_events(&senders, &mut pending));
+        assert!(!flush_staged_data_channel_events(
+            &senders,
+            &mut pending,
+            &HashSet::from([0])
+        ));
         assert_eq!(
             MAX_UNREGISTERED_PENDING_DATA_CHANNEL_EVENTS,
             pending.get(&0).map(|q| q.len()).unwrap_or(0)

@@ -9819,7 +9819,11 @@ fn test_cargo_deny_audits_use_pinned_native_binary() {
         }
         assert_eq!(
             audit_count,
-            if workflow == "ci.yml" { 7 } else { 1 },
+            if workflow == "ci.yml" {
+                tracked_cargo_lockfiles(&repo_root()).len()
+            } else {
+                1
+            },
             "{workflow}: audit coverage"
         );
     }

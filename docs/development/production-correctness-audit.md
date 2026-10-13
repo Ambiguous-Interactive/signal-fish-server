@@ -2445,6 +2445,16 @@ It preserves pre-registration events while the core channel exists and preserves
 message-before-close ordering for registered slow readers. Disconnected sender
 entries are pruned during driver flush. Refusal adds no polling task.
 
+Review also found that the wrapper helper capped missing-receiver queues before
+OPEN registration. A deterministic helper control stages 513 messages and an
+early flush retains only 256 on the baseline. The repair distinguishes pending
+registration from an announced channel whose receiver was dropped. It preserves
+all 513 distinct messages, delivers OPEN first, and retains the orphan cap after
+announcement. A small marker exists only for each live announced handle and is
+removed on CLOSE. Late OPEN events for retired handles do not restore markers.
+This control proves the helper contract; it is not a reproduced live TURN loss.
+The SCTP read-pipeline limit also bounds the current live ingress path.
+
 The native sequential history offers 82 optional channels in each direction on
 one physical link, then repeats with fresh links. It observes each remote OPEN
 before that summary can age out, keeps at most 66 channel summaries, preserves
@@ -2452,7 +2462,7 @@ both live required-channel records, and requires exact lifetime open counts.
 The stream identifiers must demonstrate reuse. Existing duplicate refusal,
 required reliable/unreliable traffic, callback exclusion, and cleanup remain
 part of the history. The focused live history passes in 5.417 seconds (nextest
-run `89d8836d`). The wrapper's 23 driver controls pass, including 4,096 orphan
+run `89d8836d`). The wrapper's driver controls pass, including 4,096 orphan
 generations, pre-registration delivery, late callbacks, lifted open-event queues,
 and registered unread message-before-close order. The baseline retired-handle
 control fails at its first undeliverable event. RTC handler controls pass 14/14

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Bound native reference-client memory retained by closed data channels (#919).
+- Bound native reference-client memory retained by closed data channels and preserve messages queued before channel registration (#919).
 
 ## [0.11.0] - 2026-10-12
 
