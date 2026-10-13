@@ -56,6 +56,7 @@ Thumbs.db
 third_party/**/.cargo-ok
 third_party/**/.cargo_vcs_info.json
 third_party/**/Cargo.lock
+!/third_party/webrtc/Cargo.lock
 !/third_party/rtc/Cargo.lock
 !/third_party/rtc-sctp/Cargo.lock
 third_party/**/Cargo.toml.orig

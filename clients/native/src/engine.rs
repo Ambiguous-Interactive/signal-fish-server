@@ -2825,10 +2825,20 @@ mod tests {
                 } else {
                     (&mut b, &mut a, &mut a_rx, a_id, b_id)
                 };
-                let prior_stats: BTreeSet<_> = receiver.peers[&receiver_peer]
+                let baseline_stats = receiver.peers[&receiver_peer]
                     .pc
                     .get_stats(std::time::Instant::now(), StatsSelector::None)
-                    .await
+                    .await;
+                let opened_before = baseline_stats
+                    .iter()
+                    .find_map(|entry| match entry {
+                        RTCStatsReportEntry::PeerConnection(stats) => {
+                            Some(stats.data_channels_opened)
+                        }
+                        _ => None,
+                    })
+                    .expect("peer lifetime statistics");
+                let prior_stats: BTreeSet<_> = baseline_stats
                     .iter()
                     .filter_map(|entry| match entry {
                         RTCStatsReportEntry::DataChannel(channel) => Some(channel.stats.id.clone()),
@@ -2837,11 +2847,13 @@ mod tests {
                     .collect();
                 // The admission control offers distinct streams as one workload.
                 // The reset control waits for each refusal before creating its successor.
+                let mut optional_streams = Vec::new();
+                let optional_count = if sequential { 82 } else { 18 };
                 let mut offered_ids = Vec::new();
                 let mut extras = Vec::new();
                 for label in [String::new(), "界".repeat(4096)]
                     .into_iter()
-                    .chain((0..16).map(|index| format!("optional-{index}")))
+                    .chain((0..optional_count - 2).map(|index| format!("optional-{index}")))
                 {
                     let channel = if sequential {
                         None
@@ -2905,6 +2917,63 @@ mod tests {
                     .await
                     .expect("remote refusal closes unsupported channel");
                     assert!(receiver.channel(receiver_peer, &label).is_none());
+                    if sequential {
+                        // Inspect each close before its summary can age out. This
+                        // observes every wire OPEN without requiring eternal stats.
+                        let stats = tokio::time::timeout(Duration::from_secs(5), async {
+                            loop {
+                                let stats = receiver.peers[&receiver_peer].pc
+                                    .get_stats(std::time::Instant::now(), StatsSelector::None).await;
+                                if stats.iter().any(|entry| matches!(entry,
+                                    RTCStatsReportEntry::DataChannel(channel)
+                                        if channel.label == label && !prior_stats.contains(&channel.stats.id)
+                                            && channel.state == rtc::data_channel::RTCDataChannelState::Closed)) {
+                                    break stats;
+                                }
+                                tokio::time::sleep(Duration::from_millis(1)).await;
+                            }
+                        }).await.expect("receiver completes optional stream reset");
+                        let opened = stats
+                            .iter()
+                            .find_map(|entry| match entry {
+                                RTCStatsReportEntry::PeerConnection(stats) => {
+                                    Some(stats.data_channels_opened)
+                                }
+                                _ => None,
+                            })
+                            .expect("peer lifetime statistics");
+                        assert_eq!(
+                            opened,
+                            opened_before + optional_streams.len() as u32 + 1,
+                            "lifetime count preserves every offered OPEN across history eviction"
+                        );
+                        let channels: Vec<_> = stats
+                            .iter()
+                            .filter_map(|entry| match entry {
+                                RTCStatsReportEntry::DataChannel(channel) => Some(channel),
+                                _ => None,
+                            })
+                            .collect();
+                        assert!(
+                            channels.len() <= 66,
+                            "closed history grows with refused channels: {}",
+                            channels.len()
+                        );
+                        let closed = channels
+                            .iter()
+                            .find(|channel| {
+                                channel.label == label && !prior_stats.contains(&channel.stats.id)
+                            })
+                            .expect("receiver observes this optional OPEN before history eviction");
+                        assert_eq!(closed.state, rtc::data_channel::RTCDataChannelState::Closed);
+                        optional_streams.push(closed.data_channel_identifier);
+                        for required in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                            let live = channels.iter().find(|channel| channel.label == required
+                                && channel.state == rtc::data_channel::RTCDataChannelState::Open)
+                                .expect("live required-channel statistics survive closed-history eviction");
+                            assert!(prior_stats.contains(&live.stats.id));
+                        }
+                    }
                 }
                 sender
                     .channel(sender_peer, RELIABLE_LABEL)
@@ -3011,37 +3080,15 @@ mod tests {
                     assert_eq!(receiver.connected_pair_count(), 1);
                 }
                 if sequential {
-                    // The sender can be refused before ACK and never get an open
-                    // stats record. The receiver records each accepted wire OPEN.
-                    let stats = receiver.peers[&receiver_peer]
-                        .pc
-                        .get_stats(std::time::Instant::now(), StatsSelector::None)
-                        .await;
-                    let optional_streams: Vec<_> = stats
-                        .iter()
-                        .filter_map(|entry| match entry {
-                            RTCStatsReportEntry::DataChannel(channel)
-                                if channel.label != RELIABLE_LABEL
-                                    && channel.label != UNRELIABLE_LABEL
-                                    && !prior_stats.contains(&channel.stats.id) =>
-                            {
-                                Some(channel.data_channel_identifier)
-                            }
-                            _ => None,
-                        })
-                        .collect();
-                    assert_eq!(
-                        optional_streams.len(),
-                        18,
-                        "receiver observes every optional OPEN"
-                    );
+                    // Each wire OPEN was observed at its own close boundary.
+                    assert_eq!(optional_streams.len(), optional_count);
                     assert!(
                         optional_streams
                             .iter()
                             .copied()
                             .collect::<BTreeSet<_>>()
                             .len()
-                            < 18,
+                            < optional_count,
                         "reset history must actually reuse wire streams"
                     );
                 } else {

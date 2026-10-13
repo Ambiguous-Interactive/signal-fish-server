@@ -36,6 +36,7 @@ on:
       - "rust-toolchain.toml"
       - "clients/browser/**"
       - "clients/native/**"
+      - "third_party/webrtc/**"
       - "third_party/rtc/**"
       - "third_party/rtc-sctp/**"
       - "scripts/run-browser-interop.sh"
