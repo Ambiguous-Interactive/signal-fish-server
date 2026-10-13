@@ -41,6 +41,7 @@ import {
 } from '../shared/types.js';
 import {
   deadlineAfterSeconds,
+  monotonicNowMs,
   scheduleDeadline,
   type ScheduledDeadline,
 } from '../shared/deadline.js';
@@ -862,7 +863,7 @@ class Orchestrator {
     // The soft run window starts at PROCESS start: the CLI reports the time
     // already spent launching Chromium so the window matches the native
     // client's process-start semantics.
-    const now = Date.now();
+    const now = monotonicNowMs();
     const processStartedAtMs = now - this.config.elapsedBeforeStartMs;
     this.runDeadline = deadlineAfterSeconds(processStartedAtMs, this.config.runForSecs);
     this.nextPingAt = now + PING_INTERVAL_MS;
@@ -900,7 +901,7 @@ class Orchestrator {
     // Late joiners arm the relay probe on entry (see RELAY_SEND_SETTLE_MS):
     // the GameStarting trigger pre-dates the join and never re-fires.
     if (this.config.relayPayload !== null && lobbyState === 'finalized') {
-      this.relaySendAt = Date.now() + RELAY_SEND_SETTLE_MS;
+      this.relaySendAt = monotonicNowMs() + RELAY_SEND_SETTLE_MS;
     }
     this.maybeSendReady();
 
@@ -1336,7 +1337,7 @@ class Orchestrator {
     if (this.finished) {
       return;
     }
-    const now = Date.now();
+    const now = monotonicNowMs();
 
     // Mandatory keepalive: send `Ping` on cadence and demand a timely `Pong`.
     // An unanswered ping is a broken connection or control path — fail loudly
@@ -1474,7 +1475,7 @@ class Orchestrator {
           this.successReleasePollInFlight = false;
           this.successReleaseGranted = released;
           if (!released) {
-            this.successReleasePollAt = Date.now() + 100;
+            this.successReleasePollAt = monotonicNowMs() + 100;
           }
         });
       })
@@ -1595,7 +1596,7 @@ class Orchestrator {
         const mine = connections.find((peer) => peer['player_id'] === this.myId);
         this.emit({ event: 'game_starting', is_authority: mine?.['is_authority'] === true });
         if (this.config.relayPayload !== null && !this.relaySent) {
-          this.relaySendAt = Date.now() + RELAY_SEND_SETTLE_MS;
+          this.relaySendAt = monotonicNowMs() + RELAY_SEND_SETTLE_MS;
         }
         break;
       }
@@ -1897,7 +1898,7 @@ class Orchestrator {
     this.expectedPeers.add(peer);
     this.pairRoles.set(peer, initiate);
     if ((newlyExpected || needsConnection) && !this.connectedPairs.has(peer)) {
-      this.p2pDeadline = deadlineAfterSeconds(Date.now(), this.config.p2pTimeoutSecs);
+      this.p2pDeadline = deadlineAfterSeconds(monotonicNowMs(), this.config.p2pTimeoutSecs);
     }
     try {
       const offerSdp = await this.engine.pairWith(peer, initiate, this.lastIceServers);
@@ -2052,7 +2053,7 @@ class Orchestrator {
           const previous = this.pairRetryState.get(from);
           if (attempt <= (previous?.attempt ?? 0)) break;
           const deadline = this.p2pDeadline;
-          const windowOpen = deadline !== null && Date.now() < deadline;
+          const windowOpen = deadline !== null && monotonicNowMs() < deadline;
           // A peer can close the old data channel before its marker reaches
           // the signaling socket. Remember successful formation in this generation.
           if (!windowOpen && previous?.connected !== true) break;
@@ -2111,7 +2112,7 @@ class Orchestrator {
       }
     }
     this.exchangeRetryAt =
-      this.pendingExchangePeers.size === 0 ? null : Date.now() + EXCHANGE_RETRY_MS;
+      this.pendingExchangePeers.size === 0 ? null : monotonicNowMs() + EXCHANGE_RETRY_MS;
   }
 
   /**

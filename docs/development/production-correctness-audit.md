@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -2625,3 +2625,50 @@ The repaired real Chromium mesh and native restore controls pass in nextest run
 suite, typecheck, formatting, root strict lint, and document checks pass.
 Broader A01–A22 coverage remains incomplete. Hosted CI and exact-head review are
 required before delivery.
+
+### F45 Browser wall-clock changes alter connection and run waits
+
+Finding: [#929](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/929).
+Baseline `dba33ae1`. A16/A20.
+
+The browser reference-client absolute deadlines used `Date.now`: P2P establishment,
+run window, keepalive, exchange retry, relay settle, and exit linger. The
+shared scheduler and CLI startup/watchdog calculations used the same wall
+clock. A clock adjustment could end establishment early or delay fallback.
+The native reference client already uses `Instant` for these durations.
+
+The production-dispatch history installs an incomplete planned pair, changes
+only wall time by sixty seconds, and delivers a frame to process timers. The
+forward baseline fails at `clock step 60000 cannot expire the P2P window early`.
+The backward baseline fails at `retry cannot extend the original incomplete-link
+deadline`: elapsed time reaches the original deadline without fallback. These
+are controlled clock changes, not evidence of a remote clock incident.
+
+The repair uses whole milliseconds from each process's monotonic clock for
+every duration read and the shared scheduler. The CLI transfers only elapsed
+startup time to the page. Page and CLI clock origins differ; subtracting startup
+time can produce a valid negative page run base. Integer rounding preserves
+the deadline helper's safe-integer contract and existing overflow handling.
+Relative host timers and protocol messages do not change.
+
+The thirty-six dispatcher histories cover forward, backward, and unchanged
+wall time in both roles, close-before-retry, and authoritative replacement
+completion by opening, timeout, or departure. They retain logical exchange
+receipts, use fractional monotonic reads, derive a negative page run base, and
+finish successfully. Six additional histories keep an unmet run alive until
+one millisecond before its elapsed deadline and require failure at the exact
+boundary in both roles and all three clock cases. A separate production-scheduler control proves that an
+early callback retains the remaining wait and that wall-clock changes cannot
+postpone its elapsed deadline. Browser suite, typecheck, and bundle build pass.
+Real Chromium mesh and native restore controls pass in nextest run
+`3c5b4a68-fc2f-4f9e-b6e2-6eb6b2bf51df` (10.472 and 7.438 seconds).
+Root strict lint passes. Independent review found no remaining concerns after
+the exact run-expiry controls were added. Hosted CI remains a delivery gate.
+
+Rust and .NET SDKs handle signaling without this browser reference process.
+Godot owns separate engine timers. Current SDK READMEs were inspected at
+`da8f2d16`, `e467c871`, and `226acf41`. No SDK migration is required. This
+repair does not identify the initial failures in #853/#889 or complete A16,
+A20, or #826. A separate authoritative recovery-event candidate is tracked in
+[#930](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/930)
+for runtime verification.

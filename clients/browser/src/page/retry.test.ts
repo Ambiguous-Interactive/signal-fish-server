@@ -1,12 +1,13 @@
 import { run } from './orchestrator.js';
-import type { RunConfig } from '../shared/types.js';
+import { EXIT_CRITERIA_UNMET, type RunConfig } from '../shared/types.js';
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
-// Regression #921: drive real dispatch and engine callbacks in both server-assigned roles.
-for (const [initiate, closeBeforeRetry, replacementOutcome] of (
+// Drive real dispatch and engine callbacks in both server-assigned roles.
+// Clock steps must preserve run, retry, and replacement deadlines (#921, #925).
+const retryScenarios = (
   [
     [false, false],
     [true, false],
@@ -14,19 +15,34 @@ for (const [initiate, closeBeforeRetry, replacementOutcome] of (
     [true, true],
   ] as const
 ).flatMap(([initiate, closeBeforeRetry]) =>
-  (['open', 'timeout', 'removed'] as const).map(
-    (replacementOutcome) => [initiate, closeBeforeRetry, replacementOutcome] as const,
+  (['open', 'timeout', 'removed'] as const).flatMap((replacementOutcome) =>
+    ([60_000, -60_000, 0] as const).map(
+      (clockStep) => [initiate, closeBeforeRetry, replacementOutcome, clockStep] as const,
+    ),
   ),
-)) {
+);
+const runTimeoutScenarios = ([false, true] as const).flatMap((initiate) =>
+  ([60_000, -60_000, 0] as const).map(
+    (clockStep) => [initiate, false, 'run-timeout', clockStep] as const,
+  ),
+);
+for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep] of [
+  ...retryScenarios,
+  ...runTimeoutScenarios,
+]) {
   const originalSocket = globalThis.WebSocket;
   const originalPc = globalThis.RTCPeerConnection;
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
   const originalNow = Date.now;
+  const originalPerformanceNow = performance.now;
+  let wallOffset = 0;
   const me = '00000000-0000-0000-0000-000000000001';
   const peer = '00000000-0000-0000-0000-000000000002';
   const outsider = '00000000-0000-0000-0000-000000000003';
   let generation = me;
-  let now = originalNow();
+  let now = 123;
+  const initialMonotonic = now;
+  const initialWallTime = originalNow();
   let released = false;
   let settled = false;
   let socket!: Socket;
@@ -166,7 +182,7 @@ for (const [initiate, closeBeforeRetry, replacementOutcome] of (
     joinCode: null,
     peers: 2,
     maxPlayers: null,
-    expectTotalPeers: null,
+    expectTotalPeers: replacementOutcome === 'run-timeout' ? 3 : null,
     leaveOnGameStart: false,
     gameName: 'retry',
     playerName: 'test',
@@ -178,13 +194,14 @@ for (const [initiate, closeBeforeRetry, replacementOutcome] of (
     p2pTimeoutSecs: 1,
     p2pRetryCount: 2,
     runForSecs: 10,
-    successReleaseEnabled: true,
+    successReleaseEnabled: replacementOutcome !== 'run-timeout',
     protocolVersion: 3,
     supportedTopologies: ['mesh'],
     supportedTransports: ['webrtc'],
     gameDataFormat: 'json',
     sdkVersion: 'test',
-    elapsedBeforeStartMs: 0,
+    // The page clock starts after the CLI; the derived run base is negative.
+    elapsedBeforeStartMs: 1_000,
   };
   try {
     globalThis.WebSocket = Socket as unknown as typeof WebSocket;
@@ -198,7 +215,8 @@ for (const [initiate, closeBeforeRetry, replacementOutcome] of (
         __sf_success_released: async () => released,
       },
     });
-    Date.now = () => now;
+    Date.now = () => initialWallTime + now - initialMonotonic + wallOffset;
+    performance.now = () => now + 0.9;
     const running = run(config).then((code) => {
       settled = true;
       return code;
@@ -207,6 +225,44 @@ for (const [initiate, closeBeforeRetry, replacementOutcome] of (
       await turn();
       const first = connections[0];
       assert(first !== undefined, 'install the initial planned link');
+      wallOffset = clockStep;
+      socket.deliver({ type: 'Pong' });
+      await turn();
+      assert(!settled, `clock step ${clockStep} cannot end the run early`);
+      assert(
+        !events.some((e) => e['event'] === 'transport_status_sent'),
+        `clock step ${clockStep} cannot expire the P2P window early`,
+      );
+      if (replacementOutcome === 'run-timeout') {
+        // Regression #929: wall-clock steps cannot shorten or extend the run.
+        // Require a missing third member and omit the harness hold.
+        now = initialMonotonic + config.runForSecs * 1000 - config.elapsedBeforeStartMs - 1;
+        socket.deliver({ type: 'Pong' });
+        await turn();
+        assert(!settled, `clock step ${clockStep}: the run stays live before its deadline`);
+        assert(
+          !events.some((e) => e['event'] === 'success_criteria_met'),
+          'a missing member keeps success criteria unmet',
+        );
+        now += 1;
+        socket.deliver({ type: 'Pong' });
+        const exitCode = await running;
+        assert(
+          exitCode === EXIT_CRITERIA_UNMET,
+          `initiate=${initiate}, clock step ${clockStep}: expected unmet-criteria exit, got ${exitCode}`,
+        );
+        assert(
+          events.some(
+            (e) =>
+              e['event'] === 'error' &&
+              String(e['message']).includes(
+                '--run-for-secs elapsed with unmet success criteria',
+              ),
+          ),
+          'run expiry reports unmet success criteria',
+        );
+        return;
+      }
       // Retry an incomplete link before any channel opens.
       now += 700;
       signal({ PairRetry: 1 });
@@ -361,6 +417,7 @@ for (const [initiate, closeBeforeRetry, replacementOutcome] of (
     clearTimeout(guard);
     socket?.onclose?.();
     Date.now = originalNow;
+    performance.now = originalPerformanceNow;
     globalThis.WebSocket = originalSocket;
     globalThis.RTCPeerConnection = originalPc;
     if (originalWindow === undefined) Reflect.deleteProperty(globalThis, 'window');

@@ -396,8 +396,8 @@ for (const [membershipEvent, departure] of [
   let invalidReceiptCount = 0;
   let released = false;
   let settled = false;
-  const originalNow = Date.now;
-  let virtualNow = originalNow();
+  const originalNow = performance.now;
+  let virtualNow = Math.floor(originalNow.call(performance));
   let guardTimer: ReturnType<typeof setTimeout> | undefined;
   const turn = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
   const plan = (generation: number) => ({
@@ -575,7 +575,7 @@ for (const [membershipEvent, departure] of [
     });
     console.error = () => {};
     console.debug = () => {};
-    Date.now = () => virtualNow;
+    performance.now = () => virtualNow;
     const running = run(config).then((code) => {
       settled = true;
       return code;
@@ -685,7 +685,7 @@ for (const [membershipEvent, departure] of [
   } finally {
     clearTimeout(guardTimer);
     socket?.onclose?.();
-    Date.now = originalNow;
+    performance.now = originalNow;
     globalThis.WebSocket = originalSocket;
     globalThis.RTCPeerConnection = originalPc;
     console.error = originalError;
@@ -704,12 +704,12 @@ for (const healthy of [false, true]) {
   const originalSocket = globalThis.WebSocket;
   const originalPc = globalThis.RTCPeerConnection;
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
-  const originalNow = Date.now;
+  const originalNow = performance.now;
   const originalError = console.error;
   const errors: string[] = [];
   const me = '00000000-0000-0000-0000-000000000001';
   const peer = '00000000-0000-0000-0000-000000000002';
-  let now = originalNow();
+  let now = Math.floor(originalNow.call(performance));
   let socket!: DiagnosticSocket;
   let connection!: DiagnosticConnection;
   let guardTimer: ReturnType<typeof setTimeout> | undefined;
@@ -797,7 +797,7 @@ for (const healthy of [false, true]) {
       configurable: true,
       value: { __sf_emit: () => {} },
     });
-    Date.now = () => now;
+    performance.now = () => now;
     console.error = (...args: unknown[]) => errors.push(args.map(String).join(' '));
     const running = run({
       serverUrl: 'ws://mock.invalid/v3/ws',
@@ -876,7 +876,7 @@ for (const healthy of [false, true]) {
   } finally {
     clearTimeout(guardTimer);
     socket?.onclose?.();
-    Date.now = originalNow;
+    performance.now = originalNow;
     globalThis.WebSocket = originalSocket;
     globalThis.RTCPeerConnection = originalPc;
     console.error = originalError;
