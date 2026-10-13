@@ -153,13 +153,13 @@ and the [changelog flow](skills/classify-user-visible-changes/SKILL.md).
 
 ### Writing Style for User-Facing Text (Required)
 
-Write every user-facing text in Simplified Technical English (STE): short,
-simple, direct, and extremely brief. This applies to PR titles and
-descriptions, issue text and comments, commit messages, code review comments,
-documentation, CHANGELOG entries, and operator-facing log messages. Write
-active voice; name the actor ("The server closes the connection"). One idea
-per sentence. Use common words; no idioms, jokes, marketing language, or
-hype.
+Discuss security topics only when the user requests them. Focus routine updates
+on gameplay, correctness, usability, performance, and delivery. Continue required checks.
+
+Write all user-facing text in Simplified Technical English (STE): short, simple, direct, and extremely brief.
+This includes PRs, issues, commits, reviews, docs, CHANGELOG entries, and operator logs.
+Use active voice and name the actor. Use one idea per sentence and common words.
+Do not use idioms, jokes, marketing language, or hype.
 
 PR descriptions follow `.github/pull_request_template.md` (short Why/What
 shape): 1 "why" sentence, 2-4 one-line "what" bullets; detail belongs in

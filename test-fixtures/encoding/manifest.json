@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "fixtures": [
+    {
+      "name": "input-state",
+      "file": "input-state.json",
+      "bytes": 17,
+      "sha256": "dea826d4a5102ee40e7695c559e5888422f50c54926d93c968c5e35d49286729"
+    },
+    {
+      "name": "snapshot-small",
+      "file": "snapshot-small.json",
+      "bytes": 256,
+      "sha256": "33d4b2686baabd5c74a2f047a250ca32f927dd34f0b39e389add38f53c309b12"
+    },
+    {
+      "name": "snapshot-large",
+      "file": "snapshot-large.json",
+      "bytes": 881,
+      "sha256": "cc3198d7f5be8d1243e311f19ddced23f47c8a32cd32c458572070ca8cd8fe38"
+    },
+    {
+      "name": "world-delta",
+      "file": "world-delta.json",
+      "bytes": 4096,
+      "sha256": "42f85f61c846d9ab433a5f56d5474392075ee4d8733403a797db22b975d6930e"
+    }
+  ]
+}
