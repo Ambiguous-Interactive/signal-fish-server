@@ -2415,7 +2415,8 @@ and exact-head review remain required before merging.
 
 ### F41 — Closed native channels retain lifetime statistics and event queues
 
-Baseline: `ba8867af`. A20. Finding:
+Baseline: [release commit](https://github.com/Ambiguous-Interactive/signal-fish-server/commit/ba8867afc89c0d058957d9efee6018525e0ab0d6).
+A20. Finding:
 [#919](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/919).
 Resource follow-up: [#870](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/870).
 
