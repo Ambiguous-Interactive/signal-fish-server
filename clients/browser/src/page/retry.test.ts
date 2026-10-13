@@ -6,12 +6,18 @@ function assert(condition: boolean, message: string): void {
 }
 
 // Regression #921: drive real dispatch and engine callbacks in both server-assigned roles.
-for (const [initiate, closeBeforeRetry] of [
-  [false, false],
-  [true, false],
-  [false, true],
-  [true, true],
-] as const) {
+for (const [initiate, closeBeforeRetry, replacementOutcome] of (
+  [
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ] as const
+).flatMap(([initiate, closeBeforeRetry]) =>
+  (['open', 'timeout', 'removed'] as const).map(
+    (replacementOutcome) => [initiate, closeBeforeRetry, replacementOutcome] as const,
+  ),
+)) {
   const originalSocket = globalThis.WebSocket;
   const originalPc = globalThis.RTCPeerConnection;
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
@@ -303,6 +309,16 @@ for (const [initiate, closeBeforeRetry] of [
       generation = outsider;
       plan();
       await turn();
+      // Regression #925: completed old-link receipts cannot skip this new wait.
+      released = true;
+      now += 100;
+      socket.deliver({ type: 'Pong' });
+      await turn();
+      now += 300;
+      socket.deliver({ type: 'Pong' });
+      await turn();
+      assert(!settled, 'success must wait for an authoritative replacement link');
+      released = false;
       signal({ PairRetry: 1 });
       await turn();
       assert(
@@ -311,7 +327,17 @@ for (const [initiate, closeBeforeRetry] of [
       );
       if (!initiate) signal({ Offer: 'final-offer' });
       await turn();
-      connections[4]?.open();
+      if (replacementOutcome === 'open') {
+        connections[4]?.open();
+      } else if (replacementOutcome === 'timeout') {
+        now += 1000;
+        socket.deliver({ type: 'Pong' });
+      } else {
+        socket.deliver({
+          type: 'PlayerLeft',
+          data: { player_id: peer, epoch: 1, final_seq: 0 },
+        });
+      }
       await turn();
       released = true;
       now += 100;

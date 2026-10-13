@@ -1956,7 +1956,7 @@ class Orchestrator {
   /** Retire one retained physical link for a newer authoritative generation. */
   private prepareRetainedPairReplacement(peer: string): void {
     this.pairRetryState.delete(peer);
-    this.retryingPairs.delete(peer);
+    this.retryingPairs.add(peer);
     this.retirePeerLink(peer);
   }
 

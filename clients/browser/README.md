@@ -106,7 +106,9 @@ satisfy the receive criterion.
 
 When a peer reconnects or rejoins, `--exchange` requires fresh sends and receipts on both
 data channels. Completed exchanges for other peers remain valid. A transport
-rebuild alone does not reset the exchange.
+rebuild alone does not reset the exchange. When a new session plan replaces an
+established link, the client waits for its replacement channels to open or the
+P2P deadline to expire before success. Peer departure clears that wait.
 
 Set `--p2p-retry-count N` on both reference clients to enable the `PairRetry`
 signal extension. The browser accepts peer-requested attempt numbers from 1
