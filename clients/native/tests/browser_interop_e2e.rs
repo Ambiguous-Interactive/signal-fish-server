@@ -107,7 +107,7 @@ use base64::Engine as _;
 static SCENARIO_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Number of scenarios queueing behind [`SCENARIO_SERIAL`] (keep in sync with
 /// the scenarios that acquire `SCENARIO_SERIAL` in this file).
-const SCENARIO_COUNT: u64 = 14;
+const SCENARIO_COUNT: u64 = 15;
 /// Generous ceiling for ONE scenario in a fully degraded run: server spawn
 /// (up to 3 attempts x 15 s health deadline = 45 s) plus one client wave
 /// hard-bounded by `--max-runtime-secs 90`, with the rest absorbing Chromium
@@ -505,6 +505,147 @@ async fn native_restore_restarts_browser_bidirectional_exchange() {
             client.diagnostics()
         );
     }
+    server.shutdown().await;
+}
+
+/// Regression #930: a late join replaces the retained native/browser physical
+/// link without a PairRetry marker, while its logical exchange stays complete.
+#[tokio::test(flavor = "multi_thread")]
+async fn late_join_reports_retained_browser_native_pair_recovery() {
+    let _serial = acquire_serial().await;
+    let mut server = spawn_server("mesh").await;
+    let url = server.v3_ws_url();
+    let workdir = tempfile::tempdir().expect("late-join recovery workdir");
+    let success = workdir.path().join("success");
+    let success_path = success.to_str().unwrap();
+    let mut native = spawn_client(
+        &ClientSpec {
+            name: "incumbent-native",
+            server_url: &url,
+            game_name: "replacement-recovery",
+            join_code: None,
+            peers: 2,
+            exchange: true,
+            relay_payload: None,
+            extra_args: &["--max-players", "3", "--success-release-file", success_path],
+        },
+        workdir.path(),
+    );
+    let created = native.await_event("room_created", EVENT_TIMEOUT).await;
+    let code = str_field(&created, "room_code");
+    let mut browser = spawn_browser_client(
+        &ClientSpec {
+            name: "incumbent-browser",
+            server_url: &url,
+            game_name: "replacement-recovery",
+            join_code: Some(code),
+            peers: 2,
+            exchange: true,
+            relay_payload: None,
+            extra_args: &["--success-release-file", success_path],
+        },
+        workdir.path(),
+    );
+    let initial = collect_client_outcomes([&mut native, &mut browser].into_iter().map(
+        |client| async move {
+            client
+                .await_event("success_criteria_met", EVENT_TIMEOUT)
+                .await;
+        },
+    ))
+    .await;
+    assert!(
+        initial.iter().all(Result::is_ok),
+        "initial formation; native: {}; browser: {}",
+        native.diagnostics(),
+        browser.diagnostics()
+    );
+    let ids = [
+        player_id_of(&native.events, "incumbent-native"),
+        player_id_of(&browser.events, "incumbent-browser"),
+    ];
+    let initial_lengths = [native.events.len(), browser.events.len()];
+    let mut joiner = spawn_client(
+        &ClientSpec {
+            name: "late-native",
+            server_url: &url,
+            game_name: "replacement-recovery",
+            join_code: Some(code),
+            peers: 3,
+            exchange: true,
+            relay_payload: None,
+            extra_args: &["--success-release-file", success_path],
+        },
+        workdir.path(),
+    );
+    let recovered = collect_client_outcomes([&mut native, &mut browser].into_iter().map(
+        |client| async move {
+            client
+                .await_event("p2p_pair_reconnected", EVENT_TIMEOUT)
+                .await;
+        },
+    ))
+    .await;
+    assert!(
+        recovered.iter().all(Result::is_ok),
+        "retained pair recovery; native: {}; browser: {}",
+        native.diagnostics(),
+        browser.diagnostics()
+    );
+    // Keep every endpoint live until the new two-peer exchanges also complete.
+    let formed = collect_client_outcomes([&mut native, &mut browser, &mut joiner].into_iter().map(
+        |client| async move {
+            tokio::time::timeout(EVENT_TIMEOUT, async {
+                while events_named(&client.events, "channel_message").len() < 4 {
+                    client.await_event("channel_message", EVENT_TIMEOUT).await;
+                }
+            })
+            .await
+            .expect("both logical peer exchanges");
+        },
+    ))
+    .await;
+    assert!(
+        formed.iter().all(Result::is_ok),
+        "late-join exchange; native: {}; browser: {}; joiner: {}",
+        native.diagnostics(),
+        browser.diagnostics(),
+        joiner.diagnostics()
+    );
+    std::fs::write(success, b"release").unwrap();
+    for (index, client) in [&mut native, &mut browser].into_iter().enumerate() {
+        drain_expect_success(client).await;
+        let fresh = &client.events[initial_lengths[index]..];
+        let recovered = events_named(fresh, "p2p_pair_reconnected");
+        assert_eq!(recovered.len(), 1, "{}", client.diagnostics());
+        assert_eq!(recovered[0]["peer"], ids[1 - index]);
+        let logical = events_named(&client.events, "p2p_pair_connected");
+        assert_eq!(logical.len(), 2, "one event per logical peer");
+        assert_eq!(
+            logical
+                .iter()
+                .filter(|e| e["peer"] == ids[1 - index])
+                .count(),
+            1
+        );
+        for event in ["channel_message_sent", "channel_message"] {
+            assert_eq!(
+                events_named(&client.events, event).len(),
+                4,
+                "retained exchange cannot repeat"
+            );
+        }
+        assert!(
+            events_named(&client.events, "error").is_empty(),
+            "{}",
+            client.diagnostics()
+        );
+    }
+    drain_expect_success(&mut joiner).await;
+    assert!(
+        events_named(&joiner.events, "p2p_pair_reconnected").is_empty(),
+        "new obligations are initial formations"
+    );
     server.shutdown().await;
 }
 

@@ -1307,7 +1307,7 @@ struct Orchestrator<'a> {
     /// the reconnect gap without turning partial-connectivity fallback into an
     /// all-pairs requirement after the original P2P window expires.
     retrying_pairs: BTreeSet<PlayerId>,
-    /// Peers whose current physical link completed a PairRetry generation.
+    /// Peers whose current physical link recovered a retained logical pair.
     p2p_reconnected_pairs: BTreeSet<PlayerId>,
     /// Peers whose current connection generation emitted the terminal local
     /// ICE gathering callback. Harness-held success uses this as the exact
@@ -2034,7 +2034,10 @@ impl Orchestrator<'_> {
         }
         if self.cli.p2p_rebuild_release_file.is_some()
             && (!self.p2p_rebuild_released
-                || !self.expected_peers.is_subset(&self.p2p_reconnected_pairs))
+                || !self.expected_peers.is_subset(&self.p2p_reconnected_pairs)
+                || !self.expected_peers.iter().all(|peer| {
+                    self.pair_retry_attempts.get(peer) == Some(&self.cli.p2p_retry_count)
+                }))
         {
             return Ok(());
         }
@@ -2993,9 +2996,8 @@ impl Orchestrator<'_> {
         self.selected_pair_evidence.require(peer);
         self.start_selected_pair_probe(peer);
         self.formed_pairs.insert(peer);
-        // Replacement channels can open after the retry wait has expired.
-        let coordinated_reconnect = self.pair_connected_reported.contains(&peer)
-            && self.pair_retry_attempts.contains_key(&peer);
+        // Logical formation survives authoritative replacements and retry
+        // deadlines. The engine reports formation once per physical link.
         if note_current_pair_connected(
             &mut self.connected_pairs,
             &mut self.pair_connected_reported,
@@ -3003,8 +3005,7 @@ impl Orchestrator<'_> {
             peer,
         ) {
             emit(&Event::P2pPairConnected { peer });
-        }
-        if coordinated_reconnect {
+        } else {
             self.p2p_reconnected_pairs.insert(peer);
             emit(&Event::P2pPairReconnected { peer });
         }

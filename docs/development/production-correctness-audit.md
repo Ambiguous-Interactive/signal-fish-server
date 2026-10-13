@@ -2672,3 +2672,52 @@ repair does not identify the initial failures in #853/#889 or complete A16,
 A20, or #826. A separate authoritative recovery-event candidate is tracked in
 [#930](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/930)
 for runtime verification.
+
+### F46 Authoritative peer-link replacement omits recovery events
+
+Finding: [#930](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/930).
+Baseline `990fa327`. A20.
+
+The native reference client required a PairRetry attempt before emitting
+`p2p_pair_reconnected`. A new authoritative plan clears those attempts, so
+replacement channels could reopen without an event. The browser retained a
+replacement wait, but timeout cleared that wait and could suppress a late
+recovery event. Physical formation and message delivery are separate from
+these reporting defects. Neither finding identifies the initial formation
+causes in #853 or #889.
+
+The event contract follows the logical peer obligation. First successful
+formation emits one `p2p_pair_connected`. Each later physical formation emits
+one `p2p_pair_reconnected`, after a retry or an authoritative replacement,
+including after the P2P deadline. Timeout alone emits no recovery. Departure
+clears the logical history, so rejoining creates a new obligation. Completed
+exchange evidence survives a transport replacement.
+
+The production dispatchers reproduce both defects. Native baseline fails the
+recovery assertion for a previously formed responder before timeout. Browser
+baseline fails the late-opening authoritative replacement assertion. Native
+controls cover both roles, opening before and after timeout, previously formed
+and never-formed links, duplicate plans, duplicate opens, stale callbacks,
+departure, and new obligations. The browser runs 58 controlled histories,
+including the prior retry and clock controls, plus authoritative recovery,
+late recovery, departure, and first formation after replacement. The repair
+selects the event from retained logical formation. Both engines already
+permit one full-pair formation per physical link and reject retired callbacks.
+No new state or deadline behavior is needed. The held native exchange still
+requires the reserved PairRetry attempt, so an authoritative recovery cannot
+release that harness barrier. A failing gate control proves this distinction
+for no attempt, an earlier attempt, and the reserved attempt.
+
+The real Chromium/native late-join control passes in nextest run
+`ad3af02c-fd27-4c5f-973c-40e09a6062c4` (2.714 seconds). It establishes the
+initial pair, fills an open room seat, and requires one recovery event at each
+retained endpoint. It also requires one logical pair event per peer, preserved
+exchange counts, new-peer exchanges, and clean exits. Root and native strict
+lint, browser suite, typecheck, build, and document checks pass. Hosted CI and
+review of the final head remain delivery gates.
+
+Rust (`da8f2d16`) and .NET (`e467c871`) SDK READMEs describe signaling clients
+without the reference-process event stream. Godot (`2a74de36`) owns a separate
+engine adapter. This fix changes reference-process JSONL reporting only;
+server messages and SDK contracts stay unchanged. No SDK migration is needed.
+A20 and the broader #826 audit remain incomplete.

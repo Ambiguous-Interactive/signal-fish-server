@@ -173,3 +173,189 @@ async fn formed_pair_accepts_remote_retry_after_window_expiry() {
         }
     }
 }
+
+// Regression #930: recovery describes a retained logical pair, not a retry marker.
+#[tokio::test]
+async fn authoritative_replacement_reports_recovery_before_and_after_timeout() {
+    for initiate in [false, true] {
+        for expired in [false, true] {
+            for previously_formed in [false, true] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let url = format!("ws://{}", listener.local_addr().unwrap());
+                let server = tokio::spawn(async move {
+                    let (tcp, _) = listener.accept().await.unwrap();
+                    tokio_tungstenite::accept_async(tcp).await.unwrap()
+                });
+                let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+                let _server_ws = server.await.unwrap();
+                let cli = Cli::parse_from([
+                    "reference-native",
+                    "--server-url",
+                    &url,
+                    "--create-room",
+                    "--p2p-timeout-secs",
+                    "60",
+                ]);
+                let peer = PlayerId::from_u128(2);
+                let mut state =
+                    super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+                state.negotiated_version = 3;
+                let plan = |generation| {
+                    serde_json::from_value::<ServerMessage>(json!({
+                    "type": "SessionPlan", "data": {
+                        "generation": SessionGeneration::from_u128(generation),
+                        "topology": "mesh", "transport": "webrtc", "fallback": "relay",
+                        "peers": [{"player_id": peer, "player_name": "peer", "is_authority": false, "initiate": initiate}]
+                    }
+                })).unwrap()
+                };
+                state.handle_server_message(plan(3)).await.unwrap();
+                if previously_formed {
+                    for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                        state
+                            .handle_engine_event(EngineEvent::ChannelOpen {
+                                peer,
+                                generation: 1,
+                                label: label.to_string(),
+                            })
+                            .await
+                            .unwrap();
+                        state.exchange_ledger.note_sent(peer, label);
+                        state.exchange_ledger.note_received(peer, label.to_string());
+                    }
+                }
+                state.handle_server_message(plan(4)).await.unwrap();
+                state.handle_server_message(plan(4)).await.unwrap();
+                assert!(
+                    state.engine.is_current_generation(peer, 2),
+                    "duplicate plan cannot rebuild"
+                );
+                assert!(state.pair_retry_attempts.is_empty());
+                if expired {
+                    state.p2p_deadline = Some(Deadline::after(Instant::now(), Duration::ZERO));
+                    state.process_timers().await.unwrap();
+                    assert!(state.retrying_pairs.is_empty());
+                }
+                // Old callbacks cannot report recovery for the new generation.
+                for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                    state
+                        .handle_engine_event(EngineEvent::ChannelOpen {
+                            peer,
+                            generation: 1,
+                            label: label.to_string(),
+                        })
+                        .await
+                        .unwrap();
+                }
+                assert!(!state.connected_pairs.contains(&peer));
+                assert!(!state.p2p_reconnected_pairs.contains(&peer));
+                state
+                    .handle_engine_event(EngineEvent::ChannelOpen {
+                        peer,
+                        generation: 2,
+                        label: RELIABLE_LABEL.to_string(),
+                    })
+                    .await
+                    .unwrap();
+                assert!(
+                    !state.p2p_reconnected_pairs.contains(&peer),
+                    "one channel cannot report recovery"
+                );
+                for label in [UNRELIABLE_LABEL, RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                    state
+                        .handle_engine_event(EngineEvent::ChannelOpen {
+                            peer,
+                            generation: 2,
+                            label: label.to_string(),
+                        })
+                        .await
+                        .unwrap();
+                }
+                assert_eq!(state.p2p_reconnected_pairs.contains(&peer), previously_formed,
+                    "initiate={initiate}, expired={expired}, previously_formed={previously_formed}: replacement reports recovery only for a previously formed logical pair");
+                assert!(state.pair_connected_reported.contains(&peer));
+                assert!(state.connected_pairs.contains(&peer));
+                if previously_formed {
+                    assert!(state.exchange_ledger.unmet_criteria().is_empty());
+                }
+                state
+                    .handle_server_message(ServerMessage::PlayerLeft {
+                        player_id: peer,
+                        epoch: None,
+                        final_seq: None,
+                    })
+                    .await
+                    .unwrap();
+                assert!(!state.pair_connected_reported.contains(&peer));
+                assert!(!state.p2p_reconnected_pairs.contains(&peer));
+                state.handle_server_message(plan(5)).await.unwrap();
+                for generation in [2, 3] {
+                    for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                        state
+                            .handle_engine_event(EngineEvent::ChannelOpen {
+                                peer,
+                                generation,
+                                label: label.to_string(),
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    assert!(
+                        !state.p2p_reconnected_pairs.contains(&peer),
+                        "departure clears the logical recovery history"
+                    );
+                }
+                assert!(state.connected_pairs.contains(&peer));
+                state.remove_pair_obligation(peer).await;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn authoritative_recovery_cannot_release_reserved_retry_exchange() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        tokio_tungstenite::accept_async(tcp).await.unwrap()
+    });
+    let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let _server_ws = server.await.unwrap();
+    let gate = tempfile::NamedTempFile::new().unwrap();
+    let path = gate.path().to_str().unwrap();
+    let cli = Cli::parse_from([
+        "reference-native",
+        "--server-url",
+        &url,
+        "--create-room",
+        "--exchange",
+        "--exchange-release-file",
+        path,
+        "--p2p-rebuild-release-file",
+        path,
+        "--p2p-retry-count",
+        "2",
+    ]);
+    let peer = PlayerId::from_u128(2);
+    let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+    state.expected_peers.insert(peer);
+    state.connected_pairs.insert(peer);
+    state.p2p_reconnected_pairs.insert(peer);
+    state.p2p_rebuild_released = true;
+    // Completed earlier exchange avoids requiring physical channels in this gate control.
+    for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+        state.exchange_ledger.note_sent(peer, label);
+    }
+    for attempt in [None, Some(1), Some(2)] {
+        if let Some(attempt) = attempt {
+            state.pair_retry_attempts.insert(peer, attempt);
+        }
+        state.process_exchange_gate(Instant::now()).await.unwrap();
+        assert_eq!(
+            state.exchange_released,
+            attempt == Some(2),
+            "only the reserved PairRetry generation can release the held exchange: {attempt:?}"
+        );
+    }
+}

@@ -248,8 +248,8 @@ until the pipe drains, closes, or the process exits.
 | `channel_closed` | `peer`, `label` | A required data channel closed or became unreadable; the unusable pair is removed and relay fallback remains live |
 | `channel_message_sent` | `peer`, `label`, `text` | An `--exchange` message was sent |
 | `channel_message` | `peer`, `label`, `text` | A data-channel text message arrived |
-| `p2p_pair_connected` | `peer` | BOTH channels toward `peer` are open |
-| `p2p_pair_reconnected` | `peer` | BOTH channels reopened for a coordinated PairRetry generation |
+| `p2p_pair_connected` | `peer` | Both channels first opened for this logical peer obligation |
+| `p2p_pair_reconnected` | `peer` | Both channels reopened for a retained logical pair after PairRetry or a new session plan, even after the P2P deadline |
 | `selected_candidate_pair` | `peer`, `local_candidate_type`, `remote_candidate_type`, `local_candidate_address`, `remote_candidate_address` | Native-only nominated ICE pair after both channels open. The client reads the transport pair directly, including the actual type and address of a learned `prflx` remote candidate. Exchange proceeds while the probe runs, but clean exit requires this event. TURN requires both types to be `relay`. IPv6 requires a local `host`, a remote `host` or `prflx`, and two concrete dialable IPv6 addresses. Missing or `null` address evidence fails the IPv6 gate |
 | `exchange_ready` | — | Harness-only barrier: every planned pair is open and local ICE gathering is complete, while `--exchange-release-file` still holds application exchange |
 | `exchange_reliable_ready` | — | Loss-harness barrier: every planned pair has sent and received its exact reliable exchange, while `--unreliable-exchange-release-file` still holds the unreliable half |
@@ -315,6 +315,11 @@ unknown generation are discarded.
   local rebuild gate. A fresh retry wait is bounded by `--p2p-timeout-secs`;
   an active window stays fixed. A late replacement still reports recovery.
   Departure and a new server generation clear this formation history.
+- A retained logical pair emits `p2p_pair_reconnected` once when both replacement
+  channels open, after a retry or a new authoritative plan. Timeout alone emits
+  no recovery event. First formation emits only `p2p_pair_connected`. Departure
+  clears the logical history, so rejoining creates a new obligation. Completed
+  exchanges survive a transport replacement.
 - The overall WebRTC status resolves when every currently expected pair is connected or at
   `--p2p-timeout-secs`. `connected: true` iff **at least one** pair is connected; a zero-pair resolution also
   emits `fallback_engaged`.

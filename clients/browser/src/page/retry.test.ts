@@ -26,9 +26,23 @@ const runTimeoutScenarios = ([false, true] as const).flatMap((initiate) =>
     (clockStep) => [initiate, false, 'run-timeout', clockStep] as const,
   ),
 );
-for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep] of [
-  ...retryScenarios,
-  ...runTimeoutScenarios,
+// Regression #930: authoritative replacement reports recovery without PairRetry.
+const authoritativeScenarios = ([false, true] as const).flatMap((initiate) =>
+  ([false, true] as const).flatMap((closeBeforeRetry) =>
+    (['open', 'late-open', 'removed'] as const).map(
+      (outcome) => [initiate, closeBeforeRetry, outcome, 0, false] as const,
+    ),
+  ),
+);
+for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep, retryAuthoritative] of [
+  ...retryScenarios.map((scenario) => [...scenario, true] as const),
+  ...runTimeoutScenarios.map((scenario) => [...scenario, true] as const),
+  ...authoritativeScenarios,
+  ...([false, true] as const).flatMap((initiate) =>
+    (['first-open', 'late-first-open'] as const).map(
+      (outcome) => [initiate, false, outcome, 0, false] as const,
+    ),
+  ),
 ]) {
   const originalSocket = globalThis.WebSocket;
   const originalPc = globalThis.RTCPeerConnection;
@@ -263,6 +277,56 @@ for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep] of [
         );
         return;
       }
+      if (replacementOutcome === 'first-open' || replacementOutcome === 'late-first-open') {
+        // Replacing a never-formed link still produces an initial connection.
+        generation = outsider;
+        plan();
+        await turn();
+        plan();
+        await turn();
+        assert(connections.length === 2, 'duplicate initial replacement plan keeps one link');
+        if (!initiate) signal({ Offer: 'first-offer' });
+        await turn();
+        if (replacementOutcome === 'late-first-open') {
+          now += 1001;
+          socket.deliver({ type: 'Pong' });
+          await turn();
+        }
+        first?.open();
+        await turn();
+        assert(
+          !events.some((e) => e['event'] === 'p2p_pair_connected'),
+          'retired callbacks cannot form the logical pair',
+        );
+        const current = connections[1];
+        current?.open();
+        await turn();
+        for (const channel of current?.channels ?? []) {
+          channel.open();
+          channel.receive();
+        }
+        socket.deliver({
+          type: 'PeerTransportStatus',
+          data: { peer_id: peer, transport: 'webrtc', connected: true },
+        });
+        await turn();
+        assert(
+          events.filter((e) => e['event'] === 'p2p_pair_connected').length === 1,
+          'first successful formation emits one logical pair',
+        );
+        assert(
+          !events.some((e) => e['event'] === 'p2p_pair_reconnected'),
+          'never-formed replacement cannot report recovery',
+        );
+        released = true;
+        now += 100;
+        socket.deliver({ type: 'Pong' });
+        await turn();
+        now += 300;
+        socket.deliver({ type: 'Pong' });
+        assert((await running) === 0, 'first replacement formation completes the exchange');
+        return;
+      }
       // Retry an incomplete link before any channel opens.
       now += 700;
       signal({ PairRetry: 1 });
@@ -375,16 +439,52 @@ for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep] of [
       await turn();
       assert(!settled, 'success must wait for an authoritative replacement link');
       released = false;
-      signal({ PairRetry: 1 });
+      const recoveriesBeforePlan = events.filter(
+        (e) => e['event'] === 'p2p_pair_reconnected',
+      ).length;
+      plan();
       await turn();
-      assert(
-        connections.length === 5,
-        'a new authoritative generation starts a fresh retry budget',
-      );
+      assert(connections.length === 4, 'a duplicate plan keeps the current physical link');
+      if (retryAuthoritative) {
+        signal({ PairRetry: 1 });
+        await turn();
+        assert(
+          connections.length === 5,
+          'a new authoritative generation starts a fresh retry budget',
+        );
+      }
+      const finalLink = connections[retryAuthoritative ? 4 : 3];
       if (!initiate) signal({ Offer: 'final-offer' });
       await turn();
-      if (replacementOutcome === 'open') {
-        connections[4]?.open();
+      if (replacementOutcome === 'open' || replacementOutcome === 'late-open') {
+        if (replacementOutcome === 'late-open') {
+          now += 1000;
+          socket.deliver({ type: 'Pong' });
+          await turn();
+          assert(
+            events.filter((e) => e['event'] === 'p2p_pair_reconnected').length ===
+              recoveriesBeforePlan,
+            'timeout alone cannot report recovery',
+          );
+        }
+        finalLink?.open();
+        await turn();
+        for (const channel of finalLink?.channels ?? []) channel.open();
+        rebuilt?.open();
+        await turn();
+        assert(
+          events.filter((e) => e['event'] === 'p2p_pair_reconnected').length ===
+            recoveriesBeforePlan + 1,
+          `initiate=${initiate}, outcome=${replacementOutcome}: authoritative replacement reports exactly one recovery`,
+        );
+        assert(
+          events.filter((e) => e['event'] === 'p2p_pair_connected').length === 1,
+          'replacement retains one logical pair event',
+        );
+        assert(
+          events.filter((e) => e['event'] === 'channel_message_sent').length === 2,
+          'replacement retains the logical exchange',
+        );
       } else if (replacementOutcome === 'timeout') {
         now += 1000;
         socket.deliver({ type: 'Pong' });
@@ -395,6 +495,15 @@ for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep] of [
         });
       }
       await turn();
+      if (replacementOutcome === 'removed') {
+        finalLink?.open();
+        await turn();
+        assert(
+          events.filter((e) => e['event'] === 'p2p_pair_reconnected').length ===
+            recoveriesBeforePlan,
+          'departure and retired callbacks cannot report recovery',
+        );
+      }
       released = true;
       now += 100;
       socket.deliver({ type: 'Pong' });
