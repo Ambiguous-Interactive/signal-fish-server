@@ -10,7 +10,7 @@ import { EventOutput } from '../shared/event-output.js';
 // client's (clients/native/src/events.rs).
 
 /** Classification of an opaque matchbox-shaped signal payload. */
-export type SignalKind = 'offer' | 'answer' | 'ice_candidate' | 'other';
+export type SignalKind = 'offer' | 'answer' | 'ice_candidate' | 'pair_retry' | 'other';
 
 /** Classify an opaque signal value by its single matchbox-convention key. */
 export function classifySignal(signal: unknown): SignalKind {
@@ -28,6 +28,8 @@ export function classifySignal(signal: unknown): SignalKind {
       return 'answer';
     case 'IceCandidate':
       return 'ice_candidate';
+    case 'PairRetry':
+      return 'pair_retry';
     default:
       return 'other';
   }

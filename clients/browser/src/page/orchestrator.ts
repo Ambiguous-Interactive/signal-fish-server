@@ -712,6 +712,9 @@ class Orchestrator {
   /** Opaque generation from the latest authoritative SessionPlan. */
   private currentSessionGeneration: string | null = null;
   private readonly expectedPeers = new Set<string>();
+  private readonly pairRoles = new Map<string, boolean>();
+  private readonly pairRetryAttempts = new Map<string, number>();
+  private readonly retryingPairs = new Set<string>();
   private readonly connectedPairs = new Set<string>();
   private readonly pairConnectedReported = new Set<string>();
   private lastIceServers: PlanIceServer[] = [];
@@ -1382,6 +1385,7 @@ class Orchestrator {
       // The current P2P window expired: report any real state change.
       this.resolveTransportStatus();
       this.p2pDeadline = null;
+      this.retryingPairs.clear();
     }
 
     if (this.successReleasePollAt !== null && now >= this.successReleasePollAt) {
@@ -1891,6 +1895,7 @@ class Orchestrator {
     const newlyExpected = !this.expectedPeers.has(peer);
     const needsConnection = !this.engine.isPaired(peer);
     this.expectedPeers.add(peer);
+    this.pairRoles.set(peer, initiate);
     if ((newlyExpected || needsConnection) && !this.connectedPairs.has(peer)) {
       this.p2pDeadline = deadlineAfterSeconds(Date.now(), this.config.p2pTimeoutSecs);
     }
@@ -1919,6 +1924,9 @@ class Orchestrator {
 
   private removePairObligation(peer: string): void {
     this.expectedPeers.delete(peer);
+    this.pairRoles.delete(peer);
+    this.pairRetryAttempts.delete(peer);
+    this.retryingPairs.delete(peer);
     this.connectedPairs.delete(peer);
     this.pairConnectedReported.delete(peer);
     this.peerStatusFrom.delete(peer);
@@ -1942,6 +1950,8 @@ class Orchestrator {
 
   /** Retire one retained physical link for a newer authoritative generation. */
   private prepareRetainedPairReplacement(peer: string): void {
+    this.pairRetryAttempts.delete(peer);
+    this.retryingPairs.delete(peer);
     this.connectedPairs.delete(peer);
     this.pendingExchangePeers.delete(peer);
     this.reportedExchangeDiagnostics.delete(peer);
@@ -1960,8 +1970,13 @@ class Orchestrator {
       );
       return;
     }
-    this.emit({ event: 'signal_received', from, kind: classifySignal(signal) });
+    const kind = classifySignal(signal);
+    this.emit({ event: 'signal_received', from, kind });
     this.assertActive();
+    if (kind === 'pair_retry') {
+      await this.applySignal(from, signal);
+      return;
+    }
     if (!this.engine.isPaired(from)) {
       if (shouldBufferSignalForUnpairedPeer(this.expectedPeers, from)) {
         if (!tryBufferPlannedSignal(this.pendingSignals, from, signal)) {
@@ -2018,6 +2033,34 @@ class Orchestrator {
           this.assertActive();
           break;
         }
+        case 'pair_retry': {
+          const attempt = payload['PairRetry'];
+          // The reference-only extension requires explicit opt-in on both endpoints.
+          if (
+            typeof attempt !== 'number' ||
+            !Number.isInteger(attempt) ||
+            attempt < 1 ||
+            attempt > this.config.p2pRetryCount
+          ) {
+            throw new Error('PairRetry attempt is outside the configured retry budget');
+          }
+          const initiate = this.pairRoles.get(from);
+          if (!this.expectedPeers.has(from) || initiate === undefined) {
+            throw new Error('PairRetry from an unplanned peer');
+          }
+          if (attempt <= (this.pairRetryAttempts.get(from) ?? 0)) break;
+          const incomplete = !this.connectedPairs.has(from);
+          const deadline = this.p2pDeadline;
+          const windowOpen = deadline !== null && Date.now() < deadline;
+          if (incomplete && !windowOpen) break;
+          this.pairRetryAttempts.set(from, attempt);
+          this.retryingPairs.add(from);
+          this.handlePeerTransportLoss(from);
+          await this.establishPair(from, initiate);
+          // A retry cannot extend an active establishment window for any peer.
+          if (windowOpen) this.p2pDeadline = deadline;
+          break;
+        }
         case 'other':
           throw new Error('signal does not match the matchbox PeerSignal convention');
       }
@@ -2033,8 +2076,11 @@ class Orchestrator {
    */
   private onPairConnected(peer: string): void {
     this.assertActive();
+    const retried = this.retryingPairs.delete(peer);
     if (noteCurrentPairConnected(this.connectedPairs, this.pairConnectedReported, peer)) {
       this.emit({ event: 'p2p_pair_connected', peer });
+    } else if (retried) {
+      this.emit({ event: 'p2p_pair_reconnected', peer });
     }
     if (this.config.exchange) {
       this.exchangeLedger.noteConnected(peer);
@@ -2269,6 +2315,9 @@ class Orchestrator {
       unmet.push(
         `awaiting authoritative SessionPlan (${this.initialSessionPlanPending ? 'session' : 'membership'} trigger, ${this.pendingMembershipPlans.size} membership epoch(s))`,
       );
+    }
+    for (const peer of this.retryingPairs) {
+      unmet.push(`pair retry incomplete (${peer})`);
     }
     if (this.webrtcSessionExpected()) {
       if (this.transportStatus === null) {

@@ -107,7 +107,7 @@ use base64::Engine as _;
 static SCENARIO_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Number of scenarios queueing behind [`SCENARIO_SERIAL`] (keep in sync with
 /// the scenarios that acquire `SCENARIO_SERIAL` in this file).
-const SCENARIO_COUNT: u64 = 13;
+const SCENARIO_COUNT: u64 = 14;
 /// Generous ceiling for ONE scenario in a fully degraded run: server spawn
 /// (up to 3 attempts x 15 s health deadline = 45 s) plus one client wave
 /// hard-bounded by `--max-runtime-secs 90`, with the rest absorbing Chromium
@@ -126,6 +126,160 @@ async fn acquire_serial() -> tokio::sync::MutexGuard<'static, ()> {
     tokio::time::timeout(SERIAL_ACQUIRE_TIMEOUT, SCENARIO_SERIAL.lock())
         .await
         .expect("acquire the scenario serialization lock in time")
+}
+
+/// Regression #921: a native initiator rebuilds its browser-host link before
+/// releasing gameplay. The browser must replace its responder before the Offer.
+#[tokio::test]
+async fn native_retry_rebuilds_browser_link_before_gameplay() {
+    let _serial = acquire_serial().await;
+    let mut server = spawn_server("host").await;
+    let url = server.v3_ws_url();
+    let workdir = tempfile::tempdir().expect("browser/native retry workdir");
+    let rebuild = workdir.path().join("rebuild");
+    let exchange = workdir.path().join("exchange");
+    let success = workdir.path().join("success");
+    let mut browser = spawn_browser_client(
+        &ClientSpec {
+            name: "retry-browser-host",
+            server_url: &url,
+            game_name: "browser-native-retry",
+            join_code: None,
+            peers: 2,
+            exchange: true,
+            relay_payload: None,
+            extra_args: &[
+                "--success-release-file",
+                success.to_str().unwrap(),
+                "--p2p-retry-count",
+                "2",
+            ],
+        },
+        workdir.path(),
+    );
+    let room = browser.await_event("room_created", EVENT_TIMEOUT).await;
+    let mut native = spawn_client(
+        &ClientSpec {
+            name: "retry-native-initiator",
+            server_url: &url,
+            game_name: "browser-native-retry",
+            join_code: Some(str_field(&room, "room_code")),
+            peers: 2,
+            exchange: true,
+            relay_payload: None,
+            extra_args: &[
+                "--exchange-release-file",
+                exchange.to_str().unwrap(),
+                "--p2p-rebuild-release-file",
+                rebuild.to_str().unwrap(),
+                "--p2p-retry-count",
+                "2",
+                "--success-release-file",
+                success.to_str().unwrap(),
+            ],
+        },
+        workdir.path(),
+    );
+    let (native_setup, browser_setup) = tokio::join!(
+        std::panic::AssertUnwindSafe(native.await_event("exchange_ready", EVENT_TIMEOUT))
+            .catch_unwind(),
+        std::panic::AssertUnwindSafe(browser.await_event("p2p_pair_connected", EVENT_TIMEOUT))
+            .catch_unwind(),
+    );
+    assert!(
+        native_setup.is_ok() && browser_setup.is_ok(),
+        "initial retry link; native: {}; browser: {}",
+        native.diagnostics(),
+        browser.diagnostics()
+    );
+    assert_eq!(events_named(&browser.events, "channel_open").len(), 2);
+    let native_id = player_id_of(&native.events, "retry-native-initiator");
+    let browser_id = player_id_of(&browser.events, "retry-browser-host");
+    let native_plan = single_event(&native.events, "session_plan", &native.name);
+    assert_eq!(str_field(native_plan, "host"), browser_id);
+    assert_eq!(native_plan["peers"][0]["initiate"], true);
+    std::fs::write(&rebuild, b"rebuild").unwrap();
+    let (native_retry, browser_retry) = tokio::join!(
+        std::panic::AssertUnwindSafe(native.await_event("p2p_pair_reconnected", EVENT_TIMEOUT))
+            .catch_unwind(),
+        std::panic::AssertUnwindSafe(async {
+            while events_named(&browser.events, "channel_open").len() < 4 {
+                browser.await_event("channel_open", EVENT_TIMEOUT).await;
+            }
+        })
+        .catch_unwind(),
+    );
+    assert!(
+        native_retry.is_ok() && browser_retry.is_ok(),
+        "replacement retry link; native: {}; browser: {}",
+        native.diagnostics(),
+        browser.diagnostics()
+    );
+    assert!(
+        events_named(&native.events, "channel_message_sent").is_empty(),
+        "gameplay stays held until the replacement opens"
+    );
+    std::fs::write(&exchange, b"exchange").unwrap();
+    let (native_success, browser_success) = tokio::join!(
+        std::panic::AssertUnwindSafe(native.await_event("success_criteria_met", EVENT_TIMEOUT))
+            .catch_unwind(),
+        std::panic::AssertUnwindSafe(browser.await_event("success_criteria_met", EVENT_TIMEOUT))
+            .catch_unwind(),
+    );
+    assert!(
+        native_success.is_ok() && browser_success.is_ok(),
+        "replacement gameplay; native: {}; browser: {}",
+        native.diagnostics(),
+        browser.diagnostics()
+    );
+    for client in [&native, &browser] {
+        assert_eq!(
+            events_named(&client.events, "channel_open").len(),
+            4,
+            "{}",
+            client.diagnostics()
+        );
+        assert_eq!(events_named(&client.events, "p2p_pair_connected").len(), 1);
+        assert_eq!(
+            events_named(&client.events, "p2p_pair_reconnected").len(),
+            1
+        );
+        assert_eq!(
+            events_named(&client.events, "channel_message_sent").len(),
+            2
+        );
+        let messages = events_named(&client.events, "channel_message");
+        assert_eq!(messages.len(), 2, "{}", client.diagnostics());
+        let remote = if client.name == "retry-browser-host" {
+            &native_id
+        } else {
+            &browser_id
+        };
+        let labels: BTreeSet<_> = messages
+            .iter()
+            .map(|message| {
+                assert_eq!(str_field(message, "peer"), remote);
+                let payload: Value = serde_json::from_str(str_field(message, "text")).unwrap();
+                assert_eq!(payload["from"], *remote);
+                assert_eq!(payload["channel"], message["label"]);
+                assert_eq!(payload["seq"], 0);
+                str_field(message, "label")
+            })
+            .collect();
+        assert_eq!(labels, BTreeSet::from([RELIABLE, UNRELIABLE]));
+        assert!(
+            events_named(&client.events, "error").is_empty(),
+            "{}",
+            client.diagnostics()
+        );
+    }
+    std::fs::write(&success, b"success").unwrap();
+    let (native_exit, browser_exit) = tokio::join!(
+        native.drain_to_exit(CLIENT_EXIT_TIMEOUT),
+        browser.drain_to_exit(CLIENT_EXIT_TIMEOUT)
+    );
+    assert_eq!((native_exit, browser_exit), (0, 0));
+    server.shutdown().await;
 }
 
 /// One fully drained scenario: 3 clients (creator + 2 joiners by room code),

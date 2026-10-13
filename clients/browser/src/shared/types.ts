@@ -51,6 +51,8 @@ export interface RunConfig {
   relayPayload: string | null;
   crippleIce: boolean;
   p2pTimeoutSecs: number;
+  /** Maximum peer-requested PairRetry attempt; zero keeps the extension disabled. */
+  p2pRetryCount: number;
   runForSecs: number;
   /** Hold a successful run open until the CLI's release-file bridge returns true. */
   successReleaseEnabled: boolean;
