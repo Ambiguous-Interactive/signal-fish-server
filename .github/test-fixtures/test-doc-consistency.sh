@@ -125,6 +125,9 @@ INTERNAL_PATHS=(
     # Source-adjacent directories
     "scripts/check-foo.sh"
     "tests/unit_test.rs"
+    "benches/encoding/Cargo.toml"
+    "benches/encoding/support/flat.rs"
+    "benches/encoding/results/baseline/summary.csv"
     "clients/browser/tests/nested/control.js"
     "clients/native/tests/interop_e2e.rs"
     "clients/fortress/tests/multiprocess.rs"
@@ -231,6 +234,8 @@ NON_INTERNAL_PATHS=(
     "src/server.rs"
     "build.rs"
     "benches/benchmark.rs"
+    "benches/encoding-extra/runtime.rs"
+    "benches/Encoding/support/model.rs"
     # Project manifests
     "Cargo.toml"
     # User-facing docs
@@ -261,6 +266,8 @@ echo -e "${YELLOW}--- Changelog gate behavior ---${NC}"
 # Format: "expected_result|test_name|file1 file2 ..."
 #   expected_result: pass | fail
 GATE_TESTS=(
+    "pass|Encoding study alone|benches/encoding/Cargo.toml benches/encoding/support/model.rs"
+    "fail|Encoding study plus server runtime without CHANGELOG|benches/encoding/support/model.rs src/server.rs"
     "pass|Compatibility fixture sources alone|clients/fortress/src/main.rs clients/fortress-wasm/src/lib.rs"
     "fail|Fixture plus server runtime without CHANGELOG|clients/fortress/src/main.rs src/server.rs"
     "fail|Fixture plus native runtime without CHANGELOG|clients/fortress-wasm/src/lib.rs clients/native/src/client.rs"

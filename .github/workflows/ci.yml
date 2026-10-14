@@ -521,6 +521,7 @@ jobs:
               # package manifests/lockfiles (MSRV/toolchain/docs parity touchpoints).
               case "$f" in
                 Cargo.toml|Cargo.lock|clients/native/Cargo.toml|clients/native/Cargo.lock) HAS_DEPENDENCY_CHANGE="true" ;;
+                benches/encoding/Cargo.toml|benches/encoding/Cargo.lock) HAS_DEPENDENCY_CHANGE="true" ;;
                 fuzz/Cargo.toml|fuzz/Cargo.lock) HAS_DEPENDENCY_CHANGE="true" ;;
                 clients/fortress/Cargo.toml|clients/fortress/Cargo.lock) HAS_DEPENDENCY_CHANGE="true" ;;
                 clients/fortress-wasm/Cargo.toml|clients/fortress-wasm/Cargo.lock) HAS_DEPENDENCY_CHANGE="true" ;;
@@ -528,6 +529,7 @@ jobs:
                 .github/*|.githooks/*|.devcontainer/*|.config/*|.vscode/*|.claude/*) ;;
                 scripts/*|tests/*|test-fixtures/*|formal/*|.llm/*|target/*|progress/*) ;;
                 clients/browser/tests/*|clients/native/tests/*|clients/fortress/tests/*|clients/fortress-wasm/tests/*) ;;
+                benches/encoding/*) ;;
                 # Standalone compatibility fixture sources (publish = false).
                 clients/fortress/src/*|clients/fortress-wasm/src/*|clients/fortress-wasm/harness.mjs|clients/fortress-wasm/project/main.gd) ;;
                 src/*_tests.rs|src/*_test.rs|src/*/tests.rs|clients/native/src/*_tests.rs|clients/native/src/*_test.rs|clients/native/src/*/tests.rs) ;;
@@ -674,6 +676,13 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: ${{ steps.deny-msrv.outputs.version }}
         run: cargo deny --log-level warn --manifest-path Cargo.toml --all-features check
+      - name: Run cargo-deny (encoding study)
+        if: steps.dep-relevance.outputs.relevant == 'true'
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.deny-msrv.outputs.version }}
+        run: >-
+          cargo deny --log-level warn --manifest-path benches/encoding/Cargo.toml
+          --config deny.toml --all-features check
       - name: Run cargo-deny (native reference client)
         if: steps.dep-relevance.outputs.relevant == 'true'
         env:
@@ -766,6 +775,9 @@ jobs:
       - name: Run cargo-audit
         if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         run: cargo audit
+      - name: Run cargo-audit (encoding study)
+        if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
+        run: cargo audit --file benches/encoding/Cargo.lock
       - name: Run cargo-audit (native reference client)
         if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         run: cargo audit --file clients/native/Cargo.lock

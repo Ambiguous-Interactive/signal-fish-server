@@ -1,0 +1,6 @@
+table Input { tick:uint; buttons:uint; horizontal:int; vertical:int; }
+table Entity { id:uint; position:[double] (required); velocity:[double] (required); health:uint; ammo:uint; active:bool; }
+table Snapshot { tick:uint; entities:[Entity] (required); map:string (required); }
+table Update { id:uint; position:[double] (required); health:uint; animation:uint; }
+struct Tile { x:uint; y:uint; tile_type:uint; }
+table Delta { tick:uint; base_tick:uint; spawned:[Entity] (required); updated:[Update] (required); removed:[uint] (required); tiles:[Tile] (required); }
