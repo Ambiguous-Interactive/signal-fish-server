@@ -167,6 +167,82 @@ try {
     );
     console.error(`ok - Chromium required-channel mode admission ${JSON.stringify(evidence)}`);
   }
+  for (const label of ['reliable', 'unreliable']) {
+    const evidence = await page.evaluate(async (label) => {
+      const check = (condition, message) => {
+        if (!condition) throw new Error(`${label}: ${message}`);
+      };
+      const deadline = performance.now() + 10000;
+      const until = async (condition, message) => {
+        while (!condition()) {
+          check(performance.now() < deadline, `timed out: ${message}`);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      };
+      const NativeConnection = globalThis.RTCPeerConnection;
+      let receiver;
+      globalThis.RTCPeerConnection = class extends NativeConnection {
+        constructor(configuration) {
+          super(configuration);
+          receiver = this;
+        }
+      };
+      const events = [];
+      const engine = new channelEngine.Engine(false, {
+        onLocalCandidate: () => {},
+        onPcState: () => {},
+        onChannelClosed: (_peer, _generation, name) => events.push(`close:${name}`),
+        onChannelOpen: (_peer, _generation, name) => events.push(`open:${name}`),
+        onChannelMessage: () => {},
+      });
+      const sender = new NativeConnection();
+      try {
+        await engine.pairWith('peer', false, []);
+        globalThis.RTCPeerConnection = NativeConnection;
+        const originalAnnouncement = receiver.ondatachannel;
+        let heldAnnouncement;
+        receiver.ondatachannel = (event) => {
+          heldAnnouncement = event;
+        };
+        const remoteChannel = sender.createDataChannel(
+          label,
+          label === 'unreliable' ? { ordered: false, maxRetransmits: 0 } : {},
+        );
+        await sender.setLocalDescription(await sender.createOffer());
+        await until(() => sender.iceGatheringState === 'complete', 'offer ICE gathering');
+        await receiver.setRemoteDescription(sender.localDescription);
+        await receiver.setLocalDescription(await receiver.createAnswer());
+        await until(() => receiver.iceGatheringState === 'complete', 'answer ICE gathering');
+        await sender.setRemoteDescription(receiver.localDescription);
+        await until(
+          () => heldAnnouncement !== undefined && remoteChannel.readyState === 'open',
+          'hold a real required-channel announcement',
+        );
+        remoteChannel.close();
+        await until(
+          () => heldAnnouncement.channel.readyState === 'closed',
+          'remote reset closes the held channel before registration',
+        );
+        check(events.length === 0, 'no engine channel callback before registration');
+        originalAnnouncement.call(receiver, heldAnnouncement);
+        await Promise.resolve();
+        check(
+          JSON.stringify(events) === JSON.stringify([`close:${label}`]),
+          'terminal registration reports immediately',
+        );
+        heldAnnouncement.channel.dispatchEvent(new Event('close'));
+        heldAnnouncement.channel.dispatchEvent(new Event('error'));
+        await Promise.resolve();
+        check(events.length === 1, 'duplicate terminal events report once');
+        return { label, readyState: heldAnnouncement.channel.readyState, events };
+      } finally {
+        globalThis.RTCPeerConnection = NativeConnection;
+        engine.removePeer('peer');
+        sender.close();
+      }
+    }, label);
+    console.error(`ok - Chromium closed-before-registration ${JSON.stringify(evidence)}`);
+  }
 } finally {
   await browser.close();
 }

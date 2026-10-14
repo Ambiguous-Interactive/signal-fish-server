@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -2889,3 +2889,36 @@ These controls verify the starter's in-memory startup and requested drain.
 They do not qualify runtime destruction during drain, every deployment signal,
 TLS listener ownership, or every configuration field's behavior. A17, A18,
 and the wider #826 campaign remain incomplete.
+
+### F49 Browser misses channel closure before handler registration
+
+Issue [#955](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/955)
+affects the browser reference engine under A20. A required channel can reach
+`closing` or `closed` before the engine registers its handlers. The previous
+code recovers an already-open channel but waits for another close/error event
+on a terminal channel. The client delays transport-loss handling until its P2P
+wait expires.
+
+The repair schedules the existing terminal callback for both terminal states.
+The callback keeps its generation, channel identity, and one-notification
+checks. Connecting and open registration behavior stays the same. The existing
+orchestrator then reports channel closure and handles transport loss.
+
+Red evidence: the old engine fails the registration-state regression at
+`reliable/closing/false`. Real Chromium also fails when the sender closes a
+required channel while its receiver announcement is held. The receiver reaches
+`closed` before the held announcement is passed to the engine. The old engine
+emits no channel event at registration. The repaired engine reports one close
+for each required label. Later close/error events do not duplicate that report.
+
+The deterministic controls cover both labels, all four registration states,
+retirement before the scheduled notification, fresh-link recovery, and old
+callbacks after replacement. The real-wire controls run with the existing
+channel-mode suite in `npm run test:channel-modes` under `clients/browser`.
+The browser tests, strict type checks, and real channel-mode controls pass.
+
+This is a controlled delayed-registration history. It does not identify the
+unexplained establishment failure in #853 or the mesh receipt debt in #889.
+The private reference engine changes no server message or external-client API.
+Rust, .NET, and Godot clients do not consume this browser engine. Their separate
+channel-closure assessments remain independent.

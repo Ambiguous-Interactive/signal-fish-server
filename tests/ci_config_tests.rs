@@ -3619,7 +3619,7 @@ fn test_h14_selector_runs_in_ci_nextest_and_the_standalone_gate_stays_retired() 
     assert_eq!(
         cargo_commands,
         vec![
-            "cargo nextest run --profile ci --locked --all-features --test \
+            "cargo nextest run --profile ci --locked --all-features --cargo-profile ci --test \
              mixed_encoding_relay_e2e --run-ignored ignored-only -E \
              'test(=unsupported_message_pack_fallback_does_not_flap_weaker_recipient)' \
              --no-tests fail --success-output final 2>&1 | tee mixed-encoding-output.txt"

@@ -133,6 +133,8 @@ ends, even if its old channel closes before the retry marker arrives. Use this e
 
 The client keeps the first data channel for each label in a peer connection.
 It closes duplicate channels so they cannot replace a working channel.
+A required channel that is already closing or closed when announced reports
+transport loss immediately. It does not wait for the P2P deadline.
 Incoming data-channel messages are limited to 64 KiB of raw input and decoded
 UTF-8 text. The client retains at most 256 pending messages and 1 MiB of decoded
 text across all peers and connection generations. A message stays charged
