@@ -690,6 +690,7 @@ class Orchestrator {
   private pendingChannelMessageBytes = 0;
   private finishResolve: ((code: number) => void) | null = null;
   private finished = false;
+  private readonly peerWorkStopped = new AbortController();
 
   // --- Session state (field-for-field mirror of the native Orchestrator) ---
   private readonly present = new Set<string>();
@@ -1278,6 +1279,7 @@ class Orchestrator {
       return;
     }
     this.finished = true;
+    this.peerWorkStopped.abort();
     if (this.wakeTimer !== null) {
       this.wakeTimer.cancel();
       this.wakeTimer = null;
@@ -1902,7 +1904,10 @@ class Orchestrator {
       this.p2pDeadline = deadlineAfterSeconds(monotonicNowMs(), this.config.p2pTimeoutSecs);
     }
     try {
-      const offerSdp = await this.engine.pairWith(peer, initiate, this.lastIceServers);
+      const offerSdp = await this.awaitPeerOperation(
+        peer,
+        this.engine.pairWith(peer, initiate, this.lastIceServers),
+      );
       this.assertActive();
       if (offerSdp !== null) {
         this.sendSignal(peer, 'offer', { Offer: offerSdp });
@@ -1921,6 +1926,49 @@ class Orchestrator {
         await this.applySignal(peer, signal);
         this.assertActive();
       }
+    }
+  }
+
+  private async awaitPeerOperation<T>(peer: string, operation: Promise<T>): Promise<T> {
+    this.assertActive();
+    const runDeadline = shouldDeferSuccessAtRunDeadline(
+      this.config.successReleaseEnabled,
+      this.successCriteriaReported,
+      this.successReleaseGranted,
+      this.lingerUntil,
+    )
+      ? Number.POSITIVE_INFINITY
+      : this.runDeadline;
+    const operationDeadline =
+      this.config.p2pTimeoutSecs === 0
+        ? deadlineAfterSeconds(monotonicNowMs(), this.config.runForSecs)
+        : (this.p2pDeadline ??
+          deadlineAfterSeconds(monotonicNowMs(), this.config.p2pTimeoutSecs));
+    const deadline = Math.min(operationDeadline, runDeadline);
+    let rejectWait: ((reason: Error) => void) | undefined;
+    const expired = new Promise<never>((_resolve, reject) => {
+      rejectWait = reject;
+    });
+    const stopped = () => rejectWait?.(FatalError.connection('the client is stopping'));
+    this.peerWorkStopped.signal.addEventListener('abort', stopped, { once: true });
+    const timer = scheduleDeadline(deadline, () => {
+      try {
+        this.handlePeerTransportLoss(peer);
+      } catch (error) {
+        this.failFatal(
+          error instanceof FatalError
+            ? error
+            : FatalError.connection(`peer teardown failed: ${describe(error)}`),
+        );
+      } finally {
+        rejectWait?.(new Error('browser peer negotiation deadline expired'));
+      }
+    });
+    try {
+      return await Promise.race([operation, expired]);
+    } finally {
+      timer.cancel();
+      this.peerWorkStopped.signal.removeEventListener('abort', stopped);
     }
   }
 
@@ -2014,7 +2062,10 @@ class Orchestrator {
           if (typeof sdp !== 'string') {
             throw new Error('Offer payload is not a string');
           }
-          const answerSdp = await this.engine.handleOffer(from, sdp);
+          const answerSdp = await this.awaitPeerOperation(
+            from,
+            this.engine.handleOffer(from, sdp),
+          );
           this.assertActive();
           this.sendSignal(from, 'answer', { Answer: answerSdp });
           break;
@@ -2024,7 +2075,7 @@ class Orchestrator {
           if (typeof sdp !== 'string') {
             throw new Error('Answer payload is not a string');
           }
-          await this.engine.handleAnswer(from, sdp);
+          await this.awaitPeerOperation(from, this.engine.handleAnswer(from, sdp));
           this.assertActive();
           break;
         }
@@ -2038,7 +2089,10 @@ class Orchestrator {
           if (typeof candidate !== 'string') {
             throw new Error('IceCandidate payload is not a string');
           }
-          await this.engine.handleRemoteCandidate(from, candidate);
+          await this.awaitPeerOperation(
+            from,
+            this.engine.handleRemoteCandidate(from, candidate),
+          );
           this.assertActive();
           break;
         }
@@ -2386,6 +2440,7 @@ class Orchestrator {
   /** Post-run cleanup: close the socket (Chromium teardown reaps the rest). */
   private teardown(): void {
     this.finished = true;
+    this.peerWorkStopped.abort();
     this.wakeTimer?.cancel();
     this.wakeTimer = null;
     this.releaseHandshakeFrames();

@@ -213,6 +213,13 @@ ICE, SCTP, and required data-channel states. The report includes channel buffer
 sizes and observed open callbacks. It excludes SDP, addresses, and credentials.
 The report records the timeout state; it does not identify the failure cause.
 The client can still accept a late connection within its run window.
+Pending browser offer, answer, and ICE operations use the remaining P2P window,
+or a fresh `--p2p-timeout-secs` budget after that window expires. The active run
+window also bounds these waits. A zero P2P timeout reports fallback immediately
+and still permits late connection. In that mode, each operation uses a
+`--run-for-secs` budget, capped by the active run window. A stalled operation closes its physical link
+and lets queued relay traffic continue. A new session plan can build a fresh
+link. A late completion from the retired link cannot resume negotiation.
 
 ## mDNS `.local` posture (empirically pinned)
 

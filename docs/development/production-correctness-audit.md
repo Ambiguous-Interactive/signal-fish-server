@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -2955,3 +2955,61 @@ Neither attempt saves a cache or runs the later non-TLS, allocation, and H14
 controls. Neither proves the timing bound in
 [#953](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/953).
 The separate dependency-audit failure remains outside the user's work scope.
+
+### F50 Browser negotiation blocks relay traffic and connection deadlines
+
+Issue [#960](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/960)
+affects the browser reference orchestrator under A20. It awaits browser offer,
+answer, and ICE operations on its single input chain. P2P and run timer callbacks
+append work to that chain. An unresolved browser operation therefore blocks
+both deadline processing and queued relay traffic until the CLI watchdog aborts
+or the browser operation settles.
+
+The deterministic regression on `ad4a1cac` holds each of six browser negotiation
+paths. It queues an accountable relay frame, advances the monotonic clock beyond
+the P2P deadline, and runs due timers. Every path fails to close the stalled
+link, report fallback, or process relay traffic. Releasing the held promise also
+permits late negotiation and signaling on the old implementation.
+
+The repair races each complete pairing or incoming signal operation against an
+absolute deadline outside the chain. It uses the remaining P2P window, or the
+configured P2P duration when no window remains, and the active run deadline.
+A zero P2P timeout controls fallback reporting only. It uses the configured run
+duration for operations, capped by the active run deadline.
+The existing success-release hold keeps its run-window exemption. Expiry retires
+the physical link before rejecting the wait. Existing engine identity checks
+stop late offer, answer, and buffered-candidate continuations. Shutdown rejects
+pending waits and cancels their timers.
+
+The retained regression covers eight suspension seams: offer creation, offer
+local description, remote offer, remote answer, answer creation, answer local
+description, live ICE, and buffered ICE. Each runs with the P2P deadline first
+and with the run deadline first. A third matrix sets the P2P timeout to zero:
+negotiation stays live before the run deadline and expires at that deadline.
+P2P expiry admits the queued relay frame and
+reports fallback before the held operation settles. Run expiry ends using the
+existing success criteria. Late completion sends no old signal and performs no
+later negotiation step. A new authoritative generation negotiates a fresh link.
+Successful operations and shutdown leave no extra deadline timers.
+
+Review also found that a failed fallback send could throw from the timer before
+rejecting the wait. Eight red controls reproduce that second hang. The callback
+now routes teardown failures to the connection-error exit and always rejects
+the wait. No timer exception escapes, and shutdown cancels every retained timer.
+
+These controlled promises prove orchestration behavior. They do not reproduce
+an actual hung Chromium operation or explain #853 or #889. Browser tests and
+strict type checks pass. The first hosted browser/native run passed 16 cells
+and failed `native_retry_rebuilds_browser_link_before_gameplay`. Its browser sets
+`--p2p-timeout-secs 0` to report fallback before forming a late connection.
+The first repair incorrectly used that reporting deadline to cancel browser
+operations. All eight zero-budget regressions expose early retirement. The
+corrected operation budget preserves immediate fallback and late connection.
+The focused real Chromium/native retry cell fails in 31.982 seconds with the
+first repair bundle and passes in 5.503 seconds with the corrected bundle.
+Hosted browser/native interoperability must pass before merge.
+The native engine has similar inline waits;
+[#961](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/961)
+tracks its independent cancellation assessment before any repair. The server wire protocol is unchanged. Rust,
+.NET, and Godot SDKs do not import the private browser reference orchestrator,
+so this repair requires no SDK migration or tracking issue.
