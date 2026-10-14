@@ -142,3 +142,121 @@ async fn remote_peer_close_retires_both_required_channels() {
         pair.cleanup().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_live_channel_opens_connect_each_pair_once() {
+    let mut pair = LivePair::connect().await;
+    for (engine, peer) in [
+        (&mut pair.sender, pair.receiver_id),
+        (&mut pair.receiver, pair.sender_id),
+    ] {
+        assert_eq!(engine.connected_pair_count(), 1);
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL, RELIABLE_LABEL] {
+            assert!(!engine.note_channel_open(peer, label).await);
+        }
+        assert_eq!(engine.connected_pair_count(), 1);
+    }
+    pair.cleanup().await;
+}
+
+/*
+    The driver can open and close a channel while its callbacks stay queued.
+*/
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_channel_opens_do_not_connect_a_closed_pair() {
+    for closed_label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+        let (a_tx, mut a_events) = mpsc::unbounded_channel();
+        let (b_tx, mut b_events) = mpsc::unbounded_channel();
+        let settings = EngineSettings {
+            disable_mdns: true,
+            ..EngineSettings::default()
+        };
+        let mut a = Engine::new(settings, a_tx).unwrap();
+        let mut b = Engine::new(settings, b_tx).unwrap();
+        let a_id = PlayerId::from_u128(0xa);
+        let b_id = PlayerId::from_u128(0xb);
+        let offer = a.pair_with(b_id, true, &[]).await.unwrap().unwrap();
+        b.pair_with(a_id, false, &[]).await.unwrap();
+        let answer = b.handle_offer(a_id, offer).await.unwrap();
+        a.handle_answer(b_id, answer).await.unwrap();
+        let mut a_opens = Vec::new();
+        let mut b_opens = Vec::new();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while a_opens.len() < 2 || b_opens.len() < 2 {
+                tokio::select! {
+                    event = a_events.recv() => match event.unwrap() {
+                        EngineEvent::LocalCandidate { candidate_json, .. } => {
+                            b.handle_remote_candidate(a_id, &candidate_json).await.unwrap();
+                        }
+                        EngineEvent::RemoteChannel { label, channel, .. } => {
+                            a.store_remote_channel(b_id, label, channel).await;
+                        }
+                        event @ EngineEvent::ChannelOpen { .. } => a_opens.push(event),
+                        _ => {}
+                    },
+                    event = b_events.recv() => match event.unwrap() {
+                        EngineEvent::LocalCandidate { candidate_json, .. } => {
+                            a.handle_remote_candidate(b_id, &candidate_json).await.unwrap();
+                        }
+                        EngineEvent::RemoteChannel { label, channel, .. } => {
+                            b.store_remote_channel(a_id, label, channel).await;
+                        }
+                        event @ EngineEvent::ChannelOpen { .. } => b_opens.push(event),
+                        _ => {}
+                    },
+                }
+            }
+        })
+        .await
+        .expect("real channels open before the delayed callback drain");
+        a.channel(b_id, closed_label)
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+        // Check the initiating side immediately after close(), before draining
+        // its terminal notifications. The physical state already forbids sends.
+        for event in &a_opens {
+            if let EngineEvent::ChannelOpen { label, .. } = event {
+                assert!(
+                    !a.note_channel_open(b_id, label).await,
+                    "queued opens must not connect a closing {closed_label} channel"
+                );
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut a_closed = false;
+            let mut b_closed = false;
+            while !a_closed || !b_closed {
+                tokio::select! {
+                    event = a_events.recv(), if !a_closed => {
+                        if let EngineEvent::ChannelClosed { label, .. } = event.unwrap() {
+                            a_closed = label == closed_label;
+                        }
+                    }
+                    event = b_events.recv(), if !b_closed => {
+                        if let EngineEvent::ChannelClosed { label, .. } = event.unwrap() {
+                            b_closed = label == closed_label;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the physical channel closes before queued opens are handled");
+        for (engine, peer, opens) in [(&mut a, b_id, a_opens), (&mut b, a_id, b_opens)] {
+            for event in opens {
+                assert!(
+                    engine.is_current_event(&event),
+                    "closure does not change the incarnation"
+                );
+                if let EngineEvent::ChannelOpen { label, .. } = event {
+                    assert!(!engine.note_channel_open(peer, &label).await,
+                        "queued opens must not declare a pair connected after {closed_label} closes");
+                }
+            }
+            assert_eq!(engine.connected_pair_count(), 0);
+            engine.remove_peer(peer).await.unwrap();
+        }
+    }
+}

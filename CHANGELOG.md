@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix false native peer connection reports from delayed data-channel open events (#948).
 - Discard old native and browser peer-link traffic when a fresh room membership arrives (#937).
 - Report native and browser reference-client recovery when new session plans
   replace established peer links, even after the connection wait expires (#930).

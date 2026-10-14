@@ -2604,7 +2604,7 @@ impl Orchestrator<'_> {
                     peer,
                     label: label.clone(),
                 });
-                if self.engine.note_channel_open(peer, &label) {
+                if self.engine.note_channel_open(peer, &label).await {
                     self.on_pair_connected(peer).await?;
                 }
             }
