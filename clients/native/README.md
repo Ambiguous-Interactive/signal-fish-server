@@ -16,7 +16,11 @@ The engine closes channels with other delivery settings before admission.
 **Migration:** Custom peers must use these settings for the required labels.
 The engine cancels their polling tasks when it removes a peer or stops.
 A remote close or a stopped channel event stream triggers link cleanup and
-relay fallback. Network loss still follows the configured P2P deadlines.
+relay fallback. The engine observes both selected channels as open before
+reporting a connected pair. Delayed open callbacks do not revive channels
+that already closed. A channel can still close after its state check.
+**Migration:** Native library callers must now await `Engine::note_channel_open`.
+Network loss still follows the configured P2P deadlines.
 It closes other remote labels without retaining them or starting callbacks.
 **Migration:** Applications that need extra channels must own their channel
 handling. This restriction belongs to these reference clients; the server

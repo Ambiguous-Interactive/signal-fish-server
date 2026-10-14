@@ -199,7 +199,7 @@ async fn live_remote_delivery_modes_preserve_required_channels() {
                         assert!(required_channel_delivery_mode(&label, channel.as_ref()).await, "remote DCEP mode lost");
                         b.store_remote_channel(a_id, label, channel).await;
                     }
-                    EngineEvent::ChannelOpen { label, .. } => { b.note_channel_open(a_id, &label); }
+                    EngineEvent::ChannelOpen { label, .. } => { b.note_channel_open(a_id, &label).await; }
                     EngineEvent::ChannelClosed { .. } => panic!("required channel closed"),
                     EngineEvent::PcState { state: RTCPeerConnectionState::Failed, .. } => panic!("receiver link failed"),
                     _ => {}

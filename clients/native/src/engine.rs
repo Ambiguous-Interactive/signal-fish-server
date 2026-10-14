@@ -687,9 +687,11 @@ impl Engine {
         ));
     }
 
-    /// Record an open channel; returns `true` exactly once per peer, at the
-    /// moment both expected labels are open (the pair is connected).
-    pub fn note_channel_open(&mut self, peer: PlayerId, label: &str) -> bool {
+    /// Record an open callback and inspect both selected channels.
+    /// Returns `true` once per link when both channels are observed open.
+    /// Callers must await this method. These observations do not prevent a
+    /// later channel close; callers must still handle terminal channel events.
+    pub async fn note_channel_open(&mut self, peer: PlayerId, label: &str) -> bool {
         let Some(link) = self.peers.get_mut(&peer) else {
             tracing::warn!(%peer, label, "channel open for unknown peer");
             return false;
@@ -697,11 +699,26 @@ impl Engine {
         link.open_labels.insert(label.to_string());
         let fully_open = link.open_labels.contains(RELIABLE_LABEL)
             && link.open_labels.contains(UNRELIABLE_LABEL);
-        if fully_open && !link.pair_connected {
-            link.pair_connected = true;
-            return true;
+        if !fully_open || link.pair_connected {
+            return false;
         }
-        false
+        /*
+            Queued open callbacks can outlive their channels. Separate state
+            observations cannot prevent a later close.
+        */
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            let Some(channel) = link.channels.get(label) else {
+                return false;
+            };
+            if !matches!(
+                channel.ready_state().await,
+                Ok(rtc::data_channel::RTCDataChannelState::Open)
+            ) {
+                return false;
+            }
+        }
+        link.pair_connected = true;
+        true
     }
 
     /// Look up a stored channel by peer and label.
@@ -2534,13 +2551,22 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn note_channel_open_fires_pair_connected_exactly_once() {
+    #[tokio::test]
+    async fn channel_open_requires_both_current_channels_to_be_open() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut engine = Engine::new(EngineSettings::default(), tx).expect("engine builds");
+        let mut engine = Engine::new(crippled_settings(IpFamily::Ipv4), tx).expect("engine builds");
         let peer = PlayerId::from_u128(0xc);
-        // Unknown peer: never connected.
-        assert!(!engine.note_channel_open(peer, RELIABLE_LABEL));
+        assert!(!engine.note_channel_open(peer, RELIABLE_LABEL).await);
+        for initiate in [false, true] {
+            engine.pair_with(peer, initiate, &[]).await.unwrap();
+            // The responder has no channels; initiator channels are connecting.
+            // Neither may form a live pair from historical callbacks alone.
+            for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                assert!(!engine.note_channel_open(peer, label).await);
+            }
+            assert_eq!(engine.connected_pair_count(), 0);
+            engine.remove_peer(peer).await.unwrap();
+        }
     }
 
     // Regression #869: remote announcements must not displace local or remote labels.
@@ -2791,7 +2817,7 @@ mod tests {
                                 a.store_remote_channel(b_id, label, channel).await;
                             }
                             EngineEvent::ChannelOpen { label, .. } => {
-                                a_connected |= a.note_channel_open(b_id, &label);
+                                a_connected |= a.note_channel_open(b_id, &label).await;
                             }
                             EngineEvent::PcState { state, .. } => {
                                 a_pc_connected |= state == RTCPeerConnectionState::Connected;
@@ -2808,7 +2834,7 @@ mod tests {
                                 b.store_remote_channel(a_id, label, channel).await;
                             }
                             EngineEvent::ChannelOpen { label, .. } => {
-                                b_connected |= b.note_channel_open(a_id, &label);
+                                b_connected |= b.note_channel_open(a_id, &label).await;
                             }
                             _ => {}
                         },
@@ -3214,7 +3240,7 @@ mod tests {
                             a.store_remote_channel(b_id, label, channel).await;
                         }
                         EngineEvent::ChannelOpen { label, .. } => {
-                            a_connected |= a.note_channel_open(b_id, &label);
+                            a_connected |= a.note_channel_open(b_id, &label).await;
                         }
                         EngineEvent::PcState { state, .. } => {
                             a_pc_connected |= state == RTCPeerConnectionState::Connected;
@@ -3231,7 +3257,7 @@ mod tests {
                             b.store_remote_channel(a_id, label, channel).await;
                         }
                         EngineEvent::ChannelOpen { label, .. } => {
-                            b_connected |= b.note_channel_open(a_id, &label);
+                            b_connected |= b.note_channel_open(a_id, &label).await;
                         }
                         _ => {}
                     },

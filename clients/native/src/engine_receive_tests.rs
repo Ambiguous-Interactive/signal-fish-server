@@ -228,7 +228,7 @@ impl LivePair {
                             self.sender.store_remote_channel(self.receiver_id, label, channel).await;
                         }
                         EngineEvent::ChannelOpen { label, .. } => {
-                            sender_connected |= self.sender.note_channel_open(self.receiver_id, &label);
+                            sender_connected |= self.sender.note_channel_open(self.receiver_id, &label).await;
                         }
                         _ => {}
                     },
@@ -240,7 +240,7 @@ impl LivePair {
                             self.receiver.store_remote_channel(self.sender_id, label, channel).await;
                         }
                         EngineEvent::ChannelOpen { label, .. } => {
-                            receiver_connected |= self.receiver.note_channel_open(self.sender_id, &label);
+                            receiver_connected |= self.receiver.note_channel_open(self.sender_id, &label).await;
                         }
                         _ => {}
                     },

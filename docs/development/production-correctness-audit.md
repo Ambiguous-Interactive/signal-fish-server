@@ -2766,3 +2766,51 @@ unproved and has a runtime assessment in
 No SDK migration is required by this reference-client repair. This finding
 does not identify the initial formation failures in #853/#889 or complete A20
 or #826. Hosted CI and final-head review remain delivery gates.
+
+### F48 Queued channel opens report an already-closed native pair
+
+Finding: [#948](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/948).
+Baseline `b35d9a40`. A20.
+
+The native engine records historical required-channel open labels. The channel
+pollers continue while the orchestrator awaits other work. Both channels can
+open and a required channel can close before the orchestrator consumes the
+open callbacks. Those callbacks still belong to the current physical link,
+so generation fencing does not exclude them. The old engine then declares
+the pair connected. The dispatcher records formation and can attempt its
+exchange on the closed channel before consuming the terminal callback.
+
+The real-WebRTC regression retains actual open callbacks from both endpoints,
+closes a required channel, and then applies the retained opens. Baseline
+nextest `a2224f99` fails the connection assertion for the reliable channel.
+The repair checks both selected channels' physical state before reporting
+formation. Missing channels, Connecting channels, and failed state lookups
+cannot establish a connected pair. Each channel must report Open when checked; the two reads are not an atomic
+snapshot. The callback-label and once-per-physical-link gates remain in place.
+
+The live controls cover each required label and both endpoint roles. They
+also check local closure before consuming the terminal notifications. The
+existing remote-close control proves replacement links reopen and exchange
+fresh messages in both directions. Initial repaired controls pass in native
+nextest `5bd9fea9`. These state observations do not guarantee a future send:
+a channel can still close after a successful check. This repair excludes
+already-closing or closed channels when delayed opens are processed.
+
+Browser formation already checks both selected channels' current readyState.
+Rust (`da8f2d16`) and .NET (`e467c871`) SDKs own signaling and relay without
+these WebRTC engines, so their wire contracts and migration needs do not
+change. Godot (`2a74de36`) counts connected peer connections in its separate
+engine mesh adapter. Required-channel closure remains an engine assessment in
+[Godot #365](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/365).
+Native library consumers must now await `Engine::note_channel_open`.
+The retry controls now establish real SDP/ICE channels before dispatching
+formation callbacks. Their timeout, retry, stale-generation, and recovery
+assertions remain intact. The dispatcher control retains a real terminal
+callback while draining earlier opens with exchange enabled; no probe is sent,
+no recovery is recorded, and the terminal callback still retires the link and
+reports relay fallback with unpaid exchange debt preserved. The rebuilt
+three-player native mesh and live relay-floor control passes in nextest
+`6ea16902`. Independent review added a real repeated-open once-per-link control,
+which passes with the delayed-close control in `8bc2bdb2`.
+This finding does not identify the initial failures in #853/#889 or complete
+A20 or #826. Hosted CI and final-head review remain delivery gates.
