@@ -1884,7 +1884,11 @@ class Orchestrator {
    * Pair with `peer` per the server's directive: create the connection, offer
    * when told to, then drain any defensively buffered signals.
    */
-  private async establishPair(peer: string, initiate: boolean): Promise<void> {
+  private async establishPair(
+    peer: string,
+    initiate: boolean,
+    retainedDeadline: number | null = null,
+  ): Promise<void> {
     this.assertActive();
     if (this.pendingMembershipPlans.has(peer)) return;
     if (peer === this.myId) {
@@ -1901,7 +1905,8 @@ class Orchestrator {
     this.expectedPeers.add(peer);
     this.pairRoles.set(peer, initiate);
     if ((newlyExpected || needsConnection) && !this.connectedPairs.has(peer)) {
-      this.p2pDeadline = deadlineAfterSeconds(monotonicNowMs(), this.config.p2pTimeoutSecs);
+      this.p2pDeadline =
+        retainedDeadline ?? deadlineAfterSeconds(monotonicNowMs(), this.config.p2pTimeoutSecs);
     }
     try {
       const offerSdp = await this.awaitPeerOperation(
@@ -2124,9 +2129,7 @@ class Orchestrator {
           });
           this.retryingPairs.add(from);
           this.retirePeerLink(from);
-          await this.establishPair(from, initiate);
-          // A retry cannot extend an active establishment window for any peer.
-          if (windowOpen) this.p2pDeadline = deadline;
+          await this.establishPair(from, initiate, windowOpen ? deadline : null);
           break;
         }
         case 'other':

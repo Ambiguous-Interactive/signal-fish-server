@@ -3114,3 +3114,38 @@ relay, retry, signal, peer-status, and server metric ledgers remain required.
 The scoped oracle controls pass. The final hosted loss matrix remains a
 delivery gate. This assertion repair does not identify why the initial
 channel closed or claim that a passing repetition repairs a stack defect.
+
+### F53 Browser retry negotiation renews an active connection window
+
+Issue [#969](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/969)
+affects the browser reference orchestrator under A20. A remote `PairRetry`
+replaces an incomplete physical link and starts `establishPair`. That method
+arms a new P2P deadline before offer creation. The caller restores the original
+deadline only after negotiation completes. A stalled replacement offer thus
+delays fallback and queued relay gameplay beyond the original window.
+
+Two deterministic dispatch histories fail on `cd994865`. Each starts a
+1,000 ms connection window and requests a retry at 700 ms. The replacement
+holds either `createOffer` or `setLocalDescription`. At 999 ms the link stays
+live. At 1,000 ms the baseline fails link retirement, fallback reporting, and
+queued relay delivery. Releasing the held promise permits late signaling.
+These controlled promises do not establish a spontaneous Chromium stall or
+explain the separate failures in #853 and #889.
+
+The repair passes the retained deadline into pairing before negotiation starts.
+It removes the late restoration. The operation timer now retires the link at
+the original deadline. The regression checks exact, once-only relay delivery
+before the held promise resolves, refusal of another incomplete retry after
+expiry, late continuation exclusion, fresh-generation negotiation, and timer
+cleanup. Existing retry histories cover both roles, wall-clock changes,
+previously connected recovery, and authoritative replacement. The zero-timeout
+and run-first negotiation controls remain unchanged.
+
+Native `rebuild_pair` already uses `PairGeneration::Retry`, which does not arm
+a new connection window. The server protocol and configuration are unchanged.
+The Rust, .NET, and Godot SDKs do not import this private browser orchestrator.
+They require no migration or tracking issue for this repair.
+
+The browser suite, strict type checks, formatting, and build pass locally.
+Real Chromium/native retry, restore, and three-player mesh controls pass
+in 6.487 seconds. Hosted verification and review remain the merge gate.

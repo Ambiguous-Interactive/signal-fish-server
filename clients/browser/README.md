@@ -126,9 +126,9 @@ through N (maximum 255). It does not schedule retries itself. The default is 0
 (disabled). Repeated or older attempts do not rebuild a link. A fresh session
 plan generation or peer departure clears the attempt history. Each replacement
 keeps the server-assigned offerer role. An active retry must finish or reach its
-P2P deadline before
-success. Retries do not extend an existing establishment window. A connected
-peer can request a coordinated rebuild with a new window after the old window
+P2P deadline before success. Retry offer creation and local description use the
+remaining original establishment window. A connected peer can request a
+coordinated rebuild with a new window after the old window
 ends, even if its old channel closes before the retry marker arrives. Use this extension only with peers that support it.
 
 The client keeps the first data channel for each label in a peer connection.
