@@ -28,7 +28,7 @@ repository. For another application, use the dependencies above and copy the
 code below. Use the [configuration guide](configuration.md) to provide valid
 settings. The default metrics policy needs a configured token.
 Press Ctrl+C to send the shutdown advisory, close sockets, and wait for cleanup
-before the runtime exits.
+before the runtime exits. Signal setup failures return an error after cleanup.
 
 The source is [examples/embedded_server.rs](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/examples/embedded_server.rs).
 The example and this block use the same code. The tests run its startup and
@@ -51,11 +51,12 @@ async fn main() -> anyhow::Result<()> {
     let listener =
         tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], cfg.port))).await?;
     println!("Server listening on {}", listener.local_addr()?);
-    serve_until(listener, game_server, &cfg.security.cors_origins, async {
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            eprintln!("Shutdown signal failed: {error}");
-        }
-    })
+    serve_until(
+        listener,
+        game_server,
+        &cfg.security.cors_origins,
+        tokio::signal::ctrl_c(),
+    )
     .await
 }
 
@@ -120,7 +121,7 @@ pub async fn serve_until(
     listener: tokio::net::TcpListener,
     game_server: Arc<EnhancedGameServer>,
     cors_origins: &str,
-    shutdown: impl Future<Output = ()> + Send + 'static,
+    shutdown: impl Future<Output = std::io::Result<()>> + Send + 'static,
 ) -> anyhow::Result<()> {
     let router = websocket::create_standalone_router(cors_origins).with_state(game_server.clone());
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
@@ -134,13 +135,15 @@ pub async fn serve_until(
     });
     let drain_server = game_server.clone();
     let drain_shutdown_tx = shutdown_tx.clone();
+    let (signal_result_tx, signal_result_rx) = tokio::sync::oneshot::channel();
     let result = axum::serve(
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        shutdown.await;
+        let signal_result = shutdown.await;
         run_drain_choreography(&drain_server, drain_shutdown_tx).await;
+        let _ = signal_result_tx.send(signal_result);
     })
     .await;
     if !game_server.is_draining() {
@@ -148,6 +151,7 @@ pub async fn serve_until(
     }
     cleanup.await?;
     result?;
+    signal_result_rx.await??;
     Ok(())
 }
 ```

@@ -67,6 +67,7 @@ async fn starter_maps_loaded_limits_and_drains_live_connection() {
     let task = tokio::spawn(async move {
         embedded_server::serve_until(listener, running_server, "*", async {
             shutdown_rx.await.expect("shutdown trigger");
+            Ok(())
         })
         .await
     });
@@ -142,10 +143,42 @@ async fn starter_shutdown_without_clients_finishes() {
         .expect("bind");
     tokio::time::timeout(
         Duration::from_secs(10),
-        embedded_server::serve_until(listener, server.clone(), "*", std::future::ready(())),
+        embedded_server::serve_until(listener, server.clone(), "*", std::future::ready(Ok(()))),
     )
     .await
     .expect("idle drain deadline")
     .expect("serve result");
     assert!(server.is_draining());
+}
+
+#[tokio::test]
+async fn starter_returns_signal_failure_after_cleanup() {
+    let server = embedded_server::build_server(&starter_config())
+        .await
+        .expect("build starter");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        embedded_server::serve_until(
+            listener,
+            server.clone(),
+            "*",
+            std::future::ready(Err(std::io::Error::other("injected signal setup failure"))),
+        ),
+    )
+    .await
+    .expect("signal failure cleanup deadline");
+    let error = result.expect_err("signal setup failure must not report a successful shutdown");
+    let signal_error = error
+        .downcast_ref::<std::io::Error>()
+        .expect("original signal error");
+    assert_eq!(signal_error.kind(), std::io::ErrorKind::Other);
+    assert_eq!(signal_error.to_string(), "injected signal setup failure");
+    assert!(server.is_draining());
+    assert_eq!(
+        server.wait_for_shutdown_connections(Duration::ZERO).await,
+        0
+    );
 }

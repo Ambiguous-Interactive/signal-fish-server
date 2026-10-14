@@ -2881,8 +2881,9 @@ and drains on Ctrl+C before the listener and cleanup task finish.
 ties the guide to that source, checks altered limits and invalid configuration,
 and observes v3 `GoingAway` followed by close code `4000 server_shutdown`
 over a real loopback socket. The retained controls require zero remaining
-registrations and test shutdown without clients. An isolated embedding
-application also compiles with only the documented direct dependencies.
+registrations and test shutdown without clients. A signal setup failure
+returns its original error after cleanup. An isolated embedding application
+also compiles with only the documented direct dependencies.
 
 These controls verify the starter's in-memory startup and requested drain.
 They do not qualify runtime destruction during drain, every deployment signal,
