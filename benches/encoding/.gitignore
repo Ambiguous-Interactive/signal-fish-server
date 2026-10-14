@@ -1,0 +1,6 @@
+# Cross-language study build products
+**/node_modules/
+**/bin/
+**/obj/
+godot/.godot/
+godot/*.uid

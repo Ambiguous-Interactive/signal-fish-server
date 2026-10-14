@@ -1,0 +1,9 @@
+syntax = "proto3";
+package signal_fish.encoding;
+option csharp_namespace = "SignalFish.Encoding";
+message Input { uint32 tick = 1; uint32 buttons = 2; sint32 horizontal = 3; sint32 vertical = 4; }
+message Entity { uint32 id = 1; repeated double position = 2; repeated double velocity = 3; uint32 health = 4; uint32 ammo = 5; bool active = 6; }
+message Snapshot { uint32 tick = 1; repeated Entity entities = 2; string map = 3; }
+message Update { uint32 id = 1; repeated double position = 2; uint32 health = 3; uint32 animation = 4; }
+message Tile { uint32 x = 1; uint32 y = 2; uint32 tile_type = 3; }
+message Delta { uint32 tick = 1; uint32 base_tick = 2; repeated Entity spawned = 3; repeated Update updated = 4; repeated uint32 removed = 5; repeated Tile tiles = 6; }

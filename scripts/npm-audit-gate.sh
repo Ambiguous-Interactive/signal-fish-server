@@ -66,7 +66,7 @@ BROWSER_ALLOWED_ADVISORIES=()
 
 GRAPH="${1:-}"
 if [ "$#" -gt 1 ]; then
-    echo "Usage: $0 [root|browser]" >&2
+    echo "Usage: $0 [root|browser|encoding]" >&2
     exit 2
 fi
 case "$GRAPH" in
@@ -78,8 +78,12 @@ case "$GRAPH" in
         ALLOWED_ADVISORIES=("${BROWSER_ALLOWED_ADVISORIES[@]+"${BROWSER_ALLOWED_ADVISORIES[@]}"}")
         GRAPH_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/clients/browser"
         ;;
+    encoding)
+        ALLOWED_ADVISORIES=()
+        GRAPH_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/benches/encoding/typescript"
+        ;;
     *)
-        echo "Usage: $0 [root|browser]" >&2
+        echo "Usage: $0 [root|browser|encoding]" >&2
         exit 2
         ;;
 esac

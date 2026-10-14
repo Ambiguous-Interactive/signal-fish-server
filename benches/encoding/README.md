@@ -107,3 +107,7 @@ The [2026-10-14 ARM baseline](results/2026-10-14-aarch64/README.md) records all
 36 codec/fixture cells and all 72 encode/decode operations. It includes sizes,
 Criterion confidence intervals, allocation counts, source fingerprints, and
 host limits. Use its source manifest when comparing a later run.
+
+The [cross-language study](CROSS_LANGUAGE.md) adds TypeScript, C#, and GDScript
+measurements over the same frozen inputs. It records codec limits and verifies
+protobuf and schema-varint wire agreement with this Rust package.

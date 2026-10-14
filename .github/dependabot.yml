@@ -235,6 +235,30 @@ updates:
           - "minor"
           - "patch"
 
+  # Standalone client-language measurement graphs.
+  - package-ecosystem: "npm"
+    directory: "/benches/encoding/typescript"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "wallstop"
+    open-pull-requests-limit: 1
+    groups:
+      npm-encoding-updates:
+        patterns:
+          - "*"
+  - package-ecosystem: "nuget"
+    directory: "/benches/encoding/csharp"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "wallstop"
+    open-pull-requests-limit: 1
+    groups:
+      nuget-encoding-updates:
+        patterns:
+          - "*"
+
   # ============================================================================
   # GitHub Actions Dependencies
   # ============================================================================
