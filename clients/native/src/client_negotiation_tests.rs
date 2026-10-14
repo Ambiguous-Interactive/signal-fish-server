@@ -382,16 +382,30 @@ async fn stalled_peer_close_does_not_abort_a_coordinated_retry() {
     let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
     state.current_session_generation = Some(SessionGeneration::from_u128(3));
     state.establish_pair(peer, false).await.unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
     state.engine.negotiation_hold = Some(NegotiationHold {
         step: "close",
-        entered: Arc::new(tokio::sync::Notify::new()),
+        entered: entered.clone(),
         release: Arc::new(tokio::sync::Notify::new()),
     });
     tokio::time::pause();
-    state
-        .request_pair_retry(peer, 1)
+    let mut retry = Box::pin(state.request_pair_retry(peer, 1));
+    tokio::select! {
+        _ = entered.notified() => {}
+        result = &mut retry => panic!("retry ended before the held close: {result:?}"),
+    }
+    tokio::time::advance(Duration::from_millis(249)).await;
+    assert!(
+        futures_util::poll!(retry.as_mut()).is_pending(),
+        "close must remain held before its deadline"
+    );
+    tokio::time::advance(Duration::from_millis(2)).await;
+    tokio::time::resume();
+    retry
+        .as_mut()
         .await
         .expect("retired close timeout must not end the relay session");
+    drop(retry);
     assert!(
         state.engine.is_current_generation(peer, 2),
         "retry installs its fresh physical link"
