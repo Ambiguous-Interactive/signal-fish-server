@@ -3054,10 +3054,10 @@ Queued relay traffic and server replies then resume. This bounds suspension;
 it does not make an inline negotiation operation serve WebSocket frames before
 its deadline.
 
-The final focused native run passes 42 tests. These include all 32 deadline
+The final focused native run passes 43 tests. These include all 32 deadline
 histories, eight zero-P2P histories, eight held-success histories, and retained
 retry and channel-lifetime controls. Every canceled history then completes a
-fresh bidirectional exchange on both required channels. All three wrapper
+fresh bidirectional exchange on both required channels. All four wrapper
 driver lifetime cases pass. Three real Chromium/native cells also pass:
 room restore, coordinated retry, and a three-player mesh.
 
@@ -3066,6 +3066,14 @@ the retained retry test. Boxing the large negotiation future and the shared
 test helper removes the added nested stack frames. The final run includes a
 future-size regression. Root and native strict lint pass. Hosted CI and final
 review remain delivery gates for this repair.
+
+Review finds that a close timeout can still abort a coordinated retry after
+the physical link has been retired. A direct retry control fails at that
+error. The timeout now permits retry while ordinary close errors keep their
+existing handling. A fourth wrapper control also fails when close waits on
+the core and another caller retains the peer. Close now takes driver
+cancellation ownership and marks closing before that wait. Canceling it stops
+the driver even while peer clones remain. All four wrapper controls pass.
 The interop runner includes the wrapper cancellation controls with its retained
 event-queue tests. Release qualification in #912 must retain these controls.
 
@@ -3073,3 +3081,36 @@ The wire protocol is unchanged. External Rust, .NET, and Godot SDKs do not
 import this private native orchestrator or its local wrapper graph, so no SDK
 migration or client tracking issue is needed. This finding does not diagnose
 issues #853 or #889, qualify a replacement registry release, or complete A20 or #826.
+
+### F52 The loss oracle rejects recovered initial channel closure
+
+Issue [#966](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/966)
+comes from PR #965 head `abb8dff3`, Verification run `38640004745`, job
+`116112796174`. The host-eight loss cell fails after 18.957 seconds. The other
+three loss cells pass. Artifact `webrtc-netem-38640004745-1` retains the matrix
+output and endpoint event streams.
+
+Client c07 reports a required `unreliable` channel close before its first pair
+connection. It reports fallback, retries, forms the initial pair, reaches
+`exchange_ready`, completes the reserved clean rebuild, exchanges both required
+labels in both directions, and reaches `success_criteria_met`. No negotiation
+deadline or error event occurs. The oracle rejects its early false transport
+report because it only permits fallback between the two exchange barriers.
+
+The scenario allows initial loss and automatic retries before its reserved
+clean rebuild. Native channel-close handling requires immediate fallback when
+no pair remains. The assertion rejects this permitted recovery. A minimized
+replay of the captured lifecycle fails at the same assertion.
+
+The repair permits an initial false report only after required-channel or
+terminal peer loss in the latest plan. The same peer must form before
+`exchange_ready`, with no intervening connection that makes the loss stale.
+Its fallback event must stay in that phase. The reserved rebuild window keeps
+its existing bounds. Controls reject missing plans, unplanned peers, optional
+channels, nonterminal states, absent or stale causes, missing or late recovery,
+superseded plans, missing fallback, and duplicate reports. Exact channel,
+relay, retry, signal, peer-status, and server metric ledgers remain required.
+
+The scoped oracle controls pass. The final hosted loss matrix remains a
+delivery gate. This assertion repair does not identify why the initial
+channel closed or claim that a passing repetition repairs a stack defect.

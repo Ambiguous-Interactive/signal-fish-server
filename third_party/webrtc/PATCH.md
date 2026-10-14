@@ -29,6 +29,8 @@ No additional channel polling task is needed for a refused announcement.
 The driver task has one cancellation owner during construction, use, and close.
 Dropping a pending build, a peer, or an interrupted close stops that task.
 Explicit close retains its brief graceful stop and callback-specific detach.
+It keeps driver cancellation ownership while waiting for the core, even when
+other callers retain peer handles.
 The changed upstream files are `src/peer_connection/driver.rs` and
 `src/peer_connection/mod.rs`.
 

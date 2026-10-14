@@ -116,3 +116,49 @@ fn cancelled_close_retains_driver_cancellation_ownership() {
         released(&weak).await;
     });
 }
+
+#[test]
+fn cancelled_close_stops_the_driver_while_peer_clones_remain() {
+    run(async {
+        let runtime = default_runtime().unwrap();
+        let core = rtc::peer_connection::RTCPeerConnectionBuilder::new()
+            .build(runtime.now())
+            .unwrap();
+        let pc = Arc::new(
+            PeerConnectionImpl::new(
+                core,
+                runtime,
+                Arc::new(HeldHandler {
+                    entered: AtomicBool::new(false),
+                    held: false,
+                }),
+                rtc::ice::mdns::MulticastDnsMode::Disabled,
+                false,
+                vec!["127.0.0.1:0"],
+                Vec::<&str>::new(),
+                0,
+                usize::MAX,
+                None,
+                rtc::crypto::default_provider().unwrap(),
+            )
+            .await
+            .unwrap(),
+        );
+        let retained = pc.clone();
+        let mut stopped = pc.driver_stopped.lock().await.take().unwrap();
+        let core_guard = pc.inner.core.lock().await;
+        let mut close = Box::pin(pc.close());
+        assert!(
+            futures::poll!(&mut close).is_pending(),
+            "close waits for the held core"
+        );
+        drop(close);
+        tokio::time::timeout(Duration::from_millis(500), stopped.recv())
+            .await
+            .expect("canceling close must stop its driver while callers still retain the peer");
+        assert!(retained.inner.closing.load(Ordering::Acquire));
+        drop(core_guard);
+        drop(retained);
+        drop(pc);
+    });
+}

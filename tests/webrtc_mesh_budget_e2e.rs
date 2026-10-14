@@ -219,6 +219,63 @@ fn held_window<'a>(events: &'a [Value], who: &str) -> &'a [Value] {
     events
 }
 
+fn initial_transport_loss_recovers_before_ready(
+    window: &[Value],
+    report_index: usize,
+    ready_index: usize,
+) -> bool {
+    let Some((plan_index, plan)) = window[..report_index]
+        .iter()
+        .enumerate()
+        .rfind(|(_, event)| event_name(event) == Some("session_plan"))
+    else {
+        return false;
+    };
+    let planned: BTreeSet<&str> = plan
+        .get("peers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|peer| peer.get("player_id").and_then(Value::as_str))
+        .collect();
+    window[plan_index + 1..report_index]
+        .iter()
+        .enumerate()
+        .any(|(offset, event)| {
+            let loss_index = plan_index + 1 + offset;
+            let loss = match event_name(event) {
+                Some("channel_closed") => event
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .is_some_and(|label| CHANNEL_LABELS.contains(&label)),
+                Some("pc_state") => matches!(
+                    event.get("state").and_then(Value::as_str),
+                    Some("failed" | "closed")
+                ),
+                _ => false,
+            };
+            let Some(peer) = event.get("peer").and_then(Value::as_str) else {
+                return false;
+            };
+            if !loss || !planned.contains(peer) {
+                return false;
+            }
+            let is_connection = |event: &Value| {
+                matches!(
+                    event_name(event),
+                    Some("p2p_pair_connected" | "p2p_pair_reconnected")
+                ) && event.get("peer").and_then(Value::as_str) == Some(peer)
+            };
+            !window[loss_index + 1..report_index]
+                .iter()
+                .any(is_connection)
+                && window[report_index + 1..ready_index].iter().any(|event| {
+                    event_name(event) == Some("p2p_pair_connected")
+                        && event.get("peer").and_then(Value::as_str) == Some(peer)
+                })
+        })
+}
+
 fn assert_own_transport_history(
     window: &[Value],
     expected_connected: bool,
@@ -235,6 +292,7 @@ fn assert_own_transport_history(
         );
     let mut states = Vec::new();
     let mut fallback_pending = false;
+    let mut fallback_limit = None;
     for (index, event) in window.iter().enumerate() {
         match event_name(event) {
             Some("transport_status_sent") => {
@@ -250,7 +308,14 @@ fn assert_own_transport_history(
                         panic!("{who}: own transport status lacks connected: {event}")
                     });
                 if !connected && allow_rebuild {
-                    assert!(rebuild_window.is_some_and(|(start, end)| start < index && index < end), "{who}: fallback transport report is outside the coordinated rebuild window");
+                    let (start, end) =
+                        rebuild_window.expect("retry-enabled history needs both exchange barriers");
+                    let in_rebuild = start < index && index < end;
+                    let initial_loss = states.is_empty()
+                        && index < start
+                        && initial_transport_loss_recovers_before_ready(window, index, start);
+                    assert!(in_rebuild || initial_loss, "{who}: fallback transport report lacks an initial loss/recovery or coordinated rebuild");
+                    fallback_limit = Some(if initial_loss { start } else { end });
                 }
                 fallback_pending = !connected;
                 states.push(connected);
@@ -262,11 +327,18 @@ fn assert_own_transport_history(
                 );
                 if allow_rebuild {
                     assert!(
-                        rebuild_window.is_some_and(|(start, end)| start < index && index < end),
-                        "{who}: fallback event is outside the coordinated rebuild window"
+                        fallback_limit.is_some_and(|limit| index < limit),
+                        "{who}: fallback event is outside its loss/recovery phase"
                     );
                 }
                 fallback_pending = false;
+                fallback_limit = None;
+            }
+            Some("exchange_ready") if allow_rebuild => {
+                assert!(
+                    !fallback_pending && states.last() == Some(&true),
+                    "{who}: initial exchange barrier preceded transport recovery"
+                );
             }
             Some("exchange_reliable_ready") if allow_rebuild => {
                 assert!(
@@ -334,6 +406,113 @@ fn transport_history_accepts_exact_clean_fallback_and_rebuild_reports() {
         assert_eq!(
             assert_own_transport_history(&events, expected, rebuild, label),
             states
+        );
+    }
+}
+
+fn captured_initial_channel_loss_history() -> Vec<Value> {
+    let peer = "planned-peer";
+    vec![
+        json!({"event":"session_plan", "peers":[{"player_id":peer}]}),
+        json!({"event":"channel_closed", "peer":peer, "label":"unreliable"}),
+        json!({"event":"transport_status_sent", "transport":"webrtc", "connected":false}),
+        json!({"event":"fallback_engaged"}),
+        json!({"event":"signal_sent", "kind":"pair_retry", "to":peer}),
+        json!({"event":"channel_open", "peer":peer, "label":"unreliable"}),
+        json!({"event":"channel_open", "peer":peer, "label":"reliable"}),
+        json!({"event":"p2p_pair_connected", "peer":peer}),
+        json!({"event":"transport_status_sent", "transport":"webrtc", "connected":true}),
+        json!({"event":"exchange_ready"}),
+        json!({"event":"signal_sent", "kind":"pair_retry", "to":peer}),
+        json!({"event":"p2p_pair_reconnected", "peer":peer}),
+        json!({"event":"exchange_reliable_ready"}),
+        json!({"event":"success_criteria_met"}),
+    ]
+}
+
+#[test]
+fn initial_required_channel_loss_can_recover_before_the_rebuild_barrier() {
+    let events = captured_initial_channel_loss_history();
+    assert_eq!(
+        assert_own_transport_history(&events, true, true, "captured c07 initial close"),
+        [false, true]
+    );
+}
+
+#[test]
+fn initial_fallback_requires_a_current_planned_loss_and_timely_recovery() {
+    for cause in ["required channel close", "failed", "closed"] {
+        let mut events = captured_initial_channel_loss_history();
+        if cause != "required channel close" {
+            events[1] = json!({"event":"pc_state", "peer":"planned-peer", "state":cause});
+        }
+        assert_eq!(
+            assert_own_transport_history(&events, true, true, cause),
+            [false, true]
+        );
+    }
+    for case in [
+        "no plan",
+        "unplanned peer",
+        "optional channel",
+        "nonterminal state",
+        "no loss",
+        "no recovery",
+        "wrong recovery peer",
+        "stale loss",
+        "late recovery",
+        "missing fallback",
+        "duplicate false",
+        "superseded peer",
+        "superseded cause",
+    ] {
+        let mut events = captured_initial_channel_loss_history();
+        match case {
+            "no plan" => {
+                events.remove(0);
+            }
+            "unplanned peer" => events[1]["peer"] = json!("other-peer"),
+            "optional channel" => events[1]["label"] = json!("optional"),
+            "nonterminal state" => {
+                events[1] =
+                    json!({"event":"pc_state", "peer":"planned-peer", "state":"disconnected"})
+            }
+            "no loss" => {
+                events.remove(1);
+            }
+            "no recovery" => {
+                events.remove(7);
+            }
+            "wrong recovery peer" => events[7]["peer"] = json!("other-peer"),
+            "stale loss" => {
+                let recovery = events.remove(7);
+                events.insert(2, recovery);
+            }
+            "late recovery" => {
+                let recovery = events.remove(7);
+                events.insert(10, recovery);
+            }
+            "missing fallback" => {
+                events.remove(3);
+            }
+            "duplicate false" => {
+                events.insert(3, events[2].clone());
+            }
+            "superseded peer" => {
+                events.insert(
+                    1,
+                    json!({"event":"session_plan", "peers":[{"player_id":"other-peer"}]}),
+                );
+            }
+            "superseded cause" => {
+                events.insert(2, events[0].clone());
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            std::panic::catch_unwind(|| assert_own_transport_history(&events, true, true, case))
+                .is_err(),
+            "{case}: unexplained initial fallback must fail"
         );
     }
 }

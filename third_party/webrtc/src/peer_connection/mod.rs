@@ -1129,17 +1129,13 @@ impl crate::sealed::Sealed for PeerConnectionImpl {}
 #[async_trait::async_trait]
 impl PeerConnection for PeerConnectionImpl {
     async fn close(&self) -> Result<()> {
+        let driver_handle = self.driver_handle.lock().await.take();
+        self.inner.closing.store(true, Ordering::Release);
+        self.inner.data_channel_backpressure.notify_waiters();
         {
             let mut core = self.inner.core.lock().await;
             core.close()?;
         }
-        // Mark closing before waking the driver, so it stops even if the wake is
-        // ever dropped (mirrors `Drop`; see `PeerConnectionRef::closing`).
-        self.inner.closing.store(true, Ordering::Release);
-        // Wake any sender blocked in `DataChannel::writable()` so it observes `closing`
-        // and returns `ErrDataChannelClosed` at once, rather than waiting out its 50 ms
-        // liveness backstop — the driver has stopped draining `outstanding_bytes`.
-        self.inner.data_channel_backpressure.notify_waiters();
         // Best-effort wake. A send failure here is benign, not an error:
         // `closing` already guarantees the driver terminates, and it may already
         // have observed the flag and dropped the receiver via its independent
@@ -1153,7 +1149,6 @@ impl PeerConnection for PeerConnectionImpl {
             .send(PeerConnectionDriverEvent::Close)
             .await;
 
-        let driver_handle = self.driver_handle.lock().await.take();
         let driver_stopped = self.driver_stopped.lock().await.take();
         if let Some(driver_handle) = driver_handle {
             if is_polling_driver(&self.inner) {

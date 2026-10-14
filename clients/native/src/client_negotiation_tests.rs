@@ -360,3 +360,44 @@ async fn negotiation_future_keeps_nested_retry_stack_bounded() {
         "nested retry frames must not retain the stack operation inline: {bytes} bytes"
     );
 }
+
+#[tokio::test]
+async fn stalled_peer_close_does_not_abort_a_coordinated_retry() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        tokio_tungstenite::accept_async(tcp).await.unwrap()
+    });
+    let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let _server_ws = server.await.unwrap();
+    let cli = Cli::parse_from([
+        "reference-native",
+        "--server-url",
+        &url,
+        "--create-room",
+        "--disable-mdns",
+    ]);
+    let peer = PlayerId::from_u128(2);
+    let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+    state.current_session_generation = Some(SessionGeneration::from_u128(3));
+    state.establish_pair(peer, false).await.unwrap();
+    state.engine.negotiation_hold = Some(NegotiationHold {
+        step: "close",
+        entered: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    });
+    tokio::time::pause();
+    state
+        .request_pair_retry(peer, 1)
+        .await
+        .expect("retired close timeout must not end the relay session");
+    assert!(
+        state.engine.is_current_generation(peer, 2),
+        "retry installs its fresh physical link"
+    );
+    assert_eq!(state.pair_retry_attempts.get(&peer), Some(&1));
+    assert!(state.expected_peers.contains(&peer));
+    state.engine.negotiation_hold = None;
+    state.engine.remove_peer(peer).await.unwrap();
+}

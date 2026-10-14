@@ -441,10 +441,17 @@ impl Engine {
     pub async fn remove_peer(&mut self, peer: PlayerId) -> Result<()> {
         if let Some(mut link) = self.peers.remove(&peer) {
             link.stop_channel_tasks();
-            crate::deadline::timeout(Duration::from_millis(250), link.pc.close())
-                .await
-                .context("peer connection close deadline elapsed")?
-                .context("close departed RTCPeerConnection")?;
+            #[cfg(test)]
+            let negotiation_hold = self.negotiation_hold.clone();
+            let result = crate::deadline::timeout(Duration::from_millis(250), async {
+                negotiation_checkpoint!(negotiation_hold, "close");
+                link.pc.close().await
+            })
+            .await;
+            match result {
+                Ok(result) => result.context("close departed RTCPeerConnection")?,
+                Err(_) => tracing::warn!(%peer, "Peer close deadline elapsed; retry can continue"),
+            }
         }
         Ok(())
     }
