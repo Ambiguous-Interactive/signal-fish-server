@@ -1055,3 +1055,18 @@ This testing infrastructure provides defense in depth against CI/CD issues:
 - [Markdownlint Rules](https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md)
 - [GitHub Actions Workflow Config](../.llm/skills/github-actions-workflow-config/SKILL.md)
 - [CI CD Troubleshooting Categories](../.llm/skills/ci-cd-troubleshooting/references/diagnostic-workflow.md)
+
+### Root timing evidence
+
+The Linux root job records processor count, affinity, available cgroup CPU
+limits and counters, load, and CPU pressure before and after the root suite.
+The collector walks visible cgroup v2 ancestors. A cgroup namespace can hide
+outer limits; the snapshots do not prove that no outer quota exists.
+The after-test step also runs on failure. Missing optional kernel files are
+reported as unavailable. These snapshots do not measure per-test CPU usage.
+
+The relay matrix prints each completed cell's full observation before checking
+its p99 limit. A failed limit therefore retains throughput, completion time,
+latency percentiles, backpressure, and RSS. The limit and delivery checks stay
+the same. See [#956](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/956)
+for the unresolved hosted latency failure and the controlled overlap results.

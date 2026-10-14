@@ -2922,3 +2922,36 @@ unexplained establishment failure in #853 or the mesh receipt debt in #889.
 The private reference engine changes no server message or external-client API.
 Rust, .NET, and Godot clients do not consume this browser engine. Their separate
 channel-closure assessments remain independent.
+
+### Session 435 browser closure and hosted relay timing evidence
+
+Browser repair F49 is verified by deterministic controls, real Chromium
+closure histories, and the hosted Browser Interop workflow at `b8637712`.
+The same head fails the Linux root job's clean JSON 16-player relay cell:
+p99 is 422,623 us against the unchanged 250,000 us limit. Issue
+[#956](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/956)
+owns the unresolved cause. The package verifier overlaps that cell and takes
+315.423 s. That overlap is an observation, not a proved cause.
+
+The local all-feature CI-profile relay and package tests pass together under
+CPU affinity 0,1 and four nextest slots. The relay takes 6.643 s; the package
+verifier takes 109.357 s. A later isolated run of the unchanged relay binary
+on CPU 0 completes all six cells, with JSON 16-player p99 14,170 us and
+MessagePack 16-player p99 10,745 us. These controls do not reproduce the hosted
+failure. The attempted one-CPU coload run began after the package process
+ended; it supplies isolated evidence only.
+
+The next head adds CPU snapshots before and after the root suite and prints a
+completed relay cell's full observation before its latency assertion. The
+250 ms limit, six cells, delivery ledgers, epoch/sequence checks, backpressure
+checks, eviction checks, feature set, and scheduling stay the same. A forced
+zero-limit negative control verifies that a refused cell retains its full
+observation; the real limit is restored before validation and publication.
+
+Retain both failed cold attempts. `d9020bca` stopped at the outdated H14
+command guard. `b8637712` compiles in 395 s and runs only 2,692/3,232 tests in
+614.246 s; 2,691 pass, one fails, 540 do not run, and 37 remain skipped.
+Neither attempt saves a cache or runs the later non-TLS, allocation, and H14
+controls. Neither proves the timing bound in
+[#953](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/953).
+The separate dependency-audit failure remains outside the user's work scope.

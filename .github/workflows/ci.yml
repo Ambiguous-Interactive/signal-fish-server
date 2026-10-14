@@ -384,9 +384,19 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0
 
+      - name: Record root CPU budget before tests
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash scripts/record-test-cpu-evidence.sh
+
       - name: Run nextest
         # nextest does not support doc-tests; those are validated by doc-validation.yml
         run: cargo nextest run --profile ci --locked --all-features --cargo-profile ci
+
+      - name: Record root CPU budget after tests
+        if: ${{ always() && runner.os == 'Linux' }}
+        shell: bash
+        run: bash scripts/record-test-cpu-evidence.sh
 
       - name: Reject TLS configuration in a non-TLS binary
         if: matrix.os == 'ubuntu-latest'

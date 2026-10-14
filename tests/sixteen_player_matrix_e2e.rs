@@ -783,18 +783,6 @@ async fn run_cell(
     let p95_micros = percentile(95);
     let p99_micros = percentile(99);
     let max_micros = *latencies.last().expect("matrix produced latency samples");
-    // The per-cell diagnostic below reports `p99_us` on every platform either
-    // way, so an exempt platform still records the number; only the gate is
-    // skipped.
-    if profile == NetworkProfile::Clean
-        && traffic.enforce_pr_latency_limit
-        && wall_clock_latency_is_gated()
-    {
-        assert!(
-            p99_micros < P99_LIMIT_MICROS,
-            "{cell_label}: p99 relay latency {p99_micros}us exceeded {P99_LIMIT_MICROS}us"
-        );
-    }
     let sender_completion = sender_completed_at.saturating_sub(Duration::from_millis(50));
     let ingress_messages = cell.players as f64 * traffic.messages_per_sender as f64;
     let achieved_ingress_messages_per_second = ingress_messages / sender_completion.as_secs_f64();
@@ -818,6 +806,16 @@ async fn run_cell(
         sender_completion.as_millis(),
         completion.as_millis(),
     );
+
+    if profile == NetworkProfile::Clean
+        && traffic.enforce_pr_latency_limit
+        && wall_clock_latency_is_gated()
+    {
+        assert!(
+            p99_micros < P99_LIMIT_MICROS,
+            "{cell_label}: p99 relay latency {p99_micros}us exceeded {P99_LIMIT_MICROS}us"
+        );
+    }
 
     drop(sinks);
     drop(streams);
