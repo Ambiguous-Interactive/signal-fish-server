@@ -386,12 +386,12 @@ jobs:
 
       - name: Run nextest
         # nextest does not support doc-tests; those are validated by doc-validation.yml
-        run: cargo nextest run --profile ci --locked --all-features
+        run: cargo nextest run --profile ci --locked --all-features --cargo-profile ci
 
       - name: Reject TLS configuration in a non-TLS binary
         if: matrix.os == 'ubuntu-latest'
         run: >-
-          cargo nextest run --profile ci --locked --no-default-features
+          cargo nextest run --profile ci --locked --no-default-features --cargo-profile ci
           --test config_and_endpoints_tests
           --no-tests fail
           -E 'test(=validate_config_rejects_tls_for_a_binary_without_tls_support)'
@@ -424,7 +424,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo nextest run --profile ci --locked --all-features \
+          cargo nextest run --profile ci --locked --all-features --cargo-profile ci \
             --test mixed_encoding_relay_e2e --run-ignored ignored-only \
             -E 'test(=unsupported_message_pack_fallback_does_not_flap_weaker_recipient)' \
             --no-tests fail \
@@ -442,16 +442,12 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Drop trybuild artifacts before cache save
-        # trybuild builds nested cargo projects under `<target>/tests`. Swatinem/rust-cache's
-        # restore-time cleanup probes `<target>/tests/target` (a path trybuild never creates) in a
-        # non-awaited call, surfacing a benign but noisy `##[error]ENOENT` whenever a restored
-        # cache contains that dir. Dropping it before the post-run cache save keeps it out of
-        # future caches; the noise self-clears after one save cycle (a cache saved before this
-        # step still shows it once on restore).
+      - name: Prepare nested test cache
+        # The pinned cache action walks both target/tests/target and trybuild.
+        # Create the missing sibling so its asynchronous walk cannot fail.
         if: always()
         shell: bash
-        run: rm -rf "${CARGO_TARGET_DIR:-target}/tests"
+        run: mkdir -p "${CARGO_TARGET_DIR:-target}/tests/target"
 
   doc-consistency:
     name: Doc Consistency

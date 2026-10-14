@@ -226,6 +226,27 @@ Key design decisions:
 **Test that enforces this:** `test_ci_workflow_has_required_jobs`
 (validates the Dependency Audit job exists in ci.yml)
 
+#### Test Build and Nested Cache
+
+The Linux test lane uses both `--profile ci` for nextest timeout settings and
+`--cargo-profile ci` for Cargo compilation. Cargo's existing CI profile removes
+debug data and keeps the development profile's assertions and overflow checks.
+The full suite, non-TLS control, and H14 control use the same Cargo profile.
+
+The lane keeps trybuild's dependency artifacts. Before cache save, an
+always-run Bash step creates `target/tests/target` under the effective target
+directory. The pinned cache action walks that directory and `tests/trybuild`.
+Creating its missing sibling prevents the asynchronous missing-directory error
+while the cache action still removes workspace artifacts. Other full-suite
+lanes retain their existing removal policy.
+
+Six focused controls check the two build profiles, safe cache handling, and
+unset, empty, and space-containing target overrides. A fixture that executes
+the pinned cache cleaner reproduces the old error and passes with preparation.
+Hosted cold and warm timings determine the performance result; a cache hit or
+a green rerun alone does not establish a CI time improvement. See
+[#953](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/953).
+
 #### Relay Allocation Ceilings
 
 The CI workflow runs the production-seam relay allocation harness on Linux for

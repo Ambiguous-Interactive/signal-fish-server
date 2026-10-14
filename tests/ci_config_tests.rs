@@ -23070,6 +23070,55 @@ fn run_step_drops_trybuild_tests_dir(run: &str) -> bool {
     run.contains("rm -rf") && run.contains("/tests")
 }
 
+fn run_step_prepares_trybuild_cache(run: &str) -> bool {
+    run.trim() == r#"mkdir -p "${CARGO_TARGET_DIR:-target}/tests/target""#
+}
+
+fn step_handles_trybuild_cache(step: &Yaml) -> bool {
+    let run = step
+        .as_mapping_get("run")
+        .and_then(Yaml::as_str)
+        .unwrap_or("");
+    step.as_mapping_get("if").and_then(Yaml::as_str) == Some("always()")
+        && step.as_mapping_get("shell").and_then(Yaml::as_str) == Some("bash")
+        && (run.trim() == r#"rm -rf "${CARGO_TARGET_DIR:-target}/tests""#
+            || run_step_prepares_trybuild_cache(run))
+}
+
+#[test]
+fn test_nested_cache_policy_requires_a_safe_always_run_step() {
+    let prepare = r#"mkdir -p "${CARGO_TARGET_DIR:-target}/tests/target""#;
+    let drop = r#"rm -rf "${CARGO_TARGET_DIR:-target}/tests""#;
+    for (label, condition, shell, command, expected) in [
+        ("prepare both walks", "always()", "bash", prepare, true),
+        ("discard nested cache", "always()", "bash", drop, true),
+        ("successful runs only", "success()", "bash", prepare, false),
+        ("wrong shell", "always()", "pwsh", prepare, false),
+        (
+            "wrong sibling",
+            "always()",
+            "bash",
+            "mkdir -p target/tests/other",
+            false,
+        ),
+        (
+            "comment only",
+            "always()",
+            "bash",
+            "# mkdir -p target/tests/target",
+            false,
+        ),
+    ] {
+        let source = format!("if: '{condition}'\nshell: {shell}\nrun: |\n  {command}\n");
+        let documents = Yaml::load_from_str(&source).expect("fixture step");
+        assert_eq!(
+            step_handles_trybuild_cache(&documents[0]),
+            expected,
+            "{label}"
+        );
+    }
+}
+
 #[test]
 fn test_jobs_running_trybuild_under_rust_cache_drop_nested_target_dir() {
     // CLASS GUARD for the trybuild/rust-cache `##[error]ENOENT` noise (root cause and
@@ -23126,7 +23175,7 @@ fn test_jobs_running_trybuild_under_rust_cache_drop_nested_target_dir() {
                 }
                 if let Some(run) = step.as_mapping_get("run").and_then(|v| v.as_str()) {
                     runs_full_suite |= run_step_executes_full_test_suite(run);
-                    drops_tests_dir |= run_step_drops_trybuild_tests_dir(run);
+                    drops_tests_dir |= step_handles_trybuild_cache(step);
                 }
             }
 
@@ -24292,6 +24341,132 @@ fn test_ci_nextest_uses_ci_profile() {
          The repository defines [profile.ci] in .config/nextest.toml; CI should \
          activate it so timeout/output tuning is not silently ignored."
     );
+}
+
+#[test]
+fn test_nextest_uses_the_cargo_ci_profile_for_every_build() {
+    let root = repo_root();
+    let content = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let job = extract_workflow_job_block(&content, "nextest").expect("nextest job");
+    let commands: Vec<_> = job
+        .lines()
+        .filter(|line| line.contains("cargo nextest run"))
+        .collect();
+    assert_eq!(
+        commands.len(),
+        3,
+        "keep the full suite, non-TLS control, and H14 control"
+    );
+    for command in commands {
+        assert!(
+            command.contains("--cargo-profile ci"),
+            "use Cargo's lean CI profile: {command}"
+        );
+        assert!(
+            command.contains("--profile ci"),
+            "keep nextest timeout tuning: {command}"
+        );
+    }
+}
+
+#[test]
+fn test_nextest_preserves_nested_dependency_cache() {
+    let root = repo_root();
+    let content = read_live_file(&root.join(".github/workflows/ci.yml"));
+    let documents = Yaml::load_from_str(&content).expect("valid workflow");
+    let steps = documents[0]
+        .as_mapping_get("jobs")
+        .and_then(|jobs| jobs.as_mapping_get("nextest"))
+        .and_then(|job| job.as_mapping_get("steps"))
+        .and_then(Yaml::as_sequence)
+        .expect("nextest steps");
+    let preparation = steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str) == Some("Prepare nested test cache")
+        })
+        .expect("cache preparation step");
+    assert_eq!(
+        preparation.as_mapping_get("if").and_then(Yaml::as_str),
+        Some("always()")
+    );
+    assert_eq!(
+        preparation.as_mapping_get("shell").and_then(Yaml::as_str),
+        Some("bash")
+    );
+    assert_eq!(
+        preparation.as_mapping_get("run").and_then(Yaml::as_str),
+        Some(r#"mkdir -p "${CARGO_TARGET_DIR:-target}/tests/target""#)
+    );
+    for step in steps {
+        let run = step
+            .as_mapping_get("run")
+            .and_then(Yaml::as_str)
+            .unwrap_or("");
+        assert!(
+            !run_step_drops_trybuild_tests_dir(run),
+            "retain the dependency cache: {run}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_nested_cache_preparation_keeps_dependencies_with_target_overrides() {
+    let content = read_live_file(&repo_root().join(".github/workflows/ci.yml"));
+    let documents = Yaml::load_from_str(&content).expect("valid workflow");
+    let steps = documents[0]
+        .as_mapping_get("jobs")
+        .and_then(|jobs| jobs.as_mapping_get("nextest"))
+        .and_then(|job| job.as_mapping_get("steps"))
+        .and_then(Yaml::as_sequence)
+        .expect("nextest steps");
+    let command = steps
+        .iter()
+        .find(|step| {
+            step.as_mapping_get("name").and_then(Yaml::as_str) == Some("Prepare nested test cache")
+        })
+        .and_then(|step| step.as_mapping_get("run"))
+        .and_then(Yaml::as_str)
+        .expect("actual preparation command");
+    for (label, target_override) in [
+        ("unset", None),
+        ("empty", Some("")),
+        ("path with spaces", Some("custom build target")),
+    ] {
+        let directory = unique_temp_dir("nested-cache-preparation");
+        let target = directory.path().join(
+            target_override
+                .filter(|value| !value.is_empty())
+                .unwrap_or("target"),
+        );
+        let dependency = target.join("tests/trybuild/debug/deps/libcached.rlib");
+        write_file(&dependency, "retained dependency");
+        let mut process = bash_command();
+        process
+            .arg("-c")
+            .arg(command)
+            .current_dir(directory.path())
+            .env_remove("CARGO_TARGET_DIR");
+        if let Some(value) = target_override {
+            process.env("CARGO_TARGET_DIR", value);
+        }
+        let result = process.output().expect("run cache preparation");
+        assert!(
+            result.status.success(),
+            "{label}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            target.join("tests/target").is_dir(),
+            "{label}: missing cache walk sibling"
+        );
+        assert_eq!(
+            read_file(&dependency),
+            "retained dependency",
+            "{label}: dependency changed"
+        );
+    }
 }
 
 #[test]
@@ -34908,7 +35083,7 @@ fn test_mutants_profile_stays_relief_free_and_sleep_bounded() {
 }
 
 /// Jobs that run the FULL test suite under a Swatinem/rust-cache and therefore
-/// must drop trybuild's nested `<target>/tests` artifacts before the cache save
+/// must handle trybuild's nested `<target>/tests` artifacts before cache save
 /// (otherwise rust-cache's restore-time cleanup emits a noisy `##[error]ENOENT`).
 ///
 /// Keyed by (workflow file, job key). The job keys are the REAL keys verified
@@ -34947,15 +35122,22 @@ fn extract_workflow_job_block(content: &str, job_key: &str) -> Option<String> {
     }
 }
 
-/// Return `true` if `job_block` contains the canonical trybuild-drop step:
-/// a step named `Drop trybuild artifacts before cache save` whose `run:` is
-/// exactly `rm -rf "${CARGO_TARGET_DIR:-target}/tests"` and which has
-/// `if: always()`.
-fn job_has_trybuild_drop_step(job_block: &str) -> bool {
-    let has_name = job_block.contains("Drop trybuild artifacts before cache save");
-    let has_run = job_block.contains(r#"rm -rf "${CARGO_TARGET_DIR:-target}/tests""#);
-    let has_if_always = job_block.contains("if: always()");
-    has_name && has_run && has_if_always
+/// Require one always-run Bash step that removes the nested artifacts or
+/// prepares both directories walked by the pinned cache action.
+fn job_has_safe_trybuild_cache_step(job_block: &str) -> bool {
+    let Ok(documents) = Yaml::load_from_str(job_block) else {
+        return false;
+    };
+    documents
+        .first()
+        .and_then(Yaml::as_mapping)
+        .is_some_and(|jobs| {
+            jobs.iter().any(|(_, job)| {
+                job.as_mapping_get("steps")
+                    .and_then(Yaml::as_sequence)
+                    .is_some_and(|steps| steps.iter().any(step_handles_trybuild_cache))
+            })
+        })
 }
 
 #[test]
@@ -34984,7 +35166,7 @@ fn test_full_suite_caching_jobs_drop_trybuild_artifacts() {
             continue;
         };
         checked_blocks += 1;
-        if !job_has_trybuild_drop_step(&block) {
+        if !job_has_safe_trybuild_cache_step(&block) {
             violations.push(format!(
                 "{workflow_file} job `{job_key}` is missing the canonical trybuild-drop step.\n  \
                  Required: a step named `Drop trybuild artifacts before cache save` with \
@@ -35050,7 +35232,7 @@ fn test_full_suite_caching_jobs_drop_trybuild_artifacts() {
             }
             let key_pair = (workflow_file, job_key.as_str());
             let is_registered = registered.contains(&key_pair);
-            let has_drop = job_has_trybuild_drop_step(&block);
+            let has_drop = job_has_safe_trybuild_cache_step(&block);
             if !is_registered && !has_drop {
                 violations.push(format!(
                     "{workflow_file} job `{job_key}` uses Swatinem/rust-cache AND runs the full \
@@ -35069,7 +35251,7 @@ fn test_full_suite_caching_jobs_drop_trybuild_artifacts() {
         "Full-suite trybuild-artifact-drop policy violations:\n\n{}\n\n\
          Why this matters: a full-suite test run under rust-cache caches trybuild's \
          `<target>/tests` dir, and rust-cache's restore cleanup then emits a noisy \
-         `##[error]ENOENT`. Dropping the dir before the save keeps the trigger out of the cache.\n\
+         `##[error]ENOENT`. Removing artifacts or preparing the missing sibling prevents this error.\n\
          Fix: see each line above.\n\
          Verify: cargo test --test ci_config_tests test_full_suite_caching_jobs_drop_trybuild_artifacts",
         violations.join("\n")
