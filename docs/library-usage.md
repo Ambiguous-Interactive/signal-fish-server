@@ -17,36 +17,55 @@ leaves the old metadata intact and returns an error to the player.
 signal-fish-server = "0.11.0"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
+axum = "0.8"
 
 ```
 
 ## Basic Embedded Server
 
-```rust,ignore
+Run this complete example with `cargo run --example embedded_server` from the
+repository. For another application, use the dependencies above and copy the
+code below. Use the [configuration guide](configuration.md) to provide valid
+settings. The default metrics policy needs a configured token.
+Press Ctrl+C to send the shutdown advisory, close sockets, and wait for cleanup
+before the runtime exits.
 
+The source is [examples/embedded_server.rs](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/examples/embedded_server.rs).
+The example and this block use the same code. The tests run its startup and
+shutdown functions against an in-memory server.
+
+```rust
 use signal_fish_server::{
     config,
     database::DatabaseConfig,
-    server::{EnhancedGameServer, ServerConfig},
+    server::{run_drain_choreography, EnhancedGameServer, ServerConfig},
     websocket,
 };
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{future::Future, net::SocketAddr, sync::Arc, time::Duration};
 
+#[cfg(not(test))]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Loading rejects malformed sources and type mismatches, but deliberately
-    // only logs semantic validation errors so tools can inspect the merged
-    // configuration. Embedders must make semantic failure fatal before mapping
-    // the loaded values into runtime types.
     let cfg = config::load()?;
-    config::validate_config_security(&cfg)?;
+    let game_server = build_server(&cfg).await?;
+    let listener =
+        tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], cfg.port))).await?;
+    println!("Server listening on {}", listener.local_addr()?);
+    serve_until(listener, game_server, &cfg.security.cors_origins, async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            eprintln!("Shutdown signal failed: {error}");
+        }
+    })
+    .await
+}
 
-    // Build server configuration
-    // Note: Only key fields shown for brevity - see src/server.rs ServerConfig for all required fields
+pub async fn build_server(cfg: &config::Config) -> anyhow::Result<Arc<EnhancedGameServer>> {
+    config::validate_config_security(cfg)?;
     let server_config = ServerConfig {
         default_max_players: cfg.server.default_max_players,
         ping_timeout: Duration::from_secs(cfg.server.ping_timeout),
         room_cleanup_interval: Duration::from_secs(cfg.server.room_cleanup_interval),
+        drain_grace: Duration::from_secs(cfg.server.drain_grace_secs),
         max_rooms_per_game: cfg.server.max_rooms_per_game,
         max_rooms: cfg.server.max_rooms,
         rate_limit_config: signal_fish_server::rate_limit::RateLimitConfig {
@@ -56,11 +75,16 @@ async fn main() -> anyhow::Result<()> {
             max_signals: cfg.rate_limit.max_signals,
             max_signal_errors: cfg.rate_limit.max_signal_errors,
             max_inbound_error_replies: cfg.rate_limit.max_inbound_error_replies,
+            max_relay_bytes: cfg.rate_limit.max_relay_bytes,
+            max_room_relay_bytes: cfg.rate_limit.max_room_relay_bytes,
         },
         empty_room_timeout: Duration::from_secs(cfg.server.empty_room_timeout),
         inactive_room_timeout: Duration::from_secs(cfg.server.inactive_room_timeout),
         max_message_size: cfg.security.max_message_size,
         max_outbound_message_size: cfg.security.max_outbound_message_size,
+        max_signal_bytes: cfg.security.max_signal_bytes,
+        max_connection_info_bytes: cfg.security.max_connection_info_bytes,
+        max_game_data_bytes: cfg.security.max_game_data_bytes.clone(),
         max_connections_per_ip: cfg.security.max_connections_per_ip,
         max_connections: cfg.security.max_connections,
         require_metrics_auth: cfg.security.require_metrics_auth,
@@ -73,58 +97,59 @@ async fn main() -> anyhow::Result<()> {
         heartbeat_throttle: Duration::from_secs(cfg.server.heartbeat_throttle_secs),
         region_id: cfg.server.region_id.clone(),
         room_code_prefix: cfg.server.room_code_prefix.clone(),
-        ..Default::default()
+        default_max_spectators: cfg.server.default_max_spectators,
     };
+    let game_server = EnhancedGameServer::new(
+        server_config,
+        cfg.protocol.clone(),
+        cfg.relay_types.clone(),
+        cfg.session.clone(),
+        cfg.turn.clone(),
+        DatabaseConfig::InMemory,
+        cfg.metrics.clone(),
+        cfg.coordination.clone(),
+        cfg.security.transport.clone(),
+        cfg.security.allowed_apps.clone(),
+    )
+    .await?;
+    game_server.install_connect_token_key(&cfg.security)?;
+    Ok(game_server)
+}
 
-    // Create the game server
-    let game_server = Arc::new(
-        EnhancedGameServer::new(
-            server_config,
-            cfg.protocol.clone(),
-            cfg.relay_types.clone(),
-            cfg.session.clone(),
-            cfg.turn.clone(),
-            DatabaseConfig::InMemory,
-            cfg.metrics.clone(),
-            cfg.coordination.clone(),
-            cfg.security.transport.clone(),
-            cfg.security.allowed_apps.clone(),
-        )
-        .await?
-    );
-
-    // Start background cleanup task
-    let cleanup = game_server.clone();
-    tokio::spawn(async move {
-        cleanup.cleanup_task().await
+pub async fn serve_until(
+    listener: tokio::net::TcpListener,
+    game_server: Arc<EnhancedGameServer>,
+    cors_origins: &str,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    let router = websocket::create_standalone_router(cors_origins).with_state(game_server.clone());
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let cleanup_server = game_server.clone();
+    let cleanup = tokio::spawn(async move {
+        cleanup_server
+            .cleanup_task_until(async move {
+                let _ = shutdown_rx.wait_for(|stopping| *stopping).await;
+            })
+            .await;
     });
-
-    // Build the Axum router
-    let router = websocket::create_standalone_router(&cfg.security.cors_origins)
-        .with_state(game_server.clone());
-
-    // Start listening
-    let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-
-    println!("Server listening on {}", addr);
-
-    let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
-
-    axum::serve(
+    let drain_server = game_server.clone();
+    let drain_shutdown_tx = shutdown_tx.clone();
+    let result = axum::serve(
         listener,
         router.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .await?;
-
-    // Once the serve future returns, run the shutdown drain so connected
-    // clients receive their `GoingAway` advisory and coded `4000` close
-    // instead of an abrupt drop when the process exits.
-    signal_fish_server::server::run_drain_choreography(&game_server, shutdown_tx).await;
-
+    .with_graceful_shutdown(async move {
+        shutdown.await;
+        run_drain_choreography(&drain_server, drain_shutdown_tx).await;
+    })
+    .await;
+    if !game_server.is_draining() {
+        run_drain_choreography(&game_server, shutdown_tx).await;
+    }
+    cleanup.await?;
+    result?;
     Ok(())
 }
-
 ```
 
 Keep the owning Tokio runtime alive until the shutdown drain finishes. Canceling
@@ -146,6 +171,10 @@ as a failed connection attempt. The WebSocket path reports close code `1011`
 with reason `admission_failed`. Panic payloads are not returned to the client.
 
 ## Custom Storage Backend
+
+The fragments below are schematic. They need your storage implementation and
+all remaining `GameDatabase` methods. Add `async-trait` and `uuid` to your
+application dependencies.
 
 Implement the `GameDatabase` trait for custom room-record storage. This alone
 does not persist a live room across process restart; read the
@@ -272,6 +301,10 @@ let game_server = EnhancedGameServer::new(
 
 ## Custom Router Integration
 
+This fragment needs `game_server` from the complete example, a
+`SocketAddr` import, and your `api_status` handler. Use the complete example's
+shutdown path when you serve the merged router.
+
 Integrate Signal Fish into an existing Axum application:
 
 ```rust
@@ -377,6 +410,10 @@ Available features:
   for local interop testing against legacy matchbox clients.
 
 ## Testing
+
+This fragment is schematic. It needs constructor arguments and a room created
+through the WebSocket API. For a runnable embedding test, see
+[the starter tests](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/tests/library_usage_tests.rs).
 
 Use the library in your tests:
 

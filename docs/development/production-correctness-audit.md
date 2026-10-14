@@ -2863,3 +2863,28 @@ Native and browser reference clients accept authoritative generations but
 reject Direct execution and use relay. Fortress fixtures use relay adapters.
 They do not establish external Direct transport acceptance. This work does not
 complete the wider A11 or #826 audit.
+
+### A17/A18 follow-up — Compile and drain the embedding starter
+
+Baseline `154e5805`. Issue
+[#951](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/951).
+The complete-looking Library Usage starter failed compilation with `E0063`
+for missing relay-byte rate limits and `E0308` for an extra `Arc` layer.
+Its direct dependency block also omitted `axum`. Other loaded limits fell
+back to runtime defaults, and the listener had no shutdown trigger.
+
+The repaired starter maps every runtime setting from validated configuration,
+uses the constructor's existing `Arc`, installs the configured tenant key,
+and drains on Ctrl+C before the listener and cleanup task finish.
+`examples/embedded_server.rs` is compiled by the existing all-target gates.
+`tests/library_usage_tests.rs` imports its startup and shutdown functions,
+ties the guide to that source, checks altered limits and invalid configuration,
+and observes v3 `GoingAway` followed by close code `4000 server_shutdown`
+over a real loopback socket. The retained controls require zero remaining
+registrations and test shutdown without clients. An isolated embedding
+application also compiles with only the documented direct dependencies.
+
+These controls verify the starter's in-memory startup and requested drain.
+They do not qualify runtime destruction during drain, every deployment signal,
+TLS listener ownership, or every configuration field's behavior. A17, A18,
+and the wider #826 campaign remain incomplete.

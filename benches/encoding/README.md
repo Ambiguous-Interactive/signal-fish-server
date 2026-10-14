@@ -78,7 +78,8 @@ The runtime executable uses the normal system allocator.
 These are concrete schema and API choices, not optimal implementations of each
 format. The corpus is synthetic. Host load can affect timing. Results do not
 establish server throughput, cross-language costs, or a new encoding adoption.
-Issues #771 and #772 own those separate gates.
+The [client-language study](CROSS_LANGUAGE.md) supplies the #771 measurements.
+The [adoption decision](ADOPTION.md) applies the separate #772 gate.
 
 ## Generated bindings
 

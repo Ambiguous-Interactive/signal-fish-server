@@ -15,6 +15,30 @@ use common::{bash_command, repo_root, unique_temp_dir, write_file};
 use std::fs;
 use std::path::Path;
 
+#[test]
+fn editor_keeps_save_checks_out_of_the_agent_build_loop() {
+    let path = ".vscode/settings.json";
+    let raw = fs::read_to_string(repo_root().join(path)).expect("read editor settings");
+    let settings: serde_json::Value =
+        serde_json::from_str(&common::strip_comment_lines(&raw)).expect("parse editor settings");
+    assert_eq!(
+        settings["rust-analyzer.checkOnSave"], false,
+        "{path}: saving must not launch a full Clippy sweep that locks scoped Cargo runs"
+    );
+    assert_eq!(
+        settings["rust-analyzer.check.command"], "clippy",
+        "{path}: manual editor checks must retain Clippy"
+    );
+    assert_eq!(
+        settings["rust-analyzer.check.allTargets"], true,
+        "{path}: manual editor checks must retain all targets"
+    );
+    assert_eq!(
+        settings["rust-analyzer.cargo.features"], "all",
+        "{path}: manual editor checks must retain all features"
+    );
+}
+
 fn copy_dev_loop_script(temp_root: &Path) {
     let script_src = repo_root().join("scripts/dev-loop.sh");
     let script_dst = temp_root.join("scripts/dev-loop.sh");
