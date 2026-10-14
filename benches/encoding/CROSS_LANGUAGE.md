@@ -38,8 +38,8 @@ The runner checks source lengths and hashes against the corpus manifest. Each
 language checks logical values and coordinate/velocity float64 bits, including
 negative zero. The independent Python oracle checks all twenty cells and their
 samples. Recorded-source hashes and CSV summaries must agree with the raw
-samples. Its five negative controls reject changed values, negative-zero loss,
-missing cells, duplicate cells, and changed protobuf bytes.
+samples. Its six negative controls reject changed values, negative-zero loss,
+missing cells, duplicate cells, changed boolean types, and changed protobuf bytes.
 
 The checked-in protobuf schema matches Rust `prost` field tags, integer types,
 packed repeated doubles, and tile fields. C# and TypeScript protobuf output and

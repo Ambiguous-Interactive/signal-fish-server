@@ -48,6 +48,22 @@ def require(condition, message):
         raise ValueError(message)
 
 
+def logical_equal(left, right):
+    # Equal integer/decimal coordinate spellings are allowed. JSON booleans
+    # are a separate type even though Python bool inherits from int.
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return left == right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(logical_equal(left[key], right[key]) for key in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(logical_equal(a, b) for a, b in zip(left, right))
+    return left == right
+
+
 def verify(rows, rust, measured):
     manifest = json.loads((CORPUS / 'manifest.json').read_text())
     fixtures = {f['name']: f for f in manifest['fixtures']}
@@ -65,7 +81,7 @@ def verify(rows, rust, measured):
                 hashlib.sha256(source).hexdigest() == fixture['sha256'], 'Source manifest differs')
         value = json.loads(source)
         context = f"{row['language']}/{row['codec']}/{row['fixture']}"
-        require(row['logical'] == value, f'{context}: logical values differ')
+        require(logical_equal(row['logical'], value), f'{context}: logical values differ')
         require(row['float_bits'] == bits(value), f'{context}: floating-point bits differ')
         wire = base64.b64decode(row['wire_base64'], validate=True)
         require(len(wire) == row['bytes'], f'{context}: wire byte count differs')
@@ -86,10 +102,13 @@ def verify(rows, rust, measured):
 def self_test(rows, rust):
     # Independent negative controls must reject both value and signed-zero loss.
     import copy
-    for mutate in ('value', 'bits', 'missing', 'duplicate', 'wire'):
+    for mutate in ('value', 'boolean', 'bits', 'missing', 'duplicate', 'wire'):
         broken = copy.deepcopy(rows)
         if mutate == 'value':
             broken[0]['logical'][0] += 1
+        elif mutate == 'boolean':
+            record = next(r for r in broken if r['fixture'] == 'snapshot-small')
+            record['logical']['entities'][0]['active'] = 0
         elif mutate == 'bits':
             record = next(r for r in broken if '0000000000000080' in r['float_bits'])
             index = record['float_bits'].index('0000000000000080')
@@ -189,7 +208,7 @@ def main():
                        'sources': {name: hashlib.sha256((STUDY / name).read_bytes()).hexdigest() for name in sorted(sources)},
                        'corpus_manifest_sha256': hashlib.sha256((CORPUS / 'manifest.json').read_bytes()).hexdigest()}
         (args.output / 'environment.json').write_text(json.dumps(environment, indent=2) + '\n')
-    print(f'Passed {len(rows)} cells, 8 Rust reference wires, and 5 negative controls.')
+    print(f'Passed {len(rows)} cells, 8 Rust reference wires, and 6 negative controls.')
 
 
 if __name__ == '__main__':

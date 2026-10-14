@@ -2,7 +2,7 @@
 
 All four frozen gameplay shapes were measured in all three requested languages.
 The run records twenty codec/fixture cells and forty encode/decode operations.
-All 400 timed samples are retained. All corpus controls and five independent
+All 400 timed samples are retained. All corpus controls and six independent
 negative controls passed. Protobuf and schema-varint match the Rust wire bytes.
 
 Host: Linux aarch64 on the same shared development container as the Rust baseline.
@@ -30,26 +30,26 @@ wide timing variation. These observations alone do not meet the adoption gate.
 | Rust | messagepack-named | world-delta | 3752 | 3.931 | 6.830 |
 | Rust | prost | world-delta | 2147 | 3.277 | 4.880 |
 | Rust | schema-varint | world-delta | 1755 | 0.925 | 2.967 |
-| typescript | msgpack-all-f64 | input-state | 37 | 2.277 | 0.236 |
-| typescript | protobuf | input-state | 10 | 0.590 | 1.031 |
-| typescript | msgpack-all-f64 | snapshot-small | 293 | 4.432 | 1.780 |
-| typescript | protobuf | snapshot-small | 139 | 23.330 | 4.750 |
-| typescript | msgpack-all-f64 | snapshot-large | 1043 | 9.062 | 6.009 |
-| typescript | protobuf | snapshot-large | 507 | 86.391 | 14.260 |
-| typescript | msgpack-all-f64 | world-delta | 5736 | 43.045 | 32.286 |
-| typescript | protobuf | world-delta | 2147 | 324.245 | 88.276 |
-| csharp | protobuf | input-state | 10 | 0.092 | 0.106 |
-| csharp | protobuf | snapshot-small | 139 | 0.554 | 0.700 |
-| csharp | protobuf | snapshot-large | 507 | 1.440 | 2.417 |
-| csharp | protobuf | world-delta | 2147 | 6.616 | 10.745 |
-| gdscript | msgpack-f32 | input-state | 6 | 8.178 | 5.812 |
-| gdscript | schema-varint | input-state | 6 | 3.124 | 5.686 |
-| gdscript | msgpack-f32 | snapshot-small | 189 | 92.335 | 68.364 |
-| gdscript | schema-varint | snapshot-small | 124 | 13.982 | 30.973 |
-| gdscript | msgpack-f32 | snapshot-large | 651 | 532.614 | 329.915 |
-| gdscript | schema-varint | snapshot-large | 448 | 74.887 | 110.845 |
-| gdscript | msgpack-f32 | world-delta | 3032 | 2081.443 | 1205.695 |
-| gdscript | schema-varint | world-delta | 1755 | 271.582 | 523.888 |
+| typescript | msgpack-all-f64 | input-state | 37 | 2.615 | 0.275 |
+| typescript | protobuf | input-state | 10 | 0.756 | 1.028 |
+| typescript | msgpack-all-f64 | snapshot-small | 293 | 4.951 | 2.052 |
+| typescript | protobuf | snapshot-small | 139 | 26.059 | 4.596 |
+| typescript | msgpack-all-f64 | snapshot-large | 1043 | 9.654 | 5.838 |
+| typescript | protobuf | snapshot-large | 507 | 64.145 | 12.309 |
+| typescript | msgpack-all-f64 | world-delta | 5736 | 36.815 | 24.534 |
+| typescript | protobuf | world-delta | 2147 | 249.211 | 67.337 |
+| csharp | protobuf | input-state | 10 | 0.052 | 0.076 |
+| csharp | protobuf | snapshot-small | 139 | 0.421 | 0.634 |
+| csharp | protobuf | snapshot-large | 507 | 1.480 | 2.115 |
+| csharp | protobuf | world-delta | 2147 | 5.967 | 9.466 |
+| gdscript | msgpack-f32 | input-state | 6 | 6.949 | 5.477 |
+| gdscript | schema-varint | input-state | 6 | 2.858 | 3.360 |
+| gdscript | msgpack-f32 | snapshot-small | 189 | 58.050 | 36.303 |
+| gdscript | schema-varint | snapshot-small | 124 | 9.262 | 13.841 |
+| gdscript | msgpack-f32 | snapshot-large | 651 | 194.376 | 120.912 |
+| gdscript | schema-varint | snapshot-large | 448 | 25.987 | 46.839 |
+| gdscript | msgpack-f32 | world-delta | 3032 | 984.691 | 573.727 |
+| gdscript | schema-varint | world-delta | 1755 | 140.404 | 296.765 |
 
 The TypeScript MessagePack mode writes every number as float64 to preserve
 negative zero. The GDScript library writes float32 and loses `0.1` precision.
