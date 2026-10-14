@@ -12,13 +12,12 @@
 //!
 //! A non-relay decision is also recorded as the room's sticky
 //! [`ActiveSessionPlan`], the single source of truth for the session the room is
-//! actually running. Finalized join/reconnect refreshes consult it instead of
-//! re-running the ladder, and whenever a membership-touching event (a departure
-//! via [`EnhancedGameServer::handle_session_member_departure`], or a late join /
-//! reconnect) finds a `host`-topology entry whose stored host is invalid — no
-//! longer a member, or seated but no longer capable of the session
-//! ([`ActiveSessionPlan::host_invalid`]) — execution-aware repair re-elects a
-//! host and re-emits fresh per-recipient `SessionPlan`s. Topology and
+//! actually running. Membership refreshes and Direct host endpoint changes
+//! consult it instead of re-running the ladder. An invalid stored host
+//! ([`ActiveSessionPlan::host_invalid`]) triggers execution-aware re-election
+//! or an authoritative Relay reset when no executable host remains. A usable
+//! Direct host endpoint replacement publishes a fresh shared generation without
+//! waiting for membership changes. Topology and
 //! transport are **sticky for the session lifetime**: the ladder runs once at
 //! finalize and is never re-run mid-session, even though the capability
 //! intersection can only widen when members depart — a mid-game data-path
@@ -61,8 +60,8 @@ use super::{EnhancedGameServer, NegotiatedProtocol};
 /// non-relay plan. Relay-floor rooms record nothing; a later reconnect derives
 /// its explicit Relay/Relay refresh from that absence rather than sticky state.
 ///
-/// This is what the room is *actually running*: late-join / reconnect pairing
-/// and departure re-planning consult it rather than re-running
+/// This is what the room is *actually running*: membership and Direct endpoint
+/// refreshes consult it rather than re-running
 /// [`choose_session_plan`] over the current member list, because the live
 /// membership can drift from the finalize-time membership (departures open
 /// seats; reconnects can re-seat an incumbent with downgraded capabilities)
@@ -72,7 +71,7 @@ use super::{EnhancedGameServer, NegotiatedProtocol};
 /// run the stored pair.
 ///
 /// Topology and transport are immutable for the session lifetime; only `host`
-/// is rewritten (by host failover re-election when the host departs).
+/// is rewritten by execution-aware host re-election.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ActiveSessionPlan {
     pub topology: Topology,
@@ -84,7 +83,7 @@ impl ActiveSessionPlan {
     /// Rehydrate a full [`SessionPlanDecision`] from this sticky decision plus
     /// the room's *current* member list. The ladder is **not** re-run — the
     /// stored topology/transport/host shape per-recipient plans for finalized
-    /// joins, reconnects, and departure re-planning.
+    /// membership refreshes and Direct endpoint changes.
     pub(crate) fn decision_with(self, members: Vec<SessionMember>) -> SessionPlanDecision {
         SessionPlanDecision {
             generation: SessionGeneration::new_v4(),
@@ -95,15 +94,10 @@ impl ActiveSessionPlan {
         }
     }
 
-    /// Whether this is a `host`-topology decision whose stored host can no
-    /// longer anchor the session: no host was recorded, the recorded host is no
-    /// longer in `members`, or the recorded host is still a member but no
-    /// longer satisfies [`Self::supported_by`] (reachable only through a
-    /// reconnect-with-downgraded-capabilities race — departure re-planning
-    /// never fires for a member that stays seated, so without this arm such a
-    /// host would wedge the room forever). This is the wedge state both
-    /// membership-touching events repair before publication: left alone, every
-    /// plan the room hands out would point at a host that cannot answer.
+    /// Whether a host-topology session has no usable stored host because it is
+    /// absent, lacks the negotiated capabilities, or has no usable Direct
+    /// endpoint. Membership refreshes and Direct host endpoint updates resolve
+    /// this state before publishing a new authoritative plan.
     pub(crate) fn host_invalid(&self, members: &[SessionMember]) -> bool {
         self.topology == Topology::Host
             && !self.host.is_some_and(|host| {
@@ -197,7 +191,7 @@ pub(crate) struct SessionPlanDecision {
 }
 
 /// Pure resolution of the session plan every member must observe after a
-/// membership publication. State and metrics are deliberately deferred to the
+/// membership or endpoint publication. State and metrics are deferred to the
 /// caller's exact-routing transaction hook.
 pub(crate) struct MembershipSessionDecision {
     pub decision: SessionPlanDecision,
@@ -601,11 +595,11 @@ impl SessionPlanDecision {
     /// - **Host:** the host receives every pairable client (each
     ///   `initiate = false`); each pairable client receives only the host
     ///   (`initiate = true`). Clients never signal each other in a star topology.
-    /// - **Relay:** an empty peer list. This is serialized for authoritative
-    ///   Finalized-room join/reconnect refreshes and otherwise remains defensive.
+    /// - **Relay:** an empty peer list for finalization, finalized membership
+    ///   refreshes, and terminal host-loss resets.
     ///
     /// This is the single peer-list seam every emission path shares (finalize,
-    /// host-failover re-plan, finalized join, and reconnect), so the filter
+    /// host failover, endpoint refresh, finalized join, and reconnect), so the filter
     /// holds uniformly. At FINALIZE it is
     /// provably a no-op: [`choose_session_plan`] selects a non-relay pair only
     /// when [`all_support`] holds, i.e. every member already satisfies the
@@ -711,7 +705,7 @@ impl EnhancedGameServer {
     /// player list, attaching each player's negotiated capabilities.
     ///
     /// Shared by finalize (which runs the ladder), finalized membership
-    /// refreshes, and [`Self::handle_session_member_departure`] (host failover).
+    /// refreshes, Direct endpoint changes, and host failover.
     /// Membership refreshes rehydrate the stored decision over current members
     /// instead of re-running the ladder.
     ///

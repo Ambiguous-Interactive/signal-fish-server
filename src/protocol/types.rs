@@ -180,9 +180,10 @@ pub struct SessionPeer {
     pub initiate: bool,
 }
 
-/// The per-recipient session directive emitted at lobby finalization (v3 only).
+/// The per-recipient authoritative session directive (v3 only).
 ///
-/// Sent after the unchanged `GameStarting` to each v3-capable member. Under the
+/// Initial emission follows `GameStarting`; membership refreshes and Direct
+/// host endpoint changes send a fresh plan to every current v3 member. Under the
 /// protocol v3 session-selection and deterministic-offerer contracts, it tells
 /// the recipient which topology/transport to use, who (if anyone) the host is,
 /// which peers to connect to (with per-recipient `initiate` flags), the ICE
@@ -194,7 +195,7 @@ pub struct SessionPeer {
 pub struct SessionPlanPayload {
     /// Opaque generation shared by every recipient of this room-plan
     /// publication. A later generation supersedes every retained physical
-    /// WebRTC pair; logical peer obligations remain stable.
+    /// WebRTC or Direct link. The new plan defines the current peer obligations.
     pub generation: SessionGeneration,
     /// Chosen session topology (`relay`, `host`, or `mesh`).
     pub topology: Topology,
