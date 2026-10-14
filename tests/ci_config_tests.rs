@@ -1550,13 +1550,20 @@ const REQUIRED_RELEASE_TARGETS: &[(&str, &str)] = &[
 #[test]
 fn test_every_package_manifest_declares_an_unsafe_code_policy() {
     /// Packages permitted to use `deny` instead of `forbid`, with the reason.
-    const DENY_UNSAFE_PACKAGES: &[(&str, &str)] = &[(
-        "clients/fortress-wasm/Cargo.toml",
-        "godot-rust requires one `unsafe impl ExtensionLibrary` marker",
-    )];
+    const DENY_UNSAFE_PACKAGES: &[(&str, &str)] = &[
+        (
+            "clients/fortress-wasm/Cargo.toml",
+            "godot-rust requires one `unsafe impl ExtensionLibrary` marker",
+        ),
+        (
+            "benches/encoding/Cargo.toml",
+            "flatc-generated accessors in the isolated benchmark; decode verifies roots",
+        ),
+    ];
     /// Asserted present so a broken discovery cannot pass vacuously.
     const REQUIRED_MANIFESTS: &[&str] = &[
         "Cargo.toml",
+        "benches/encoding/Cargo.toml",
         "clients/fortress/Cargo.toml",
         "clients/fortress-wasm/Cargo.toml",
         "clients/native/Cargo.toml",
@@ -25058,6 +25065,8 @@ fn test_pre_commit_changelog_gate_classification_and_verdicts_when_pwsh_availabl
                     ".github/workflows/ci.yml", ".githooks/pre-commit", ".devcontainer/Dockerfile",
                     ".config/cargo-deny.toml", ".vscode/settings.json", ".claude/settings.json",
                     "scripts/check-foo.sh", "tests/unit_test.rs", "test-fixtures/data.json",
+                    "benches/encoding/Cargo.toml", "benches/encoding/support/flat.rs",
+                    "benches/encoding/results/baseline/summary.csv",
                     "formal/model.tla", ".llm/skills/foo.md", "target/debug/binary", "progress/notes.md",
                     "clients/fortress/src/main.rs", "clients/fortress/src/nested/peer.rs",
                     "clients/fortress-wasm/src/lib.rs", "clients/fortress-wasm/src/nested/peer.rs",
@@ -25082,6 +25091,7 @@ fn test_pre_commit_changelog_gate_classification_and_verdicts_when_pwsh_availabl
                     "clients/fortress-wasm/project/other.gd", "clients/fortress-wasm/harness.mjs.bak",
                     "clients/fortress-wasm/project/main.gd.bak",
                     "src/main.rs", "src/server.rs", "build.rs", "benches/benchmark.rs",
+                    "benches/encoding-extra/runtime.rs", "benches/Encoding/support/model.rs",
                     "clients/native/src/client.rs", "clients/browser/src/client.js", "clients/other/src/main.rs",
                     "clients/fortress/Cargo.toml", "clients/fortress-wasm/Cargo.toml",
                     "clients/fortress-other/src/main.rs", "clients/fortress-wasm-extra/src/lib.rs",
@@ -25115,6 +25125,13 @@ fn test_pre_commit_changelog_gate_classification_and_verdicts_when_pwsh_availabl
                 Reset-Counters
                 Test-ChangelogGate -ChangedFiles @("clients/fortress/src/main.rs", "clients/fortress-wasm/src/lib.rs")
                 Assert ($script:Skipped -eq 1 -and $script:Failed -eq 0) "compatibility fixture sources alone must skip the gate"
+
+                Reset-Counters
+                Test-ChangelogGate -ChangedFiles @("benches/encoding/Cargo.toml", "benches/encoding/support/model.rs")
+                Assert ($script:Skipped -eq 1 -and $script:Failed -eq 0) "encoding study alone must skip the gate"
+                Reset-Counters
+                Test-ChangelogGate -ChangedFiles @("benches/encoding/support/model.rs", "src/server.rs")
+                Assert ($script:Failed -eq 1 -and $script:Skipped -eq 0) "encoding study plus runtime must require the changelog"
 
                 # 4) CHANGELOG.md never requires itself.
                 Reset-Counters

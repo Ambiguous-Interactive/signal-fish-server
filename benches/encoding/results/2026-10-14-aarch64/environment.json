@@ -1,0 +1,53 @@
+{
+  "observed_at_utc": "2026-10-14T00:10:41.743260+00:00",
+  "source_base_commit": "ca6b2950d10a9cae2b43e3b55c55f5bad41fbb69",
+  "source_manifest_sha256": "d0ccca8a1eda5a133bc204ae439a0c577c0d852ff0142d16d6851947b4a3f3c5",
+  "source_manifest_hash_rule": "SHA-256 of sorted relative path, NUL, lowercase file SHA-256, LF for each source file",
+  "source_files": {
+    "Cargo.lock": "551af145565f7da0d692c02086c871d6978f321b5577a43e8c3796c1e3f4aa95",
+    "Cargo.toml": "180420055c06ffc237e3f690fa50da0836dcdafb743cba43e58d173b48cbeb6a",
+    "benches/allocations.rs": "5237070e962014ca25b6b4efc88c5ba285f2724c7a8d3bb3019b9f9ee5edbccd",
+    "benches/runtime.rs": "4789e5ca38e4e97c27082f0b6276f04c2bc961e73b7131e691c3f8b659fa502e",
+    "generated/game_capnp.rs": "1d1ba712e85eee5fa34c42ae6ad6232fc03911508b914479501975841f9b82f3",
+    "generated/game_generated.rs": "e7967290d60edcb8585983f52ee3bc93b9ae519b09ae7af49b461096bd0581cc",
+    "schema/game.capnp": "494c1cfd0961651c69f21e515d466ecfafdad3903d024774130d848088a5c72a",
+    "schema/game.fbs": "8473948bef9d2059cc8d01a6b5deda28932b79bb429acb3fe5165958cd491ef9",
+    "support/cap.rs": "c1ba6dc6b48876751217629a6f5325a0595cec12f778da4a32dab94566c82a9f",
+    "support/flat.rs": "4c2d1905b2cd7cbab56e858fd8b5bf46897f933006891c9f0022e4f188cf8614",
+    "support/mod.rs": "2f5d76a31e700d98893f620076ecfb064c20908899ced5812693d7242205db62",
+    "support/model.rs": "64f8947f7c1749517444256f127845c93a53e0d4ed56ca62b5beaf003d7a1fab",
+    "support/varint.rs": "f0c58cdce977ebe6e10b9706087689a9ab853f086c95d31e6d1493dab882857e"
+  },
+  "rustc": "rustc 1.91.0 (f8297e351 2025-10-28)\nbinary: rustc\ncommit-hash: f8297e351a40c1439a467bbbb6879088047f50b3\ncommit-date: 2025-10-28\nhost: aarch64-unknown-linux-gnu\nrelease: 1.91.0\nLLVM version: 21.1.2",
+  "os": "Linux",
+  "kernel": "6.18.54.1-microsoft-standard-WSL2",
+  "architecture": "aarch64",
+  "cpu_affinity": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+  ],
+  "cpu_quota": "max 100000",
+  "memory_limit": "max",
+  "release_profile": {
+    "lto": "thin",
+    "codegen_units": 1,
+    "opt_level": 3
+  },
+  "criterion": {
+    "samples": 50,
+    "warmup_seconds": 1,
+    "measurement_seconds": 2
+  },
+  "allocation_samples": 5,
+  "notes": "Unpinned shared ARM devcontainer. No server load or capacity claim. Source parsing, validation, and reporting are outside the measured operations."
+}

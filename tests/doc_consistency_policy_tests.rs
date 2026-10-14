@@ -144,6 +144,11 @@ fn test_ci_dependency_detection_classifies_cargo_npm_and_mixed_changes() {
     let script = dependency_detection_script(&extract_ci_dep_detect_step_block(&workflow));
     let cases = [
         ("cargo-root", "Cargo.toml\nCargo.lock\n", true),
+        ("encoding-graph", "benches/encoding/Cargo.toml\nbenches/encoding/Cargo.lock\n", true),
+        ("encoding-internal", "Cargo.lock\nbenches/encoding/support/flat.rs\n", true),
+        ("encoding-plus-server", "Cargo.lock\nbenches/encoding/support/model.rs\nsrc/server.rs\n", false),
+        ("encoding-near-prefix", "Cargo.lock\nbenches/encoding-extra/runtime.rs\n", false),
+        ("encoding-uppercase", "Cargo.lock\nbenches/Encoding/support/model.rs\n", false),
         ("npm-root", "package.json\npackage-lock.json\n", true),
         (
             "npm-browser",
@@ -234,6 +239,7 @@ fn test_ci_dep_detect_internal_paths_match_script() {
         ".claude/*",
         "scripts/*",
         "tests/*",
+        "benches/encoding/*",
         "clients/browser/tests/*",
         "clients/native/tests/*",
         "clients/native/src/*_tests.rs",

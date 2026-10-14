@@ -11,6 +11,26 @@
 
 version: 2
 updates:
+  - package-ecosystem: "cargo"
+    directory: "/benches/encoding"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "wallstop"
+    rebase-strategy: "auto"
+    commit-message:
+      prefix: "chore(encoding)"
+      include: "scope"
+    open-pull-requests-limit: 1
+    labels:
+      - "dependencies"
+      - "rust"
+      - "automated"
+    groups:
+      cargo-encoding-updates:
+        patterns:
+          - "*"
+
   # ============================================================================
   # Rust Dependencies (Cargo) - Root Workspace
   # ============================================================================

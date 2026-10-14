@@ -1,0 +1,70 @@
+name: Encoding Study
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "benches/encoding/**"
+      - "test-fixtures/encoding/**"
+      - "rust-toolchain.toml"
+      - "scripts/read-toml-string.sh"
+      - ".github/workflows/encoding-study.yml"
+  push:
+    branches: [main]
+    paths:
+      - "benches/encoding/**"
+      - "test-fixtures/encoding/**"
+      - "rust-toolchain.toml"
+      - "scripts/read-toml-string.sh"
+      - ".github/workflows/encoding-study.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name }}-${{
+      github.event_name == 'pull_request' && github.event.pull_request.number ||
+      github.event_name == 'push' && github.ref || github.run_id
+    }}
+  cancel-in-progress: true
+
+jobs:
+  encoding:
+    name: Encoding Corpus Controls
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain)
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: clippy, rustfmt
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: benches/encoding
+          save-if: >-
+            ${{ github.event_name != 'pull_request' ||
+            github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Check format
+        run: cargo fmt --manifest-path benches/encoding/Cargo.toml -- --check
+      - name: Lint benchmark targets
+        run: >-
+          cargo clippy --locked --manifest-path benches/encoding/Cargo.toml
+          --all-targets -- -D warnings
+      - name: Check corpus roundtrips and negative controls
+        run: cargo test --locked --manifest-path benches/encoding/Cargo.toml --test roundtrip
+      - name: Check runtime benchmark paths
+        run: cargo bench --locked --manifest-path benches/encoding/Cargo.toml --bench runtime -- --test
+      - name: Check allocation measurements
+        run: cargo bench --locked --manifest-path benches/encoding/Cargo.toml --bench allocations
