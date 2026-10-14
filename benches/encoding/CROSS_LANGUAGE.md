@@ -95,4 +95,4 @@ The [ARM baseline](results/2026-10-14-cross-language-aarch64/README.md) records
 all encode/decode samples, wire bytes, runtime versions, host limits, and source
 hashes beside the Rust baseline. Different runtime and model costs limit direct
 language comparisons. The Rust run uses Criterion's different sampling method.
-No result here decides the separate adoption gate in #772.
+The [adoption decision](ADOPTION.md) applies the separate gate in #772.

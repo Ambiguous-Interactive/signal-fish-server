@@ -178,6 +178,24 @@ cargo run -- --print-config
 
 ## Testing
 
+### Fast Local Iteration
+
+Run the owning target during edits:
+
+```bash
+scripts/dev-loop.sh <test-name> --clippy
+```
+
+The editor keeps automatic save checks off so a full Clippy sweep cannot hold
+Cargo's build lock during scoped agent checks. Editor analysis and completion
+stay enabled. Use the Rust Analyzer `Run flycheck` command for a manual full
+editor check, or set `rust-analyzer.checkOnSave` to `true` in the workspace settings.
+See [Rust Analyzer configuration](https://rust-analyzer.github.io/book/configuration).
+
+Before publication, run `cargo fmt` and `cargo clippy --all-targets
+--all-features -- -D warnings` once. Hosted CI runs the full test suites.
+The commands below are for full verification or focused failure reproduction.
+
 ### Run All Tests
 
 ```bash

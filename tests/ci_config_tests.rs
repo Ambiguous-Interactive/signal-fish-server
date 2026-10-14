@@ -46,6 +46,70 @@ fn cargo_deny_available() -> bool {
 }
 
 #[test]
+fn encoding_workflow_skips_only_study_markdown() {
+    let content = read_live_file(&repo_root().join(".github/workflows/encoding-study.yml"));
+    let documents = Yaml::load_from_str(&content).expect("valid encoding workflow");
+    let triggers = documents[0]
+        .as_mapping_get("on")
+        .expect("workflow triggers");
+    for event in ["pull_request", "push"] {
+        let paths = triggers
+            .as_mapping_get(event)
+            .and_then(|trigger| trigger.as_mapping_get("paths"))
+            .and_then(Yaml::as_sequence)
+            .expect("encoding path filters");
+        let filters: Vec<_> = paths
+            .iter()
+            .map(|path| path.as_str().expect("path string"))
+            .collect();
+        assert_eq!(
+            filters,
+            [
+                "benches/encoding/**",
+                "!benches/encoding/*.md",
+                "!benches/encoding/**/*.md",
+                "test-fixtures/encoding/**",
+                "rust-toolchain.toml",
+                "scripts/read-toml-string.sh",
+                ".github/workflows/encoding-study.yml",
+            ],
+            "{event}: keep every executable input and exclude only study Markdown after inclusion"
+        );
+        for (path, expected) in [
+            ("benches/encoding/README.md", false),
+            ("benches/encoding/results/baseline/README.md", false),
+            ("benches/encoding/typescript/harness.ts", true),
+            ("benches/encoding/godot/harness.gd", true),
+            ("benches/encoding/csharp/Program.cs", true),
+            ("benches/encoding/support/model.rs", true),
+            ("benches/encoding/schema/game.proto", true),
+            ("benches/encoding/results/baseline/samples.json", true),
+            ("benches/encoding/results/baseline/summary.csv", true),
+            ("benches/encoding/Cargo.lock", true),
+            ("test-fixtures/encoding/manifest.json", true),
+            ("test-fixtures/encoding/README.md", true),
+            ("rust-toolchain.toml", true),
+            ("scripts/read-toml-string.sh", true),
+            (".github/workflows/encoding-study.yml", true),
+        ] {
+            let selected = filters.iter().fold(false, |selected, filter| {
+                let pattern = filter.strip_prefix('!').unwrap_or(filter);
+                if glob_matches(pattern, path) {
+                    !filter.starts_with('!')
+                } else {
+                    selected
+                }
+            });
+            assert_eq!(selected, expected, "{event}: {path}");
+        }
+    }
+    assert!(
+        triggers.as_mapping_get("workflow_dispatch").is_some(),
+        "manual full controls remain available"
+    );
+}
+
+#[test]
 fn browser_interop_retains_failure_diagnostics() {
     let content = read_live_file(&repo_root().join(".github/workflows/browser-interop.yml"));
     let documents = Yaml::load_from_str(&content).expect("valid browser workflow");

@@ -108,6 +108,7 @@ fn is_expected_package_diagnostic(line: &str) -> bool {
         || is_registry_transport_warning(line)
         || line.starts_with("warning: ignoring test `")
         || line.starts_with("warning: ignoring benchmark `")
+        || line.replace('\\', "/") == "warning: ignoring example `embedded_server` as `examples/embedded_server.rs` is not included in the published package"
         || trimmed.starts_with("Packaging signal-fish-server ")
         || trimmed.starts_with("Updating crates.io index")
         || trimmed.starts_with("Packaged ")
@@ -473,6 +474,26 @@ fn cargo_package_diagnostics_classify_cache_contention_without_hiding_warnings()
             "warning: ignoring benchmark `relay_allocations` as `benches/relay_allocations.rs` is not included in the published package",
             true,
             "expected omitted benchmark target",
+        ),
+        (
+            "warning: ignoring example `embedded_server` as `examples/embedded_server.rs` is not included in the published package",
+            true,
+            "repository-only embedding starter",
+        ),
+        (
+            "warning: ignoring example `embedded_server` as `examples\\embedded_server.rs` is not included in the published package",
+            true,
+            "repository-only embedding starter on Windows",
+        ),
+        (
+            "warning: ignoring example `other` as `examples/other.rs` is not included in the published package",
+            false,
+            "unreviewed example omission",
+        ),
+        (
+            "warning: ignoring example `embedded_server` because it is invalid",
+            false,
+            "invalid starter must still fail",
         ),
         (
             "warning: spurious network error (3 tries remaining): [16] Error in the HTTP2 framing layer",

@@ -1,5 +1,7 @@
 {
     // Rust Analyzer
+    // Agents run scoped checks explicitly; save-time sweeps compete for Cargo locks.
+    "rust-analyzer.checkOnSave": false,
     "rust-analyzer.check.command": "clippy",
     "rust-analyzer.check.allTargets": true,
     "rust-analyzer.cargo.features": "all",
