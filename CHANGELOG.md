@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Keep browser reference-client relay traffic and run deadlines working when WebRTC negotiation stalls (#960).
+- Preserve browser reference-client relay traffic and run deadlines during stalled WebRTC negotiation (#960).
 - Use rustls 0.23.46 for corrected TLS session handling in the server and native reference client.
 - Report browser reference-client channel closure immediately when the channel closes before handler registration (#955).
 - Fix the library starter so applications can compile it, drain on Ctrl+C, and report signal setup failures (#951).

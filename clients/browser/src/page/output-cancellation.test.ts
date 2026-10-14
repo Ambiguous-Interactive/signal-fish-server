@@ -316,6 +316,7 @@ for (const deadlineKind of ['p2p', 'run'] as const) {
     let connection: DeadlineConnection | undefined;
     let release: (() => void) | undefined;
     let running: Promise<number> | undefined;
+    let runResult: number | undefined;
     const held = new Promise<void>((resolve) => {
       release = resolve;
     });
@@ -435,6 +436,9 @@ for (const deadlineKind of ['p2p', 'run'] as const) {
         p2pTimeoutSecs: deadlineKind === 'p2p' ? 1 : 10,
         runForSecs: deadlineKind === 'run' ? 1 : 3,
       });
+      void running.then((code) => {
+        runResult = code;
+      });
       await turn();
       if (seam !== 'offer' && seam !== 'local') {
         if (seam === 'buffered-candidate') {
@@ -479,7 +483,20 @@ for (const deadlineKind of ['p2p', 'run'] as const) {
         seq: 1,
         data: { relay_msg: 'live' },
       });
-      now += 1100;
+      now += 900;
+      for (const [id, timer] of [...timers]) {
+        if (timer.at <= now) {
+          timers.delete(id);
+          timer.callback();
+        }
+      }
+      await turn();
+      check(connection?.closed === false, 'negotiation must remain live before its deadline');
+      check(
+        !events.some((event) => event['event'] === 'game_data_received'),
+        'relay must remain queued behind the suspended operation before expiry',
+      );
+      now += 200;
       for (const [id, timer] of [...timers]) {
         if (timer.at <= now) {
           timers.delete(id);
@@ -496,7 +513,7 @@ for (const deadlineKind of ['p2p', 'run'] as const) {
         );
       } else {
         check(
-          (await running) === 0,
+          runResult === 0,
           'the run must end from its existing fallback criteria without releasing the browser operation',
         );
       }
