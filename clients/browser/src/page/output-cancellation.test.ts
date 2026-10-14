@@ -286,7 +286,7 @@ for (const seam of [
 }
 
 // Regression #960: browser negotiation must not block relay traffic or run deadlines.
-for (const deadlineKind of ['p2p', 'run'] as const) {
+for (const deadlineKind of ['p2p', 'run', 'zero', 'send-failure'] as const) {
   for (const seam of [
     'offer',
     'local',
@@ -375,6 +375,9 @@ for (const deadlineKind of ['p2p', 'run'] as const) {
       send(line: string) {
         const frame = JSON.parse(line) as { type: string };
         sent.push(frame);
+        if (deadlineKind === 'send-failure' && frame.type === 'TransportStatus') {
+          throw new Error('socket send failed');
+        }
         if (frame.type === 'Authenticate')
           queueMicrotask(() => {
             this.deliver('Authenticated');
@@ -433,8 +436,13 @@ for (const deadlineKind of ['p2p', 'run'] as const) {
       running = run({
         ...config,
         peers: 2,
-        p2pTimeoutSecs: deadlineKind === 'p2p' ? 1 : 10,
-        runForSecs: deadlineKind === 'run' ? 1 : 3,
+        p2pTimeoutSecs:
+          deadlineKind === 'zero'
+            ? 0
+            : deadlineKind === 'p2p' || deadlineKind === 'send-failure'
+              ? 1
+              : 10,
+        runForSecs: deadlineKind === 'p2p' || deadlineKind === 'send-failure' ? 3 : 1,
       });
       void running.then((code) => {
         runResult = code;
@@ -497,12 +505,18 @@ for (const deadlineKind of ['p2p', 'run'] as const) {
         'relay must remain queued behind the suspended operation before expiry',
       );
       now += 200;
+      let timerFailure: unknown;
       for (const [id, timer] of [...timers]) {
         if (timer.at <= now) {
           timers.delete(id);
-          timer.callback();
+          try {
+            timer.callback();
+          } catch (error) {
+            timerFailure = error;
+          }
         }
       }
+      check(timerFailure === undefined, 'deadline callback must not throw outside the chain');
       await turn();
       await turn();
       check(connection?.closed === true, 'deadline must close the stalled physical link');
@@ -511,18 +525,25 @@ for (const deadlineKind of ['p2p', 'run'] as const) {
           events.some((event) => event['event'] === 'game_data_received'),
           'queued relay traffic must progress without releasing the browser operation',
         );
+      } else if (deadlineKind === 'send-failure') {
+        check(
+          runResult === 3,
+          'fallback send failure must end the run without releasing negotiation',
+        );
       } else {
         check(
           runResult === 0,
           'the run must end from its existing fallback criteria without releasing the browser operation',
         );
       }
-      check(
-        events.some(
-          (event) => event['event'] === 'transport_status_sent' && event['connected'] === false,
-        ),
-        'deadline must report relay fallback',
-      );
+      if (deadlineKind !== 'send-failure')
+        check(
+          events.some(
+            (event) =>
+              event['event'] === 'transport_status_sent' && event['connected'] === false,
+          ),
+          'deadline must report relay fallback',
+        );
       const callsAfterDeadline = calls.length;
       const signalsAfterDeadline = sent.filter((frame) => frame.type === 'Signal').length;
       release?.();

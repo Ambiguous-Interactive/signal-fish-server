@@ -2974,6 +2974,8 @@ permits late negotiation and signaling on the old implementation.
 The repair races each complete pairing or incoming signal operation against an
 absolute deadline outside the chain. It uses the remaining P2P window, or the
 configured P2P duration when no window remains, and the active run deadline.
+A zero P2P timeout controls fallback reporting only. It uses the configured run
+duration for operations, capped by the active run deadline.
 The existing success-release hold keeps its run-window exemption. Expiry retires
 the physical link before rejecting the wait. Existing engine identity checks
 stop late offer, answer, and buffered-candidate continuations. Shutdown rejects
@@ -2982,15 +2984,30 @@ pending waits and cancels their timers.
 The retained regression covers eight suspension seams: offer creation, offer
 local description, remote offer, remote answer, answer creation, answer local
 description, live ICE, and buffered ICE. Each runs with the P2P deadline first
-and with the run deadline first. P2P expiry admits the queued relay frame and
+and with the run deadline first. A third matrix sets the P2P timeout to zero:
+negotiation stays live before the run deadline and expires at that deadline.
+P2P expiry admits the queued relay frame and
 reports fallback before the held operation settles. Run expiry ends using the
 existing success criteria. Late completion sends no old signal and performs no
 later negotiation step. A new authoritative generation negotiates a fresh link.
 Successful operations and shutdown leave no extra deadline timers.
 
+Review also found that a failed fallback send could throw from the timer before
+rejecting the wait. Eight red controls reproduce that second hang. The callback
+now routes teardown failures to the connection-error exit and always rejects
+the wait. No timer exception escapes, and shutdown cancels every retained timer.
+
 These controlled promises prove orchestration behavior. They do not reproduce
 an actual hung Chromium operation or explain #853 or #889. Browser tests and
-strict type checks pass; hosted browser/native interoperability remains pending.
+strict type checks pass. The first hosted browser/native run passed 16 cells
+and failed `native_retry_rebuilds_browser_link_before_gameplay`. Its browser sets
+`--p2p-timeout-secs 0` to report fallback before forming a late connection.
+The first repair incorrectly used that reporting deadline to cancel browser
+operations. All eight zero-budget regressions expose early retirement. The
+corrected operation budget preserves immediate fallback and late connection.
+The focused real Chromium/native retry cell fails in 31.982 seconds with the
+first repair bundle and passes in 5.503 seconds with the corrected bundle.
+Hosted browser/native interoperability must pass before merge.
 The native engine has similar inline waits;
 [#961](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/961)
 tracks its independent cancellation assessment before any repair. The server wire protocol is unchanged. Rust,

@@ -1939,10 +1939,12 @@ class Orchestrator {
     )
       ? Number.POSITIVE_INFINITY
       : this.runDeadline;
-    const deadline = Math.min(
-      this.p2pDeadline ?? deadlineAfterSeconds(monotonicNowMs(), this.config.p2pTimeoutSecs),
-      runDeadline,
-    );
+    const operationDeadline =
+      this.config.p2pTimeoutSecs === 0
+        ? deadlineAfterSeconds(monotonicNowMs(), this.config.runForSecs)
+        : (this.p2pDeadline ??
+          deadlineAfterSeconds(monotonicNowMs(), this.config.p2pTimeoutSecs));
+    const deadline = Math.min(operationDeadline, runDeadline);
     let rejectWait: ((reason: Error) => void) | undefined;
     const expired = new Promise<never>((_resolve, reject) => {
       rejectWait = reject;
@@ -1950,8 +1952,17 @@ class Orchestrator {
     const stopped = () => rejectWait?.(FatalError.connection('the client is stopping'));
     this.peerWorkStopped.signal.addEventListener('abort', stopped, { once: true });
     const timer = scheduleDeadline(deadline, () => {
-      this.handlePeerTransportLoss(peer);
-      rejectWait?.(new Error('browser peer negotiation deadline expired'));
+      try {
+        this.handlePeerTransportLoss(peer);
+      } catch (error) {
+        this.failFatal(
+          error instanceof FatalError
+            ? error
+            : FatalError.connection(`peer teardown failed: ${describe(error)}`),
+        );
+      } finally {
+        rejectWait?.(new Error('browser peer negotiation deadline expired'));
+      }
     });
     try {
       return await Promise.race([operation, expired]);
