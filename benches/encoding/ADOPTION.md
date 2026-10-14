@@ -1,7 +1,7 @@
 # Gameplay encoding adoption decision
 
 Decision for [#772](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/772):
-do not add a new game-data format from this study. Keep the existing catalogue.
+do not add a new game-data format from this study. Keep the existing catalog.
 The completed measurements do not qualify any candidate under the requested gate.
 This decision applies to the frozen corpus and measured implementations.
 It does not rule out a future codec or a different implementation.
@@ -54,7 +54,7 @@ general codec. Its MessagePack baseline loses float64 precision outside the
 exactly representable frozen inputs. Its timing gains do not establish a
 drop-in implementation with the required numeric contract. The study does
 not supply maintained implementations in every required language for each
-candidate. The prior catalogue assessment in
+candidate. The prior catalog assessment in
 [#679](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/679)
 also records the GDScript availability gaps.
 
@@ -62,7 +62,7 @@ also records the GDScript availability gaps.
 
 Close this adoption decision with no new format. Do not change v2/v3 tokens,
 capabilities, mixed-room enforcement, defaults, or server dependencies.
-The independent catalogue task
+The independent catalog task
 [#678](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/678)
 and optional compression experiment
 [#773](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/773)
