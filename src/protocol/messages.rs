@@ -925,10 +925,11 @@ pub enum ServerMessage {
         peer_id: PlayerId,
         you_initiate: bool,
     },
-    /// Per-recipient session directive emitted at lobby finalization (v3 only).
+    /// Per-recipient authoritative session directive (v3 only).
     ///
-    /// Sent after the unchanged [`ServerMessage::GameStarting`] to every
-    /// v3-capable member. It carries the chosen topology/transport, the host
+    /// Initial emission follows [`ServerMessage::GameStarting`]. Membership
+    /// refreshes and Direct host endpoint changes send a fresh plan to every
+    /// current v3 member. It carries the chosen topology/transport, the host
     /// (for `host` topology), the validated host endpoint for Direct, the
     /// recipient's peer list with per-recipient `initiate` flags, ICE servers,
     /// and the relay `fallback`. Relay-resolved

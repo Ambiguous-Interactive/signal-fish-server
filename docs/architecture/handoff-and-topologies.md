@@ -172,10 +172,13 @@ removed in the same transaction that publishes an explicit Relay/Relay reset
 to every remaining v3 member.
 The reset clears the host, endpoint, peers, and ICE servers with a fresh generation.
 It does not count as a host re-plan or mint TURN credentials. The room stays on
-the relay floor. Direct endpoints are repeated on
-full late-join/reconnect/failover plan refreshes. An endpoint update by itself
-never changes the session's sticky topology or transport; a room finalized to
-relay is not upgraded mid-game.
+the relay floor. Direct endpoints are repeated on full plan refreshes. A running
+Direct host endpoint change immediately publishes a fresh shared generation.
+Endpoint loss uses the same election or Relay reset. Duplicate endpoints and
+non-host metadata do not refresh plans. A room finalized to relay is not
+upgraded mid-game. Metadata and the plan change commit only after exact-member
+delivery reservations succeed; a rejected update leaves the old metadata
+intact and returns an error so the host can retry.
 
 Re-issued and late-join plan **peer lists use the session-capability predicate**:
 `peers[]` names only members that negotiated v3 plus the session's topology and
@@ -200,7 +203,8 @@ validated endpoint. Non-host Direct clients need no endpoint.
 
 The client contract stays uniform: **the latest `SessionPlan` wins** — on a
 changed generation, rebuild retained WebRTC pairs, reject other-generation
-signals, and connect per `peers[].initiate`.
+signals, and connect per `peers[].initiate`. Direct adapters must replace the
+old socket and endpoint on each fresh generation, even when peer IDs match.
 
 ## Fallback to the floor
 

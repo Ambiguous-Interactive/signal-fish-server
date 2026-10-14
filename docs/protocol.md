@@ -398,8 +398,16 @@ v3 capability negotiation signal and does not prove reachability. One narrow v3
 use exists: a syntactically usable `direct` host/port makes an otherwise
 capability-compatible `host + direct` rung executable and is repeated as the
 elected host's `SessionPlan.direct_endpoint`. `ProvideConnectionInfo` is not
-itself a capability, status, or metrics event, and it does not authorize
+itself a capability or status event, and it does not authorize
 `Signal` or `NewPeer`; those retain their negotiated-v3 gates.
+
+When a running Direct host changes its validated endpoint, the server sends
+every current v3 member a fresh authoritative `SessionPlan`. If the endpoint
+becomes unusable, the server elects an executable replacement host or sends
+the existing Relay/Relay reset. Clients must replace the old endpoint and
+retire links from the previous generation. Duplicate endpoints, non-host
+metadata, open lobbies, and WebRTC or Relay sessions do not trigger this
+refresh. The message schema and protocol-v2 behavior stay unchanged.
 
 The `relay` variant is also unvalidated client input. Signal Fish stores and
 forwards its host, port, transport, allocation, token, and client ID, but does
@@ -1607,7 +1615,7 @@ These messages exist only on a negotiated v3 connection (and the correlated pair
 |---|---|---|
 | `Signal` | client ⇄ server | Relay an opaque, matchbox-shaped WebRTC signal to/from a specific peer in the same room |
 | `NewPeer` | server → client | Compatibility shape for an additive peer directive; current finalized membership changes use full `SessionPlan` refreshes |
-| `SessionPlan` | server → client | Per-recipient authoritative session directive emitted at finalization and finalized membership refreshes |
+| `SessionPlan` | server → client | Authoritative session directive at finalization, membership refresh, and Direct host endpoint change |
 | `TransportStatus` | client → server | Client reports its current data-path transport state (informational; drives metrics) |
 | `PeerTransportStatus` | server → client | A same-room peer's reported transport state changed (fan-out of an accepted `TransportStatus`) |
 | `RelayStats` | server → client | Optional per-connection relay delivery counters when `websocket.delivery_stats_interval_secs` is enabled |
@@ -1796,7 +1804,7 @@ therefore advertise only an address they intend room players and spectators to
 observe and players to attempt. The server does not publish it through room
 discovery, authenticate it as a network identity, or prove it reachable.
 
-`SessionPlan` can also be **re-issued mid-session** (same message shape, same v3 gating). Two triggers:
+`SessionPlan` can also be **re-issued mid-session** (same message shape, same v3 gating). Three triggers:
 
 - **Host failover.** When the host of a running `host`-topology session is found to be invalid — gone after a
   departure, self-healed on a late join that finds the stored host missing, or (after a reconnect that downgraded
@@ -1813,6 +1821,11 @@ discovery, authenticate it as a network identity, or prove it reachable.
   the room stays on the relay floor. A host
   departure itself is still signaled by `PlayerLeft` (with the v3 terminal
   watermark; its v2 projection remains byte-for-byte frozen).
+- **Direct host endpoint change.** A new usable endpoint refreshes every v3
+  member with one shared fresh generation and the same host. Endpoint loss
+  uses the host failover rule above. The server does not wait for a membership
+  change. Clients must apply the replacement plan even when its peer IDs match
+  the previous plan.
 - **Late join / reconnect into a finalized room.** Every current v3 member receives a complete, tailored plan.
   The joining actor and incumbents therefore cross the same lifecycle boundary with one authoritative peer set;
   stale links are removed without depending on an additive delta. A room with no sticky non-relay entry derives
@@ -1820,8 +1833,9 @@ discovery, authenticate it as a network identity, or prove it reachable.
 
 The topology and transport of a session are **sticky for its lifetime**: the selection ladder runs once at
 finalization and is never re-run mid-session, even when departures widen the capability intersection. A re-issued
-plan only ever changes membership-derived fields (`peers`, `host`, `ice_servers`). Re-issued and late-join plan
-peer lists contain only peers that can run the session — that negotiated v3 plus the session's topology **and**
+plan changes derived fields (`peers`, `host`, `direct_endpoint`, `ice_servers`)
+and its generation. Re-issued and late-join plan peer lists contain only peers
+that can run the session — that negotiated v3 plus the session's topology **and**
 transport. A joiner that cannot run the session is rejected at admission with
 `ROOM_SESSION_INCOMPATIBLE` (see below), so a live non-relay session's membership stays uniformly capable; what
 can remain is an incumbent that **reconnected** with downgraded capabilities (a reconnect owns its seat and is
@@ -2053,9 +2067,9 @@ finalization, late joins, reconnects, and failover do not depend on separately
 correlating legacy `GameStarting` metadata. A Direct host that reconnects
 without a usable endpoint is invalid and triggers endpoint-aware re-election;
 after failover, an ex-host reconnects as a client of the new host. Endpoint
-updates do not change a finalized room's sticky topology/transport; they are
-observed on the next membership refresh, while an already-relay room is never
-upgraded mid-session.
+updates refresh a running Direct host plan immediately. Topology and transport
+stay sticky until an unrecoverable host loss ends the session with a Relay
+reset. An already-relay room is never upgraded mid-session.
 
 ### Glare / offerer rule
 

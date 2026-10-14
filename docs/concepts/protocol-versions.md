@@ -202,13 +202,15 @@ counters. Always resynchronize application state after recipient absence.
 
 ### 5. Follow the client contract
 
-Two rules keep the client simple across finalization, late joins, reconnects, and host failover:
+Two rules apply across finalization, membership changes, host failover, and Direct endpoint updates:
 
 - **The latest `SessionPlan` wins.** On every changed plan `generation`, rebuild
   retained WebRTC pairs, reject signals from other generations, and connect per
   `peers[].initiate`, tearing down peer connections no longer listed (for example a departed host). A plan can be
-  re-issued mid-session — its topology and transport never change, only membership-derived fields (`peers`,
-  `host`, `ice_servers`).
+  re-issued mid-session with a fresh generation and updated peers, host, Direct
+  endpoint, or ICE servers. Direct adapters must retire old links and use the
+  new endpoint even when peer IDs match. Topology and transport stay sticky
+  until the session ends; an unrecoverable host loss sends a Relay reset.
 - **Relay is explicit on v3.** A `relay`/`relay` plan with an empty peer list
   tears down stale P2P links and keeps `GameData` on the WebSocket relay. V2
   clients receive no plan and continue their frozen relay flow.

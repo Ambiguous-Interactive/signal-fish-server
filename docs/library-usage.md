@@ -3,6 +3,13 @@
 Signal Fish Server is published as both a binary and a library crate. Embed the signaling server into your own
 Rust application.
 
+`EnhancedGameServer::new` returns `Arc<EnhancedGameServer>`. Call
+`handle_provide_connection_info` through that `Arc`, rather than a borrowed
+`&EnhancedGameServer`. Its owned metadata transaction continues if the calling
+task is canceled. A running Direct host endpoint update publishes a fresh
+`SessionPlan` without a membership change; a rejected publication before commit
+leaves the old metadata intact and returns an error to the player.
+
 ## Add Dependency
 
 ```toml

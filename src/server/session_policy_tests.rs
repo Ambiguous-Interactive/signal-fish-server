@@ -3255,8 +3255,383 @@ async fn host_failover_replan_filters_peer_lists_to_session_capable_members() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn running_direct_endpoint_loss_elects_ready_peer_and_ignores_other_sessions() {
+    let server = create_server_with_session(SessionConfig {
+        default_topology: Topology::Host,
+        enable_webrtc: false,
+        enable_direct: true,
+        ..SessionConfig::default()
+    })
+    .await;
+    let (host, mut host_rx) = register_client(&server).await;
+    let (peer, mut peer_rx) = register_client(&server).await;
+    let (legacy, mut legacy_rx) = register_client(&server).await;
+    let direct = NegotiatedProtocol {
+        version: 3,
+        transports: vec![Transport::Relay, Transport::Direct],
+        topologies: vec![Topology::Relay, Topology::Host],
+    };
+    for id in [host, peer] {
+        server.set_client_protocol(&id, direct.clone());
+    }
+    let room_id =
+        finalized_db_room_with(&server, host, &[(peer, "Peer"), (legacy, "Legacy")]).await;
+    publish_room_members(&server, &room_id, &[host, peer, legacy]).await;
+    let endpoint = ConnectionInfo::Direct {
+        host: "192.0.2.50".into(),
+        port: 5555,
+    };
+    for plan in [
+        None,
+        Some(ActiveSessionPlan {
+            topology: Topology::Host,
+            transport: Transport::WebRtc,
+            host: Some(host),
+        }),
+        Some(ActiveSessionPlan {
+            topology: Topology::Mesh,
+            transport: Transport::WebRtc,
+            host: None,
+        }),
+    ] {
+        if let Some(plan) = plan {
+            server.active_session_plans.insert(room_id, plan);
+        } else {
+            server.active_session_plans.remove(&room_id);
+        }
+        server
+            .handle_provide_connection_info(&host, endpoint.clone())
+            .await;
+        assert_silent(&mut host_rx).await;
+        assert_silent(&mut peer_rx).await;
+    }
+    server
+        .handle_provide_connection_info(&peer, endpoint.clone())
+        .await;
+    let active = ActiveSessionPlan {
+        topology: Topology::Host,
+        transport: Transport::Direct,
+        host: Some(host),
+    };
+    server.active_session_plans.insert(room_id, active);
+    let before = server.metrics.snapshot().await.transport;
+    server
+        .handle_provide_connection_info(
+            &host,
+            ConnectionInfo::Direct {
+                host: "0.0.0.0".into(),
+                port: 0,
+            },
+        )
+        .await;
+    let host_plan = expect_plan(&mut host_rx, "old host").await;
+    let peer_plan = expect_plan(&mut peer_rx, "replacement host").await;
+    assert_eq!(host_plan.generation, peer_plan.generation);
+    for plan in [&host_plan, &peer_plan] {
+        assert_eq!(plan.host, Some(peer));
+        assert_eq!(plan.topology, Topology::Host);
+        assert_eq!(plan.transport, Transport::Direct);
+        assert_eq!(
+            plan.direct_endpoint,
+            crate::protocol::DirectEndpoint::from_connection_info(&endpoint)
+        );
+        assert!(plan.ice_servers.is_empty());
+    }
+    assert_eq!(host_plan.peers.len(), 1);
+    assert_eq!(host_plan.peers[0].player_id, peer);
+    assert!(host_plan.peers[0].initiate);
+    assert_eq!(peer_plan.peers.len(), 1);
+    assert_eq!(peer_plan.peers[0].player_id, host);
+    assert!(!peer_plan.peers[0].initiate);
+    assert_eq!(
+        server.active_session_plan(&room_id),
+        Some(ActiveSessionPlan {
+            host: Some(peer),
+            ..active
+        })
+    );
+    let after = server.metrics.snapshot().await.transport;
+    assert_eq!(
+        after.session_replans_emitted,
+        before.session_replans_emitted + 1
+    );
+    assert_eq!(
+        after.turn_credentials_issued,
+        before.turn_credentials_issued
+    );
+    assert_silent(&mut legacy_rx).await;
+    assert_silent(&mut host_rx).await;
+    assert_silent(&mut peer_rx).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn running_direct_host_endpoint_refresh_is_atomic_serialized_and_cancellation_safe() {
+    let server = create_server_with_session(SessionConfig {
+        default_topology: Topology::Host,
+        enable_webrtc: false,
+        enable_direct: true,
+        ..SessionConfig::default()
+    })
+    .await;
+    let (host, mut host_rx) = register_client(&server).await;
+    let (peer, mut peer_rx) = register_client(&server).await;
+    let direct = NegotiatedProtocol {
+        version: 3,
+        transports: vec![Transport::Relay, Transport::Direct],
+        topologies: vec![Topology::Relay, Topology::Host],
+    };
+    for id in [host, peer] {
+        server.set_client_protocol(&id, direct.clone());
+    }
+    let room_id = finalized_db_room_with(&server, host, &[(peer, "Peer")]).await;
+    publish_room_members(&server, &room_id, &[host, peer]).await;
+    let old = ConnectionInfo::Direct {
+        host: "192.0.2.10".into(),
+        port: 7777,
+    };
+    server.handle_provide_connection_info(&host, old).await;
+    let members = server.database.get_room_players(&room_id).await.unwrap();
+    server
+        .emit_session_plan(&room_id, &finalized("host-game", members, Some(host)))
+        .await;
+    let initial = expect_plan(&mut host_rx, "host").await;
+    let _ = expect_plan(&mut peer_rx, "peer").await;
+    let replacement = ConnectionInfo::Direct {
+        host: "192.0.2.20".into(),
+        port: 8888,
+    };
+    server
+        .handle_provide_connection_info(&host, replacement.clone())
+        .await;
+    let host_plan = expect_plan(&mut host_rx, "host").await;
+    let peer_plan = expect_plan(&mut peer_rx, "peer").await;
+    assert_ne!(initial.generation, host_plan.generation);
+    assert_eq!(host_plan.generation, peer_plan.generation);
+    for plan in [&host_plan, &peer_plan] {
+        assert_eq!(plan.host, Some(host));
+        assert_eq!(plan.transport, Transport::Direct);
+        assert_eq!(
+            plan.direct_endpoint,
+            crate::protocol::DirectEndpoint::from_connection_info(&replacement)
+        );
+        assert!(plan.ice_servers.is_empty());
+    }
+    server
+        .handle_provide_connection_info(&host, replacement.clone())
+        .await;
+    server
+        .handle_provide_connection_info(&peer, replacement.clone())
+        .await;
+    assert_silent(&mut host_rx).await;
+    assert_silent(&mut peer_rx).await;
+
+    let stored_plan = server.active_session_plan(&room_id);
+    let next = ConnectionInfo::Direct {
+        host: "192.0.2.30".into(),
+        port: 9999,
+    };
+    server
+        .message_coordinator
+        .fail_room_transactions_with_routing_changed_for_test(1);
+    server
+        .handle_provide_connection_info(&host, next.clone())
+        .await;
+    assert!(matches!(
+        recv(&mut host_rx).await.as_ref(),
+        ServerMessage::Error {
+            error_code: Some(crate::protocol::ErrorCode::InternalError),
+            ..
+        }
+    ));
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        room.players[&host]
+            .connection_info
+            .as_ref()
+            .and_then(crate::protocol::DirectEndpoint::from_connection_info),
+        crate::protocol::DirectEndpoint::from_connection_info(&replacement)
+    );
+    assert_eq!(server.active_session_plan(&room_id), stored_plan);
+    assert_silent(&mut peer_rx).await;
+    server
+        .handle_provide_connection_info(&host, next.clone())
+        .await;
+    let _ = expect_plan(&mut host_rx, "retry host").await;
+    let _ = expect_plan(&mut peer_rx, "retry peer").await;
+
+    for _ in 0..16 {
+        server
+            .message_coordinator
+            .send_to_player(&peer, Arc::new(ServerMessage::Pong))
+            .await
+            .unwrap();
+    }
+    server
+        .handle_provide_connection_info(&host, replacement.clone())
+        .await;
+    assert!(matches!(
+        recv(&mut host_rx).await.as_ref(),
+        ServerMessage::Error {
+            error_code: Some(crate::protocol::ErrorCode::InternalError),
+            ..
+        }
+    ));
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        room.players[&host]
+            .connection_info
+            .as_ref()
+            .and_then(crate::protocol::DirectEndpoint::from_connection_info),
+        crate::protocol::DirectEndpoint::from_connection_info(&next)
+    );
+    assert_eq!(server.active_session_plan(&room_id), stored_plan);
+    for _ in 0..16 {
+        assert!(matches!(
+            recv(&mut peer_rx).await.as_ref(),
+            ServerMessage::Pong
+        ));
+    }
+    assert_silent(&mut host_rx).await;
+    assert_silent(&mut peer_rx).await;
+    server
+        .handle_provide_connection_info(&host, replacement.clone())
+        .await;
+    let plan = expect_plan(&mut host_rx, "healthy survivor retry").await;
+    assert_eq!(
+        plan.direct_endpoint,
+        crate::protocol::DirectEndpoint::from_connection_info(&replacement)
+    );
+    assert!(plan.peers.is_empty());
+    assert_silent(&mut peer_rx).await;
+
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .expect("in-memory fixture");
+    database.pause_next_update_player_connection_info_for_test();
+    let owned_server = Arc::clone(&server);
+    let caller = tokio::spawn(async move {
+        owned_server
+            .handle_provide_connection_info(
+                &host,
+                ConnectionInfo::Direct {
+                    host: "192.0.2.40".into(),
+                    port: 4444,
+                },
+            )
+            .await;
+    });
+    database
+        .wait_for_update_player_connection_info_for_test()
+        .await;
+    let next_server = Arc::clone(&server);
+    let mut next_update = tokio::spawn(async move {
+        next_server
+            .handle_provide_connection_info(
+                &host,
+                ConnectionInfo::Direct {
+                    host: "192.0.2.60".into(),
+                    port: 6666,
+                },
+            )
+            .await;
+    });
+    let leaving_server = Arc::clone(&server);
+    let mut leaving = tokio::spawn(async move {
+        leaving_server.leave_room(&peer).await;
+    });
+    assert!(timeout(Duration::from_millis(1), &mut next_update)
+        .await
+        .is_err());
+    assert!(timeout(Duration::from_millis(1), &mut leaving)
+        .await
+        .is_err());
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    database.release_update_player_connection_info_for_test();
+    let committed = expect_plan(&mut host_rx, "canceled caller transaction").await;
+    assert_eq!(committed.direct_endpoint.unwrap().host, "192.0.2.40");
+    next_update.await.expect("serialized update completes");
+    leaving.await.expect("serialized membership completes");
+    let mut saw_final_update = false;
+    let mut saw_departure = false;
+    for _ in 0..2 {
+        match recv(&mut host_rx).await.as_ref() {
+            ServerMessage::SessionPlan(plan) => {
+                assert_eq!(plan.direct_endpoint.as_ref().unwrap().host, "192.0.2.60");
+                assert!(plan.peers.is_empty());
+                saw_final_update = true;
+            }
+            ServerMessage::PlayerLeft { player_id, .. } => {
+                assert_eq!(*player_id, peer);
+                saw_departure = true;
+            }
+            other => panic!("unexpected serialized control: {other:?}"),
+        }
+    }
+    assert!(saw_final_update && saw_departure);
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        room.players[&host]
+            .connection_info
+            .as_ref()
+            .and_then(crate::protocol::DirectEndpoint::from_connection_info),
+        Some(crate::protocol::DirectEndpoint {
+            host: "192.0.2.60".into(),
+            port: 6666
+        })
+    );
+    assert!(!room.players.contains_key(&peer));
+    let stale = server.client_lifecycle(&host).unwrap();
+    server.connection_manager.remove_client(&host);
+    server
+        .handle_provide_connection_info_from_lifecycle(
+            &host,
+            ConnectionInfo::Direct {
+                host: "stale.example".into(),
+                port: 7777,
+            },
+            Some(stale),
+        )
+        .await;
+    let unchanged = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        unchanged.players[&host]
+            .connection_info
+            .as_ref()
+            .and_then(crate::protocol::DirectEndpoint::from_connection_info),
+        Some(crate::protocol::DirectEndpoint {
+            host: "192.0.2.60".into(),
+            port: 6666
+        })
+    );
+    assert_silent(&mut host_rx).await;
+}
+
+#[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
-async fn departure_after_last_direct_endpoint_loss_resets_authoritative_plan() {
+async fn running_direct_endpoint_loss_resets_before_departure_and_stays_relay() {
     // Regression #907: ending a host session must clear surviving Direct obligations.
     let cfg = SessionConfig {
         default_topology: Topology::Host,
@@ -3314,12 +3689,8 @@ async fn departure_after_last_direct_endpoint_loss_resets_authoritative_plan() {
             },
         )
         .await;
-    server.leave_room(&departing).await;
     let mut reset_generation = None;
     for (rx, who) in [(&mut host_rx, "host"), (&mut survivor_rx, "survivor")] {
-        assert!(
-            matches!(recv(rx).await.as_ref(), ServerMessage::PlayerLeft { player_id, .. } if *player_id == departing)
-        );
         let reset = expect_plan(rx, who).await;
         assert_ne!(reset.generation, initial.generation);
         if let Some(generation) = reset_generation {
@@ -3335,6 +3706,25 @@ async fn departure_after_last_direct_endpoint_loss_resets_authoritative_plan() {
         assert_eq!(reset.fallback, Transport::Relay);
         assert_silent(rx).await;
     }
+    let _ = expect_plan(&mut departing_rx, "departing").await;
+    server.leave_room(&departing).await;
+    for rx in [&mut host_rx, &mut survivor_rx] {
+        assert!(
+            matches!(recv(rx).await.as_ref(), ServerMessage::PlayerLeft { player_id, .. } if *player_id == departing)
+        );
+        assert_silent(rx).await;
+    }
+    server
+        .handle_provide_connection_info(
+            &host,
+            ConnectionInfo::Direct {
+                host: "192.0.2.10".into(),
+                port: 7777,
+            },
+        )
+        .await;
+    assert_silent(&mut host_rx).await;
+    assert_silent(&mut survivor_rx).await;
     assert!(server.active_session_plan(&room_id).is_none());
     let after = server.metrics.snapshot().await.transport;
     assert_eq!(

@@ -109,7 +109,10 @@ predicate. For WebRTC this is equivalent to `supports_session`; for Direct it
 also requires `direct_endpoint()` to validate the member's self-declared
 host/port. The elected endpoint is copied into every Direct
 `SessionPlan.direct_endpoint`, revalidated on membership refresh/reconnect, and
-replaced on endpoint-aware failover. Do not require non-host Direct clients to
+replaced on endpoint-aware failover. A running Direct host endpoint change
+publishes a fresh shared generation immediately. Endpoint loss elects a usable
+replacement or ends the session with the same Relay reset. Duplicate endpoints
+and non-host metadata do not rebuild plans. Do not require non-host Direct clients to
 advertise an endpoint, and do not use endpoint readiness to filter peer lists.
 
 The two predicates are distinct and must not be conflated: `is_relay()` decides

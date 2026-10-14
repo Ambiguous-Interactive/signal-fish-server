@@ -12,13 +12,12 @@
 //!
 //! A non-relay decision is also recorded as the room's sticky
 //! [`ActiveSessionPlan`], the single source of truth for the session the room is
-//! actually running. Finalized join/reconnect refreshes consult it instead of
-//! re-running the ladder, and whenever a membership-touching event (a departure
-//! via [`EnhancedGameServer::handle_session_member_departure`], or a late join /
-//! reconnect) finds a `host`-topology entry whose stored host is invalid — no
-//! longer a member, or seated but no longer capable of the session
-//! ([`ActiveSessionPlan::host_invalid`]) — execution-aware repair re-elects a
-//! host and re-emits fresh per-recipient `SessionPlan`s. Topology and
+//! actually running. Membership refreshes and Direct host endpoint changes
+//! consult it instead of re-running the ladder. An invalid stored host
+//! ([`ActiveSessionPlan::host_invalid`]) triggers execution-aware re-election
+//! or an authoritative Relay reset when no executable host remains. A usable
+//! Direct host endpoint replacement publishes a fresh shared generation without
+//! waiting for membership changes. Topology and
 //! transport are **sticky for the session lifetime**: the ladder runs once at
 //! finalize and is never re-run mid-session, even though the capability
 //! intersection can only widen when members depart — a mid-game data-path
@@ -61,8 +60,8 @@ use super::{EnhancedGameServer, NegotiatedProtocol};
 /// non-relay plan. Relay-floor rooms record nothing; a later reconnect derives
 /// its explicit Relay/Relay refresh from that absence rather than sticky state.
 ///
-/// This is what the room is *actually running*: late-join / reconnect pairing
-/// and departure re-planning consult it rather than re-running
+/// This is what the room is *actually running*: membership and Direct endpoint
+/// refreshes consult it rather than re-running
 /// [`choose_session_plan`] over the current member list, because the live
 /// membership can drift from the finalize-time membership (departures open
 /// seats; reconnects can re-seat an incumbent with downgraded capabilities)
@@ -72,7 +71,7 @@ use super::{EnhancedGameServer, NegotiatedProtocol};
 /// run the stored pair.
 ///
 /// Topology and transport are immutable for the session lifetime; only `host`
-/// is rewritten (by host failover re-election when the host departs).
+/// is rewritten by execution-aware host re-election.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ActiveSessionPlan {
     pub topology: Topology,
@@ -84,7 +83,7 @@ impl ActiveSessionPlan {
     /// Rehydrate a full [`SessionPlanDecision`] from this sticky decision plus
     /// the room's *current* member list. The ladder is **not** re-run — the
     /// stored topology/transport/host shape per-recipient plans for finalized
-    /// joins, reconnects, and departure re-planning.
+    /// membership refreshes and Direct endpoint changes.
     pub(crate) fn decision_with(self, members: Vec<SessionMember>) -> SessionPlanDecision {
         SessionPlanDecision {
             generation: SessionGeneration::new_v4(),
@@ -95,15 +94,10 @@ impl ActiveSessionPlan {
         }
     }
 
-    /// Whether this is a `host`-topology decision whose stored host can no
-    /// longer anchor the session: no host was recorded, the recorded host is no
-    /// longer in `members`, or the recorded host is still a member but no
-    /// longer satisfies [`Self::supported_by`] (reachable only through a
-    /// reconnect-with-downgraded-capabilities race — departure re-planning
-    /// never fires for a member that stays seated, so without this arm such a
-    /// host would wedge the room forever). This is the wedge state both
-    /// membership-touching events repair before publication: left alone, every
-    /// plan the room hands out would point at a host that cannot answer.
+    /// Whether a host-topology session has no usable stored host because it is
+    /// absent, lacks the negotiated capabilities, or has no usable Direct
+    /// endpoint. Membership refreshes and Direct host endpoint updates resolve
+    /// this state before publishing a new authoritative plan.
     pub(crate) fn host_invalid(&self, members: &[SessionMember]) -> bool {
         self.topology == Topology::Host
             && !self.host.is_some_and(|host| {
@@ -197,7 +191,7 @@ pub(crate) struct SessionPlanDecision {
 }
 
 /// Pure resolution of the session plan every member must observe after a
-/// membership publication. State and metrics are deliberately deferred to the
+/// membership or endpoint publication. State and metrics are deferred to the
 /// caller's exact-routing transaction hook.
 pub(crate) struct MembershipSessionDecision {
     pub decision: SessionPlanDecision,
@@ -601,11 +595,11 @@ impl SessionPlanDecision {
     /// - **Host:** the host receives every pairable client (each
     ///   `initiate = false`); each pairable client receives only the host
     ///   (`initiate = true`). Clients never signal each other in a star topology.
-    /// - **Relay:** an empty peer list. This is serialized for authoritative
-    ///   Finalized-room join/reconnect refreshes and otherwise remains defensive.
+    /// - **Relay:** an empty peer list for finalization, finalized membership
+    ///   refreshes, and terminal host-loss resets.
     ///
     /// This is the single peer-list seam every emission path shares (finalize,
-    /// host-failover re-plan, finalized join, and reconnect), so the filter
+    /// host failover, endpoint refresh, finalized join, and reconnect), so the filter
     /// holds uniformly. At FINALIZE it is
     /// provably a no-op: [`choose_session_plan`] selects a non-relay pair only
     /// when [`all_support`] holds, i.e. every member already satisfies the
@@ -711,7 +705,7 @@ impl EnhancedGameServer {
     /// player list, attaching each player's negotiated capabilities.
     ///
     /// Shared by finalize (which runs the ladder), finalized membership
-    /// refreshes, and [`Self::handle_session_member_departure`] (host failover).
+    /// refreshes, Direct endpoint changes, and host failover.
     /// Membership refreshes rehydrate the stored decision over current members
     /// instead of re-running the ladder.
     ///
@@ -1166,6 +1160,78 @@ impl EnhancedGameServer {
         members: Vec<SessionMember>,
         room_event_guard: RoomEventMutationGuard,
     ) {
+        self.publish_host_session(room_id, stored, authority, members, room_event_guard, None)
+            .await;
+    }
+
+    pub(super) async fn prepare_direct_endpoint_refresh(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+        connection_info: ConnectionInfo,
+        stored: ActiveSessionPlan,
+        room_event_guard: RoomEventMutationGuard,
+    ) -> bool {
+        let mut room = match self.database.get_room_by_id(room_id).await {
+            Ok(Some(room)) => room,
+            _ => return false,
+        };
+        if room.lobby_state != LobbyState::Finalized {
+            return self
+                .database
+                .update_player_connection_info(room_id, player_id, connection_info)
+                .await
+                .unwrap_or(false);
+        }
+        let Some(host) = room.players.get_mut(player_id) else {
+            return false;
+        };
+        let previous = host
+            .connection_info
+            .as_ref()
+            .and_then(DirectEndpoint::from_connection_info);
+        let replacement = DirectEndpoint::from_connection_info(&connection_info);
+        host.connection_info = Some(connection_info.clone());
+        if previous == replacement && replacement.is_some() {
+            return self
+                .database
+                .update_player_connection_info(room_id, player_id, connection_info)
+                .await
+                .unwrap_or(false);
+        }
+        let routed = match self.message_coordinator.routed_player_ids(room_id).await {
+            Ok(ids) => ids.map(|ids| ids.into_iter().collect::<HashSet<_>>()),
+            Err(_) => return false,
+        };
+        if routed.as_ref().is_some_and(|ids| !ids.contains(player_id)) {
+            return false;
+        }
+        let players: Vec<_> = room
+            .players
+            .into_values()
+            .filter(|member| routed.as_ref().is_none_or(|ids| ids.contains(&member.id)))
+            .collect();
+        let members = self.session_members_from(&players);
+        self.publish_host_session(
+            room_id,
+            stored,
+            room.authority_player,
+            members,
+            room_event_guard,
+            Some((*player_id, connection_info)),
+        )
+        .await
+    }
+
+    async fn publish_host_session(
+        &self,
+        room_id: &RoomId,
+        stored: ActiveSessionPlan,
+        authority: Option<PlayerId>,
+        members: Vec<SessionMember>,
+        room_event_guard: RoomEventMutationGuard,
+        metadata_update: Option<(PlayerId, ConnectionInfo)>,
+    ) -> bool {
         let resolved = membership_session_decision(Some(stored), authority, members);
         let decision = resolved.decision;
         let updated = resolved.active_plan_update;
@@ -1205,10 +1271,13 @@ impl EnhancedGameServer {
             .iter()
             .all(|batch| batch.messages.is_empty())
         {
+            if metadata_update.is_some() {
+                return false;
+            }
             if updated == Some(None) {
                 self.active_session_plans.remove(room_id);
             }
-            return;
+            return true;
         }
         let expected_members: Vec<_> = decision
             .members
@@ -1222,6 +1291,7 @@ impl EnhancedGameServer {
         let metrics_for_commit = Arc::clone(&self.metrics);
         let metrics_after_phase = Arc::clone(&self.metrics);
         let session_records = self.session_records();
+        let database = Arc::clone(&self.database);
         let completion = self.message_coordinator.enqueue_room_event(
             room_event_guard,
             Box::new(move || {
@@ -1233,6 +1303,11 @@ impl EnhancedGameServer {
                             recipient_messages,
                             Box::new(move || {
                                 Box::pin(async move {
+                                    if let Some((player_id, info)) = metadata_update {
+                                        if !database.update_player_connection_info(&room_id, &player_id, info).await? {
+                                            return Ok(false);
+                                        }
+                                    }
                                     if let Some(updated) = updated {
                                         if let Some(plan) = updated {
                                             active_session_plans.insert(room_id, plan);
@@ -1281,8 +1356,12 @@ impl EnhancedGameServer {
                 })
             }),
         );
-        if let Err(error) = completion.await {
-            tracing::warn!(%room_id, %error, "Host re-plan publication failed");
+        match completion.await {
+            Ok(committed) => committed,
+            Err(error) => {
+                tracing::warn!(%room_id, %error, "Host re-plan publication failed");
+                false
+            }
         }
     }
 
