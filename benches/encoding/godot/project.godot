@@ -1,0 +1,5 @@
+config_version=5
+[application]
+config/name="Signal Fish Encoding Study"
+[rendering]
+renderer/rendering_method="gl_compatibility"

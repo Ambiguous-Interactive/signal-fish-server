@@ -1,0 +1,18 @@
+{
+  "name": "signal-fish-encoding-study",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "tsx harness.ts --check",
+    "bench": "tsx harness.ts"
+  },
+  "devDependencies": {
+    "@bufbuild/protobuf": "2.12.1",
+    "@bufbuild/protoc-gen-es": "2.12.1",
+    "@msgpack/msgpack": "3.1.3",
+    "@types/node": "24.7.2",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
+  }
+}

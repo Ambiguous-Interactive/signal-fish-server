@@ -6503,6 +6503,10 @@ fn test_ci_deny_job_skips_dependency_irrelevant_pull_requests() {
             consumed.insert(in_directory("package.json"));
             consumed.insert(in_directory("package-lock.json"));
         }
+        if run.contains("bash scripts/npm-audit-gate.sh encoding") {
+            consumed.insert("benches/encoding/typescript/package.json".to_owned());
+            consumed.insert("benches/encoding/typescript/package-lock.json".to_owned());
+        }
         if run.contains("bash scripts/npm-audit-gate.sh browser") {
             // The gate script cds into the graph's directory itself, so the
             // step carries no `working-directory`; the argument is the graph.
@@ -28463,6 +28467,7 @@ fn test_audit_job_covers_every_dependabot_managed_npm_graph() {
             match graph.trim() {
                 "root" => Some(".".to_owned()),
                 "browser" => Some("clients/browser".to_owned()),
+                "encoding" => Some("benches/encoding/typescript".to_owned()),
                 other => panic!(
                     "npm audit gate graph `{other}` is not a Dependabot-managed npm \
                      graph; extend dependabot_npm_directories and this mapping together"
@@ -28525,6 +28530,7 @@ fn test_npm_audit_retry_steps_fail_closed() {
         .map(|directory| match directory.as_str() {
             "/" => "root".to_owned(),
             "/clients/browser" => "browser".to_owned(),
+            "/benches/encoding/typescript" => "encoding".to_owned(),
             other => panic!(
                 "new Dependabot npm graph `{other}` needs a matching npm-audit-gate \
                  graph key here and in test_audit_job_covers_every_dependabot_managed_\
@@ -28564,7 +28570,7 @@ fn test_npm_audit_retry_steps_fail_closed() {
             .strip_prefix("bash scripts/npm-audit-gate.sh ")
             .expect("prefix checked above");
         assert!(
-            graph == "root" || graph == "browser",
+            graph == "root" || graph == "browser" || graph == "encoding",
             "npm audit gate graph `{graph}` must name a Dependabot-managed npm graph"
         );
         invoked_graphs.insert(graph.to_owned());

@@ -741,6 +741,9 @@ jobs:
       - name: Run npm audit (browser reference client)
         if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         run: bash scripts/npm-audit-gate.sh browser
+      - name: Run npm audit (encoding study)
+        if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
+        run: bash scripts/npm-audit-gate.sh encoding
       - name: Read Rust toolchain
         if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         id: toolchain
