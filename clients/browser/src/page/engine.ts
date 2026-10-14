@@ -463,6 +463,9 @@ export class Engine {
     };
     channel.onclose = notifyClosed;
     channel.onerror = notifyClosed;
+    if (channel.readyState === 'closing' || channel.readyState === 'closed') {
+      queueMicrotask(notifyClosed);
+    }
   }
 }
 

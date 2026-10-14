@@ -226,6 +226,27 @@ Key design decisions:
 **Test that enforces this:** `test_ci_workflow_has_required_jobs`
 (validates the Dependency Audit job exists in ci.yml)
 
+#### Test Build and Nested Cache
+
+The Linux test lane uses both `--profile ci` for nextest timeout settings and
+`--cargo-profile ci` for Cargo compilation. Cargo's existing CI profile removes
+debug data and keeps the development profile's assertions and overflow checks.
+The full suite, non-TLS control, and H14 control use the same Cargo profile.
+
+The lane keeps trybuild's dependency artifacts. Before cache save, an
+always-run Bash step creates `target/tests/target` under the effective target
+directory. The pinned cache action walks that directory and `tests/trybuild`.
+Creating its missing sibling prevents the asynchronous missing-directory error
+while the cache action still removes workspace artifacts. Other full-suite
+lanes retain their existing removal policy.
+
+Six focused controls check the two build profiles, safe cache handling, and
+unset, empty, and space-containing target overrides. A fixture that executes
+the pinned cache cleaner reproduces the old error and passes with preparation.
+Hosted cold and warm timings determine the performance result; a cache hit or
+a green rerun alone does not establish a CI time improvement. See
+[#953](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/953).
+
 #### Relay Allocation Ceilings
 
 The CI workflow runs the production-seam relay allocation harness on Linux for
@@ -1034,3 +1055,18 @@ This testing infrastructure provides defense in depth against CI/CD issues:
 - [Markdownlint Rules](https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md)
 - [GitHub Actions Workflow Config](../.llm/skills/github-actions-workflow-config/SKILL.md)
 - [CI CD Troubleshooting Categories](../.llm/skills/ci-cd-troubleshooting/references/diagnostic-workflow.md)
+
+### Root timing evidence
+
+The Linux root job records processor count, affinity, available cgroup CPU
+limits and counters, load, and CPU pressure before and after the root suite.
+The collector walks visible cgroup v2 ancestors. A cgroup namespace can hide
+outer limits; the snapshots do not prove that no outer quota exists.
+The after-test step also runs on failure. Missing optional kernel files are
+reported as unavailable. These snapshots do not measure per-test CPU usage.
+
+The relay matrix prints each completed cell's full observation before checking
+its p99 limit. A failed limit therefore retains throughput, completion time,
+latency percentiles, backpressure, and RSS. The limit and delivery checks stay
+the same. See [#956](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/956)
+for the unresolved hosted latency failure and the controlled overlap results.

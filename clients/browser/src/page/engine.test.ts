@@ -205,3 +205,79 @@ console.error(
   }
 }
 console.error('ok - initiator modes match required remote channel admission');
+
+for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL]) {
+  for (const initialState of ['connecting', 'open', 'closing', 'closed']) {
+    for (const retireBeforeNotification of [false, true]) {
+      const originalPc = globalThis.RTCPeerConnection;
+      let connection: TestConnection | undefined;
+      const events: string[] = [];
+      class TestConnection {
+        ondatachannel: ((event: { channel: TestChannel }) => void) | null = null;
+        constructor() {
+          connection = this;
+        }
+        close(): void {}
+      }
+      class TestChannel {
+        readyState = initialState;
+        ordered = label === RELIABLE_LABEL;
+        maxRetransmits = label === RELIABLE_LABEL ? null : 0;
+        maxPacketLifeTime = null;
+        binaryType = 'blob';
+        onopen: (() => void) | null = null;
+        onclose: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        constructor(readonly label: string) {}
+        close(): void {
+          this.readyState = 'closed';
+        }
+      }
+      try {
+        globalThis.RTCPeerConnection = TestConnection as unknown as typeof RTCPeerConnection;
+        const engine = new Engine(false, {
+          onLocalCandidate: () => {},
+          onPcState: () => {},
+          onChannelOpen: (_peer, _generation, name) => events.push(`open:${name}`),
+          onChannelClosed: (_peer, _generation, name) => events.push(`close:${name}`),
+          onChannelMessage: () => {},
+        });
+        await engine.pairWith('peer', false, []);
+        const channel = new TestChannel(label);
+        connection?.ondatachannel?.({ channel });
+        if (retireBeforeNotification) engine.removePeer('peer');
+        await Promise.resolve();
+        const expected =
+          retireBeforeNotification || initialState === 'connecting'
+            ? []
+            : [`${initialState === 'open' ? 'open' : 'close'}:${label}`];
+        assert(
+          JSON.stringify(events) === JSON.stringify(expected),
+          `${label}/${initialState}/${retireBeforeNotification}: observe the registration state`,
+        );
+        if (initialState === 'closing' || initialState === 'closed') {
+          channel.onclose?.();
+          channel.onerror?.();
+          await Promise.resolve();
+          assert(events.length === expected.length, 'report terminal registration only once');
+        }
+        engine.removePeer('peer');
+        await engine.pairWith('peer', false, []);
+        const replacement = new TestChannel(label);
+        replacement.readyState = 'open';
+        connection?.ondatachannel?.({ channel: replacement });
+        await Promise.resolve();
+        assert(events.at(-1) === `open:${label}`, 'a fresh link still opens');
+        channel.onclose?.();
+        channel.onerror?.();
+        assert(events.at(-1) === `open:${label}`, 'old callbacks cannot close the replacement');
+        engine.removePeer('peer');
+      } finally {
+        globalThis.RTCPeerConnection = originalPc;
+      }
+    }
+  }
+}
+console.error(
+  'ok - terminal channel registration reports once and permits fresh-link recovery',
+);
