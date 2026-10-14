@@ -62,7 +62,7 @@ use crate::accountability::{DeliveryAccountability, GameDataDisposition};
 use crate::cli::{Cli, GameDataFormatArg};
 use crate::deadline::Deadline;
 use crate::engine::{
-    Engine, EngineEvent, SelectedPairProbeResult, RELIABLE_LABEL, UNRELIABLE_LABEL,
+    Engine, EngineEvent, Negotiation, SelectedPairProbeResult, RELIABLE_LABEL, UNRELIABLE_LABEL,
 };
 use crate::events::{emit, Event, PlanPeer, SignalKind};
 use crate::wire::{self, WsStream, HANDSHAKE_TIMEOUT};
@@ -2679,6 +2679,43 @@ impl Orchestrator<'_> {
         }
     }
 
+    async fn negotiate(
+        &mut self,
+        peer: PlayerId,
+        operation: Negotiation,
+    ) -> Result<anyhow::Result<Option<String>>, FatalError> {
+        let deadline = self.negotiation_deadline();
+        let result = self.engine.negotiate(peer, operation, deadline).await;
+        if result.is_err()
+            && !self.engine.is_paired(peer)
+            && (self.connected_pairs.contains(&peer) || deadline.is_due(Instant::now()))
+        {
+            self.handle_peer_transport_loss(peer).await?;
+        }
+        Ok(result)
+    }
+
+    fn negotiation_deadline(&self) -> Deadline {
+        let now = Instant::now();
+        let budget = if self.cli.p2p_timeout_secs == 0 {
+            self.cli.run_for_secs
+        } else {
+            self.cli.p2p_timeout_secs
+        };
+        let operation = self
+            .p2p_deadline
+            .filter(|deadline| self.cli.p2p_timeout_secs != 0 && !deadline.is_due(now))
+            .unwrap_or_else(|| Deadline::after(now, Duration::from_secs(budget)));
+        if self.success_criteria_reported && self.cli.success_release_file.is_some() {
+            return operation;
+        }
+        match (operation.finite(), self.run_deadline.finite()) {
+            (Some(a), Some(b)) => a.min(b).into(),
+            (None, _) => self.run_deadline,
+            (_, None) => operation,
+        }
+    }
+
     /// Pair with `peer` per the server's directive: create the connection,
     /// offer when told to, then drain any defensively buffered signals.
     async fn establish_pair(&mut self, peer: PlayerId, initiate: bool) -> Result<(), FatalError> {
@@ -2737,8 +2774,11 @@ impl Orchestrator<'_> {
             );
         }
         self.pair_roles.entry(peer).or_insert(initiate);
-        let ice_servers = self.last_ice_servers.clone();
-        match self.engine.pair_with(peer, initiate, &ice_servers).await {
+        let operation = Negotiation::Pair {
+            initiate,
+            ice_servers: self.last_ice_servers.clone(),
+        };
+        match self.negotiate(peer, operation).await? {
             Ok(Some(offer_sdp)) => {
                 self.send_signal(peer, SignalKind::Offer, json!({ "Offer": offer_sdp }))
                     .await?;
@@ -2941,18 +2981,25 @@ impl Orchestrator<'_> {
         let kind = SignalKind::classify(&signal);
         let result = match kind {
             SignalKind::Offer => match signal.get("Offer").and_then(|sdp| sdp.as_str()) {
-                Some(sdp) => match self.engine.handle_offer(from, sdp.to_string()).await {
-                    Ok(answer_sdp) => {
+                Some(sdp) => match self
+                    .negotiate(from, Negotiation::Offer(sdp.to_string()))
+                    .await?
+                {
+                    Ok(Some(answer_sdp)) => {
                         self.send_signal(from, SignalKind::Answer, json!({ "Answer": answer_sdp }))
                             .await?;
                         Ok(())
                     }
+                    Ok(None) => Ok(()),
                     Err(error) => Err(error),
                 },
                 None => Err(anyhow::anyhow!("Offer payload is not a string")),
             },
             SignalKind::Answer => match signal.get("Answer").and_then(|sdp| sdp.as_str()) {
-                Some(sdp) => self.engine.handle_answer(from, sdp.to_string()).await,
+                Some(sdp) => self
+                    .negotiate(from, Negotiation::Answer(sdp.to_string()))
+                    .await?
+                    .map(|_| ()),
                 None => Err(anyhow::anyhow!("Answer payload is not a string")),
             },
             SignalKind::IceCandidate => {
@@ -2968,7 +3015,10 @@ impl Orchestrator<'_> {
                     Ok(())
                 } else {
                     match signal.get("IceCandidate").and_then(|c| c.as_str()) {
-                        Some(payload) => self.engine.handle_remote_candidate(from, payload).await,
+                        Some(payload) => self
+                            .negotiate(from, Negotiation::Candidate(payload.to_string()))
+                            .await?
+                            .map(|_| ()),
                         None => Err(anyhow::anyhow!("IceCandidate payload is not a string")),
                     }
                 }
@@ -5675,3 +5725,7 @@ mod tests {
         assert!(consume_join_accountability_preface(&mut v2, &frames[1], |_| {}).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "client_negotiation_tests.rs"]
+mod negotiation_tests;

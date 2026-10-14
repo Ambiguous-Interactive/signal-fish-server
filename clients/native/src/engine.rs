@@ -30,6 +30,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use crate::deadline::Deadline;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use clap::ValueEnum;
@@ -301,9 +302,41 @@ pub struct EngineSettings {
     pub ip_family: IpFamily,
 }
 
+pub(crate) enum Negotiation {
+    Pair {
+        initiate: bool,
+        ice_servers: Vec<IceServer>,
+    },
+    Offer(String),
+    Answer(String),
+    Candidate(String),
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct NegotiationHold {
+    pub step: &'static str,
+    pub entered: Arc<tokio::sync::Notify>,
+    pub release: Arc<tokio::sync::Notify>,
+}
+
+macro_rules! negotiation_checkpoint {
+    ($hold:ident, $step:literal) => {
+        #[cfg(test)]
+        if let Some(hold) = &$hold {
+            if hold.step == $step {
+                hold.entered.notify_one();
+                hold.release.notified().await;
+            }
+        }
+    };
+}
+
 /// The per-client WebRTC engine. Owned by the orchestrator task; all methods
 /// are called from that single task, so no interior locking is needed.
 pub struct Engine {
+    #[cfg(test)]
+    pub(crate) negotiation_hold: Option<NegotiationHold>,
     settings: EngineSettings,
     runtime: Arc<dyn Runtime>,
     events: mpsc::UnboundedSender<EngineEvent>,
@@ -332,6 +365,8 @@ impl Engine {
         let runtime = default_runtime()
             .ok_or_else(|| anyhow!("webrtc 0.20 was built without an async runtime feature"))?;
         Ok(Self {
+            #[cfg(test)]
+            negotiation_hold: None,
             settings,
             runtime,
             events,
@@ -372,14 +407,51 @@ impl Engine {
         self.is_current_generation(peer, generation)
     }
 
+    pub(crate) async fn negotiate(
+        &mut self,
+        peer: PlayerId,
+        operation: Negotiation,
+        deadline: Deadline,
+    ) -> Result<Option<String>> {
+        let operation = Box::pin(async {
+            match operation {
+                Negotiation::Pair {
+                    initiate,
+                    ice_servers,
+                } => self.pair_with(peer, initiate, &ice_servers).await,
+                Negotiation::Offer(sdp) => self.handle_offer(peer, sdp).await.map(Some),
+                Negotiation::Answer(sdp) => self.handle_answer(peer, sdp).await.map(|()| None),
+                Negotiation::Candidate(payload) => self
+                    .handle_remote_candidate(peer, &payload)
+                    .await
+                    .map(|()| None),
+            }
+        });
+        let result = deadline.timeout(operation).await;
+        match result {
+            Ok(result) => result,
+            Err(_) => {
+                self.remove_peer(peer).await?;
+                Err(anyhow!("WebRTC negotiation deadline elapsed"))
+            }
+        }
+    }
+
     /// Close and forget a departed peer so a later directive can pair it anew.
     pub async fn remove_peer(&mut self, peer: PlayerId) -> Result<()> {
         if let Some(mut link) = self.peers.remove(&peer) {
             link.stop_channel_tasks();
-            link.pc
-                .close()
-                .await
-                .context("close departed RTCPeerConnection")?;
+            #[cfg(test)]
+            let negotiation_hold = self.negotiation_hold.clone();
+            let result = crate::deadline::timeout(Duration::from_millis(250), async {
+                negotiation_checkpoint!(negotiation_hold, "close");
+                link.pc.close().await
+            })
+            .await;
+            match result {
+                Ok(result) => result.context("close departed RTCPeerConnection")?,
+                Err(_) => tracing::warn!(%peer, "Peer close deadline elapsed; retry can continue"),
+            }
         }
         Ok(())
     }
@@ -413,6 +485,9 @@ impl Engine {
             .ok_or_else(|| anyhow!("peer-link generation overflow"))?;
         let generation = self.next_generation;
 
+        #[cfg(test)]
+        let negotiation_hold = self.negotiation_hold.clone();
+        negotiation_checkpoint!(negotiation_hold, "route");
         let config = RTCConfigurationBuilder::new()
             .with_ice_servers(convert_ice_servers(ice_servers))
             .with_ice_transport_policy(if self.settings.relay_only {
@@ -461,6 +536,7 @@ impl Engine {
                 .await
                 .context("create peer connection")?,
         );
+        negotiation_checkpoint!(negotiation_hold, "build");
         let link = PeerLink {
             generation,
             pc: pc.clone(),
@@ -482,10 +558,12 @@ impl Engine {
             }
             // Both channels must exist before the offer so the SDP negotiates
             // SCTP and the channels open as soon as DTLS completes.
+            negotiation_checkpoint!(negotiation_hold, "reliable");
             let reliable = pc
                 .create_data_channel(RELIABLE_LABEL, None)
                 .await
                 .context("create reliable data channel")?;
+            negotiation_checkpoint!(negotiation_hold, "unreliable");
             let unreliable = pc
                 .create_data_channel(
                     UNRELIABLE_LABEL,
@@ -529,8 +607,10 @@ impl Engine {
             link.channels
                 .insert(UNRELIABLE_LABEL.to_string(), unreliable);
 
+            negotiation_checkpoint!(negotiation_hold, "offer");
             let offer = pc.create_offer(None).await.context("create offer")?;
             let sdp = offer.sdp.clone();
+            negotiation_checkpoint!(negotiation_hold, "offer_local");
             pc.set_local_description(offer)
                 .await
                 .context("set local description (offer)")?;
@@ -550,24 +630,30 @@ impl Engine {
     /// caller relays it as `{"Answer": sdp}`). Buffered remote candidates are
     /// flushed once the remote description is set.
     pub async fn handle_offer(&mut self, peer: PlayerId, sdp: String) -> Result<String> {
+        #[cfg(test)]
+        let negotiation_hold = self.negotiation_hold.clone();
         let link = self
             .peers
             .get_mut(&peer)
             .ok_or_else(|| anyhow!("offer from unpaired peer {peer}"))?;
         let offer = RTCSessionDescription::offer(sdp).context("parse remote offer SDP")?;
         let pc = link.pc.clone();
+        negotiation_checkpoint!(negotiation_hold, "remote_offer");
         pc.set_remote_description(offer)
             .await
             .context("set remote description (offer)")?;
         link.remote_description_set = true;
         let pending = std::mem::take(&mut link.pending_candidates);
         for candidate in pending {
+            negotiation_checkpoint!(negotiation_hold, "buffered_ice");
             if pc.add_ice_candidate(candidate).await.is_err() {
                 tracing::warn!(%peer, "WebRTC stack rejected a buffered ICE candidate");
             }
         }
+        negotiation_checkpoint!(negotiation_hold, "answer");
         let answer = pc.create_answer(None).await.context("create answer")?;
         let sdp = answer.sdp.clone();
+        negotiation_checkpoint!(negotiation_hold, "answer_local");
         pc.set_local_description(answer)
             .await
             .context("set local description (answer)")?;
@@ -576,18 +662,22 @@ impl Engine {
 
     /// Initiator path: apply the remote answer; flush buffered candidates.
     pub async fn handle_answer(&mut self, peer: PlayerId, sdp: String) -> Result<()> {
+        #[cfg(test)]
+        let negotiation_hold = self.negotiation_hold.clone();
         let link = self
             .peers
             .get_mut(&peer)
             .ok_or_else(|| anyhow!("answer from unpaired peer {peer}"))?;
         let answer = RTCSessionDescription::answer(sdp).context("parse remote answer SDP")?;
         let pc = link.pc.clone();
+        negotiation_checkpoint!(negotiation_hold, "remote_answer");
         pc.set_remote_description(answer)
             .await
             .context("set remote description (answer)")?;
         link.remote_description_set = true;
         let pending = std::mem::take(&mut link.pending_candidates);
         for candidate in pending {
+            negotiation_checkpoint!(negotiation_hold, "buffered_ice");
             if pc.add_ice_candidate(candidate).await.is_err() {
                 tracing::warn!(%peer, "WebRTC stack rejected a buffered ICE candidate");
             }
@@ -606,6 +696,8 @@ impl Engine {
         peer: PlayerId,
         candidate_payload: &str,
     ) -> Result<()> {
+        #[cfg(test)]
+        let negotiation_hold = self.negotiation_hold.clone();
         if candidate_payload.len() > MAX_CANDIDATE_PAYLOAD_BYTES {
             return Err(anyhow!("remote ICE candidate payload exceeds 4096 bytes"));
         }
@@ -632,6 +724,7 @@ impl Engine {
             .saturating_add(candidate_payload.len());
         if link.remote_description_set {
             let pc = link.pc.clone();
+            negotiation_checkpoint!(negotiation_hold, "live_ice");
             pc.add_ice_candidate(init)
                 .await
                 .context("apply remote candidate")?;

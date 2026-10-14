@@ -73,9 +73,9 @@ cargo fmt --check
 echo "==> Linting the reference client (clippy, zero warnings)"
 cargo clippy --locked --all-targets -- -D warnings
 
-echo "==> Verifying WebRTC channel event retention"
+echo "==> Verifying WebRTC event retention and driver cancellation"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/webrtc/Cargo.toml" \
-    --target-dir "${CLIENT_DIR}/target" --lib peer_connection::driver::tests
+    --target-dir "${CLIENT_DIR}/target" --lib peer_connection::
 
 echo "==> Verifying RTC channel statistics retention"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
