@@ -1166,6 +1166,78 @@ impl EnhancedGameServer {
         members: Vec<SessionMember>,
         room_event_guard: RoomEventMutationGuard,
     ) {
+        self.publish_host_session(room_id, stored, authority, members, room_event_guard, None)
+            .await;
+    }
+
+    pub(super) async fn prepare_direct_endpoint_refresh(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+        connection_info: ConnectionInfo,
+        stored: ActiveSessionPlan,
+        room_event_guard: RoomEventMutationGuard,
+    ) -> bool {
+        let mut room = match self.database.get_room_by_id(room_id).await {
+            Ok(Some(room)) => room,
+            _ => return false,
+        };
+        if room.lobby_state != LobbyState::Finalized {
+            return self
+                .database
+                .update_player_connection_info(room_id, player_id, connection_info)
+                .await
+                .unwrap_or(false);
+        }
+        let Some(host) = room.players.get_mut(player_id) else {
+            return false;
+        };
+        let previous = host
+            .connection_info
+            .as_ref()
+            .and_then(DirectEndpoint::from_connection_info);
+        let replacement = DirectEndpoint::from_connection_info(&connection_info);
+        host.connection_info = Some(connection_info.clone());
+        if previous == replacement && replacement.is_some() {
+            return self
+                .database
+                .update_player_connection_info(room_id, player_id, connection_info)
+                .await
+                .unwrap_or(false);
+        }
+        let routed = match self.message_coordinator.routed_player_ids(room_id).await {
+            Ok(ids) => ids.map(|ids| ids.into_iter().collect::<HashSet<_>>()),
+            Err(_) => return false,
+        };
+        if routed.as_ref().is_some_and(|ids| !ids.contains(player_id)) {
+            return false;
+        }
+        let players: Vec<_> = room
+            .players
+            .into_values()
+            .filter(|member| routed.as_ref().is_none_or(|ids| ids.contains(&member.id)))
+            .collect();
+        let members = self.session_members_from(&players);
+        self.publish_host_session(
+            room_id,
+            stored,
+            room.authority_player,
+            members,
+            room_event_guard,
+            Some((*player_id, connection_info)),
+        )
+        .await
+    }
+
+    async fn publish_host_session(
+        &self,
+        room_id: &RoomId,
+        stored: ActiveSessionPlan,
+        authority: Option<PlayerId>,
+        members: Vec<SessionMember>,
+        room_event_guard: RoomEventMutationGuard,
+        metadata_update: Option<(PlayerId, ConnectionInfo)>,
+    ) -> bool {
         let resolved = membership_session_decision(Some(stored), authority, members);
         let decision = resolved.decision;
         let updated = resolved.active_plan_update;
@@ -1205,10 +1277,13 @@ impl EnhancedGameServer {
             .iter()
             .all(|batch| batch.messages.is_empty())
         {
+            if metadata_update.is_some() {
+                return false;
+            }
             if updated == Some(None) {
                 self.active_session_plans.remove(room_id);
             }
-            return;
+            return true;
         }
         let expected_members: Vec<_> = decision
             .members
@@ -1222,6 +1297,7 @@ impl EnhancedGameServer {
         let metrics_for_commit = Arc::clone(&self.metrics);
         let metrics_after_phase = Arc::clone(&self.metrics);
         let session_records = self.session_records();
+        let database = Arc::clone(&self.database);
         let completion = self.message_coordinator.enqueue_room_event(
             room_event_guard,
             Box::new(move || {
@@ -1233,6 +1309,11 @@ impl EnhancedGameServer {
                             recipient_messages,
                             Box::new(move || {
                                 Box::pin(async move {
+                                    if let Some((player_id, info)) = metadata_update {
+                                        if !database.update_player_connection_info(&room_id, &player_id, info).await? {
+                                            return Ok(false);
+                                        }
+                                    }
                                     if let Some(updated) = updated {
                                         if let Some(plan) = updated {
                                             active_session_plans.insert(room_id, plan);
@@ -1281,8 +1362,12 @@ impl EnhancedGameServer {
                 })
             }),
         );
-        if let Err(error) = completion.await {
-            tracing::warn!(%room_id, %error, "Host re-plan publication failed");
+        match completion.await {
+            Ok(committed) => committed,
+            Err(error) => {
+                tracing::warn!(%room_id, %error, "Host re-plan publication failed");
+                false
+            }
         }
     }
 

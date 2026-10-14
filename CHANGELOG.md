@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Refresh running Direct session plans when the host changes or loses its endpoint (#947).
+  **Breaking (Rust library):** Call `handle_provide_connection_info` through `Arc<EnhancedGameServer>`.
+
 ### Fixed
 
 - Fix false native peer connection reports from delayed data-channel open events (#948).

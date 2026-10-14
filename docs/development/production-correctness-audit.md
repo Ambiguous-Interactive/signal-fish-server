@@ -2814,3 +2814,52 @@ three-player native mesh and live relay-floor control passes in nextest
 which passes with the delayed-close control in `8bc2bdb2`.
 This finding does not identify the initial failures in #853/#889 or complete
 A20 or #826. Hosted CI and final-head review remain delivery gates.
+
+### A11 follow-up — Refresh a running Direct host endpoint
+
+Usability improvement: [#947](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/947).
+Baseline `f5bff878`.
+
+The previous protocol guide deferred host endpoint updates until a membership
+refresh. A host could replace its address while every peer retained the old
+`SessionPlan.direct_endpoint`. This did not violate that documented contract.
+The new trigger publishes a fresh authoritative plan as soon as the running
+Direct host changes its validated endpoint. Endpoint loss elects an executable
+successor or publishes the existing Relay/Relay reset. Duplicate endpoints,
+non-host metadata, open lobbies, WebRTC sessions, and Relay sessions do not
+rebuild plans. Relay sessions never upgrade from metadata changes.
+
+Baseline nextest `920f20c3` fails the endpoint-replacement control because the
+old handler sends no replacement plan. The repair owns the operation beyond
+caller cancellation and holds the source lifecycle and room mutation gates.
+It builds the candidate plan without changing stored metadata. The exact-member
+publication reserves delivery capacity and rechecks routing generations before
+its hook writes metadata and the active plan. A rejected pre-commit publication
+keeps the old metadata and returns an error, allowing the identical update to
+be retried. A successful publication shares one fresh generation across the
+current v3 members. Final scoped nextest `0174f663` passes 12 controls: endpoint
+replacement and successor election, immediate hostless reset, sticky Relay,
+duplicate and non-host suppression, WebRTC and v2 gates, pre-commit rejection
+with identical retry, real slow-peer refusal, caller cancellation, concurrent
+metadata and membership, stale source exclusion, legacy storage, and reconnect
+snapshots. Independent review finds no remaining source or test issue. These
+controls prove server publication, not delivery over an external Direct socket.
+The Rust library method now requires its existing server
+`Arc` receiver; consumers that passed `&EnhancedGameServer` must pass the `Arc`.
+
+Rust and .NET session adapters replace the endpoint and reset their liveness
+state on a fresh plan generation. Godot stores the new plan and clears WebRTC
+links for Direct or Relay plans. Direct sockets belong to each game's adapter;
+server publication alone does not prove their teardown or replacement. No
+wire schema changes. Game adapters must process every new generation, even
+when the host and peer IDs stay the same. Client acceptance remains separate:
+[Rust #288](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/288),
+[.NET #141](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/141),
+and [Godot #358](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/358).
+Those issues retain their terminal hostless-reset tests and now also require
+replacement, successor election, duplicate, ordering, and fresh recovery tests.
+
+Native and browser reference clients accept authoritative generations but
+reject Direct execution and use relay. Fortress fixtures use relay adapters.
+They do not establish external Direct transport acceptance. This work does not
+complete the wider A11 or #826 audit.

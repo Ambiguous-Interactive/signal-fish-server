@@ -33905,7 +33905,9 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
 // attribution tests (`reliable_slow_consumer_eviction_is_attributed_to_the_
 // triggering_sender` + `reliable_class_sender_classifies_the_attribution_
 // surface`).
-const MUTATION_TOTAL_MUTANTS: u32 = 427;
+// 437 (was 427): Direct endpoint refresh adds ten scoped mutation sites (#947).
+// With 44 shards, ceil(437/44) * 29s remains 290s.
+const MUTATION_TOTAL_MUTANTS: u32 = 437;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.
@@ -34173,12 +34175,12 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
         .into_iter()
         .flat_map(str::lines)
         .any(|line| {
-            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/43"
+            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/44"
         })
     {
         violations.push(
             "mutation.yml mutants job must run mutation via the exact `bash \
-             scripts/run-mutants.sh --shard ${{ matrix.shard }}/43` command, not an inline or \
+             scripts/run-mutants.sh --shard ${{ matrix.shard }}/44` command, not an inline or \
              differently scoped invocation (which would bypass the single source of truth)."
                 .to_string(),
         );
@@ -34329,7 +34331,7 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
          slice sharding are the measured levers (see .llm/skills/mutation-testing-performance/SKILL.md), \
          and routing through scripts/run-mutants.sh keeps CI and local runs identical.\n\
          Fix: restore the listed levers in scripts/run-mutants.sh / .github/workflows/mutation.yml.\n\
-         Verify: bash scripts/run-mutants.sh --shard 0/43 --print-cmd",
+         Verify: bash scripts/run-mutants.sh --shard 0/44 --print-cmd",
         violations.join("\n")
     );
 }

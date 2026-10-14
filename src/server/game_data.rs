@@ -62,9 +62,12 @@ impl EnhancedGameServer {
             .is_none_or(|source| self.connection_manager.lifecycle_matches(player_id, source))
     }
 
-    /// Store legacy, self-declared peer metadata for the `GameStarting` handoff.
+    /// Store self-declared peer metadata and refresh a running Direct host plan.
+    ///
+    /// Call this method through an `Arc<EnhancedGameServer>`. Its owned
+    /// transaction continues if the calling task is canceled.
     pub async fn handle_provide_connection_info(
-        &self,
+        self: &Arc<Self>,
         player_id: &PlayerId,
         connection_info: crate::protocol::ConnectionInfo,
     ) {
@@ -73,7 +76,7 @@ impl EnhancedGameServer {
     }
 
     pub(super) async fn handle_provide_connection_info_from_lifecycle(
-        &self,
+        self: &Arc<Self>,
         player_id: &PlayerId,
         connection_info: crate::protocol::ConnectionInfo,
         source_lifecycle: Option<Arc<ClientLifecycle>>,
@@ -83,6 +86,24 @@ impl EnhancedGameServer {
         else {
             return;
         };
+        let server = Arc::clone(self);
+        let player_id = *player_id;
+        let task = tokio::spawn(async move {
+            server
+                .provide_connection_info_owned(&player_id, connection_info, lifecycle)
+                .await;
+        });
+        if let Err(error) = task.await {
+            tracing::error!(%player_id, %error, "Peer metadata transaction failed");
+        }
+    }
+
+    async fn provide_connection_info_owned(
+        &self,
+        player_id: &PlayerId,
+        connection_info: crate::protocol::ConnectionInfo,
+        lifecycle: Arc<ClientLifecycle>,
+    ) {
         let _lifecycle_guard = lifecycle.lock().await;
         if lifecycle.player_id() != *player_id
             || !self
@@ -125,6 +146,38 @@ impl EnhancedGameServer {
                 .await;
             return;
         };
+
+        let room_event_guard = self
+            .message_coordinator
+            .lock_room_event_mutation(&room_id)
+            .await;
+        let stored = self.active_session_plan(&room_id).filter(|plan| {
+            plan.topology == crate::protocol::Topology::Host
+                && plan.transport == crate::protocol::Transport::Direct
+                && plan.host == Some(*player_id)
+        });
+        if let Some(stored) = stored {
+            let result = self
+                .prepare_direct_endpoint_refresh(
+                    &room_id,
+                    player_id,
+                    connection_info,
+                    stored,
+                    room_event_guard,
+                )
+                .await;
+            if !result {
+                let _ = self
+                    .send_error_to_player(
+                        player_id,
+                        "Failed to update Direct host endpoint; retry the connection info"
+                            .to_string(),
+                        Some(ErrorCode::InternalError),
+                    )
+                    .await;
+            }
+            return;
+        }
 
         tracing::info!(%player_id, %room_id, "Player provided legacy peer connection metadata");
 
