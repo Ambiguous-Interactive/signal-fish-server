@@ -12,6 +12,26 @@ async fn open_physical_pair(
     peer: PlayerId,
     saved_offer: Option<String>,
 ) -> (crate::engine::Engine, Vec<EngineEvent>) {
+    let (engine, opens, _) = Box::pin(open_physical_pair_with_events(
+        state,
+        server_ws,
+        peer,
+        saved_offer,
+    ))
+    .await;
+    (engine, opens)
+}
+
+pub(super) async fn open_physical_pair_with_events(
+    state: &mut Orchestrator<'_>,
+    server_ws: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    peer: PlayerId,
+    saved_offer: Option<String>,
+) -> (
+    crate::engine::Engine,
+    Vec<EngineEvent>,
+    tokio::sync::mpsc::UnboundedReceiver<EngineEvent>,
+) {
     let initiate = state.pair_roles[&peer];
     let mut offer = saved_offer;
     state.send_message(&ClientMessage::Ping).await.unwrap();
@@ -113,7 +133,7 @@ async fn open_physical_pair(
             );
         }
     }
-    (remote, opens)
+    (remote, opens, remote_events)
 }
 
 #[tokio::test]

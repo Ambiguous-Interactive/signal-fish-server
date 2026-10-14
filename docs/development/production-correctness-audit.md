@@ -3013,3 +3013,63 @@ The native engine has similar inline waits;
 tracks its independent cancellation assessment before any repair. The server wire protocol is unchanged. Rust,
 .NET, and Godot SDKs do not import the private browser reference orchestrator,
 so this repair requires no SDK migration or tracking issue.
+
+### F51 Native negotiation blocks deadlines and canceled drivers outlive links
+
+Issue [#961](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/961)
+continues A20 from baseline `438bf9f9`. The native orchestrator awaits peer
+construction, offers, answers, and ICE operations before returning to its
+WebSocket and timer loop. Its binary watchdog does not make the P2P or run
+deadlines interrupt those waits.
+
+The baseline fails 32 controlled suspension histories. Sixteen role/seam cases
+each use the P2P deadline first and the run deadline first. The seams cover
+route resolution, built-but-unregistered peers, both local channel creations,
+offer creation and local description, remote offer and answer, buffered ICE
+for both roles, answer creation and local description, and live ICE for both
+roles. Each stays pending after the relevant deadline. These controls suspend
+native operations; they do not claim a captured spontaneous stack stall.
+
+Independent real-driver controls find three cancellation leaks in the wrapper.
+Canceling construction while it awaits driver initialization drops a handle
+that detaches by default. Dropping an initialized default-runtime peer also
+leaves the driver alive. Canceling close after it takes the driver handle
+drops that handle before the explicit abort. All three baseline controls fail
+to release the handler and its driver resources.
+
+The wrapper now owns its driver through an abort-on-drop guard. Construction,
+peer destruction, and interrupted close retain cancellation ownership.
+Explicit close keeps its bounded graceful stop and callback-specific detach.
+The native orchestrator bounds each complete negotiation operation by its
+remaining P2P window and active run deadline. Zero P2P timeout controls fallback
+reporting only; operations use the run duration. The held-success harness
+retains its run-window exemption. Overflow-safe deadlines keep their existing
+meaning.
+
+Expiry drops the operation before removing the physical link and canceling its
+pollers. Close waits at most 250 ms; the driver owner stops any remaining task.
+The orchestrator clears current connection observations, retains logical pair
+and exchange obligations, and rejects events from the old physical generation.
+Queued relay traffic and server replies then resume. This bounds suspension;
+it does not make an inline negotiation operation serve WebSocket frames before
+its deadline.
+
+The final focused native run passes 42 tests. These include all 32 deadline
+histories, eight zero-P2P histories, eight held-success histories, and retained
+retry and channel-lifetime controls. Every canceled history then completes a
+fresh bidirectional exchange on both required channels. All three wrapper
+driver lifetime cases pass. Three real Chromium/native cells also pass:
+room restore, coordinated retry, and a three-player mesh.
+
+The first extended run passes 40 of 41 tests and exposes a stack overflow in
+the retained retry test. Boxing the large negotiation future and the shared
+test helper removes the added nested stack frames. The final run includes a
+future-size regression. Root and native strict lint pass. Hosted CI and final
+review remain delivery gates for this repair.
+The interop runner includes the wrapper cancellation controls with its retained
+event-queue tests. Release qualification in #912 must retain these controls.
+
+The wire protocol is unchanged. External Rust, .NET, and Godot SDKs do not
+import this private native orchestrator or its local wrapper graph, so no SDK
+migration or client tracking issue is needed. This finding does not diagnose
+issues #853 or #889, qualify a replacement registry release, or complete A20 or #826.

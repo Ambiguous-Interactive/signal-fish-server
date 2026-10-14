@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Resume native relay traffic and run deadlines after stalled WebRTC negotiation, with full link cleanup (#961).
 - Keep browser relay traffic, late connections, and run deadlines working during stalled WebRTC negotiation (#960).
 - Use rustls 0.23.46 for corrected TLS session handling in the server and native reference client.
 - Report browser reference-client channel closure immediately when the channel closes before handler registration (#955).

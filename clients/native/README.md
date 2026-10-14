@@ -21,6 +21,14 @@ reporting a connected pair. Delayed open callbacks do not revive channels
 that already closed. A channel can still close after its state check.
 **Migration:** Native library callers must now await `Engine::note_channel_open`.
 Network loss still follows the configured P2P deadlines.
+
+The orchestrator bounds each pairing, SDP, and ICE operation by its remaining
+P2P window and active run deadline. A zero P2P timeout reports fallback
+immediately but allows late negotiation until the run deadline.
+An expired operation retires its physical link before queued relay traffic and
+server replies resume. Cleanup waits at most 250 ms before stopping the driver.
+Logical exchange obligations remain due. A new plan or allowed retry can create
+a fresh link. The success-release harness keeps its existing run-window exemption.
 It closes other remote labels without retaining them or starting callbacks.
 **Migration:** Applications that need extra channels must own their channel
 handling. This restriction belongs to these reference clients; the server

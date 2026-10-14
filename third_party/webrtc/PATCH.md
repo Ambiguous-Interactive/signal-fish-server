@@ -26,11 +26,15 @@ Markers do not retain closed handles.
 Events for a retired, unregistered handle cannot recreate a retained queue.
 Disconnected event senders are removed during the next driver flush.
 No additional channel polling task is needed for a refused announcement.
-The changed upstream file is `src/peer_connection/driver.rs`.
+The driver task has one cancellation owner during construction, use, and close.
+Dropping a pending build, a peer, or an interrupted close stops that task.
+Explicit close retains its brief graceful stop and callback-specific detach.
+The changed upstream files are `src/peer_connection/driver.rs` and
+`src/peer_connection/mod.rs`.
 
 See [#919](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/919).
 Remove this package and its path patch only after a published release passes
-the retained event-ordering, retired-handle churn, native refusal/reuse, and
+the retained cancellation, event-ordering, retired-handle churn, native refusal/reuse, and
 browser interoperability controls. Track qualification in
 [#912](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/912).
 The wider resource audit #870 remains open.
