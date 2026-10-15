@@ -148,6 +148,10 @@ as UTF-8 with replacement characters for invalid bytes.
 
 ### WebSocket and output limits
 
+Each `Authenticate` and `JoinRoom` command has one 20-second response window.
+Prelude frames do not restart it. Browser output waits use the same window.
+Expiry closes the client with exit code 3; late replies cannot resume the command.
+
 The browser accepts each server frame up to 64 MiB, the server's portable
 maximum. Snapshots and reconnect replies can exceed the default 64 KiB inbound
 limit. The browser retains at most 256 pending server frames and 128 MiB of

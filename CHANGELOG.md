@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep native and browser reference-client handshakes within one 20-second window per command (#974).
 - Keep native and browser peer setup within one connection window per session plan (#972).
 - Keep native relay traffic, retries, and run deadlines working after stalled WebRTC negotiation (#961).
 - Keep browser relay traffic, retries, late connections, and run deadlines working during stalled negotiation (#960, #969).
