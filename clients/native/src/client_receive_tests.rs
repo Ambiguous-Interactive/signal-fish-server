@@ -388,3 +388,65 @@ async fn handshake_deadline_stops_a_ready_control_sequence() {
         "the inner wait read {polls} frames past the command cutoff"
     );
 }
+
+// Regression #985: the command cutoff also owns a write's ready completion.
+#[tokio::test(start_paused = true)]
+async fn handshake_writes_keep_the_original_command_cutoff() {
+    use tokio_tungstenite::tungstenite::Error as WebSocketError;
+
+    let budget = Duration::from_secs(2);
+    let mut accepted_late = Vec::new();
+    for elapsed in [
+        budget - Duration::from_millis(1),
+        budget,
+        budget + Duration::from_millis(1),
+    ] {
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let mut sink = Box::pin(futures_util::sink::unfold(
+            Some(released),
+            |mut released, _frame: Message| async move {
+                released.take().unwrap().await.unwrap();
+                Ok::<_, WebSocketError>(released)
+            },
+        ));
+        let write = send_handshake_message(
+            &mut sink,
+            &ClientMessage::Ping,
+            Deadline::after(Instant::now(), budget),
+        );
+        tokio::pin!(write);
+        assert!(futures_util::poll!(write.as_mut()).is_pending());
+        tokio::time::advance(elapsed).await;
+        release.send(()).unwrap();
+        let result = write.await;
+        if elapsed >= budget {
+            if result.is_ok() {
+                accepted_late.push(elapsed);
+            } else {
+                assert_eq!(result.unwrap_err().code, EXIT_CONNECTION_ERROR);
+            }
+        } else {
+            assert!(result.is_ok(), "on-time command: {result:?}");
+        }
+    }
+    assert!(
+        accepted_late.is_empty(),
+        "late command writes reported success: {accepted_late:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn handshake_writes_reject_expired_commands_without_polling_the_sink() {
+    let calls = std::cell::Cell::new(0);
+    let mut sink = Box::pin(futures_util::sink::unfold((), |(), _frame: Message| {
+        calls.set(calls.get() + 1);
+        std::future::ready(Ok::<_, tokio_tungstenite::tungstenite::Error>(()))
+    }));
+    for budget in [Duration::ZERO, Duration::from_millis(1)] {
+        let deadline = Deadline::after(Instant::now(), budget);
+        tokio::time::advance(budget).await;
+        let result = send_handshake_message(&mut sink, &ClientMessage::Ping, deadline).await;
+        assert_eq!(result.unwrap_err().code, EXIT_CONNECTION_ERROR);
+        assert_eq!(calls.get(), 0, "expired commands cannot reach the sink");
+    }
+}

@@ -1093,20 +1093,16 @@ fn clear_departed_membership_plan(
 }
 
 /// Send a command or cleanup retry without renewing its response window.
-async fn send_handshake_message(
-    ws: &mut WsStream,
+async fn send_handshake_message<S>(
+    ws: &mut S,
     message: &ClientMessage,
     deadline: Deadline,
-) -> Result<(), FatalError> {
-    if deadline.is_due(Instant::now()) {
-        return Err(FatalError::connection(
-            "server handshake response timed out",
-        ));
-    }
-    deadline
-        .timeout(wire::send_client_message(ws, message))
+) -> Result<(), FatalError>
+where
+    S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    wire::send_client_message_until(ws, message, deadline)
         .await
-        .map_err(|_| FatalError::connection("server handshake response timed out"))?
         .map_err(|error| FatalError::connection(format!("{error:#}")))
 }
 

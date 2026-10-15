@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -3422,3 +3422,43 @@ All 22 scoped wire and handshake controls pass. Root and native strict lint
 pass with all targets and features. Real native three-player mesh and mixed
 v2/v3 relay controls pass in 2.582 seconds. Hosted validation and final-head
 review remain delivery gates.
+
+### F60 Native WebSocket writes report success after expiry
+
+Issue [#985](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/985)
+continues A20 from `f9accf4e`. The native frame writer uses Tokio's timeout
+without checking completion time. Tokio polls the sink before its timer, so a
+ready flush can return success at or after expiry. The orchestrator can then
+emit a sent event and continue using a connection whose write window expired.
+The handshake wrapper has the same gap at its original command cutoff.
+
+A deterministic sink history holds a text or binary flush, advances the paused
+clock, and releases the flush before polling the expired timer. The baseline
+accepts both frame types at 20 seconds and at 20.001 seconds. Controls at
+19.999 seconds succeed. A separate caller control uses a two-second command
+window. Restoring the old outer-timeout behavior while keeping the repaired
+20-second writer reproduces success at two seconds and at 2.001 seconds.
+These controlled sink schedules do not establish a spontaneous socket stall.
+
+The shared writer now checks its absolute monotonic cutoff before sending and
+after completion. Handshakes pass their original command cutoff into that
+writer. The write ceiling still applies to longer or unrepresentable command
+windows. An expired result is a connection failure. A failed write can already
+have emitted bytes; callers must discard the connection, and delivery remains
+uncertain. The repair does not retract a frame or interrupt synchronous work
+inside one sink poll.
+
+Controls retain on-time text and binary flushes, exact and late expiry, the
+shorter command window, no sink work for expired commands, pending flushes,
+and ordinary sink errors. Existing real-socket controls retain blocked-endpoint
+expiry and exact healthy text, delivery-class, and binary frame shapes.
+
+All 25 focused wire and handshake controls pass. Root and native strict lint
+pass with all targets and features. Real three-player native mesh and mixed
+v2/v3 relay controls pass in 2.417 seconds.
+
+The server protocol and settings are unchanged. The Rust, .NET, and Godot SDKs
+do not import this reference-client wire helper and need no migration or
+acceptance issue. Browser writes use a separate synchronous API. This repair
+does not diagnose #853 or #889, establish #953's timing bound, or complete A20
+or the wider #826 audit. Hosted CI and final-head review remain delivery gates.

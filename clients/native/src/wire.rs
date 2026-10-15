@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use futures_util::{SinkExt, Stream, StreamExt};
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use signal_fish_server::protocol::{ClientMessage, DeliveryClass, ServerMessage};
 
 pub use signal_fish_server::protocol::{decode_v3_binary_game_data, V3BinaryGameDataFrame};
@@ -53,8 +53,24 @@ pub async fn connect(server_url: &str) -> Result<WsStream> {
 /// The write and flush share [`WRITE_TIMEOUT`]. Discard the connection on
 /// failure: cancellation can leave a partial frame in the transport.
 pub async fn send_client_message(ws: &mut WsStream, message: &ClientMessage) -> Result<()> {
+    send_client_message_until(
+        ws,
+        message,
+        Deadline::after(tokio::time::Instant::now(), WRITE_TIMEOUT),
+    )
+    .await
+}
+
+pub(crate) async fn send_client_message_until<S>(
+    ws: &mut S,
+    message: &ClientMessage,
+    deadline: Deadline,
+) -> Result<()>
+where
+    S: Sink<Message, Error = WebSocketError> + Unpin,
+{
     let json = serde_json::to_string(message).context("serialize ClientMessage")?;
-    send_frame(ws, Message::Text(json.into())).await
+    send_frame_until(ws, Message::Text(json.into()), deadline).await
 }
 
 /// Send game data with reliable delivery semantics and no coalescing key.
@@ -87,10 +103,37 @@ pub async fn send_game_data_binary(ws: &mut WsStream, payload: Vec<u8>) -> Resul
     send_frame(ws, Message::Binary(payload.into())).await
 }
 
-async fn send_frame(ws: &mut WsStream, frame: Message) -> Result<()> {
-    tokio::time::timeout(WRITE_TIMEOUT, ws.send(frame))
-        .await
-        .context("WebSocket write timed out; discard this connection")?
+async fn send_frame<S>(ws: &mut S, frame: Message) -> Result<()>
+where
+    S: Sink<Message, Error = WebSocketError> + Unpin,
+{
+    send_frame_until(
+        ws,
+        frame,
+        Deadline::after(tokio::time::Instant::now(), WRITE_TIMEOUT),
+    )
+    .await
+}
+
+async fn send_frame_until<S>(ws: &mut S, frame: Message, deadline: Deadline) -> Result<()>
+where
+    S: Sink<Message, Error = WebSocketError> + Unpin,
+{
+    let now = tokio::time::Instant::now();
+    let budget = deadline.finite().map_or(WRITE_TIMEOUT, |cutoff| {
+        cutoff.saturating_duration_since(now).min(WRITE_TIMEOUT)
+    });
+    let deadline = Deadline::after(now, budget);
+    let timed_out = || anyhow!("WebSocket write timed out; discard this connection");
+    if deadline.is_due(tokio::time::Instant::now()) {
+        return Err(timed_out());
+    }
+    let result = deadline.timeout(ws.send(frame)).await;
+    if deadline.is_due(tokio::time::Instant::now()) {
+        return Err(timed_out());
+    }
+    result
+        .map_err(|_| timed_out())?
         .context("send WebSocket frame")
 }
 
@@ -424,6 +467,99 @@ mod tests {
             overdue.is_empty(),
             "blocked writes outlive their whole-write budget (binary): {overdue:?}"
         );
+    }
+
+    // Regression #985: a ready sink completion cannot cancel an expired timer.
+    #[tokio::test(start_paused = true)]
+    async fn websocket_writes_reject_ready_flushes_at_the_deadline() {
+        let mut accepted_late = Vec::new();
+        for binary in [false, true] {
+            for elapsed in [
+                WRITE_TIMEOUT - Duration::from_millis(1),
+                WRITE_TIMEOUT,
+                WRITE_TIMEOUT + Duration::from_millis(1),
+            ] {
+                let (release, released) = tokio::sync::oneshot::channel::<()>();
+                let frame = if binary {
+                    Message::Binary(vec![0, 1, 255].into())
+                } else {
+                    Message::Text("test".into())
+                };
+                let mut frames = Vec::new();
+                let mut sink = Box::pin(futures_util::sink::unfold(
+                    Some(released),
+                    |mut released, frame| {
+                        frames.push(frame);
+                        async move {
+                            released.take().unwrap().await.unwrap();
+                            Ok::<_, WebSocketError>(released)
+                        }
+                    },
+                ));
+                let result = {
+                    let write = send_frame(&mut sink, frame.clone());
+                    tokio::pin!(write);
+                    assert!(futures_util::poll!(write.as_mut()).is_pending());
+                    tokio::time::advance(elapsed).await;
+                    release.send(()).unwrap();
+                    write.await
+                };
+                drop(sink);
+                assert_eq!(frames, [frame], "one original frame only");
+                if elapsed >= WRITE_TIMEOUT {
+                    if result.is_ok() {
+                        accepted_late.push((binary, elapsed));
+                    } else {
+                        assert!(result.unwrap_err().to_string().contains("write timed out"));
+                    }
+                } else {
+                    assert!(result.is_ok(), "on-time flush: {result:?}");
+                }
+            }
+        }
+        assert!(
+            accepted_late.is_empty(),
+            "late flushes reported success: {accepted_late:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn websocket_writes_bound_pending_flushes_and_preserve_sink_errors() {
+        for (budget, expected) in [
+            (Duration::from_secs(2), Duration::from_secs(2)),
+            (Duration::from_secs(30), WRITE_TIMEOUT),
+            (Duration::from_secs(u64::MAX), WRITE_TIMEOUT),
+        ] {
+            let mut sink = Box::pin(futures_util::sink::unfold((), |(), _frame: Message| {
+                std::future::pending::<Result<(), WebSocketError>>()
+            }));
+            let started = tokio::time::Instant::now();
+            let error = send_client_message_until(
+                &mut sink,
+                &ClientMessage::Ping,
+                Deadline::after(started, budget),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("write timed out"), "{error:#}");
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed >= expected && elapsed <= expected + Duration::from_millis(1),
+                "budget={budget:?}: {elapsed:?}"
+            );
+        }
+
+        let mut sink = Box::pin(futures_util::sink::unfold((), |(), _frame: Message| {
+            std::future::ready(Err::<(), _>(WebSocketError::ConnectionClosed))
+        }));
+        let error = send_frame(&mut sink, Message::Text("test".into()))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<WebSocketError>(),
+            Some(WebSocketError::ConnectionClosed)
+        ));
+        assert!(error.to_string().contains("send WebSocket frame"));
     }
 
     #[tokio::test]
