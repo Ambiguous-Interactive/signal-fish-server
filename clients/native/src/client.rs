@@ -1127,7 +1127,7 @@ where
                         "server handshake response timed out",
                     ));
                 }
-                let message = wire::next_server_message(ws, HANDSHAKE_TIMEOUT).await;
+                let message = wire::next_server_message_until(ws, deadline).await;
                 if deadline.is_due(Instant::now()) {
                     return Err(FatalError::connection(
                         "server handshake response timed out",

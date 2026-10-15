@@ -156,11 +156,26 @@ pub async fn next_server_message<S>(
 where
     S: Stream<Item = std::result::Result<Message, WebSocketError>> + Unpin,
 {
-    let deadline = Deadline::after(tokio::time::Instant::now(), timeout);
+    next_server_message_until(ws, Deadline::after(tokio::time::Instant::now(), timeout)).await
+}
+
+pub(crate) async fn next_server_message_until<S>(
+    ws: &mut S,
+    deadline: Deadline,
+) -> std::result::Result<ServerMessage, ServerMessageReadError>
+where
+    S: Stream<Item = std::result::Result<Message, WebSocketError>> + Unpin,
+{
+    let timed_out =
+        || ServerMessageReadError::Connection("timed out waiting for a ServerMessage".to_string());
     loop {
-        let frame = deadline.timeout(ws.next()).await.map_err(|_elapsed| {
-            ServerMessageReadError::Connection("timed out waiting for a ServerMessage".to_string())
-        })?;
+        if deadline.is_due(tokio::time::Instant::now()) {
+            return Err(timed_out());
+        }
+        let frame = deadline.timeout(ws.next()).await.map_err(|_| timed_out())?;
+        if deadline.is_due(tokio::time::Instant::now()) {
+            return Err(timed_out());
+        }
         match frame {
             Some(Ok(Message::Text(text))) => {
                 return decode_server_text(&text).map_err(ServerMessageReadError::Protocol);
@@ -464,6 +479,133 @@ mod tests {
             outcome.is_err(),
             "the finite outer test deadline must expire before the distant message wait"
         );
+    }
+
+    // Regression #983: ready frames cannot bypass the receive cutoff.
+    #[tokio::test(start_paused = true)]
+    async fn server_message_wait_rejects_ready_frames_at_expiry() {
+        use std::task::Poll;
+
+        let budget = Duration::from_secs(1);
+        for elapsed in [
+            budget - Duration::from_millis(1),
+            budget,
+            budget + Duration::from_millis(1),
+        ] {
+            let mut available = false;
+            let mut input = futures_util::stream::poll_fn(|_| {
+                if available {
+                    Poll::Ready(Some(Ok(Message::Text(r#"{"type":"Pong"}"#.into()))))
+                } else {
+                    available = true;
+                    Poll::Pending
+                }
+            });
+            let read = next_server_message(&mut input, budget);
+            tokio::pin!(read);
+            assert!(futures_util::poll!(read.as_mut()).is_pending());
+            tokio::time::advance(elapsed).await;
+            let result = read.await;
+            if elapsed < budget {
+                assert!(matches!(result, Ok(ServerMessage::Pong)), "{result:?}");
+            } else {
+                assert!(
+                    matches!(result, Err(ServerMessageReadError::Connection(ref error)) if error.contains("timed out")),
+                    "accepted a ready frame after {elapsed:?}: {result:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn server_message_wait_checks_time_between_buffered_controls() {
+        use std::task::Poll;
+
+        /* A finite ready stream crosses the cutoff in one poll and still
+        terminates on the baseline implementation. */
+        for pong in [false, true] {
+            let mut polls = 0;
+            let mut input = futures_util::stream::poll_fn(|_| {
+                polls += 1;
+                if polls <= 8 {
+                    std::thread::sleep(Duration::from_millis(5));
+                    let frame = if pong {
+                        Message::Pong(vec![].into())
+                    } else {
+                        Message::Ping(vec![].into())
+                    };
+                    Poll::Ready(Some(Ok(frame)))
+                } else {
+                    Poll::Ready(Some(Ok(Message::Text(r#"{"type":"Pong"}"#.into()))))
+                }
+            });
+            let result = next_server_message(&mut input, Duration::from_millis(10)).await;
+            assert!(
+                matches!(result, Err(ServerMessageReadError::Connection(ref error)) if error.contains("timed out")),
+                "buffered controls postponed the cutoff: pong={pong}, result={result:?}"
+            );
+            assert!(polls < 8, "stop reading controls once time is due");
+        }
+    }
+
+    #[tokio::test]
+    async fn server_message_wait_rejects_a_read_that_finishes_after_expiry() {
+        let mut input = futures_util::stream::poll_fn(|_| {
+            std::thread::sleep(Duration::from_millis(10));
+            std::task::Poll::Ready(Some(Ok(Message::Text(r#"{"type":"Pong"}"#.into()))))
+        });
+        let result = next_server_message(&mut input, Duration::from_millis(5)).await;
+        assert!(
+            matches!(result, Err(ServerMessageReadError::Connection(ref error)) if error.contains("timed out")),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn server_message_wait_preserves_controls_errors_and_zero_budget() {
+        let mut polls = 0;
+        let mut input = futures_util::stream::poll_fn(|_| {
+            polls += 1;
+            std::task::Poll::Ready(Some(Ok(Message::Text(r#"{"type":"Pong"}"#.into()))))
+        });
+        assert!(matches!(
+            next_server_message(&mut input, Duration::ZERO).await,
+            Err(ServerMessageReadError::Connection(_))
+        ));
+        assert_eq!(polls, 0, "an expired wait must not consume input");
+
+        for budget in [Duration::from_secs(1), Duration::from_secs(u64::MAX)] {
+            let mut controls = futures_util::stream::iter([
+                Ok(Message::Ping(vec![1].into())),
+                Ok(Message::Pong(vec![2].into())),
+                Ok(Message::Text(r#"{"type":"Pong"}"#.into())),
+            ]);
+            assert!(matches!(
+                next_server_message(&mut controls, budget).await,
+                Ok(ServerMessage::Pong)
+            ));
+            for (frame, protocol_error) in [
+                (Some(Ok(Message::Text("{".into()))), true),
+                (Some(Ok(Message::Binary(vec![1].into()))), true),
+                (Some(Ok(Message::Close(None))), false),
+                (Some(Err(WebSocketError::ConnectionClosed)), false),
+                (None, false),
+            ] {
+                let mut input = futures_util::stream::iter(frame);
+                let result = next_server_message(&mut input, budget).await;
+                if protocol_error {
+                    assert!(
+                        matches!(result, Err(ServerMessageReadError::Protocol(_))),
+                        "{result:?}"
+                    );
+                } else {
+                    assert!(
+                        matches!(result, Err(ServerMessageReadError::Connection(_))),
+                        "{result:?}"
+                    );
+                }
+            }
+        }
     }
 
     // Regression #819: malformed snapshots must not copy bearer tokens to logs.

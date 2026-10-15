@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -3387,3 +3387,38 @@ write controls retained from F56. Browser tests, strict type checks, formatting,
 and build pass. Root and native strict lint pass with all features and targets.
 Real Chromium/native mixed mesh, room restore, and mixed v2/v3 relay controls
 pass in 3.955 seconds. Hosted CI and final-head review remain delivery gates.
+
+### F59 Buffered native WebSocket controls bypass receive deadlines
+
+Issue [#983](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/983)
+continues A20 from `f09b072b`. The native reference receive helper skips ready
+Ping/Pong frames without checking elapsed time. Tokio polls the ready stream
+before its timeout. A control sequence can therefore keep one poll running
+past the cutoff. The handshake wrapper cannot interrupt that poll, and the
+helper starts a fresh inner window instead of using the command cutoff.
+
+Two baseline regressions return a reply after expiry: a paused-clock read
+resumes at its deadline, and a finite ready control sequence crosses the
+cutoff within one poll. A separate production handshake control uses a shorter
+original command window. It fails because the helper reads all eight control
+frames instead of stopping at that window. These finite streams establish
+the scheduling defect;
+they do not establish a spontaneous network incident or unbounded CPU work
+inside a single transport poll.
+
+The receive helper now checks the same monotonic cutoff before and after each
+frame read. The handshake passes its original command cutoff into that helper.
+The public duration-based helper keeps its signature and overflow behavior.
+Controls cover on-time replies, exact and late expiry, a read that crosses the
+cutoff before returning ready, zero-budget input preservation, both transparent
+control types, malformed and binary frames, close, transport failure, and EOF.
+Finite and unrepresentable durations retain their existing meaning.
+
+The server protocol and configuration are unchanged. The external Rust, .NET,
+and Godot SDKs do not import this reference receive helper and need no migration
+or acceptance issue. The browser uses a separate event-driven receive path.
+This repair does not diagnose #853 or #889 or complete A20 or audit #826.
+All 22 scoped wire and handshake controls pass. Root and native strict lint
+pass with all targets and features. Real native three-player mesh and mixed
+v2/v3 relay controls pass in 2.582 seconds. Hosted validation and final-head
+review remain delivery gates.

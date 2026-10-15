@@ -360,3 +360,31 @@ async fn handshake_commands_bound_delayed_results_after_preludes() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+// Regression #983: buffered controls must share the original command cutoff.
+#[tokio::test]
+async fn handshake_deadline_stops_a_ready_control_sequence() {
+    use std::task::Poll;
+
+    let mut polls = 0;
+    let mut input = futures_util::stream::poll_fn(|_| {
+        polls += 1;
+        if polls <= 8 {
+            std::thread::sleep(Duration::from_millis(5));
+            Poll::Ready(Some(Ok(Message::Ping(vec![].into()))))
+        } else {
+            Poll::Ready(Some(Ok(Message::Text(r#"{"type":"Pong"}"#.into()))))
+        }
+    });
+    let error = next_handshake_message(
+        &mut input,
+        Deadline::after(Instant::now(), Duration::from_millis(10)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, EXIT_CONNECTION_ERROR);
+    assert!(
+        polls < 8,
+        "the inner wait read {polls} frames past the command cutoff"
+    );
+}
