@@ -556,19 +556,26 @@ export class ExchangeLedger {
 export class StartGameGate {
   private readonly readyPlayers = new Set<string>();
   /** `StartGame` went out since the last invalidation (a join, a departure,
-   * or an authoritative `GAME_START_NOT_READY`). */
+   * a ready player becoming unready, or an authoritative `GAME_START_NOT_READY`). */
   private sentSinceInvalidation = false;
 
   constructor(readyPlayers: readonly string[]) {
     this.readyPlayers = new Set(readyPlayers);
   }
 
-  /** Replace the readiness set from an authoritative snapshot (`RoomJoined`
-   * baseline or `LobbyStateChanged`). Never re-arms the latch by itself: a
-   * snapshot without an invalidation must not duplicate a send. */
+  /** Replace the authoritative readiness set. Losing a ready player re-arms
+   * the latch so readiness recovery can retry before a delayed rejection.
+   * Unchanged snapshots and readiness additions preserve the latch. */
   snapshot(readyPlayers: readonly string[]): void {
+    const nextReadyPlayers = new Set(readyPlayers);
+    for (const player of this.readyPlayers) {
+      if (!nextReadyPlayers.has(player)) {
+        this.sentSinceInvalidation = false;
+        break;
+      }
+    }
     this.readyPlayers.clear();
-    for (const player of readyPlayers) {
+    for (const player of nextReadyPlayers) {
       this.readyPlayers.add(player);
     }
   }
@@ -2325,9 +2332,9 @@ class Orchestrator {
    * simply await the `GameStarting` the creator's call produces.
    *
    * The gate latches the send against duplicate all-ready broadcasts, but a
-   * join, a departure, or an authoritative `GAME_START_NOT_READY` invalidates
-   * that latch (see `StartGameGate`), and the next recomputed all-ready moment
-   * re-issues — the documented client contract
+   * join, a departure, readiness loss, or an authoritative `GAME_START_NOT_READY`
+   * invalidates that latch (see `StartGameGate`), and the next recomputed
+   * all-ready moment re-issues — the documented client contract
    * (docs/guides/building-a-client.md "StartGame authorization and readiness").
    * The server re-checks readiness under its room lock, so a premature
    * re-issue is rejected non-fatally and simply re-arms the gate.

@@ -2,6 +2,86 @@ use super::*;
 use clap::Parser;
 use futures_util::StreamExt;
 
+// Regression #990: readiness recovery must not wait for a delayed rejection.
+#[tokio::test]
+async fn readiness_recovery_reissues_start_before_a_delayed_rejection() {
+    for rejection_before_ready in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(tcp).await.unwrap()
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let mut server_ws = server.await.unwrap();
+        let cli = Cli::parse_from(["reference-native", "--server-url", &url, "--create-room"]);
+        let creator = PlayerId::from_u128(1);
+        let peer = PlayerId::from_u128(2);
+        let mut state = super::tests::fixture_orchestrator(&cli, ws, creator);
+        state.present.insert(peer);
+        state.ready_sent = true;
+        let snapshot = |all_ready| ServerMessage::LobbyStateChanged {
+            lobby_state: LobbyState::Lobby,
+            ready_players: if all_ready {
+                vec![creator, peer]
+            } else {
+                vec![creator]
+            },
+            all_ready,
+        };
+        let rejected = || ServerMessage::Error {
+            message: "room is not all ready".into(),
+            error_code: Some(ErrorCode::GameStartNotReady),
+        };
+        state.handle_server_message(snapshot(true)).await.unwrap();
+        let first = server_ws.next().await.unwrap().unwrap();
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(first.to_text().unwrap()).unwrap(),
+            ClientMessage::StartGame
+        ));
+        state.handle_server_message(snapshot(true)).await.unwrap();
+        state.handle_server_message(snapshot(false)).await.unwrap();
+        state.handle_server_message(snapshot(false)).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), server_ws.next())
+                .await
+                .is_err(),
+            "unchanged all-ready and unready snapshots must remain silent"
+        );
+        assert!(!state.start_game_gate.all_current_ready(&state.present));
+        if rejection_before_ready {
+            state.handle_server_message(rejected()).await.unwrap();
+        }
+        state.handle_server_message(snapshot(true)).await.unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(1), server_ws.next())
+            .await
+            .expect("readiness recovery must retry before a delayed rejection")
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(second.to_text().unwrap()).unwrap(),
+            ClientMessage::StartGame
+        ));
+        state.handle_server_message(snapshot(true)).await.unwrap();
+        if !rejection_before_ready {
+            state.handle_server_message(rejected()).await.unwrap();
+        }
+        state
+            .handle_server_message(ServerMessage::GameStarting {
+                peer_connections: vec![],
+            })
+            .await
+            .unwrap();
+        state.handle_server_message(snapshot(true)).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), server_ws.next())
+                .await
+                .is_err(),
+            "duplicate snapshots and finalization must not send extra commands"
+        );
+    }
+}
+
 // Regression #987: write backpressure must not consume the response window.
 #[tokio::test]
 async fn pong_response_window_starts_after_the_ping_write_finishes() {

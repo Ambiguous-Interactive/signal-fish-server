@@ -116,6 +116,11 @@ membership and re-issue `StartGame` once every current player is ready again —
 via a `LobbyStateChanged { all_ready: true }` toggle or because the unready
 member left (no broadcast fires). A one-shot latch leaves the lobby stalled.
 
+If a readiness snapshot removes a ready player, clear any pending start latch.
+Retry when all current players become ready again. Do not wait for the rejection
+error: a newer all-ready snapshot can arrive before it. Repeated unchanged
+snapshots must not send duplicate start requests.
+
 ## Mandatory vs optional
 
 | Message / feature | Status |

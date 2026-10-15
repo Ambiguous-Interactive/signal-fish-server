@@ -162,6 +162,11 @@ for (const direction of ['sent to', 'received from']) {
   );
   assert(!gate.shouldSend(false, false, present(creator)), 'non-creators never send');
   assert(!gate.shouldSend(true, true, present(creator)), 'a finalized room never sends');
+  gate.snapshot([creator, joiner]);
+  assert(
+    !gate.shouldSend(true, false, present(creator)),
+    'readiness additions must not duplicate a send',
+  );
 
   // Join invalidation: the latecomer is unready with no corrective broadcast;
   // the latch re-arms but the room is provably not all-ready.
@@ -197,6 +202,40 @@ for (const direction of ['sent to', 'received from']) {
   gate.noteSent();
   gate.reset();
   assert(!gate.shouldSend(true, false, present(creator)), 'a reset gate must not send');
+
+  // Regression #990: a ready player can toggle off and on before StartGame's
+  // error arrives. Each new all-ready moment must issue a fresh request.
+  for (const rejection of ['after', 'between', 'before', 'none']) {
+    gate = new StartGameGate([creator, joiner]);
+    gate.noteSent();
+    if (rejection === 'before') gate.startRejected();
+    gate.snapshot([creator]);
+    assert(
+      !gate.shouldSend(true, false, present(creator, joiner)),
+      `${rejection}: an unready member must prevent a retry`,
+    );
+    if (rejection === 'between') gate.startRejected();
+    gate.snapshot([creator, joiner]);
+    assert(
+      gate.shouldSend(true, false, present(creator, joiner)),
+      `${rejection}: restored readiness must retry before a delayed rejection`,
+    );
+    assert(
+      !gate.shouldSend(false, false, present(creator, joiner)),
+      `${rejection}: restored readiness must not let a non-creator send`,
+    );
+    assert(
+      !gate.shouldSend(true, true, present(creator, joiner)),
+      `${rejection}: restored readiness must not restart a finalized room`,
+    );
+    gate.noteSent();
+    gate.snapshot([joiner, creator]);
+    assert(
+      !gate.shouldSend(true, false, present(creator, joiner)),
+      `${rejection}: an unchanged ready set must not duplicate the retry`,
+    );
+    if (rejection === 'after') gate.startRejected();
+  }
 }
 
 console.error('ok - browser timer and latched-exchange state avoids false success');
