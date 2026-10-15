@@ -2,6 +2,133 @@ use super::*;
 use clap::Parser;
 use futures_util::StreamExt;
 
+// Regression #987: write backpressure must not consume the response window.
+#[tokio::test]
+async fn pong_response_window_starts_after_the_ping_write_finishes() {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::MaybeTlsStream;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let url = format!("ws://{address}");
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        tokio_tungstenite::accept_async(tcp).await.unwrap()
+    });
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_send_buffer_size(1024).unwrap();
+    let tcp = socket.connect(address).await.unwrap();
+    let (mut ws, _) = tokio_tungstenite::client_async(&url, MaybeTlsStream::Plain(tcp))
+        .await
+        .unwrap();
+    let mut server_ws = server.await.unwrap();
+    let payload = vec![42; 8 * 1024 * 1024];
+    ws.feed(Message::Binary(payload.clone().into()))
+        .await
+        .unwrap();
+    let cli = Cli::parse_from(["reference-native", "--server-url", &url, "--create-room"]);
+    let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+    state.next_ping_at = Instant::now();
+    {
+        let timer = state.process_timers();
+        tokio::pin!(timer);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut timer)
+                .await
+                .is_err(),
+            "establish socket backpressure before advancing the clock"
+        );
+        tokio::time::pause();
+        let clock_guard = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
+        tokio::time::advance(Duration::from_secs(12)).await;
+        let drain = async {
+            assert_eq!(
+                server_ws.next().await.unwrap().unwrap(),
+                Message::Binary(payload.into())
+            );
+            let ping = server_ws.next().await.unwrap().unwrap();
+            let ping: ClientMessage = serde_json::from_str(ping.to_text().unwrap()).unwrap();
+            assert!(matches!(ping, ClientMessage::Ping));
+        };
+        let (result, ()) = tokio::join!(timer, drain);
+        assert!(result.unwrap().is_none());
+        clock_guard.abort();
+    }
+    let completed = Instant::now();
+    assert_eq!(
+        state.pong_deadline,
+        Some(checked_deadline(completed, PONG_TIMEOUT)),
+        "a slow successful Ping write must leave the complete response window"
+    );
+    assert_eq!(
+        state.next_ping_at,
+        checked_deadline(completed, PING_INTERVAL)
+    );
+    tokio::time::advance(PONG_TIMEOUT - Duration::from_millis(1)).await;
+    assert!(state.process_timers().await.unwrap().is_none());
+    assert!(
+        !state.pong_grace_applied,
+        "retain the full normal response window"
+    );
+    state
+        .handle_server_message(ServerMessage::Pong)
+        .await
+        .unwrap();
+    assert!(
+        state.pong_deadline.is_none(),
+        "an on-time response keeps the connection alive"
+    );
+    tokio::time::resume();
+}
+
+#[tokio::test(start_paused = true)]
+async fn unanswered_ping_still_expires_after_its_response_window_and_drain_grace() {
+    use futures_util::FutureExt;
+
+    let clock_guard = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        tokio_tungstenite::accept_async(tcp).await.unwrap()
+    });
+    let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let mut server_ws = server.await.unwrap();
+    let cli = Cli::parse_from(["reference-native", "--server-url", &url, "--create-room"]);
+    let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+    state.next_ping_at = Instant::now();
+    assert!(state.process_timers().await.unwrap().is_none());
+    let frame = server_ws.next().await.unwrap().unwrap();
+    let ping: ClientMessage = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    assert!(matches!(ping, ClientMessage::Ping));
+    let response_deadline = state.pong_deadline.unwrap();
+    tokio::time::advance(PONG_TIMEOUT).await;
+    assert!(state.process_timers().await.unwrap().is_none());
+    assert!(state.pong_grace_applied);
+    assert_eq!(
+        state.pong_deadline,
+        Some(checked_deadline(response_deadline, PONG_DRAIN_GRACE))
+    );
+    assert!(
+        server_ws.next().now_or_never().is_none(),
+        "only one Ping may be outstanding"
+    );
+    tokio::time::advance(PONG_DRAIN_GRACE).await;
+    assert_eq!(
+        state.process_timers().await.unwrap_err().code,
+        EXIT_CONNECTION_ERROR
+    );
+    clock_guard.abort();
+}
+
 #[tokio::test]
 async fn channel_termination_reports_fallback_and_preserves_a_newer_link() {
     for receive_rejected in [false, true] {

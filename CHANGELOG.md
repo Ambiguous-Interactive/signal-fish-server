@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Give native reference clients the full Pong response window after a slow successful Ping write (#987).
 - Reject native reference-client WebSocket writes that finish after their write or handshake window expires (#985).
 - Keep native reference-client handshake deadlines active while reading buffered WebSocket control frames (#983).
 - Reject native and browser reference-client WebSocket connections once the connection wait expires (#981).
