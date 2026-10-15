@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -3527,3 +3527,38 @@ candidate, delayed open observation, removal, and replacement states.
 Rust, .NET, and Godot SDKs are unaffected: this change adds stderr diagnostics
 inside the private native reference client. Server behavior, protocol messages,
 and external client APIs are unchanged.
+
+### F62 — Readiness recovery leaves reference-client starts latched
+
+Issue #990, found at `dcde125b`. Native and browser reference clients latch a
+`StartGame` send. Their readiness snapshots replaced the ready set without
+invalidating that latch when a player became unready. If the server rejects
+the pending start, a later all-ready snapshot can arrive before the rejection
+error. The snapshot cannot retry, and the error only rearms the latch. The
+lobby then waits for another event until the run timeout.
+
+The server permits this order. Ready toggles publish through the room event
+lane. A `NotReady` result releases the mutation gate before the handler sends
+its error. A later toggle can publish first. This is a client latch defect;
+no server ordering change is required.
+
+Both clients now clear the send latch when a snapshot removes a previously
+ready player. The next all-ready snapshot can retry without waiting for an
+error. Unchanged and add-only snapshots preserve the latch. Membership and
+rejection invalidations retain their existing behavior.
+
+The native handler-level loopback regression fails on the original source
+because no second `StartGame` reaches the socket after readiness recovers.
+Its repaired history covers rejection before and after recovery, repeated
+snapshots, silence while unready, and finalization. Browser gate controls
+cover rejection before, between, after, or absent from the false/true snapshots,
+set-order independence, unchanged/add-only suppression, non-creators, and
+finalized rooms. These are deterministic permitted message histories, not a
+capture of a hosted production stall. Existing membership recovery controls
+remain required.
+
+The change fixes private orchestration in the shipped reference clients.
+Rust, .NET, and Godot SDKs do not import these modules. The server's readiness
+rules and wire messages are unchanged, so these SDKs need no migration or
+acceptance issue for this implementation repair. Broader A20, #826, #853, and
+issue #889 remain open. Timing investigations also remain open.

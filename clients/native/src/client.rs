@@ -1192,8 +1192,8 @@ fn validate_json_negotiated_server_message(message: &ServerMessage) -> Result<()
 #[derive(Debug, Default)]
 struct StartGameGate {
     ready_players: BTreeSet<PlayerId>,
-    /// `StartGame` went out since the last invalidation (a join, a departure,
-    /// or an authoritative `GAME_START_NOT_READY`).
+    /// `StartGame` went out since the last membership change, readiness loss,
+    /// or authoritative `GAME_START_NOT_READY`.
     sent_since_invalidation: bool,
 }
 
@@ -1206,10 +1206,14 @@ impl StartGameGate {
     }
 
     /// Replace the readiness set from an authoritative snapshot (`RoomJoined`
-    /// baseline or `LobbyStateChanged`). Never re-arms the latch by itself: a
-    /// snapshot without an invalidation must not duplicate a send.
+    /// baseline or `LobbyStateChanged`). Readiness loss invalidates a pending
+    /// start; unchanged and add-only snapshots preserve the send latch.
     fn snapshot(&mut self, ready_players: impl IntoIterator<Item = PlayerId>) {
-        self.ready_players = ready_players.into_iter().collect();
+        let ready_players = ready_players.into_iter().collect();
+        if !self.ready_players.is_subset(&ready_players) {
+            self.sent_since_invalidation = false;
+        }
+        self.ready_players = ready_players;
     }
 
     /// A member joined. Joiners are always unready and their `PlayerJoined`
@@ -3310,7 +3314,7 @@ impl Orchestrator<'_> {
     /// produces.
     ///
     /// The gate latches the send against duplicate all-ready broadcasts, but a
-    /// join, a departure, or an authoritative `GAME_START_NOT_READY`
+    /// join, a departure, readiness loss, or an authoritative `GAME_START_NOT_READY`
     /// invalidates that latch (see [`StartGameGate`]), and the next recomputed
     /// all-ready moment re-issues — the documented client contract
     /// (docs/guides/building-a-client.md "StartGame authorization and
