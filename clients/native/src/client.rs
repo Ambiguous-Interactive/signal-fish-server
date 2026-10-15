@@ -1824,8 +1824,9 @@ impl Orchestrator<'_> {
         }
         if now >= self.next_ping_at && self.pong_deadline.is_none() {
             self.send_message(&ClientMessage::Ping).await?;
-            self.next_ping_at = checked_deadline(now, PING_INTERVAL);
-            self.pong_deadline = Some(checked_deadline(now, PONG_TIMEOUT));
+            let sent_at = Instant::now();
+            self.next_ping_at = checked_deadline(sent_at, PING_INTERVAL);
+            self.pong_deadline = Some(checked_deadline(sent_at, PONG_TIMEOUT));
             self.pong_grace_applied = false;
         }
 

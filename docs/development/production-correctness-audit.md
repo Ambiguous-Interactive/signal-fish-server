@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -3462,3 +3462,43 @@ do not import this reference-client wire helper and need no migration or
 acceptance issue. Browser writes use a separate synchronous API. This repair
 does not diagnose #853 or #889, establish #953's timing bound, or complete A20
 or the wider #826 audit. Hosted CI and final-head review remain delivery gates.
+
+### F61 Native Ping write time consumes the Pong response window
+
+Issue [#987](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/987)
+continues A20 from `1fc0a8cf`. The native orchestrator samples time before
+awaiting its Ping write, then uses that sample for the next Ping cadence and
+Pong response deadline. A successful write can take up to 20 seconds, exceeding
+the ten-second response window. The client can enter its one-second drain grace
+immediately after finishing the write and then close a responding connection.
+
+A real loopback history queues an 8-MiB frame on a constrained socket ahead of
+Ping. It establishes actual write backpressure before pausing the clock,
+advances 12 seconds, and drains the endpoint. The complete queued frame and
+Ping arrive. The baseline leaves a Pong deadline in the past. A runnable clock
+guard prevents socket I/O from automatically advancing the paused Tokio clock.
+This controlled schedule proves the timestamp defect, not a spontaneous network
+stall or the cause of earlier peer-formation failures.
+
+Both keepalive timestamps now start after the successful Ping write. The
+regression retains the complete ten-second response window and accepts Pong
+one millisecond before expiry. A separate real-socket control sends a normal
+Ping, preserves one outstanding request, enters drain grace at ten seconds,
+and fails after that grace when no reply arrives. The existing wake-scheduling
+control also passes. Write failures remain terminal under F56/F60.
+
+The caller sweep finds no other native Ping timestamp writer after an awaited
+send. Connection construction and room restore initialize their next Ping from
+a fresh instant. Browser Ping writes use a synchronous API and have no awaited
+write between their time sample and timestamp assignment. The repair does not
+change other timer semantics or make the single task process input during a
+pending write.
+
+The wire protocol and server settings are unchanged. Rust, .NET, and Godot SDKs
+are separate implementations and do not import the native reference
+orchestrator. They need no migration or acceptance issue for this private
+keepalive repair. The broader A20 audit, #826, #853, #889, and #953 remain open.
+The three scoped keepalive controls pass in 4.922 seconds. Root and native
+strict lint pass with all targets and features. Real three-player native mesh
+and mixed v2/v3 relay controls pass in 2.654 seconds. Hosted validation and
+final-head review remain delivery gates.
