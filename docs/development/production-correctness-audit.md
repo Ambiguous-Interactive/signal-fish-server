@@ -3330,8 +3330,17 @@ only the old completion match makes it fail with `Ok(None)`; the on-time control
 still succeeds. These controlled histories do not establish every stack
 completion or operating-system schedule.
 
-The browser suite, type checks, and build pass. The 39 scoped native engine and
-negotiation controls pass in 7.836 seconds, including zero P2P timeout, held
+Review of the first repair found that a trickle-ICE completion at the shared
+setup cutoff also retired an already connected pair. Browser dispatch and a
+real native pair both reproduce this regression. Connected peers now receive
+a fresh bounded signal-operation window instead of inheriting the setup cutoff.
+Controls preserve the connected link at the setup cutoff, deliver queued relay
+data, and exchange real native gameplay on both channels afterward. Separate
+controls hold ICE through the new operation deadline and still require teardown
+and fallback. These controls use controlled clock and stack suspension.
+
+The browser suite, type checks, and build pass. The 40 scoped native engine and
+negotiation controls pass, including zero P2P timeout, held
 success, shared plan windows, relay fallback, and retry cleanup. Strict root
 and native lint pass. Real Chromium/native mesh, coordinated retry, and room
 restore controls pass. Full hosted validation and final-head review remain

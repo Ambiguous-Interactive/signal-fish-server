@@ -290,6 +290,8 @@ for (const deadlineKind of [
   'p2p',
   'p2p-late',
   'p2p-late-reject',
+  'p2p-connected',
+  'p2p-connected-timeout',
   'run',
   'zero',
   'send-failure',
@@ -307,6 +309,7 @@ for (const deadlineKind of [
     'candidate',
     'buffered-candidate',
   ] as const) {
+    if (deadlineKind.startsWith('p2p-connected') && seam !== 'candidate') continue;
     if (
       (deadlineKind === 'retry' || deadlineKind.startsWith('plan')) &&
       seam !== 'offer' &&
@@ -350,8 +353,21 @@ for (const deadlineKind of [
     const check = (condition: boolean, message: string) => {
       if (!condition) failures.push(`${deadlineKind}/${seam}: ${message}`);
     };
+    class DeadlineChannel {
+      readyState = 'connecting';
+      bufferedAmount = 0;
+      maxPacketLifeTime = null;
+      ordered: boolean;
+      maxRetransmits: number | null;
+      onopen: (() => void) | null = null;
+      constructor(readonly label: string) {
+        this.ordered = label === 'reliable';
+        this.maxRetransmits = this.ordered ? null : 0;
+      }
+    }
     class DeadlineConnection {
       closed = false;
+      ondatachannel: ((event: { channel: DeadlineChannel }) => void) | null = null;
       constructor() {
         connection = this;
         connectionCount += 1;
@@ -472,6 +488,7 @@ for (const deadlineKind of [
       running = run({
         ...config,
         peers: deadlineKind.startsWith('plan') ? 3 : 2,
+        relayPayload: deadlineKind.startsWith('p2p-connected') ? 'connected-control' : null,
         p2pTimeoutSecs: deadlineKind === 'zero' ? 0 : p2pExpiresFirst ? 1 : 10,
         runForSecs: p2pExpiresFirst ? 3 : 1,
         p2pRetryCount: deadlineKind === 'retry' ? 2 : 0,
@@ -511,6 +528,20 @@ for (const deadlineKind of [
             signal: { Offer: 'test-offer' },
           });
           await turn();
+          if (deadlineKind.startsWith('p2p-connected')) {
+            for (const label of ['reliable', 'unreliable']) {
+              const channel = new DeadlineChannel(label);
+              connection?.ondatachannel?.({ channel });
+              channel.readyState = 'open';
+              channel.onopen?.();
+            }
+            await turn();
+            check(
+              events.some((event) => event['event'] === 'p2p_pair_connected'),
+              'both required channels must connect before the late candidate',
+            );
+            now += 900;
+          }
         }
         socket?.deliver('Signal', {
           from: peer,
@@ -538,7 +569,11 @@ for (const deadlineKind of [
         seq: 1,
         data: { relay_msg: 'live' },
       });
-      now += deadlineKind === 'retry' || deadlineKind === 'plan' ? 299 : 900;
+      now += deadlineKind.startsWith('p2p-connected')
+        ? 99
+        : deadlineKind === 'retry' || deadlineKind === 'plan'
+          ? 299
+          : 900;
       for (const [id, timer] of [...timers]) {
         if (timer.at <= now) {
           timers.delete(id);
@@ -552,11 +587,31 @@ for (const deadlineKind of [
         'relay must remain queued behind the suspended operation before expiry',
       );
       now +=
-        deadlineKind === 'retry' || deadlineKind === 'plan'
+        deadlineKind === 'retry' || deadlineKind === 'plan' || deadlineKind === 'p2p-connected'
           ? 1
-          : deadlineKind === 'p2p-late'
-            ? 100
-            : 200;
+          : deadlineKind === 'p2p-connected-timeout'
+            ? 901
+            : deadlineKind === 'p2p-late'
+              ? 100
+              : 200;
+      if (deadlineKind === 'p2p-connected') {
+        release?.();
+        await turn();
+        await turn();
+        check(connection?.closed === false, 'late ICE must preserve the established link');
+        check(
+          !events.some(
+            (event) =>
+              event['event'] === 'transport_status_sent' && event['connected'] === false,
+          ),
+          'late ICE must not force a healthy pair onto relay',
+        );
+        check(
+          events.filter((event) => event['event'] === 'game_data_received').length === 1,
+          'established-peer ICE must release queued relay data once',
+        );
+        continue;
+      }
       if (deadlineKind.startsWith('p2p-late')) {
         const signalsBeforeCompletion = sent.filter((frame) => frame.type === 'Signal').length;
         if (deadlineKind === 'p2p-late-reject') reject?.(new Error('late stack failure'));

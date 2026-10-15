@@ -1971,7 +1971,7 @@ class Orchestrator {
     const operationDeadline =
       this.config.p2pTimeoutSecs === 0
         ? deadlineAfterSeconds(monotonicNowMs(), this.config.runForSecs)
-        : (this.p2pDeadline ??
+        : ((this.connectedPairs.has(peer) ? null : this.p2pDeadline) ??
           deadlineAfterSeconds(monotonicNowMs(), this.config.p2pTimeoutSecs));
     const deadline = Math.min(operationDeadline, runDeadline);
     let rejectWait: ((reason: Error) => void) | undefined;
