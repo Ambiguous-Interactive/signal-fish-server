@@ -264,3 +264,68 @@ async fn assert_closed(channel: &Arc<dyn DataChannel>) {
         "refused announcement must close its channel"
     );
 }
+
+#[tokio::test]
+async fn timeout_snapshot_tracks_local_observations_and_replacement() {
+    let (events, _receiver) = mpsc::unbounded_channel();
+    let settings = EngineSettings {
+        crippled: true,
+        disable_mdns: true,
+        ip_family: IpFamily::Ipv4,
+        ..EngineSettings::default()
+    };
+    let mut engine = Engine::new(settings, events).unwrap();
+    let peer = PlayerId::from_u128(12);
+    assert!(engine.diagnostic_snapshot(peer).is_null());
+    for initiate in [false, true] {
+        let offer = engine.pair_with(peer, initiate, &[]).await.unwrap();
+        let generation = engine.peers[&peer].generation;
+        let snapshot = engine.diagnostic_snapshot(peer);
+        assert_eq!(snapshot["generation"], generation);
+        assert_eq!(snapshot["remote_description_set"], false);
+        assert_eq!(snapshot["remote_candidate_count"], 0);
+        assert_eq!(snapshot["pending_remote_candidates"], 0);
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            assert_eq!(snapshot["channels"][label]["registered"], initiate);
+            assert_eq!(snapshot["channels"][label]["open_observed"], false);
+        }
+        let candidate = r#"{"candidate":"candidate:1 1 udp 2130706431 127.0.0.1 9 typ host","sdpMid":"0","sdpMLineIndex":0}"#;
+        engine
+            .handle_remote_candidate(peer, candidate)
+            .await
+            .unwrap();
+        let snapshot = engine.diagnostic_snapshot(peer);
+        assert_eq!(snapshot["remote_candidate_count"], 1);
+        assert_eq!(snapshot["pending_remote_candidates"], 1);
+        assert!(!snapshot.to_string().contains("127.0.0.1"));
+        assert!(!engine.note_channel_open(peer, RELIABLE_LABEL).await);
+        let snapshot = engine.diagnostic_snapshot(peer);
+        assert_eq!(snapshot["channels"][RELIABLE_LABEL]["open_observed"], true);
+        assert_eq!(snapshot["channels"][RELIABLE_LABEL]["registered"], initiate);
+        assert_eq!(
+            snapshot["channels"][UNRELIABLE_LABEL]["open_observed"],
+            false
+        );
+        let (events, _receiver) = mpsc::unbounded_channel();
+        let mut remote = Engine::new(settings, events).unwrap();
+        let me = PlayerId::from_u128(13);
+        let remote_offer = remote.pair_with(me, !initiate, &[]).await.unwrap();
+        if initiate {
+            let answer = remote.handle_offer(me, offer.unwrap()).await.unwrap();
+            engine.handle_answer(peer, answer).await.unwrap();
+        } else {
+            let answer = engine
+                .handle_offer(peer, remote_offer.unwrap())
+                .await
+                .unwrap();
+            remote.handle_answer(me, answer).await.unwrap();
+        }
+        let snapshot = engine.diagnostic_snapshot(peer);
+        assert_eq!(snapshot["remote_description_set"], true);
+        assert_eq!(snapshot["remote_candidate_count"], 1);
+        assert_eq!(snapshot["pending_remote_candidates"], 0);
+        remote.remove_peer(me).await.unwrap();
+        engine.remove_peer(peer).await.unwrap();
+        assert!(engine.diagnostic_snapshot(peer).is_null());
+    }
+}

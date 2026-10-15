@@ -827,6 +827,34 @@ impl Engine {
             .cloned()
     }
 
+    /// Local observations for a timed-out link, without waiting on its driver.
+    /// An observed open callback does not establish current channel state.
+    pub(crate) fn diagnostic_snapshot(&self, peer: PlayerId) -> serde_json::Value {
+        let Some(link) = self.peers.get(&peer) else {
+            return serde_json::Value::Null;
+        };
+        let channels: serde_json::Map<String, serde_json::Value> =
+            [RELIABLE_LABEL, UNRELIABLE_LABEL]
+                .into_iter()
+                .map(|label| {
+                    (
+                        label.to_string(),
+                        serde_json::json!({
+                            "registered": link.channels.contains_key(label),
+                            "open_observed": link.open_labels.contains(label),
+                        }),
+                    )
+                })
+                .collect();
+        serde_json::json!({
+            "generation": link.generation,
+            "remote_description_set": link.remote_description_set,
+            "remote_candidate_count": link.remote_candidate_count,
+            "pending_remote_candidates": link.pending_candidates.len(),
+            "channels": channels,
+        })
+    }
+
     /// Start a detached nominated-pair probe for the current physical
     /// link. Results use a dedicated channel so the orchestrator can arbitrate
     /// already-completed evidence at its soft deadline without consuming or
