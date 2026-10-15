@@ -136,7 +136,8 @@ pub use handler::{
 };
 pub(crate) use metrics::RejectionLogThrottle;
 pub use metrics::{
-    metrics_handler, prometheus_metrics_handler, sessions_metrics_handler, MetricsQuery,
+    metrics_handler, prometheus_metrics_handler, room_lookup_handler, sessions_metrics_handler,
+    MetricsQuery,
 };
 #[cfg(feature = "tls")]
 pub use routes::ConfiguredAcceptor;

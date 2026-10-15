@@ -157,6 +157,31 @@ carry explicit truncation flags when capped. Completed records carry a
 monotonic `seq`; `?since=<seq>` cursor-filters the completed list so a
 scraper misses no completion that stayed inside the retention ring, and
 `?applicationId=<uuid>` restricts both lists to one application's rooms.
+Use `/metrics/rooms/lookup?applicationId=<uuid>&gameName=<name>&roomCode=<code>`
+for an exact live-room lookup, including rooms beyond the active list's 512-record
+limit. The binary also serves `/v1/metrics/rooms/lookup`. Library routers serve
+`/metrics/rooms/lookup` relative to their mount point. All three key fields are
+required. Game names are case-sensitive. Room codes use the configured length
+and normalize ASCII letters to uppercase, as joins do. Invalid keys return HTTP 400.
+The endpoint follows the existing metrics bearer-token configuration.
+
+A successful lookup returns `{"available":true,"room":{...}}`. The room object
+contains only `roomId`, `applicationId`, `gameName`, `roomCode`, and `regionId`.
+The response contains at most one room and at most 4096 bytes. Oversized room
+metadata returns HTTP 503 with `available:false` and a reason. No published match returns
+`{"available":true,"room":null}`; this includes pending, abandoned, completed,
+and differently attributed rooms. A backend without session tracking returns
+`available:false` with a reason. A failed storage read returns HTTP 503 with
+`available:false`, never an absent-room result.
+
+The in-memory backend reads the code index, room row, and publication state
+under shared locks. Each lookup observes one point during that read. Concurrent
+creation, publication, deletion, or code rotation can appear before or after the
+lookup. A reused code returns the new room ID once its replacement is published.
+The response does not reserve the room or promise a later join will succeed.
+The directory must handle stale results and compare room IDs when needed.
+Exact lookup does not change list truncation flags or completed-record cursors.
+
 The `applicationId` parameter scopes the response only — it is caller-side
 view filtering, not access control: the bearer token still grants every
 application's records. Session records include room
