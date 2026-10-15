@@ -682,6 +682,7 @@ fn advance_authenticate_handshake(
 /// Returns the negotiated protocol version and the effective game-data
 /// encoding (JSON after a server downgrade notice).
 async fn authenticate(ws: &mut WsStream, cli: &Cli) -> Result<(u16, GameDataEncoding), FatalError> {
+    let deadline = Deadline::after(Instant::now(), HANDSHAKE_TIMEOUT);
     let message = ClientMessage::Authenticate {
         app_id: cli.app_id.clone(),
         // The reference client targets public-app_id deployments and never
@@ -697,15 +698,16 @@ async fn authenticate(ws: &mut WsStream, cli: &Cli) -> Result<(u16, GameDataEnco
         supported_topologies: cli.is_v3().then(|| cli.topologies()),
         requested_capabilities: None,
     };
-    wire::send_client_message(ws, &message)
-        .await
-        .map_err(|error| FatalError::connection(format!("{error:#}")))?;
+    send_handshake_message(ws, &message, deadline).await?;
 
     let mut encoding = cli.game_data_encoding();
-    while !advance_authenticate_handshake(next_handshake_message(ws).await?, &mut encoding)? {}
+    while !advance_authenticate_handshake(
+        next_handshake_message(ws, deadline).await?,
+        &mut encoding,
+    )? {}
 
     let negotiated_version = negotiated_version_from(
-        next_handshake_message(ws).await?,
+        next_handshake_message(ws, deadline).await?,
         cli.protocol_version,
         encoding,
     )?;
@@ -810,13 +812,12 @@ async fn join_room(
     ),
     FatalError,
 > {
+    let deadline = Deadline::after(Instant::now(), HANDSHAKE_TIMEOUT);
     // Validated in `run_inner`'s preflight (before any network touch); this
     // recomputation is infallible for any `Cli` that got this far.
     let max_players = cli.join_max_players().map_err(FatalError::protocol)?;
     let message = build_join_room_message(cli, max_players);
-    wire::send_client_message(ws, &message)
-        .await
-        .map_err(|error| FatalError::connection(format!("{error:#}")))?;
+    send_handshake_message(ws, &message, deadline).await?;
 
     // Read until the atomic `RoomJoined` membership baseline. Connection-level
     // accountability frames can legitimately precede it. Membership deltas
@@ -825,7 +826,7 @@ async fn join_room(
     let mut early_joined: Vec<PlayerInfo> = Vec::new();
     let mut early_left: Vec<(PlayerId, Option<u32>, Option<u64>)> = Vec::new();
     loop {
-        let message = next_handshake_message(ws).await?;
+        let message = next_handshake_message(ws, deadline).await?;
         if consume_join_accountability_preface(&mut accountability, &message, |report| {
             emit(&Event::DeliveryReport {
                 report: report.clone(),
@@ -1091,17 +1092,48 @@ fn clear_departed_membership_plan(
     }
 }
 
-async fn next_handshake_message<S>(ws: &mut S) -> Result<ServerMessage, FatalError>
+/// Send a command or cleanup retry without renewing its response window.
+async fn send_handshake_message(
+    ws: &mut WsStream,
+    message: &ClientMessage,
+    deadline: Deadline,
+) -> Result<(), FatalError> {
+    if deadline.is_due(Instant::now()) {
+        return Err(FatalError::connection(
+            "server handshake response timed out",
+        ));
+    }
+    deadline
+        .timeout(wire::send_client_message(ws, message))
+        .await
+        .map_err(|_| FatalError::connection("server handshake response timed out"))?
+        .map_err(|error| FatalError::connection(format!("{error:#}")))
+}
+
+async fn next_handshake_message<S>(
+    ws: &mut S,
+    deadline: Deadline,
+) -> Result<ServerMessage, FatalError>
 where
     S: futures_util::Stream<
             Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>,
         > + Unpin,
 {
-    let deadline = Deadline::after(Instant::now(), HANDSHAKE_TIMEOUT);
     deadline
         .timeout(async {
             loop {
-                match wire::next_server_message(ws, HANDSHAKE_TIMEOUT).await {
+                if deadline.is_due(Instant::now()) {
+                    return Err(FatalError::connection(
+                        "server handshake response timed out",
+                    ));
+                }
+                let message = wire::next_server_message(ws, HANDSHAKE_TIMEOUT).await;
+                if deadline.is_due(Instant::now()) {
+                    return Err(FatalError::connection(
+                        "server handshake response timed out",
+                    ));
+                }
+                match message {
                     Ok(ServerMessage::GoingAway { .. }) => {
                         // Drain advice can precede an authenticated admission
                         // refusal. Read the typed result under the same deadline.
@@ -1549,12 +1581,29 @@ impl Orchestrator<'_> {
             room_id: self.room_id,
             auth_token: token,
         };
+        let payload = self.reconnect_room(&reconnect).await?;
+        self.reconnect_attempts = attempt;
+        self.restore_snapshot(payload).await?;
+        self.reconnect_poll_at = (attempt < self.cli.reconnect_release_file.len())
+            .then(|| checked_deadline(Instant::now(), SUCCESS_RELEASE_POLL));
+        self.next_ping_at = checked_deadline(Instant::now(), PING_INTERVAL);
+        self.pong_deadline = None;
+        self.pong_grace_applied = false;
+        self.maybe_send_ready().await?;
+        self.maybe_send_start_game().await?;
+        Ok(())
+    }
+
+    /// Consume one restore command, including prefaces and old-socket cleanup retries.
+    async fn reconnect_room(
+        &mut self,
+        reconnect: &ClientMessage,
+    ) -> Result<signal_fish_server::protocol::ReconnectedPayload, FatalError> {
+        let deadline = Deadline::after(Instant::now(), HANDSHAKE_TIMEOUT);
         let retry_deadline = Deadline::after(Instant::now(), Duration::from_secs(2));
-        wire::send_client_message(&mut self.ws, &reconnect)
-            .await
-            .map_err(|error| FatalError::connection(format!("{error:#}")))?;
+        send_handshake_message(&mut self.ws, reconnect, deadline).await?;
         loop {
-            let message = next_handshake_message(&mut self.ws).await?;
+            let message = next_handshake_message(&mut self.ws, deadline).await?;
             if consume_join_accountability_preface(&mut self.accountability, &message, |report| {
                 emit(&Event::DeliveryReport {
                     report: report.clone(),
@@ -1565,11 +1614,7 @@ impl Orchestrator<'_> {
                 continue;
             }
             match message {
-                ServerMessage::Reconnected(payload) => {
-                    self.reconnect_attempts = attempt;
-                    self.restore_snapshot(*payload).await?;
-                    break;
-                }
+                ServerMessage::Reconnected(payload) => return Ok(*payload),
                 ServerMessage::ReconnectionFailed {
                     error_code: ErrorCode::PlayerAlreadyConnected,
                     ..
@@ -1577,9 +1622,7 @@ impl Orchestrator<'_> {
                     // Old socket cleanup may still own the live player. This
                     // refusal preserves the token; every other refusal is final.
                     tokio::time::sleep(SUCCESS_RELEASE_POLL).await;
-                    wire::send_client_message(&mut self.ws, &reconnect)
-                        .await
-                        .map_err(|error| FatalError::connection(format!("{error:#}")))?;
+                    send_handshake_message(&mut self.ws, reconnect, deadline).await?;
                 }
                 ServerMessage::ReconnectionFailed { reason, error_code } => {
                     return Err(FatalError::protocol(format!(
@@ -1593,14 +1636,6 @@ impl Orchestrator<'_> {
                 }
             }
         }
-        self.reconnect_poll_at = (attempt < self.cli.reconnect_release_file.len())
-            .then(|| checked_deadline(Instant::now(), SUCCESS_RELEASE_POLL));
-        self.next_ping_at = checked_deadline(Instant::now(), PING_INTERVAL);
-        self.pong_deadline = None;
-        self.pong_grace_applied = false;
-        self.maybe_send_ready().await?;
-        self.maybe_send_start_game().await?;
-        Ok(())
     }
 
     async fn restore_snapshot(
@@ -5446,7 +5481,12 @@ mod tests {
         );
         let mut input = futures_util::stream::iter([Ok(advice.clone()), Ok(refusal)]);
         assert!(matches!(
-            next_handshake_message(&mut input).await.unwrap(),
+            next_handshake_message(
+                &mut input,
+                Deadline::after(Instant::now(), super::HANDSHAKE_TIMEOUT)
+            )
+            .await
+            .unwrap(),
             ServerMessage::ReconnectionFailed {
                 error_code: ErrorCode::ServerDraining,
                 ..
@@ -5457,9 +5497,12 @@ mod tests {
             futures_util::stream::pending(),
         );
         let started = Instant::now();
-        let error = next_handshake_message(&mut never_responds)
-            .await
-            .unwrap_err();
+        let error = next_handshake_message(
+            &mut never_responds,
+            Deadline::after(Instant::now(), super::HANDSHAKE_TIMEOUT),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(error.code, super::EXIT_CONNECTION_ERROR);
         assert_eq!(Instant::now() - started, super::HANDSHAKE_TIMEOUT);
     }
@@ -5475,7 +5518,12 @@ mod tests {
                 Message,
                 tokio_tungstenite::tungstenite::Error,
             >(frame)]);
-            let error = next_handshake_message(&mut input).await.unwrap_err();
+            let error = next_handshake_message(
+                &mut input,
+                Deadline::after(Instant::now(), super::HANDSHAKE_TIMEOUT),
+            )
+            .await
+            .unwrap_err();
             assert_eq!(error.code, EXIT_PROTOCOL_ERROR);
         }
     }

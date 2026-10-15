@@ -657,6 +657,9 @@ class Orchestrator {
   }
   /** Stop a suspended handler before it mutates a retired session. */
   private assertActive(): void {
+    if (this.handshakeDeadline !== null && monotonicNowMs() >= this.handshakeDeadline) {
+      this.failFatal(FatalError.connection('server handshake response timed out'));
+    }
     if (this.finished || this.handshakeFatal !== null) {
       throw this.handshakeFatal ?? FatalError.connection('the client is stopping');
     }
@@ -681,6 +684,7 @@ class Orchestrator {
   } | null = null;
   /** Fatal handshake failure observed while no frame pull was pending. */
   private handshakeFatal: FatalError | null = null;
+  private handshakeDeadline: number | null = null;
   private readonly handshakeFailed = new AbortController();
 
   // --- Serialized input processing (the "orchestrator task") ---
@@ -884,11 +888,10 @@ class Orchestrator {
       this.onSocketClosed();
     };
 
-    const negotiatedVersion = await this.authenticate();
+    const negotiatedVersion = await this.handshake(() => this.authenticate());
     this.negotiatedVersion = negotiatedVersion;
     this.accountability = new DeliveryAccountability(negotiatedVersion >= 3);
-    const lobbyState = await this.joinRoom();
-    await this.flushHandshakeOutput();
+    const lobbyState = await this.handshake(() => this.joinRoom());
 
     // Joining an already-Lobby room (seat fill) means readiness is
     // immediately possible; a Finalized room means the session is already
@@ -1076,7 +1079,25 @@ class Orchestrator {
     return lobbyState;
   }
 
-  /** Pull the next server frame during the sequential handshake phase. */
+  /** One deadline covers a command's replies and output, including all preludes. */
+  private async handshake<T>(operation: () => Promise<T>): Promise<T> {
+    const deadline = monotonicNowMs() + HANDSHAKE_TIMEOUT_MS;
+    this.handshakeDeadline = deadline;
+    const timer = scheduleDeadline(deadline, () => {
+      this.failFatal(FatalError.connection('server handshake response timed out'));
+    });
+    try {
+      const result = await operation();
+      await this.flushHandshakeOutput();
+      this.assertActive();
+      return result;
+    } finally {
+      timer.cancel();
+      this.handshakeDeadline = null;
+    }
+  }
+
+  /** Pull the next server frame under the current command's deadline. */
   private async nextHandshakeFrame(retainPrevious = false): Promise<ServerFrame> {
     await this.flushHandshakeOutput();
     if (this.currentHandshakeRelease !== null) {
@@ -1084,30 +1105,24 @@ class Orchestrator {
       else this.currentHandshakeRelease();
       this.currentHandshakeRelease = null;
     }
-    if (this.handshakeFatal !== null) throw this.handshakeFatal;
+    this.assertActive();
     const buffered = this.bufferedFrames.shift();
     const retained =
       buffered ??
       (await new Promise<RetainedServerFrame>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          this.frameWaiter = null;
-          reject(FatalError.connection('timed out waiting for a ServerMessage'));
-        }, HANDSHAKE_TIMEOUT_MS);
         this.frameWaiter = {
           resolve: (frame) => {
-            clearTimeout(timer);
             this.frameWaiter = null;
             resolve(frame);
           },
           reject: (error) => {
-            clearTimeout(timer);
             this.frameWaiter = null;
             reject(error);
           },
         };
       }));
     this.currentHandshakeRelease = retained.release;
-    if (this.handshakeFatal !== null) throw this.handshakeFatal;
+    this.assertActive();
     return retained.frame;
   }
 

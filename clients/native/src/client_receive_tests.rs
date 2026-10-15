@@ -234,3 +234,129 @@ async fn fresh_membership_retires_old_links_before_the_replacement_plan() {
         state.engine.remove_peer(sibling).await.unwrap();
     }
 }
+
+// Regression #974: response preludes must not renew a command's wait.
+#[tokio::test]
+async fn handshake_commands_bound_delayed_results_after_preludes() {
+    use futures_util::SinkExt;
+    let mut failures = Vec::new();
+    for command in ["authenticate", "join", "restore"] {
+        for outcome in ["on-time", "missing", "late"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                tcp.set_nodelay(true).unwrap();
+                tokio_tungstenite::accept_async(tcp).await.unwrap()
+            });
+            let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            let mut server_ws = server.await.unwrap();
+            let cli = Cli::parse_from(["reference-native", "--server-url", &url, "--create-room"]);
+            let me = PlayerId::from_u128(1);
+            let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
+            state.accountability = DeliveryAccountability::new(true);
+            let reconnect = ClientMessage::Reconnect {
+                player_id: me,
+                room_id: state.room_id,
+                auth_token: "test-restore".into(),
+            };
+            let baseline = json!({
+                "room_id": state.room_id, "room_code": "ABC123", "player_id": me,
+                "game_name": "handshake", "max_players": 2, "supports_authority": false,
+                "current_players": [{"id": me, "name": "self", "is_authority": false,
+                    "is_ready": false, "epoch": 1, "seq": 0}],
+                "is_authority": false, "lobby_state": "lobby", "ready_players": [],
+                "relay_type": "none", "missed_events": [], "sender_watermarks": [],
+                "replay": "complete", "reconnection_token": "replacement"
+            });
+            let terminal = match command {
+                "authenticate" => json!({"type": "ProtocolInfo", "data": {"protocol_version": 3}}),
+                "join" => json!({"type": "RoomJoined", "data": baseline}),
+                _ => json!({"type": "Reconnected", "data": baseline}),
+            };
+            // Socket I/O must not auto-advance Tokio time. Keep the runtime runnable.
+            let clock_guard = tokio::spawn(async {
+                loop {
+                    tokio::task::yield_now().await;
+                }
+            });
+            tokio::time::pause();
+            let started = Instant::now();
+            let mut operation = Box::pin(async {
+                match command {
+                    "authenticate" => authenticate(&mut state.ws, &cli).await.map(|_| ()),
+                    "join" => join_room(&mut state.ws, &cli, true).await.map(|_| ()),
+                    _ => state.reconnect_room(&reconnect).await.map(|_| ()),
+                }
+            });
+            assert!(futures_util::poll!(operation.as_mut()).is_pending());
+            let request = server_ws.next().await.unwrap().unwrap();
+            let request: ClientMessage = serde_json::from_str(request.to_text().unwrap()).unwrap();
+            assert!(matches!(
+                (command, request),
+                ("authenticate", ClientMessage::Authenticate { .. })
+                    | ("join", ClientMessage::JoinRoom { .. })
+                    | ("restore", ClientMessage::Reconnect { .. })
+            ));
+            assert_eq!(
+                Instant::now(),
+                started,
+                "socket readiness must not move the clock"
+            );
+            tokio::time::advance(HANDSHAKE_TIMEOUT - Duration::from_millis(1)).await;
+            let prelude = if command == "authenticate" {
+                json!({"type": "Authenticated", "data": {
+                    "app_name": "default",
+                    "rate_limits": {"per_minute": 60, "per_hour": 3600, "per_day": 86400}
+                }})
+            } else {
+                json!({"type": "RelayStats", "data": {
+                    "interval_ms": 1000, "sent_to_you": 0,
+                    "dropped_for_you": 0, "backpressure_events": 0
+                }})
+            };
+            server_ws
+                .send(Message::Text(prelude.to_string().into()))
+                .await
+                .unwrap();
+            for _ in 0..32 {
+                let observed = futures_util::poll!(operation.as_mut());
+                assert!(
+                    observed.is_pending(),
+                    "{command}/{outcome}: premature result {observed:?}"
+                );
+                tokio::task::yield_now().await;
+            }
+            if outcome != "on-time" {
+                // Cross a full tick of Tokio's millisecond timer wheel.
+                tokio::time::advance(Duration::from_millis(2)).await;
+            }
+            if outcome != "missing" {
+                server_ws
+                    .send(Message::Text(terminal.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+            let mut observed = std::task::Poll::Pending;
+            let io_deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < io_deadline {
+                observed = futures_util::poll!(operation.as_mut());
+                if observed.is_ready() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            match (outcome, observed) {
+                ("on-time", std::task::Poll::Ready(Ok(()))) => {}
+                ("missing" | "late", std::task::Poll::Ready(Err(error))) => {
+                    assert_eq!(error.code, EXIT_CONNECTION_ERROR);
+                }
+                (_, result) => failures.push(format!("{command}/{outcome}: {result:?}")),
+            }
+            drop(operation);
+            clock_guard.abort();
+            tokio::time::resume();
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

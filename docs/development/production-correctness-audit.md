@@ -3197,3 +3197,56 @@ and Godot SDKs do not import either private reference orchestrator and need no
 migration for this repair. This finding does not explain #853 or #889, establish
 the CI timing bound in #953, qualify published RTC replacements in #912, or
 complete the broader A01–A22 audit in #826.
+
+### F55 Reference-client handshake preludes renew command waits
+
+Issue [#974](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/974)
+continues A16/A20 from `0d702411`. Native and browser reference clients start a
+new 20-second response wait for every accepted application frame. A delayed
+`Authenticated` reply gives `ProtocolInfo` another full window. Room accounting
+or membership preludes can extend `JoinRoom` indefinitely. Native `Reconnect`
+uses the same repeated wait. Browser output flushes can also suspend a command
+before its response timer starts.
+
+Browser command histories deliver an accepted prelude at 19,999 ms. The old
+client remains pending at 20,000 ms during authentication, v2 membership,
+v3 accounting, and held authentication output. On-time baseline controls pass.
+A separate expiry control delivers a valid room baseline before the due host
+timer callback runs. The repair rejects it before publishing room success.
+Another control completes late authentication and gives the following room
+command its own full window. Both versions retain timer cleanup, socket closure,
+and late-continuation exclusion. Review found that final `protocol_info` output
+still ran under the next command's window. Two additional histories reproduce
+that gap on PR #975's first head. The command wrapper now drains final output
+before clearing its deadline. Held-join ingress coverage suspends actual
+`room_created` output and retains the exact baseline-plus-255 frame boundary.
+
+Each command now has one monotonic deadline. Browser frame and output waits
+share a scheduled timer and abort state. Native command writes, response frames,
+and reconnect cleanup retries retain one absolute deadline. The native read
+path checks expiry before and after a ready frame; buffered replies cannot
+bypass the deadline. The reconnect response loop is separate from snapshot
+application, so peer rebuilding keeps its existing run and connection windows.
+
+Native tests use real loopback WebSockets and a controlled Tokio clock. A
+runnable clock guard prevents automatic time advancement during socket I/O.
+They allow one millisecond for Tokio's timer-wheel resolution. Nine histories
+cover authentication, join, and reconnect with on-time, missing, and late
+terminal replies. Restoring per-read renewal makes all three commands remain
+pending for missing replies and accept late replies; on-time controls still pass.
+These controlled histories do not establish a spontaneous
+server stall. Earlier malformed-reply and automatically advanced-clock probes
+were invalidated and do not count as evidence.
+
+The browser suite, type checks, and build pass locally. The restored native
+controls pass in 0.113 seconds. Strict root and native lint pass with all
+features and targets. Real Chromium/native mesh, room restore, and the mixed
+v2/v3 relay floor pass in 3.732 seconds. These checks cover the repaired seams;
+they do not complete the wider audit.
+
+The server protocol and configuration do not change. The Rust, .NET, and Godot
+SDKs do not import either private reference orchestrator; they need no migration
+or acceptance issue for this repair. A16/A20 and the wider #826 audit remain
+incomplete. The repair does not establish #953's CI timing bound or explain the
+initial peer-formation failures in #853 and #889. Hosted CI and final-head review
+remain delivery gates.

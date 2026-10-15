@@ -123,7 +123,7 @@ for (const scenario of [
         });
       if (frame.type === 'JoinRoom')
         queueMicrotask(() => {
-          if (phase === 'join' || phase === 'join-held' || phase === 'join-sequential') {
+          if (phase === 'join' || phase === 'join-sequential') {
             if (phase === 'join-sequential') return;
             for (let i = 0; i < 257; i += 1)
               this.deliver('PlayerJoined', { player: { id: peer, epoch: 1, seq: 0 } });
@@ -155,7 +155,7 @@ for (const scenario of [
             held &&
             (event['event'] === 'game_data_received' ||
               (phase === 'authenticate-held' && event['event'] === 'connected') ||
-              (phase === 'join-held' && event['event'] === 'protocol_info') ||
+              (phase === 'join-held' && event['event'] === 'room_created') ||
               (phase === 'transition-held' && event['event'] === 'room_joined'))
           )
             return blocked;
@@ -300,6 +300,18 @@ for (const scenario of [
     }
     if (phase === 'frame-overflow') {
       socket?.onmessage?.({ data: new ArrayBuffer(64 * 1024 * 1024 + 1) });
+      await turn();
+    }
+    if (phase === 'join-held') {
+      assert(
+        events.some((event) => event['event'] === 'room_created'),
+        'hold actual join output',
+      );
+      assert(result === undefined, 'keep the join pending while output is held');
+      for (let i = 0; i < 255; i += 1) socket?.deliver('Pong');
+      await turn();
+      assert(result === undefined, 'the held baseline plus 255 frames fit the count boundary');
+      socket?.deliver('Pong');
       await turn();
     }
     if (phase === 'transition-held') {

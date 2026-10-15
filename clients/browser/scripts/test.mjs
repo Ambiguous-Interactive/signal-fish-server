@@ -10,6 +10,7 @@ for (const entryPoint of [
   'src/page/orchestrator.test.ts',
   'src/page/retry.test.ts',
   'src/page/ingress.test.ts',
+  'src/page/handshake.test.ts',
   'src/page/output-cancellation.test.ts',
   'src/cli/args.test.ts',
   'src/cli/output.test.ts',

@@ -286,6 +286,10 @@ until the pipe drains, closes, or the process exits.
 | `4` | `--max-runtime-secs` watchdog fired (hard abort) |
 | `101` | Unexpected panic in main; stderr flush is limited to one second, and `exiting` may be absent |
 
+Each `Authenticate`, `JoinRoom`, and `Reconnect` command has one 20-second
+response window. Prelude frames and old-socket cleanup retries do not restart
+it. Expiry ends the run with exit code 3. Start a fresh client after this failure.
+
 ## Signal payload convention (matchbox `PeerSignal`)
 
 Per [ADR-0002](../../docs/adr/0002-matchbox-compatibility.md) the opaque `signal` field uses the matchbox shape —
