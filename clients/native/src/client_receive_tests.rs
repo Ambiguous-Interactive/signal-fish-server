@@ -42,10 +42,9 @@ async fn readiness_recovery_reissues_start_before_a_delayed_rejection() {
         state.handle_server_message(snapshot(true)).await.unwrap();
         state.handle_server_message(snapshot(false)).await.unwrap();
         state.handle_server_message(snapshot(false)).await.unwrap();
+        let unexpected = tokio::time::timeout(Duration::from_millis(25), server_ws.next()).await;
         assert!(
-            tokio::time::timeout(Duration::from_millis(25), server_ws.next())
-                .await
-                .is_err(),
+            unexpected.is_err(),
             "unchanged all-ready and unready snapshots must remain silent"
         );
         assert!(!state.start_game_gate.all_current_ready(&state.present));
@@ -73,10 +72,9 @@ async fn readiness_recovery_reissues_start_before_a_delayed_rejection() {
             .await
             .unwrap();
         state.handle_server_message(snapshot(true)).await.unwrap();
+        let unexpected = tokio::time::timeout(Duration::from_millis(25), server_ws.next()).await;
         assert!(
-            tokio::time::timeout(Duration::from_millis(25), server_ws.next())
-                .await
-                .is_err(),
+            unexpected.is_err(),
             "duplicate snapshots and finalization must not send extra commands"
         );
     }
