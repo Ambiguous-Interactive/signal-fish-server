@@ -4043,6 +4043,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_room_lookup_serializes_with_publication_deletion_and_code_reuse() {
+        let db = InMemoryDatabase::new();
+        let room_guard = db.rooms.read().await;
+        let creation = create_test_room(&db, "lookup_game", "CREATE");
+        tokio::pin!(creation);
+        assert!(futures_util::poll!(&mut creation).is_pending());
+        let lookup = db.get_room("lookup_game", "CREATE");
+        tokio::pin!(lookup);
+        assert!(futures_util::poll!(&mut lookup).is_pending());
+        drop(room_guard);
+        let created = creation.await.unwrap();
+        let observed = lookup.await.unwrap().unwrap();
+        assert_eq!(observed.id, created.id);
+        assert_eq!(observed.code, created.code);
+        assert_eq!(observed.region_id, created.region_id);
+        let pending = db
+            .create_pending_room_classified(
+                "lookup_game".to_string(),
+                Some("LOOKUP".to_string()),
+                2,
+                true,
+                Uuid::new_v4(),
+                "auto".to_string(),
+                "region-a".to_string(),
+                Some(Uuid::new_v4()),
+                None,
+            )
+            .await
+            .unwrap();
+        let publication_guard = db.room_publication.write().await;
+        let lookup = db.get_room("lookup_game", "LOOKUP");
+        tokio::pin!(lookup);
+        assert!(futures_util::poll!(&mut lookup).is_pending());
+        let publication = db.publish_room(&pending.id);
+        tokio::pin!(publication);
+        assert!(futures_util::poll!(&mut publication).is_pending());
+        drop(publication_guard);
+        assert!(lookup.await.unwrap().is_none());
+        publication.await.unwrap();
+        assert_eq!(
+            db.get_room("lookup_game", "LOOKUP")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            pending.id
+        );
+
+        let room_guard = db.rooms.read().await;
+        let deletion = db.delete_room(&pending.id);
+        tokio::pin!(deletion);
+        assert!(futures_util::poll!(&mut deletion).is_pending());
+        let lookup = db.get_room("lookup_game", "LOOKUP");
+        tokio::pin!(lookup);
+        assert!(futures_util::poll!(&mut lookup).is_pending());
+        drop(room_guard);
+        assert!(deletion.await.unwrap());
+        assert!(lookup.await.unwrap().is_none());
+
+        let replacement = create_test_room(&db, "lookup_game", "LOOKUP")
+            .await
+            .unwrap();
+        let room_guard = db.rooms.read().await;
+        let rotation = db.update_room_code(&replacement.id, "ROTATE".to_string());
+        tokio::pin!(rotation);
+        assert!(futures_util::poll!(&mut rotation).is_pending());
+        let lookup = db.get_room("lookup_game", "LOOKUP");
+        tokio::pin!(lookup);
+        assert!(futures_util::poll!(&mut lookup).is_pending());
+        drop(room_guard);
+        rotation.await.unwrap();
+        assert!(lookup.await.unwrap().is_none());
+        let observed = db.get_room("lookup_game", "ROTATE").await.unwrap().unwrap();
+        assert_eq!(observed.id, replacement.id);
+        assert_ne!(observed.id, pending.id);
+        assert_eq!(observed.code, "ROTATE");
+    }
+
+    #[tokio::test]
     async fn test_delete_room_frees_room_code() {
         let db = InMemoryDatabase::new();
 

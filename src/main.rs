@@ -403,7 +403,12 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/metrics/sessions",
             get(websocket::sessions_metrics_handler),
-        );
+        )
+        .route(
+            "/v1/metrics/rooms/lookup",
+            get(websocket::room_lookup_handler),
+        )
+        .route("/metrics/rooms/lookup", get(websocket::room_lookup_handler));
 
     // Spawn legacy full-mesh signaling on a separate port if enabled.
     //

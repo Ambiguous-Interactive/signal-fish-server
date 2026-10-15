@@ -1201,8 +1201,56 @@ impl DistributedLock for DrainOnLockAcquire {
     }
 }
 
+#[tokio::test]
+async fn test_metrics_room_lookup_distinguishes_unavailable_storage_and_read_failure() {
+    for track_sessions in [false, true] {
+        let mut database = DrainAfterCreateDatabase::new(create_test_database().await);
+        database.track_sessions = track_sessions;
+        database.fail_room_lookup = true;
+        let server = create_test_server_with_message_coordinator_and_lock(
+            ServerConfig {
+                require_metrics_auth: false,
+                ..ServerConfig::default()
+            },
+            Arc::new(InMemoryMessageCoordinator::new()),
+            Arc::new(InMemoryDistributedLock::new()),
+            Arc::new(database),
+        )
+        .await;
+        let test_server =
+            axum_test::TestServer::new(crate::websocket::create_router("*").with_state(server));
+        let response = test_server
+            .get(&format!(
+                "/metrics/rooms/lookup?applicationId={}&gameName=game&roomCode=LOOKUP",
+                uuid::Uuid::new_v4()
+            ))
+            .await;
+        response.assert_status(if track_sessions {
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            axum::http::StatusCode::OK
+        });
+        let value = response.json::<serde_json::Value>();
+        assert_eq!(value["available"], false);
+        assert!(
+            value.get("room").is_none(),
+            "unavailable must not report an absent room: {value}"
+        );
+        assert_eq!(
+            value["reason"],
+            if track_sessions {
+                "room lookup failed"
+            } else {
+                "the configured database backend does not track session records"
+            }
+        );
+    }
+}
+
 struct DrainAfterCreateDatabase {
     inner: Arc<dyn GameDatabase>,
+    track_sessions: bool,
+    fail_room_lookup: bool,
     server: StdMutex<Option<Weak<EnhancedGameServer>>>,
     triggered: AtomicBool,
     trigger_drain_after_create: bool,
@@ -1224,6 +1272,8 @@ impl DrainAfterCreateDatabase {
     fn new(inner: Arc<dyn GameDatabase>) -> Self {
         Self {
             inner,
+            track_sessions: false,
+            fail_room_lookup: false,
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
             trigger_drain_after_create: true,
@@ -1252,6 +1302,8 @@ impl DrainAfterCreateDatabase {
     fn with_legacy_collision_once(inner: Arc<dyn GameDatabase>) -> Self {
         Self {
             inner,
+            track_sessions: false,
+            fail_room_lookup: false,
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
             trigger_drain_after_create: false,
@@ -1273,6 +1325,8 @@ impl DrainAfterCreateDatabase {
     fn with_ambiguous_commit_once(inner: Arc<dyn GameDatabase>) -> Self {
         Self {
             inner,
+            track_sessions: false,
+            fail_room_lookup: false,
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
             trigger_drain_after_create: false,
@@ -1294,6 +1348,8 @@ impl DrainAfterCreateDatabase {
     fn with_paused_empty_cleanup(inner: Arc<dyn GameDatabase>) -> Self {
         Self {
             inner,
+            track_sessions: false,
+            fail_room_lookup: false,
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
             trigger_drain_after_create: false,
@@ -1315,6 +1371,8 @@ impl DrainAfterCreateDatabase {
     fn with_paused_expired_cleanup(inner: Arc<dyn GameDatabase>) -> Self {
         Self {
             inner,
+            track_sessions: false,
+            fail_room_lookup: false,
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
             trigger_drain_after_create: false,
@@ -1390,6 +1448,12 @@ impl DrainAfterCreateDatabase {
 
 #[async_trait::async_trait]
 impl GameDatabase for DrainAfterCreateDatabase {
+    fn session_records(&self) -> Option<Arc<crate::session_records::SessionRecords>> {
+        self.track_sessions
+            .then(|| self.inner.session_records())
+            .flatten()
+    }
+
     async fn initialize(&self) -> anyhow::Result<()> {
         self.inner.initialize().await
     }
@@ -1534,6 +1598,9 @@ impl GameDatabase for DrainAfterCreateDatabase {
     }
 
     async fn get_room(&self, game_name: &str, room_code: &str) -> anyhow::Result<Option<Room>> {
+        if self.fail_room_lookup {
+            anyhow::bail!("injected room lookup failure");
+        }
         self.inner.get_room(game_name, room_code).await
     }
 

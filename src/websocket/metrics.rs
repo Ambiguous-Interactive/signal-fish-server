@@ -19,6 +19,8 @@ use super::prometheus::render_prometheus_metrics;
 /// negligible volume.
 const REJECTION_LOG_MIN_INTERVAL: Duration = Duration::from_secs(60);
 
+const ROOM_LOOKUP_RESPONSE_MAX_BYTES: usize = 4096;
+
 /// One decision to emit a throttled metrics-endpoint warning.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum RejectionLogEmission<'a> {
@@ -435,6 +437,85 @@ pub struct SessionsQuery {
     /// records. A malformed value fails the request (extractor 400).
     #[serde(default, rename = "applicationId")]
     application_id: Option<uuid::Uuid>,
+}
+
+/// Exact directory key for `/metrics/rooms/lookup`.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoomLookupQuery {
+    application_id: uuid::Uuid,
+    game_name: String,
+    room_code: String,
+}
+
+/// Find one published live room without the session-list cap.
+///
+/// Application filtering selects a view under the existing metrics token.
+/// The database lookup observes publication and code ownership together.
+/// A room may change or close after that observation; callers must still
+/// handle join refusal and code reuse.
+pub async fn room_lookup_handler(
+    headers: HeaderMap,
+    State(server): State<Arc<EnhancedGameServer>>,
+    axum::extract::Query(query): axum::extract::Query<RoomLookupQuery>,
+) -> axum::response::Result<axum::response::Json<serde_json::Value>> {
+    if server.config().require_metrics_auth {
+        enforce_metrics_auth(&headers, server.as_ref()).await?;
+    }
+    crate::protocol::validation::validate_game_name_with_config(
+        &query.game_name,
+        server.protocol_config(),
+    )
+    .and_then(|()| {
+        crate::protocol::validation::validate_room_code_with_config(
+            &query.room_code,
+            server.protocol_config(),
+        )
+    })
+    .map_err(|reason| (StatusCode::BAD_REQUEST, reason))?;
+    if server.session_records().is_none() {
+        return Ok(axum::response::Json(serde_json::json!({
+            "available": false,
+            "reason": "the configured database backend does not track session records",
+        })));
+    }
+    let room = server
+        .database()
+        .get_room(&query.game_name, &query.room_code.to_ascii_uppercase())
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "Room lookup failed");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                axum::response::Json(serde_json::json!({
+                    "available": false,
+                    "reason": "room lookup failed",
+                })),
+            )
+        })?
+        .filter(|room| room.application_id == Some(query.application_id))
+        .map(|room| {
+            serde_json::json!({
+                "roomId": room.id,
+                "applicationId": room.application_id,
+                "gameName": room.game_name,
+                "roomCode": room.code,
+                "regionId": room.region_id,
+            })
+        });
+    let value = serde_json::json!({"available": true, "room": room});
+    if serde_json::to_vec(&value).map_or(true, |bytes| bytes.len() > ROOM_LOOKUP_RESPONSE_MAX_BYTES)
+    {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::response::Json(serde_json::json!({
+                "available": false,
+                "reason": "room lookup exceeds the response size limit",
+            })),
+        )
+            .into());
+    }
+    Ok(axum::response::Json(value))
 }
 
 /// Session records endpoint (issues #708, #763, #766) - one record per room,

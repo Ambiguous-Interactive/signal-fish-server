@@ -1794,6 +1794,256 @@ async fn test_metrics_endpoint_rejects_invalid_bearer_token() {
 // ===========================================================================
 
 #[tokio::test]
+async fn test_metrics_room_lookup_finds_rooms_beyond_session_cap_and_tracks_lifecycle() {
+    use uuid::Uuid;
+
+    let mut config = test_server_config();
+    config.require_metrics_auth = true;
+    config.metrics_auth_token = Some("lookup-token".to_string());
+    let server =
+        test_helpers::create_test_server_with_config(config, ProtocolConfig::default()).await;
+    let application_id = Uuid::new_v4();
+    let database = server.database();
+    let mut rooms = Vec::new();
+    for index in 0..512 {
+        let room = database
+            .create_room(
+                "lookup_game".to_string(),
+                Some(format!("{index:06}")),
+                2,
+                true,
+                Uuid::new_v4(),
+                "auto".to_string(),
+                "region-a".to_string(),
+                Some(application_id),
+            )
+            .await
+            .unwrap();
+        rooms.push(room);
+    }
+    let pending = database
+        .create_pending_room_classified(
+            "lookup_game".to_string(),
+            Some("LOOKUP".to_string()),
+            2,
+            true,
+            Uuid::new_v4(),
+            "auto".to_string(),
+            "region-b".to_string(),
+            Some(application_id),
+            None,
+        )
+        .await
+        .unwrap();
+    let test_server = axum_test::TestServer::new(create_router("*").with_state(server.clone()));
+    let path = format!(
+        "/metrics/rooms/lookup?applicationId={application_id}&gameName=lookup_game&roomCode=lookup"
+    );
+    for token in [None, Some("Bearer wrong-token")] {
+        let mut request = test_server.get(&path);
+        if let Some(token) = token {
+            request = request.add_header(
+                axum::http::header::AUTHORIZATION,
+                token.parse::<axum::http::HeaderValue>().unwrap(),
+            );
+        }
+        request
+            .await
+            .assert_status(axum::http::StatusCode::UNAUTHORIZED);
+    }
+    let token = "Bearer lookup-token"
+        .parse::<axum::http::HeaderValue>()
+        .unwrap();
+    let hidden = test_server
+        .get(&path)
+        .add_header(axum::http::header::AUTHORIZATION, token.clone())
+        .await;
+    hidden.assert_status_ok();
+    assert_eq!(
+        hidden.json::<serde_json::Value>(),
+        serde_json::json!({"available": true, "room": null})
+    );
+    database.publish_room(&pending.id).await.unwrap();
+    let listed = test_server
+        .get("/metrics/sessions")
+        .add_header(axum::http::header::AUTHORIZATION, token.clone())
+        .await
+        .json::<serde_json::Value>();
+    assert_eq!(listed["activeCount"], 513);
+    assert_eq!(listed["activeOmitted"], 1);
+    assert_eq!(listed["activeTruncated"], true);
+    rooms.push(pending.clone());
+    let omitted = rooms
+        .iter()
+        .find(|room| {
+            !listed["active"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|record| record["roomId"] == room.id.to_string())
+        })
+        .unwrap();
+    let omitted_lookup = test_server
+        .get(&format!(
+            "/metrics/rooms/lookup?applicationId={application_id}&gameName=lookup_game&roomCode={}",
+            omitted.code
+        ))
+        .add_header(axum::http::header::AUTHORIZATION, token.clone())
+        .await;
+    omitted_lookup.assert_status_ok();
+    assert_eq!(
+        omitted_lookup.json::<serde_json::Value>()["room"]["roomId"],
+        omitted.id.to_string()
+    );
+    let found = test_server
+        .get(&path)
+        .add_header(axum::http::header::AUTHORIZATION, token.clone())
+        .await;
+    found.assert_status_ok();
+    let expected = serde_json::json!({
+        "available": true,
+        "room": {"roomId": pending.id, "applicationId": application_id, "gameName": "lookup_game", "roomCode": "LOOKUP", "regionId": "region-b"}
+    });
+    assert_eq!(found.json::<serde_json::Value>(), expected);
+    assert!(found.as_bytes().len() < 1024);
+    for (game, code, app) in [
+        ("other_game", "LOOKUP", application_id),
+        ("lookup_game", "ABSENT", application_id),
+        ("lookup_game", "LOOKUP", Uuid::new_v4()),
+    ] {
+        let response = test_server
+            .get(&format!(
+                "/metrics/rooms/lookup?applicationId={app}&gameName={game}&roomCode={code}"
+            ))
+            .add_header(axum::http::header::AUTHORIZATION, token.clone())
+            .await;
+        response.assert_status_ok();
+        assert_eq!(
+            response.json::<serde_json::Value>(),
+            serde_json::json!({"available": true, "room": null})
+        );
+    }
+    database.delete_room(&pending.id).await.unwrap();
+    let removed = test_server
+        .get(&path)
+        .add_header(axum::http::header::AUTHORIZATION, token.clone())
+        .await;
+    removed.assert_status_ok();
+    assert_eq!(
+        removed.json::<serde_json::Value>(),
+        serde_json::json!({"available": true, "room": null})
+    );
+    let replacement = database
+        .create_room(
+            "lookup_game".to_string(),
+            Some("LOOKUP".to_string()),
+            2,
+            true,
+            Uuid::new_v4(),
+            "auto".to_string(),
+            "region-c".to_string(),
+            Some(application_id),
+        )
+        .await
+        .unwrap();
+    let reused = test_server
+        .get(&path)
+        .add_header(axum::http::header::AUTHORIZATION, token.clone())
+        .await;
+    let reused = reused.json::<serde_json::Value>();
+    assert_eq!(reused["room"]["roomId"], replacement.id.to_string());
+    assert_eq!(reused["room"]["regionId"], "region-c");
+    database
+        .clear_room_application_id(&replacement.id)
+        .await
+        .unwrap();
+    let unowned = test_server
+        .get(&path)
+        .add_header(axum::http::header::AUTHORIZATION, token.clone())
+        .await;
+    unowned.assert_status_ok();
+    assert_eq!(
+        unowned.json::<serde_json::Value>(),
+        serde_json::json!({"available": true, "room": null})
+    );
+    let creator = replacement.players.keys().next().unwrap();
+    database
+        .abandon_room(&replacement.id, creator)
+        .await
+        .unwrap();
+    database
+        .set_room_application_id(&replacement.id, application_id)
+        .await
+        .unwrap();
+    let abandoned = test_server
+        .get(&path)
+        .add_header(axum::http::header::AUTHORIZATION, token.clone())
+        .await;
+    abandoned.assert_status_ok();
+    assert_eq!(
+        abandoned.json::<serde_json::Value>(),
+        serde_json::json!({"available": true, "room": null})
+    );
+    database.delete_room(&replacement.id).await.unwrap();
+    let mut empty_region_response = expected;
+    empty_region_response["room"]["regionId"] = serde_json::json!("");
+    let response_overhead = serde_json::to_vec(&empty_region_response).unwrap().len();
+    for response_bytes in [4096, 4097] {
+        let room = database
+            .create_room(
+                "lookup_game".to_string(),
+                Some("LOOKUP".to_string()),
+                2,
+                true,
+                Uuid::new_v4(),
+                "auto".to_string(),
+                "x".repeat(response_bytes - response_overhead),
+                Some(application_id),
+            )
+            .await
+            .unwrap();
+        let response = test_server
+            .get(&path)
+            .add_header(axum::http::header::AUTHORIZATION, token.clone())
+            .await;
+        if response_bytes == 4096 {
+            response.assert_status_ok();
+            assert_eq!(response.as_bytes().len(), 4096);
+            assert_eq!(
+                response.json::<serde_json::Value>()["room"]["roomId"],
+                room.id.to_string()
+            );
+        } else {
+            response.assert_status(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+            let value = response.json::<serde_json::Value>();
+            assert_eq!(value["available"], false);
+            assert!(value.get("room").is_none());
+            assert!(response.as_bytes().len() < 4096);
+        }
+        database.delete_room(&room.id).await.unwrap();
+    }
+    for query in [
+        "",
+        "applicationId=invalid&gameName=game&roomCode=LOOKUP",
+        "gameName=game&roomCode=LOOKUP",
+        "applicationId={app}&gameName=&roomCode=LOOKUP",
+        "applicationId={app}&gameName=bad%21&roomCode=LOOKUP",
+        "applicationId={app}&gameName=game&roomCode=SHORT",
+        "applicationId={app}&gameName=game&roomCode=BAD%21%21%21",
+        "applicationId={app}&gameName=game&roomCode=LOOKUP&unknown=1",
+        "applicationId={app}&gameName=game&roomCode=",
+        "applicationId={app}&gameName=game&roomCode=%C3%A9%C3%A9%C3%A9",
+    ] {
+        let query = query.replace("{app}", &application_id.to_string());
+        test_server
+            .get(&format!("/metrics/rooms/lookup?{query}"))
+            .add_header(axum::http::header::AUTHORIZATION, token.clone())
+            .await
+            .assert_status(axum::http::StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
 async fn test_metrics_sessions_endpoint_returns_bounded_session_shape() {
     let mut config = test_server_config();
     config.require_metrics_auth = false;
