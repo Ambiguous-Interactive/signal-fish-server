@@ -1,6 +1,8 @@
 import { encode } from '@msgpack/msgpack';
 import {
   bytesToBase64,
+  connect,
+  CONNECT_TIMEOUT_MS,
   classifyOpaqueNegotiatedServerInput,
   classifyJsonNegotiatedServerInput,
   joinRoomFrameData,
@@ -274,3 +276,106 @@ try {
   assert(!message.includes('private-room-token'), `binary key leaked: ${message}`);
   assert(message.includes('unknown field'), `missing binary failure cause: ${message}`);
 }
+
+// Regression #981: dispatching a ready open must not cancel an expired budget.
+const connectFailures: string[] = [];
+for (const scenario of [
+  'on-time',
+  'at-deadline',
+  'late-open',
+  'timeout',
+  'closed',
+  'on-time',
+] as const) {
+  const originalSocket = globalThis.WebSocket;
+  const originalNow = performance.now;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  let now = 123;
+  let socket!: Socket;
+  let nextTimer = 0;
+  const timers = new Map<number, () => void>();
+  class Socket {
+    binaryType = 'blob';
+    onopen: (() => void) | null = null;
+    onclose: ((event: { code: number }) => void) | null = null;
+    closes = 0;
+    constructor() {
+      socket = this;
+    }
+    close(): void {
+      this.closes += 1;
+      this.onclose?.({ code: 1000 });
+    }
+  }
+  const check = (condition: boolean, message: string) => {
+    if (!condition) connectFailures.push(`${scenario}: ${message}`);
+  };
+  try {
+    globalThis.WebSocket = Socket as unknown as typeof WebSocket;
+    performance.now = () => now;
+    globalThis.setTimeout = ((callback: () => void) => {
+      const id = ++nextTimer;
+      timers.set(id, callback);
+      return id;
+    }) as unknown as typeof setTimeout;
+    globalThis.clearTimeout = ((id: number) => {
+      timers.delete(id);
+    }) as unknown as typeof clearTimeout;
+    let outcome: WebSocket | Error | undefined;
+    let settlements = 0;
+    const connecting = connect('ws://mock.invalid/v3/ws').then(
+      (value) => {
+        outcome = value;
+        settlements += 1;
+      },
+      (error: Error) => {
+        outcome = error;
+        settlements += 1;
+      },
+    );
+    check(socket.binaryType === 'arraybuffer', 'preserve synchronous binary input');
+    now +=
+      scenario === 'on-time' || scenario === 'closed'
+        ? CONNECT_TIMEOUT_MS - 1
+        : CONNECT_TIMEOUT_MS;
+    if (scenario === 'late-open') now += 1;
+    if (scenario === 'timeout') {
+      const due = [...timers.values()];
+      timers.clear();
+      for (const callback of due) callback();
+    } else if (scenario === 'closed') {
+      socket.onclose?.({ code: 1006 });
+    } else {
+      socket.onopen?.();
+    }
+    await connecting;
+    if (scenario === 'on-time') {
+      check(outcome === (socket as unknown as WebSocket), 'return the on-time socket');
+      check(socket.closes === 0, 'keep the successful socket open');
+    } else {
+      check(outcome instanceof Error, 'reject the failed connection');
+      check(
+        outcome instanceof Error &&
+          outcome.message.includes(scenario === 'closed' ? 'close code 1006' : 'timed out'),
+        'retain the correct failure cause',
+      );
+      check(
+        socket.closes === (scenario === 'closed' ? 0 : 1),
+        'close an expired connection exactly once',
+      );
+    }
+    check(timers.size === 0, 'cancel the connection timer');
+    socket.onopen?.();
+    socket.onclose?.({ code: 1006 });
+    await Promise.resolve();
+    check(settlements === 1, 'ignore late duplicate callbacks');
+  } finally {
+    globalThis.WebSocket = originalSocket;
+    performance.now = originalNow;
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+}
+assert(connectFailures.length === 0, connectFailures.join('\n'));
+console.error('ok - WebSocket connection expiry rejects late opens and cleans up timers');

@@ -5,6 +5,7 @@
 // hand-models only the envelope fields it actually reads — drift is caught by
 // the interop suite, which drives this client against the real server binary.
 
+import { monotonicNowMs, scheduleDeadline } from '../shared/deadline.js';
 import type { GameDataFormat } from '../shared/types.js';
 import type { DeliveryClass } from './accountability.js';
 
@@ -674,21 +675,28 @@ export function negotiatedProtocolVersion(frame: ServerFrame, offeredVersion: nu
 export function connect(serverUrl: string): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     let settled = false;
+    const deadline = monotonicNowMs() + CONNECT_TIMEOUT_MS;
     const ws = new WebSocket(serverUrl);
     // Normalize binary application messages to synchronous ArrayBuffer input;
     // Blob conversion would otherwise reorder them around later text frames.
     ws.binaryType = 'arraybuffer';
-    const timer = setTimeout(() => {
+    const expire = () => {
       if (!settled) {
         settled = true;
+        timer.cancel();
         ws.close();
         reject(new Error(`websocket connect to ${serverUrl} timed out`));
       }
-    }, CONNECT_TIMEOUT_MS);
+    };
+    const timer = scheduleDeadline(deadline, expire);
     ws.onopen = () => {
+      if (monotonicNowMs() >= deadline) {
+        expire();
+        return;
+      }
       if (!settled) {
         settled = true;
-        clearTimeout(timer);
+        timer.cancel();
         resolve(ws);
       }
     };
@@ -697,7 +705,7 @@ export function connect(serverUrl: string): Promise<WebSocket> {
     ws.onclose = (event) => {
       if (!settled) {
         settled = true;
-        clearTimeout(timer);
+        timer.cancel();
         reject(
           new Error(`websocket connect to ${serverUrl} failed (close code ${event.code})`),
         );

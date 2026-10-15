@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject native and browser reference-client WebSocket connections once the connection wait expires (#981).
 - Discard late reference-client peer setup results without disconnecting working peer links (#979).
 - End native and browser sessions after failed signaling writes, and stop stalled native WebSocket writes (#976).
 - Keep reference-client handshakes and browser output within one 20-second window per command (#974).
