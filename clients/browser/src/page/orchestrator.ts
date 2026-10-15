@@ -891,11 +891,7 @@ class Orchestrator {
     const negotiatedVersion = await this.handshake(() => this.authenticate());
     this.negotiatedVersion = negotiatedVersion;
     this.accountability = new DeliveryAccountability(negotiatedVersion >= 3);
-    const lobbyState = await this.handshake(async () => {
-      const state = await this.joinRoom();
-      await this.flushHandshakeOutput();
-      return state;
-    });
+    const lobbyState = await this.handshake(() => this.joinRoom());
 
     // Joining an already-Lobby room (seat fill) means readiness is
     // immediately possible; a Finalized room means the session is already
@@ -1092,6 +1088,7 @@ class Orchestrator {
     });
     try {
       const result = await operation();
+      await this.flushHandshakeOutput();
       this.assertActive();
       return result;
     } finally {

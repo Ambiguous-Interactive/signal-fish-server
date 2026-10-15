@@ -34,6 +34,7 @@ for (const version of [2, 3]) {
     'authenticate',
     'join',
     'authenticate-output',
+    'authenticate-final-output',
     'healthy',
     'late-buffered',
     'phase-window',
@@ -121,7 +122,10 @@ for (const version of [2, 3]) {
           __sf_emit: (line: string) => {
             const event = JSON.parse(line) as Record<string, unknown>;
             events.push(event);
-            if (phase === 'authenticate-output' && event['event'] === 'authenticated')
+            if (
+              (phase === 'authenticate-output' && event['event'] === 'authenticated') ||
+              (phase === 'authenticate-final-output' && event['event'] === 'protocol_info')
+            )
               return heldOutput;
           },
         },
@@ -156,6 +160,14 @@ for (const version of [2, 3]) {
           backpressure_events: 0,
         });
       await turn();
+      if (phase === 'authenticate-final-output') {
+        socket.deliver('ProtocolInfo', { protocol_version: version });
+        await turn();
+        check(
+          !sent.includes('JoinRoom'),
+          'finish authentication output before sending JoinRoom',
+        );
+      }
       const deliverBaseline = () => {
         socket.deliver('RoomJoined', {
           player_id: me,
@@ -207,6 +219,11 @@ for (const version of [2, 3]) {
         socket.deliver(phase.startsWith('authenticate') ? 'ProtocolInfo' : 'RoomJoined');
         await turn();
         check(!sent.includes('PlayerReady'), 'late replies cannot send readiness');
+        if (phase === 'authenticate-final-output')
+          check(
+            !sent.includes('JoinRoom'),
+            'late authentication output cannot start a room command',
+          );
         check(timers.size === 0, 'clear every handshake timer');
       }
     } finally {

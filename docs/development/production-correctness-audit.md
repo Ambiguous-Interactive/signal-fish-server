@@ -3215,7 +3215,11 @@ A separate expiry control delivers a valid room baseline before the due host
 timer callback runs. The repair rejects it before publishing room success.
 Another control completes late authentication and gives the following room
 command its own full window. Both versions retain timer cleanup, socket closure,
-and late-continuation exclusion.
+and late-continuation exclusion. Review found that final `protocol_info` output
+still ran under the next command's window. Two additional histories reproduce
+that gap on PR #975's first head. The command wrapper now drains final output
+before clearing its deadline. Held-join ingress coverage suspends actual
+`room_created` output and retains the exact baseline-plus-255 frame boundary.
 
 Each command now has one monotonic deadline. Browser frame and output waits
 share a scheduled timer and abort state. Native command writes, response frames,
