@@ -1660,11 +1660,12 @@ class Orchestrator {
             this.resolveTransportStatus();
           }
         }
+        const planDeadline = deadlineAfterSeconds(monotonicNowMs(), this.config.p2pTimeoutSecs);
         for (const peer of peers) {
           this.assertActive();
           const peerId = String(peer['player_id']);
           if (transport === 'webrtc' && added.delete(peerId)) {
-            await this.establishPair(peerId, peer['initiate'] === true);
+            await this.establishPair(peerId, peer['initiate'] === true, planDeadline);
             this.assertActive();
           }
         }
@@ -1907,6 +1908,13 @@ class Orchestrator {
     if ((newlyExpected || needsConnection) && !this.connectedPairs.has(peer)) {
       this.p2pDeadline =
         retainedDeadline ?? deadlineAfterSeconds(monotonicNowMs(), this.config.p2pTimeoutSecs);
+    }
+    if (
+      this.config.p2pTimeoutSecs !== 0 &&
+      retainedDeadline !== null &&
+      monotonicNowMs() >= retainedDeadline
+    ) {
+      return;
     }
     try {
       const offerSdp = await this.awaitPeerOperation(

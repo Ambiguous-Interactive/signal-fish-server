@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -3149,3 +3149,51 @@ They require no migration or tracking issue for this repair.
 The browser suite, strict type checks, formatting, and build pass locally.
 Real Chromium/native retry, restore, and three-player mesh controls pass
 in 6.487 seconds. Hosted verification and review remain the merge gate.
+
+### F54 Sequential planned peers renew the connection window
+
+Issue [#972](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/972)
+continues A20 from `9196b197`. Both reference orchestrators await each peer in
+an authoritative plan and arm a fresh shared P2P deadline per peer. A slow first
+peer thus extends the wait for later peers and delays queued relay gameplay.
+The native deferred pairing gate has the same serial renewal path. This is
+separate from the browser retry renewal in F53.
+
+Two browser dispatch histories fail on the baseline. In a three-player plan,
+the first offer consumes 700 ms of a 1,000 ms window. The second peer holds
+`createOffer` or `setLocalDescription`. At 1,000 ms its link remains live,
+fallback is absent, and a queued relay message has no receipt. Releasing the
+held promise permits late signaling. Two more histories hold the first peer
+through the whole window and show that later peers still start negotiation
+after expiry. These controls use browser doubles and do not prove a spontaneous
+Chromium stall.
+
+A native real-stack history also fails on the baseline. With two planned
+initiators and a held offer, dispatch does not settle within 100 ms after the
+1,000 ms window expires. Native controls cover both offer seams, authoritative
+plan dispatch, deferred gate release, and first-peer completion at 700 ms or
+expiry at 1,000 ms. They use paused Tokio time and controlled stack suspension;
+they do not measure real-world setup latency.
+
+Both clients now share one start time or absolute deadline across each planned
+batch. Later peers retain their logical obligations but do not start physical
+negotiation after that window expires. Native retry scheduling uses the same
+batch start time. Individual legacy `NewPeer` directives and coordinated
+same-link retries retain their separate existing behavior. Native signal-drain
+and pairing call sites were swept; the deferred gate and authoritative plan
+were the only other serial multi-peer pairing loops.
+
+The browser suite and type checks pass. All 37 scoped native negotiation and
+connection-window controls pass in 7.835 seconds. Browser controls verify exact,
+once-only queued relay receipt, fallback, late-completion exclusion, fresh-plan
+recovery, and timer cleanup. Native controls retain the zero-timeout, run-first,
+held-success, driver cancellation, and live fresh-link exchange boundaries.
+Strict root and native lint pass with all targets and features. Real
+Chromium/native mesh, restore, and retry controls pass in 4.405 seconds. Hosted
+CI and exact-head review remain the delivery gates.
+
+The server protocol and configuration do not change. The external Rust, .NET,
+and Godot SDKs do not import either private reference orchestrator and need no
+migration for this repair. This finding does not explain #853 or #889, establish
+the CI timing bound in #953, qualify published RTC replacements in #912, or
+complete the broader A01–A22 audit in #826.

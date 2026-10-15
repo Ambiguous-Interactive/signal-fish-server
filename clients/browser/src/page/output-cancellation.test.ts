@@ -285,8 +285,16 @@ for (const seam of [
   }
 }
 
-// Regressions #960/#969: negotiation and retries share absolute connection deadlines.
-for (const deadlineKind of ['p2p', 'run', 'zero', 'send-failure', 'retry'] as const) {
+// Regressions #960/#969/#972: negotiation and retries share absolute connection deadlines.
+for (const deadlineKind of [
+  'p2p',
+  'run',
+  'zero',
+  'send-failure',
+  'retry',
+  'plan',
+  'plan-expiry',
+] as const) {
   for (const seam of [
     'offer',
     'local',
@@ -297,7 +305,12 @@ for (const deadlineKind of ['p2p', 'run', 'zero', 'send-failure', 'retry'] as co
     'candidate',
     'buffered-candidate',
   ] as const) {
-    if (deadlineKind === 'retry' && seam !== 'offer' && seam !== 'local') continue;
+    if (
+      (deadlineKind === 'retry' || deadlineKind.startsWith('plan')) &&
+      seam !== 'offer' &&
+      seam !== 'local'
+    )
+      continue;
     const originalPc = globalThis.RTCPeerConnection;
     const originalSocket = globalThis.WebSocket;
     const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
@@ -313,15 +326,19 @@ for (const deadlineKind of ['p2p', 'run', 'zero', 'send-failure', 'retry'] as co
     const calls: string[] = [];
     const me = '00000000-0000-0000-0000-000000000001';
     const peer = '00000000-0000-0000-0000-000000000002';
+    const secondPeer = '00000000-0000-0000-0000-000000000003';
     let socket: DeadlineSocket | undefined;
     let connection: DeadlineConnection | undefined;
     let release: (() => void) | undefined;
     let running: Promise<number> | undefined;
     let runResult: number | undefined;
-    let holdEnabled = deadlineKind !== 'retry';
+    let holdEnabled = deadlineKind !== 'retry' && deadlineKind !== 'plan';
     let connectionCount = 0;
     const p2pExpiresFirst =
-      deadlineKind === 'p2p' || deadlineKind === 'send-failure' || deadlineKind === 'retry';
+      deadlineKind === 'p2p' ||
+      deadlineKind === 'send-failure' ||
+      deadlineKind === 'retry' ||
+      deadlineKind.startsWith('plan');
     const held = new Promise<void>((resolve) => {
       release = resolve;
     });
@@ -345,7 +362,10 @@ for (const deadlineKind of ['p2p', 'run', 'zero', 'send-failure', 'retry'] as co
       }
       async setLocalDescription() {
         calls.push('local');
-        if (holdEnabled && (seam === 'local' || seam === 'answer-local')) await held;
+        if (deadlineKind === 'plan' && connectionCount === 1) {
+          now += 700;
+          holdEnabled = true;
+        } else if (holdEnabled && (seam === 'local' || seam === 'answer-local')) await held;
       }
       async setRemoteDescription() {
         calls.push('remote');
@@ -397,7 +417,10 @@ for (const deadlineKind of ['p2p', 'run', 'zero', 'send-failure', 'retry'] as co
               room_code: 'TEST',
               lobby_state: 'finalized',
               ready_players: [],
-              current_players: [me, peer].map((id) => ({ id, epoch: 1, seq: 0 })),
+              current_players: (deadlineKind.startsWith('plan')
+                ? [me, peer, secondPeer]
+                : [me, peer]
+              ).map((id) => ({ id, epoch: 1, seq: 0 })),
             });
             this.deliver('SessionPlan', {
               generation: me,
@@ -410,6 +433,9 @@ for (const deadlineKind of ['p2p', 'run', 'zero', 'send-failure', 'retry'] as co
                   player_id: peer,
                   initiate: seam === 'offer' || seam === 'local' || seam === 'remote-answer',
                 },
+                ...(deadlineKind.startsWith('plan')
+                  ? [{ player_id: secondPeer, initiate: true }]
+                  : []),
               ],
             });
           });
@@ -441,7 +467,7 @@ for (const deadlineKind of ['p2p', 'run', 'zero', 'send-failure', 'retry'] as co
       console.error = () => {};
       running = run({
         ...config,
-        peers: 2,
+        peers: deadlineKind.startsWith('plan') ? 3 : 2,
         p2pTimeoutSecs: deadlineKind === 'zero' ? 0 : p2pExpiresFirst ? 1 : 10,
         runForSecs: p2pExpiresFirst ? 3 : 1,
         p2pRetryCount: deadlineKind === 'retry' ? 2 : 0,
@@ -508,7 +534,7 @@ for (const deadlineKind of ['p2p', 'run', 'zero', 'send-failure', 'retry'] as co
         seq: 1,
         data: { relay_msg: 'live' },
       });
-      now += deadlineKind === 'retry' ? 299 : 900;
+      now += deadlineKind === 'retry' || deadlineKind === 'plan' ? 299 : 900;
       for (const [id, timer] of [...timers]) {
         if (timer.at <= now) {
           timers.delete(id);
@@ -521,7 +547,7 @@ for (const deadlineKind of ['p2p', 'run', 'zero', 'send-failure', 'retry'] as co
         !events.some((event) => event['event'] === 'game_data_received'),
         'relay must remain queued behind the suspended operation before expiry',
       );
-      now += deadlineKind === 'retry' ? 1 : 200;
+      now += deadlineKind === 'retry' || deadlineKind === 'plan' ? 1 : 200;
       let timerFailure: unknown;
       for (const [id, timer] of [...timers]) {
         if (timer.at <= now) {
@@ -537,7 +563,17 @@ for (const deadlineKind of ['p2p', 'run', 'zero', 'send-failure', 'retry'] as co
       await turn();
       await turn();
       check(connection?.closed === true, 'deadline must close the stalled physical link');
-      if (deadlineKind === 'p2p' || deadlineKind === 'retry') {
+      if (deadlineKind === 'plan-expiry') {
+        check(
+          connectionCount === 1,
+          'later peers must not start negotiation after the shared plan window expires',
+        );
+      }
+      if (
+        deadlineKind === 'p2p' ||
+        deadlineKind === 'retry' ||
+        deadlineKind.startsWith('plan')
+      ) {
         const relayEvents = events.filter((event) => event['event'] === 'game_data_received');
         check(
           relayEvents.length === 1 &&
@@ -589,7 +625,11 @@ for (const deadlineKind of ['p2p', 'run', 'zero', 'send-failure', 'retry'] as co
         sent.filter((frame) => frame.type === 'Signal').length === signalsAfterDeadline,
         'late completion must not signal the retired link',
       );
-      if (deadlineKind === 'p2p' || deadlineKind === 'retry') {
+      if (
+        deadlineKind === 'p2p' ||
+        deadlineKind === 'retry' ||
+        deadlineKind.startsWith('plan')
+      ) {
         const oldConnection = connection;
         socket?.deliver('SessionPlan', {
           generation: peer,

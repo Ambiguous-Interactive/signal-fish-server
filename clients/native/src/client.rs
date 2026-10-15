@@ -367,12 +367,13 @@ fn note_current_pair_connected(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PairGeneration {
     Initial,
+    Plan(Instant),
     Retry,
 }
 
 impl PairGeneration {
     fn arms_p2p_window(self) -> bool {
-        self == Self::Initial
+        self != Self::Retry
     }
 }
 
@@ -387,6 +388,10 @@ fn arm_pair_window(
     if !generation.arms_p2p_window() {
         return;
     }
+    let now = match generation {
+        PairGeneration::Plan(started) => started,
+        PairGeneration::Initial | PairGeneration::Retry => now,
+    };
     let fresh_deadline = Deadline::after(now, timeout);
     *deadline = Some(fresh_deadline);
     *retry_at = (retry_count > 0)
@@ -1992,8 +1997,10 @@ impl Orchestrator<'_> {
         emit(&Event::P2pGateReleased {
             pending_pairs: pending.len(),
         });
+        let started = Instant::now();
         for (peer, initiate) in pending {
-            self.establish_pair(peer, initiate).await?;
+            self.establish_pair_generation(peer, initiate, PairGeneration::Plan(started))
+                .await?;
         }
         Ok(())
     }
@@ -2318,13 +2325,19 @@ impl Orchestrator<'_> {
                         self.resolve_transport_status().await?;
                     }
                 }
+                let started = Instant::now();
                 for peer in &plan.peers {
                     if plan.transport == Transport::WebRtc && peer.player_id != self.my_id {
                         self.pair_roles.insert(peer.player_id, peer.initiate);
                     }
                     if plan.transport == Transport::WebRtc && added.remove(&peer.player_id) {
                         if self.p2p_released {
-                            self.establish_pair(peer.player_id, peer.initiate).await?;
+                            self.establish_pair_generation(
+                                peer.player_id,
+                                peer.initiate,
+                                PairGeneration::Plan(started),
+                            )
+                            .await?;
                         } else {
                             self.expected_peers.insert(peer.player_id);
                             self.pending_pair_directives
@@ -2719,8 +2732,17 @@ impl Orchestrator<'_> {
     /// Pair with `peer` per the server's directive: create the connection,
     /// offer when told to, then drain any defensively buffered signals.
     async fn establish_pair(&mut self, peer: PlayerId, initiate: bool) -> Result<(), FatalError> {
-        self.establish_pair_link(peer, initiate, PairGeneration::Initial)
-            .await?;
+        self.establish_pair_generation(peer, initiate, PairGeneration::Initial)
+            .await
+    }
+
+    async fn establish_pair_generation(
+        &mut self,
+        peer: PlayerId,
+        initiate: bool,
+        generation: PairGeneration,
+    ) -> Result<(), FatalError> {
+        self.establish_pair_link(peer, initiate, generation).await?;
         if let Some(buffered) = self.pending_signals.remove(&peer) {
             for signal in buffered {
                 self.apply_signal(peer, signal).await?;
@@ -2774,6 +2796,14 @@ impl Orchestrator<'_> {
             );
         }
         self.pair_roles.entry(peer).or_insert(initiate);
+        if matches!(generation, PairGeneration::Plan(_))
+            && self.cli.p2p_timeout_secs != 0
+            && self
+                .p2p_deadline
+                .is_some_and(|deadline| deadline.is_due(Instant::now()))
+        {
+            return Ok(());
+        }
         let operation = Negotiation::Pair {
             initiate,
             ice_servers: self.last_ice_servers.clone(),

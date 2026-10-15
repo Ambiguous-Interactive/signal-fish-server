@@ -415,3 +415,109 @@ async fn stalled_peer_close_does_not_abort_a_coordinated_retry() {
     state.engine.negotiation_hold = None;
     state.engine.remove_peer(peer).await.unwrap();
 }
+
+// Regression #972: one peer must not renew the remaining plan's connection window.
+#[tokio::test]
+async fn planned_peers_share_the_connection_deadline() {
+    for (step, gated, partial) in [
+        ("offer", false, false),
+        ("offer_local", false, false),
+        ("offer", true, false),
+        ("offer", false, true),
+        ("offer_local", true, true),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(tcp).await.unwrap()
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let _server_ws = server.await.unwrap();
+        let cli = Cli::parse_from([
+            "reference-native",
+            "--server-url",
+            &url,
+            "--create-room",
+            "--disable-mdns",
+            "--p2p-timeout-secs",
+            "1",
+            "--p2p-retry-count",
+            "0",
+            "--run-for-secs",
+            "10",
+        ]);
+        let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+        let peers = [PlayerId::from_u128(2), PlayerId::from_u128(3)];
+        let plan: ServerMessage = serde_json::from_value(json!({
+            "type": "SessionPlan", "data": {
+                "generation": PlayerId::from_u128(4), "topology": "mesh", "transport": "webrtc",
+                "host": null, "direct_endpoint": null, "ice_servers": [], "fallback": "relay",
+                "peers": peers.map(|player_id| json!({
+                    "player_id": player_id, "player_name": "peer", "is_authority": false, "initiate": true
+                }))
+            }
+        })).unwrap();
+        if gated {
+            state.p2p_released = false;
+            state.handle_server_message(plan.clone()).await.unwrap();
+        }
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        state.engine.negotiation_hold = Some(NegotiationHold {
+            step,
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        tokio::time::pause();
+        let started = Instant::now();
+        let mut operation = Box::pin(async {
+            if gated {
+                state.process_p2p_gate(started).await
+            } else {
+                state.handle_server_message(plan).await
+            }
+        });
+        tokio::select! {
+            _ = entered.notified() => {}
+            result = &mut operation => panic!("{step}/{gated}: ended before held negotiation: {result:?}"),
+        }
+        if partial {
+            tokio::time::advance(Duration::from_millis(700)).await;
+            release.notify_one();
+            tokio::select! {
+                _ = entered.notified() => {}
+                result = &mut operation => panic!("{step}/{gated}: ended before second held negotiation: {result:?}"),
+            }
+        }
+        tokio::time::advance(Duration::from_millis(if partial { 299 } else { 999 })).await;
+        assert!(
+            futures_util::poll!(operation.as_mut()).is_pending(),
+            "{step}/{gated}: no early expiry"
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let result = tokio::time::timeout(Duration::from_millis(100), operation.as_mut()).await;
+        assert!(
+            result.is_ok(),
+            "{step}/{gated}: later peers renew the expired plan window"
+        );
+        result.unwrap().unwrap();
+        drop(operation);
+        assert_eq!(state.expected_peers, BTreeSet::from(peers));
+        for (index, peer) in peers.into_iter().enumerate() {
+            assert_eq!(
+                state.engine.is_paired(peer),
+                partial && index == 0,
+                "{step}/{gated}: expired plan must not retain links"
+            );
+        }
+        assert!(state.p2p_deadline.unwrap().is_due(Instant::now()));
+        assert_eq!(state.process_timers().await.unwrap(), None);
+        assert_eq!(state.transport_status, Some(false));
+        tokio::time::resume();
+        state.engine.negotiation_hold = None;
+        for peer in peers {
+            state.engine.remove_peer(peer).await.unwrap();
+        }
+    }
+}
