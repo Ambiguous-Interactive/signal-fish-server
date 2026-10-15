@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -3250,3 +3250,49 @@ or acceptance issue for this repair. A16/A20 and the wider #826 audit remain
 incomplete. The repair does not establish #953's CI timing bound or explain the
 initial peer-formation failures in #853 and #889. Hosted CI and final-head review
 remain delivery gates.
+
+### F56 Native WebSocket writes block timers and signaling failures stay nonfatal
+
+Issue [#976](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/976)
+continues A20 from `27a9b6c6`. Native runtime control, signaling, and relay writes
+await the WebSocket sink without a deadline. A nonreading endpoint can hold the
+single orchestrator task inside a write. The task cannot process its keepalive,
+P2P, or run timers until that write returns. The binary watchdog is separate
+from these timers and from the public library lifecycle.
+
+Two real loopback histories complete the WebSocket upgrade, retain the server
+socket without reading, and constrain the client socket's send buffer. An
+8-MiB text or binary write remains pending during a 50-ms real-clock observation.
+After a further 20 seconds on the paused Tokio clock, both baseline writes stay
+pending. The test does not require a network outage or infer one from timing.
+
+The shared native frame writer now gives each complete send and flush one
+20-second budget. Text control, signaling, JSON relay, explicit delivery-class
+relay, and binary relay use that boundary. Existing command deadlines still
+bound the whole handshake. A timed-out write returns a connection error; callers
+must discard the connection because a partial frame may remain. This bounds
+write suspension. It does not make the single task process incoming frames
+while a write is pending or make the soft run deadline interrupt each write.
+
+The caller sweep also finds swallowed connection failures. Native remote
+`PairRetry` converts a fatal retry error into a nonfatal signal diagnostic.
+A closed-socket regression reproduces that behavior during the fallback-status
+write. Browser offer creation and incoming signal handling likewise catch
+connection failures as peer negotiation errors. Two browser dispatch histories
+make replacement offer and incoming-offer answer writes throw. The baseline
+answer history continues instead of ending the session. Restoring the old
+pairing catch after repairing the signal catch reproduces the offer failure.
+
+The native retry handler and both browser catches now preserve connection
+failures as terminal. Ordinary peer negotiation and invalid retry input retain
+their existing nonfatal handling. The focused native run passes eight tests,
+including both blocked-write histories, four healthy wire frame shapes, the
+retry failure, and the retained command-window controls. Browser tests, type
+checks, and build pass. All five native retry tests pass. Real Chromium/native
+coordinated retry, room restore, and mixed v2/v3 relay pass. Hosted CI and review
+remain delivery gates.
+
+The wire protocol is unchanged. The external Rust, .NET, and Godot SDKs do not
+import these private reference-client implementations. No SDK migration or
+tracking issue is needed. This repair does not diagnose #853 or #889 or complete
+A20 or the broader audit in #826.

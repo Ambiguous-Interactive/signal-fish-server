@@ -563,3 +563,40 @@ async fn queued_opens_after_physical_close_do_not_report_pair_recovery() {
         replacement_remote.remove_peer(state.my_id).await.unwrap();
     }
 }
+
+// Regression #976: a failed retry status write must terminate the connection.
+#[tokio::test]
+async fn remote_retry_preserves_terminal_websocket_write_errors() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        tokio_tungstenite::accept_async(tcp).await.unwrap()
+    });
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let _server_ws = server.await.unwrap();
+    ws.close(None).await.unwrap();
+    let cli = Cli::parse_from([
+        "reference-native",
+        "--server-url",
+        &url,
+        "--create-room",
+        "--p2p-retry-count",
+        "1",
+    ]);
+    let peer = PlayerId::from_u128(2);
+    let generation = SessionGeneration::from_u128(3);
+    let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+    state.current_session_generation = Some(generation);
+    state.webrtc_plan_seen = true;
+    state.transport_status = Some(true);
+    state.expected_peers.insert(peer);
+    state.formed_pairs.insert(peer);
+    state.connected_pairs.insert(peer);
+    state.pair_roles.insert(peer, false);
+    let error = state
+        .handle_signal(peer, generation, json!({"PairRetry": 1}))
+        .await
+        .expect_err("a failed fallback write must not become a nonfatal signal error");
+    assert_eq!(error.code, EXIT_CONNECTION_ERROR);
+}

@@ -148,6 +148,9 @@ as UTF-8 with replacement characters for invalid bytes.
 
 ### WebSocket and output limits
 
+A failed signaling write ends the session with exit code 3, including writes
+from peer negotiation and retries. Start a fresh client after this failure.
+
 Each `Authenticate` and `JoinRoom` command has one 20-second response window.
 Prelude frames do not restart it. Browser output waits use the same window.
 Expiry closes the client with exit code 3; late replies cannot resume the command.
