@@ -33,14 +33,18 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Connect to the signaling endpoint (full `ws://.../v3/ws` URL).
+/// The upgrade must complete before the original [`CONNECT_TIMEOUT`] deadline.
 pub async fn connect(server_url: &str) -> Result<WsStream> {
-    let (stream, _response) = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        tokio_tungstenite::connect_async(server_url),
-    )
-    .await
-    .map_err(|_elapsed| anyhow!("websocket connect to {server_url} timed out"))?
-    .with_context(|| format!("websocket connect to {server_url} failed"))?;
+    let deadline = Deadline::after(tokio::time::Instant::now(), CONNECT_TIMEOUT);
+    let connection = deadline
+        .timeout(tokio_tungstenite::connect_async(server_url))
+        .await;
+    if deadline.is_due(tokio::time::Instant::now()) {
+        return Err(anyhow!("websocket connect to {server_url} timed out"));
+    }
+    let (stream, _response) = connection
+        .map_err(|_elapsed| anyhow!("websocket connect to {server_url} timed out"))?
+        .with_context(|| format!("websocket connect to {server_url} failed"))?;
     Ok(stream)
 }
 
@@ -205,6 +209,151 @@ mod tests {
     use super::*;
 
     const PATTERNED_PLAYER_ID: u128 = 0x0011_2233_4455_6677_8899_aabb_ccdd_eeff;
+
+    // Regression #981: a ready upgrade cannot bypass an expired timeout.
+    #[tokio::test(start_paused = true)]
+    async fn websocket_connect_rejects_a_ready_upgrade_at_the_deadline() {
+        let clock_guard = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
+        let mut accepted_late = Vec::new();
+        for elapsed in [
+            CONNECT_TIMEOUT - Duration::from_millis(1),
+            CONNECT_TIMEOUT,
+            CONNECT_TIMEOUT + Duration::from_millis(1),
+            CONNECT_TIMEOUT - Duration::from_millis(1),
+        ] {
+            let expired = elapsed >= CONNECT_TIMEOUT;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                ready_tx.send(()).unwrap();
+                ws.next().await
+            });
+            let url = format!("ws://{address}");
+            let connecting = connect(&url);
+            tokio::pin!(connecting);
+            let started = tokio::time::Instant::now();
+            tokio::select! {
+                biased;
+                result = &mut ready_rx => result.unwrap(),
+                result = &mut connecting => panic!("client settled before the server published its response: {result:?}"),
+            }
+            for _ in 0..128 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                tokio::time::Instant::now(),
+                started,
+                "socket I/O must not advance the clock"
+            );
+            tokio::time::advance(elapsed).await;
+            let result = connecting.await;
+            if expired {
+                if result.is_ok() {
+                    accepted_late.push(elapsed);
+                } else {
+                    assert!(result
+                        .as_ref()
+                        .unwrap_err()
+                        .to_string()
+                        .contains("timed out"));
+                }
+            } else {
+                assert!(result.is_ok(), "accept an on-time upgrade: {result:?}");
+            }
+            drop(result);
+            let terminal = tokio::time::timeout(Duration::from_secs(1), server)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                !matches!(terminal, Some(Ok(_))),
+                "a retired connection sends no application frame: {terminal:?}"
+            );
+        }
+        clock_guard.abort();
+        assert!(
+            accepted_late.is_empty(),
+            "accepted an upgrade at expiry: {accepted_late:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn websocket_connect_times_out_without_an_upgrade_response() {
+        use tokio::io::AsyncReadExt;
+
+        let clock_guard = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut tcp, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                request.push(tcp.read_u8().await.unwrap());
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            ready_tx.send(()).unwrap();
+            tcp.read(&mut [0_u8; 1]).await.unwrap()
+        });
+        let url = format!("ws://{address}");
+        let connecting = connect(&url);
+        tokio::pin!(connecting);
+        tokio::select! {
+            biased;
+            result = &mut ready_rx => result.unwrap(),
+            result = &mut connecting => panic!("connection settled without an upgrade: {result:?}"),
+        }
+        tokio::time::advance(CONNECT_TIMEOUT + Duration::from_millis(1)).await;
+        let error = connecting.await.unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error:#}");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), server)
+                .await
+                .unwrap()
+                .unwrap(),
+            0,
+            "timeout releases the TCP connection"
+        );
+        clock_guard.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_connect_preserves_upgrade_refusal() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut tcp, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                request.push(tcp.read_u8().await.unwrap());
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            tcp.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let error = connect(&format!("ws://{address}")).await.unwrap_err();
+        assert!(error.to_string().contains("failed"), "{error:#}");
+        assert!(format!("{error:#}").contains("503"), "{error:#}");
+        server.await.unwrap();
+    }
 
     // Regression #976: a nonreading endpoint must not hold the client forever.
     #[tokio::test]

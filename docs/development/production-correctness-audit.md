@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -3351,3 +3351,39 @@ and Godot SDKs do not import these private reference implementations and need
 no migration or acceptance issue. This finding does not explain #853 or #889,
 prove #953's timing bound, qualify #912's dependencies, or complete A20 or the
 broader #826 audit.
+
+### F58 Reference-client WebSocket upgrades bypass the connection deadline
+
+Issue [#981](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/981)
+continues A02/A20 from `b3699622`. The browser connector uses only a scheduled
+timeout callback. An open event dispatched at expiry can cancel that due timer
+and return the socket. The native connector uses Tokio's timeout, which polls
+a ready upgrade before its expired timer. Both clients can start authentication
+after the original ten-second connection window.
+
+Two browser histories advance the monotonic clock to the deadline or one
+millisecond past it, then dispatch open before the timer callback. Both fail
+against the baseline. A real native loopback history suspends the connector
+while the server finishes writing its HTTP upgrade. Resuming the ready connector
+at expiry returns a socket on the baseline. The on-time control passes one
+millisecond before expiry. These controlled schedules do not prove a spontaneous
+network or browser stall.
+
+Both connectors now compare completion with the original monotonic deadline.
+The browser closes an expired socket and cancels its timer before rejecting.
+Native drops an expired upgrade result, releasing the transport. Controls retain
+on-time upgrades, no-response timeouts, ordinary refusals, and fresh connections
+after expiry. Browser callbacks settle once; native endpoints observe transport
+closure without application frames. The native clock guard excludes automatic
+clock advances during socket I/O.
+
+The server protocol and configuration are unchanged. The external Rust, .NET,
+and Godot SDKs do not import these private reference connectors and need no
+migration or acceptance issue. The command windows in F55 and peer negotiation
+in F57 remain separate controls. This finding does not diagnose #853 or #889,
+prove #953's timing bound, qualify #912's dependencies, or complete A02/A20 or
+the broader #826 audit. All 11 scoped native wire tests pass, including both
+write controls retained from F56. Browser tests, strict type checks, formatting,
+and build pass. Root and native strict lint pass with all features and targets.
+Real Chromium/native mixed mesh, room restore, and mixed v2/v3 relay controls
+pass in 3.955 seconds. Hosted CI and final-head review remain delivery gates.
