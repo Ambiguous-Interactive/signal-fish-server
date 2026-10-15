@@ -1941,6 +1941,7 @@ class Orchestrator {
         this.sendSignal(peer, 'offer', { Offer: offerSdp });
       }
     } catch (error) {
+      if (error instanceof FatalError && error.code === EXIT_CONNECTION_ERROR) throw error;
       this.assertActive();
       // A single failed pair is not fatal: the p2p timeout resolves the
       // overall status and the relay floor still carries data.
@@ -2159,6 +2160,7 @@ class Orchestrator {
           throw new Error('signal does not match the matchbox PeerSignal convention');
       }
     } catch (error) {
+      if (error instanceof FatalError && error.code === EXIT_CONNECTION_ERROR) throw error;
       this.assertActive();
       this.emit({ event: 'error', message: `signal from ${from} failed: ${describe(error)}` });
     }

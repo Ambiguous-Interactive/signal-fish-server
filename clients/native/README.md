@@ -289,6 +289,9 @@ until the pipe drains, closes, or the process exits.
 Each `Authenticate`, `JoinRoom`, and `Reconnect` command has one 20-second
 response window. Prelude frames and old-socket cleanup retries do not restart
 it. Expiry ends the run with exit code 3. Start a fresh client after this failure.
+Runtime WebSocket writes also have a 20-second limit, including their flush.
+A failed write ends the session with exit code 3. The client does not retry
+a partial frame on the same connection.
 
 ## Signal payload convention (matchbox `PeerSignal`)
 

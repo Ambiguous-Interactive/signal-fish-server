@@ -3091,9 +3091,10 @@ impl Orchestrator<'_> {
             SignalKind::PairRetry => match signal.get("PairRetry").and_then(|value| value.as_u64())
             {
                 Some(attempt) if attempt > 0 && attempt <= u64::from(self.cli.p2p_retry_count) => {
-                    self.rebuild_pair(from, attempt as u8, false)
-                        .await
-                        .map_err(|error| anyhow::anyhow!(error.message))
+                    match self.rebuild_pair(from, attempt as u8, false).await {
+                        Err(error) if error.code == EXIT_CONNECTION_ERROR => return Err(error),
+                        result => result.map_err(|error| anyhow::anyhow!(error.message)),
+                    }
                 }
                 Some(attempt) => Err(anyhow::anyhow!(
                     "PairRetry attempt {attempt} is outside the configured retry budget"

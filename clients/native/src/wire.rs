@@ -26,9 +26,11 @@ pub type WsStream =
 /// Time allowed for the initial TCP + WebSocket handshake.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Per-message ceiling during the sequential handshake phase (authenticate /
-/// join). Generous: a CI scheduling budget, not an expected wait.
+/// Whole-command ceiling during the sequential handshake phase.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Maximum time to send and flush one complete WebSocket frame.
+pub const WRITE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Connect to the signaling endpoint (full `ws://.../v3/ws` URL).
 pub async fn connect(server_url: &str) -> Result<WsStream> {
@@ -43,12 +45,12 @@ pub async fn connect(server_url: &str) -> Result<WsStream> {
 }
 
 /// Serialize `message` and send it as one WebSocket text frame.
+///
+/// The write and flush share [`WRITE_TIMEOUT`]. Discard the connection on
+/// failure: cancellation can leave a partial frame in the transport.
 pub async fn send_client_message(ws: &mut WsStream, message: &ClientMessage) -> Result<()> {
     let json = serde_json::to_string(message).context("serialize ClientMessage")?;
-    ws.send(Message::Text(json.into()))
-        .await
-        .context("send ClientMessage frame")?;
-    Ok(())
+    send_frame(ws, Message::Text(json.into())).await
 }
 
 /// Send game data with reliable delivery semantics and no coalescing key.
@@ -74,13 +76,18 @@ pub async fn send_game_data_with_delivery(
 ///
 /// Issue #627: with `rkyv`/`protobuf` negotiated, the payload bytes are the
 /// game's business and relay untouched — the frame carries no JSON envelope.
+/// The write and flush share [`WRITE_TIMEOUT`]. Discard the connection on failure.
 /// Requires protocol v3: the strict v3 reply envelope is the only attributed
 /// delivery shape (v2 passthrough has no sender attribution).
 pub async fn send_game_data_binary(ws: &mut WsStream, payload: Vec<u8>) -> Result<()> {
-    ws.send(Message::Binary(payload.into()))
+    send_frame(ws, Message::Binary(payload.into())).await
+}
+
+async fn send_frame(ws: &mut WsStream, frame: Message) -> Result<()> {
+    tokio::time::timeout(WRITE_TIMEOUT, ws.send(frame))
         .await
-        .context("send binary game-data frame")?;
-    Ok(())
+        .context("WebSocket write timed out; discard this connection")?
+        .context("send WebSocket frame")
 }
 
 pub(crate) fn game_data_message(data: serde_json::Value) -> ClientMessage {
@@ -198,6 +205,100 @@ mod tests {
     use super::*;
 
     const PATTERNED_PLAYER_ID: u128 = 0x0011_2233_4455_6677_8899_aabb_ccdd_eeff;
+
+    // Regression #976: a nonreading endpoint must not hold the client forever.
+    #[tokio::test]
+    async fn websocket_writes_expire_with_a_nonreading_endpoint() {
+        use futures_util::FutureExt;
+        use tokio_tungstenite::MaybeTlsStream;
+
+        let mut overdue = Vec::new();
+        for binary in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                tokio_tungstenite::accept_async(tcp).await.unwrap()
+            });
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.set_send_buffer_size(1024).unwrap();
+            let tcp = socket.connect(address).await.unwrap();
+            let (mut ws, _) = tokio_tungstenite::client_async(
+                format!("ws://{address}"),
+                MaybeTlsStream::Plain(tcp),
+            )
+            .await
+            .unwrap();
+            let _nonreading_endpoint = server.await.unwrap();
+            let payload = "x".repeat(8 * 1024 * 1024);
+            let mut write = Box::pin(async {
+                if binary {
+                    send_game_data_binary(&mut ws, payload.into_bytes()).await
+                } else {
+                    send_client_message(&mut ws, &game_data_message(serde_json::json!(payload)))
+                        .await
+                }
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut write)
+                    .await
+                    .is_err(),
+                "binary={binary}: establish actual socket backpressure before advancing time"
+            );
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(20)).await;
+            let result = write.as_mut().now_or_never();
+            tokio::time::resume();
+            if let Some(result) = result {
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("write timed out"), "{error:#}");
+            } else {
+                overdue.push(binary);
+            }
+        }
+        assert!(
+            overdue.is_empty(),
+            "blocked writes outlive their whole-write budget (binary): {overdue:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_writes_preserve_frames_with_a_reading_endpoint() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let mut frames = Vec::new();
+            for _ in 0..4 {
+                frames.push(ws.next().await.unwrap().unwrap());
+            }
+            frames
+        });
+        let mut ws = connect(&format!("ws://{address}")).await.unwrap();
+        send_client_message(&mut ws, &ClientMessage::Ping)
+            .await
+            .unwrap();
+        send_game_data(&mut ws, json!({"move": 7})).await.unwrap();
+        send_game_data_with_delivery(&mut ws, json!({"move": 8}), DeliveryClass::Latest, Some(2))
+            .await
+            .unwrap();
+        send_game_data_binary(&mut ws, vec![0, 1, 255])
+            .await
+            .unwrap();
+        let frames = server.await.unwrap();
+        for (frame, expected) in frames[..3].iter().zip([
+            json!({"type": "Ping"}),
+            json!({"type": "GameData", "data": {"data": {"move": 7}}}),
+            json!({"type": "GameData", "data": {"data": {"move": 8}, "class": "latest", "key": 2}}),
+        ]) {
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(frame.to_text().unwrap()).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(frames[3], Message::Binary(vec![0, 1, 255].into()));
+    }
 
     #[tokio::test]
     async fn unrepresentable_message_wait_does_not_expire_immediately() {

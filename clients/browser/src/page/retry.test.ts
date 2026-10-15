@@ -1,5 +1,5 @@
 import { run } from './orchestrator.js';
-import { EXIT_CRITERIA_UNMET, type RunConfig } from '../shared/types.js';
+import { EXIT_CONNECTION_ERROR, EXIT_CRITERIA_UNMET, type RunConfig } from '../shared/types.js';
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
@@ -38,6 +38,9 @@ for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep, retryAuth
   ...retryScenarios.map((scenario) => [...scenario, true] as const),
   ...runTimeoutScenarios.map((scenario) => [...scenario, true] as const),
   ...authoritativeScenarios,
+  ...([false, true] as const).map(
+    (initiate) => [initiate, false, 'send-failed', 0, false] as const,
+  ),
   ...([false, true] as const).flatMap((initiate) =>
     (['first-open', 'late-first-open'] as const).map(
       (outcome) => [initiate, false, outcome, 0, false] as const,
@@ -59,6 +62,7 @@ for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep, retryAuth
   const initialWallTime = originalNow();
   let released = false;
   let settled = false;
+  let failWrites = false;
   let socket!: Socket;
   let guard: ReturnType<typeof setTimeout> | undefined;
   const connections: Connection[] = [];
@@ -144,6 +148,7 @@ for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep, retryAuth
       this.onmessage?.({ data: JSON.stringify(frame) });
     }
     send(text: string): void {
+      if (failWrites) throw new Error('write failed');
       const frame = JSON.parse(text) as Record<string, unknown>;
       sent.push(frame);
       if (frame['type'] === 'Authenticate') {
@@ -247,6 +252,18 @@ for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep, retryAuth
         !events.some((e) => e['event'] === 'transport_status_sent'),
         `clock step ${clockStep} cannot expire the P2P window early`,
       );
+      if (replacementOutcome === 'send-failed') {
+        failWrites = true;
+        signal(initiate ? { PairRetry: 1 } : { Offer: 'incoming-offer' });
+        await turn();
+        assert(settled, `initiate=${initiate}: a failed signaling write must end the run`);
+        assert((await running) === EXIT_CONNECTION_ERROR, 'preserve the connection error');
+        assert(
+          connections.every((connection) => connection.closed),
+          'retire all peer links',
+        );
+        return;
+      }
       if (replacementOutcome === 'run-timeout') {
         // Regression #929: wall-clock steps cannot shorten or extend the run.
         // Require a missing third member and omit the harness hold.
