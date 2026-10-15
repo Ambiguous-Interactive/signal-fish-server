@@ -1102,6 +1102,40 @@ async fn mesh_n3_partial_ice_cripple_relay_fallback() {
         "{crippled_name}: a zero-pair resolution must engage the relay fallback exactly once"
     );
 
+    for (index, who) in CLIENT_NAMES.iter().enumerate() {
+        let timeout_lines: Vec<_> = run
+            .diagnostics(index)
+            .lines()
+            .filter(|line| line.contains("P2P connection timed out"))
+            .collect();
+        assert_eq!(
+            timeout_lines.len(),
+            if index == CRIPPLED { 2 } else { 1 },
+            "{}: report each incomplete peer once; {}",
+            who,
+            run.diagnostics(index)
+        );
+        for peer in run.other_ids(index) {
+            assert_eq!(
+                timeout_lines.iter().any(|line| line.contains(peer)),
+                index == CRIPPLED || peer == run.ids[CRIPPLED],
+                "{}: timeout diagnostics must identify only incomplete peers",
+                who
+            );
+        }
+        for line in timeout_lines {
+            for field in [
+                "generation",
+                "remote_description_set",
+                "pending_remote_candidates",
+                "registered",
+                "open_observed",
+            ] {
+                assert!(line.contains(field), "missing {field}: {line}");
+            }
+        }
+    }
+
     // Asymmetric fan-out matrix: the healthy members observe the OTHER
     // healthy member's `true` AND the crippled member's `false`; the crippled
     // member observes two `true`s. Exactly one report per reporter (dedup).

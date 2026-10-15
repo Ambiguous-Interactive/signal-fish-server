@@ -3502,3 +3502,28 @@ The three scoped keepalive controls pass in 4.922 seconds. Root and native
 strict lint pass with all targets and features. Real three-player native mesh
 and mixed v2/v3 relay controls pass in 2.654 seconds. Hosted validation and
 final-head review remain delivery gates.
+
+### Native establishment diagnostics — issue #853
+
+At `665a256f`, 20 captured native/browser room-restore histories passed in
+43.277 seconds (Nextest `b178a333-7dc3-47b9-a711-d8432b612072`). Each history
+includes initial establishment and replacement exchange. This does not explain
+or repair the original failure. Issue #853 remains open.
+
+The native timeout path now records each incomplete expected peer before it
+resolves transport status. The snapshot reports the current physical-link
+generation, remote-description application, remote candidate admission and
+queue counts, channel registration, and handled open callbacks. Snapshot
+construction reads local state without awaiting the WebRTC driver. A removed
+link produces `null`. Observed opens do not prove current channel state.
+
+The existing three-player partial-ICE scenario is the runtime control: both
+healthy endpoints report only their missing edge; the isolated endpoint reports
+both missing edges. Healthy channel exchange, transport-status fan-out, and
+relay delivery remain required. The baseline failed because it emitted zero
+timeout snapshots. Unit controls cover unpaired, initiator, responder, queued
+candidate, delayed open observation, removal, and replacement states.
+
+Rust, .NET, and Godot SDKs are unaffected: this change adds stderr diagnostics
+inside the private native reference client. Server behavior, protocol messages,
+and external client APIs are unchanged.

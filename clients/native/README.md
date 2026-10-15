@@ -469,6 +469,16 @@ Windows at 2x Linux per minute and the server deploys on Linux. Cross-platform r
 
 ## Troubleshooting
 
+When a peer connection times out, stderr logs `P2P connection timed out` for
+that peer. The snapshot names the physical-link generation, remote-description
+status, admitted and queued remote ICE candidate counts, and both required
+channels. `registered` means the client stored a selected channel. `open_observed`
+means the client handled its open callback. These are local observations;
+they do not prove current channel or network state. A `null` snapshot means
+the physical link was already removed. The snapshot does not wait for the
+WebRTC driver. Compare both endpoints and their `pc_state` events when
+investigating a failed connection.
+
 - **`SIGNAL_FISH_SERVER_BIN is not set` panic:** the interop tests drive the real server binary. Run
   `cargo build --bin signal-fish-server` at the repository root and export
   `SIGNAL_FISH_SERVER_BIN=<repo>/target/debug/signal-fish-server`, or just use

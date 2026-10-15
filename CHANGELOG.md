@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Report native reference-client channel and ICE observations when P2P establishment times out (#853).
+
 ### Changed
 
 - Refresh running Direct session plans immediately when the host changes or loses its endpoint (#947).

@@ -1844,6 +1844,13 @@ impl Orchestrator<'_> {
             .p2p_deadline
             .is_some_and(|deadline| deadline.is_due(now))
         {
+            for peer in self.expected_peers.difference(&self.connected_pairs) {
+                tracing::warn!(
+                    %peer,
+                    snapshot = %self.engine.diagnostic_snapshot(*peer),
+                    "P2P connection timed out"
+                );
+            }
             // The current P2P window expired: report any real state change.
             self.resolve_transport_status().await?;
             self.p2p_deadline = None;
