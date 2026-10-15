@@ -285,9 +285,11 @@ for (const seam of [
   }
 }
 
-// Regressions #960/#969/#972: negotiation and retries share absolute connection deadlines.
+// Regressions #960/#969/#972/#979: negotiation and retries share absolute connection deadlines.
 for (const deadlineKind of [
   'p2p',
+  'p2p-late',
+  'p2p-late-reject',
   'run',
   'zero',
   'send-failure',
@@ -330,17 +332,19 @@ for (const deadlineKind of [
     let socket: DeadlineSocket | undefined;
     let connection: DeadlineConnection | undefined;
     let release: (() => void) | undefined;
+    let reject: ((error: Error) => void) | undefined;
     let running: Promise<number> | undefined;
     let runResult: number | undefined;
     let holdEnabled = deadlineKind !== 'retry' && deadlineKind !== 'plan';
     let connectionCount = 0;
     const p2pExpiresFirst =
-      deadlineKind === 'p2p' ||
+      deadlineKind.startsWith('p2p') ||
       deadlineKind === 'send-failure' ||
       deadlineKind === 'retry' ||
       deadlineKind.startsWith('plan');
-    const held = new Promise<void>((resolve) => {
+    const held = new Promise<void>((resolve, rejectHeld) => {
       release = resolve;
+      reject = rejectHeld;
     });
     const turn = () => new Promise<void>((resolve) => originalSetTimeout(resolve, 0));
     const check = (condition: boolean, message: string) => {
@@ -547,7 +551,24 @@ for (const deadlineKind of [
         !events.some((event) => event['event'] === 'game_data_received'),
         'relay must remain queued behind the suspended operation before expiry',
       );
-      now += deadlineKind === 'retry' || deadlineKind === 'plan' ? 1 : 200;
+      now +=
+        deadlineKind === 'retry' || deadlineKind === 'plan'
+          ? 1
+          : deadlineKind === 'p2p-late'
+            ? 100
+            : 200;
+      if (deadlineKind.startsWith('p2p-late')) {
+        const signalsBeforeCompletion = sent.filter((frame) => frame.type === 'Signal').length;
+        if (deadlineKind === 'p2p-late-reject') reject?.(new Error('late stack failure'));
+        else release?.();
+        await turn();
+        await turn();
+        check(
+          sent.filter((frame) => frame.type === 'Signal').length === signalsBeforeCompletion,
+          'expired completion must not signal before the due timer callback runs',
+        );
+        check(connection?.closed === true, 'expired completion must retire its physical link');
+      }
       let timerFailure: unknown;
       for (const [id, timer] of [...timers]) {
         if (timer.at <= now) {
@@ -570,7 +591,7 @@ for (const deadlineKind of [
         );
       }
       if (
-        deadlineKind === 'p2p' ||
+        deadlineKind.startsWith('p2p') ||
         deadlineKind === 'retry' ||
         deadlineKind.startsWith('plan')
       ) {
@@ -626,11 +647,12 @@ for (const deadlineKind of [
         'late completion must not signal the retired link',
       );
       if (
-        deadlineKind === 'p2p' ||
+        deadlineKind.startsWith('p2p') ||
         deadlineKind === 'retry' ||
         deadlineKind.startsWith('plan')
       ) {
         const oldConnection = connection;
+        holdEnabled = false;
         socket?.deliver('SessionPlan', {
           generation: peer,
           topology: 'mesh',

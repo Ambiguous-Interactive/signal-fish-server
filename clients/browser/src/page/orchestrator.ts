@@ -1994,7 +1994,16 @@ class Orchestrator {
       }
     });
     try {
-      return await Promise.race([operation, expired]);
+      const result = await Promise.race([operation, expired]);
+      if (monotonicNowMs() >= deadline) {
+        throw new Error('browser peer negotiation deadline expired');
+      }
+      return result;
+    } catch (error) {
+      if (monotonicNowMs() >= deadline && this.engine.isPaired(peer)) {
+        this.handlePeerTransportLoss(peer);
+      }
+      throw error;
     } finally {
       timer.cancel();
       this.peerWorkStopped.signal.removeEventListener('abort', stopped);

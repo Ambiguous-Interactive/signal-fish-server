@@ -413,6 +413,10 @@ impl Engine {
         operation: Negotiation,
         deadline: Deadline,
     ) -> Result<Option<String>> {
+        if deadline.is_due(tokio::time::Instant::now()) {
+            self.remove_peer(peer).await?;
+            return Err(anyhow!("WebRTC negotiation deadline elapsed"));
+        }
         let operation = Box::pin(async {
             match operation {
                 Negotiation::Pair {
@@ -429,8 +433,8 @@ impl Engine {
         });
         let result = deadline.timeout(operation).await;
         match result {
-            Ok(result) => result,
-            Err(_) => {
+            Ok(result) if !deadline.is_due(tokio::time::Instant::now()) => result,
+            _ => {
                 self.remove_peer(peer).await?;
                 Err(anyhow!("WebRTC negotiation deadline elapsed"))
             }
@@ -731,6 +735,7 @@ impl Engine {
         } else {
             link.pending_candidates.push(init);
         }
+        negotiation_checkpoint!(negotiation_hold, "candidate_complete");
         Ok(())
     }
 

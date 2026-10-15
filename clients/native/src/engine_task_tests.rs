@@ -124,3 +124,63 @@ async fn retired_peer_pollers_release_unconnected_channels() {
         }
     }
 }
+
+// Regression #979: a ready stack operation must not bypass an expired deadline.
+#[tokio::test]
+async fn ready_negotiation_respects_the_absolute_deadline() {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut engine = Engine::new(EngineSettings::default(), tx).unwrap();
+    let peer = PlayerId::from_u128(979);
+    tokio::time::pause();
+    for expired in [false, true] {
+        engine.pair_with(peer, false, &[]).await.unwrap();
+        let generation = engine.peers[&peer].generation;
+        let deadline = Deadline::after(tokio::time::Instant::now(), Duration::from_secs(1));
+        if expired {
+            tokio::time::advance(Duration::from_secs(1)).await;
+        }
+        let result = engine
+            .negotiate(peer, Negotiation::Candidate(String::new()), deadline)
+            .await;
+        assert_eq!(result.is_err(), expired, "expired={expired}: {result:?}");
+        assert_eq!(engine.is_current_generation(peer, generation), !expired);
+        if !expired {
+            assert_eq!(engine.peers[&peer].pending_candidates.len(), 1);
+        }
+        engine.remove_peer(peer).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn ready_negotiation_completion_rechecks_the_absolute_deadline() {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut engine = Engine::new(EngineSettings::default(), tx).unwrap();
+    let peer = PlayerId::from_u128(979);
+    tokio::time::pause();
+    for expired in [false, true] {
+        engine.pair_with(peer, false, &[]).await.unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        engine.negotiation_hold = Some(NegotiationHold {
+            step: "candidate_complete",
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        let deadline = Deadline::after(tokio::time::Instant::now(), Duration::from_secs(1));
+        let mut operation =
+            Box::pin(engine.negotiate(peer, Negotiation::Candidate(String::new()), deadline));
+        tokio::select! {
+            _ = entered.notified() => {}
+            result = &mut operation => panic!("candidate did not reach the hold: {result:?}"),
+        }
+        if expired {
+            tokio::time::advance(Duration::from_secs(1)).await;
+        }
+        release.notify_one();
+        let result = operation.await;
+        assert_eq!(result.is_err(), expired, "expired={expired}: {result:?}");
+        assert_eq!(engine.is_paired(peer), !expired);
+        engine.negotiation_hold = None;
+        engine.remove_peer(peer).await.unwrap();
+    }
+}
