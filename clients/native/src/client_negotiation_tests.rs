@@ -521,3 +521,106 @@ async fn planned_peers_share_the_connection_deadline() {
         }
     }
 }
+
+// Regression #979 review: established links do not inherit the setup cutoff.
+#[tokio::test]
+async fn connected_peer_ice_uses_a_fresh_bounded_operation_window() {
+    for expired in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(tcp).await.unwrap()
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let mut server_ws = server.await.unwrap();
+        let cli = Cli::parse_from([
+            "reference-native",
+            "--server-url",
+            &url,
+            "--create-room",
+            "--disable-mdns",
+            "--p2p-timeout-secs",
+            "1",
+            "--run-for-secs",
+            "10",
+        ]);
+        let peer = PlayerId::from_u128(2);
+        let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+        state.webrtc_plan_seen = true;
+        state.expected_peers.insert(peer);
+        state.pair_roles.insert(peer, true);
+        let offer = state.engine.pair_with(peer, true, &[]).await.unwrap();
+        let (mut remote, opens, mut remote_events) =
+            super::retry_tests::open_physical_pair_with_events(
+                &mut state,
+                &mut server_ws,
+                peer,
+                offer,
+            )
+            .await;
+        for event in opens {
+            state.handle_engine_event(event).await.unwrap();
+        }
+        assert!(state.connected_pairs.contains(&peer));
+        assert_eq!(state.transport_status, Some(true));
+        tokio::time::pause();
+        let clock_guard = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
+        let now = Instant::now();
+        state.p2p_deadline = Some(Deadline::after(now, Duration::from_secs(1)));
+        state.run_deadline = Deadline::after(now, Duration::from_secs(10));
+        tokio::time::advance(Duration::from_millis(900)).await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        state.engine.negotiation_hold = Some(NegotiationHold {
+            step: "candidate_complete",
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        let mut operation = Box::pin(state.negotiate(peer, Negotiation::Candidate(String::new())));
+        tokio::select! {
+            _ = entered.notified() => {}
+            result = &mut operation => panic!("live candidate did not reach the hold: {result:?}"),
+        }
+        tokio::time::advance(Duration::from_millis(if expired { 1000 } else { 100 })).await;
+        release.notify_one();
+        let result = operation.await.unwrap();
+        clock_guard.abort();
+        tokio::time::resume();
+        state.engine.negotiation_hold = None;
+        assert_eq!(result.is_err(), expired, "expired={expired}: {result:?}");
+        assert_eq!(state.engine.is_paired(peer), !expired);
+        assert_eq!(state.connected_pairs.contains(&peer), !expired);
+        assert_eq!(state.transport_status, Some(!expired));
+        if !expired {
+            for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                state
+                    .engine
+                    .channel(peer, label)
+                    .unwrap()
+                    .send_text("after-setup-cutoff")
+                    .await
+                    .unwrap();
+            }
+            let mut received = BTreeSet::new();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while received.len() < 2 {
+                    if let EngineEvent::ChannelMessage { label, text, .. } =
+                        remote_events.recv().await.unwrap()
+                    {
+                        assert_eq!(text, "after-setup-cutoff");
+                        assert!(received.insert(label));
+                    }
+                }
+            })
+            .await
+            .expect("both live channels still carry gameplay after the setup deadline");
+        }
+        state.engine.remove_peer(peer).await.unwrap();
+        remote.remove_peer(state.my_id).await.unwrap();
+    }
+}

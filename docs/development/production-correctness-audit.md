@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -3296,3 +3296,58 @@ The wire protocol is unchanged. The external Rust, .NET, and Godot SDKs do not
 import these private reference-client implementations. No SDK migration or
 tracking issue is needed. This repair does not diagnose #853 or #889 or complete
 A20 or the broader audit in #826.
+
+### F57 Reference-client ready peer work bypasses expired deadlines
+
+Issue [#979](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/979)
+continues A20 from `81e8c081`. Browser peer negotiation races a promise against
+an absolute timer. If the promise settles after expiry but before the timer
+callback runs, it cancels the timer and can publish a late offer or answer.
+The physical peer link remains installed. The native engine has a related
+boundary: Tokio polls a ready operation before checking its expired timer.
+A synchronous candidate-buffer operation can therefore succeed at expiry.
+
+Eight browser histories hold offer creation, local description, remote offer,
+remote answer, answer creation, answer description, live ICE, or buffered ICE.
+They advance the monotonic clock past expiry and release the operation before
+running due timer callbacks. All eight baseline histories retain the expired
+link; six also publish late signaling. The repaired controls complete at the
+exact deadline and reject the results. Eight more histories reject the held
+operation after expiry. Both sets verify retired links, no late signaling,
+once-only intact queued relay delivery, fresh-generation recovery, and timer
+cleanup. Existing on-time and scheduled-expiry controls remain in the suite.
+These browser doubles do not establish a spontaneous Chromium stall.
+
+A separate real native-stack history buffers an ICE candidate at an expired
+absolute deadline. The baseline returns `Ok(None)` instead of retiring the
+peer. Its on-time control succeeds. The engine now checks the deadline before
+polling work and after it settles, and uses the existing bounded peer cleanup
+on expiry. The browser checks both successful and failed settlement before
+allowing further signaling. A signaling failure during fallback remains fatal.
+A second native history holds the real operation after candidate buffering,
+then releases its ready result at expiry before polling the timer. Restoring
+only the old completion match makes it fail with `Ok(None)`; the on-time control
+still succeeds. These controlled histories do not establish every stack
+completion or operating-system schedule.
+
+Review of the first repair found that a trickle-ICE completion at the shared
+setup cutoff also retired an already connected pair. Browser dispatch and a
+real native pair both reproduce this regression. Connected peers now receive
+a fresh bounded signal-operation window instead of inheriting the setup cutoff.
+Controls preserve the connected link at the setup cutoff, deliver queued relay
+data, and exchange real native gameplay on both channels afterward. Separate
+controls hold ICE through the new operation deadline and still require teardown
+and fallback. These controls use controlled clock and stack suspension.
+
+The browser suite, type checks, and build pass. The 40 scoped native engine and
+negotiation controls pass, including zero P2P timeout, held
+success, shared plan windows, relay fallback, and retry cleanup. Strict root
+and native lint pass. Real Chromium/native mesh, coordinated retry, and room
+restore controls pass. Full hosted validation and final-head review remain
+delivery gates.
+
+The wire protocol and server behavior do not change. The external Rust, .NET,
+and Godot SDKs do not import these private reference implementations and need
+no migration or acceptance issue. This finding does not explain #853 or #889,
+prove #953's timing bound, qualify #912's dependencies, or complete A20 or the
+broader #826 audit.

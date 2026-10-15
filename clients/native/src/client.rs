@@ -2732,7 +2732,7 @@ impl Orchestrator<'_> {
         peer: PlayerId,
         operation: Negotiation,
     ) -> Result<anyhow::Result<Option<String>>, FatalError> {
-        let deadline = self.negotiation_deadline();
+        let deadline = self.negotiation_deadline(peer);
         let result = self.engine.negotiate(peer, operation, deadline).await;
         if result.is_err()
             && !self.engine.is_paired(peer)
@@ -2743,7 +2743,7 @@ impl Orchestrator<'_> {
         Ok(result)
     }
 
-    fn negotiation_deadline(&self) -> Deadline {
+    fn negotiation_deadline(&self, peer: PlayerId) -> Deadline {
         let now = Instant::now();
         let budget = if self.cli.p2p_timeout_secs == 0 {
             self.cli.run_for_secs
@@ -2752,6 +2752,7 @@ impl Orchestrator<'_> {
         };
         let operation = self
             .p2p_deadline
+            .filter(|_| !self.connected_pairs.contains(&peer))
             .filter(|deadline| self.cli.p2p_timeout_secs != 0 && !deadline.is_due(now))
             .unwrap_or_else(|| Deadline::after(now, Duration::from_secs(budget)));
         if self.success_criteria_reported && self.cli.success_release_file.is_some() {

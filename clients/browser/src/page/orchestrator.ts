@@ -1971,7 +1971,7 @@ class Orchestrator {
     const operationDeadline =
       this.config.p2pTimeoutSecs === 0
         ? deadlineAfterSeconds(monotonicNowMs(), this.config.runForSecs)
-        : (this.p2pDeadline ??
+        : ((this.connectedPairs.has(peer) ? null : this.p2pDeadline) ??
           deadlineAfterSeconds(monotonicNowMs(), this.config.p2pTimeoutSecs));
     const deadline = Math.min(operationDeadline, runDeadline);
     let rejectWait: ((reason: Error) => void) | undefined;
@@ -1994,7 +1994,16 @@ class Orchestrator {
       }
     });
     try {
-      return await Promise.race([operation, expired]);
+      const result = await Promise.race([operation, expired]);
+      if (monotonicNowMs() >= deadline) {
+        throw new Error('browser peer negotiation deadline expired');
+      }
+      return result;
+    } catch (error) {
+      if (monotonicNowMs() >= deadline && this.engine.isPaired(peer)) {
+        this.handlePeerTransportLoss(peer);
+      }
+      throw error;
     } finally {
       timer.cancel();
       this.peerWorkStopped.signal.removeEventListener('abort', stopped);
