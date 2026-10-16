@@ -3601,5 +3601,5 @@ values instead of the opaque base64 wrapper. Server messages, negotiated
 formats, deployment defaults, and room rules are unchanged. Rust, .NET, and
 Godot SDKs have separate MessagePack implementations and do not import these
 reference clients. They need no implementation change or acceptance issue for
-this repair. The complete catalogue assessment in #678 and the wider A01–A22
+this repair. The complete catalog assessment in #678 and the wider A01–A22
 audit remain open. Final-head hosted CI and review are delivery gates.
