@@ -550,11 +550,10 @@ mod tests {
                         .await
                 }
             });
+            let observation = tokio::time::timeout(Duration::from_millis(50), &mut write).await;
             assert!(
-                tokio::time::timeout(Duration::from_millis(50), &mut write)
-                    .await
-                    .is_err(),
-                "binary={binary}: establish actual socket backpressure before advancing time"
+                observation.is_err(),
+                "binary={binary}: establish actual socket backpressure before advancing time: {observation:?}"
             );
             tokio::time::pause();
             tokio::time::advance(Duration::from_secs(20)).await;

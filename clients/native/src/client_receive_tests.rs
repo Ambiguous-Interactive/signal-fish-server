@@ -110,11 +110,10 @@ async fn pong_response_window_starts_after_the_ping_write_finishes() {
     {
         let timer = state.process_timers();
         tokio::pin!(timer);
+        let observation = tokio::time::timeout(Duration::from_millis(50), &mut timer).await;
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut timer)
-                .await
-                .is_err(),
-            "establish socket backpressure before advancing the clock"
+            observation.is_err(),
+            "establish socket backpressure before advancing the clock: {observation:?}"
         );
         tokio::time::pause();
         let clock_guard = tokio::spawn(async {
