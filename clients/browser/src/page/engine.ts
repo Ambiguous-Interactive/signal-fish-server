@@ -85,6 +85,10 @@ export class Engine {
     return this.peers.has(peer);
   }
 
+  generationOf(peer: string): number | undefined {
+    return this.peers.get(peer)?.generation;
+  }
+
   isCurrentGeneration(peer: string, generation: number): boolean {
     return this.peers.get(peer)?.generation === generation;
   }
