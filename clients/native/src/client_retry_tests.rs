@@ -490,6 +490,8 @@ async fn stalled_exchange_send_preserves_relay_and_unpaid_debt() {
             ["pending", "run-deadline", "ready-late", "expired"].map(|mode| (label, mode))
         })
     {
+        let diagnostics = super::peer_loss_tests::DiagnosticCapture::default();
+        let _subscriber = tracing::subscriber::set_default(diagnostics.subscriber());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -569,6 +571,16 @@ async fn stalled_exchange_send_preserves_relay_and_unpaid_debt() {
         }
         if mode == "run-deadline" {
             assert!(started.elapsed() < CHANNEL_SEND_TIMEOUT);
+        }
+        let losses = diagnostics.losses();
+        assert_eq!(losses.len(), 1, "{label}/{mode}: {losses:?}");
+        assert!(losses[0]
+            .0
+            .contains(&format!("data-channel send failed on {label}")));
+        assert_eq!(losses[0].1["generation"], 1);
+        for required in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            assert_eq!(losses[0].1["channels"][required]["registered"], true);
+            assert_eq!(losses[0].1["channels"][required]["open_observed"], true);
         }
         assert!(!state.engine.is_paired(peer));
         assert!(!state.connected_pairs.contains(&peer));

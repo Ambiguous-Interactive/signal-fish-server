@@ -85,6 +85,13 @@ cargo run -- --server-url ws://127.0.0.1:3536/v3/ws --create-room --peers 2 --ex
 stdout is a machine interface (one JSON event per line, see the event contract below); all logging goes to stderr
 (`RUST_LOG`, default `info`).
 
+The client records `P2P link lost` before failed connections, required channels,
+or negotiation deadlines remove a peer link. Each record names the peer and
+reason. It retains the link generation, candidate counts, remote-description
+observation, and channel registration and open observations. An observed open
+callback does not prove that a channel is still open. Intentional replacements
+and stale callbacks do not produce failure records.
+
 The binary writes diagnostics on one thread outside Tokio. It admits at most
 256 records, including formatting and the in-flight write. Each record retains
 at most 4 KiB, for at most 1 MiB of admitted record storage. Oversized records
