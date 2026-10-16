@@ -4021,3 +4021,23 @@ All five binary and bundle hashes stay fixed during these final-source runs.
 Real Chromium also passes seven delivery-mode controls, two channel-closure
 controls, and four embedded-SDP controls. Hosted CI must validate the wider
 interop suite. These bounded successes still do not explain #853 or #889.
+
+Remote review found a second timer-order defect in the first F72 repair.
+At the run cutoff, the room wake could evaluate success before an equally due
+peer-operation timer cleared its physical work. The new generic pending-work
+criterion then failed a run whose gameplay requirements were already met.
+
+The retained eight-case matrix controls both timer orders. On `a0157029`,
+a never-formed zero-P2P-timeout offer and a formed pair with settled exchange
+receipts fail when the room wake runs first; both pass when the peer timer runs
+first. Missing reliable or unreliable receipts fail in both orders. The repair
+retires pending physical work synchronously at the original non-deferred run
+cutoff, before checking logical success. It adds no grace and preserves pending
+work before cutoff, retry obligations, and exchange debt. Both timer orders now
+agree. Late completion and late receipts cannot change the result. Browser
+tests, type checks, the build, and independent adversarial review pass.
+
+The corrected bundle passes two more restore and two more three-player mesh
+controls in 11.199 seconds. Ten complete streams retain 508 events and exact
+peer/label send and receipt counts, with no errors. Binary and bundle hashes
+stay fixed throughout these final corrected-source captures.

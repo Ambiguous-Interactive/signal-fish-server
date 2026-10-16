@@ -1423,6 +1423,23 @@ class Orchestrator {
       this.pollSuccessRelease();
     }
 
+    /*
+      Peer-operation timers share the run cutoff with the room wake. Retire
+      their physical work first even when the room wake runs before them.
+      Logical retry and exchange obligations remain part of the exit decision.
+    */
+    if (
+      now >= this.runDeadline &&
+      !shouldDeferSuccessAtRunDeadline(
+        this.config.successReleaseEnabled,
+        this.successCriteriaReported,
+        this.successReleaseGranted,
+        this.lingerUntil,
+      )
+    ) {
+      for (const peer of Array.from(this.peerTasks.keys())) this.handlePeerTransportLoss(peer);
+    }
+
     this.armSuccessLinger(now);
     if (this.lingerUntil !== null && now >= this.lingerUntil) {
       // Criteria can regress during the linger (an authoritative plan or a
