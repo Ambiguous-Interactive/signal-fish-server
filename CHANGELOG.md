@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Stop retired browser reference-client signals from reaching replacement peer links (#1015).
 - Let browser reference-client pair retries recover from stalled negotiation before the connection deadline (#1013).
 - Keep browser reference-client relay traffic and other peers moving during stalled negotiation,
   and prevent false run failures and false fallback reports at the run deadline (#1011).

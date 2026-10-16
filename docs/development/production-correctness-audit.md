@@ -4104,3 +4104,41 @@ not establish the spontaneous causes in #853 or #889; both remain open.
 Rust, .NET, and Godot SDKs are unaffected because they do not import this
 private browser orchestrator. The server protocol, defaults, and public SDK
 APIs are unchanged. No migration or external-client tracking issue is needed.
+
+### F74 — Retired browser buffered signals reach replacement peer links
+
+Issue [#1015](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1015)
+continues A20 at `cb9c08ef`. A planned peer can lose its physical link before
+SDP and ICE arrive. The browser buffers those signals until a pairing directive
+creates a new link. Its buffer drain checks the task token and session before
+the loop, then awaits each entry. A retry or authoritative replacement can
+retire that task during an await. When the old operation completes or fails,
+the old loop applies its next entry through the replacement's engine link and
+captures the replacement task token. Old ICE and SDP can alter the new link.
+
+The deterministic regression fails against the unchanged baseline orchestrator
+when a retry replaces a held remote-offer operation. The old operation then
+completes, and its buffered ICE reaches the replacement. The repair rechecks
+the original session, task token, and planned membership before each buffered
+entry. Existing physical-link checks still fence the current awaited operation.
+
+The 64-case matrix holds remote-offer application, answer creation, local-answer
+application, or buffered ICE. Each held operation completes, fails, or remains
+pending across a retry, a changed plan generation, departure and rejoin, a fresh
+player incarnation, or transport loss. Four uninterrupted controls drain both
+ICE entries and send both buffered-offer answers. Replacement SDP precedes its
+ICE. Late old completion, failure, and expiry cannot add old ICE, send old SDP,
+report a current-link error, or close the replacement.
+
+The browser test suite, type checks, build, and formatting pass. Fresh baseline
+retry, restore, and three-player mesh controls each pass twice with fixed file
+hashes and complete endpoint streams. The rebuilt browser also passes two
+retry, two restore, and two mesh controls in 17.359 seconds. Fourteen complete
+endpoint streams retain 702 events. File hashes remain fixed across all six
+runs. These bounded successes do not identify
+the spontaneous causes in #853 or #889. Both issues and the broader #826 audit
+remain open.
+
+Rust, .NET, and Godot SDKs are unaffected because they do not import this
+private browser orchestrator. The server wire contract, defaults, and public
+SDK APIs are unchanged. No client migration or acceptance issue is needed.
