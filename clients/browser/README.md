@@ -86,7 +86,8 @@ binary frame or text `GameDataBinary` is a protocol error in that mode. With
 `--game-data-format message_pack`, the client encodes the relay payload as
 MessagePack and decodes received payloads into ordinary `game_data_received`
 events. V2 uses the legacy three-field relay envelope. V3 requires delivery
-stamps. JSON-source data stays on text in mixed rooms. MessagePack integers
+stamps. Object keys stay unchanged, including `__proto__`, empty names, and Unicode.
+JSON-source data stays on text in mixed rooms. MessagePack integers
 outside JavaScript's exact integer range and non-JSON payload types are rejected.
 With `--game-data-format rkyv|protobuf`, the client preserves opaque binary
 payloads and also accepts JSON text fallback from compatible senders.

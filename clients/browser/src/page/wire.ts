@@ -116,6 +116,15 @@ export function sendMessagePackGameData(
   sendOpaqueGameData(sendBinary, encode(normalizeOutgoingJsonValue(data)));
 }
 
+const messagePackKeyTextDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+/** Prefix decoded map keys until Object.fromEntries restores their exact names. */
+const messagePackObjectKeyDecoder = {
+  canBeCached: (_byteLength: number): boolean => true,
+  decode: (bytes: Uint8Array, offset: number, length: number): string =>
+    `\u0000${messagePackKeyTextDecoder.decode(bytes.subarray(offset, offset + length))}`,
+};
+
 function messagePackJsonValue(value: unknown): unknown {
   if (typeof value === 'bigint') {
     const number = Number(value);
@@ -130,7 +139,7 @@ function messagePackJsonValue(value: unknown): unknown {
     Object.getPrototypeOf(value) === Object.prototype
   ) {
     return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, messagePackJsonValue(item)]),
+      Object.entries(value).map(([key, item]) => [key.slice(1), messagePackJsonValue(item)]),
     );
   }
   return value;
@@ -150,7 +159,17 @@ export function classifyMessagePackNegotiatedServerInput(
     throw new Error('expected MessagePack payload encoding');
   const payload = frame.data['payload'] as Uint8Array;
   const value = normalizeOutgoingJsonValue(
-    messagePackJsonValue(decode(payload, { useBigInt64: true })),
+    messagePackJsonValue(
+      decode(payload, {
+        useBigInt64: true,
+        keyDecoder: messagePackObjectKeyDecoder,
+        mapKeyConverter: (key) => {
+          if (typeof key === 'string') return key;
+          if (typeof key === 'number') return `\u0000${key}`;
+          throw new Error('MessagePack object key must be a string or number');
+        },
+      }),
+    ),
   );
   const { payload: _payload, encoding: _encoding, ...metadata } = frame.data;
   return {
