@@ -173,7 +173,7 @@ export class Engine {
    */
   async handleOffer(peer: string, sdp: string): Promise<string> {
     const link = this.linkOf(peer, 'offer');
-    await link.pc.setRemoteDescription({ type: 'offer', sdp });
+    await link.pc.setRemoteDescription({ type: 'offer', sdp: this.remoteSdp(sdp) });
     this.assertCurrentLink(peer, link);
     link.remoteDescriptionSet = true;
     await this.flushPendingCandidates(peer, link);
@@ -191,7 +191,7 @@ export class Engine {
   /** Initiator path: apply the remote answer; flush buffered candidates. */
   async handleAnswer(peer: string, sdp: string): Promise<void> {
     const link = this.linkOf(peer, 'answer');
-    await link.pc.setRemoteDescription({ type: 'answer', sdp });
+    await link.pc.setRemoteDescription({ type: 'answer', sdp: this.remoteSdp(sdp) });
     this.assertCurrentLink(peer, link);
     link.remoteDescriptionSet = true;
     await this.flushPendingCandidates(peer, link);
@@ -205,6 +205,7 @@ export class Engine {
    * clients, mirroring the native engine).
    */
   async handleRemoteCandidate(peer: string, candidatePayload: string): Promise<void> {
+    if (this.crippled) return;
     // UTF-16 length is a cheap lower bound on UTF-8 bytes. Reject oversized
     // strings before encoding, so even the size check has bounded allocation.
     if (candidatePayload.length > MAX_CANDIDATE_PAYLOAD_BYTES) {
@@ -293,6 +294,11 @@ export class Engine {
         }),
       ),
     };
+  }
+
+  private remoteSdp(sdp: string): string {
+    // Complete SDP bypasses trickle-ICE filtering.
+    return this.crippled ? sdp.replace(/^a=candidate:.*(?:\r?\n|$)/gm, '') : sdp;
   }
 
   private linkOf(peer: string, what: string): PeerLink {

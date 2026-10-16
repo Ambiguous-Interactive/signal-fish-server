@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
 
@@ -3696,3 +3696,73 @@ failure histories. Server, native executable, browser CLI, and page bundle
 hashes match before and after. The #853 restore control passes in 3.779 seconds;
 The #889 mesh control passes in 4.816 seconds. Both endpoint streams and server logs are
 retained. These are passing attempts, not repairs of the original failures.
+
+### F66 — Browser crippled ICE admits candidates inside remote SDP
+
+Issue #999, found at `10365436`. The browser drops local candidate callbacks
+and incoming candidate signals in crippled mode. Its remote offer and answer
+handlers still pass embedded candidates to Chromium. Complete SDP can therefore
+establish both required channels, so the fallback control can report a path
+that the option promised to disable. This is a reference transport control
+defect; it does not identify the original #853 or #889 failure causes.
+
+The repair removes candidate attributes from remote SDP only in crippled mode.
+Both offer and answer paths use the same transformation. Healthy SDP stays
+byte-identical. The engine also ignores incoming candidate calls before
+parsing or buffering them. The orchestrator retains its existing candidate
+signal filter. Unit controls cover both roles, both modes, CRLF/LF,
+candidates before and inside a media section, and
+an unterminated final candidate. They verify that crippled candidates never
+queue or apply, while healthy candidates flush in order after SDP. Both the
+SDP regression and the candidate guard fail before their respective repairs.
+
+A real Chromium experiment supplies fully gathered SDP from a healthy peer.
+On the baseline, the crippled responder connects and opens both required
+channels in less than one second. After the repair, crippled offer and answer
+controls stay unconnected during the bounded observation. Healthy controls
+exchange exact messages on both labels in both directions. The four cases also
+run in the durable Chromium channel suite. Each crippled case observes 1.5
+seconds without formation. These observations cover candidate-bearing SDP in
+this local runtime; they do not certify every ICE implementation or explain
+unrelated timeouts.
+
+Rust SDK `da8f2d16`, .NET SDK `e467c871`, and Godot SDK `2a74de36` have separate
+implementations and do not import this browser engine or its crippled-mode
+option. They are unaffected. Server signaling payloads remain opaque and
+unchanged. No SDK migration or acceptance issue is needed. The broader A20/A22
+coverage and audit #826 remain open. Hosted CI and final review remain gates.
+
+### F67 — Native exchange send failure ends the relay session
+
+Issue #1000, found at `10365436`. A required channel can close after physical
+pair formation while its terminal callback is still queued. The native
+exchange gate can run first. Its send error becomes a fatal connection error,
+so the signaling session ends instead of using the documented relay floor.
+The same send helper serves immediate, deferred, and unreliable-only exchange.
+
+The real native-pair regression closes a required channel and holds its
+terminal callback before releasing exchange. The baseline fails with exit
+code 3 and a data-channel-closed error. Both required labels, the separate
+unreliable release, and the immediate send entry point have controls. Missing
+channel storage has its own control.
+
+The repair uses the existing P2P loss handler for missing-channel or failed
+exchange sends. It retires the physical link and reports the current transport
+state. Failed labels are not credited. Completed labels and missing receipt
+debt remain unchanged. Successful sends keep their existing behavior. If the
+fallback status cannot reach the signaling socket, that write error still
+ends the session. No new retry policy or send deadline is introduced.
+
+The scoped tests verify fallback, a subsequent exact relay payload and Ping
+on the WebSocket, and a fresh coordinated link rebuild that discharges missing
+send and receipt debt. The missing-channel control separately checks terminal
+signaling write failure. These are controlled real-stack and
+loopback histories, not captured causes of #853 or #889. The browser already
+retries exchange send errors without ending its signaling session and needs
+no equivalent repair. Broader audit and timing work remain open.
+
+Rust SDK `da8f2d16`, .NET SDK `e467c871`, and Godot SDK `2a74de36` do not import
+the native reference orchestrator or its private exchange helper. Each SDK is
+unaffected. Server messages, payloads, defaults, and SDK APIs are unchanged;
+no SDK migration or acceptance issue is required. Final-head hosted tests and
+review remain delivery gates.

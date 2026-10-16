@@ -281,3 +281,73 @@ for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL]) {
 console.error(
   'ok - terminal channel registration reports once and permits fresh-link recovery',
 );
+
+// Regression #999: complete remote SDP must not bypass --cripple-ice.
+for (const crippled of [false, true]) {
+  for (const path of ['offer', 'answer'] as const) {
+    for (const newline of ['\r\n', '\n']) {
+      const originalPc = globalThis.RTCPeerConnection;
+      const applied: RTCSessionDescriptionInit[] = [];
+      const candidates: string[] = [];
+      class TestConnection {
+        async setRemoteDescription(description: RTCSessionDescriptionInit): Promise<void> {
+          applied.push(description);
+        }
+        async addIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {
+          candidates.push(candidate.candidate ?? '');
+        }
+        async createAnswer(): Promise<RTCSessionDescriptionInit> {
+          return { type: 'answer', sdp: 'local-answer' };
+        }
+        async setLocalDescription(): Promise<void> {}
+        close(): void {}
+      }
+      try {
+        globalThis.RTCPeerConnection = TestConnection as unknown as typeof RTCPeerConnection;
+        const engine = new Engine(crippled, {
+          onLocalCandidate: () => {},
+          onPcState: () => {},
+          onChannelOpen: () => {},
+          onChannelClosed: () => {},
+          onChannelMessage: () => {},
+        });
+        if (crippled) await engine.handleRemoteCandidate('unpaired', 'x'.repeat(4097));
+        await engine.pairWith('peer', false, []);
+        await engine.handleRemoteCandidate('peer', 'queued');
+        assert(candidates.length === 0, 'candidates wait until remote SDP is applied');
+        const lines = [
+          'v=0',
+          'a=ice-ufrag:example',
+          'a=candidate:1 1 udp 1234 192.0.2.1 1234 typ host',
+          'm=application 9 UDP/DTLS/SCTP webrtc-datachannel',
+          'a=candidate:2 1 udp 1233 192.0.2.2 1235 typ host',
+          'a=end-of-candidates',
+        ];
+        // The final candidate deliberately has no newline.
+        const sdp = [...lines, 'a=candidate:3 1 udp 1232 192.0.2.3 1236 typ host'].join(
+          newline,
+        );
+        if (path === 'offer') await engine.handleOffer('peer', sdp);
+        else await engine.handleAnswer('peer', sdp);
+        const expected = crippled
+          ? lines.filter((line) => !line.startsWith('a=candidate:')).join(newline) + newline
+          : sdp;
+        assert(
+          applied.length === 1 && applied[0]?.type === path && applied[0]?.sdp === expected,
+          `${path}/${crippled}/${JSON.stringify(newline)}: crippled SDP drops all embedded candidates; healthy SDP stays intact`,
+        );
+        await engine.handleRemoteCandidate('peer', 'direct');
+        assert(
+          JSON.stringify(candidates) === JSON.stringify(crippled ? [] : ['queued', 'direct']),
+          `${path}/${crippled}: crippled mode drops queued and direct candidates; healthy mode applies both in order`,
+        );
+        engine.removePeer('peer');
+      } finally {
+        globalThis.RTCPeerConnection = originalPc;
+      }
+    }
+  }
+}
+console.error(
+  'ok - crippled offer and answer ignore embedded ICE while healthy SDP stays intact',
+);

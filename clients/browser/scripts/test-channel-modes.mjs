@@ -243,6 +243,95 @@ try {
     }, label);
     console.error(`ok - Chromium closed-before-registration ${JSON.stringify(evidence)}`);
   }
+  // Regression #999: embedded candidates must preserve deterministic relay fallback.
+  for (const crippled of [false, true])
+    for (const path of ['offer', 'answer']) {
+      const result = await page.evaluate(
+        async ({ crippled, path }) => {
+          const events = [];
+          const remote = new RTCPeerConnection();
+          const remoteChannels = [];
+          remote.ondatachannel = ({ channel }) => {
+            remoteChannels.push(channel);
+            channel.onmessage = ({ data }) => events.push(`remote:${channel.label}:${data}`);
+          };
+          const engine = new channelEngine.Engine(crippled, {
+            onLocalCandidate: () => {},
+            onPcState: (_p, _g, state) => events.push(state),
+            onChannelClosed: () => {},
+            onChannelOpen: (_p, _g, label) => events.push(label),
+            onChannelMessage: (_p, _g, label, text) => events.push(`${label}:${text}`),
+          });
+          const until = async (condition, milliseconds = 8000) => {
+            const end = performance.now() + milliseconds;
+            while (!condition() && performance.now() < end)
+              await new Promise((resolve) => setTimeout(resolve, 10));
+          };
+          try {
+            const offer = await engine.pairWith('peer', path === 'answer', []);
+            let remoteSdp;
+            if (path === 'offer') {
+              for (const channel of [
+                remote.createDataChannel('reliable'),
+                remote.createDataChannel('unreliable', { ordered: false, maxRetransmits: 0 }),
+              ]) {
+                remoteChannels.push(channel);
+                channel.onmessage = ({ data }) =>
+                  events.push(`remote:${channel.label}:${data}`);
+              }
+              await remote.setLocalDescription(await remote.createOffer());
+              await until(() => remote.iceGatheringState === 'complete');
+              remoteSdp = remote.localDescription.sdp;
+              const answer = await engine.handleOffer('peer', remoteSdp);
+              await remote.setRemoteDescription({ type: 'answer', sdp: answer });
+            } else {
+              await remote.setRemoteDescription({ type: 'offer', sdp: offer });
+              await remote.setLocalDescription(await remote.createAnswer());
+              await until(() => remote.iceGatheringState === 'complete');
+              remoteSdp = remote.localDescription.sdp;
+              await engine.handleAnswer('peer', remoteSdp);
+            }
+            if (!remoteSdp.includes('a=candidate:'))
+              throw new Error('probe requires embedded candidates');
+            await until(
+              () => events.includes('reliable') && events.includes('unreliable'),
+              crippled ? 1500 : 8000,
+            );
+            const connected = events.includes('reliable') && events.includes('unreliable');
+            if (connected === crippled)
+              throw new Error(
+                `incorrect result: ${JSON.stringify({ crippled, path, events })}`,
+              );
+            if (!crippled) {
+              await until(
+                () =>
+                  remoteChannels.length === 2 &&
+                  remoteChannels.every((channel) => channel.readyState === 'open'),
+              );
+              for (const channel of remoteChannels) {
+                channel.send('to-engine');
+                engine.channel('peer', channel.label).send('to-remote');
+              }
+              const received = () =>
+                ['reliable', 'unreliable'].every(
+                  (label) =>
+                    events.includes(`${label}:to-engine`) &&
+                    events.includes(`remote:${label}:to-remote`),
+                );
+              await until(received);
+              if (!received())
+                throw new Error('healthy pair must exchange both labels in both directions');
+            }
+            return { crippled, path, connected, events, sender: remote.connectionState };
+          } finally {
+            engine.removePeer('peer');
+            remote.close();
+          }
+        },
+        { crippled, path },
+      );
+      console.error(`ok - Chromium embedded SDP fallback ${JSON.stringify(result)}`);
+    }
 } finally {
   await browser.close();
 }

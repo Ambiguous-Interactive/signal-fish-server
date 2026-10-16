@@ -2131,18 +2131,21 @@ impl Orchestrator<'_> {
             if self.exchange_ledger.has_sent(peer, label) {
                 continue;
             }
-            let Some(channel) = self.engine.channel(peer, label) else {
-                return Err(FatalError::connection(format!(
-                    "open pair with {peer} is missing channel {label}"
-                )));
-            };
             let text = format!(
                 r#"{{"from":"{}","channel":"{}","seq":0}}"#,
                 self.my_id, label
             );
-            channel.send_text(&text).await.map_err(|error| {
-                FatalError::connection(format!("send on {label} to {peer} failed: {error}"))
-            })?;
+            let result = match self.engine.channel(peer, label) {
+                Some(channel) => channel
+                    .send_text(&text)
+                    .await
+                    .map_err(|error| format!("send on {label} to {peer} failed: {error}")),
+                None => Err(format!("open pair with {peer} is missing channel {label}")),
+            };
+            if let Err(message) = result {
+                emit(&Event::Error { message });
+                return self.handle_peer_transport_loss(peer).await;
+            }
             self.exchange_ledger.note_sent(peer, label);
             emit(&Event::ChannelMessageSent {
                 peer,
