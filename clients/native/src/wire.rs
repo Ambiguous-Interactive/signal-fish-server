@@ -525,7 +525,12 @@ mod tests {
 
         let mut overdue = Vec::new();
         for binary in [false, true] {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let receiving_socket = tokio::net::TcpSocket::new_v4().unwrap();
+            receiving_socket.set_recv_buffer_size(1024).unwrap();
+            receiving_socket
+                .bind("127.0.0.1:0".parse().unwrap())
+                .unwrap();
+            let listener = receiving_socket.listen(1).unwrap();
             let address = listener.local_addr().unwrap();
             let server = tokio::spawn(async move {
                 let (tcp, _) = listener.accept().await.unwrap();

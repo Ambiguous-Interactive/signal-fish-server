@@ -65,7 +65,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
 | A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
-| A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
+| A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17; Windows backpressure fixtures in F75 |
 
 For each task, record reviewed functions and tests, unresolved hypotheses, and
 the exact scope of any successful experiment. Default, TLS, legacy-fullmesh,
@@ -4142,3 +4142,32 @@ remain open.
 Rust, .NET, and Godot SDKs are unaffected because they do not import this
 private browser orchestrator. The server wire contract, defaults, and public
 SDK APIs are unchanged. No client migration or acceptance issue is needed.
+
+### F75 — Windows deadline fixtures complete before backpressure
+
+Issue [#1017](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1017)
+continues A22. Scheduled WebRTC run `38853983812` failed two native deadline
+fixtures on Windows at `3330d6c`. Both failures occurred at their setup
+assertion, before simulated time advanced. Linux and macOS passed. A fresh
+manual run `38961414369` reproduced both failures on `d2878e4a`.
+
+Diagnostic head `bdcbbe10`, run `38962172874`, retains the completed results.
+The Pong fixture returns `Ok(Ok(None))`; the text-write fixture returns
+`Ok(Ok(()))`. Both writes succeeded before the 50 ms setup observation ended.
+The 8 MiB frame and 1,024-byte sender buffer did not establish the assumed
+backpressure on Windows. The evidence does not identify the internal Windows
+buffering mechanism or show a production deadline failure.
+
+The revised fixtures also set the listener's receive buffer to 1,024 bytes
+before bind and listen. They keep the nonreading endpoint, the original 8 MiB
+payload, both text and binary writes, the 50 ms pending-write assertion, and
+the complete 20-second write budget. The Pong control still advances 12 seconds
+during the blocked write, drains the original frame before Ping, and requires
+the full response window after successful write completion. No production code
+or timeout changes. Both focused Linux tests pass in 4.344 seconds. Hosted CI
+owns cross-platform acceptance.
+
+The browser buffered-signal repair in F74 remains independent. Rust, .NET, and
+Godot SDKs are unaffected because this change only adjusts native reference
+unit-test sockets. No public API, wire, or migration change is needed. The
+broader A22 and #826 audits remain open.

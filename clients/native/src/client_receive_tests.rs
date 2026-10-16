@@ -86,7 +86,12 @@ async fn pong_response_window_starts_after_the_ping_write_finishes() {
     use futures_util::SinkExt;
     use tokio_tungstenite::MaybeTlsStream;
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let receiving_socket = tokio::net::TcpSocket::new_v4().unwrap();
+    receiving_socket.set_recv_buffer_size(1024).unwrap();
+    receiving_socket
+        .bind("127.0.0.1:0".parse().unwrap())
+        .unwrap();
+    let listener = receiving_socket.listen(1).unwrap();
     let address = listener.local_addr().unwrap();
     let url = format!("ws://{address}");
     let server = tokio::spawn(async move {
