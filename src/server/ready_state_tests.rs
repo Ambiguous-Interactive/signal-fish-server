@@ -1576,8 +1576,13 @@ async fn concurrent_unready_and_start_follow_room_gate_order() {
             assert!(futures_util::poll!(&mut toggle).is_pending());
             assert!(futures_util::poll!(&mut start).is_pending());
         }
-        assert!(starter_messages.try_recv().is_err());
-        assert!(toggler_messages.try_recv().is_err());
+        for messages in [&mut starter_messages, &mut toggler_messages] {
+            let pending = messages.try_recv();
+            assert!(
+                matches!(pending, Err(mpsc::error::TryRecvError::Empty)),
+                "both handlers must wait for the room gate: {pending:?}"
+            );
+        }
         drop(gate);
         tokio::join!(start, toggle);
 
@@ -1653,9 +1658,10 @@ async fn concurrent_unready_and_start_follow_room_gate_order() {
             ));
         }
         for messages in [&mut starter_messages, &mut toggler_messages] {
+            let pending = messages.try_recv();
             assert!(
-                matches!(messages.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-                "the completed history must contain no extra frame"
+                matches!(pending, Err(mpsc::error::TryRecvError::Empty)),
+                "the completed history must contain no extra frame: {pending:?}"
             );
         }
         if !start_first {
@@ -1673,10 +1679,11 @@ async fn concurrent_unready_and_start_follow_room_gate_order() {
                     recv(messages).await.as_ref(),
                     ServerMessage::SessionPlan(_)
                 ));
-                assert!(matches!(
-                    messages.try_recv(),
-                    Err(mpsc::error::TryRecvError::Empty)
-                ));
+                let pending = messages.try_recv();
+                assert!(
+                    matches!(pending, Err(mpsc::error::TryRecvError::Empty)),
+                    "the recovered history must contain no extra frame: {pending:?}"
+                );
             }
             let recovered = server
                 .database
