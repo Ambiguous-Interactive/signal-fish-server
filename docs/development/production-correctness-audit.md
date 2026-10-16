@@ -4218,3 +4218,79 @@ locally under `progress/session-461-final-interop`. Executable and bundle
 hashes match before and after the six runs. No original spontaneous failure
 recurs. These runs qualify the added diagnostics without settling either
 original cause.
+
+### F77 — Native link retirement removes failure diagnostics
+
+Issue [#1019](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1019)
+continues A20 and A22 at `5db7ce37`. Native connection failure, required-channel
+closure, receive rejection, and exchange-send failure remove the engine link
+without retaining its observations. Negotiation expiry also removes the link
+inside the engine before returning to the orchestrator. A later P2P timeout
+snapshot can therefore be null. Browser F76 does not cover these native paths.
+
+The native client now reports the peer, reason, and existing engine snapshot
+before these removals. The snapshot retains the physical generation, candidate
+counts, remote-description observation, and both channel registration and open
+observations. It makes no driver calls. An observed open callback does not
+establish current channel readiness. The record uses the existing bounded
+stderr writer. Intentional departures and replacements do not report failure.
+
+The new regression captures real tracing output. It fails against the unchanged
+runtime because the first failed connection produces no snapshot. Its twelve
+histories cover failed and closed connections, both required channel labels,
+receive rejection, already-expired negotiation, a pending operation, and a
+result ready at expiry. They also cover intentional retirement and stale
+events. Retired callbacks cannot duplicate loss or affect a fresh link.
+The existing held-negotiation controls now require loss snapshots at every
+retained-link stage. Route and build cancellation occur before engine storage
+and must not fabricate link observations. Eight real-wire send-timeout histories
+retain both channel observations before removal while preserving unpaid
+exchange debt and live relay traffic. All forty selected native tests pass.
+
+This repairs missing observations. It does not identify the spontaneous causes
+in #853 or #889. Both issues and the broader #826 audit remain open. The
+independent Rust, .NET, and Godot SDKs are unaffected: this change adds stderr
+records only in the native reference engine and orchestrator. Wire formats,
+JSONL event types, public APIs, and recovery behavior do not change.
+
+The initial native build passes two browser retry controls, two restore
+controls for #853, and two three-player mesh controls for #889 in 17.075
+seconds. Fourteen complete endpoint streams retain 701 events, including
+48 sends, 48 receipts, fourteen success barriers, and fourteen exits with code
+zero. No endpoint emits an error. All server logs and file hashes are retained
+locally under `progress/session-462-final-interop`. The five executable and
+bundle hashes match before and after all six runs. No original spontaneous
+failure recurs. Root and native formatting and strict all-target, all-feature
+clippy pass. The browser unit suite and bundle build also pass.
+
+### F78 — Withdrawn dependency blocks package verification
+
+Issue [#1021](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1021)
+records a root verification failure at PR #1020 head `91757b40`. Cargo reports
+that locked `inout 0.2.3` was withdrawn from crates.io. The package control
+rejects that warning. The suite stops after 2,726 passes and one failure,
+leaving 524 tests and the later allocation and H14 gates unrun.
+
+The registry lists compatible `inout 0.2.4` with Rust 1.85 support. The repair
+updates only that package and its checksum in the root, native, and fuzz
+lockfiles. No other retained lockfile contains `inout 0.2.3`. Manifests and
+package-verification assertions remain unchanged. The source delta affects
+only the optional `block-padding` feature, which the server does not enable
+even with all root features. This is a package publication repair.
+
+The old lockfile reproduces the hosted warning at the same package assertion
+(Nextest `5b2c2a1c`). With `0.2.4`, the unchanged control passes in 195.631
+seconds (`45c11115`), including the generated archive's all-feature library
+test compilation. Root and native strict lint pass on the updated lockfiles.
+The package assertions, warning filters, and workflow coverage are unchanged.
+No dependency-only changelog entry is needed because the enabled runtime
+code and public contracts do not change.
+
+The final `0.2.4` builds pass two browser retry, two restore, and two
+three-player mesh controls in 15.717 seconds. Fourteen complete endpoint
+streams retain 702 events, 48 sends, 48 receipts, fourteen success barriers,
+and fourteen exits with code zero. No endpoint emits an error. All five file
+hashes match before and after the six runs. Full endpoint and server logs
+remain under `progress/session-462-lockfix-interop`. These runs also provide
+new #853 and #889 attempts on the updated graph; neither original failure
+recurs, so neither investigation is complete.

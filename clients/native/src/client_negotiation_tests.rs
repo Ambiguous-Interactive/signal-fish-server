@@ -14,6 +14,8 @@ enum Budget {
 }
 
 async fn held_negotiation(step: &'static str, budget: Budget, initiate: bool) {
+    let diagnostics = super::peer_loss_tests::DiagnosticCapture::default();
+    let _subscriber = tracing::subscriber::set_default(diagnostics.subscriber());
     let run_first = matches!(budget, Budget::Run | Budget::Zero);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
@@ -164,6 +166,18 @@ async fn held_negotiation(step: &'static str, budget: Budget, initiate: bool) {
         "{step}: retire partial state before resuming"
     );
     assert!(!state.engine.is_current_generation(peer, old_generation));
+    let losses = diagnostics.losses();
+    assert_eq!(
+        losses.len(),
+        usize::from(!matches!(step, "route" | "build")),
+        "{step}: {losses:?}"
+    );
+    if let Some((prefix, snapshot)) = losses.first() {
+        assert!(prefix.contains("negotiation deadline expired"), "{prefix}");
+        assert!(prefix.contains(&peer.to_string()), "{prefix}");
+        assert_eq!(snapshot["generation"], old_generation);
+    }
+
     assert!(
         state.expected_peers.contains(&peer),
         "{step}: retain logical obligations"

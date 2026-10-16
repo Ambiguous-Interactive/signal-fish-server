@@ -2255,7 +2255,12 @@ impl Orchestrator<'_> {
             };
             if let Err(message) = result {
                 emit(&Event::Error { message });
-                return self.handle_peer_transport_loss(peer).await;
+                return self
+                    .handle_peer_transport_loss(
+                        peer,
+                        &format!("data-channel send failed on {label}"),
+                    )
+                    .await;
             }
             self.exchange_ledger.note_sent(peer, label);
             emit(&Event::ChannelMessageSent {
@@ -2727,7 +2732,8 @@ impl Orchestrator<'_> {
                     state: state.to_string(),
                 });
                 if is_terminal_peer_connection_state(&state) {
-                    self.handle_peer_transport_loss(peer).await?;
+                    self.handle_peer_transport_loss(peer, &format!("connection state {state}"))
+                        .await?;
                 }
             }
             EngineEvent::RemoteChannel {
@@ -2748,8 +2754,9 @@ impl Orchestrator<'_> {
                 }
             }
             EngineEvent::ChannelClosed { peer, label, .. } => {
+                let reason = format!("required data channel closed: {label}");
                 emit(&Event::ChannelClosed { peer, label });
-                self.handle_peer_transport_loss(peer).await?;
+                self.handle_peer_transport_loss(peer, &reason).await?;
             }
             EngineEvent::ChannelMessage {
                 peer,
@@ -2768,15 +2775,21 @@ impl Orchestrator<'_> {
                 emit(&Event::Error {
                     message: format!("peer {peer} channel {label} exceeded receive limits"),
                 });
+                let reason = format!("data-channel receive rejected: {label}");
                 emit(&Event::ChannelClosed { peer, label });
-                self.handle_peer_transport_loss(peer).await?;
+                self.handle_peer_transport_loss(peer, &reason).await?;
             }
         }
         Ok(())
     }
 
     /// Tear down an unusable P2P link while retaining its planned obligation.
-    async fn handle_peer_transport_loss(&mut self, peer: PlayerId) -> Result<(), FatalError> {
+    async fn handle_peer_transport_loss(
+        &mut self,
+        peer: PlayerId,
+        reason: &str,
+    ) -> Result<(), FatalError> {
+        self.engine.report_peer_loss(peer, reason);
         self.selected_pair_evidence.clear(peer);
         self.connected_pairs.remove(&peer);
         self.p2p_reconnected_pairs.remove(&peer);
@@ -2829,7 +2842,8 @@ impl Orchestrator<'_> {
             && !self.engine.is_paired(peer)
             && (self.connected_pairs.contains(&peer) || deadline.is_due(Instant::now()))
         {
-            self.handle_peer_transport_loss(peer).await?;
+            self.handle_peer_transport_loss(peer, "negotiation failed")
+                .await?;
         }
         Ok(result)
     }
@@ -5922,3 +5936,7 @@ mod tests {
 #[cfg(test)]
 #[path = "client_negotiation_tests.rs"]
 mod negotiation_tests;
+
+#[cfg(test)]
+#[path = "peer_loss_tests.rs"]
+mod peer_loss_tests;

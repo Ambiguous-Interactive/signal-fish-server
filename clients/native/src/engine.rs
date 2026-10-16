@@ -414,6 +414,7 @@ impl Engine {
         deadline: Deadline,
     ) -> Result<Option<String>> {
         if deadline.is_due(tokio::time::Instant::now()) {
+            self.report_peer_loss(peer, "negotiation deadline expired");
             self.remove_peer(peer).await?;
             return Err(anyhow!("WebRTC negotiation deadline elapsed"));
         }
@@ -435,6 +436,7 @@ impl Engine {
         match result {
             Ok(result) if !deadline.is_due(tokio::time::Instant::now()) => result,
             _ => {
+                self.report_peer_loss(peer, "negotiation deadline expired");
                 self.remove_peer(peer).await?;
                 Err(anyhow!("WebRTC negotiation deadline elapsed"))
             }
@@ -825,6 +827,17 @@ impl Engine {
             .get(&peer)
             .and_then(|link| link.channels.get(label))
             .cloned()
+    }
+
+    pub(crate) fn report_peer_loss(&self, peer: PlayerId, reason: &str) {
+        if self.is_paired(peer) {
+            tracing::warn!(
+                %peer,
+                %reason,
+                snapshot = %self.diagnostic_snapshot(peer),
+                "P2P link lost"
+            );
+        }
     }
 
     /// Local observations for a timed-out link, without waiting on its driver.
