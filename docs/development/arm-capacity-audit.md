@@ -3347,3 +3347,50 @@ Test progress reads event counts without taking the evidence. The former
 `snapshot` method now has the name `take_records`, which makes its ownership
 transfer explicit. The final capture still transfers each record once after
 all tasks finish.
+
+### C3 stream-observation memory — #775
+
+At `560ec0df`, the capacity oracle retained one pointer per receipt, then
+scanned each stream for distinct arrivals, order, and completeness. It now
+accumulates each stream's compact coverage, counts, and first offending
+sequences in one arrival pass. Stream lifetime boundaries are resolved once.
+The completeness pass consumes that stream's coverage and applies the same
+exact gap rules. Raw events remain unchanged for artifact replay and latency.
+The accompanying identity repairs are recorded in production audit F70.
+
+The experiment used 16 peers and 100, 1,000, and 5,000 sends per peer. Each
+size ran five alternating baseline/candidate pairs in fresh processes, using
+the existing ignored `generator_memory_profile_on_complete_fanout` control.
+Python `os.wait4` recorded peak child RSS, including event collection and the
+full oracle. Both variants used rustc 1.94.0, the debug test profile, and the
+same ARM64 Linux host under WSL2. All 30 trials passed. The complete summary
+JSON matched across every trial at each size.
+
+| Receipts | Baseline median KiB (range) | Candidate median KiB (range) |
+| --- | --- | --- |
+| 24,000 | 17,804 (17,468–17,868) | 17,892 (17,764–17,956) |
+| 240,000 | 55,876 (55,748–55,940) | 54,300 (54,108–54,364) |
+| 1,200,000 | 228,428 (228,428–228,556) | 217,756 (217,572–217,892) |
+
+The largest shape reduces median peak RSS by 4.7%. Small runs use slightly
+more memory. Median oracle times at the three sizes were 98,751/92,348,
+1,119,676/1,150,648, and 6,284,484/6,218,053 microseconds for baseline/candidate.
+These times include the new identity checks. They do not establish a general
+speed improvement or server capacity.
+
+A separately registered fragmented-arrival check replays 240,000 receipts,
+placing every stream's odd positions before every stream's even positions.
+Five alternating pairs each reject the exact 240 first inversions. Neither
+variant reports a missing, duplicate, or misrouted receipt. The expected
+nonzero test exits are retained, not discarded trials. Median peak RSS is
+97,400 KiB (97,064–97,548) for baseline and 97,364 KiB (97,132–97,528) for the
+candidate. This does not establish a memory gain for fragmented arrivals.
+Concurrent fragmented coverage can still retain one range per distinct
+sequence. Parsed records, sender indexes, and gap indexes also grow with
+workload. Issue #775 remains open for workload-wide bounds and long live cells.
+
+Registration scripts, all raw trial output, fixture streams, complete summary
+comparisons, and executable hashes remain under `/tmp/session457/`. The
+stream-observation counter test independently checks all 4,096 six-arrival
+histories and the one-range ordered-stream shape. Existing real-socket lossy,
+churn, payload, and replay controls verify the surrounding delivery contract.

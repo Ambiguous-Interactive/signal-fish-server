@@ -3881,3 +3881,48 @@ are unchanged; no SDK migration is required.
 The captured #853 reconnect and #889 mesh controls pass with fixed baseline
 binaries in 1.85 and 2.32 seconds. Their source failure causes remain unknown.
 These passes do not close either issue or the broader A20 and #826 audit.
+
+### F70 — Capacity receipts bypass recipient and application identity checks
+
+Issues #1006 and #1007 continue A22 at `560ec0df`. The capacity oracle indexed
+all receipts but visited only roster recipients. Two additional receipts to an
+unknown recipient left a complete history valid. A separate control changed
+one receipt's application ledger sequence while retaining its valid server
+stream position. That history also stayed valid. These are confirmed checker
+defects. They do not prove a server misroute or payload corruption.
+
+The oracle now rejects each unknown-recipient arrival with its exact delivery
+key. It also compares each receipt's application sequence with the recorded
+send at that sender epoch's server position. The comparison uses the epoch's
+send block, including after reconnect; application sequences continue across
+epochs while server positions restart. Both violations use the existing
+`MisroutedDeliveries` reason. Raw receipts, byte evidence, and latency accounting
+remain observable. No artifact schema or server protocol changes.
+
+Both focused regressions fail before their respective repairs. Final controls
+cover all three delivery classes, unknown recipients in the opaque experiment,
+another known ledger sequence, an absent ledger sequence, and a previous-epoch
+sequence after reconnect. A real-socket history is then edited and replayed
+through the public artifact path. Both mutations fail with their exact keys;
+restoring the original events reproduces the complete original summary.
+Existing duplicate, order, gap, missing, churn, and payload-size controls stay
+separate. The broader A22 and #826 audits remain open.
+
+The same review replaces the per-receipt pointer index with compact stream
+observations. The independent position-set and unique-arrival reference covers
+all 4,096 six-arrival histories over zero, one, two, and `u64::MAX`. It checks
+unique counts, duplicate counts and first keys, and order counts and first keys.
+An ordered 100,000-message stream retains one coverage range. The
+[capacity report](arm-capacity-audit.md#c3-stream-observation-memory--775)
+records the measured gains and limits. Raw record retention and fragmented
+coverage remain workload-dependent; this is not a complete memory bound.
+
+Five fixed-binary #853 restore attempts and five #889 three-player browser mesh
+attempts pass. The test executable, server, native executable, browser CLI, and
+page bundle hashes match before and after the alternating attempts. Each run
+retains endpoint streams and server diagnostics. These runs do not reproduce
+or repair the original failures. Both issues remain open.
+
+Rust, .NET, and Godot SDKs are unaffected: these changes are private capacity
+checker code and its tests. No client imports this checker. Server behavior,
+SDK APIs, wire messages, and defaults are unchanged.
