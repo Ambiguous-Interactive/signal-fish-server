@@ -13,11 +13,18 @@ for (const phase of ['remote-offer', 'answer', 'local-answer', 'candidate'] as c
     'departure',
     'incarnation',
     'loss',
+    'closed',
+    'channel-close',
+    'channel-error',
+    'timeout',
+    'late-completion',
     'none',
   ] as const) {
     for (const oldOutcome of (replacement === 'none'
       ? ['resolve']
       : ['resolve', 'reject', 'pending']) as readonly string[]) {
+      const originalError = console.error;
+      const diagnostics: string[] = [];
       const originalPc = globalThis.RTCPeerConnection;
       const originalSocket = globalThis.WebSocket;
       const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
@@ -85,8 +92,25 @@ for (const phase of ['remote-offer', 'answer', 'local-answer', 'candidate'] as c
         async addIceCandidate() {
           await this.step('candidate');
         }
+        ondatachannel: ((event: { channel: Channel }) => void) | null = null;
         close() {
           this.closed = true;
+        }
+      }
+      class Channel {
+        readonly ordered: boolean;
+        readonly maxRetransmits: number | null;
+        constructor(readonly label: string) {
+          this.ordered = label === 'reliable';
+          this.maxRetransmits = this.ordered ? null : 0;
+        }
+        readonly maxPacketLifeTime = null;
+        readyState = 'connecting';
+        bufferedAmount = 17;
+        onclose: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        close() {
+          this.readyState = 'closed';
         }
       }
       class Socket {
@@ -139,6 +163,7 @@ for (const phase of ['remote-offer', 'answer', 'local-answer', 'candidate'] as c
         }
       }
       try {
+        console.error = (...args: unknown[]) => diagnostics.push(args.map(String).join(' '));
         globalThis.RTCPeerConnection = Connection as unknown as typeof RTCPeerConnection;
         globalThis.WebSocket = Socket as unknown as typeof WebSocket;
         Object.defineProperty(globalThis, 'window', {
@@ -226,11 +251,79 @@ for (const phase of ['remote-offer', 'answer', 'local-answer', 'candidate'] as c
           continue;
         }
         let replacementGeneration = me;
+        const channelLabel =
+          phase === 'answer' || phase === 'candidate' ? 'unreliable' : 'reliable';
+        const lossReplacements = [
+          'loss',
+          'closed',
+          'channel-close',
+          'channel-error',
+          'timeout',
+          'late-completion',
+        ];
         if (replacement === 'retry') {
           socket.signal({ PairRetry: 1 });
-        } else if (replacement === 'loss') {
-          connections[1]!.connectionState = 'failed';
-          connections[1]!.onconnectionstatechange?.();
+        } else if (lossReplacements.includes(replacement)) {
+          if (replacement === 'loss' || replacement === 'closed') {
+            connections[1]!.connectionState = replacement === 'loss' ? 'failed' : 'closed';
+            connections[1]!.onconnectionstatechange?.();
+          } else if (replacement === 'late-completion') {
+            now = 1100;
+            if (oldOutcome === 'reject') rejectOld(new Error('late browser failure'));
+            else resolveOld();
+          } else if (replacement === 'timeout') {
+            now = 1100;
+            for (const [id, timer] of [...timers]) {
+              if (timer.at <= now) {
+                timers.delete(id);
+                timer.callback();
+              }
+            }
+          } else {
+            const channel = new Channel(channelLabel);
+            connections[1]!.ondatachannel?.({ channel });
+            if (replacement === 'channel-close') {
+              channel.close();
+              channel.onclose?.();
+            } else channel.onerror?.();
+          }
+          await turn();
+          const losses = diagnostics.filter((line) =>
+            line.startsWith(`P2P link lost for ${peer}: `),
+          );
+          assert(
+            losses.length === 2,
+            `${replacement}/${phase}: each failed link retains one snapshot before removal; ${JSON.stringify(diagnostics)}`,
+          );
+          const snapshot = JSON.parse(losses[1]!.split(': ').slice(1).join(': ')) as Record<
+            string,
+            unknown
+          >;
+          assert(
+            (snapshot['link'] as Record<string, unknown>)['generation'] === 2,
+            'loss describes the retired physical generation',
+          );
+          const expectedReason =
+            replacement === 'loss'
+              ? 'connection state failed'
+              : replacement === 'closed'
+                ? 'connection state closed'
+                : replacement === 'timeout' || replacement === 'late-completion'
+                  ? 'negotiation deadline expired'
+                  : `required channel ${channelLabel} closed or failed`;
+          assert(
+            snapshot['reason'] === expectedReason,
+            `${replacement}: retain the terminal cause`,
+          );
+          if (replacement.startsWith('channel-')) {
+            const channels = (snapshot['link'] as Record<string, unknown>)[
+              'channels'
+            ] as Record<string, Record<string, unknown>>;
+            assert(
+              channels[channelLabel]!['bufferedAmount'] === 17,
+              'capture channel details before teardown',
+            );
+          }
           socket.deliver('NewPeer', { peer_id: peer, you_initiate: false });
         } else {
           if (replacement === 'departure')
@@ -256,6 +349,13 @@ for (const phase of ['remote-offer', 'answer', 'local-answer', 'candidate'] as c
           connections.length === 3 && connections[1]?.closed === true,
           `${replacement}/${phase}: replace the held link; count=${connections.length}; events=${JSON.stringify(events)}`,
         );
+        const lossesBeforeOldResult = diagnostics.filter((line) =>
+          line.startsWith('P2P link lost for'),
+        ).length;
+        assert(
+          lossesBeforeOldResult === (lossReplacements.includes(replacement) ? 2 : 1),
+          'intentional replacement does not report a link failure',
+        );
         resolveReplacement();
         await turn();
         const remote = calls.indexOf(`2:remote-${initiate ? 'answer' : 'offer'}`);
@@ -276,6 +376,11 @@ for (const phase of ['remote-offer', 'answer', 'local-answer', 'candidate'] as c
           }
         }
         await turn();
+        assert(
+          diagnostics.filter((line) => line.startsWith('P2P link lost for')).length ===
+            lossesBeforeOldResult,
+          'retired results and deadlines cannot report replacement loss',
+        );
         assert(
           connections[2]?.closed === false,
           `${replacement}/${phase}: old expiry cannot close the new link`,
@@ -302,6 +407,7 @@ for (const phase of ['remote-offer', 'answer', 'local-answer', 'candidate'] as c
         socket?.onclose?.();
         await running;
         await turn();
+        console.error = originalError;
         performance.now = originalNow;
         globalThis.setTimeout = originalSetTimeout;
         globalThis.clearTimeout = originalClearTimeout;

@@ -4177,3 +4177,44 @@ The browser buffered-signal repair in F74 remains independent. Rust, .NET, and
 Godot SDKs are unaffected because this change only adjusts native reference
 unit-test sockets. No public API, wire, or migration change is needed. The
 broader A22 and #826 audits remain open.
+
+### F76 — Browser link retirement removes failure diagnostics
+
+Continues A20 and A22 in [#826](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/826),
+[#853](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/853),
+and [#889](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/889).
+The browser removes a failed physical link before its P2P timeout snapshot.
+The later snapshot can be null. Connection-state and channel-close events do
+not retain the channel buffers, observed open labels, or SCTP state at loss.
+This prevents a later timeout log from distinguishing these terminal histories.
+
+The browser now writes a snapshot to stderr before removing a failed link.
+It identifies a failed or closed connection, a closed or failed required
+channel, or an expired negotiation operation. Each snapshot includes the
+physical generation, connection and ICE states, SCTP state, and both required
+channels. Intentional plan changes, departures, and retries do not report a
+failure. Old operations cannot report a loss against a replacement link.
+The existing timeout snapshot remains available for links that still exist.
+
+The 124-case deterministic regression fails on the unchanged browser because
+the loss snapshot is absent. It covers held offer application, answer creation,
+local-answer application, and ICE application. Connection loss, required-channel
+close and error, and operation timeout each retain the retiring generation.
+Old operations complete, reject, or remain pending. Late old results and
+expiry do not report replacement loss. Uninterrupted drains, plan replacement,
+retry, departure, and incarnation controls retain their original behavior.
+
+This repairs missing observations. It does not establish the cause of the
+original spontaneous establishment or mesh failures. Keep #853, #889, and
+broader #826 open. Rust, .NET, and Godot SDKs are unaffected because they do
+not import the private browser orchestrator. Wire formats, JSONL event types,
+public SDK APIs, and recovery behavior do not change.
+
+The complete browser unit suite, type checks, build, and formatting pass.
+The rebuilt bundle passes two native/browser retry controls, two restore
+controls for #853, and two three-player mesh controls for #889 in 19.969
+seconds. All fourteen endpoint event streams and server logs are retained
+locally under `progress/session-461-final-interop`. Executable and bundle
+hashes match before and after the six runs. No original spontaneous failure
+recurs. These runs qualify the added diagnostics without settling either
+original cause.
