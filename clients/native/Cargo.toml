@@ -6,7 +6,7 @@ license = "MIT"
 authors = ["Ambiguous Interactive <eli@theambiguous.co>"]
 description = "Native Rust reference client for the Signal Fish protocol v3 (real WebRTC stack)"
 repository = "https://github.com/Ambiguous-Interactive/signal-fish-server"
-rust-version = "1.91.0"
+rust-version = "1.94.0"
 publish = false
 
 # Matches the server crate: this reference client carries no `unsafe` block.
@@ -20,13 +20,13 @@ signal-fish-server = { path = "../.." }
 # Real WebRTC stack (peer connections + data channels).
 webrtc = "0.21.1"
 rtc = "0.21.1"
-async-trait = "0.1"
+async-trait = "0.1.92"
 # webrtc 0.21 binds exactly the addresses supplied by the application. Enumerate
 # concrete interfaces so host ICE candidates never advertise a wildcard address.
-if-addrs = "0.15"
+if-addrs = "0.15.0"
 
 # Async runtime & WebSocket wire layer.
-tokio = { version = "1.52", features = [
+tokio = { version = "1.53.3", features = [
     "rt-multi-thread",
     "macros",
     "time",
@@ -34,25 +34,25 @@ tokio = { version = "1.52", features = [
     "net",
     "io-util",
 ] }
-tokio-tungstenite = "0.29"
-futures-util = { version = "0.3", features = ["std"] }
+tokio-tungstenite = "0.30.0"
+futures-util = { version = "0.3.34", features = ["std"] }
 
 # Serialization (JSON text frames + JSONL event output).
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-rmp = "0.8"
-rmp-serde = "1.3"
-serde_bytes = "0.11"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+rmp = "0.8.15"
+rmp-serde = "1.3.1"
+serde_bytes = "0.11.19"
 # Lossless base64 rendering of opaque game-data payloads in emitted events
 # (issue #627): the bytes are the game's business, so events must not guess
 # an encoding — version-matched with the server crate's base64 usage.
-base64 = "0.22"
+base64 = "0.23.1"
 
 # CLI, errors, logging (all logging goes to stderr; stdout is events-only).
-clap = { version = "4.6", features = ["derive"] }
-anyhow = "1.0"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = [
+clap = { version = "4.6.7", features = ["derive"] }
+anyhow = "1.0.104"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = [
     "fmt",
     "env-filter",
     "std",
@@ -70,16 +70,16 @@ browser-interop = []
 [dev-dependencies]
 # The interop harness spawns the server binary + N client binaries as real
 # child processes; `process` mirrors the root crate's test-only tokio features.
-tokio = { version = "1.52", features = ["process", "test-util"] }
-tempfile = "3.27"
+tokio = { version = "1.53.3", features = ["process", "test-util"] }
+tempfile = "3.27.0"
 # The harness compares player UUIDs for the deterministic offerer assertion
 # (PlayerId is a uuid::Uuid alias in the server crate; lib code never needs
 # the crate directly).
-uuid = { version = "1.23", features = ["serde"] }
+uuid = { version = "1.28.0", features = ["serde"] }
 # The starved-runtime matrix (tests/starved_runtime_e2e.rs) floods a real
 # server process per test; serializing keeps the cells from CPU-starving each
 # other under plain `cargo test` (each cell is deliberately load-heavy).
-serial_test = "3.5"
+serial_test = "4.0.1"
 
 [[bin]]
 name = "signal-fish-reference-native"

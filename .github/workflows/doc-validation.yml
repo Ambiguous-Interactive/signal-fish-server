@@ -60,7 +60,7 @@ env:
   # Keep these pinned versions in sync with .devcontainer/Dockerfile ARGs.
   # Enforced by scripts/check-tooling-parity.sh.
   TAPLO_CLI_VERSION: 0.10.0
-  YQ_VERSION: v4.53.2
+  YQ_VERSION: v4.54.1
   # Enforce strict rustdoc validation
   RUSTDOCFLAGS: "-D warnings -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links -D rustdoc::invalid_codeblock_attributes"
 
@@ -402,7 +402,7 @@ jobs:
           echo "✓ All YAML blocks valid ($total checked)"
 
       - name: Install TOML validator
-        uses: taiki-e/install-action@v2.87.22
+        uses: taiki-e/install-action@v2.87.28
         with:
           tool: taplo-cli@${{ env.TAPLO_CLI_VERSION }}
           fallback: none

@@ -10,10 +10,10 @@ readonly GODOT_PROJECT="${FIXTURE_ROOT}/project"
 readonly GODOT_BIN_DIR="${GODOT_PROJECT}/bin"
 readonly EXPORT_DIR="${GODOT_PROJECT}/build"
 readonly ARTIFACT_DIR="${FIXTURE_ROOT}/artifacts"
-readonly NIGHTLY="nightly-2026-03-01"
+readonly NIGHTLY="nightly-2026-10-16"
 readonly TARGET="wasm32-unknown-emscripten"
-readonly EMSDK_VERSION="3.1.74"
-readonly GODOT_VERSION="4.5"
+readonly EMSDK_VERSION="6.0.12"
+readonly GODOT_VERSION="4.7.2"
 readonly LIBRARY_NAME="signal_fish_fortress_wasm_interop"
 readonly TARGET_DIR="${REPO_ROOT}/target/fortress-wasm"
 readonly COMMON_RUSTFLAGS="-Z unstable-options -C panic=immediate-abort -C link-arg=-sSIDE_MODULE=2 -C llvm-args=-enable-emscripten-cxx-exceptions=0 -Z default-visibility=hidden -Z link-native-libraries=no"
@@ -35,12 +35,12 @@ if ! emcc --version | head -n 1 | grep -F "${EMSDK_VERSION}" >/dev/null; then
     exit 1
 fi
 
-readonly GODOT_BIN="${GODOT4_BIN:-godot4}"
+readonly GODOT_BIN="${GDRUST_GODOT_BIN:-${GODOT4_BIN:-godot4}}"
 if [[ ! -x "${GODOT_BIN}" ]] && ! command -v "${GODOT_BIN}" >/dev/null 2>&1; then
     printf 'BUSTED: Godot executable not found: %s\n' "${GODOT_BIN}" >&2
     exit 1
 fi
-if ! "${GODOT_BIN}" --version | grep -Eq "^${GODOT_VERSION}\.stable"; then
+if [[ "$("${GODOT_BIN}" --version)" != "${GODOT_VERSION}.stable.official."* ]]; then
     printf 'BUSTED: Godot %s stable is required\n' "${GODOT_VERSION}" >&2
     "${GODOT_BIN}" --version >&2
     exit 1
@@ -50,14 +50,16 @@ if ! rustup toolchain list | grep -q "^${NIGHTLY}"; then
     exit 1
 fi
 
+export GDRUST_GODOT_BIN="${GODOT_BIN}"
+
 mkdir -p "${GODOT_BIN_DIR}" "${EXPORT_DIR}" "${ARTIFACT_DIR}"
 
 feature_tree="${ARTIFACT_DIR}/cargo-feature-tree.txt"
 cargo +"${NIGHTLY}" tree --manifest-path "${MANIFEST_PATH}" --locked -e features >"${feature_tree}"
-grep -F 'signal-fish-client v0.13.0' "${feature_tree}" >/dev/null
-grep -F 'signal-fish-client-godot v0.13.0' "${feature_tree}" >/dev/null
-grep -F 'fortress-rollback v0.12.0' "${feature_tree}" >/dev/null
-grep -F 'godot v0.4.5' "${feature_tree}" >/dev/null
+grep -F 'signal-fish-client v0.14.0' "${feature_tree}" >/dev/null
+grep -F 'signal-fish-client-godot v0.14.0' "${feature_tree}" >/dev/null
+grep -F 'fortress-rollback v0.13.0' "${feature_tree}" >/dev/null
+grep -F 'godot v0.5.5' "${feature_tree}" >/dev/null
 if grep -Eq 'transport-websocket-emscripten|sync-send' "${feature_tree}"; then
     printf 'BUSTED: forbidden raw-WebSocket or Send+Sync feature in released graph\n' >&2
     exit 1
@@ -136,4 +138,4 @@ timeout --foreground 180s "${harness_launcher[@]}" node "${FIXTURE_ROOT}/harness
 timeout --foreground 180s "${harness_launcher[@]}" node "${FIXTURE_ROOT}/harness.mjs" \
     inbound-overflow "${EXPORT_DIR}" "${SERVER_BIN}" "${ARTIFACT_DIR}" "${BUILD_SHA}"
 
-printf 'HEALTHY: released Signal Fish client 0.13.0 satisfies the Godot no-thread WASM healthy gates\n'
+printf 'HEALTHY: released Signal Fish client 0.14.0 satisfies the Godot no-thread WASM healthy gates\n'

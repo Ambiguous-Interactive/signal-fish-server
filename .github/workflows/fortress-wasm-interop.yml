@@ -33,15 +33,15 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_NIGHTLY: nightly-2026-03-01
-  EMSDK_VERSION: 3.1.74
-  GODOT_VERSION: "4.5"
-  GODOT_RELEASE: 4.5-stable
-  GODOT_EDITOR_SHA512: b5bd5d8a4dd3f44de1d123361beabaafa4825dd05b5e20fd2bfa540f32594f81d82e7c4e86fae420f4faee77d9def573b570f8b156e9c84a4dc2d5123d09e852
-  GODOT_TEMPLATES_SHA512: 1643140ac56ba8e6d18be34eb27788ec6a216e4a3f45dbcc3e01caf2b28ae9c8229832061e30200e296a1be46cec61e2b54c6d9df190b921ea1d0ad5f3f25ed1
-  GODOT_DOWNLOADS: ${{ github.workspace }}/.godot-downloads/4.5
-  GODOT_ROOT: ${{ github.workspace }}/.godot-ci/4.5
-  XDG_DATA_HOME: ${{ github.workspace }}/.godot-data/4.5
+  RUST_NIGHTLY: nightly-2026-10-16
+  EMSDK_VERSION: 6.0.12
+  GODOT_VERSION: "4.7.2"
+  GODOT_RELEASE: 4.7.2-stable
+  GODOT_EDITOR_SHA512: 9aa00f7a605200940bce3027a567b782f49bd8e940dd06ae9e987bd65aee1b1467edd56ed84fcdcbdd44354bf613bdbb4e5d2913e925850368e150c59ed54c65
+  GODOT_TEMPLATES_SHA512: ca4d71c4d7b81dfc15d1a98baa07534aa95b03fdda78a0075b06672e1648d2e5f40980c9adc28d23e1b92e732ee7bf3461997aa804af74ec2fcd7a93ccb84079
+  GODOT_DOWNLOADS: ${{ github.workspace }}/.godot-downloads/4.7.2
+  GODOT_ROOT: ${{ github.workspace }}/.godot-ci/4.7.2
+  XDG_DATA_HOME: ${{ github.workspace }}/.godot-data/4.7.2
 
 jobs:
   browser-interop:
@@ -108,7 +108,7 @@ jobs:
           cp -R "$template_stage/templates" \
             "$XDG_DATA_HOME/godot/export_templates/${GODOT_VERSION}.stable"
           chmod +x "$GODOT_ROOT/Godot_v${GODOT_RELEASE}_linux.x86_64"
-          echo "GODOT4_BIN=$GODOT_ROOT/Godot_v${GODOT_RELEASE}_linux.x86_64" >> "$GITHUB_ENV"
+          echo "GDRUST_GODOT_BIN=$GODOT_ROOT/Godot_v${GODOT_RELEASE}_linux.x86_64" >> "$GITHUB_ENV"
       - name: Compile exact released graph for Emscripten
         env:
           RUSTFLAGS: >-
@@ -161,7 +161,7 @@ jobs:
         run: bash scripts/run-fortress-wasm-interop.sh
       - name: Upload failure evidence
         if: failure()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: fortress-wasm-${{ matrix.browser }}-failure-${{ github.run_id }}
           path: |
@@ -186,7 +186,7 @@ jobs:
         with:
           toolchain: 1.94.0
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2.87.22
+        uses: taiki-e/install-action@v2.87.28
         with:
           tool: cargo-deny@0.20.2
       - name: Run cargo-deny

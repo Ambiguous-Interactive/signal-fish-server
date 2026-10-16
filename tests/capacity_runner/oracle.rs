@@ -1202,10 +1202,10 @@ pub fn summarize(
                         .get(&(recipient.as_str(), sender, *epoch))
                         .map_or(&[][..], Vec::as_slice),
                 };
-                let mut covered: BTreeSet<u64> = unique
-                    .iter()
-                    .map(|(server_seq, _, _)| *server_seq)
-                    .collect();
+                let mut covered = StreamCoverage::default();
+                for (server_seq, _, _) in &unique {
+                    covered.insert(*server_seq, *server_seq);
+                }
                 for gap in stream_gaps {
                     if gap.to_seq > total_owed {
                         invalid_gaps.record_violation(
@@ -1221,7 +1221,7 @@ pub fn summarize(
                     // Reject BEFORE inserting: a rejected range contributes
                     // no coverage, so its non-overlapping remainder stays an
                     // honest uncovered omission in the totals.
-                    if (gap.from_seq..=gap.to_seq).any(|seq| covered.contains(&seq)) {
+                    if !covered.insert(gap.from_seq, gap.to_seq) {
                         invalid_gaps.record_violation(
                             gap,
                             format!(
@@ -1231,47 +1231,15 @@ pub fn summarize(
                         );
                         continue;
                     }
-                    for seq in gap.from_seq..=gap.to_seq {
-                        covered.insert(seq);
-                    }
                     outcome.gap_covered += gap.to_seq - gap.from_seq + 1;
                 }
-                // Work in the owed domain: shift everything at or below the
-                // rejoin floor out (not owed), so the hole scan and the
-                // deficit math see exactly the seat's owed window.
-                let owed: BTreeSet<u64> = covered
-                    .iter()
-                    .filter(|seq| **seq > owed_floor)
-                    .map(|seq| seq - owed_floor)
-                    .collect();
+                // Count covered positions and holes above the seat's floor.
+                let accounting = covered.above(owed_floor);
                 let owed_total = total_owed.saturating_sub(owed_floor);
-                // Holes: uncovered owed sequences at or below the highest
-                // covered position — the head below the first covered value
-                // and the spans between covered values. A hole means the
-                // server relayed (stamped) past it without delivering or
-                // reporting it — silent loss. The first hole is named
-                // exactly (in stream coordinates).
-                let mut holes: u64 = 0;
-                let mut first_hole: Option<u64> = None;
-                if let Some(lowest) = owed.first() {
-                    if *lowest > 1 {
-                        holes += *lowest - 1;
-                        first_hole = Some(owed_floor + 1);
-                    }
-                }
-                let mut previous: Option<u64> = None;
-                for seq in &owed {
-                    if let Some(position) = previous {
-                        let span = seq - position - 1;
-                        if span > 0 {
-                            holes += span;
-                            first_hole.get_or_insert(owed_floor + position + 1);
-                        }
-                    }
-                    previous = Some(*seq);
-                }
+                let holes = accounting.holes;
+                let first_hole = accounting.first_hole;
                 let deficit = owed_total
-                    .saturating_sub(count_u64(owed.len()))
+                    .saturating_sub(accounting.covered)
                     .saturating_sub(holes);
                 if holes > 0 {
                     outcome.missing += holes;
@@ -1291,7 +1259,7 @@ pub fn summarize(
                             recipient: recipient.clone(),
                             sender: sender.to_string(),
                             epoch: *epoch,
-                            seq: owed_floor + previous.map_or(0, |highest| highest) + 1,
+                            seq: accounting.highest + 1,
                         });
                     }
                 } else if !connected_through {
@@ -1481,6 +1449,82 @@ pub fn summarize(
     }
 }
 
+/// Disjoint inclusive ranges for one recipient stream. Adjacent ranges merge,
+/// so a compact gap report never expands into one allocation per omitted send.
+/// Reject an overlapping report in full before changing coverage.
+#[derive(Default)]
+struct StreamCoverage {
+    ranges: BTreeMap<u64, u64>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CoverageAccounting {
+    covered: u64,
+    holes: u64,
+    first_hole: Option<u64>,
+    highest: u64,
+}
+
+impl StreamCoverage {
+    fn insert(&mut self, mut from: u64, mut to: u64) -> bool {
+        if from == 0 || from > to {
+            return false;
+        }
+        // The last range beginning at or below `to` is the only candidate
+        // needed to prove overlap in this disjoint, ordered map.
+        if self
+            .ranges
+            .range(..=to)
+            .next_back()
+            .is_some_and(|(_, end)| *end >= from)
+        {
+            return false;
+        }
+        if let Some((&start, &end)) = self.ranges.range(..from).next_back() {
+            if end.checked_add(1) == Some(from) {
+                self.ranges.remove(&start);
+                from = start;
+            }
+        }
+        if let Some(next) = to.checked_add(1) {
+            if let Some(end) = self.ranges.remove(&next) {
+                to = end;
+            }
+        }
+        self.ranges.insert(from, to);
+        true
+    }
+
+    fn above(&self, floor: u64) -> CoverageAccounting {
+        let mut result = CoverageAccounting {
+            covered: 0,
+            holes: 0,
+            first_hole: None,
+            highest: floor,
+        };
+        for (&start, &end) in &self.ranges {
+            if end <= floor {
+                continue;
+            }
+            // end > floor proves floor + 1 fits the run's sequence space.
+            let start = start.max(floor + 1);
+            let hole = start - result.highest - 1;
+            if hole > 0 {
+                result.holes += hole;
+                result.first_hole.get_or_insert(result.highest + 1);
+            }
+            result.covered += end - start + 1;
+            result.highest = end;
+        }
+        result
+    }
+
+    #[cfg(test)]
+    fn stored_ranges(&self) -> usize {
+        self.ranges.len()
+    }
+}
+
 /// Nearest-rank percentile of an ascending-sorted sample list, computed in
 /// exact integer arithmetic: `rank = ceil(count * numerator / denominator)`.
 fn percentile_of_sorted(sorted: &[u64], numerator: u64, denominator: u64) -> u64 {
@@ -1491,4 +1535,148 @@ fn percentile_of_sorted(sorted: &[u64], numerator: u64, denominator: u64) -> u64
     let rank = (count * numerator).div_ceil(denominator);
     let index = usize::try_from(rank).unwrap_or(1).clamp(1, sorted.len());
     sorted[index - 1]
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    // Issue #775: one compact report must not allocate once per omitted send.
+    #[test]
+    fn a_long_gap_retains_one_range_and_exact_floor_accounting() {
+        let mut coverage = StreamCoverage::default();
+        assert!(coverage.insert(1, 1_000_000));
+        assert_eq!(coverage.stored_ranges(), 1);
+        assert_eq!(
+            coverage.above(123),
+            CoverageAccounting {
+                covered: 999_877,
+                holes: 0,
+                first_hole: None,
+                highest: 1_000_000,
+            }
+        );
+        assert!(!coverage.insert(1_000_000, 1_000_001));
+        assert_eq!(coverage.stored_ranges(), 1);
+    }
+
+    /// Frozen position-set reference: insertion order, overlap rejection,
+    /// floors inside ranges, empty windows, and exact first holes must agree.
+    #[test]
+    fn range_coverage_matches_position_set_for_all_small_range_triples() {
+        let ranges: Vec<_> = (1..=5)
+            .flat_map(|start| (start..=5).map(move |end| (start, end)))
+            .collect();
+        for a in &ranges {
+            for b in &ranges {
+                for c in &ranges {
+                    let mut coverage = StreamCoverage::default();
+                    let mut reference = BTreeSet::new();
+                    for &(from, to) in [a, b, c] {
+                        let accepted = !(from..=to).any(|seq| reference.contains(&seq));
+                        assert_eq!(
+                            coverage.insert(from, to),
+                            accepted,
+                            "insert {from}:{to}; {a:?} {b:?} {c:?}"
+                        );
+                        if accepted {
+                            reference.extend(from..=to);
+                        }
+                        for floor in 0..=6 {
+                            let owed: BTreeSet<_> = reference
+                                .iter()
+                                .copied()
+                                .filter(|seq| *seq > floor)
+                                .collect();
+                            let highest = owed.last().copied().unwrap_or(floor);
+                            let missing: Vec<_> = ((floor + 1)..=highest)
+                                .filter(|seq| !owed.contains(seq))
+                                .collect();
+                            assert_eq!(
+                                coverage.above(floor),
+                                CoverageAccounting {
+                                    covered: count_u64(owed.len()),
+                                    holes: count_u64(missing.len()),
+                                    first_hole: missing.first().copied(),
+                                    highest,
+                                },
+                                "floor {floor}; {a:?} {b:?} {c:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn range_coverage_handles_sequence_limits_and_adjacent_bridges() {
+        let mut coverage = StreamCoverage::default();
+        assert!(!coverage.insert(0, 1));
+        assert!(!coverage.insert(2, 1));
+        assert!(coverage.insert(1, 2));
+        assert!(coverage.insert(5, u64::MAX));
+        assert_eq!(coverage.stored_ranges(), 2);
+        assert_eq!(
+            coverage.above(0),
+            CoverageAccounting {
+                covered: u64::MAX - 2,
+                holes: 2,
+                first_hole: Some(3),
+                highest: u64::MAX,
+            }
+        );
+        assert!(!coverage.insert(3, 5));
+        assert_eq!(
+            coverage.stored_ranges(),
+            2,
+            "rejected overlap cannot cover the hole"
+        );
+        assert!(coverage.insert(3, 4));
+        assert_eq!(
+            coverage.stored_ranges(),
+            1,
+            "the bridge merges both neighbors"
+        );
+        assert_eq!(
+            coverage.above(0),
+            CoverageAccounting {
+                covered: u64::MAX,
+                holes: 0,
+                first_hole: None,
+                highest: u64::MAX,
+            }
+        );
+        assert_eq!(
+            coverage.above(u64::MAX),
+            CoverageAccounting {
+                covered: 0,
+                holes: 0,
+                first_hole: None,
+                highest: u64::MAX,
+            }
+        );
+        assert!(!coverage.insert(u64::MAX, u64::MAX));
+    }
+
+    #[test]
+    #[ignore = "isolated coverage scratch profile; run in fresh processes"]
+    fn compact_gap_coverage_memory_profile() {
+        let count = std::env::var("CAPACITY_COVERAGE_PROBE_POSITIONS")
+            .expect("position count")
+            .parse::<u64>()
+            .expect("u64 count");
+        assert!((1..=1_000_000).contains(&count));
+        let mut coverage = StreamCoverage::default();
+        assert!(coverage.insert(1, count));
+        let accounting = coverage.above(count / 10);
+        assert_eq!(accounting.covered, count - count / 10);
+        assert_eq!(accounting.holes, 0);
+        println!(
+            "{}",
+            serde_json::json!({"positions": count,
+            "covered": accounting.covered, "holes": accounting.holes,
+            "first_hole": accounting.first_hole, "highest": accounting.highest})
+        );
+    }
 }

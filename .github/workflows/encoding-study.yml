@@ -79,7 +79,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
       - name: Install Node.js
-        uses: actions/setup-node@v7.0.0
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: "24"
           cache: npm
@@ -109,7 +109,7 @@ jobs:
         shell: bash
         run: |
           curl --fail --location --retry 3 \
-            https://github.com/godotengine/godot/releases/download/4.5.1-stable/Godot_v4.5.1-stable_linux.x86_64.zip \
+            https://github.com/godotengine/godot/releases/download/4.7.2-stable/Godot_v4.7.2-stable_linux.x86_64.zip \
             --output "$RUNNER_TEMP/godot.zip"
           unzip -q "$RUNNER_TEMP/godot.zip" -d "$RUNNER_TEMP/godot"
           echo "$RUNNER_TEMP/godot" >> "$GITHUB_PATH"
@@ -119,8 +119,8 @@ jobs:
       - name: Check language roundtrips and Rust wire agreement
         run: >-
           python3 benches/encoding/cross_language.py --check
-          --godot Godot_v4.5.1-stable_linux.x86_64
+          --godot Godot_v4.7.2-stable_linux.x86_64
       - name: Reconcile recorded measurements and source manifest
         run: >-
           python3 benches/encoding/cross_language.py --verify-recorded
-          benches/encoding/results/2026-10-14-cross-language-aarch64
+          benches/encoding/results/2026-10-16-cross-language-aarch64

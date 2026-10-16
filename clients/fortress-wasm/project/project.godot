@@ -1,4 +1,4 @@
-; Minimal Godot 4.5 no-thread browser interoperability project.
+; Minimal Godot 4.7.2 no-thread browser interoperability project.
 config_version=5
 
 [application]

@@ -3166,6 +3166,56 @@ explicitly and report errors with the artifact path. The repository sweep found
 two other Rust buffered writers, both already flushing. The failure control and
 real-socket artifact/interval replay control passed after the fix.
 
+### C3 compact oracle coverage — #775
+
+The oracle expanded each inclusive gap report into one set entry per omitted
+sequence. It then copied covered positions above the recipient's rejoin floor
+into a second set. A single long gap could therefore require large temporary
+storage even when the report itself was small.
+
+Coverage now uses disjoint inclusive ranges. Adjacent ranges merge. An
+intersecting report contributes no coverage, including its non-overlapping
+remainder. The oracle counts covered positions and holes above the rejoin
+floor directly from range boundaries. Missing counts and the first missing
+sequence retain the same meaning. Duplicate and arrival-order checks still
+use the original receipt stream.
+
+The registered experiment compared the original position-set algorithm with
+the range algorithm in two isolated standard-library test harnesses. Both used
+rustc 1.94.0 on ARM64 Linux under WSL2 without optimization. Each harness inserted
+one gap and evaluated coverage above the one-tenth floor. Sizes were 10,000,
+100,000, and 1,000,000 positions. Each size ran in three fresh baseline processes,
+then three candidate processes. Python `os.wait4` measured peak child RSS.
+All 18 processes exited successfully. Paired covered counts, hole counts,
+first holes, and highest covered positions matched exactly.
+
+| Gap positions | Position-set median KiB (range) | Range median KiB (range) |
+| --- | --- | --- |
+| 10,000 | 8,500 (8,468–8,500) | 8,464 (8,436–8,464) |
+| 100,000 | 8,500 (8,500–8,520) | 8,464 (8,464–8,464) |
+| 1,000,000 | 22,304 (22,176–22,556) | 8,468 (8,468–8,468) |
+
+The child RSS includes the Python fork's initial memory high-water mark.
+Small results therefore include a measurement floor. These numbers isolate
+coverage scratch; they do not measure the full oracle or server capacity.
+The baseline harness retains one set, so it excludes the old oracle's second
+owed-position set. Source harnesses, binary hashes, logs, and every attempt
+remain under `/tmp/capacity-coverage-profile/`. The initial repository-binary
+baseline used rustc 1.91.0 before the dependency update changed the toolchain.
+It remains recorded, but is excluded from this paired comparison.
+
+The million-position control failed before the change because it retained
+1,000,000 entries. It now retains one range. An independent position-set
+reference checks all triples of ranges in a five-position domain, every
+insertion result, and every floor from zero through six. Boundary controls
+cover empty coverage, adjacent bridges, rejected partial overlaps, and
+`u64::MAX`. The ignored `compact_gap_coverage_memory_profile` test can repeat
+the candidate probe with `CAPACITY_COVERAGE_PROBE_POSITIONS`.
+
+Issue #775 remains open. Live events, arrival indexes, sender indexes, and
+replay records still grow with offered work. The required ten-minute live
+cell has not been demonstrated. No accepted capacity point is claimed.
+
 ### C2 generator delay investigation — #795
 
 The scheduled main run

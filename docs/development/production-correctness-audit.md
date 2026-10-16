@@ -3766,3 +3766,44 @@ the native reference orchestrator or its private exchange helper. Each SDK is
 unaffected. Server messages, payloads, defaults, and SDK APIs are unchanged;
 no SDK migration or acceptance issue is required. Final-head hosted tests and
 review remain delivery gates.
+
+### F68 — Pending native exchange sends stop relay processing
+
+Issue #1002 continues A20 after F67. The native exchange helper awaits the
+WebRTC send on the single orchestrator task without a local deadline. The
+shipped driver awaits capacity, its peer core lock, and driver wake work.
+A pending send therefore stops relay input, keepalives, and timer processing.
+The independent binary watchdog can end the process but cannot preserve the
+relay session.
+
+The regression forms a real native pair, then holds the send future at the
+exchange helper. Baseline nextest `a52283cf` fails at the outer watchdog after
+both channels open and the pair reports connected. This is a controlled
+pending-operation history. It does not prove a spontaneous driver stall or
+explain #853 or #889.
+
+Each local exchange enqueue now has a one-second deadline, shortened by the
+existing active operation and run deadline. Checks before work starts and when
+it settles reject already-expired work and ready completions at the cutoff.
+A failed or expired send uses F67's physical-link cleanup and current transport
+report. Completed labels and missing send/receipt debt remain unchanged.
+A timed-out operation can already have queued bytes; the client does not claim
+rollback or delivery certainty. Signaling write failures remain terminal.
+
+The focused history covers both required labels, a permanently pending send,
+a shorter run cutoff, already-expired work, and a ready completion at the
+cutoff. Each failure retains exchange debt and permits exact relay data and
+Ping on the signaling socket. F67's successful real sends, coordinated rebuild,
+ordinary send errors, missing-channel control, and signaling-error control
+remain separate checks. Scoped nextest `838d4ca9` passes all three controls.
+The held-send control also verifies that cancellation releases captured state.
+Hosted interoperability and review remain delivery gates. These controls prove
+a bound for one send and its recovery. Deferred exchange still processes peers
+in sequence; they do not prove keepalive
+responsiveness across an arbitrary mesh of stalled sends. That batch-scheduling
+question remains outside this repair and is tracked in #1003.
+
+The browser API sends synchronously. The Rust, .NET, and Godot SDKs do not
+import this private native reference helper. Server messages, SDK APIs, and
+retry defaults are unchanged. No SDK migration is required.
+The broader A20 and #826 audits remain open.

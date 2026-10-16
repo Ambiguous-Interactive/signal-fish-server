@@ -625,10 +625,10 @@ async fn handshake_writes_keep_the_original_command_cutoff() {
         release.send(()).unwrap();
         let result = write.await;
         if elapsed >= budget {
-            if result.is_ok() {
-                accepted_late.push(elapsed);
+            if let Err(error) = result {
+                assert_eq!(error.code, EXIT_CONNECTION_ERROR);
             } else {
-                assert_eq!(result.unwrap_err().code, EXIT_CONNECTION_ERROR);
+                accepted_late.push(elapsed);
             }
         } else {
             assert!(result.is_ok(), "on-time command: {result:?}");

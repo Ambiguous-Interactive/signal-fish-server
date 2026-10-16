@@ -7,7 +7,7 @@ records reviewed contracts, reproducible findings, and the remaining audit work.
 
 ## Prerequisites
 
-- Rust 1.91.0 or later (see `rust-version` in `Cargo.toml`)
+- Rust 1.94.0 or later (see `rust-version` in `Cargo.toml`)
 - No system libraries required for the default build
 
 ### CI Tooling Parity
@@ -709,7 +709,7 @@ async fn test_websocket_connection() {
 
 ### Minimum Supported Rust Version (MSRV)
 
-The project MSRV is defined in `Cargo.toml` (`rust-version = "1.91.0"`). This is the oldest
+The project MSRV is defined in `Cargo.toml` (`rust-version = "1.94.0"`). This is the oldest
 Rust compiler version guaranteed to build the project.
 
 ### Verifying MSRV Consistency

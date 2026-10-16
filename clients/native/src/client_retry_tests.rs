@@ -3,6 +3,141 @@ use super::*;
 use clap::Parser;
 use futures_util::StreamExt;
 
+// Regression #1002: a held local send must release the orchestrator and preserve relay.
+#[tokio::test]
+async fn stalled_exchange_send_preserves_relay_and_unpaid_debt() {
+    struct SendGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for SendGuard {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    for (label, mode) in [RELIABLE_LABEL, UNRELIABLE_LABEL]
+        .into_iter()
+        .flat_map(|label| {
+            ["pending", "run-deadline", "ready-late", "expired"].map(|mode| (label, mode))
+        })
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(tcp).await.unwrap()
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let mut server_ws = server.await.unwrap();
+        let cli = Cli::parse_from(["reference-native", "--server-url", &url, "--create-room"]);
+        let peer = PlayerId::from_u128(2);
+        let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+        state.current_session_generation = Some(SessionGeneration::from_u128(3));
+        state.webrtc_plan_seen = true;
+        state.establish_pair(peer, true).await.unwrap();
+        let (mut remote, opens) = open_physical_pair(&mut state, &mut server_ws, peer, None).await;
+        for event in opens {
+            state.handle_engine_event(event).await.unwrap();
+        }
+        state.exchange_ledger.note_connected(peer);
+        let other_label = if label == RELIABLE_LABEL {
+            UNRELIABLE_LABEL
+        } else {
+            RELIABLE_LABEL
+        };
+        state.exchange_ledger.note_sent(peer, other_label);
+        if mode == "run-deadline" {
+            state.run_deadline = Deadline::after(Instant::now(), Duration::from_millis(50));
+        } else if mode == "expired" {
+            state.run_deadline = Deadline::after(Instant::now(), Duration::ZERO);
+        }
+        let clock_guard = if mode == "ready-late" {
+            tokio::time::pause();
+            Some(tokio::spawn(async {
+                loop {
+                    tokio::task::yield_now().await;
+                }
+            }))
+        } else {
+            None
+        };
+        let started = Instant::now();
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut calls = 0;
+        let result = tokio::time::timeout(
+            CHANNEL_SEND_TIMEOUT + Duration::from_secs(1),
+            state.send_exchange_with(peer, &[label], |_channel, _text| {
+                calls += 1;
+                let dropped = dropped.clone();
+                async move {
+                    let _guard = SendGuard(dropped);
+                    if mode == "ready-late" {
+                        tokio::time::advance(CHANNEL_SEND_TIMEOUT).await;
+                        Ok(())
+                    } else if mode == "expired" {
+                        Ok(())
+                    } else {
+                        std::future::pending::<webrtc::error::Result<()>>().await
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("a pending local send must retire its link before the outer watchdog");
+        if let Some(guard) = clock_guard {
+            guard.abort();
+            tokio::time::resume();
+        }
+        assert_eq!(calls, usize::from(mode != "expired"), "mode={mode}");
+        assert_eq!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            mode != "expired",
+            "the completed or timed-out send future must release its captured state"
+        );
+        result.expect("a local send timeout must retain the signaling connection");
+        if mode == "pending" {
+            assert!(started.elapsed() >= CHANNEL_SEND_TIMEOUT);
+        }
+        if mode == "run-deadline" {
+            assert!(started.elapsed() < CHANNEL_SEND_TIMEOUT);
+        }
+        assert!(!state.engine.is_paired(peer));
+        assert!(!state.connected_pairs.contains(&peer));
+        assert_eq!(state.transport_status, Some(false));
+        assert!(!state.exchange_ledger.has_sent(peer, label));
+        assert!(state.exchange_ledger.has_sent(peer, other_label));
+        assert!(!state.exchange_ledger.unmet_criteria().is_empty());
+        wire::send_game_data(&mut state.ws, json!({"after_stalled_send": label}))
+            .await
+            .unwrap();
+        state.send_message(&ClientMessage::Ping).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut fallback_seen = false;
+            let mut relay_seen = false;
+            loop {
+                let frame = server_ws.next().await.unwrap().unwrap();
+                if let Message::Text(text) = frame {
+                    match serde_json::from_str::<ClientMessage>(&text).unwrap() {
+                        ClientMessage::TransportStatus {
+                            transport: Transport::WebRtc,
+                            connected: false,
+                        } => fallback_seen = true,
+                        ClientMessage::GameData { data, .. } => {
+                            assert_eq!(data["after_stalled_send"], label);
+                            relay_seen = true;
+                        }
+                        ClientMessage::Ping => {
+                            assert!(fallback_seen && relay_seen);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        })
+        .await
+        .expect("relay and Ping remain writable after local send timeout");
+        remote.remove_peer(state.my_id).await.unwrap();
+    }
+}
+
 // Regression #1000: a local channel send failure must preserve the relay floor.
 #[tokio::test]
 async fn exchange_send_after_channel_close_preserves_relay_and_debt() {

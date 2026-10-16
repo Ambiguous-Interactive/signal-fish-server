@@ -16,9 +16,11 @@ The engine closes channels with other delivery settings before admission.
 **Migration:** Custom peers must use these settings for the required labels.
 The engine cancels their polling tasks when it removes a peer or stops.
 A remote close or a stopped channel event stream triggers link cleanup and
-relay fallback. A missing channel or failed exchange send uses the same cleanup
-and keeps the signaling session live. Failed sends keep their exchange debt;
-a failed signaling write still ends the session. The engine observes both selected channels as open before
+relay fallback. A missing channel, failed send, or stalled exchange send uses
+the same cleanup and keeps the signaling session live. Each local exchange
+send has a one-second limit and respects the shorter active operation deadline.
+A failed or expired send keeps its exchange debt; a failed signaling write
+still ends the session. The engine observes both selected channels as open before
 reporting a connected pair. Delayed open callbacks do not revive channels
 that already closed. A channel can still close after its state check.
 **Migration:** Native library callers must now await `Engine::note_channel_open`.

@@ -87,6 +87,10 @@ pub const EXIT_HARD_TIMEOUT: i32 = 4;
 /// re-sent, so waiting for it would never fire the probe).
 const RELAY_SEND_SETTLE: Duration = Duration::from_millis(250);
 
+// A probe only enqueues local data. A stalled driver must release the
+// orchestrator promptly so it can process relay traffic and keepalives.
+const CHANNEL_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+
 fn checked_deadline(start: Instant, duration: Duration) -> Instant {
     start.checked_add(duration).unwrap_or(start)
 }
@@ -2127,6 +2131,22 @@ impl Orchestrator<'_> {
     }
 
     async fn send_exchange(&mut self, peer: PlayerId, labels: &[&str]) -> Result<(), FatalError> {
+        self.send_exchange_with(peer, labels, |channel, text| async move {
+            channel.send_text(&text).await
+        })
+        .await
+    }
+
+    async fn send_exchange_with<Send, SendFuture>(
+        &mut self,
+        peer: PlayerId,
+        labels: &[&str],
+        mut send: Send,
+    ) -> Result<(), FatalError>
+    where
+        Send: FnMut(std::sync::Arc<dyn webrtc::data_channel::DataChannel>, String) -> SendFuture,
+        SendFuture: Future<Output = webrtc::error::Result<()>>,
+    {
         for &label in labels {
             if self.exchange_ledger.has_sent(peer, label) {
                 continue;
@@ -2135,11 +2155,22 @@ impl Orchestrator<'_> {
                 r#"{{"from":"{}","channel":"{}","seq":0}}"#,
                 self.my_id, label
             );
+            let operation = self.negotiation_deadline(peer);
+            let local = Deadline::after(Instant::now(), CHANNEL_SEND_TIMEOUT);
+            let deadline = match (operation.finite(), local.finite()) {
+                (Some(a), Some(b)) => a.min(b).into(),
+                (Some(_), None) => operation,
+                _ => local,
+            };
+            let expired = || format!("send on {label} to {peer} exceeded its local deadline");
             let result = match self.engine.channel(peer, label) {
-                Some(channel) => channel
-                    .send_text(&text)
-                    .await
-                    .map_err(|error| format!("send on {label} to {peer} failed: {error}")),
+                Some(_) if deadline.is_due(Instant::now()) => Err(expired()),
+                Some(channel) => match deadline.timeout(send(channel, text.clone())).await {
+                    Ok(result) if !deadline.is_due(Instant::now()) => {
+                        result.map_err(|error| format!("send on {label} to {peer} failed: {error}"))
+                    }
+                    _ => Err(expired()),
+                },
                 None => Err(format!("open pair with {peer} is missing channel {label}")),
             };
             if let Err(message) = result {

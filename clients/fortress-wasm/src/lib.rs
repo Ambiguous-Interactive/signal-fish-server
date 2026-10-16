@@ -27,10 +27,10 @@ const MAX_STALL_RATE_PER_MILLE: u64 = 20;
 const MIN_ACTIVE_CALLBACKS: u64 = 600;
 const NEGATIVE_ACTIVE_CALLBACK_BUDGET: u64 = MIN_ACTIVE_CALLBACKS;
 const RUNTIME_DEADLINE: Duration = Duration::from_secs(90);
-const SIGNAL_FISH_CLIENT_VERSION: &str = "0.13.0";
-const SIGNAL_FISH_CLIENT_GODOT_VERSION: &str = "0.13.0";
-const FORTRESS_ROLLBACK_VERSION: &str = "0.12.0";
-const GODOT_RUST_VERSION: &str = "0.4.5";
+const SIGNAL_FISH_CLIENT_VERSION: &str = "0.14.0";
+const SIGNAL_FISH_CLIENT_GODOT_VERSION: &str = "0.14.0";
+const FORTRESS_ROLLBACK_VERSION: &str = "0.13.0";
+const GODOT_RUST_VERSION: &str = "0.5.5";
 const WASM_TARGET: &str = "wasm32-unknown-emscripten";
 
 type Client = SignalFishPollingClient<GodotWebSocketTransport>;
@@ -305,15 +305,15 @@ impl Runtime {
             return Err("build_sha must be a full 40-character Git object id".to_owned());
         }
         if config.godot_runtime.major != 4
-            || config.godot_runtime.minor != 5
-            || config.godot_runtime.patch != 0
+            || config.godot_runtime.minor != 7
+            || config.godot_runtime.patch != 2
             || config.godot_runtime.status != "stable"
             || config.godot_runtime.build != "official"
             || config.godot_runtime.hash.is_empty()
-            || config.godot_runtime.string != "4.5-stable (official)"
+            || config.godot_runtime.string != "4.7.2-stable (official)"
         {
             return Err(format!(
-                "unsupported Godot runtime identity {} (expected 4.5.0 stable)",
+                "unsupported Godot runtime identity {} (expected 4.7.2 stable)",
                 config.godot_runtime.string
             ));
         }
@@ -1187,7 +1187,9 @@ impl INode for FortressWasmPeer {
                 self.report_json = Some(json);
                 self.completed = true;
             }
-            Err(error) => godot_error!("FORTRESS_WASM report serialization error: {error}"),
+            Err(error) => {
+                godot_error!("FORTRESS_WASM report serialization error: {error}");
+            }
         }
     }
 }

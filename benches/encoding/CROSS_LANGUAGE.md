@@ -7,7 +7,7 @@ TypeScript, C#, and GDScript use the same four frozen inputs as the
 
 ## Run
 
-Install Node.js 24, .NET SDK 10.0.402, Godot 4.5.1, and the repository's Rust
+Install Node.js 24, .NET SDK 10.0.402, Godot 4.7.2, and the repository's Rust
 toolchain. Restore the locked TypeScript graph once:
 
 ```bash
@@ -60,8 +60,8 @@ separate controls. The GDScript adapter is measurement code, not a general parse
 | Language | Codec | Contract and limit |
 | --- | --- | --- |
 | TypeScript | `@msgpack/msgpack` 3.1.3 | Named fields; `forceIntegerToFloat` preserves negative zero but writes every number as float64 |
-| TypeScript | `@bufbuild/protobuf` 2.12.1 | Generated schema; packed repeated doubles |
-| C# | `Google.Protobuf` 3.33.0 | Generated schema; packed repeated doubles |
+| TypeScript | `@bufbuild/protobuf` 2.16.0 | Generated schema; packed repeated doubles |
+| C# | `Google.Protobuf` 3.36.2 | Generated schema; packed repeated doubles |
 | GDScript | Godot4MessagePack | Named fields; integers normalized; floats encoded as float32 |
 | GDScript | Schema varint | Schema field order; unsigned LEB128; ZigZag axes; float64 coordinates |
 
@@ -96,3 +96,7 @@ all encode/decode samples, wire bytes, runtime versions, host limits, and source
 hashes beside the Rust baseline. Different runtime and model costs limit direct
 language comparisons. The Rust run uses Criterion's different sampling method.
 The [adoption decision](ADOPTION.md) applies the separate gate in #772.
+
+The [dependency refresh](results/2026-10-16-cross-language-aarch64/README.md)
+retains a new full sample set for the current locks and Godot 4.7.2. The earlier
+baseline remains historical evidence for its recorded sources.
