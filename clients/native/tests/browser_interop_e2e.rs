@@ -440,6 +440,11 @@ async fn native_restore_restarts_browser_bidirectional_exchange() {
                 while events_named(&native.events, "channel_message").len() < 2 {
                     native.await_event("channel_message", EVENT_TIMEOUT).await;
                 }
+                while events_named(&native.events, "channel_message_sent").len() < 2 {
+                    native
+                        .await_event("channel_message_sent", EVENT_TIMEOUT)
+                        .await;
+                }
             })
             .await
             .expect("initial native exchange");
@@ -486,6 +491,17 @@ async fn native_restore_restarts_browser_bidirectional_exchange() {
                 < 2
             {
                 client.await_event("channel_message", EVENT_TIMEOUT).await;
+            }
+            while events_named(
+                &client.events[initial_lengths[index]..],
+                "channel_message_sent",
+            )
+            .len()
+                < 2
+            {
+                client
+                    .await_event("channel_message_sent", EVENT_TIMEOUT)
+                    .await;
             }
         })
         .await

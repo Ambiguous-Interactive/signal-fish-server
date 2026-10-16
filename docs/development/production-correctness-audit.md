@@ -3863,6 +3863,14 @@ burst control fails when the input-burst bound is removed, with Tokio's
 cooperative yield disabled. No timeout is enlarged and no cancelled send is
 recorded as successful.
 
+Hosted restore validation exposed a separate test-order assumption. The test
+waited for inbound reliable data, then required the local send event to be
+already recorded. A held local exchange gate now forces the inbound event
+first and makes the old assertion fail. The repaired oracle waits for both
+directions within the same original deadline, then keeps the exact counts,
+payload checks, and final exchange checks. This repairs the test oracle;
+it does not identify a new transport delivery defect.
+
 The browser sends synchronously and has no matching deferred async batch.
 Rust SDK `da8f2d16` uses a nonblocking driver seam, .NET SDK `e467c871` builds
 its own C# assembly, and Godot SDK `2a74de36` uses the engine mesh transport.
