@@ -9,16 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add browser reference-client MessagePack relay support for protocol v2 and v3 (#678).
 - Find a published live room by application, game, and room code beyond the session-list limit (#992).
 - Report native reference-client channel and ICE observations when P2P establishment times out (#853).
 
 ### Changed
 
+- **Breaking:** Native MessagePack runs now encode valid payloads and emit decoded receipt values
+  instead of base64 wrappers (#678).
 - Refresh running Direct session plans immediately when the host changes or loses its endpoint (#947).
   **Breaking:** Rust library callers must use `handle_provide_connection_info` through `Arc<EnhancedGameServer>`.
 
 ### Fixed
 
+- Keep browser opaque relay sessions connected when mixed-room senders use JSON fallback (#994).
 - Retry native and browser reference-client game starts when players become ready again (#990).
 - Give native reference clients the full Pong response window after a slow successful Ping write (#987).
 - Reject native reference-client WebSocket writes that finish after their write or handshake window expires (#985).

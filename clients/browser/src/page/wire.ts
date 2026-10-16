@@ -5,6 +5,7 @@
 // hand-models only the envelope fields it actually reads — drift is caught by
 // the interop suite, which drives this client against the real server binary.
 
+import { encode, decode } from '@msgpack/msgpack';
 import { monotonicNowMs, scheduleDeadline } from '../shared/deadline.js';
 import type { GameDataFormat } from '../shared/types.js';
 import type { DeliveryClass } from './accountability.js';
@@ -105,6 +106,57 @@ export function sendOpaqueGameData(
   const frame = new ArrayBuffer(bytes.byteLength);
   new Uint8Array(frame).set(bytes);
   sendBinary(frame);
+}
+
+/** Send a normalized JSON value as a raw MessagePack payload. */
+export function sendMessagePackGameData(
+  sendBinary: (frame: ArrayBuffer) => void,
+  data: unknown,
+): void {
+  sendOpaqueGameData(sendBinary, encode(normalizeOutgoingJsonValue(data)));
+}
+
+function messagePackJsonValue(value: unknown): unknown {
+  if (typeof value === 'bigint') {
+    const number = Number(value);
+    if (!Number.isSafeInteger(number))
+      throw new Error('MessagePack integer is not exactly representable');
+    return number;
+  }
+  if (Array.isArray(value)) return value.map(messagePackJsonValue);
+  if (
+    value !== null &&
+    typeof value === 'object' &&
+    Object.getPrototypeOf(value) === Object.prototype
+  ) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, messagePackJsonValue(item)]),
+    );
+  }
+  return value;
+}
+
+/** Accept JSON fallback and the version's MessagePack relay envelope. */
+export function classifyMessagePackNegotiatedServerInput(
+  data: unknown,
+  version: number,
+): ServerFrame {
+  if (typeof data === 'string') return classifyTextServerInput(data, 'message_pack');
+  if (!(data instanceof ArrayBuffer || ArrayBuffer.isView(data))) {
+    throw new Error('expected text or binary MessagePack input');
+  }
+  const frame = parseBinaryGameDataFrame(data, version);
+  if (frame.data['encoding'] !== 'message_pack')
+    throw new Error('expected MessagePack payload encoding');
+  const payload = frame.data['payload'] as Uint8Array;
+  const value = normalizeOutgoingJsonValue(
+    messagePackJsonValue(decode(payload, { useBigInt64: true })),
+  );
+  const { payload: _payload, encoding: _encoding, ...metadata } = frame.data;
+  return {
+    type: 'GameData',
+    data: { ...metadata, data: value, ...(version >= 3 ? { class: 'reliable' } : {}) },
+  };
 }
 
 /**
@@ -302,14 +354,22 @@ export function parseServerFrame(text: string): ServerFrame {
 
 /** Decode the mandatory MessagePack metadata envelope on a v3 binary frame. */
 export function parseV3BinaryGameDataFrame(wire: ArrayBuffer | ArrayBufferView): ServerFrame {
+  return parseBinaryGameDataFrame(wire, 3);
+}
+
+function parseBinaryGameDataFrame(
+  wire: ArrayBuffer | ArrayBufferView,
+  version: number,
+): ServerFrame {
   const bytes = ArrayBuffer.isView(wire)
     ? new Uint8Array(wire.buffer, wire.byteOffset, wire.byteLength)
     : new Uint8Array(wire);
   const reader = new MessagePackReader(bytes);
   const fieldCount = reader.readMapLength('envelope');
-  if (fieldCount !== 5) {
+  const expectedFields = version >= 3 ? 5 : 3;
+  if (fieldCount !== expectedFields) {
     throw new Error(
-      `v3 binary GameData envelope must contain exactly 5 fields, got ${fieldCount}`,
+      `v${version} binary GameData envelope must contain exactly ${expectedFields} fields, got ${fieldCount}`,
     );
   }
 
@@ -347,9 +407,11 @@ export function parseV3BinaryGameDataFrame(wire: ArrayBuffer | ArrayBufferView):
         payload = reader.readBinary('payload');
         break;
       case 'seq':
+        if (version < 3) throw new Error('v2 binary GameData exposed seq');
         seq = reader.readPositiveInteger('seq', MAX_SAFE_BIGINT);
         break;
       case 'epoch':
+        if (version < 3) throw new Error('v2 binary GameData exposed epoch');
         epoch = reader.readPositiveInteger('epoch', BigInt(MAX_U32));
         break;
       default:
@@ -362,8 +424,7 @@ export function parseV3BinaryGameDataFrame(wire: ArrayBuffer | ArrayBufferView):
     fromPlayer === undefined ||
     encodingValue === undefined ||
     payload === undefined ||
-    seq === undefined ||
-    epoch === undefined
+    (version >= 3 && (seq === undefined || epoch === undefined))
   ) {
     throw new Error('v3 binary GameData envelope is missing a required field');
   }
@@ -373,8 +434,7 @@ export function parseV3BinaryGameDataFrame(wire: ArrayBuffer | ArrayBufferView):
       from_player: fromPlayer,
       encoding: encodingValue,
       payload,
-      seq,
-      epoch,
+      ...(version >= 3 ? { seq, epoch } : {}),
     },
   };
 }
@@ -581,9 +641,15 @@ export function classifyJsonNegotiatedServerInput(data: unknown): ServerFrame {
       'received a non-text WebSocket frame while game_data_format=json was negotiated',
     );
   }
+  return classifyTextServerInput(data, 'json');
+}
+
+function classifyTextServerInput(data: string, format: string): ServerFrame {
   const frame = parseServerFrame(data);
   if (frame.type === 'GameDataBinary') {
-    throw new Error('received text GameDataBinary while game_data_format=json was negotiated');
+    throw new Error(
+      `received text GameDataBinary while game_data_format=${format} was negotiated`,
+    );
   }
   return frame;
 }
@@ -591,17 +657,10 @@ export function classifyJsonNegotiatedServerInput(data: unknown): ServerFrame {
 /**
  * Parse the mixed stream selected by an opaque `game_data_format` (#627):
  * server control frames stay on text, game data arrives as strict v3 binary
- * envelopes, and a text `GameData` frame is the protocol error it is under
- * that negotiation.
+ * envelopes, and compatible senders can deliver JSON text fallback.
  */
 export function classifyOpaqueNegotiatedServerInput(data: unknown): ServerFrame {
-  if (typeof data === 'string') {
-    const frame = parseServerFrame(data);
-    if (frame.type === 'GameData') {
-      throw new Error('received text GameData while an opaque game_data_format was negotiated');
-    }
-    return frame;
-  }
+  if (typeof data === 'string') return classifyTextServerInput(data, 'opaque');
   if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
     try {
       return parseV3BinaryGameDataFrame(data);
@@ -638,8 +697,10 @@ export function negotiatedGameDataFormat(
   if (!value.includes(requested)) {
     throw new Error(
       `server does not advertise game_data_format '${requested}' ` +
-        `(ProtocolInfo.game_data_formats: [${value.join(', ')}]); opaque encodings require the ` +
-        'protocol.enable_rkyv_game_data / protocol.enable_protobuf_game_data server knobs',
+        `(ProtocolInfo.game_data_formats: [${value.join(', ')}]); enable ` +
+        (requested === 'message_pack'
+          ? 'protocol.enable_message_pack_game_data'
+          : 'protocol.enable_rkyv_game_data / protocol.enable_protobuf_game_data server knobs'),
     );
   }
   return requested;

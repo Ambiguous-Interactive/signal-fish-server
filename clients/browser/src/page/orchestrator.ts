@@ -53,6 +53,7 @@ import {
   NON_TEXT_APPLICATION_FRAME,
   bytesToBase64,
   classifyJsonNegotiatedServerInput,
+  classifyMessagePackNegotiatedServerInput,
   classifyOpaqueNegotiatedServerInput,
   clientFrame,
   connect,
@@ -61,6 +62,7 @@ import {
   negotiatedProtocolVersion,
   sendGameData,
   sendOpaqueGameData,
+  sendMessagePackGameData,
   type ServerFrame,
 } from './wire.js';
 import { Backlog, utf8Bytes } from '../shared/backlog.js';
@@ -988,7 +990,7 @@ class Orchestrator {
       }
       // The opaque wire shape is v3-only for this client (#627): the strict
       // binary envelope is the only shape that carries sender attribution.
-      if (negotiated < 3) {
+      if (effectiveFormat !== 'message_pack' && negotiated < 3) {
         throw FatalError.protocol(
           `opaque game data requires protocol version 3; the server negotiated v${negotiated}`,
         );
@@ -1187,7 +1189,12 @@ class Orchestrator {
       frame =
         this.effectiveFormat === 'json'
           ? classifyJsonNegotiatedServerInput(data)
-          : classifyOpaqueNegotiatedServerInput(data);
+          : this.effectiveFormat === 'message_pack'
+            ? classifyMessagePackNegotiatedServerInput(
+                data,
+                this.negotiatedVersion ?? this.config.protocolVersion,
+              )
+            : classifyOpaqueNegotiatedServerInput(data);
     } catch (error) {
       release();
       this.failFatal(FatalError.protocol(`invalid ServerMessage frame: ${describe(error)}`));
@@ -2355,6 +2362,10 @@ class Orchestrator {
     }
     if (this.effectiveFormat === 'json') {
       sendGameData((frame) => this.sendFrame(frame), {
+        relay_msg: this.config.relayPayload,
+      });
+    } else if (this.effectiveFormat === 'message_pack') {
+      sendMessagePackGameData((frame) => this.sendBinaryFrame(frame), {
         relay_msg: this.config.relayPayload,
       });
     } else {

@@ -143,7 +143,7 @@ for (const value of ['rkyv', 'protobuf'] as const) {
     `--game-data-format ${value} must parse exactly`,
   );
 }
-for (const value of ['message_pack', 'JSON', '']) {
+for (const value of ['msgpack', 'JSON', '']) {
   let rejected = false;
   try {
     parseArgs([
@@ -223,4 +223,20 @@ for (const value of ['-1', '1.5', '256', '9007199254740992', '1e0']) {
     rejected = error instanceof UsageError;
   }
   assert(rejected, `retry count ${value} must be rejected`);
+}
+
+for (const version of ['2', '3']) {
+  const messagePack = parseArgs([
+    '--server-url',
+    'ws://127.0.0.1/ws',
+    '--create-room',
+    '--protocol-version',
+    version,
+    '--game-data-format',
+    'message_pack',
+  ]);
+  assert(
+    messagePack?.config.gameDataFormat === 'message_pack',
+    `v${version} must accept MessagePack`,
+  );
 }

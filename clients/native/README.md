@@ -162,10 +162,17 @@ snapshots are checked for a positive stable interval and monotonic cumulative
 counters. Unsupported-format errors are optional rate-limited advisories: when
 present they require a prior causal exact report, but need not be adjacent to
 it. V2 mode rejects all v3 stamps/reports and remains reliable FIFO; raw
-binary game data is always reliable. This runtime negotiates
-`game_data_format: "json"`, so an incoming binary frame or text
-`GameDataBinary` is a protocol error. The strict MessagePack decoder remains a
-tested protocol utility for binary-capable clients.
+binary game data is always reliable. The default format is `json`, which
+rejects binary frames and text `GameDataBinary`. Use
+`--game-data-format message_pack` with protocol v2 or v3 to encode relay
+payloads as MessagePack and receive ordinary `game_data_received` payloads.
+V2 uses the legacy three-field relay envelope. V3 requires delivery stamps.
+Both versions accept JSON text fallback from mixed-room senders.
+**Migration:** MessagePack runs now emit the decoded value in `payload`,
+replacing the former `{encoding, payload}` base64 wrapper. Consumers must
+read the application value directly. Use `rkyv` or `protobuf` for opaque bytes.
+The opt-in `rkyv` and `protobuf` modes preserve opaque bytes and require v3
+because their v2 passthrough lacks sender attribution.
 
 Peer lifecycle control has priority and may overtake already-queued old-epoch
 data. The client therefore keeps the old cursor long enough to validate that

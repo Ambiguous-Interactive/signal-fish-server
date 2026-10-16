@@ -222,7 +222,7 @@ pub struct Cli {
     /// Game-data encoding negotiated in Authenticate and used for every
     /// `--relay-payload` send (issue #627). `json` (the default) keeps the
     /// legacy text wire shape byte-identical; `message_pack` is the standard
-    /// v3 binary encoding (enabled by default; a deployment opts out via
+    /// v2/v3 binary encoding (enabled by default; a deployment opts out via
     /// `protocol.enable_message_pack_game_data`); `rkyv`/`protobuf` are the
     /// server's opt-in opaque encodings: the payload relays as untouched
     /// bytes and arrives in the strict protocol-v3 binary envelope, so the

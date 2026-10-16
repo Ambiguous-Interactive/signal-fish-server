@@ -3562,3 +3562,44 @@ Rust, .NET, and Godot SDKs do not import these modules. The server's readiness
 rules and wire messages are unchanged, so these SDKs need no migration or
 acceptance issue for this implementation repair. Broader A20, #826, #853, and
 issue #889 remain open. Timing investigations also remain open.
+
+### F63 — Reference-client MessagePack and mixed-room reception
+
+At `de5adb40`, the browser CLI rejects `message_pack`. The native CLI accepts
+it, but sends the relay text as raw bytes and emits received bytes through its
+opaque path. These bytes are not a MessagePack application value. A compatible
+recipient cannot decode them. This continues encoding task #678 and A20.
+
+The browser CLI regression fails on the baseline option. A real three-player
+history with a v2 MessagePack browser, a v3 MessagePack native client, and a
+JSON native client fails when the browser receives the native raw text.
+The native receipt also retains a base64 wrapper instead of a decoded value.
+Both clients now encode the relay probe as a MessagePack value and apply
+received values through their normal gameplay event and delivery-ledger paths.
+Their v2 envelopes omit delivery stamps; v3 envelopes require them. Negotiation
+checks deployment support in both versions. Opaque v2 reference-client runs
+remain unsupported because raw passthrough has no sender identity.
+
+The sweep found browser issue #994. The browser rejects text `GameData` in
+opaque modes, although the server delivers JSON-source data and compatible
+MessagePack conversions as text. Its new unit control fails on the baseline.
+A real Chromium rkyv recipient also exits on the valid text frame. Opaque modes
+now accept JSON fallback and retain binary-envelope and delivery validation.
+
+Two three-player MessagePack controls cover browser v2/native v3 and browser
+v3/native v2, each with a JSON peer. Every directed receipt must preserve its
+sender and exact payload. Separate rkyv and protobuf Chromium controls receive
+exact JSON and MessagePack fallback payloads from real socket senders.
+Existing same-format opaque, mesh, and room-restore controls remain required.
+All eight scoped runtime controls pass in 31.408 seconds. Unit controls cover
+malformed envelopes, version mismatch, trailing payloads, unsupported encoding,
+Unicode, nested values, and browser integer precision. Passing captured
+attempts do not explain or repair #853 or #889.
+
+**Migration:** Native MessagePack receipt events now contain decoded application
+values instead of the opaque base64 wrapper. Server messages, negotiated
+formats, deployment defaults, and room rules are unchanged. Rust, .NET, and
+Godot SDKs have separate MessagePack implementations and do not import these
+reference clients. They need no implementation change or acceptance issue for
+this repair. The complete catalog assessment in #678 and the wider A01–A22
+audit remain open. Final-head hosted CI and review are delivery gates.

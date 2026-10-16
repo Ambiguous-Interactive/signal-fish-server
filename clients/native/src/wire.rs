@@ -1,17 +1,19 @@
 //! WebSocket wire layer: JSON text frames carrying the server crate's own
 //! `ClientMessage` / `ServerMessage` enums.
 //!
-//! Envelope types are NEVER hand-rolled here — they come straight from
-//! `signal_fish_server::protocol` via the path dependency, so the reference
-//! client cannot drift from the server's wire contract. Only the opaque
-//! `signal` payload (matchbox `PeerSignal` shape per ADR-0002) is built by the
-//! client, because the server deliberately does not model it.
+//! JSON messages and the strict v3 binary decoder come from
+//! `signal_fish_server::protocol`. The legacy v2 MessagePack envelope is
+//! decoded locally. The opaque `signal` payload uses the matchbox
+//! `PeerSignal` shape from ADR-0002.
 
+use std::io::Cursor;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
-use signal_fish_server::protocol::{ClientMessage, DeliveryClass, ServerMessage};
+use signal_fish_server::protocol::{
+    ClientMessage, DeliveryClass, GameDataEncoding, PlayerId, ServerMessage,
+};
 
 pub use signal_fish_server::protocol::{decode_v3_binary_game_data, V3BinaryGameDataFrame};
 
@@ -90,6 +92,65 @@ pub async fn send_game_data_with_delivery(
 ) -> Result<()> {
     let message = game_data_message_with_delivery(data, class, key)?;
     send_client_message(ws, &message).await
+}
+
+/// Send a JSON-compatible value as a raw MessagePack payload.
+pub async fn send_message_pack_game_data(ws: &mut WsStream, data: serde_json::Value) -> Result<()> {
+    send_game_data_binary(ws, rmp_serde::to_vec_named(&data)?).await
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyMessagePackFrame {
+    from_player: PlayerId,
+    encoding: GameDataEncoding,
+    payload: serde_bytes::ByteBuf,
+}
+
+fn decode_exact_message_pack<T: serde::de::DeserializeOwned>(wire: &[u8]) -> Result<T> {
+    let mut cursor = Cursor::new(wire);
+    let value = rmp_serde::from_read(&mut cursor)?;
+    if cursor.position() != u64::try_from(wire.len())? {
+        return Err(anyhow!("MessagePack value has trailing bytes"));
+    }
+    Ok(value)
+}
+
+/// Decode a MessagePack relay into the normal application event path.
+pub(crate) fn decode_message_pack_game_data(wire: &[u8], version: u16) -> Result<ServerMessage> {
+    let (from_player, encoding, payload, seq, epoch) = if version >= 3 {
+        let frame = decode_v3_binary_game_data(wire).map_err(anyhow::Error::msg)?;
+        (
+            frame.from_player,
+            frame.encoding,
+            frame.payload,
+            Some(frame.seq),
+            Some(frame.epoch),
+        )
+    } else {
+        if rmp::decode::read_map_len(&mut &*wire)? != 3 {
+            return Err(anyhow!("v2 MessagePack relay requires three fields"));
+        }
+        let frame: LegacyMessagePackFrame = decode_exact_message_pack(wire)?;
+        (
+            frame.from_player,
+            frame.encoding,
+            frame.payload.into_vec(),
+            None,
+            None,
+        )
+    };
+    if encoding != GameDataEncoding::MessagePack {
+        return Err(anyhow!("expected MessagePack payload encoding"));
+    }
+    Ok(ServerMessage::GameData {
+        from_player,
+        data: decode_exact_message_pack(&payload)?,
+        seq,
+        epoch,
+        class: None,
+        key: None,
+    })
 }
 
 /// Send an opaque game-data payload as one raw binary WebSocket frame.
@@ -949,6 +1010,71 @@ mod tests {
                 decode_v3_binary_game_data(&wire).is_err(),
                 "noncanonical {name} envelope was accepted: {wire:?}"
             );
+        }
+    }
+    #[test]
+    fn message_pack_relay_decodes_both_versions_and_rejects_wrong_shapes() {
+        use signal_fish_server::protocol::{GameDataEncoding, PlayerId, ServerMessage};
+        let sender = PlayerId::from_u128(1);
+        let payload =
+            serde_json::json!({ "relay_msg": "hello 世界", "nested": [null, true, 1.25, -17] });
+        for version in [2, 3] {
+            #[derive(serde::Serialize)]
+            struct Frame {
+                from_player: PlayerId,
+                encoding: GameDataEncoding,
+                #[serde(with = "serde_bytes")]
+                payload: Vec<u8>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                seq: Option<u64>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                epoch: Option<u32>,
+            }
+            let mut frame = Frame {
+                from_player: sender,
+                encoding: GameDataEncoding::MessagePack,
+                payload: rmp_serde::to_vec_named(&payload).unwrap(),
+                seq: (version == 3).then_some(7),
+                epoch: (version == 3).then_some(3),
+            };
+            let bytes = rmp_serde::to_vec_named(&frame).unwrap();
+            let decoded = super::decode_message_pack_game_data(&bytes, version).unwrap();
+            let ServerMessage::GameData {
+                from_player,
+                data,
+                seq,
+                epoch,
+                class,
+                key,
+            } = decoded
+            else {
+                panic!("expected GameData")
+            };
+            assert_eq!(from_player, sender);
+            assert_eq!(data, payload);
+            assert_eq!(seq, frame.seq);
+            assert_eq!(epoch, frame.epoch);
+            assert!(class.is_none() && key.is_none());
+            assert!(
+                super::decode_message_pack_game_data(&bytes, if version == 2 { 3 } else { 2 })
+                    .is_err()
+            );
+            let mut trailing = bytes;
+            trailing.push(0);
+            assert!(super::decode_message_pack_game_data(&trailing, version).is_err());
+            frame.encoding = GameDataEncoding::Protobuf;
+            assert!(super::decode_message_pack_game_data(
+                &rmp_serde::to_vec_named(&frame).unwrap(),
+                version
+            )
+            .is_err());
+            frame.encoding = GameDataEncoding::MessagePack;
+            frame.payload.push(0);
+            assert!(super::decode_message_pack_game_data(
+                &rmp_serde::to_vec_named(&frame).unwrap(),
+                version
+            )
+            .is_err());
         }
     }
 }
