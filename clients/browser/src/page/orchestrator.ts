@@ -799,7 +799,7 @@ class Orchestrator {
           }
           this.emit({ event: 'pc_state', peer, state });
           if (isTerminalPeerConnectionState(state)) {
-            this.handlePeerTransportLoss(peer);
+            this.handlePeerTransportLoss(peer, `connection state ${state}`);
           }
         });
       },
@@ -821,7 +821,7 @@ class Orchestrator {
           }
           if (reason !== undefined) this.emit({ event: 'error', message: reason });
           this.emit({ event: 'channel_closed', peer, label });
-          this.handlePeerTransportLoss(peer);
+          this.handlePeerTransportLoss(peer, `required channel ${label} closed or failed`);
         });
       },
       onChannelMessage: (peer, generation, label, text, textBytes) => {
@@ -2110,7 +2110,7 @@ class Orchestrator {
     this.peerWorkStopped.signal.addEventListener('abort', stopped, { once: true });
     const expire = () => {
       try {
-        if (isCurrent()) this.handlePeerTransportLoss(peer);
+        if (isCurrent()) this.handlePeerTransportLoss(peer, 'negotiation deadline expired');
       } catch (error) {
         this.failFatal(
           error instanceof FatalError
@@ -2133,7 +2133,7 @@ class Orchestrator {
       return result;
     } catch (error) {
       if (monotonicNowMs() >= deadline && isCurrent()) {
-        this.handlePeerTransportLoss(peer);
+        this.handlePeerTransportLoss(peer, 'negotiation deadline expired');
       }
       throw error;
     } finally {
@@ -2174,7 +2174,11 @@ class Orchestrator {
   }
 
   /** Tear down an unusable P2P link while retaining its planned obligation. */
-  private handlePeerTransportLoss(peer: string): void {
+  private handlePeerTransportLoss(peer: string, reason: string): void {
+    const link = this.engine.diagnosticSnapshot(peer);
+    if (link !== null) {
+      console.error(`P2P link lost for ${peer}: ${JSON.stringify({ reason, link })}`);
+    }
     this.retirePeerLink(peer);
     if (this.webrtcPlanSeen) {
       this.resolveTransportStatus();
