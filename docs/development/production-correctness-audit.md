@@ -3638,8 +3638,8 @@ The browser now prefixes decoded map keys during MessagePack materialization
 and restores their exact names through `Object.fromEntries`. Values and
 application-visible key names stay unchanged. Empty names, nested objects,
 NUL-prefixed names, and a leading Unicode byte-order mark have distinct
-controls. Non-string map keys and non-JSON payloads remain rejected. Existing
-integer precision and version-specific envelope validation still apply.
+controls. Numeric map keys retain their existing conversion to string names.
+Non-JSON payload values remain rejected. Existing integer precision and version-specific envelope validation still apply.
 
 Real Chromium v2 and v3 recipients each receive exact JSON and MessagePack
 payloads from live senders. Separate opaque recipients preserve these keys on

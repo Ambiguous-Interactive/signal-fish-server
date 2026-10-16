@@ -164,9 +164,9 @@ export function classifyMessagePackNegotiatedServerInput(
         useBigInt64: true,
         keyDecoder: messagePackObjectKeyDecoder,
         mapKeyConverter: (key) => {
-          if (typeof key !== 'string')
-            throw new Error('MessagePack object key is not a string');
-          return key;
+          if (typeof key === 'string') return key;
+          if (typeof key === 'number') return `\u0000${key}`;
+          throw new Error('MessagePack object key must be a string or number');
         },
       }),
     ),
