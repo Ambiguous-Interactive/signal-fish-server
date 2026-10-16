@@ -4158,14 +4158,20 @@ The 8 MiB frame and 1,024-byte sender buffer did not establish the assumed
 backpressure on Windows. The evidence does not identify the internal Windows
 buffering mechanism or show a production deadline failure.
 
-The revised fixtures also set the listener's receive buffer to 1,024 bytes
-before bind and listen. They keep the nonreading endpoint, the original 8 MiB
-payload, both text and binary writes, the 50 ms pending-write assertion, and
-the complete 20-second write budget. The Pong control still advances 12 seconds
-during the blocked write, drains the original frame before Ping, and requires
-the full response window after successful write completion. No production code
-or timeout changes. Both focused Linux tests pass in 4.344 seconds. Hosted CI
-owns cross-platform acceptance.
+Constraining the listener alone also failed in run `38963141010`, head
+`866b5f43`, with the same successful-write results. That candidate does not
+establish a repair. The revised shared fixture sets the accepted socket's
+receive buffer explicitly and records its inherited and configured values.
+It sends 8 MiB fixture frames until a write remains pending for 50 ms, with
+a hard limit of 16 frames. A setup error or failure to establish backpressure
+still fails the test. The fixture records the exact frame count.
+
+The deadline controls retain both text and binary writes, the original 8 MiB
+application payloads, the 50 ms pending-write assertion, and the complete
+20-second write budget. The Pong control still advances 12 seconds during the
+blocked write, drains and checks every queued frame before Ping, and requires
+the full response window after successful write completion. No production
+code or timeout changes. Hosted CI owns cross-platform acceptance.
 
 The browser buffered-signal repair in F74 remains independent. Rust, .NET, and
 Godot SDKs are unaffected because this change only adjusts native reference
