@@ -14,6 +14,7 @@ for (const entryPoint of [
   'src/page/output-cancellation.test.ts',
   'src/page/peer-work.test.ts',
   'src/page/queued-retry.test.ts',
+  'src/page/buffered-retirement.test.ts',
   'src/page/run-cutoff.test.ts',
   'src/cli/args.test.ts',
   'src/cli/output.test.ts',

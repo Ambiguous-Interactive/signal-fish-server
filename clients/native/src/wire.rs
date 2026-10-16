@@ -521,27 +521,16 @@ mod tests {
     #[tokio::test]
     async fn websocket_writes_expire_with_a_nonreading_endpoint() {
         use futures_util::FutureExt;
-        use tokio_tungstenite::MaybeTlsStream;
 
         let mut overdue = Vec::new();
         for binary in [false, true] {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
-            let server = tokio::spawn(async move {
-                let (tcp, _) = listener.accept().await.unwrap();
-                tokio_tungstenite::accept_async(tcp).await.unwrap()
-            });
-            let socket = tokio::net::TcpSocket::new_v4().unwrap();
-            socket.set_send_buffer_size(1024).unwrap();
-            let tcp = socket.connect(address).await.unwrap();
-            let (mut ws, _) = tokio_tungstenite::client_async(
-                format!("ws://{address}"),
-                MaybeTlsStream::Plain(tcp),
-            )
-            .await
-            .unwrap();
-            let _nonreading_endpoint = server.await.unwrap();
+            let (mut ws, _nonreading_endpoint) = crate::socket_tests::websocket_pair().await;
             let payload = "x".repeat(8 * 1024 * 1024);
+            crate::socket_tests::queue_until_blocked(
+                &mut ws,
+                Message::Binary(payload.as_bytes().to_vec().into()),
+            )
+            .await;
             let mut write = Box::pin(async {
                 if binary {
                     send_game_data_binary(&mut ws, payload.into_bytes()).await
@@ -550,11 +539,10 @@ mod tests {
                         .await
                 }
             });
+            let observation = tokio::time::timeout(Duration::from_millis(50), &mut write).await;
             assert!(
-                tokio::time::timeout(Duration::from_millis(50), &mut write)
-                    .await
-                    .is_err(),
-                "binary={binary}: establish actual socket backpressure before advancing time"
+                observation.is_err(),
+                "binary={binary}: establish actual socket backpressure before advancing time: {observation:?}"
             );
             tokio::time::pause();
             tokio::time::advance(Duration::from_secs(20)).await;

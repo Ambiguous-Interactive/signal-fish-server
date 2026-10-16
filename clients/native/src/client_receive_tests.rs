@@ -83,38 +83,21 @@ async fn readiness_recovery_reissues_start_before_a_delayed_rejection() {
 // Regression #987: write backpressure must not consume the response window.
 #[tokio::test]
 async fn pong_response_window_starts_after_the_ping_write_finishes() {
-    use futures_util::SinkExt;
-    use tokio_tungstenite::MaybeTlsStream;
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let url = format!("ws://{address}");
-    let server = tokio::spawn(async move {
-        let (tcp, _) = listener.accept().await.unwrap();
-        tokio_tungstenite::accept_async(tcp).await.unwrap()
-    });
-    let socket = tokio::net::TcpSocket::new_v4().unwrap();
-    socket.set_send_buffer_size(1024).unwrap();
-    let tcp = socket.connect(address).await.unwrap();
-    let (mut ws, _) = tokio_tungstenite::client_async(&url, MaybeTlsStream::Plain(tcp))
-        .await
-        .unwrap();
-    let mut server_ws = server.await.unwrap();
+    let (mut ws, mut server_ws) = crate::socket_tests::websocket_pair().await;
+    let url = format!("ws://{}", server_ws.get_ref().local_addr().unwrap());
     let payload = vec![42; 8 * 1024 * 1024];
-    ws.feed(Message::Binary(payload.clone().into()))
-        .await
-        .unwrap();
+    let frame = Message::Binary(payload.into());
+    let queued = crate::socket_tests::queue_until_blocked(&mut ws, frame.clone()).await;
     let cli = Cli::parse_from(["reference-native", "--server-url", &url, "--create-room"]);
     let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
     state.next_ping_at = Instant::now();
     {
         let timer = state.process_timers();
         tokio::pin!(timer);
+        let observation = tokio::time::timeout(Duration::from_millis(50), &mut timer).await;
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut timer)
-                .await
-                .is_err(),
-            "establish socket backpressure before advancing the clock"
+            observation.is_err(),
+            "establish socket backpressure before advancing the clock: {observation:?}"
         );
         tokio::time::pause();
         let clock_guard = tokio::spawn(async {
@@ -124,10 +107,9 @@ async fn pong_response_window_starts_after_the_ping_write_finishes() {
         });
         tokio::time::advance(Duration::from_secs(12)).await;
         let drain = async {
-            assert_eq!(
-                server_ws.next().await.unwrap().unwrap(),
-                Message::Binary(payload.into())
-            );
+            for _ in 0..queued {
+                assert_eq!(server_ws.next().await.unwrap().unwrap(), frame);
+            }
             let ping = server_ws.next().await.unwrap().unwrap();
             let ping: ClientMessage = serde_json::from_str(ping.to_text().unwrap()).unwrap();
             assert!(matches!(ping, ClientMessage::Ping));

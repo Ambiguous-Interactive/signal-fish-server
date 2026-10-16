@@ -2071,6 +2071,12 @@ class Orchestrator {
       this.pendingSignals.delete(peer);
       for (const signal of buffered) {
         this.assertActive();
+        if (
+          this.currentSessionGeneration !== sessionGeneration ||
+          this.peerTasks.get(peer)?.token !== taskToken ||
+          !this.expectedPeers.has(peer)
+        )
+          return;
         await this.applySignal(peer, signal);
         this.assertActive();
       }

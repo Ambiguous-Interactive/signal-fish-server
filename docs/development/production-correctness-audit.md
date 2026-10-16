@@ -65,7 +65,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
 | A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
-| A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17 |
+| A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17; Windows backpressure fixtures in F75 |
 
 For each task, record reviewed functions and tests, unresolved hypotheses, and
 the exact scope of any successful experiment. Default, TLS, legacy-fullmesh,
@@ -4104,3 +4104,76 @@ not establish the spontaneous causes in #853 or #889; both remain open.
 Rust, .NET, and Godot SDKs are unaffected because they do not import this
 private browser orchestrator. The server protocol, defaults, and public SDK
 APIs are unchanged. No migration or external-client tracking issue is needed.
+
+### F74 — Retired browser buffered signals reach replacement peer links
+
+Issue [#1015](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1015)
+continues A20 at `cb9c08ef`. A planned peer can lose its physical link before
+SDP and ICE arrive. The browser buffers those signals until a pairing directive
+creates a new link. Its buffer drain checks the task token and session before
+the loop, then awaits each entry. A retry or authoritative replacement can
+retire that task during an await. When the old operation completes or fails,
+the old loop applies its next entry through the replacement's engine link and
+captures the replacement task token. Old ICE and SDP can alter the new link.
+
+The deterministic regression fails against the unchanged baseline orchestrator
+when a retry replaces a held remote-offer operation. The old operation then
+completes, and its buffered ICE reaches the replacement. The repair rechecks
+the original session, task token, and planned membership before each buffered
+entry. Existing physical-link checks still fence the current awaited operation.
+
+The 64-case matrix holds remote-offer application, answer creation, local-answer
+application, or buffered ICE. Each held operation completes, fails, or remains
+pending across a retry, a changed plan generation, departure and rejoin, a fresh
+player incarnation, or transport loss. Four uninterrupted controls drain both
+ICE entries and send both buffered-offer answers. Replacement SDP precedes its
+ICE. Late old completion, failure, and expiry cannot add old ICE, send old SDP,
+report a current-link error, or close the replacement.
+
+The browser test suite, type checks, build, and formatting pass. Fresh baseline
+retry, restore, and three-player mesh controls each pass twice with fixed file
+hashes and complete endpoint streams. The rebuilt browser also passes two
+retry, two restore, and two mesh controls in 17.359 seconds. Fourteen complete
+endpoint streams retain 702 events. File hashes remain fixed across all six
+runs. These bounded successes do not identify
+the spontaneous causes in #853 or #889. Both issues and the broader #826 audit
+remain open.
+
+Rust, .NET, and Godot SDKs are unaffected because they do not import this
+private browser orchestrator. The server wire contract, defaults, and public
+SDK APIs are unchanged. No client migration or acceptance issue is needed.
+
+### F75 — Windows deadline fixtures complete before backpressure
+
+Issue [#1017](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1017)
+continues A22. Scheduled WebRTC run `38853983812` failed two native deadline
+fixtures on Windows at `3330d6c`. Both failures occurred at their setup
+assertion, before simulated time advanced. Linux and macOS passed. A fresh
+manual run `38961414369` reproduced both failures on `d2878e4a`.
+
+Diagnostic head `bdcbbe10`, run `38962172874`, retains the completed results.
+The Pong fixture returns `Ok(Ok(None))`; the text-write fixture returns
+`Ok(Ok(()))`. Both writes succeeded before the 50 ms setup observation ended.
+The 8 MiB frame and 1,024-byte sender buffer did not establish the assumed
+backpressure on Windows. The evidence does not identify the internal Windows
+buffering mechanism or show a production deadline failure.
+
+Constraining the listener alone also failed in run `38963141010`, head
+`866b5f43`, with the same successful-write results. That candidate does not
+establish a repair. The revised shared fixture sets the accepted socket's
+receive buffer explicitly and records its inherited and configured values.
+It sends 8 MiB fixture frames until a write remains pending for 50 ms, with
+a hard limit of 16 frames. A setup error or failure to establish backpressure
+still fails the test. The fixture records the exact frame count.
+
+The deadline controls retain both text and binary writes, the original 8 MiB
+application payloads, the 50 ms pending-write assertion, and the complete
+20-second write budget. The Pong control still advances 12 seconds during the
+blocked write, drains and checks every queued frame before Ping, and requires
+the full response window after successful write completion. No production
+code or timeout changes. Hosted CI owns cross-platform acceptance.
+
+The browser buffered-signal repair in F74 remains independent. Rust, .NET, and
+Godot SDKs are unaffected because this change only adjusts native reference
+unit-test sockets. No public API, wire, or migration change is needed. The
+broader A22 and #826 audits remain open.

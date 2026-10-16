@@ -33,3 +33,6 @@ pub mod engine;
 pub mod event_output;
 pub mod events;
 pub mod wire;
+
+#[cfg(test)]
+mod socket_tests;
