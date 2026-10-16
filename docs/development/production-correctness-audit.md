@@ -3916,7 +3916,7 @@ observations. The independent position-set and unique-arrival reference covers
 all 4,096 six-arrival histories over zero, one, two, and `u64::MAX`. It checks
 unique counts, duplicate counts and first keys, and order counts and first keys.
 An ordered 100,000-message stream retains one coverage range. The
-[capacity report](arm-capacity-audit.md#c3-stream-observation-memory--775)
+[capacity report](arm-capacity-audit.md#c3-stream-observation-memory)
 records the measured gains and limits. Raw record retention and fragmented
 coverage remain workload-dependent; this is not a complete memory bound.
 

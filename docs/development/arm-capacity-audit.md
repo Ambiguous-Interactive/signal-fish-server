@@ -3348,7 +3348,7 @@ Test progress reads event counts without taking the evidence. The former
 transfer explicit. The final capture still transfers each record once after
 all tasks finish.
 
-### C3 stream-observation memory — #775
+### C3 stream-observation memory
 
 At `560ec0df`, the capacity oracle retained one pointer per receipt, then
 scanned each stream for distinct arrivals, order, and completeness. It now
@@ -3401,3 +3401,31 @@ comparisons, and executable hashes remain under `/tmp/session457/`. The
 stream-observation counter test independently checks all 4,096 six-arrival
 histories and the one-range ordered-stream shape. Existing real-socket lossy,
 churn, payload, and replay controls verify the surrounding delivery contract.
+
+### C3 Linux long-run generator stalls
+
+Two registered #775 attempts use one room, 16 players, 60 sends/s per player,
+96-byte reliable v3 JSON data, seed 1, 120 seconds of warm-up, and 600 seconds
+of measurement. Each schedules 691,232 sends and 10,368,480 recipient deliveries.
+Both use the same fixed initial candidate and server on the shared ARM64 WSL2
+host. The later opaque-leak correction does not affect this reliable-only cell.
+These runs are separate from final-head hosted validation.
+
+| Attempt | Max observed lag us | Completed sends | Unsent sends | Receipts | Peak child KiB |
+| --- | --- | --- | --- | --- | --- |
+| With other agent work | 618,958 | 129,480 | 561,752 | 1,942,200 | 476,144 |
+| Without agent builds or tests | 490,648 | 475,376 | 215,856 | 7,130,640 | 1,690,784 |
+
+Both runs are invalid against the unchanged 250,000 us generator-lag bound.
+Both retain zero outstanding deliveries and reproduce their complete summaries
+through artifact replay. The second summary also retains the completed-send
+lag of 386,245 us. A successful test-process exit means replay matched; it does
+not make either capacity verdict valid. Each peak covers a partial workload,
+so neither bounds memory for all scheduled work.
+
+The second recurrence excludes agent builds as a necessary condition for every
+observed stall. The host remains shared and unconstrained, and the cause is
+unknown. [Issue #1009](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1009)
+tracks the required scheduling, CPU, allocator, and host-clock investigation.
+Keep the original offered work, lag bound, and full failed histories. No valid
+ten-minute capacity cell or workload-wide memory bound is established here.
