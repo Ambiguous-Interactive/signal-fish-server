@@ -128,19 +128,31 @@ async fn p2p_gate_does_not_signal_removed_peers() {
             expects_retained,
             "{removal}"
         );
-        let mut signaled = BTreeSet::new();
-        while let Ok(Some(Ok(Message::Text(text)))) =
-            tokio::time::timeout(Duration::from_millis(30), server_ws.next()).await
-        {
-            if let ClientMessage::Signal { to, .. } = serde_json::from_str(&text).unwrap() {
-                signaled.insert(to);
-            }
+        if expects_retained {
+            let frame = tokio::time::timeout(Duration::from_secs(1), server_ws.next())
+                .await
+                .expect("retained offer arrives before the deadline")
+                .expect("signaling socket remains open")
+                .expect("signaling frame is valid");
+            let Message::Text(text) = frame else {
+                panic!("{removal}: retained offer must use a text frame");
+            };
+            let ClientMessage::Signal { to, signal, .. } = serde_json::from_str(&text).unwrap()
+            else {
+                panic!("{removal}: retained offer must be a Signal");
+            };
+            assert_eq!(to, retained, "{removal}: only the retained offerer signals");
+            assert!(
+                signal.get("Offer").and_then(|sdp| sdp.as_str()).is_some(),
+                "{removal}: retained signal must carry an offer"
+            );
         }
+        let unexpected_signal =
+            tokio::time::timeout(Duration::from_millis(30), server_ws.next()).await;
         assert!(
-            !signaled.contains(&removed),
-            "{removal}: sent Signal to removed peer"
+            unexpected_signal.is_err(),
+            "{removal}: unexpected extra signaling or closed socket: {unexpected_signal:?}"
         );
-        assert_eq!(signaled.contains(&retained), expects_retained, "{removal}");
         state.engine.remove_peer(removed).await.unwrap();
         state.engine.remove_peer(retained).await.unwrap();
     }
