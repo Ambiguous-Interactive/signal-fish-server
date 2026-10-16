@@ -3216,6 +3216,50 @@ Issue #775 remains open. Live events, arrival indexes, sender indexes, and
 replay records still grow with offered work. The required ten-minute live
 cell has not been demonstrated. No accepted capacity point is claimed.
 
+### C3 receipt-index and arrival-state memory — #775
+
+The oracle copied three integers per receipt into its arrival index, cloned
+one stream at a time, and built a unique-arrival vector plus a position set.
+It now indexes borrowed receipts and checks distinct arrivals and arrival
+order directly with compact coverage ranges. Duplicate arrivals do not change
+the previous unique arrival. Sequence zero still participates in duplicate
+and order checks, but cannot cover an owed one-based sequence.
+
+The registered experiment used the existing ignored
+`generator_memory_profile_on_complete_fanout` probe with 16 peers and 100,
+1,000, and 5,000 sends per peer. Each size ran in three fresh baseline
+processes, then three fresh candidate processes. The baseline was commit
+`d503f04d`; the candidate changed only the oracle algorithm for this probe. Both binaries used rustc 1.94.0 on ARM64 Linux
+under WSL2 with the debug test profile. Python
+`os.wait4` measured peak child RSS, including event collection and the full
+oracle. All 18 attempts passed. Full summary JSON matched exactly across
+all six processes at each size.
+
+| Receipts | Baseline median KiB (range) | Candidate median KiB (range) |
+| --- | --- | --- |
+| 24,000 | 18,120 (18,116–18,248) | 17,664 (17,472–17,728) |
+| 240,000 | 59,652 (59,636–59,788) | 55,560 (55,464–55,672) |
+| 1,200,000 | 247,368 (247,304–247,432) | 228,352 (228,316–228,416) |
+
+A follow-up registered check ran five alternating baseline/candidate pairs
+at 1,200,000 receipts, as required by the C4 paired-performance plan. All ten
+attempts passed, and their full summary JSON matched exactly. Baseline median
+peak RSS was 246,416 KiB (246,380–246,536); candidate median was 227,672 KiB
+(227,532–227,832), a 7.6% reduction. The initial 18 attempts remain recorded.
+These are synthetic generator results. They do not establish server capacity.
+Raw output, every attempt, measurement/comparison scripts, and binary hashes
+remain under `/tmp/session456-capacity/`. The two new controls compare all 4,096
+six-arrival streams over zero, one, two, and `u64::MAX` against independent
+position-set and unique-window rules, and require a 100,000-message ordered
+stream to retain one range. The focused 28-control run passed, including
+exact gap accounting, pressure replay, churn floors, and invalid arrivals.
+
+Issue #775 remains open. The arrival index still retains one reference per
+receipt. Live and replay records and sender indexes still grow with offered
+work. Sparse or reordered arrivals can retain one range per distinct
+sequence. The ten-minute live demonstration and workload-wide memory bounds
+remain unfinished.
+
 ### C2 generator delay investigation — #795
 
 The scheduled main run

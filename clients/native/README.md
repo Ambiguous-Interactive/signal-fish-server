@@ -304,6 +304,10 @@ Runtime WebSocket writes also have a 20-second limit, including their flush.
 A failed write ends the session with exit code 3. The client does not retry
 a partial frame on the same connection.
 
+Deferred exchange sends let the client read signaling between channel attempts.
+A stalled send keeps its unmet exchange criteria and triggers relay fallback
+for its peer. The run deadline still applies.
+
 ## Signal payload convention (matchbox `PeerSignal`)
 
 Per [ADR-0002](../../docs/adr/0002-matchbox-compatibility.md) the opaque `signal` field uses the matchbox shape —

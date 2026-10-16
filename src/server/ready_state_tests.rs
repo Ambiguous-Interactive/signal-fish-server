@@ -1532,3 +1532,162 @@ fn count_lobby_state_changed(receiver: &mut mpsc::Receiver<Arc<ServerMessage>>) 
         }
     }
 }
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn concurrent_unready_and_start_follow_room_gate_order() {
+    for start_first in [true, false] {
+        let server = create_test_server_with_session(mesh_session_config()).await;
+        let (starter, mut starter_messages) = register_client(&server).await;
+        let (toggler, mut toggler_messages) = register_client(&server).await;
+        server.set_client_protocol(&starter, v3_webrtc());
+        server.set_client_protocol(&toggler, v3_webrtc());
+        for (id, name) in [(starter, "Starter"), (toggler, "Toggler")] {
+            server
+                .handle_join_room(
+                    &id,
+                    "ready-start-contention".to_string(),
+                    Some("RACE08".to_string()),
+                    name.to_string(),
+                    Some(2),
+                    Some(false),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+        }
+        server.handle_player_ready(&starter).await;
+        server.handle_player_ready(&toggler).await;
+        drain_pending(&mut starter_messages);
+        drain_pending(&mut toggler_messages);
+        let room_id = server.get_client_room(&starter).await.expect("joined room");
+        let gate = server
+            .message_coordinator
+            .lock_room_event_mutation(&room_id)
+            .await;
+        let start = server.handle_start_game(&starter);
+        let toggle = server.handle_player_ready(&toggler);
+        tokio::pin!(start, toggle);
+        if start_first {
+            assert!(futures_util::poll!(&mut start).is_pending());
+            assert!(futures_util::poll!(&mut toggle).is_pending());
+        } else {
+            assert!(futures_util::poll!(&mut toggle).is_pending());
+            assert!(futures_util::poll!(&mut start).is_pending());
+        }
+        assert!(starter_messages.try_recv().is_err());
+        assert!(toggler_messages.try_recv().is_err());
+        drop(gate);
+        tokio::join!(start, toggle);
+
+        let stored = server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .expect("read final room")
+            .expect("room remains present");
+        if start_first {
+            assert_eq!(stored.lobby_state, LobbyState::Finalized);
+            assert_eq!(stored.ready_players.len(), 2);
+            assert!(stored.ready_players.contains(&starter));
+            assert!(stored.ready_players.contains(&toggler));
+            let mut snapshot_ready = server
+                .room_coordinator
+                .current_ready_players(&room_id)
+                .await;
+            let mut durable_ready = stored.ready_players.clone();
+            snapshot_ready.sort_unstable();
+            durable_ready.sort_unstable();
+            assert_eq!(snapshot_ready, durable_ready);
+            for messages in [&mut starter_messages, &mut toggler_messages] {
+                assert!(matches!(
+                    recv(messages).await.as_ref(),
+                    ServerMessage::GameStarting { .. }
+                ));
+                match recv(messages).await.as_ref() {
+                    ServerMessage::SessionPlan(plan) => {
+                        assert_eq!(plan.topology, Topology::Mesh);
+                        assert_eq!(plan.transport, Transport::WebRtc);
+                    }
+                    other => panic!("expected mesh session plan, received {other:?}"),
+                }
+            }
+            assert!(matches!(
+                recv(&mut toggler_messages).await.as_ref(),
+                ServerMessage::Error {
+                    error_code: Some(ErrorCode::InvalidRoomState),
+                    ..
+                }
+            ));
+        } else {
+            assert_eq!(stored.lobby_state, LobbyState::Lobby);
+            assert!(stored.ready_players.is_empty());
+            assert_eq!(
+                server
+                    .room_coordinator
+                    .current_ready_players(&room_id)
+                    .await,
+                vec![starter]
+            );
+            for messages in [&mut starter_messages, &mut toggler_messages] {
+                match recv(messages).await.as_ref() {
+                    ServerMessage::LobbyStateChanged {
+                        lobby_state,
+                        ready_players,
+                        all_ready,
+                    } => {
+                        assert_eq!(*lobby_state, LobbyState::Lobby);
+                        assert_eq!(*ready_players, vec![starter]);
+                        assert!(!all_ready);
+                    }
+                    other => panic!("expected unready snapshot, received {other:?}"),
+                }
+            }
+            assert!(matches!(
+                recv(&mut starter_messages).await.as_ref(),
+                ServerMessage::Error {
+                    error_code: Some(ErrorCode::GameStartNotReady),
+                    ..
+                }
+            ));
+        }
+        for messages in [&mut starter_messages, &mut toggler_messages] {
+            assert!(
+                matches!(messages.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                "the completed history must contain no extra frame"
+            );
+        }
+        if !start_first {
+            server.handle_player_ready(&toggler).await;
+            for messages in [&mut starter_messages, &mut toggler_messages] {
+                expect_lobby_state_changed(messages, true, "recovered member").await;
+            }
+            server.handle_start_game(&starter).await;
+            for messages in [&mut starter_messages, &mut toggler_messages] {
+                assert!(matches!(
+                    recv(messages).await.as_ref(),
+                    ServerMessage::GameStarting { .. }
+                ));
+                assert!(matches!(
+                    recv(messages).await.as_ref(),
+                    ServerMessage::SessionPlan(_)
+                ));
+                assert!(matches!(
+                    messages.try_recv(),
+                    Err(mpsc::error::TryRecvError::Empty)
+                ));
+            }
+            let recovered = server
+                .database
+                .get_room_by_id(&room_id)
+                .await
+                .expect("read recovered room")
+                .expect("recovered room exists");
+            assert_eq!(recovered.lobby_state, LobbyState::Finalized);
+            assert_eq!(recovered.ready_players.len(), 2);
+            assert!(recovered.ready_players.contains(&starter));
+            assert!(recovered.ready_players.contains(&toggler));
+        }
+    }
+}

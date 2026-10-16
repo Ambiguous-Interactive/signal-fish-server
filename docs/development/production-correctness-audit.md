@@ -51,7 +51,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; embedded receiver-loss rollback in F18; size-refusal rollback in F21; known socket-close rollback in F22; stale expiry cleanup in F32 |
 | A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
 | A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32 |
-| A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial |
+| A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial; two ordered concurrent unready/start histories and recovery checked in session 456 |
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial |
 | A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31 |
 | A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38 |
@@ -97,6 +97,29 @@ baseline. It maps audit ownership; it does not certify these operations.
 | `KickPlayer`, `BanPlayer`, `UnbanPlayer` | A05, A09, A15 | Authority check, target lifecycle, reconnect tombstone, ban perimeter, close |
 | `RegenerateRoomCode`, `SetRoomAccess` | A07, A09 | Admission serialization, authorization, uncertain response recovery |
 | `TransferAuthority` | A09, A11 | Eligible live member, replay/publication order, transport-host independence |
+
+## Bounded histories without a confirmed defect
+
+### A08 — Concurrent unready and game start
+
+At `d503f04d`, two ready v3 mesh members contend on the room event gate.
+The retained `concurrent_unready_and_start_follow_room_gate_order` test polls
+both real handlers until pending behind the held gate, in each FIFO order.
+Neither client receives output before the gate releases.
+
+When StartGame wins, both clients receive GameStarting then SessionPlan.
+The ready toggle receives INVALID_ROOM_STATE. The finalized room keeps both
+members ready. When the unready toggle wins, both clients receive the unready
+lobby snapshot and StartGame receives GAME_START_NOT_READY. The room stays in
+Lobby. Making the member ready again then permits a successful start.
+Both histories check exact output queues and the live and durable ready sets
+at their appropriate lifecycle boundaries.
+
+A temporary control that bypassed StartGame's room gate failed the test.
+The production source was restored. This checks two controlled handler and
+queue histories. It does not cover TCP delivery, storage failures, all
+schedules, or all A08 membership operations. No new defect is claimed;
+A08 and campaign #826 remain incomplete.
 
 ## Initial findings
 
@@ -3798,7 +3821,7 @@ ordinary send errors, missing-channel control, and signaling-error control
 remain separate checks. Scoped nextest `838d4ca9` passes all three controls.
 The held-send control also verifies that cancellation releases captured state.
 Hosted interoperability and review remain delivery gates. These controls prove
-a bound for one send and its recovery. Deferred exchange still processes peers
+a bound for one send and its recovery. F68's repair still processes deferred peers
 in sequence; they do not prove keepalive
 responsiveness across an arbitrary mesh of stalled sends. That batch-scheduling
 question remains outside this repair and is tracked in #1003.
@@ -3807,3 +3830,46 @@ The browser API sends synchronously. The Rust, .NET, and Godot SDKs do not
 import this private native reference helper. Server messages, SDK APIs, and
 retry defaults are unchanged. No SDK migration is required.
 The broader A20 and #826 audits remain open.
+
+### F69 — Deferred native exchange batches delay signaling across peers
+
+Issue #1003 continues A20 at `d503f04d`. Both deferred release gates await
+every connected peer in sequence on the orchestrator task. F68 bounds each
+send, but the caller cannot read signaling between those waits.
+
+The initial baseline control forms four real peer links and holds all four
+local send futures.
+After the first send starts, the socket receives an on-time Pong and relay
+data, then a close. The baseline delays this input for 4.027 seconds and fails
+the 2.8-second response bound. This is a controlled send-stall history. It
+does not establish a spontaneous driver stall or a false Pong timeout.
+
+The gates now queue each channel label separately. The event loop checks
+ready signaling, engine events, probes, and timers before the next deferred
+send. It limits normal input to 16 events per burst so continuous input
+cannot prevent exchange work. Each send keeps its existing one-second local
+limit and shorter operation or run deadline. Each queued item retains its
+physical channel identity; replacement channels cannot inherit old work.
+Successful labels retain their evidence. Failed or cancelled labels keep
+their debt and use the existing physical-link cleanup and relay fallback.
+
+The final seven-control selection passes. Both release gates preserve real
+bidirectional exchange with a healthy peer after a stalled peer. The socket
+control checks a cleared Pong deadline, exactly-once v3 relay accounting,
+and unpaid stalled-peer debt. Separate controls cover missing and replaced
+channel identities, an expired run window, terminal signaling writes,
+single-send cancellation, and existing retry exchange. A ready-callback
+burst control fails when the input-burst bound is removed, with Tokio's
+cooperative yield disabled. No timeout is enlarged and no cancelled send is
+recorded as successful.
+
+The browser sends synchronously and has no matching deferred async batch.
+Rust SDK `da8f2d16` uses a nonblocking driver seam, .NET SDK `e467c871` builds
+its own C# assembly, and Godot SDK `2a74de36` uses the engine mesh transport.
+None imports this reference orchestrator or its exchange probe. All three
+are unaffected. Server wire messages, SDK APIs, defaults, and timeout values
+are unchanged; no SDK migration is required.
+
+The captured #853 reconnect and #889 mesh controls pass with fixed baseline
+binaries in 1.85 and 2.32 seconds. Their source failure causes remain unknown.
+These passes do not close either issue or the broader A20 and #826 audit.
