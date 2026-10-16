@@ -3384,12 +3384,13 @@ async fn active_room_restore_rebuilds_live_webrtc_before_exact_exchange() {
     let workdir = tempfile::tempdir().expect("WebRTC restore workdir");
     let disconnect = workdir.path().join("disconnect");
     let resume = workdir.path().join("resume");
-    let exchange = workdir.path().join("exchange");
+    let exchange = workdir.path().join("restoring-exchange");
+    let incumbent_exchange = workdir.path().join("incumbent-exchange");
     let unreliable = workdir.path().join("unreliable");
     let success = workdir.path().join("success");
     let common = [
         "--exchange-release-file",
-        exchange.to_str().unwrap(),
+        incumbent_exchange.to_str().unwrap(),
         "--unreliable-exchange-release-file",
         unreliable.to_str().unwrap(),
         "--success-release-file",
@@ -3448,7 +3449,8 @@ async fn active_room_restore_rebuilds_live_webrtc_before_exact_exchange() {
         player_id_of(&restoring.events, "restoring-p2p"),
         player_id_of(&incumbent.events, "incumbent-p2p"),
     ];
-    std::fs::write(exchange, b"exchange").unwrap();
+    std::fs::write(&exchange, b"exchange").unwrap();
+    std::fs::write(&incumbent_exchange, b"exchange").unwrap();
     for client in [&mut restoring, &mut incumbent] {
         client
             .await_event("exchange_reliable_ready", EVENT_TIMEOUT)
@@ -3459,6 +3461,7 @@ async fn active_room_restore_rebuilds_live_webrtc_before_exact_exchange() {
             1
         );
     }
+    std::fs::remove_file(&exchange).unwrap();
     let initial_log_lengths = [restoring.events.len(), incumbent.events.len()];
     std::fs::write(disconnect, b"disconnect").unwrap();
     restoring
@@ -3490,10 +3493,23 @@ async fn active_room_restore_rebuilds_live_webrtc_before_exact_exchange() {
     }
     assert!(events_named(&restoring.events, "session_plan").len() >= 2);
     assert!(events_named(&incumbent.events, "session_plan").len() > plan_count);
-    for client in [&mut restoring, &mut incumbent] {
+    for (index, client) in [&mut restoring, &mut incumbent].into_iter().enumerate() {
         tokio::time::timeout(EVENT_TIMEOUT, async {
             while events_named(&client.events, "channel_message").len() < 2 {
                 client.await_event("channel_message", EVENT_TIMEOUT).await;
+            }
+            if index == 0 {
+                assert_eq!(
+                    events_named(&client.events, "channel_message_sent").len(),
+                    1,
+                    "the fresh remote receipt must precede the held local send"
+                );
+                std::fs::write(&exchange, b"fresh exchange").unwrap();
+            }
+            while events_named(&client.events, "channel_message_sent").len() < 2 {
+                client
+                    .await_event("channel_message_sent", EVENT_TIMEOUT)
+                    .await;
             }
         })
         .await

@@ -1,7 +1,324 @@
 // Regression #923: dispatch retries through the real native engine.
 use super::*;
 use clap::Parser;
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
+
+// Regression #1003: queued signaling must run between deferred peer sends.
+#[tokio::test]
+async fn deferred_exchange_mesh_services_pong_and_relay_between_held_sends() {
+    for unreliable in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(tcp).await.unwrap()
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let mut server_ws = server.await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let release = dir.path().join("release");
+        let mut args = vec![
+            "native",
+            "--server-url",
+            &url,
+            "--create-room",
+            "--exchange",
+            "--exchange-release-file",
+            release.to_str().unwrap(),
+        ];
+        if unreliable {
+            args.extend([
+                "--unreliable-exchange-release-file",
+                release.to_str().unwrap(),
+            ]);
+        }
+        let cli = Cli::parse_from(args);
+        let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+        state.current_session_generation = Some(SessionGeneration::from_u128(3));
+        state.webrtc_plan_seen = true;
+        let mut remotes = Vec::new();
+        let mut remote_receivers = Vec::new();
+        for id in 2..=5 {
+            let peer = PlayerId::from_u128(id);
+            state.establish_pair(peer, true).await.unwrap();
+            let (remote, opens, receiver) =
+                open_physical_pair_with_events(&mut state, &mut server_ws, peer, None).await;
+            remote_receivers.push(receiver);
+            for event in opens {
+                state.handle_engine_event(event).await.unwrap();
+            }
+            state.ice_gathering_complete.insert(peer);
+            if unreliable {
+                state.exchange_ledger.note_sent(peer, RELIABLE_LABEL);
+                state
+                    .exchange_ledger
+                    .note_received(peer, RELIABLE_LABEL.to_string());
+            }
+            remotes.push(remote);
+        }
+        state.exchange_released = unreliable;
+        let label = if unreliable {
+            UNRELIABLE_LABEL
+        } else {
+            RELIABLE_LABEL
+        };
+        let healthy_peer = PlayerId::from_u128(3);
+        let healthy_channels: Vec<_> = [RELIABLE_LABEL, UNRELIABLE_LABEL]
+            .map(|label| state.engine.channel(healthy_peer, label).unwrap())
+            .into();
+        let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+        state.exchange_send_hook = Some(Box::new(move |channel, text| {
+            let tx = started_tx.clone();
+            let healthy = healthy_channels
+                .iter()
+                .any(|other| std::sync::Arc::ptr_eq(other, &channel));
+            Box::pin(async move {
+                if healthy {
+                    channel.send_text(&text).await
+                } else {
+                    let _ = tx.send(());
+                    std::future::pending().await
+                }
+            })
+        }));
+        std::fs::write(&release, b"go").unwrap();
+        state.pong_deadline = Some(Instant::now() + PONG_TIMEOUT);
+        let sender = PlayerId::from_u128(20);
+        state.accountability = DeliveryAccountability::new(true);
+        let sender_info: PlayerInfo = serde_json::from_value(json!({
+            "id": sender, "name": "sender", "is_authority": false, "is_ready": true,
+            "epoch": 1, "seq": 0,
+        }))
+        .unwrap();
+        state
+            .accountability
+            .rebaseline_snapshot(&[sender_info])
+            .unwrap();
+        let healthy_return_channels: Vec<_> = [RELIABLE_LABEL, UNRELIABLE_LABEL]
+            .map(|label| {
+                (
+                    label,
+                    remotes.get(1).unwrap().channel(state.my_id, label).unwrap(),
+                )
+            })
+            .into();
+        let task = tokio::spawn(async move {
+            started_rx.recv().await.unwrap();
+            for (label, channel) in healthy_return_channels {
+                channel
+                    .send_text(
+                        &json!({"from": healthy_peer, "channel": label, "seq": 0}).to_string(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            server_ws
+                .send(Message::Text(
+                    serde_json::to_string(&ServerMessage::Pong).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+            let relay = ServerMessage::GameData {
+                from_player: sender,
+                data: json!({"relay_msg": 1}),
+                seq: Some(1),
+                epoch: Some(1),
+                class: None,
+                key: None,
+            };
+            server_ws
+                .send(Message::Text(serde_json::to_string(&relay).unwrap().into()))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            server_ws.close(None).await.unwrap();
+        });
+        let started = Instant::now();
+        let result = state.run_loop().await;
+        let elapsed = started.elapsed();
+        eprintln!(
+            "deferred gate unreliable={unreliable}: signaling close consumed after {elapsed:?}"
+        );
+        task.await.unwrap();
+        assert!(result.is_err(), "server close ends the run");
+        assert!(
+            state.relay_received_from.contains(&sender),
+            "queued relay must be consumed"
+        );
+        assert!(
+            state.pong_deadline.is_none(),
+            "queued Pong clears the pending response"
+        );
+        assert!(
+            !state.pong_grace_applied,
+            "on-time Pong must clear its deadline"
+        );
+        assert!(
+            elapsed < Duration::from_millis(2800),
+            "mesh delayed signaling for {elapsed:?}"
+        );
+        assert!(state.exchange_ledger.has_sent(healthy_peer, label));
+        assert!(state.engine.is_paired(healthy_peer));
+        assert!(state
+            .exchange_ledger
+            .received
+            .get(&healthy_peer)
+            .unwrap()
+            .contains(label));
+        assert_eq!(state.relay_received_from.len(), 1);
+        let duplicate = state
+            .accountability
+            .record_game_data(sender, Some(1), Some(1), None, None)
+            .unwrap_err();
+        assert!(
+            duplicate.contains("duplicate/backward"),
+            "seq1 was consumed exactly once: {duplicate}"
+        );
+        assert_eq!(
+            state
+                .accountability
+                .record_game_data(sender, Some(2), Some(1), None, None)
+                .unwrap(),
+            GameDataDisposition::Apply
+        );
+        assert!(!state
+            .exchange_ledger
+            .has_sent(PlayerId::from_u128(2), label));
+        assert!(!state.exchange_ledger.unmet_criteria().is_empty());
+        for mut remote in remotes {
+            remote.remove_peer(state.my_id).await.unwrap();
+        }
+    }
+}
+
+// A continuously ready callback stream must still let queued exchange advance.
+#[tokio::test]
+async fn deferred_exchange_advances_before_a_ready_callback_burst_finishes() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        tokio_tungstenite::accept_async(tcp).await.unwrap()
+    });
+    let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let _server_ws = server.await.unwrap();
+    let cli = Cli::parse_from([
+        "native",
+        "--server-url",
+        &url,
+        "--create-room",
+        "--exchange",
+    ]);
+    let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+    let peer = PlayerId::from_u128(2);
+    state.current_session_generation = Some(SessionGeneration::from_u128(3));
+    state.establish_pair(peer, true).await.unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(2), state.engine_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let (_, generation) = event.peer_generation();
+    let (tx, rx) = mpsc::unbounded_channel();
+    state.engine_rx = rx;
+    for _ in 0..1000 {
+        tx.send(EngineEvent::ChannelClosed {
+            peer: PlayerId::from_u128(99),
+            generation: 0,
+            label: RELIABLE_LABEL.to_string(),
+        })
+        .unwrap();
+    }
+    tx.send(EngineEvent::ChannelClosed {
+        peer,
+        generation,
+        label: RELIABLE_LABEL.to_string(),
+    })
+    .unwrap();
+    state.connected_pairs.insert(peer);
+    state.exchange_ledger.note_connected(peer);
+    state.queue_exchange(peer, &[RELIABLE_LABEL]);
+    state.exchange_send_hook = Some(Box::new(|_, _| Box::pin(async { Ok(()) })));
+    state.run_deadline = Deadline::after(Instant::now(), Duration::from_millis(100));
+    assert_eq!(
+        tokio::task::unconstrained(state.run_loop()).await.unwrap(),
+        EXIT_CRITERIA_UNMET
+    );
+    assert!(
+        state.exchange_ledger.has_sent(peer, RELIABLE_LABEL),
+        "the deferred send must run before the last queued callback retires its channel"
+    );
+}
+
+// Deferred work must not transfer to a replacement link or extend the run window.
+#[tokio::test]
+async fn deferred_exchange_fences_replacements_deadlines_and_signaling_failure() {
+    for mode in [
+        "replacement",
+        "old-channel-replacement",
+        "deadline",
+        "signaling-failure",
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(tcp).await.unwrap()
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let _server_ws = server.await.unwrap();
+        let cli = Cli::parse_from([
+            "native",
+            "--server-url",
+            &url,
+            "--create-room",
+            "--exchange",
+        ]);
+        let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+        let peer = PlayerId::from_u128(2);
+        state.webrtc_plan_seen = true;
+        state.current_session_generation = Some(SessionGeneration::from_u128(3));
+        state.transport_status = Some(true);
+        if mode == "old-channel-replacement" {
+            state.establish_pair(peer, true).await.unwrap();
+        }
+        state.exchange_ledger.note_connected(peer);
+        state.connected_pairs.insert(peer);
+        state.queue_exchange(peer, &[RELIABLE_LABEL]);
+        match mode {
+            "replacement" | "old-channel-replacement" => {
+                if mode == "old-channel-replacement" {
+                    state.prepare_retained_pair_replacement(peer).await;
+                }
+                state.establish_pair(peer, true).await.unwrap();
+                assert!(state.engine.channel(peer, RELIABLE_LABEL).is_some());
+                state.connected_pairs.insert(peer);
+                state.process_deferred_exchange().await.unwrap();
+                assert!(
+                    state.engine.is_paired(peer),
+                    "old queued work cannot retire a replacement"
+                );
+                assert_eq!(state.transport_status, Some(true));
+            }
+            "deadline" => {
+                state.run_deadline = Deadline::after(Instant::now(), Duration::ZERO);
+                assert_eq!(state.run_loop().await.unwrap(), EXIT_CRITERIA_UNMET);
+                assert_eq!(
+                    state.deferred_exchange.len(),
+                    1,
+                    "expired runs cannot start queued sends"
+                );
+            }
+            _ => {
+                state.ws.close(None).await.unwrap();
+                let error = state.process_deferred_exchange().await.unwrap_err();
+                assert_eq!(error.code, EXIT_CONNECTION_ERROR);
+                assert!(!state.connected_pairs.contains(&peer));
+            }
+        }
+        assert!(!state.exchange_ledger.has_sent(peer, RELIABLE_LABEL));
+        assert!(!state.exchange_ledger.unmet_criteria().is_empty());
+    }
+}
 
 // Regression #1002: a held local send must release the orchestrator and preserve relay.
 #[tokio::test]
@@ -190,6 +507,9 @@ async fn exchange_send_after_channel_close_preserves_relay_and_debt() {
         if trigger == "unreliable_gate" {
             std::fs::write(&release_path, b"release").unwrap();
             state.process_exchange_gate(Instant::now()).await.unwrap();
+            while !state.deferred_exchange.is_empty() {
+                state.process_deferred_exchange().await.unwrap();
+            }
             remote
                 .channel(state.my_id, RELIABLE_LABEL)
                 .unwrap()
@@ -230,6 +550,9 @@ async fn exchange_send_after_channel_close_preserves_relay_and_debt() {
             _ => state.process_exchange_gate(Instant::now()).await,
         };
         result.expect("closed P2P sends must retain the live signaling connection");
+        while !state.deferred_exchange.is_empty() {
+            state.process_deferred_exchange().await.unwrap();
+        }
         assert_eq!(state.transport_status, Some(false));
         assert!(!state.connected_pairs.contains(&peer));
         assert!(!state.engine.is_paired(peer));

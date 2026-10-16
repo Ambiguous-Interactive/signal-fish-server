@@ -609,6 +609,9 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         relay_received_from: BTreeSet::new(),
         peer_status_from: BTreeSet::new(),
         exchange_ledger: ExchangeLedger::default(),
+        deferred_exchange: VecDeque::new(),
+        #[cfg(test)]
+        exchange_send_hook: None,
         exchange_released: cli.exchange_release_file.is_none(),
         exchange_ready_reported: false,
         exchange_release_poll_at: None,
@@ -1131,6 +1134,7 @@ enum LoopInput {
     Engine(Option<EngineEvent>),
     SelectedPair(Option<SelectedPairProbeResult>),
     Tick,
+    DeferredExchange,
 }
 
 fn validate_json_negotiated_server_message(message: &ServerMessage) -> Result<(), FatalError> {
@@ -1238,6 +1242,21 @@ impl StartGameGate {
     fn note_sent(&mut self) {
         self.sent_since_invalidation = true;
     }
+}
+
+#[cfg(test)]
+type ExchangeSendHook = Box<
+    dyn FnMut(
+            std::sync::Arc<dyn webrtc::data_channel::DataChannel>,
+            String,
+        ) -> std::pin::Pin<Box<dyn Future<Output = webrtc::error::Result<()>> + Send>>
+        + Send,
+>;
+
+struct DeferredExchangeSend {
+    peer: PlayerId,
+    label: &'static str,
+    channel: Option<std::sync::Arc<dyn webrtc::data_channel::DataChannel>>,
 }
 
 /// Single-task state machine driving the session after the room is joined.
@@ -1352,6 +1371,10 @@ struct Orchestrator<'a> {
     peer_status_from: BTreeSet<PlayerId>,
     /// Monotonic logical exchange debt and evidence per connected peer.
     exchange_ledger: ExchangeLedger,
+    /// Deferred work owns the channel identity so replacements cannot inherit old sends.
+    deferred_exchange: VecDeque<DeferredExchangeSend>,
+    #[cfg(test)]
+    exchange_send_hook: Option<ExchangeSendHook>,
     /// Whether an optional harness gate has released the application exchange.
     exchange_released: bool,
     /// Whether the stable all-planned-pairs-open barrier event was emitted.
@@ -1390,17 +1413,36 @@ struct Orchestrator<'a> {
 
 impl Orchestrator<'_> {
     async fn run_loop(&mut self) -> Result<i32, FatalError> {
+        let mut normal_input_burst = 0_u8;
         loop {
+            if self.deferred_exchange.is_empty() {
+                normal_input_burst = 0;
+            }
             if let Some(code) = self.process_timers().await? {
                 return Ok(code);
             }
             let wake_at = self.next_wake();
+            /*
+             * Drain ready signaling, callbacks and timers before another local send.
+             * Limit each burst so continuous relay traffic cannot starve exchange.
+             */
             let input = tokio::select! {
-                frame = futures_util::StreamExt::next(&mut self.ws) => LoopInput::Server(frame),
-                event = self.engine_rx.recv() => LoopInput::Engine(event),
-                result = self.selected_pair_rx.recv() => LoopInput::SelectedPair(result),
-                _ = tokio::time::sleep_until(wake_at) => LoopInput::Tick,
+                biased;
+                input = async {
+                    tokio::select! {
+                        frame = futures_util::StreamExt::next(&mut self.ws) => LoopInput::Server(frame),
+                        event = self.engine_rx.recv() => LoopInput::Engine(event),
+                        result = self.selected_pair_rx.recv() => LoopInput::SelectedPair(result),
+                        _ = tokio::time::sleep_until(wake_at) => LoopInput::Tick,
+                    }
+                }, if normal_input_burst < 16 || self.deferred_exchange.is_empty() => input,
+                _ = std::future::ready(()), if !self.deferred_exchange.is_empty() => LoopInput::DeferredExchange,
             };
+            if matches!(input, LoopInput::DeferredExchange) {
+                normal_input_burst = 0;
+            } else {
+                normal_input_burst = normal_input_burst.saturating_add(1);
+            }
             match input {
                 LoopInput::Server(Some(Ok(Message::Text(text)))) => {
                     // ANY inbound frame proves the connection and the server
@@ -1484,6 +1526,7 @@ impl Orchestrator<'_> {
                     tracing::warn!("selected-pair probe channel closed");
                 }
                 LoopInput::Tick => {}
+                LoopInput::DeferredExchange => self.process_deferred_exchange().await?,
             }
 
             // FAULT INJECTION (--tick-stall-ms): deliberately BLOCK this
@@ -1683,6 +1726,7 @@ impl Orchestrator<'_> {
         self.p2p_retry_at = None;
         self.p2p_rebuild_release_poll_at = None;
         self.p2p_rebuild_released = self.cli.p2p_rebuild_release_file.is_none();
+        self.deferred_exchange.clear();
         self.exchange_released = self.cli.exchange_release_file.is_none();
         self.unreliable_exchange_released = self.cli.unreliable_exchange_release_file.is_none();
         self.drop_ice_from = None;
@@ -2078,7 +2122,7 @@ impl Orchestrator<'_> {
             &[RELIABLE_LABEL, UNRELIABLE_LABEL][..]
         };
         for peer in peers {
-            self.send_exchange(peer, labels).await?;
+            self.queue_exchange(peer, labels);
         }
         Ok(())
     }
@@ -2107,7 +2151,7 @@ impl Orchestrator<'_> {
         self.unreliable_exchange_release_poll_at = None;
         let peers: Vec<PlayerId> = self.connected_pairs.iter().copied().collect();
         for peer in peers {
-            self.send_exchange(peer, &[UNRELIABLE_LABEL]).await?;
+            self.queue_exchange(peer, &[UNRELIABLE_LABEL]);
         }
         Ok(())
     }
@@ -2130,7 +2174,43 @@ impl Orchestrator<'_> {
                 .label_complete(&self.expected_peers, RELIABLE_LABEL)
     }
 
+    fn queue_exchange(&mut self, peer: PlayerId, labels: &[&'static str]) {
+        for &label in labels {
+            self.deferred_exchange.push_back(DeferredExchangeSend {
+                peer,
+                label,
+                channel: self.engine.channel(peer, label),
+            });
+        }
+    }
+
+    async fn process_deferred_exchange(&mut self) -> Result<(), FatalError> {
+        if let Some(DeferredExchangeSend {
+            peer,
+            label,
+            channel: queued_channel,
+        }) = self.deferred_exchange.pop_front()
+        {
+            let current_channel = self.engine.channel(peer, label);
+            let same_channel = match (&queued_channel, &current_channel) {
+                (Some(queued), Some(current)) => std::sync::Arc::ptr_eq(queued, current),
+                (None, None) => true,
+                _ => false,
+            };
+            if same_channel && self.connected_pairs.contains(&peer) {
+                self.send_exchange(peer, &[label]).await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn send_exchange(&mut self, peer: PlayerId, labels: &[&str]) -> Result<(), FatalError> {
+        #[cfg(test)]
+        if let Some(mut hook) = self.exchange_send_hook.take() {
+            let result = self.send_exchange_with(peer, labels, &mut hook).await;
+            self.exchange_send_hook = Some(hook);
+            return result;
+        }
         self.send_exchange_with(peer, labels, |channel, text| async move {
             channel.send_text(&text).await
         })
@@ -4309,6 +4389,9 @@ mod tests {
             relay_received_from: BTreeSet::new(),
             peer_status_from: BTreeSet::new(),
             exchange_ledger: ExchangeLedger::default(),
+            deferred_exchange: VecDeque::new(),
+            #[cfg(test)]
+            exchange_send_hook: None,
             exchange_released: cli.exchange_release_file.is_none(),
             exchange_ready_reported: false,
             exchange_release_poll_at: None,

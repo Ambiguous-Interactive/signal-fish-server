@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use hdrhistogram::Histogram;
 
 use crate::config::{count_u64, DeliveryClass, Experiment};
-use crate::records::{ChurnPhase, GapEvent, RunRecords, SentEvent};
+use crate::records::{ChurnPhase, GapEvent, ReceiptEvent, RunRecords, SentEvent};
 use crate::schedule::{ChurnPlan, Phase, SenderPlan};
 
 /// One delivery key that violated the contract, named exactly. `epoch` and
@@ -862,8 +862,8 @@ pub fn summarize(
             });
 
     // Receipts grouped per `(recipient, sender, epoch)` stream, in arrival
-    // order: `(server_seq, ledger_seq, received_us)`.
-    let mut arrivals: BTreeMap<(&str, &str, u32), Vec<(u64, u64, u64)>> = BTreeMap::new();
+    // order. Borrow the evidence rather than copying every arrival field.
+    let mut arrivals: BTreeMap<(&str, &str, u32), Vec<&ReceiptEvent>> = BTreeMap::new();
     for receipt in &records.receipts {
         arrivals
             .entry((
@@ -872,7 +872,7 @@ pub fn summarize(
                 receipt.epoch,
             ))
             .or_default()
-            .push((receipt.server_seq, receipt.seq, receipt.received_us));
+            .push(receipt);
     }
     let disconnected: BTreeSet<&str> = records
         .disconnects
@@ -1062,7 +1062,7 @@ pub fn summarize(
                 // that the server must refuse. Counted only in the leak
                 // category: its verdict names the recipient and stream
                 // exactly, and a leak already invalidates the run.
-                let (seq, _, _) = stream.first().copied().unwrap_or((0, 0, 0));
+                let seq = stream.first().map_or(0, |receipt| receipt.server_seq);
                 leaked.record(DeliveryKey {
                     recipient: recipient.clone(),
                     sender: (*sender).to_string(),
@@ -1072,7 +1072,7 @@ pub fn summarize(
                 continue;
             }
             if !expected_senders.contains(sender) {
-                let (seq, _, _) = stream.first().copied().unwrap_or((0, 0, 0));
+                let seq = stream.first().map_or(0, |receipt| receipt.server_seq);
                 outcome.misrouted += count_u64(stream.len());
                 misrouted.record(DeliveryKey {
                     recipient: recipient.clone(),
@@ -1085,16 +1085,18 @@ pub fn summarize(
             // Delivered evidence counts every unique arrival on every
             // stream — closed streams included: their arrivals were real
             // deliveries, even though nothing further is owed.
+            let mut distinct = ArrivalCoverage::default();
             let unique = stream
                 .iter()
-                .map(|(server_seq, _, _)| *server_seq)
-                .collect::<BTreeSet<_>>()
-                .len();
+                .filter(|receipt| distinct.observe(receipt.server_seq).is_some())
+                .count();
             *received_by_sender.entry(sender).or_insert(0) += count_u64(unique);
             let block_len = count_u64(blocks.get(&(*sender, *epoch)).map_or(0, Vec::len));
             let closed_after = view.closed_at.get(&((*sender).to_string(), *epoch));
             let floor = view.floors.get(&((*sender).to_string(), *epoch));
-            for &(server_seq, _ledger_seq, received_us) in stream {
+            for receipt in stream {
+                let server_seq = receipt.server_seq;
+                let received_us = receipt.received_us;
                 let key = DeliveryKey {
                     recipient: recipient.clone(),
                     sender: (*sender).to_string(),
@@ -1145,36 +1147,33 @@ pub fn summarize(
                 let total_owed = count_u64(block.len());
                 let arrival = arrivals
                     .get(&(recipient.as_str(), sender, *epoch))
-                    .cloned()
-                    .unwrap_or_default();
+                    .map_or(&[][..], Vec::as_slice);
 
-                // Duplicates: a stream sequence observed more than once.
-                let mut seen = BTreeSet::new();
-                let mut unique: Vec<(u64, u64, u64)> = Vec::with_capacity(arrival.len());
-                for (server_seq, ledger_seq, received_us) in arrival {
-                    if !seen.insert(server_seq) {
-                        outcome.duplicates += 1;
-                        duplicates.record(DeliveryKey {
-                            recipient: recipient.clone(),
-                            sender: sender.to_string(),
-                            epoch: *epoch,
-                            seq: server_seq,
-                        });
-                        continue;
-                    }
-                    unique.push((server_seq, ledger_seq, received_us));
-                }
-
-                // Arrival order: per-stream sequences must strictly increase.
-                for pair in unique.windows(2) {
-                    if pair[1].0 <= pair[0].0 {
-                        outcome.out_of_order += 1;
-                        out_of_order.record(DeliveryKey {
-                            recipient: recipient.clone(),
-                            sender: sender.to_string(),
-                            epoch: *epoch,
-                            seq: pair[1].0,
-                        });
+                // Track first arrivals in place. Adjacent sequence coverage
+                // merges, so an ordered complete stream retains one range.
+                let mut observed = ArrivalCoverage::default();
+                for receipt in arrival {
+                    let server_seq = receipt.server_seq;
+                    match observed.observe(server_seq) {
+                        None => {
+                            outcome.duplicates += 1;
+                            duplicates.record(DeliveryKey {
+                                recipient: recipient.clone(),
+                                sender: sender.to_string(),
+                                epoch: *epoch,
+                                seq: server_seq,
+                            });
+                        }
+                        Some(true) => {
+                            outcome.out_of_order += 1;
+                            out_of_order.record(DeliveryKey {
+                                recipient: recipient.clone(),
+                                sender: sender.to_string(),
+                                epoch: *epoch,
+                                seq: server_seq,
+                            });
+                        }
+                        Some(false) => {}
                     }
                 }
 
@@ -1187,7 +1186,6 @@ pub fn summarize(
                     .get(&((*sender).to_string(), *epoch))
                     .copied()
                     .unwrap_or((0, 0, false));
-                let received_unique = count_u64(unique.len());
 
                 // Coverage model, shared by every class over the stream's
                 // owed window (above the rejoin floor, bounded by what the
@@ -1202,10 +1200,7 @@ pub fn summarize(
                         .get(&(recipient.as_str(), sender, *epoch))
                         .map_or(&[][..], Vec::as_slice),
                 };
-                let mut covered = StreamCoverage::default();
-                for (server_seq, _, _) in &unique {
-                    covered.insert(*server_seq, *server_seq);
-                }
+                let mut covered = observed.covered;
                 for gap in stream_gaps {
                     if gap.to_seq > total_owed {
                         invalid_gaps.record_violation(
@@ -1265,7 +1260,6 @@ pub fn summarize(
                 } else if !connected_through {
                     outcome.undelivered_at_disconnect += deficit;
                 }
-                let _ = received_unique;
             }
         }
         outcome.received = received_by_sender
@@ -1449,6 +1443,33 @@ pub fn summarize(
     }
 }
 
+/// Exact distinct-arrival and ordering state without a per-receipt copy.
+/// Zero remains observable for duplicate/order checks even though it cannot
+/// cover an owed (one-based) server sequence.
+#[derive(Default)]
+struct ArrivalCoverage {
+    covered: StreamCoverage,
+    zero_seen: bool,
+    previous: Option<u64>,
+}
+
+impl ArrivalCoverage {
+    /// None is a duplicate; Some(true) is a first arrival out of order.
+    fn observe(&mut self, sequence: u64) -> Option<bool> {
+        let fresh = if sequence == 0 {
+            !std::mem::replace(&mut self.zero_seen, true)
+        } else {
+            self.covered.insert(sequence, sequence)
+        };
+        if !fresh {
+            return None;
+        }
+        let out_of_order = self.previous.is_some_and(|previous| sequence <= previous);
+        self.previous = Some(sequence);
+        Some(out_of_order)
+    }
+}
+
 /// Disjoint inclusive ranges for one recipient stream. Adjacent ranges merge,
 /// so a compact gap report never expands into one allocation per omitted send.
 /// Reject an overlapping report in full before changing coverage.
@@ -1540,6 +1561,50 @@ fn percentile_of_sorted(sorted: &[u64], numerator: u64, denominator: u64) -> u64
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
+
+    // Issue #775: the old per-position set retained a node per receipt.
+    #[test]
+    fn ordered_arrivals_retain_one_range_without_losing_duplicate_checks() {
+        let mut arrivals = ArrivalCoverage::default();
+        for sequence in 1..=100_000 {
+            assert_eq!(arrivals.observe(sequence), Some(false));
+        }
+        assert_eq!(arrivals.covered.stored_ranges(), 1);
+        for sequence in [1, 50_000, 100_000] {
+            assert_eq!(arrivals.observe(sequence), None);
+        }
+        assert_eq!(arrivals.covered.above(0).covered, 100_000);
+    }
+
+    /// Compare the old independent position-set and unique-window rules on
+    /// every short stream, including zero, overflow boundaries, and repeats.
+    #[test]
+    fn compact_arrivals_match_position_sets_and_unique_arrival_order() {
+        let values = [0, 1, 2, u64::MAX];
+        for encoded in 0_u32..4096 {
+            let mut digits = encoded;
+            let mut seen = BTreeSet::new();
+            let mut unique = Vec::new();
+            let mut arrivals = ArrivalCoverage::default();
+            for _ in 0..6 {
+                let sequence = values[usize::try_from(digits % 4).expect("digit")];
+                digits /= 4;
+                let expected = if seen.insert(sequence) {
+                    let out_of_order = unique.last().is_some_and(|last| sequence <= *last);
+                    unique.push(sequence);
+                    Some(out_of_order)
+                } else {
+                    None
+                };
+                assert_eq!(arrivals.observe(sequence), expected, "stream {encoded}");
+            }
+            assert_eq!(
+                arrivals.covered.above(0).covered,
+                count_u64(seen.iter().filter(|sequence| **sequence > 0).count()),
+                "stream {encoded}"
+            );
+        }
+    }
 
     // Issue #775: one compact report must not allocate once per omitted send.
     #[test]
