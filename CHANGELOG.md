@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Let browser reference-client pair retries recover from stalled negotiation before the connection deadline (#1013).
 - Keep browser reference-client relay traffic and other peers moving during stalled negotiation,
   and prevent false run failures and false fallback reports at the run deadline (#1011).
 - Discard native reference-client deferred connections when peers leave or session plans remove them (#1010).

@@ -1744,14 +1744,15 @@ class Orchestrator {
       }
       case 'Signal': {
         const peer = String(data['from']);
+        const generation = parseSessionGeneration(data['generation']) ?? '';
+        // A retry starts a new physical link. It cannot wait behind the old
+        // link's stalled SDP/ICE, whose timeout would discard the queued retry.
+        if (this.canStartPairRetry(peer, generation, data['signal'])) {
+          this.peerTasks.delete(peer);
+        }
         this.schedulePeerTask(
           peer,
-          () =>
-            this.handleSignal(
-              peer,
-              parseSessionGeneration(data['generation']) ?? '',
-              data['signal'],
-            ),
+          () => this.handleSignal(peer, generation, data['signal']),
           utf8Bytes(JSON.stringify(data)),
         );
         break;
@@ -1939,6 +1940,28 @@ class Orchestrator {
   // -------------------------------------------------------------------------
   // P2P pairing + signaling (mirrors the native establish/handle/apply trio)
   // -------------------------------------------------------------------------
+
+  private canStartPairRetry(peer: string, generation: string, signal: unknown): boolean {
+    if (
+      this.pendingMembershipPlans.has(peer) ||
+      !isCurrentSessionGeneration(this.currentSessionGeneration, generation) ||
+      classifySignal(signal) !== 'pair_retry' ||
+      !this.expectedPeers.has(peer) ||
+      !this.pairRoles.has(peer)
+    )
+      return false;
+    const attempt = (signal as Record<string, unknown>)['PairRetry'];
+    const previous = this.pairRetryState.get(peer);
+    return (
+      typeof attempt === 'number' &&
+      Number.isInteger(attempt) &&
+      attempt >= 1 &&
+      attempt <= this.config.p2pRetryCount &&
+      attempt > (previous?.attempt ?? 0) &&
+      ((this.p2pDeadline !== null && monotonicNowMs() < this.p2pDeadline) ||
+        previous?.connected === true)
+    );
+  }
 
   /** Keep each peer's SDP/ICE ordered without holding the room input chain. */
   private schedulePeerTask(peer: string, task: () => Promise<void>, retainedBytes = 0): void {
@@ -2262,12 +2285,11 @@ class Orchestrator {
             throw new Error('PairRetry from an unplanned peer');
           }
           const previous = this.pairRetryState.get(from);
-          if (attempt <= (previous?.attempt ?? 0)) break;
+          if (!this.canStartPairRetry(from, this.currentSessionGeneration ?? '', signal)) break;
           const deadline = this.p2pDeadline;
           const windowOpen = deadline !== null && monotonicNowMs() < deadline;
           // A peer can close the old data channel before its marker reaches
           // the signaling socket. Remember successful formation in this generation.
-          if (!windowOpen && previous?.connected !== true) break;
           this.pairRetryState.set(from, {
             attempt,
             connected: previous?.connected ?? false,
