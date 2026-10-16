@@ -833,6 +833,23 @@ three-field map (`from_player`, `encoding`, `payload`), while legacy JSON, rkyv,
 and protobuf binary paths pass the payload bytes through unchanged. Neither v2
 form carries `seq` or `epoch`.
 
+All four advertised formats can be negotiated with protocol v2 or v3.
+The recipient's version determines its reply envelope, even when the sender
+uses a different version. The live catalog matrix covers all 64 combinations
+of source version, source format, recipient version, and recipient format:
+
+| Source format | Same-format recipient | Different-format recipient |
+| --- | --- | --- |
+| JSON | JSON text | JSON text |
+| MessagePack | Version-specific binary envelope | JSON text fallback |
+| rkyv or protobuf | V2 raw bytes or v3 binary envelope | Unsupported-format report and advisory on v3; advisory on v2 |
+
+The browser and native reference clients require v3 for opaque modes. V2 raw
+bytes carry no sender identity. A reference client cannot assign these bytes
+to a peer without an application schema. Applications that use v2 opaque
+payloads must supply their own attribution scheme. The server preserves the
+frozen raw-byte contract and does not add sender fields to those payloads.
+
 Binary game data is always reliable. The bare binary frame has no `class` or
 `key`, and clients must not infer a delivery class from its contents.
 

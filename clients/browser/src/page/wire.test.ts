@@ -451,6 +451,7 @@ for (const version of [2, 3]) {
   );
   for (const invalid of [
     Uint8Array.of(0xc1),
+    Uint8Array.of(0x81, 0x01, 0x02),
     encode(Uint8Array.of(1)),
     encode(9007199254740992n, { useBigInt64: true }),
     encode(Number.NaN),
@@ -467,6 +468,22 @@ for (const version of [2, 3]) {
     }
     assert(rejected, `v${version} must reject malformed or lossy MessagePack payloads`);
   }
+  const keyedPayload = JSON.parse(
+    '{"__proto__":{"score":3},"constructor":{"prototype":4},"nested":[{"__proto__":5}],"":6,"\\u0000score":7,"世界":8,"\\ufeffscore":9}',
+  ) as Record<string, unknown>;
+  keyedPayload['x'.repeat(300)] = 'long key';
+  const keyed = classifyMessagePackNegotiatedServerInput(
+    encode({
+      ...fields,
+      payload: encode(keyedPayload),
+      ...(version === 3 ? { seq: 1, epoch: 1 } : {}),
+    }),
+    version,
+  );
+  assert(
+    JSON.stringify(keyed.data['data']) === JSON.stringify(keyedPayload),
+    `v${version} must preserve every JSON object key`,
+  );
   const safe64 = classifyMessagePackNegotiatedServerInput(
     encode({
       ...fields,

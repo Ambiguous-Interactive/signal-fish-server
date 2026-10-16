@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve JSON object keys in browser MessagePack relay payloads on protocol v2 and v3 (#996).
 - Keep browser opaque relay sessions connected when mixed-room senders use JSON fallback (#994).
 - Retry native and browser reference-client game starts when players become ready again (#990).
 - Give native reference clients the full Pong response window after a slow successful Ping write (#987).

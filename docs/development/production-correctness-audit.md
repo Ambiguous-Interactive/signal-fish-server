@@ -3603,3 +3603,49 @@ Godot SDKs have separate MessagePack implementations and do not import these
 reference clients. They need no implementation change or acceptance issue for
 this repair. The complete catalog assessment in #678 and the wider A01–A22
 audit remain open. Final-head hosted CI and review are delivery gates.
+
+### Catalog qualification after F63
+
+At `7606fd8c`, the real-socket coverage does not qualify every format and
+version pair. Two new controls cover all four formats on both versions.
+The relay matrix uses eight source combinations and eight recipients per
+source. All 64 paths preserve exact payloads or report an unsupported format.
+The negotiation matrix checks all eight deployment flag combinations against
+all eight version/request pairs. Each advertisement and effective format must
+match the deployment policy. Disabled requests must warn and fall back to JSON.
+
+The relay checks use the recipient's version for stamps and envelope shape.
+They check exact v3 omission ranges, v2 field and report exclusion, and ordered
+source departure after each payload or refusal. The matrix passes in 0.673
+seconds; negotiation passes in 0.322 seconds. V2 opaque paths preserve raw
+bytes, as required by the frozen contract. Those bytes cannot identify a sender
+without application metadata. Both reference clients therefore retain their
+explicit v3 requirement for opaque modes. This documents that boundary and
+does not claim v2 reference-client attribution parity. Keep #678 open for its
+full acceptance decision. No new encoding or capability is introduced.
+
+### F64 — Browser MessagePack rejects valid object keys
+
+The catalog assessment found #996. On `7606fd8c`, the browser decoder rejects a
+MessagePack payload with an object property named `__proto__`. JSON fallback
+and native decoding can preserve this value, so the recipient format changes
+whether the same game message can be received. The new wire regression fails
+with the decoder's key rejection before the repair. A real Chromium v3
+recipient also fails in 1.313 seconds on the baseline browser bundle. Its
+bundle hashes stay fixed before and after that run.
+
+The browser now prefixes decoded map keys during MessagePack materialization
+and restores their exact names through `Object.fromEntries`. Values and
+application-visible key names stay unchanged. Empty names, nested objects,
+NUL-prefixed names, and a leading Unicode byte-order mark have distinct
+controls. Non-string map keys and non-JSON payloads remain rejected. Existing
+integer precision and version-specific envelope validation still apply.
+
+Real Chromium v2 and v3 recipients each receive exact JSON and MessagePack
+payloads from live senders. Separate opaque recipients preserve these keys on
+the JSON fallback path. All four runtime controls pass. The public server
+wire, deployment flags, room behavior, and SDK APIs do not change. Rust, .NET,
+and Godot clients do not import this browser implementation and need no
+migration for this repair. Full hosted CI and final review remain delivery
+gates. Captured passing attempts for #853 and #889 do not establish their
+failure causes; both issues stay open.

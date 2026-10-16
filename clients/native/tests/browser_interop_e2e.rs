@@ -1629,12 +1629,20 @@ async fn browser_message_pack_v3_mixed_relay() {
     run_browser_message_pack_relay("3").await;
 }
 
-async fn run_opaque_browser_mixed_inputs(encoding: &'static str, knob: &'static str) {
+async fn run_browser_mixed_inputs(
+    encoding: &'static str,
+    knob: &'static str,
+    version: &'static str,
+) {
     use signal_fish_reference_native::wire::{self, WsStream};
     let _serial = acquire_serial().await;
     let mut server = spawn_server_with_extra_env("relay", &[(knob, "true".to_string())]).await;
     let workdir = tempfile::tempdir().unwrap();
-    let url = server.v3_ws_url();
+    let url = if version == "2" {
+        server.v2_ws_url()
+    } else {
+        server.v3_ws_url()
+    };
     let release = workdir.path().join("release");
     let mut browser = spawn_browser_client(
         &ClientSpec {
@@ -1648,6 +1656,8 @@ async fn run_opaque_browser_mixed_inputs(encoding: &'static str, knob: &'static 
             extra_args: &[
                 "--game-data-format",
                 encoding,
+                "--protocol-version",
+                version,
                 "--success-release-file",
                 release.to_str().unwrap(),
             ],
@@ -1699,7 +1709,9 @@ async fn run_opaque_browser_mixed_inputs(encoding: &'static str, knob: &'static 
     browser.await_event("game_starting", EVENT_TIMEOUT).await;
     let payloads = [
         json!({"relay_msg": "JSON 世界"}),
-        json!({"relay_msg": "MessagePack 世界"}),
+        json!({"relay_msg": "MessagePack 世界", "__proto__": {"score": 3},
+            "constructor": {"prototype": 4}, "nested": [{"__proto__": 5}],
+            "": 6, "\u{0000}score": 7, "世界": 8, "\u{feff}score": 9}),
     ];
     wire::send_game_data(&mut senders[0], payloads[0].clone())
         .await
@@ -1734,14 +1746,35 @@ async fn run_opaque_browser_mixed_inputs(encoding: &'static str, knob: &'static 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn browser_rkyv_accepts_json_and_message_pack_fallback() {
-    run_opaque_browser_mixed_inputs("rkyv", "SIGNAL_FISH__PROTOCOL__ENABLE_RKYV_GAME_DATA").await;
+    run_browser_mixed_inputs("rkyv", "SIGNAL_FISH__PROTOCOL__ENABLE_RKYV_GAME_DATA", "3").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn browser_protobuf_accepts_json_and_message_pack_fallback() {
-    run_opaque_browser_mixed_inputs(
+    run_browser_mixed_inputs(
         "protobuf",
         "SIGNAL_FISH__PROTOCOL__ENABLE_PROTOBUF_GAME_DATA",
+        "3",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_message_pack_v2_preserves_json_object_keys() {
+    run_browser_mixed_inputs(
+        "message_pack",
+        "SIGNAL_FISH__PROTOCOL__ENABLE_MESSAGE_PACK_GAME_DATA",
+        "2",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_message_pack_v3_preserves_json_object_keys() {
+    run_browser_mixed_inputs(
+        "message_pack",
+        "SIGNAL_FISH__PROTOCOL__ENABLE_MESSAGE_PACK_GAME_DATA",
+        "3",
     )
     .await;
 }

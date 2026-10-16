@@ -1,4 +1,4 @@
-//! H14: mixed JSON/MessagePack rooms over real WebSockets.
+//! Mixed encoding catalog and H14 relay checks over real WebSockets.
 //!
 //! The pre-registered concern was that one incompatible recipient could turn
 //! every binary relay into an `UNSUPPORTED_GAME_DATA_FORMAT` error and amplify
@@ -1686,4 +1686,388 @@ async fn v2_recipients_of_opaque_payloads_get_advisories_without_v3_reports() {
     drop(v2_json);
     drop(v2_message_pack);
     running_server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn complete_encoding_catalog_relays_across_both_protocol_versions() {
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct LegacyMessagePackFrame {
+        from_player: PlayerId,
+        encoding: GameDataEncoding,
+        payload: serde_bytes::ByteBuf,
+    }
+
+    let formats = [
+        GameDataEncoding::Json,
+        GameDataEncoding::MessagePack,
+        GameDataEncoding::Rkyv,
+        GameDataEncoding::Protobuf,
+    ];
+    for source_version in [2, 3] {
+        for source_format in formats {
+            let mut protocol = ProtocolConfig::default();
+            protocol.sdk_compatibility.enforce = false;
+            protocol.enable_rkyv_game_data = true;
+            protocol.enable_protobuf_game_data = true;
+            let server = create_test_server_with_config(test_server_config(), protocol).await;
+            let metrics = server.metrics();
+            let router = create_router("http://localhost:3000").with_state(server.clone());
+            let running = RunningTestServer::spawn(server, router).await;
+            let mut members = Vec::new();
+            for (version, format) in std::iter::once((source_version, source_format)).chain(
+                [2, 3]
+                    .into_iter()
+                    .flat_map(|version| formats.map(|format| (version, format))),
+            ) {
+                let mut ws = connect(running.addr()).await;
+                authenticate_with_encoding(&mut ws, version, Some(format)).await;
+                let player = try_join(
+                    ws,
+                    "catalog",
+                    "CAT001",
+                    Some(9),
+                    &format!("member-{}", members.len()),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("v{version} {format:?}: {error:?}"));
+                members.push((version, format, player));
+            }
+            assert_eq!(members.last().unwrap().2.room_player_count, 9);
+            let ids: Vec<_> = members
+                .iter()
+                .map(|(_, _, player)| player.player_id)
+                .collect();
+            for (index, (version, format, member)) in members.iter_mut().enumerate() {
+                let mut pending: std::collections::BTreeSet<_> =
+                    ids[index + 1..].iter().copied().collect();
+                let deadline = tokio::time::Instant::now() + FRAME_DEADLINE;
+                while !pending.is_empty() {
+                    let frame = tokio::time::timeout_at(deadline, member.ws.next())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                    match frame {
+                        Message::Text(text) => {
+                            match serde_json::from_str::<ServerMessage>(&text).unwrap() {
+                                ServerMessage::PlayerJoined { player } => assert!(
+                                    pending.remove(&player.id),
+                                    "v{version} {format:?}: duplicate or unknown join {}",
+                                    player.id
+                                ),
+                                ServerMessage::LobbyStateChanged { .. } => {}
+                                other => panic!(
+                                    "v{version} {format:?}: unexpected setup message {other:?}"
+                                ),
+                            }
+                        }
+                        Message::Ping(_) | Message::Pong(_) => {}
+                        other => panic!("v{version} {format:?}: unexpected setup frame {other:?}"),
+                    }
+                }
+            }
+            let (_, _, mut source) = members.remove(0);
+            let value =
+                serde_json::json!({"relay_msg": "catalog 世界", "state": [null, true, -17, 1.25]});
+            let opaque = vec![0x52, 0x4b, 0x00, 0xff, 0x80];
+            let payload = match source_format {
+                GameDataEncoding::Json => serde_json::to_vec(&value).unwrap(),
+                GameDataEncoding::MessagePack => rmp_serde::to_vec_named(&value).unwrap(),
+                GameDataEncoding::Rkyv | GameDataEncoding::Protobuf => opaque,
+            };
+            let input = if source_format == GameDataEncoding::Json {
+                Message::Text(
+                    serde_json::to_string(&ClientMessage::GameData {
+                        data: value.clone(),
+                        class: None,
+                        key: None,
+                    })
+                    .unwrap()
+                    .into(),
+                )
+            } else {
+                Message::Binary(payload.clone().into())
+            };
+            source.ws.send(input).await.unwrap();
+            for (version, format, recipient) in &mut members {
+                let context =
+                    format!("v{source_version} {source_format:?} -> v{version} {format:?}");
+                let compatible = source_format == GameDataEncoding::Json
+                    || source_format == GameDataEncoding::MessagePack
+                    || source_format == *format;
+                let binary = source_format != GameDataEncoding::Json && source_format == *format;
+                let deadline = tokio::time::Instant::now() + FRAME_DEADLINE;
+                let mut delivered = false;
+                let mut advisory = false;
+                let mut gap = false;
+                while !(if compatible {
+                    delivered
+                } else {
+                    advisory && (*version == 2 || gap)
+                }) {
+                    let frame = tokio::time::timeout_at(deadline, recipient.ws.next())
+                        .await
+                        .unwrap_or_else(|_| panic!("{context}: timed out"))
+                        .unwrap()
+                        .unwrap();
+                    match frame {
+                        Message::Binary(bytes) => {
+                            assert!(compatible && binary, "{context}: unexpected binary payload");
+                            assert!(!delivered, "{context}: duplicate payload");
+                            if *version == 3 {
+                                let frame = decode_v3_binary_game_data(&bytes).unwrap();
+                                assert_eq!(frame.from_player, source.player_id, "{context}");
+                                assert_eq!(frame.encoding, source_format, "{context}");
+                                assert_eq!(frame.payload, payload, "{context}");
+                                assert_eq!((frame.seq, frame.epoch), (1, 1), "{context}");
+                            } else if source_format == GameDataEncoding::MessagePack {
+                                let frame: LegacyMessagePackFrame =
+                                    rmp_serde::from_slice(&bytes).unwrap();
+                                assert_eq!(frame.from_player, source.player_id, "{context}");
+                                assert_eq!(frame.encoding, source_format, "{context}");
+                                assert_eq!(frame.payload.as_ref(), payload, "{context}");
+                            } else {
+                                assert_eq!(
+                                    bytes.as_ref(),
+                                    payload,
+                                    "{context}: frozen v2 raw payload"
+                                );
+                            }
+                            delivered = true;
+                        }
+                        Message::Text(text) => {
+                            if *version == 2 {
+                                let raw: serde_json::Value = serde_json::from_str(&text).unwrap();
+                                if raw["type"] == "GameData" {
+                                    for field in ["seq", "epoch", "class", "key"] {
+                                        assert!(
+                                            raw["data"].get(field).is_none(),
+                                            "{context}: v3 field {field} leaked"
+                                        );
+                                    }
+                                }
+                            }
+                            match serde_json::from_str::<ServerMessage>(&text).unwrap() {
+                                ServerMessage::GameData {
+                                    from_player,
+                                    data,
+                                    seq,
+                                    epoch,
+                                    class,
+                                    key,
+                                } => {
+                                    assert!(
+                                        compatible && !binary,
+                                        "{context}: unexpected JSON fallback"
+                                    );
+                                    assert!(!delivered, "{context}: duplicate payload");
+                                    assert_eq!(from_player, source.player_id, "{context}");
+                                    assert_eq!(data, value, "{context}");
+                                    assert_eq!(
+                                        (seq, epoch),
+                                        if *version == 3 {
+                                            (Some(1), Some(1))
+                                        } else {
+                                            (None, None)
+                                        },
+                                        "{context}"
+                                    );
+                                    if *version == 2 {
+                                        assert!(
+                                            class.is_none() && key.is_none(),
+                                            "{context}: v3 fields leaked"
+                                        );
+                                    }
+                                    delivered = true;
+                                }
+                                ServerMessage::Error {
+                                    message,
+                                    error_code,
+                                } => {
+                                    assert!(!compatible, "{context}: {message}");
+                                    assert_eq!(
+                                        error_code,
+                                        Some(ErrorCode::UnsupportedGameDataFormat),
+                                        "{context}"
+                                    );
+                                    advisory = true;
+                                }
+                                ServerMessage::DeliveryReport(report) => {
+                                    assert_eq!(*version, 3, "{context}: v3 report leaked");
+                                    if !compatible {
+                                        assert_eq!(
+                                            report.per_class.reliable.unsupported_format, 1,
+                                            "{context}"
+                                        );
+                                        assert_eq!(
+                                            report.gaps,
+                                            vec![DeliveryGap {
+                                                from_player: source.player_id,
+                                                epoch: 1,
+                                                from_seq: 1,
+                                                to_seq: 1,
+                                                reason: DeliveryGapReason::UnsupportedFormat,
+                                            }],
+                                            "{context}"
+                                        );
+                                        gap = true;
+                                    }
+                                }
+                                ServerMessage::PlayerJoined { .. }
+                                | ServerMessage::LobbyStateChanged { .. } => {}
+                                other => panic!("{context}: unexpected message {other:?}"),
+                            }
+                        }
+                        Message::Ping(_) | Message::Pong(_) => {}
+                        other => panic!("{context}: unexpected frame {other:?}"),
+                    }
+                }
+            }
+            source
+                .ws
+                .send(Message::Text(
+                    serde_json::to_string(&ClientMessage::LeaveRoom)
+                        .unwrap()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            for (version, format, recipient) in &mut members {
+                let deadline = tokio::time::Instant::now() + FRAME_DEADLINE;
+                loop {
+                    let frame = tokio::time::timeout_at(deadline, recipient.ws.next())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                    match frame {
+                        Message::Text(text) => {
+                            match serde_json::from_str::<ServerMessage>(&text).unwrap() {
+                                ServerMessage::PlayerLeft { player_id, .. } => {
+                                    assert_eq!(player_id, source.player_id);
+                                    break;
+                                }
+                                ServerMessage::DeliveryReport(_) => {
+                                    assert_eq!(*version, 3, "v2 report leaked")
+                                }
+                                ServerMessage::LobbyStateChanged { .. }
+                                | ServerMessage::AuthorityChanged { .. } => {}
+                                other => panic!(
+                                    "v{version} {format:?}: unexpected trailing message {other:?}"
+                                ),
+                            }
+                        }
+                        Message::Ping(_) | Message::Pong(_) => {}
+                        other => {
+                            panic!("v{version} {format:?}: unexpected trailing frame {other:?}")
+                        }
+                    }
+                }
+            }
+            websocket_test_helpers::assert_message_conservation(&metrics).await;
+            drop(members);
+            drop(source);
+            running.shutdown().await;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn encoding_catalog_negotiation_enforces_every_deployment_opt_in() {
+    use websocket_test_helpers::next_matching_server_message_within;
+
+    let formats = [
+        GameDataEncoding::Json,
+        GameDataEncoding::MessagePack,
+        GameDataEncoding::Rkyv,
+        GameDataEncoding::Protobuf,
+    ];
+    for flags in 0_u8..8 {
+        let mut protocol = ProtocolConfig::default();
+        protocol.sdk_compatibility.enforce = false;
+        protocol.enable_message_pack_game_data = flags & 1 != 0;
+        protocol.enable_rkyv_game_data = flags & 2 != 0;
+        protocol.enable_protobuf_game_data = flags & 4 != 0;
+        let expected: Vec<_> = formats
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| *index == 0 || flags & (1 << (index - 1)) != 0)
+            .map(|(_, format)| format)
+            .collect();
+        let server = create_test_server_with_config(test_server_config(), protocol).await;
+        let router = create_router("http://localhost:3000").with_state(server.clone());
+        let running = RunningTestServer::spawn(server.clone(), router).await;
+        for version in [2, 3] {
+            for requested in formats {
+                let context = format!("flags={flags}, v{version}, requested={requested:?}");
+                let mut ws = connect(running.addr()).await;
+                ws.send(Message::Text(
+                    serde_json::json!({"type":"Authenticate", "data": {
+                        "app_id":"room16", "protocol_version":version, "game_data_format":requested,
+                    }})
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+                let mut fallback_warning = false;
+                next_matching_server_message_within(&mut ws, FRAME_DEADLINE, &context, |message| {
+                    match message {
+                        ServerMessage::Error { error_code, .. } => {
+                            assert_eq!(
+                                error_code,
+                                Some(ErrorCode::UnsupportedGameDataFormat),
+                                "{context}"
+                            );
+                            fallback_warning = true;
+                            None
+                        }
+                        ServerMessage::Authenticated { .. } => Some(()),
+                        other => panic!("{context}: unexpected authentication message {other:?}"),
+                    }
+                })
+                .await;
+                let info = next_matching_server_message_within(
+                    &mut ws,
+                    FRAME_DEADLINE,
+                    &context,
+                    |message| match message {
+                        ServerMessage::ProtocolInfo(info) => Some(info),
+                        other => panic!("{context}: unexpected negotiation message {other:?}"),
+                    },
+                )
+                .await;
+                assert_eq!(info.game_data_formats, expected, "{context}");
+                assert_eq!(
+                    info.protocol_version,
+                    (version == 3).then_some(3),
+                    "{context}"
+                );
+                let supported = expected.contains(&requested);
+                assert_eq!(fallback_warning, !supported, "{context}");
+                let player = try_join(
+                    ws,
+                    "catalog-flags",
+                    "FLAGS1",
+                    Some(9),
+                    &format!("{version}-{requested:?}"),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{context}: {error:?}"));
+                assert_eq!(
+                    server.client_game_data_format(&player.player_id),
+                    if supported {
+                        requested
+                    } else {
+                        GameDataEncoding::Json
+                    },
+                    "{context}"
+                );
+                drop(player);
+            }
+        }
+        running.shutdown().await;
+    }
 }
