@@ -208,7 +208,7 @@ Browser-specific additions and deviations:
 | Flag / behavior | Meaning |
 |-----------------|---------|
 | `--mdns-obfuscation` | Leave Chromium's DEFAULT mDNS host-candidate obfuscation ON (candidates become opaque `<uuid>.local` names, exercising the documented cross-stack `.local` trap). Default OFF: Chromium is launched with `--disable-features=WebRtcHideLocalIpsWithMdns` for deterministic loopback host candidates |
-| `--cripple-ice` (browser flavor) | The browser cannot filter network interfaces the way the native engine does; determinism comes from dropping ALL outbound candidates AND ignoring all inbound ones (`signal_received` is still emitted). With zero remote candidates on both sides, no ICE check pair ever forms |
+| `--cripple-ice` (browser flavor) | The browser cannot filter network interfaces the way the native engine does; determinism comes from dropping outbound candidate signals and ignoring inbound candidate signals and candidates embedded in remote offer/answer SDP (`signal_received` is still emitted). Without remote candidates, no ICE check pair forms |
 | Native `--ip-family` | Not exposed by the browser client. Chromium chooses its own interfaces; pinning the ICE address family is a native-engine capability used by the IPv6 interop cell |
 | Native `--drop-ice-from` | Not exposed by the browser client. It is a native-only matrix-harness fault for isolating one webrtc-rs peer edge; shared interop and `--cripple-ice` behavior remain identical |
 | `--run-for-secs` measurement | The soft window still measures from PROCESS start: the CLI passes the Chromium-launch time already spent into the page engine, which subtracts it |

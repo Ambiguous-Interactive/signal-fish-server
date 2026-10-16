@@ -3,6 +3,210 @@ use super::*;
 use clap::Parser;
 use futures_util::StreamExt;
 
+// Regression #1000: a local channel send failure must preserve the relay floor.
+#[tokio::test]
+async fn exchange_send_after_channel_close_preserves_relay_and_debt() {
+    for (trigger, closed_label) in [
+        ("exchange_gate", RELIABLE_LABEL),
+        ("exchange_gate", UNRELIABLE_LABEL),
+        ("unreliable_gate", UNRELIABLE_LABEL),
+        ("immediate", RELIABLE_LABEL),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(tcp).await.unwrap()
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let mut server_ws = server.await.unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let release_path = directory.path().join("exchange-release");
+        let mut arguments = vec![
+            "reference-native",
+            "--server-url",
+            &url,
+            "--create-room",
+            "--disable-mdns",
+            "--exchange",
+            "--exchange-release-file",
+            release_path.to_str().unwrap(),
+            "--p2p-retry-count",
+            "1",
+        ];
+        if trigger == "unreliable_gate" {
+            arguments.extend([
+                "--unreliable-exchange-release-file",
+                release_path.to_str().unwrap(),
+            ]);
+        }
+        let cli = Cli::parse_from(arguments);
+        let peer = PlayerId::from_u128(2);
+        let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+        state.current_session_generation = Some(SessionGeneration::from_u128(3));
+        state.webrtc_plan_seen = true;
+        state.establish_pair(peer, true).await.unwrap();
+        let (mut remote, opens) = open_physical_pair(&mut state, &mut server_ws, peer, None).await;
+        for event in opens {
+            state.handle_engine_event(event).await.unwrap();
+        }
+        assert!(state.connected_pairs.contains(&peer));
+        state.ice_gathering_complete.insert(peer);
+        if trigger == "unreliable_gate" {
+            std::fs::write(&release_path, b"release").unwrap();
+            state.process_exchange_gate(Instant::now()).await.unwrap();
+            remote
+                .channel(state.my_id, RELIABLE_LABEL)
+                .unwrap()
+                .send_text(&json!({"from": peer, "channel": RELIABLE_LABEL, "seq": 0}).to_string())
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !state.exchange_reliable_gate_ready() {
+                    let event = state.engine_rx.recv().await.unwrap();
+                    state.handle_engine_event(event).await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+        }
+        state
+            .engine
+            .channel(peer, closed_label)
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(state.engine_rx.recv().await.unwrap(), EngineEvent::ChannelClosed { label, .. } if label == closed_label) {
+                    break;
+                }
+            }
+        }).await.expect("hold the terminal channel callback before the exchange send");
+        std::fs::write(&release_path, b"release").unwrap();
+        let result = match trigger {
+            "unreliable_gate" => state.process_unreliable_exchange_gate(Instant::now()).await,
+            "immediate" => {
+                state
+                    .send_exchange(peer, &[RELIABLE_LABEL, UNRELIABLE_LABEL])
+                    .await
+            }
+            _ => state.process_exchange_gate(Instant::now()).await,
+        };
+        result.expect("closed P2P sends must retain the live signaling connection");
+        assert_eq!(state.transport_status, Some(false));
+        assert!(!state.connected_pairs.contains(&peer));
+        assert!(!state.engine.is_paired(peer));
+        assert!(!state.exchange_ledger.has_sent(peer, closed_label));
+        assert_eq!(
+            state.exchange_ledger.has_sent(peer, RELIABLE_LABEL),
+            closed_label == UNRELIABLE_LABEL
+        );
+        assert!(!state.exchange_ledger.unmet_criteria().is_empty());
+        wire::send_game_data(&mut state.ws, json!({"after_p2p_failure": trigger}))
+            .await
+            .unwrap();
+        state.send_message(&ClientMessage::Ping).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut fallback_seen = false;
+            let mut relay_seen = false;
+            loop {
+                let frame = server_ws.next().await.unwrap().unwrap();
+                if let Message::Text(text) = frame {
+                    match serde_json::from_str::<ClientMessage>(&text).unwrap() {
+                        ClientMessage::GameData { data, .. } => {
+                            assert_eq!(data["after_p2p_failure"], trigger);
+                            relay_seen = true;
+                        }
+                        ClientMessage::TransportStatus {
+                            transport: Transport::WebRtc,
+                            connected: false,
+                        } => fallback_seen = true,
+                        ClientMessage::Ping => {
+                            assert!(fallback_seen && relay_seen);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        })
+        .await
+        .expect("relay control frames remain writable after P2P send failure");
+        remote.remove_peer(state.my_id).await.unwrap();
+        state.request_pair_retry(peer, 1).await.unwrap();
+        let (mut replacement, opens) =
+            open_physical_pair(&mut state, &mut server_ws, peer, None).await;
+        state.exchange_released = true;
+        for event in opens {
+            state.handle_engine_event(event).await.unwrap();
+        }
+        assert!(state.connected_pairs.contains(&peer));
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            assert!(state.exchange_ledger.has_sent(peer, label));
+            replacement
+                .channel(state.my_id, label)
+                .unwrap()
+                .send_text(&json!({"from": peer, "channel": label, "seq": 0}).to_string())
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !state.exchange_ledger.unmet_criteria().is_empty() {
+                let event = state.engine_rx.recv().await.unwrap();
+                state.handle_engine_event(event).await.unwrap();
+            }
+        })
+        .await
+        .expect("fresh transport discharges remaining send and receipt debt");
+        state.remove_pair_obligation(peer).await;
+        replacement.remove_peer(state.my_id).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn exchange_missing_channel_preserves_debt_and_signaling_errors() {
+    for signaling_closed in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(tcp).await.unwrap()
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let _server_ws = server.await.unwrap();
+        let cli = Cli::parse_from([
+            "reference-native",
+            "--server-url",
+            &url,
+            "--create-room",
+            "--exchange",
+        ]);
+        let peer = PlayerId::from_u128(2);
+        let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+        state.webrtc_plan_seen = true;
+        state.transport_status = Some(true);
+        state.connected_pairs.insert(peer);
+        state.exchange_ledger.note_connected(peer);
+        if signaling_closed {
+            state.ws.close(None).await.unwrap();
+        }
+        let result = state
+            .send_exchange(peer, &[RELIABLE_LABEL, UNRELIABLE_LABEL])
+            .await;
+        if signaling_closed {
+            assert_eq!(result.unwrap_err().code, EXIT_CONNECTION_ERROR);
+        } else {
+            result.unwrap();
+            assert_eq!(state.transport_status, Some(false));
+            state.send_message(&ClientMessage::Ping).await.unwrap();
+        }
+        assert!(state.exchange_ledger.sent.is_empty());
+        assert!(!state.exchange_ledger.unmet_criteria().is_empty());
+    }
+}
+
 /*
     Keep real open callbacks queued so tests control their dispatch time.
 */
