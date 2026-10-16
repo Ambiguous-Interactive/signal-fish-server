@@ -156,7 +156,7 @@ for (const scenario of ['synchronous', 'delayed'] as const) {
     running = run(config);
     await turn();
     if (scenario === 'delayed') {
-      check(connections.length === 1, 'peer 1 must be awaiting its actual offer');
+      check(connections.length === 2, 'both peers negotiate while their offers are held');
       rejectOutput?.(new Error('consumer closed'));
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -183,8 +183,8 @@ for (const scenario of ['synchronous', 'delayed'] as const) {
     await turn();
     await turn();
     check(
-      connections.length === (scenario === 'synchronous' ? 0 : 1),
-      'failure must prevent new peer connections, including peer 2 after teardown',
+      connections.length === (scenario === 'synchronous' ? 0 : 2),
+      'failure must prevent any new peer connections after teardown',
     );
     check(
       connections.every((pc) => pc.localDescriptionAfterClose === 0),
@@ -285,6 +285,7 @@ for (const seam of [
   }
 }
 
+// Regression #1011: relay input remains live during each suspended peer operation.
 // Regressions #960/#969/#972/#979: negotiation and retries share absolute connection deadlines.
 for (const deadlineKind of [
   'p2p',
@@ -366,23 +367,26 @@ for (const deadlineKind of [
       }
     }
     class DeadlineConnection {
+      readonly index: number;
       closed = false;
       ondatachannel: ((event: { channel: DeadlineChannel }) => void) | null = null;
       constructor() {
         connection = this;
         connectionCount += 1;
+        this.index = connectionCount;
       }
       createDataChannel(label: string) {
         return { label, readyState: 'connecting' };
       }
       async createOffer() {
         calls.push('offer');
-        if (holdEnabled && seam === 'offer') await held;
+        if ((holdEnabled || (deadlineKind === 'plan' && this.index === 2)) && seam === 'offer')
+          await held;
         return { type: 'offer', sdp: 'test-offer' };
       }
       async setLocalDescription() {
         calls.push('local');
-        if (deadlineKind === 'plan' && connectionCount === 1) {
+        if (deadlineKind === 'plan' && this.index === 1) {
           now += 700;
           holdEnabled = true;
         } else if (holdEnabled && (seam === 'local' || seam === 'answer-local')) await held;
@@ -562,7 +566,7 @@ for (const deadlineKind of [
           : seam === 'answer-local'
             ? 'local'
             : seam;
-      check(calls.at(-1) === heldCall, 'the actual browser operation must be suspended');
+      check(calls.includes(heldCall), 'the actual browser operation must be suspended');
       socket?.deliver('GameData', {
         from_player: peer,
         epoch: 1,
@@ -583,8 +587,8 @@ for (const deadlineKind of [
       await turn();
       check(connection?.closed === false, 'negotiation must remain live before its deadline');
       check(
-        !events.some((event) => event['event'] === 'game_data_received'),
-        'relay must remain queued behind the suspended operation before expiry',
+        events.filter((event) => event['event'] === 'game_data_received').length === 1,
+        'relay must arrive while peer negotiation is suspended before expiry',
       );
       now +=
         deadlineKind === 'retry' || deadlineKind === 'plan' || deadlineKind === 'p2p-connected'
@@ -641,8 +645,8 @@ for (const deadlineKind of [
       check(connection?.closed === true, 'deadline must close the stalled physical link');
       if (deadlineKind === 'plan-expiry') {
         check(
-          connectionCount === 1,
-          'later peers must not start negotiation after the shared plan window expires',
+          connectionCount === 2,
+          'each planned peer must start independently before the shared window expires',
         );
       }
       if (

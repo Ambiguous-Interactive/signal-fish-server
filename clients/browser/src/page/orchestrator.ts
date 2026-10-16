@@ -25,10 +25,10 @@
 //    `--relay-payload`.
 //
 // Concurrency: the page is single-threaded, but server frames and browser
-// WebRTC callbacks both trigger async work. Every input is appended to one
-// promise chain (`enqueue`), so handlers never interleave and every stdout
-// event is emitted in causal order — the JS equivalent of the native client's
-// single `tokio::select!` task.
+// WebRTC callbacks both trigger async work. Room input uses one promise
+// chain (`enqueue`). Each peer has a separate ordered SDP/ICE queue so a
+// stalled WebRTC operation cannot hold relay input or other peers. Retained
+// peer work keeps its input backlog credit until consumption or cancellation.
 
 import {
   EXIT_CONNECTION_ERROR,
@@ -729,6 +729,7 @@ class Orchestrator {
   private currentSessionGeneration: string | null = null;
   private readonly expectedPeers = new Set<string>();
   private readonly pairRoles = new Map<string, boolean>();
+  private readonly peerTasks = new Map<string, { tail: Promise<void>; token: object }>();
   private readonly pairRetryState = new Map<string, { attempt: number; connected: boolean }>();
   private readonly retryingPairs = new Set<string>();
   private readonly connectedPairs = new Set<string>();
@@ -1692,7 +1693,9 @@ class Orchestrator {
           this.assertActive();
           const peerId = String(peer['player_id']);
           if (transport === 'webrtc' && added.delete(peerId)) {
-            await this.establishPair(peerId, peer['initiate'] === true, planDeadline);
+            this.schedulePeerTask(peerId, () =>
+              this.establishPair(peerId, peer['initiate'] === true, planDeadline),
+            );
             this.assertActive();
           }
         }
@@ -1713,14 +1716,20 @@ class Orchestrator {
         const youInitiate = data['you_initiate'] === true;
         this.emit({ event: 'new_peer', peer_id: peerId, you_initiate: youInitiate });
         // Same pairing path as a plan peer (the late-join offerer rule).
-        await this.establishPair(peerId, youInitiate);
+        this.schedulePeerTask(peerId, () => this.establishPair(peerId, youInitiate));
         break;
       }
       case 'Signal': {
-        await this.handleSignal(
-          String(data['from']),
-          parseSessionGeneration(data['generation']) ?? '',
-          data['signal'],
+        const peer = String(data['from']);
+        this.schedulePeerTask(
+          peer,
+          () =>
+            this.handleSignal(
+              peer,
+              parseSessionGeneration(data['generation']) ?? '',
+              data['signal'],
+            ),
+          utf8Bytes(JSON.stringify(data)),
         );
         break;
       }
@@ -1908,6 +1917,44 @@ class Orchestrator {
   // P2P pairing + signaling (mirrors the native establish/handle/apply trio)
   // -------------------------------------------------------------------------
 
+  /** Keep each peer's SDP/ICE ordered without holding the room input chain. */
+  private schedulePeerTask(peer: string, task: () => Promise<void>, retainedBytes = 0): void {
+    const release = this.taskBacklog.reserve(retainedBytes);
+    if (release === null) {
+      this.failFatal(FatalError.connection('browser input task backlog limit exceeded'));
+      return;
+    }
+    const generation = this.currentSessionGeneration;
+    const previous = this.peerTasks.get(peer);
+    const token = previous?.token ?? {};
+    const slot = { tail: Promise.resolve(), token };
+    this.peerTasks.set(peer, slot);
+    let operation: Promise<void>;
+    const execute = async () => {
+      if (this.finished || this.currentSessionGeneration !== generation) return;
+      // A queued task may outlive a departure or replacement in the same plan.
+      if (this.peerTasks.get(peer)?.token !== token) return;
+      await task();
+    };
+    operation = (previous === undefined ? execute() : previous.tail.then(execute)).finally(
+      release,
+    );
+    slot.tail = operation;
+    void operation.then(
+      () => {
+        if (this.peerTasks.get(peer)?.tail === operation) this.peerTasks.delete(peer);
+        this.enqueue(async () => {});
+      },
+      (error: unknown) => {
+        this.failFatal(
+          error instanceof FatalError
+            ? error
+            : FatalError.protocol(`peer operation failed: ${describe(error)}`),
+        );
+      },
+    );
+  }
+
   /**
    * Pair with `peer` per the server's directive: create the connection, offer
    * when told to, then drain any defensively buffered signals.
@@ -1918,6 +1965,8 @@ class Orchestrator {
     retainedDeadline: number | null = null,
   ): Promise<void> {
     this.assertActive();
+    const sessionGeneration = this.currentSessionGeneration;
+    const taskToken = this.peerTasks.get(peer)?.token;
     if (this.pendingMembershipPlans.has(peer)) return;
     if (peer === this.myId) {
       console.error(`server asked us to pair with ourselves (${peer}); ignoring`);
@@ -1949,16 +1998,28 @@ class Orchestrator {
         this.engine.pairWith(peer, initiate, this.lastIceServers),
       );
       this.assertActive();
+      if (
+        this.currentSessionGeneration !== sessionGeneration ||
+        this.peerTasks.get(peer)?.token !== taskToken
+      )
+        return;
       if (offerSdp !== null) {
         this.sendSignal(peer, 'offer', { Offer: offerSdp });
       }
     } catch (error) {
       if (error instanceof FatalError && error.code === EXIT_CONNECTION_ERROR) throw error;
       this.assertActive();
+      if (this.peerTasks.get(peer)?.token !== taskToken) return;
       // A single failed pair is not fatal: the p2p timeout resolves the
       // overall status and the relay floor still carries data.
       this.emit({ event: 'error', message: `pairing with ${peer} failed: ${describe(error)}` });
     }
+    if (
+      this.currentSessionGeneration !== sessionGeneration ||
+      this.peerTasks.get(peer)?.token !== taskToken ||
+      !this.expectedPeers.has(peer)
+    )
+      return;
     const buffered = this.pendingSignals.get(peer);
     if (buffered !== undefined) {
       this.pendingSignals.delete(peer);
@@ -1972,6 +2033,9 @@ class Orchestrator {
 
   private async awaitPeerOperation<T>(peer: string, operation: Promise<T>): Promise<T> {
     this.assertActive();
+    const generation = this.engine.generationOf(peer);
+    const isCurrent = () =>
+      generation !== undefined && this.engine.isCurrentGeneration(peer, generation);
     const runDeadline = shouldDeferSuccessAtRunDeadline(
       this.config.successReleaseEnabled,
       this.successCriteriaReported,
@@ -1994,7 +2058,7 @@ class Orchestrator {
     this.peerWorkStopped.signal.addEventListener('abort', stopped, { once: true });
     const timer = scheduleDeadline(deadline, () => {
       try {
-        this.handlePeerTransportLoss(peer);
+        if (isCurrent()) this.handlePeerTransportLoss(peer);
       } catch (error) {
         this.failFatal(
           error instanceof FatalError
@@ -2010,9 +2074,10 @@ class Orchestrator {
       if (monotonicNowMs() >= deadline) {
         throw new Error('browser peer negotiation deadline expired');
       }
+      if (!isCurrent()) throw new Error('the peer link was retired');
       return result;
     } catch (error) {
-      if (monotonicNowMs() >= deadline && this.engine.isPaired(peer)) {
+      if (monotonicNowMs() >= deadline && isCurrent()) {
         this.handlePeerTransportLoss(peer);
       }
       throw error;
@@ -2028,6 +2093,7 @@ class Orchestrator {
   }
 
   private removePairObligation(peer: string): void {
+    this.peerTasks.delete(peer);
     this.expectedPeers.delete(peer);
     this.pairRoles.delete(peer);
     this.pairRetryState.delete(peer);
@@ -2042,7 +2108,8 @@ class Orchestrator {
   }
 
   /** Retire physical state without publishing an interim transport decision. */
-  private retirePeerLink(peer: string): void {
+  private retirePeerLink(peer: string, invalidateTasks = true): void {
+    if (invalidateTasks) this.peerTasks.delete(peer);
     this.connectedPairs.delete(peer);
     this.pendingExchangePeers.delete(peer);
     this.reportedExchangeDiagnostics.delete(peer);
@@ -2103,6 +2170,11 @@ class Orchestrator {
    */
   private async applySignal(from: string, signal: unknown): Promise<void> {
     this.assertActive();
+    const taskToken = this.peerTasks.get(from)?.token;
+    const sessionGeneration = this.currentSessionGeneration;
+    const isCurrentTask = () =>
+      this.currentSessionGeneration === sessionGeneration &&
+      this.peerTasks.get(from)?.token === taskToken;
     const kind = classifySignal(signal);
     const payload = signal as Record<string, unknown>;
     try {
@@ -2117,6 +2189,7 @@ class Orchestrator {
             this.engine.handleOffer(from, sdp),
           );
           this.assertActive();
+          if (!isCurrentTask()) return;
           this.sendSignal(from, 'answer', { Answer: answerSdp });
           break;
         }
@@ -2173,7 +2246,7 @@ class Orchestrator {
             connected: previous?.connected ?? false,
           });
           this.retryingPairs.add(from);
-          this.retirePeerLink(from);
+          this.retirePeerLink(from, false);
           await this.establishPair(from, initiate, windowOpen ? deadline : null);
           break;
         }
@@ -2183,6 +2256,7 @@ class Orchestrator {
     } catch (error) {
       if (error instanceof FatalError && error.code === EXIT_CONNECTION_ERROR) throw error;
       this.assertActive();
+      if (this.peerTasks.get(from)?.token !== taskToken) return;
       this.emit({ event: 'error', message: `signal from ${from} failed: ${describe(error)}` });
     }
   }
@@ -2445,6 +2519,9 @@ class Orchestrator {
       unmet.push(
         `awaiting authoritative SessionPlan (${this.initialSessionPlanPending ? 'session' : 'membership'} trigger, ${this.pendingMembershipPlans.size} membership epoch(s))`,
       );
+    }
+    for (const peer of this.peerTasks.keys()) {
+      unmet.push(`peer operation pending (${peer})`);
     }
     for (const peer of this.retryingPairs) {
       unmet.push(`pair retry incomplete (${peer})`);

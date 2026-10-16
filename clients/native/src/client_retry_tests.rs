@@ -3,6 +3,149 @@ use super::*;
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 
+// Regression #1010: a held P2P gate must not restore removed plan obligations.
+#[tokio::test]
+async fn p2p_gate_does_not_signal_removed_peers() {
+    for removal in [
+        "departure",
+        "relay plan",
+        "replacement plan",
+        "departure and rejoin",
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(tcp).await.unwrap()
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let mut server_ws = server.await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let release = dir.path().join("release");
+        let cli = Cli::parse_from([
+            "native",
+            "--server-url",
+            &url,
+            "--create-room",
+            "--p2p-release-file",
+            release.to_str().unwrap(),
+        ]);
+        let me = PlayerId::from_u128(1);
+        let removed = PlayerId::from_u128(2);
+        let retained = PlayerId::from_u128(3);
+        let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
+        state.current_session_generation = Some(SessionGeneration::from_u128(1));
+        state.webrtc_plan_seen = true;
+        state.present.insert(removed);
+        for peer in [removed, retained] {
+            state
+                .handle_server_message(ServerMessage::NewPeer {
+                    peer_id: peer,
+                    you_initiate: true,
+                })
+                .await
+                .unwrap();
+        }
+        match removal {
+            "departure" | "departure and rejoin" => state
+                .handle_server_message(ServerMessage::PlayerLeft {
+                    player_id: removed,
+                    epoch: None,
+                    final_seq: None,
+                })
+                .await
+                .unwrap(),
+            _ => {
+                let transport = if removal == "relay plan" {
+                    "relay"
+                } else {
+                    "webrtc"
+                };
+                let peers = if removal == "relay plan" {
+                    json!([])
+                } else {
+                    json!([{
+                        "player_id": retained, "player_name": "retained", "is_authority": false,
+                        "initiate": true,
+                    }])
+                };
+                let plan = serde_json::from_value(json!({
+                    "type": "SessionPlan", "data": {
+                        "generation": SessionGeneration::from_u128(2),
+                        "topology": if transport == "relay" { "relay" } else { "mesh" },
+                        "transport": transport, "peers": peers, "fallback": "relay",
+                    }
+                }))
+                .unwrap();
+                state.handle_server_message(plan).await.unwrap();
+            }
+        }
+        assert!(
+            !state.pending_pair_directives.contains_key(&removed),
+            "{removal}: removed directive remains queued"
+        );
+        state
+            .handle_signal(
+                removed,
+                state.current_session_generation.unwrap(),
+                json!({"Offer": "late offer from removed peer"}),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !state.pending_signals.contains_key(&removed),
+            "{removal}: removed directive accepted a late signal"
+        );
+        let rejoined = removal == "departure and rejoin";
+        if rejoined {
+            // The returning identity now answers. Do not use its old offerer role.
+            state
+                .handle_server_message(ServerMessage::NewPeer {
+                    peer_id: removed,
+                    you_initiate: false,
+                })
+                .await
+                .unwrap();
+        }
+        std::fs::write(&release, b"go").unwrap();
+        state.process_p2p_gate(Instant::now()).await.unwrap();
+        assert_eq!(
+            state.engine.is_paired(removed),
+            rejoined,
+            "{removal}: gate used a removed directive"
+        );
+        assert_eq!(
+            state.expected_peers.contains(&removed),
+            rejoined,
+            "{removal}: gate restored removed debt"
+        );
+        if rejoined {
+            assert_eq!(state.pair_roles.get(&removed), Some(&false));
+        }
+        let expects_retained = removal != "relay plan";
+        assert_eq!(
+            state.engine.is_paired(retained),
+            expects_retained,
+            "{removal}"
+        );
+        let mut signaled = BTreeSet::new();
+        while let Ok(Some(Ok(Message::Text(text)))) =
+            tokio::time::timeout(Duration::from_millis(30), server_ws.next()).await
+        {
+            if let ClientMessage::Signal { to, .. } = serde_json::from_str(&text).unwrap() {
+                signaled.insert(to);
+            }
+        }
+        assert!(
+            !signaled.contains(&removed),
+            "{removal}: sent Signal to removed peer"
+        );
+        assert_eq!(signaled.contains(&retained), expects_retained, "{removal}");
+        state.engine.remove_peer(removed).await.unwrap();
+        state.engine.remove_peer(retained).await.unwrap();
+    }
+}
+
 // Regression #1003: queued signaling must run between deferred peer sends.
 #[tokio::test]
 async fn deferred_exchange_mesh_services_pong_and_relay_between_held_sends() {

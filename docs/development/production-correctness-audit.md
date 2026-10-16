@@ -3929,3 +3929,95 @@ or repair the original failures. Both issues remain open.
 Rust, .NET, and Godot SDKs are unaffected: these changes are private capacity
 checker code and its tests. No client imports this checker. Server behavior,
 SDK APIs, wire messages, and defaults are unchanged.
+
+### Session 458 initial WebRTC captures
+
+Ten fresh fixed-binary #853 restore attempts and ten #889 three-player mesh
+attempts pass at `a7abbd60`. The test executable, server, native executable,
+browser CLI, and page bundle hashes match the session 457 values before and
+after capture. All twenty attempts retain complete endpoint streams and server
+stdout and stderr. Fifty client streams contain 2,508 events. Exact peer and
+channel-label send and receipt counts match; each client exits successfully.
+
+The attempts take 65.625 seconds in total. They use the unchanged baseline
+binaries, before the session 458 source repairs. They do not validate those
+repairs, reproduce either original failure, or establish a cause. #853 still
+needs a failed establishment history with both endpoints. #889 still needs the
+missing label and endpoint transitions from a failed mesh run. Both stay open.
+
+### F71 — Native deferred pairing restores removed peers
+
+Issue [#1010](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1010)
+affects the private native reference orchestrator under A20. While
+`--p2p-release-file` holds pairing, `NewPeer` and WebRTC plans retain a deferred
+directive. `remove_pair_obligation` cleared the live link, roles, signals, and
+logical expectation, but retained that directive. Releasing the gate then
+recreated the removed link and pairing obligation and sent an offer to the
+removed peer.
+
+At `a7abbd60`, the real-engine and real-WebSocket regression
+`p2p_gate_does_not_signal_removed_peers` fails after dispatching `PlayerLeft`.
+Nextest run `8f5291a9-44ae-492f-ac85-2e2335aa94bd` records the departure, then
+releases two deferred directives and sends an offer to the departed identity.
+The test fails in 0.678 seconds. The repair removes the pending directive at
+the shared logical removal boundary. Restore already clears the full map;
+retry and retained-peer replacement already remove their individual entries.
+
+The retained table covers departure, a relay-only authoritative plan, a reduced
+WebRTC plan, and departure followed by the same identity returning as answerer.
+It checks the physical link, expected peer set, current role, and actual outbound
+signaling. A retained offerer must still send its offer. A late signal from a
+removed peer cannot recreate buffered signaling. The returning answerer must
+not use the old offerer directive.
+
+This is a controlled deferred-gate history, not an explanation of #853 or #889.
+The fix changes no server wire format, defaults, or SDK API. Rust, .NET, and
+Godot SDKs do not use this private native CLI pairing gate and need no migration.
+
+### F72 — Pending browser negotiation delays relay gameplay and other peers
+
+Issue [#1011](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1011)
+affects the private browser reference orchestrator under A20. Earlier F50,
+F53, and F54 repairs enforced absolute deadlines. Before expiry, an unresolved
+browser operation still held the shared input chain. Relay gameplay and other
+peers' negotiation waited for that operation or its deadline.
+
+The new pre-expiry assertions fail on `a7abbd60`: an accountable relay message
+remains queued while offer creation is held. The same matrix exercises local
+description, remote offer, remote answer, answer creation, answer description,
+live ICE, and buffered ICE. This is a controlled browser promise history, not
+a diagnosis of the spontaneous #853 or #889 failures.
+
+The repair schedules negotiation separately for each peer while preserving
+that peer's SDP and ICE order. The room input chain continues to process relay,
+membership, and timer work. Queued peer operations retain task backlog credits
+until completion. Logical removal and authoritative replacement invalidate old
+work. Retry keeps its current queue order. Operation timeouts compare physical
+link generations before retiring a link, so an old wait cannot remove a fresh
+replacement. Existing connection and run windows remain unchanged.
+
+The focused peer-work regression also fails the baseline because the healthy
+peer does not start while the first offer waits. Its repaired controls check
+healthy Answer and ICE order, queued same-peer signals, held retry offers, and
+same-generation removal and re-addition. Old work is resolved, rejected, or
+left pending through its original deadline while the replacement stays live.
+Small signal batches retain peer-task credits until the existing backlog limit
+refuses further work. Browser tests, strict type checks, and the build pass.
+
+The earlier shared-deadline test expected the second planned peer never to
+start if the first peer used the full window. Both now start before the same
+deadline. Neither starts or continues after expiry. The output-cancellation
+control likewise expects two independently pending offers, and still requires
+no late signaling or successful exit after output failure.
+
+Rust, .NET, and Godot SDKs are unaffected: they do not import this private
+browser orchestrator. The server protocol, defaults, and SDK APIs are unchanged.
+No migration or external-client tracking issue is required for either repair.
+
+The rebuilt native executable and browser bundle pass two restore and two
+three-player mesh controls in 12.556 seconds. All ten endpoint streams retain
+505 events, exact peer/label send and receipt counts, and successful exits.
+All five binary and bundle hashes stay fixed during these final-source runs.
+Real Chromium also passes seven delivery-mode controls, two channel-closure
+controls, and four embedded-SDP controls. Hosted CI must validate the wider
+interop suite. These bounded successes still do not explain #853 or #889.

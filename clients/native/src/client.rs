@@ -3070,6 +3070,7 @@ impl Orchestrator<'_> {
 
     async fn remove_pair_obligation(&mut self, peer: PlayerId) {
         self.expected_peers.remove(&peer);
+        self.pending_pair_directives.remove(&peer);
         self.pair_roles.remove(&peer);
         self.pair_retry_attempts.remove(&peer);
         self.formed_pairs.remove(&peer);

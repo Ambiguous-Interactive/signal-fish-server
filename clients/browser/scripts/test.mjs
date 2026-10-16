@@ -12,6 +12,7 @@ for (const entryPoint of [
   'src/page/ingress.test.ts',
   'src/page/handshake.test.ts',
   'src/page/output-cancellation.test.ts',
+  'src/page/peer-work.test.ts',
   'src/cli/args.test.ts',
   'src/cli/output.test.ts',
 ]) {
