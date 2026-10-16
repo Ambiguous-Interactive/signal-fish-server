@@ -83,11 +83,16 @@ advisories: when present they require a prior causal exact report, but need not
 be adjacent to it. V2 mode remains reliable FIFO, and raw binary data is
 always reliable. The default `game_data_format` is `"json"`, so an incoming
 binary frame or text `GameDataBinary` is a protocol error in that mode. With
-an explicit opaque `--game-data-format rkyv|protobuf`, the runtime sends and
-accepts strict binary envelopes instead and rejects text `GameData`; when the
-server refuses the requested format it applies the pinned JSON downgrade
-notice and continues on the text floor. The strict MessagePack decoder is kept
-as a tested protocol utility for binary-capable client implementations.
+`--game-data-format message_pack`, the client encodes the relay payload as
+MessagePack and decodes received payloads into ordinary `game_data_received`
+events. V2 uses the legacy three-field relay envelope. V3 requires delivery
+stamps. JSON-source data stays on text in mixed rooms. MessagePack integers
+outside JavaScript's exact integer range and non-JSON payload types are rejected.
+With `--game-data-format rkyv|protobuf`, the client preserves opaque binary
+payloads and also accepts JSON text fallback from compatible senders.
+Opaque modes require v3 because their v2 passthrough lacks sender attribution.
+When the server refuses a requested format, the client applies its JSON
+downgrade notice and continues on the text floor.
 
 Priority peer lifecycle control can overtake queued data from the old epoch.
 The page continues to account for that tail but does not emit/apply it after

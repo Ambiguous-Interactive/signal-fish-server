@@ -71,7 +71,7 @@ Options:
   --protocol-version <V>        2 omits every v3 Authenticate field [default: 3]
   --supported-topologies <LIST> Comma-separated topologies [default: relay,host,mesh]
   --supported-transports <LIST> Comma-separated transports [default: relay,webrtc]
-  --game-data-format <FORMAT>   Authenticate game_data_format: json, rkyv, or
+  --game-data-format <FORMAT>   Authenticate game_data_format: json, message_pack, rkyv, or
                                 protobuf [default: json]
   --mdns-obfuscation            Keep Chromium's mDNS candidate obfuscation ON
                                 (default: disabled for deterministic loopback)
@@ -242,7 +242,7 @@ export function parseArgs(argv: string[]): CliOptions | null {
     'json',
   );
   const protocolVersion = numberFlag('--protocol-version', 3);
-  if (gameDataFormat !== 'json' && protocolVersion < 3) {
+  if ((gameDataFormat === 'rkyv' || gameDataFormat === 'protobuf') && protocolVersion < 3) {
     throw new UsageError('--game-data-format rkyv|protobuf requires --protocol-version 3');
   }
 

@@ -501,9 +501,13 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
     // (issue #627): the strict binary envelope is the only delivery shape
     // that carries the sender attribution and stamps the success criteria
     // consume — v2 passthrough relays raw payload with no attribution.
-    if cli.game_data_format != GameDataFormatArg::Json && !cli.is_v3() {
+    if matches!(
+        cli.game_data_format,
+        GameDataFormatArg::Rkyv | GameDataFormatArg::Protobuf
+    ) && !cli.is_v3()
+    {
         return Err(FatalError::protocol(
-            "non-json game data requires --protocol-version 3",
+            "opaque game data requires --protocol-version 3",
         ));
     }
 
@@ -720,61 +724,51 @@ fn negotiated_version_from(
     offered_version: u16,
     requested_format: GameDataEncoding,
 ) -> Result<u16, FatalError> {
-    match message {
-        // Negotiated v2 omits the additive field by wire contract.
-        ServerMessage::ProtocolInfo(info) => match info.protocol_version {
-            None => {
-                // The reference client's opaque wire shape is v3-only
-                // (issue #627): the strict binary envelope is the only shape
-                // that carries the sender attribution the success criteria
-                // consume. A v2 negotiation therefore cannot serve an opaque
-                // request, even when the deployment advertises the format
-                // (`ProtocolInfoPayload.game_data_formats` is not
-                // version-gated on the wire).
-                if requested_format != GameDataEncoding::Json {
-                    return Err(FatalError::protocol(format!(
-                        "{} game data requires protocol version 3; the server negotiated v2",
-                        requested_format.as_wire_str()
-                    )));
-                }
-                Ok(2)
-            }
-            Some(version) if (2..=3).contains(&version) && version <= offered_version => {
-                // Fail the run before any room is touched when the deployment
-                // does not serve the requested opaque encoding (issue #627);
-                // the guidance names the server knob that advertises it.
-                if requested_format != GameDataEncoding::Json
-                    && !info.game_data_formats.contains(&requested_format)
-                {
-                    // Every refused encoding names the knob that advertises
-                    // it. `message_pack` ships enabled by default (opt-out),
-                    // but a deployment that disabled it owes the operator the
-                    // same pointer as the opt-in encodings.
-                    let knob = match requested_format {
-                        GameDataEncoding::Rkyv => "protocol.enable_rkyv_game_data",
-                        GameDataEncoding::Protobuf => "protocol.enable_protobuf_game_data",
-                        GameDataEncoding::MessagePack => "protocol.enable_message_pack_game_data",
-                        // Unreachable: Json requests skip this guard above.
-                        // Refuse instead of panicking: the no-panic policy
-                        // forbids panic-prone macros in production code.
-                        GameDataEncoding::Json => "",
-                    };
-                    return Err(FatalError::protocol(format!(
-                        "server does not advertise {} game data \
-                         (ProtocolInfo.game_data_formats = {:?}); the deployment must enable {knob}",
-                        requested_format.as_wire_str(),
-                        info.game_data_formats
-                    )));
-                }
-                Ok(version)
-            }
-            Some(version) => Err(FatalError::protocol(format!(
-                "ProtocolInfo.protocol_version {version} is outside 2..=3 or exceeds offered version {offered_version}"
-            ))),
-        },
-        ServerMessage::Reconnected(_) => Err(FatalError::protocol("received Reconnected before ProtocolInfo")),
-        _ => Err(FatalError::protocol("expected ProtocolInfo, received an unexpected server message")),
+    let info = match message {
+        ServerMessage::ProtocolInfo(info) => info,
+        ServerMessage::Reconnected(_) => {
+            return Err(FatalError::protocol(
+                "received Reconnected before ProtocolInfo",
+            ))
+        }
+        _ => {
+            return Err(FatalError::protocol(
+                "expected ProtocolInfo, received an unexpected server message",
+            ))
+        }
+    };
+    let version = info.protocol_version.unwrap_or(2);
+    if !(2..=3).contains(&version) || version > offered_version {
+        return Err(FatalError::protocol(format!(
+            "ProtocolInfo.protocol_version {version} is outside 2..=3 or exceeds offered version {offered_version}"
+        )));
     }
+    if version < 3
+        && matches!(
+            requested_format,
+            GameDataEncoding::Rkyv | GameDataEncoding::Protobuf
+        )
+    {
+        return Err(FatalError::protocol(format!(
+            "{} game data requires protocol version 3; the server negotiated v2",
+            requested_format.as_wire_str()
+        )));
+    }
+    if requested_format != GameDataEncoding::Json
+        && !info.game_data_formats.contains(&requested_format)
+    {
+        let knob = match requested_format {
+            GameDataEncoding::Rkyv => "protocol.enable_rkyv_game_data",
+            GameDataEncoding::Protobuf => "protocol.enable_protobuf_game_data",
+            GameDataEncoding::MessagePack => "protocol.enable_message_pack_game_data",
+            GameDataEncoding::Json => "",
+        };
+        return Err(FatalError::protocol(format!(
+            "server does not advertise {} game data (ProtocolInfo.game_data_formats = {:?}); the deployment must enable {knob}",
+            requested_format.as_wire_str(), info.game_data_formats
+        )));
+    }
+    Ok(version)
 }
 
 /// Build the `JoinRoom` message for one run (issue #630): `--join-code` sets
@@ -3347,6 +3341,10 @@ impl Orchestrator<'_> {
             wire::send_game_data(&mut self.ws, json!({ "relay_msg": text }))
                 .await
                 .map_err(|error| FatalError::connection(format!("{error:#}")))?;
+        } else if self.game_data_encoding == GameDataEncoding::MessagePack {
+            wire::send_message_pack_game_data(&mut self.ws, json!({ "relay_msg": text }))
+                .await
+                .map_err(|error| FatalError::connection(format!("{error:#}")))?;
         } else {
             wire::send_game_data_binary(&mut self.ws, text.into_bytes())
                 .await
@@ -3364,6 +3362,11 @@ impl Orchestrator<'_> {
     /// the opaque payload surfaces base64-rendered in the event stream
     /// (lossless, encoding-explicit — the bytes are never guessed at).
     async fn handle_binary_game_data(&mut self, wire_bytes: &[u8]) -> Result<(), FatalError> {
+        if self.game_data_encoding == GameDataEncoding::MessagePack {
+            let message = wire::decode_message_pack_game_data(wire_bytes, self.negotiated_version)
+                .map_err(|_| FatalError::protocol("invalid MessagePack game data"))?;
+            return self.handle_server_message(message).await;
+        }
         let frame = wire::decode_v3_binary_game_data(wire_bytes).map_err(|_| {
             // Decoder errors can contain untrusted keys or encoding tokens.
             FatalError::protocol(format!(
@@ -5662,6 +5665,36 @@ mod tests {
             EXIT_PROTOCOL_ERROR
         );
         assert_eq!(encoding, GameDataEncoding::Rkyv);
+    }
+
+    #[test]
+    fn message_pack_negotiation_checks_advertisement_in_both_versions() {
+        for version in [None, Some(2), Some(3)] {
+            for advertised in [false, true] {
+                let mut value = json!({
+                    "type": "ProtocolInfo", "data": {
+                        "protocol_version": version,
+                        "game_data_formats": if advertised { vec!["json", "message_pack"] } else { vec!["json"] },
+                    },
+                });
+                if version.is_none() {
+                    value["data"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("protocol_version");
+                }
+                let info = serde_json::from_value(value).unwrap();
+                let result = negotiated_version_from(info, 3, GameDataEncoding::MessagePack);
+                assert_eq!(
+                    result.is_ok(),
+                    advertised,
+                    "version={version:?}, advertised={advertised}"
+                );
+                if advertised {
+                    assert_eq!(result.unwrap(), version.unwrap_or(2));
+                }
+            }
+        }
     }
 
     #[test]

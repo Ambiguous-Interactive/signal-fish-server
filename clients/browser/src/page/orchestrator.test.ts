@@ -268,6 +268,12 @@ console.error('ok - browser timer and latched-exchange state avoids false succes
     'a downgrade notice adopts JSON',
   );
 
+  const messagePackStep = advanceAuthenticateHandshake(downgrade, 'message_pack');
+  assert(
+    !('fatal' in messagePackStep) && messagePackStep.effectiveFormat === 'json',
+    'MessagePack refusal adopts JSON before the room handshake',
+  );
+
   const authenticated = { type: 'Authenticated', data: { app_name: 'default' } };
   step = advanceAuthenticateHandshake(authenticated, 'json');
   assert(!('fatal' in step) && step.authenticated, 'Authenticated completes the handshake');

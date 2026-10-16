@@ -1,6 +1,8 @@
-import { encode } from '@msgpack/msgpack';
+import { encode, decode } from '@msgpack/msgpack';
 import {
   bytesToBase64,
+  classifyMessagePackNegotiatedServerInput,
+  sendMessagePackGameData,
   connect,
   CONNECT_TIMEOUT_MS,
   classifyOpaqueNegotiatedServerInput,
@@ -136,20 +138,21 @@ function binaryEnvelope(
     classifyOpaqueNegotiatedServerInput(JSON.stringify({ type: 'Pong' })).type === 'Pong',
     'a text server control frame still classifies under opaque negotiation',
   );
+  assert(
+    classifyOpaqueNegotiatedServerInput(
+      JSON.stringify({ type: 'GameData', data: { data: { relay_msg: 'hi' } } }),
+    ).type === 'GameData',
+    'opaque recipients must accept JSON-source and converted MessagePack data',
+  );
   expectError(
-    () =>
-      classifyOpaqueNegotiatedServerInput(
-        JSON.stringify({ type: 'GameData', data: { data: { relay_msg: 'hi' } } }),
-      ),
-    'text GameData while an opaque game_data_format was negotiated',
+    () => classifyOpaqueNegotiatedServerInput('{"type":"GameDataBinary"}'),
+    'text GameDataBinary',
   );
   expectError(
     () => classifyOpaqueNegotiatedServerInput(Uint8Array.of(0x80).buffer),
     'invalid binary GameData frame while an opaque game_data_format was negotiated',
   );
-  console.error(
-    'ok - browser opaque-negotiated input routes binary and rejects text game data',
-  );
+  console.error('ok - browser opaque-negotiated input routes binary and accepts JSON fallback');
 }
 
 // Issue #627: the opaque relay payload is sent as exactly its payload bytes.
@@ -200,6 +203,10 @@ function binaryEnvelope(
     'protocol.enable_rkyv_game_data / protocol.enable_protobuf_game_data',
   );
   expectError(() => negotiatedGameDataFormat(jsonOnly, 'protobuf'), 'does not advertise');
+  expectError(
+    () => negotiatedGameDataFormat(jsonOnly, 'message_pack'),
+    'protocol.enable_message_pack_game_data',
+  );
   expectError(
     () => negotiatedGameDataFormat({ type: 'Authenticated', data: {} }, 'rkyv'),
     'expected ProtocolInfo',
@@ -379,3 +386,120 @@ for (const scenario of [
 }
 assert(connectFailures.length === 0, connectFailures.join('\n'));
 console.error('ok - WebSocket connection expiry rejects late opens and cleans up timers');
+
+// #678: MessagePack payloads use the existing version-specific relay envelope.
+for (const version of [2, 3]) {
+  const payload = { relay_msg: 'hello 世界', nested: [null, true, 1.25, -17] };
+  const fields = {
+    from_player: SENDER_BYTES,
+    encoding: 'message_pack',
+    payload: encode(payload),
+  };
+  const envelope = encode({ ...fields, ...(version === 3 ? { seq: 7, epoch: 3 } : {}) });
+  const padded = new Uint8Array(envelope.length + 8);
+  padded.set(envelope, 4);
+  const frame = classifyMessagePackNegotiatedServerInput(padded.subarray(4, -4), version);
+  assert(frame.type === 'GameData', `v${version} MessagePack becomes application GameData`);
+  expectError(
+    () => classifyMessagePackNegotiatedServerInput('{"type":"GameDataBinary"}', version),
+    'text GameDataBinary',
+  );
+  assert(frame.data['from_player'] === SENDER, 'MessagePack preserves sender attribution');
+  assert(JSON.stringify(frame.data['data']) === JSON.stringify(payload), 'payload round-trips');
+  assert(
+    version === 3
+      ? frame.data['seq'] === 7 &&
+          frame.data['epoch'] === 3 &&
+          frame.data['class'] === 'reliable'
+      : !('seq' in frame.data) && !('epoch' in frame.data) && !('class' in frame.data),
+    'delivery metadata follows the recipient protocol',
+  );
+  assert(
+    classifyMessagePackNegotiatedServerInput('{"type":"Pong"}', version).type === 'Pong',
+    'control remains text',
+  );
+  const fallback = { type: 'GameData', data: { from_player: SENDER, data: payload } };
+  assert(
+    JSON.stringify(
+      classifyMessagePackNegotiatedServerInput(JSON.stringify(fallback), version),
+    ) === JSON.stringify(fallback),
+    'mixed JSON sources remain text',
+  );
+  expectError(
+    () =>
+      classifyMessagePackNegotiatedServerInput(
+        encode({
+          ...fields,
+          encoding: 'protobuf',
+          ...(version === 3 ? { seq: 1, epoch: 1 } : {}),
+        }),
+        version,
+      ),
+    'expected MessagePack',
+  );
+  expectError(
+    () =>
+      classifyMessagePackNegotiatedServerInput(
+        encode({ ...fields, ...(version === 2 ? { seq: 1, epoch: 1 } : {}) }),
+        version,
+      ),
+    'fields',
+  );
+  expectError(
+    () => classifyMessagePackNegotiatedServerInput(new Uint8Array([...envelope, 0]), version),
+    'trailing',
+  );
+  for (const invalid of [
+    Uint8Array.of(0xc1),
+    encode(Uint8Array.of(1)),
+    encode(9007199254740992n, { useBigInt64: true }),
+    encode(Number.NaN),
+    encode(new Date()),
+  ]) {
+    let rejected = false;
+    try {
+      classifyMessagePackNegotiatedServerInput(
+        encode({ ...fields, payload: invalid, ...(version === 3 ? { seq: 1, epoch: 1 } : {}) }),
+        version,
+      );
+    } catch {
+      rejected = true;
+    }
+    assert(rejected, `v${version} must reject malformed or lossy MessagePack payloads`);
+  }
+  const safe64 = classifyMessagePackNegotiatedServerInput(
+    encode({
+      ...fields,
+      payload: encode({ value: 42n }, { useBigInt64: true }),
+      ...(version === 3 ? { seq: 1, epoch: 1 } : {}),
+    }),
+    version,
+  );
+  assert(
+    (safe64.data['data'] as Record<string, unknown>)['value'] === 42,
+    'safe int64 remains exact',
+  );
+}
+{
+  let output: ArrayBuffer | undefined;
+  sendMessagePackGameData(
+    (frame) => {
+      output = frame;
+    },
+    { relay_msg: 'hello 世界' },
+  );
+  assert(
+    output !== undefined && JSON.stringify(decode(output)) === '{"relay_msg":"hello 世界"}',
+    'sender emits raw MessagePack with no relay envelope',
+  );
+  expectError(
+    () =>
+      sendMessagePackGameData(
+        () => {
+          throw new Error('must not send');
+        },
+        { invalid: Infinity },
+      ),
+    'not a finite number',
+  );
+}

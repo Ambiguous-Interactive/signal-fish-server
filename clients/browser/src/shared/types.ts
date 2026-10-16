@@ -18,7 +18,7 @@ export const TOPOLOGIES = ['relay', 'host', 'mesh'] as const;
 /** Wire tokens for data-path transports (CLI tokens are identical). */
 export const TRANSPORTS = ['relay', 'direct', 'webrtc'] as const;
 /** Wire tokens for the `Authenticate.game_data_format` opt-in (#627). */
-export const GAME_DATA_FORMATS = ['json', 'rkyv', 'protobuf'] as const;
+export const GAME_DATA_FORMATS = ['json', 'message_pack', 'rkyv', 'protobuf'] as const;
 
 export type Topology = (typeof TOPOLOGIES)[number];
 export type Transport = (typeof TRANSPORTS)[number];

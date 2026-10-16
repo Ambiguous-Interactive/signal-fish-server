@@ -107,7 +107,7 @@ use base64::Engine as _;
 static SCENARIO_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Number of scenarios queueing behind [`SCENARIO_SERIAL`] (keep in sync with
 /// the scenarios that acquire `SCENARIO_SERIAL` in this file).
-const SCENARIO_COUNT: u64 = 15;
+const SCENARIO_COUNT: u64 = 19;
 /// Generous ceiling for ONE scenario in a fully degraded run: server spawn
 /// (up to 3 attempts x 15 s health deadline = 45 s) plus one client wave
 /// hard-bounded by `--max-runtime-secs 90`, with the rest absorbing Chromium
@@ -1544,6 +1544,206 @@ async fn mixed_v2_browser_v3_native_relay_floor() {
         single_event(full_log, "game_starting", who);
         assert_live_relay_floor(&run, index);
     }
+}
+
+async fn run_browser_message_pack_relay(version: &'static str) {
+    let _serial = acquire_serial().await;
+    let run = run_three_clients(
+        "relay",
+        "browser-message-pack",
+        &[
+            ClientConfig {
+                browser: true,
+                exchange: false,
+                relay: true,
+                extra_args: if version == "2" {
+                    &[
+                        "--game-data-format",
+                        "message_pack",
+                        "--protocol-version",
+                        "2",
+                    ]
+                } else {
+                    &[
+                        "--game-data-format",
+                        "message_pack",
+                        "--protocol-version",
+                        "3",
+                    ]
+                },
+                v2_endpoint: version == "2",
+            },
+            ClientConfig {
+                browser: false,
+                exchange: false,
+                relay: true,
+                extra_args: if version == "3" {
+                    &[
+                        "--game-data-format",
+                        "message_pack",
+                        "--protocol-version",
+                        "2",
+                    ]
+                } else {
+                    &["--game-data-format", "message_pack"]
+                },
+                v2_endpoint: version == "3",
+            },
+            ClientConfig {
+                browser: false,
+                exchange: false,
+                relay: true,
+                extra_args: &[],
+                v2_endpoint: false,
+            },
+        ],
+    )
+    .await;
+    for (index, who) in CLIENT_NAMES.iter().enumerate() {
+        assert_live_relay_floor(&run, index);
+        single_event(&run.logs[index], "game_starting", who);
+        assert!(
+            events_named(&run.logs[index], "error").is_empty(),
+            "{who}: {:?}",
+            run.logs[index]
+        );
+        let expected = if (index == 0 && version == "2") || (index == 1 && version == "3") {
+            2
+        } else {
+            3
+        };
+        assert_eq!(
+            single_event(&run.logs[index], "protocol_info", who)["negotiated_version"],
+            expected
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_message_pack_v2_mixed_relay() {
+    run_browser_message_pack_relay("2").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_message_pack_v3_mixed_relay() {
+    run_browser_message_pack_relay("3").await;
+}
+
+async fn run_opaque_browser_mixed_inputs(encoding: &'static str, knob: &'static str) {
+    use signal_fish_reference_native::wire::{self, WsStream};
+    let _serial = acquire_serial().await;
+    let mut server = spawn_server_with_extra_env("relay", &[(knob, "true".to_string())]).await;
+    let workdir = tempfile::tempdir().unwrap();
+    let url = server.v3_ws_url();
+    let release = workdir.path().join("release");
+    let mut browser = spawn_browser_client(
+        &ClientSpec {
+            name: "opaque-browser",
+            server_url: &url,
+            game_name: "opaque-mixed-inputs",
+            join_code: None,
+            peers: 3,
+            exchange: false,
+            relay_payload: None,
+            extra_args: &[
+                "--game-data-format",
+                encoding,
+                "--success-release-file",
+                release.to_str().unwrap(),
+            ],
+        },
+        workdir.path(),
+    );
+    let created = browser.await_event("room_created", EVENT_TIMEOUT).await;
+    async fn send(ws: &mut WsStream, value: Value) {
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(
+            value.to_string().into(),
+        ))
+        .await
+        .unwrap();
+    }
+    async fn receive(ws: &mut WsStream, kind: &str) -> Value {
+        tokio::time::timeout(EVENT_TIMEOUT, async {
+            loop {
+                let message = ws.next().await.unwrap().unwrap();
+                let value: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                assert_ne!(value["type"], "Error", "{value}");
+                if value["type"] == kind {
+                    return value;
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+    let mut senders = Vec::new();
+    let mut ids = Vec::new();
+    for format in ["json", "message_pack"] {
+        let mut ws = wire::connect(&url).await.unwrap();
+        send(&mut ws, json!({ "type": "Authenticate", "data": {
+            "app_id": harness::INTEROP_APP_ID, "protocol_version": 3, "game_data_format": format,
+        }})).await;
+        receive(&mut ws, "Authenticated").await;
+        receive(&mut ws, "ProtocolInfo").await;
+        send(&mut ws, json!({ "type": "JoinRoom", "data": {
+            "game_name": "opaque-mixed-inputs", "room_code": created["room_code"],
+            "player_name": format, "max_players": 3, "supports_authority": false, "join_only": true,
+        }})).await;
+        let joined = receive(&mut ws, "RoomJoined").await;
+        ids.push(joined["data"]["player_id"].as_str().unwrap().to_string());
+        senders.push(ws);
+    }
+    for ws in &mut senders {
+        send(ws, json!({ "type": "PlayerReady" })).await;
+    }
+    browser.await_event("game_starting", EVENT_TIMEOUT).await;
+    let payloads = [
+        json!({"relay_msg": "JSON 世界"}),
+        json!({"relay_msg": "MessagePack 世界"}),
+    ];
+    wire::send_game_data(&mut senders[0], payloads[0].clone())
+        .await
+        .unwrap();
+    wire::send_game_data_binary(
+        &mut senders[1],
+        rmp_serde::to_vec_named(&payloads[1]).unwrap(),
+    )
+    .await
+    .unwrap();
+    while events_named(&browser.events, "game_data_received").len() < 2 {
+        browser
+            .await_event("game_data_received", EVENT_TIMEOUT)
+            .await;
+    }
+    std::fs::write(&release, b"release").unwrap();
+    drain_expect_success(&mut browser).await;
+    let receipts = events_named(&browser.events, "game_data_received");
+    assert_eq!(receipts.len(), 2);
+    for (id, payload) in ids.iter().zip(&payloads) {
+        let received = receipts.iter().find(|event| event["from"] == *id).unwrap();
+        assert_eq!(received["payload"], *payload);
+    }
+    assert!(
+        events_named(&browser.events, "error").is_empty(),
+        "{}",
+        browser.diagnostics()
+    );
+    drop(senders);
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_rkyv_accepts_json_and_message_pack_fallback() {
+    run_opaque_browser_mixed_inputs("rkyv", "SIGNAL_FISH__PROTOCOL__ENABLE_RKYV_GAME_DATA").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_protobuf_accepts_json_and_message_pack_fallback() {
+    run_opaque_browser_mixed_inputs(
+        "protobuf",
+        "SIGNAL_FISH__PROTOCOL__ENABLE_PROTOBUF_GAME_DATA",
+    )
+    .await;
 }
 
 /// Scenario 9 (see the module docs): the BROWSER creator opens a 3-seat room
