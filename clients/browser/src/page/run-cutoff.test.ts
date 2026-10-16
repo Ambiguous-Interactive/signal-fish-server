@@ -4,10 +4,15 @@ function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 // The room wake can reach the cutoff before an equally due peer-operation timer.
-for (const [scenario, timerOrder] of (
-  ['fallback', 'paid', 'missing-reliable', 'missing-unreliable'] as const
+for (const [scenario, timerOrder, p2pTimeoutSecs] of (
+  ['fallback', 'paid', 'missing-reliable', 'missing-unreliable', 'answered'] as const
 ).flatMap((scenario) =>
-  (['room-first', 'peer-first'] as const).map((timerOrder) => [scenario, timerOrder] as const),
+  (scenario === 'answered'
+    ? (['room-first'] as const)
+    : (['room-first', 'peer-first'] as const)
+  ).flatMap((timerOrder) =>
+    [0, 15].map((p2pTimeoutSecs) => [scenario, timerOrder, p2pTimeoutSecs] as const),
+  ),
 )) {
   const originalPc = globalThis.RTCPeerConnection;
   const originalSocket = globalThis.WebSocket;
@@ -18,6 +23,8 @@ for (const [scenario, timerOrder] of (
   const me = '00000000-0000-0000-0000-000000000001';
   const peer = '00000000-0000-0000-0000-000000000002';
   const events: Record<string, unknown>[] = [];
+  const transportStatuses: boolean[] = [];
+  let cutoffOnAnswer = false;
   const channels: Channel[] = [];
   const timers = new Map<number, { at: number; callback: () => void }>();
   let timerId = 0;
@@ -89,7 +96,18 @@ for (const [scenario, timerOrder] of (
       this.onmessage?.({ data: JSON.stringify({ type, data }) });
     }
     send(line: string) {
-      const { type } = JSON.parse(line) as { type: string };
+      const frame = JSON.parse(line) as {
+        type: string;
+        data: { connected?: boolean; signal?: { Answer?: string } };
+      };
+      const { type } = frame;
+      if (type === 'TransportStatus') transportStatuses.push(frame.data.connected === true);
+      // Observe the Answer after awaitPeerOperation has returned and cancelled
+      // its timer, while the enclosing peer-task finalizer is still pending.
+      if (type === 'Signal' && frame.data.signal?.Answer && cutoffOnAnswer) {
+        now = 1100;
+        [...timers.values()].at(-1)?.callback();
+      }
       if (type === 'Authenticate')
         queueMicrotask(() => {
           this.deliver('Authenticated');
@@ -158,7 +176,7 @@ for (const [scenario, timerOrder] of (
       exchange: true,
       relayPayload: null,
       crippleIce: false,
-      p2pTimeoutSecs: 0,
+      p2pTimeoutSecs,
       p2pRetryCount: 0,
       runForSecs: 1,
       successReleaseEnabled: false,
@@ -184,6 +202,28 @@ for (const [scenario, timerOrder] of (
         channel.onopen?.();
         if (scenario === 'paid' || scenario !== `missing-${label}`)
           channel.onmessage?.({ data: JSON.stringify({ from: peer, channel: label, seq: 0 }) });
+      }
+      if (scenario === 'answered') {
+        await turn();
+        cutoffOnAnswer = true;
+        socket.deliver('Signal', {
+          from: peer,
+          generation: me,
+          signal: { Offer: 'renegotiate' },
+        });
+        await turn();
+        assert(result === 0, 'a completed Answer permits success at cutoff');
+        assert(
+          JSON.stringify(transportStatuses) ===
+            JSON.stringify(p2pTimeoutSecs === 0 ? [false, true] : [true]),
+          'completed peer work must not publish transport loss at cutoff',
+        );
+        assert(
+          events.filter((event) => event['event'] === 'fallback_engaged').length ===
+            (p2pTimeoutSecs === 0 ? 1 : 0),
+          'completed peer work must not announce fallback at cutoff',
+        );
+        continue;
       }
       socket.deliver('Signal', {
         from: peer,
@@ -224,6 +264,21 @@ for (const [scenario, timerOrder] of (
       `${scenario}: cutoff uses logical debt, observed exit ${result}`,
     );
     assert(connection.closed, `${scenario}: cutoff retires the pending link`);
+    const expectedStatuses =
+      scenario === 'fallback'
+        ? [false]
+        : p2pTimeoutSecs === 0
+          ? [false, true, false]
+          : [true, false];
+    assert(
+      JSON.stringify(transportStatuses) === JSON.stringify(expectedStatuses),
+      `${scenario}: active expired work keeps the existing transport-loss report`,
+    );
+    assert(
+      events.filter((event) => event['event'] === 'fallback_engaged').length ===
+        expectedStatuses.filter((connected) => !connected).length,
+      'active expired work preserves fallback event ordering',
+    );
     assert(
       !scenario.startsWith('missing-') ||
         events.some((event) => String(event['message']).includes('exchange incomplete')),

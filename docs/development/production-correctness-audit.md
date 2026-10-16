@@ -4030,7 +4030,7 @@ criterion then failed a run whose gameplay requirements were already met.
 The retained eight-case matrix controls both timer orders. On `a0157029`,
 a never-formed zero-P2P-timeout offer and a formed pair with settled exchange
 receipts fail when the room wake runs first; both pass when the peer timer runs
-first. Missing reliable or unreliable receipts fail in both orders. The repair
+first. Missing reliable or unreliable receipts fail in both orders. The first correction
 retires pending physical work synchronously at the original non-deferred run
 cutoff, before checking logical success. It adds no grace and preserves pending
 work before cutoff, retry obligations, and exchange debt. Both timer orders now
@@ -4041,3 +4041,29 @@ The corrected bundle passes two more restore and two more three-player mesh
 controls in 11.199 seconds. Ten complete streams retain 508 events and exact
 peer/label send and receipt counts, with no errors. Binary and bundle hashes
 stay fixed throughout these final corrected-source captures.
+
+A further review compared cutoff transport reports with original `a7abbd60`.
+With the default 15-second P2P timeout, held ICE already reports transport
+`true` then `false` and fallback at the active run deadline. Both original timer
+orders succeed. The held-ICE report itself is not new behavior.
+
+A narrower completion history exposes a real regression in `5cd5c305`.
+An Answer completes before cutoff and its operation timer is canceled. The
+Answer send then triggers the room wake before the detached handler finalizer
+clears its task entry. Original main succeeds with transport `true` only;
+`5cd5c305` succeeds but adds a false loss and fallback report. The retained
+regression fails that exact report on `5cd5c305`.
+
+The final repair tracks active browser-operation expirations separately from
+peer-task bookkeeping. At cutoff it expires only due active waits through the
+existing physical-generation checks, then invalidates queued and finishing
+handlers without reporting physical loss. The 18-case matrix covers both timer
+orders, zero and default P2P timeouts, completed Answers, and each missing
+exchange label. Held-ICE fallback still matches original main. Completed
+Answers do not report loss. Missing receipts still fail. Package checks and
+independent adversarial review pass.
+
+The final active-wait repair passes two restore and two three-player mesh
+controls in 10.269 seconds. Ten complete streams retain 502 events and exact
+peer/label send and receipt counts, with no errors. Source and all five binary
+and bundle hashes remain fixed during these latest controls.

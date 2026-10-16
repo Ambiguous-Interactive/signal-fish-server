@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Keep browser reference-client relay traffic and other peers moving during stalled negotiation,
-  and prevent false run failures at the run deadline (#1011).
+  and prevent false run failures and false fallback reports at the run deadline (#1011).
 - Discard native reference-client deferred connections when peers leave or session plans remove them (#1010).
 - Keep native reference-client relay sessions responsive when data-channel exchange sends fail or stall across peers
   (#1000, #1002, #1003).

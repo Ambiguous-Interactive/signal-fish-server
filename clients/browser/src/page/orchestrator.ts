@@ -730,6 +730,7 @@ class Orchestrator {
   private readonly expectedPeers = new Set<string>();
   private readonly pairRoles = new Map<string, boolean>();
   private readonly peerTasks = new Map<string, { tail: Promise<void>; token: object }>();
+  private readonly pendingPeerOperations = new Set<{ deadline: number; expire: () => void }>();
   private readonly pairRetryState = new Map<string, { attempt: number; connected: boolean }>();
   private readonly retryingPairs = new Set<string>();
   private readonly connectedPairs = new Set<string>();
@@ -1437,7 +1438,12 @@ class Orchestrator {
         this.lingerUntil,
       )
     ) {
-      for (const peer of Array.from(this.peerTasks.keys())) this.handlePeerTransportLoss(peer);
+      for (const pending of Array.from(this.pendingPeerOperations)) {
+        if (pending.deadline <= now) pending.expire();
+      }
+      /* Queued or finishing handlers carry no physical timeout of their own.
+       * Cancel their tokens without publishing a transport-loss decision. */
+      this.peerTasks.clear();
     }
 
     this.armSuccessLinger(now);
@@ -2073,7 +2079,7 @@ class Orchestrator {
     });
     const stopped = () => rejectWait?.(FatalError.connection('the client is stopping'));
     this.peerWorkStopped.signal.addEventListener('abort', stopped, { once: true });
-    const timer = scheduleDeadline(deadline, () => {
+    const expire = () => {
       try {
         if (isCurrent()) this.handlePeerTransportLoss(peer);
       } catch (error) {
@@ -2085,7 +2091,10 @@ class Orchestrator {
       } finally {
         rejectWait?.(new Error('browser peer negotiation deadline expired'));
       }
-    });
+    };
+    const pending = { deadline, expire };
+    this.pendingPeerOperations.add(pending);
+    const timer = scheduleDeadline(deadline, expire);
     try {
       const result = await Promise.race([operation, expired]);
       if (monotonicNowMs() >= deadline) {
@@ -2099,6 +2108,7 @@ class Orchestrator {
       }
       throw error;
     } finally {
+      this.pendingPeerOperations.delete(pending);
       timer.cancel();
       this.peerWorkStopped.signal.removeEventListener('abort', stopped);
     }
