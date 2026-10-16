@@ -421,14 +421,10 @@ mod tests {
             tokio::time::advance(elapsed).await;
             let result = connecting.await;
             if expired {
-                if result.is_ok() {
-                    accepted_late.push(elapsed);
+                if let Err(error) = &result {
+                    assert!(error.to_string().contains("timed out"));
                 } else {
-                    assert!(result
-                        .as_ref()
-                        .unwrap_err()
-                        .to_string()
-                        .contains("timed out"));
+                    accepted_late.push(elapsed);
                 }
             } else {
                 assert!(result.is_ok(), "accept an on-time upgrade: {result:?}");
@@ -615,10 +611,10 @@ mod tests {
                 drop(sink);
                 assert_eq!(frames, [frame], "one original frame only");
                 if elapsed >= WRITE_TIMEOUT {
-                    if result.is_ok() {
-                        accepted_late.push((binary, elapsed));
+                    if let Err(error) = result {
+                        assert!(error.to_string().contains("write timed out"));
                     } else {
-                        assert!(result.unwrap_err().to_string().contains("write timed out"));
+                        accepted_late.push((binary, elapsed));
                     }
                 } else {
                     assert!(result.is_ok(), "on-time flush: {result:?}");

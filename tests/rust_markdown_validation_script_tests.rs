@@ -260,6 +260,100 @@ pub fn needs_external_context(_: MissingType) {}
             forbidden_substrings: &[],
         },
         ValidatorCase {
+            name: "external_context_inference_cascade_is_a_warning",
+            markdown: r#"```rust
+use missing_crate::connect;
+async fn example() {
+    let (sender, _) = connect().await;
+    sender.send("hello").await;
+}
+```
+"#,
+            expect_success: true,
+            expected_substrings: &["requires external context", "Warned: 1", "Failed: 0"],
+            forbidden_substrings: &["FAILED:"],
+        },
+        ValidatorCase {
+            name: "wrapped_external_context_inference_cascade_is_a_warning",
+            markdown: r#"```rust
+use missing_crate::connect;
+let (sender, _) = connect();
+sender.send("hello");
+```
+"#,
+            expect_success: true,
+            expected_substrings: &["requires external context", "Warned: 1", "Failed: 0"],
+            forbidden_substrings: &["FAILED:"],
+        },
+        ValidatorCase {
+            name: "mixed_context_inference_remains_syntax_only",
+            markdown: r#"```rust
+use missing_crate::Value;
+fn example(_: Value) {
+    let unrelated = Vec::new();
+}
+```
+"#,
+            expect_success: true,
+            expected_substrings: &[
+                "requires external context (syntax valid)",
+                "Validated: 0",
+                "Warned: 1",
+                "Failed: 0",
+            ],
+            forbidden_substrings: &["Compiled and validated"],
+        },
+        ValidatorCase {
+            name: "standalone_inference_error_is_rejected",
+            markdown: r#"```rust
+fn example() {
+    let value = Vec::new();
+}
+```
+"#,
+            expect_success: false,
+            expected_substrings: &["FAILED:", "E0282", "Failed: 1"],
+            forbidden_substrings: &["requires external context"],
+        },
+        ValidatorCase {
+            name: "standalone_trait_inference_error_is_rejected",
+            markdown: r#"```rust
+fn example() {
+    let value = [1, 2].into_iter().collect();
+}
+```
+"#,
+            expect_success: false,
+            expected_substrings: &["FAILED:", "E0283", "Failed: 1"],
+            forbidden_substrings: &["requires external context"],
+        },
+        ValidatorCase {
+            name: "external_context_does_not_mask_type_mismatch",
+            markdown: r#"```rust
+use missing_crate::Value;
+fn example(_: Value) {
+    let wrong: u8 = "wrong";
+}
+```
+"#,
+            expect_success: false,
+            expected_substrings: &["FAILED:", "E0308", "Failed: 1"],
+            forbidden_substrings: &["requires external context"],
+        },
+        ValidatorCase {
+            name: "external_context_does_not_mask_macro_errors",
+            markdown: r#"```rust
+use missing_crate::Value;
+fn example(_: Value) {
+    println!("{");
+}
+```
+"#,
+            expect_success: false,
+            expected_substrings: &["FAILED:", "invalid format string", "Failed: 1"],
+            forbidden_substrings: &["requires external context"],
+        },
+        ValidatorCase {
             name: "compiles_rustdoc_style_statement_blocks",
             markdown: r#"# Rustdoc-Style Snippet
 

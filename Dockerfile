@@ -21,15 +21,15 @@
 # Stage 1: Chef - Install cargo-chef for dependency management.
 # Pinned to the native build platform so `cargo install` runs without emulation.
 # Using bookworm (Debian 12); cross GCC toolchains are available in its repos.
-FROM --platform=$BUILDPLATFORM rust:1.91-bookworm AS chef
+FROM --platform=$BUILDPLATFORM rust:1.94-bookworm AS chef
 # Pin cargo-chef to an explicit version (not "latest") for reproducible builds.
-# 0.1.77 is the latest stable and trims lints from the generated recipe.json.
+# 0.1.78 is the latest stable and trims lints from the generated recipe.json.
 # Note: `cargo chef cook` may still emit benign
 # `warning: edition is set on library/binary/benchmark ... which is deprecated`
 # lines under cargo 1.91. These come from the cargo-chef skeleton's target
 # tables, NOT our Cargo.toml (which sets `edition` only in [package]); the build
 # succeeds regardless. See .llm/context-docs-and-ci-pitfalls.md.
-RUN cargo install cargo-chef --version 0.1.77 --locked
+RUN cargo install cargo-chef --version 0.1.78 --locked
 WORKDIR /app
 
 # Stage 2: Planner - Analyze dependencies (host-native; recipe.json is

@@ -2978,7 +2978,7 @@ fn test_relay_timing_observations_workflow_is_bounded_complete_and_retainable() 
     );
     assert_eq!(
         upload.as_mapping_get("uses").and_then(Yaml::as_str),
-        Some("actions/upload-artifact@v7.0.1")
+        Some("actions/upload-artifact@v7.0.2")
     );
     let with = upload.as_mapping_get("with").expect("upload settings");
     let paths = with
@@ -3219,7 +3219,7 @@ fn test_verification_nightly_retains_h14_hosted_attempt_evidence() {
     );
     assert_eq!(
         upload.as_mapping_get("uses").and_then(Yaml::as_str),
-        Some("actions/upload-artifact@v7.0.1")
+        Some("actions/upload-artifact@v7.0.2")
     );
     let upload_with = upload.as_mapping_get("with").expect("H14 upload settings");
     assert_eq!(
@@ -3433,7 +3433,7 @@ fn test_verification_nightly_retains_multiprocess_pause_resume_evidence() {
     );
     assert_eq!(
         upload.as_mapping_get("uses").and_then(Yaml::as_str),
-        Some("actions/upload-artifact@v7.0.1")
+        Some("actions/upload-artifact@v7.0.2")
     );
     let with = upload.as_mapping_get("with").expect("upload settings");
     assert_eq!(
@@ -6914,7 +6914,7 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
     assert_eq!(permissions.trim(), "contents: read");
     for required in [
         "Require default branch dispatch",
-        "actions/create-github-app-token@v3.2.0",
+        "actions/create-github-app-token@v3.3.0",
         "permission-contents: write",
         "permission-pull-requests: write",
         "ref: ${{ github.sha }}",
@@ -6937,7 +6937,7 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         "bash scripts/ensure-release-pr.sh",
         "\"$body_file\" \"$expected_head_sha\"",
         "Release - Publish Crate",
-        "actions/upload-artifact@v7.0.1",
+        "actions/upload-artifact@v7.0.2",
     ] {
         assert!(
             prepare.contains(required),
@@ -7004,7 +7004,7 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
             [
                 "id: app-token-client",
                 "if: steps.app-credentials.outputs.mode == 'client-id'",
-                "uses: actions/create-github-app-token@v3.2.0",
+                "uses: actions/create-github-app-token@v3.3.0",
                 "client-id: ${{ vars.AUTO_COMMIT_APP_CLIENT_ID }}",
                 "private-key: ${{ secrets.AUTO_COMMIT_APP_PRIVATE_KEY }}",
                 "permission-contents: write",
@@ -7017,7 +7017,7 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
             [
                 "id: app-token-id",
                 "if: steps.app-credentials.outputs.mode == 'app-id'",
-                "uses: actions/create-github-app-token@v3.2.0",
+                "uses: actions/create-github-app-token@v3.3.0",
                 "app-id: ${{ secrets.AUTO_COMMIT_APP_ID }}",
                 "private-key: ${{ secrets.AUTO_COMMIT_APP_PRIVATE_KEY }}",
                 "permission-contents: write",
@@ -7041,7 +7041,7 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
     }
     assert_eq!(
         prepare
-            .matches("uses: actions/create-github-app-token@v3.2.0")
+            .matches("uses: actions/create-github-app-token@v3.3.0")
             .count(),
         2,
         "prepare-release.yml must have exactly one mutually exclusive token action per \
@@ -14696,6 +14696,34 @@ fn test_bash_command_helper_scrubs_nested_cargo_instrumentation_env() {
 fn test_bash_command_import_platform_detector_data_driven_cases() {
     let cases = [
         (
+            "match guard helper counts as portable use",
+            r#"
+mod common;
+use common::bash_command;
+fn test() {
+    match () {
+        _ if bash_command().status().is_ok() => (),
+        _ => (),
+    }
+}
+"#,
+            false,
+        ),
+        (
+            "match guard binding shadows imported helper in guard and body",
+            r#"
+mod common;
+use common::bash_command;
+fn test() {
+    match Some(|| true) {
+        Some(bash_command) if bash_command() => { bash_command(); },
+        _ => (),
+    }
+}
+"#,
+            true,
+        ),
+        (
             "rejects import compiled on windows with only unix-gated call",
             r#"
 mod common;
@@ -16507,8 +16535,8 @@ impl<'ast> Visit<'ast> for RustPolicyVisitor<'_> {
             let mut scope = RustNameScope::default();
             collect_pat_local_names(&node.pat, &mut scope);
             visitor.with_child_scope(scope, |visitor| {
-                if let Some((_if_token, guard)) = &node.guard {
-                    visitor.visit_expr(guard);
+                if let Pat::Guard(pat) = &node.pat {
+                    visitor.visit_expr(&pat.guard);
                 }
                 visitor.visit_expr(&node.body);
             });
@@ -17333,6 +17361,7 @@ fn local_import_name(
 
 fn collect_pat_local_names(pat: &Pat, scope: &mut RustNameScope) {
     match pat {
+        Pat::Guard(pat) => collect_pat_local_names(&pat.pat, scope),
         Pat::Ident(pat) => {
             scope.value_names.insert(pat.ident.to_string());
             if let Some((_at, subpat)) = &pat.subpat {
@@ -21153,60 +21182,6 @@ esac
     );
 }
 
-fn assert_dependabot_cargo_holds(directory: &str, expected: &[(&str, &str)]) {
-    let path = repo_root().join(".github/dependabot.yml");
-    let content = read_live_file(&path);
-    let documents = Yaml::load_from_str(&content).expect("dependabot.yml must parse as YAML");
-    let updates = documents
-        .first()
-        .and_then(|document| document.as_mapping_get("updates"))
-        .unwrap_or_else(|| panic!("dependabot.yml must define an updates sequence"));
-    let Yaml::Sequence(updates) = updates else {
-        panic!("dependabot.yml updates must be a sequence");
-    };
-    let cargo_entry = updates
-        .iter()
-        .find(|entry| {
-            entry
-                .as_mapping_get("package-ecosystem")
-                .and_then(Yaml::as_str)
-                == Some("cargo")
-                && entry.as_mapping_get("directory").and_then(Yaml::as_str) == Some(directory)
-        })
-        .unwrap_or_else(|| {
-            panic!("dependabot.yml must define the Cargo update entry for `{directory}`")
-        });
-    let ignores = cargo_entry
-        .as_mapping_get("ignore")
-        .unwrap_or_else(|| panic!("Cargo updates for `{directory}` must retain version holds"));
-    let Yaml::Sequence(ignores) = ignores else {
-        panic!("Cargo update ignores for `{directory}` must be a sequence");
-    };
-
-    for &(dependency, version) in expected {
-        let found = ignores.iter().any(|entry| {
-            let dependency_matches = entry
-                .as_mapping_get("dependency-name")
-                .and_then(Yaml::as_str)
-                == Some(dependency);
-            let Some(Yaml::Sequence(versions)) = entry.as_mapping_get("versions") else {
-                return false;
-            };
-            dependency_matches
-                && versions
-                    .iter()
-                    .any(|configured| configured.as_str() == Some(version))
-        });
-        assert!(
-            found,
-            "Dependabot Cargo updates for `{directory}` must ignore {dependency} {version} \
-             until its measured graph/MSRV incompatibility is resolved. Security advisory \
-             scanning remains independent of version-update ignores.\nFile: {}",
-            path.display()
-        );
-    }
-}
-
 fn dependabot_cargo_directories_from_yaml(content: &str) -> BTreeSet<String> {
     let documents = Yaml::load_from_str(content).expect("dependabot.yml must parse as YAML");
     let updates = documents
@@ -21355,16 +21330,9 @@ updates:
 }
 
 #[test]
-fn test_dependabot_holds_measured_incompatible_root_cargo_lines() {
-    assert_dependabot_cargo_holds(
-        "/",
-        &[
-            ("base64", "0.23.x"),
-            ("tokio-tungstenite", "0.30.x"),
-            ("serial_test", "4.x"),
-            ("syn", "3.x"),
-        ],
-    );
+fn test_dependabot_allows_migrated_root_cargo_lines() {
+    let holds = dependabot_cargo_holds_by_directory();
+    assert!(holds.get("/").expect("root Cargo entry").is_empty());
 }
 
 #[test]
@@ -23553,9 +23521,9 @@ fn test_analysis_nightly_version_consistency() {
     let unused_deps = read_live_file(&root.join(".github/workflows/unused-deps.yml"));
     for required in [
         "uses: taiki-e/install-action@",
-        "tool: cargo-machete@0.7.0,cargo-udeps@0.1.61",
+        "tool: cargo-machete@0.9.2,cargo-udeps@0.1.61",
         "fallback: none",
-        "cargo machete --version | grep -Fxq '0.7.0'",
+        "cargo machete --version | grep -Fxq '0.9.2'",
         "cargo +nightly-2026-08-01 udeps --version | grep -Fxq 'cargo-udeps 0.1.61'",
         "cargo +nightly-2026-08-01 udeps --locked --all-targets --all-features",
     ] {
@@ -31653,8 +31621,8 @@ fn test_fortress_interop_gate_is_pinned_and_runs_current_server() {
     let runner = read_file(&root.join("scripts/run-fortress-interop.sh"));
 
     for dependency in [
-        "fortress-rollback = \"=0.12.0\"",
-        "signal-fish-client = { version = \"=0.13.0\"",
+        "fortress-rollback = \"=0.13.0\"",
+        "signal-fish-client = { version = \"=0.14.0\"",
     ] {
         assert!(
             manifest.contains(dependency),
@@ -31662,7 +31630,7 @@ fn test_fortress_interop_gate_is_pinned_and_runs_current_server() {
         );
     }
 
-    let fortress_package = cargo_lock_package(&lockfile, "fortress-rollback", "0.12.0");
+    let fortress_package = cargo_lock_package(&lockfile, "fortress-rollback", "0.13.0");
     let codec_package = cargo_lock_package(&lockfile, "bincode-next", "2.1.0");
     let fixture_package = cargo_lock_package(&lockfile, "signal-fish-fortress-interop", "0.1.0");
     for package in [fortress_package, codec_package] {
@@ -31682,7 +31650,7 @@ fn test_fortress_interop_gate_is_pinned_and_runs_current_server() {
     );
     assert!(
         fortress_package.contains(" \"bincode-next\","),
-        "Fortress 0.12.0 must directly use the maintained codec: {fortress_package}"
+        "Fortress 0.13.0 must directly use the maintained codec: {fortress_package}"
     );
     assert!(
         !lockfile.contains("name = \"bincode\"\n"),
@@ -31776,7 +31744,7 @@ fn test_turn_interop_gate_is_local_pinned_and_fail_closed() {
         "timeout-minutes: 4",
         "timeout --signal=TERM --kill-after=30s 15m bash scripts/run-turn-interop.sh",
         "if: ${{ always() && !success() }}",
-        "actions/upload-artifact@v7.0.1",
+        "actions/upload-artifact@v7.0.2",
         "retention-days: 14",
         "if-no-files-found: error",
     ] {
@@ -32897,10 +32865,10 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     let workflow = read_live_file(&root.join(".github/workflows/fortress-wasm-interop.yml"));
 
     for dependency in [
-        "fortress-rollback = \"=0.12.0\"",
-        "signal-fish-client = { version = \"=0.13.0\", default-features = false, features = [\"polling-client\"] }",
-        "signal-fish-client-godot = \"=0.13.0\"",
-        "godot = { version = \"=0.4.5\", features = [\"api-custom\", \"experimental-wasm\", \"experimental-wasm-nothreads\", \"lazy-function-tables\"] }",
+        "fortress-rollback = \"=0.13.0\"",
+        "signal-fish-client = { version = \"=0.14.0\", default-features = false, features = [\"polling-client\"] }",
+        "signal-fish-client-godot = \"=0.14.0\"",
+        "godot = { version = \"=0.5.5\", features = [\"api-custom\", \"experimental-wasm\", \"experimental-wasm-nothreads\", \"lazy-function-tables\"] }",
     ] {
         assert!(
             manifest.contains(dependency),
@@ -32912,11 +32880,11 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         Some("1.94.0".to_owned())
     );
     for (name, version) in [
-        ("fortress-rollback", "0.12.0"),
+        ("fortress-rollback", "0.13.0"),
         ("bincode-next", "2.1.0"),
-        ("signal-fish-client", "0.13.0"),
-        ("signal-fish-client-godot", "0.13.0"),
-        ("godot", "0.4.5"),
+        ("signal-fish-client", "0.14.0"),
+        ("signal-fish-client-godot", "0.14.0"),
+        ("godot", "0.5.5"),
     ] {
         let package = cargo_lock_package(&lockfile, name, version);
         assert!(
@@ -32929,7 +32897,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         1,
         "the WASM fixture must resolve exactly one godot-rust release so the adapter and fixture cannot link incompatible engine bindings"
     );
-    let fortress_package = cargo_lock_package(&lockfile, "fortress-rollback", "0.12.0");
+    let fortress_package = cargo_lock_package(&lockfile, "fortress-rollback", "0.13.0");
     let fixture_package =
         cargo_lock_package(&lockfile, "signal-fish-fortress-wasm-interop", "0.1.0");
     assert!(
@@ -32943,7 +32911,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     );
     assert!(
         fortress_package.contains(" \"bincode-next\","),
-        "Fortress 0.12.0 must directly use the maintained codec: {fortress_package}"
+        "Fortress 0.13.0 must directly use the maintained codec: {fortress_package}"
     );
     assert!(
         !lockfile.contains("name = \"bincode\"\n"),
@@ -32970,7 +32938,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "self.active_callback_count >= NEGATIVE_ACTIVE_CALLBACK_BUDGET",
         "self.completed || self.report_json.is_some()",
         "self.running_finished_at.get_or_insert_with(Instant::now);",
-        "config.godot_runtime.string != \"4.5-stable (official)\"",
+        "config.godot_runtime.string != \"4.7.2-stable (official)\"",
         "godot_runtime: self.config.godot_runtime.clone()",
         "configure_identity",
         "enqueue_target_reached",
@@ -32980,8 +32948,8 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "relay_sent_sequence_hash",
         "relay_received_sequence_hash",
         "use signal_fish_client_godot::GodotWebSocketTransport;",
-        "const SIGNAL_FISH_CLIENT_GODOT_VERSION: &str = \"0.13.0\";",
-        "const FORTRESS_ROLLBACK_VERSION: &str = \"0.12.0\";",
+        "const SIGNAL_FISH_CLIENT_GODOT_VERSION: &str = \"0.14.0\";",
+        "const FORTRESS_ROLLBACK_VERSION: &str = \"0.13.0\";",
         "signal_fish_client_godot_version: SIGNAL_FISH_CLIENT_GODOT_VERSION",
         "const REPORT_SCHEMA_VERSION: u32 = 3;",
         "const MAX_STALL_RATE_PER_MILLE: u64 = 20;",
@@ -33024,9 +32992,9 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "room.schema_version === 3",
         "schema_version: 3,",
         "report.schema_version === 3",
-        "report.signal_fish_client_godot_version === \"0.13.0\"",
-        "report.fortress_rollback_version === \"0.12.0\"",
-        "report.godot_runtime.string === \"4.5-stable (official)\"",
+        "report.signal_fish_client_godot_version === \"0.14.0\"",
+        "report.fortress_rollback_version === \"0.13.0\"",
+        "report.godot_runtime.string === \"4.7.2-stable (official)\"",
         "assertExactKeys(report, reportKeys",
         "report.relay_send_retries <= 8",
         "report.client_game_data_sent_during_run * 1_000",
@@ -33165,8 +33133,8 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     for required in [
         "cargo build --manifest-path \"${REPO_ROOT}/Cargo.toml\" --locked --bin signal-fish-server",
         "wasm32-unknown-emscripten",
-        "nightly-2026-03-01",
-        "3.1.74",
+        "nightly-2026-10-16",
+        "6.0.12",
         "released \"${EXPORT_DIR}\"",
         "negative \"${EXPORT_DIR}\"",
         "restart \"${EXPORT_DIR}\"",
@@ -33174,10 +33142,10 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "inbound-overflow \"${EXPORT_DIR}\"",
         "timeout --foreground 180s",
         "timeout --foreground",
-        "signal-fish-client v0.13.0",
-        "signal-fish-client-godot v0.13.0",
-        "fortress-rollback v0.12.0",
-        "HEALTHY: released Signal Fish client 0.13.0",
+        "signal-fish-client v0.14.0",
+        "signal-fish-client-godot v0.14.0",
+        "fortress-rollback v0.13.0",
+        "HEALTHY: released Signal Fish client 0.14.0",
     ] {
         assert!(
             runner.contains(required),
@@ -33223,7 +33191,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "GODOT_TEMPLATES_SHA512:",
         "sha512sum --check",
         "cargo +\"$RUST_NIGHTLY\" clippy",
-        "actions/upload-artifact@v7.0.1",
+        "actions/upload-artifact@v7.0.2",
         "if: failure()",
         "RUSTUP_TOOLCHAIN: 1.94.0",
         "schedule:",

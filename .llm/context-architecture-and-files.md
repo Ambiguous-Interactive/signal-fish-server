@@ -39,8 +39,8 @@ browser↔native interop cells live in the native crate behind the
 stdout event contract and exit codes (the native README is canonical).
 `clients/fortress/` is the native Fortress rollback interoperability fixture;
 `clients/fortress-wasm/` reuses its deterministic workload and relay ledger in
-a Godot 4.5, single-threaded Emscripten build exercised by two isolated browser
-processes via `scripts/run-fortress-wasm-interop.sh`. The exact released 0.9.0
+a Godot 4.7.2, single-threaded Emscripten build exercised by two isolated browser
+processes via `scripts/run-fortress-wasm-interop.sh`. The exact released 0.14.0
 client + Godot adapter graph is required to pass every health gate in two
 Chromium processes; the same harness retains an expected-`BUSTED`
 one-admission-per-callback negative control. P13 is complete for the explicitly

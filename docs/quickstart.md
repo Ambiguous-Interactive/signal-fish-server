@@ -26,7 +26,7 @@ Choose Docker or Cargo.
 
 === "Cargo"
 
-    Install Rust 1.91+, then clone the repository. Copy the local
+    Install Rust 1.94+, then clone the repository. Copy the local
     development config before starting the server; the secure built-in defaults
     require settings that are not suitable for this first run.
 

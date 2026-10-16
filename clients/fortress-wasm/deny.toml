@@ -10,7 +10,7 @@ ignore = []
 
 [licenses]
 version = 2
-# MPL-2.0 is required by the exact godot-rust 0.4.5 production graph;
+# MPL-2.0 is required by the exact godot-rust 0.5.5 production graph;
 # BSD-3-Clause and ISC cover its bindgen build dependencies.
 allow = [
     "MIT",

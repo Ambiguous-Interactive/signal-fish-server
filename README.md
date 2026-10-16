@@ -14,7 +14,7 @@
          alt="Documentation">
   </a>
   <a href="https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/rust-toolchain.toml">
-    <img src="https://img.shields.io/badge/MSRV-1.91.0-blue.svg?style=for-the-badge"
+    <img src="https://img.shields.io/badge/MSRV-1.94.0-blue.svg?style=for-the-badge"
          alt="MSRV">
   </a>
   <a href="LICENSE">
@@ -71,7 +71,7 @@ curl http://localhost:3536/v2/health
 
 ### From source
 
-Source builds require Rust 1.91.0 or newer. Copy the development configuration so
+Source builds require Rust 1.94.0 or newer. Copy the development configuration so
 the local server accepts clients without a configured app-ID allowlist:
 
 ```bash

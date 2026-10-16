@@ -2,7 +2,7 @@
 # https://github.com/Ambiguous-Interactive/signal-fish-server
 
 FROM mcr.microsoft.com/devcontainers/rust:2-bookworm
-# Project MSRV: 1.91.0 — this image must provide >= 1.91
+# Project MSRV: 1.94.0 — this image must provide >= 1.94
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -18,18 +18,18 @@ ARG LYCHEE_AARCH64_MUSL_SHA256=5d0b0e3aeab240f41920c633a6eaf97599be6eedda034b36e
 # builds. Wired into every agent harness via .vscode/mcp.json, .mcp.json,
 # opencode.json, and ~/.codex/config.toml (see .devcontainer/post-create.sh).
 # SHA256s are the Linux x86_64/arm64 lines of the release's checksums.txt
-# (github-mcp-server_1.12.2_checksums.txt), cross-checked against the release
+# (github-mcp-server_2.0.2_checksums.txt), cross-checked against the release
 # asset digests.
-ARG GITHUB_MCP_VERSION=1.12.2
-ARG GITHUB_MCP_X86_64_SHA256=95843162759da2c31dde082dd145be35db82164594796c294414b69790c2290e
-ARG GITHUB_MCP_ARM64_SHA256=2b30f9fcc061b57456cbe38ddc0f13c88863bad49557508a9196f2d1c4cb17a5
-ARG POWERSHELL_VERSION=7.6.2
-ARG POWERSHELL_X64_SHA256=6cbcfbf20e376aa62ffd91c973493c41a7a52ddfd5a5db3ff9bc12f0d0fe9292
-ARG POWERSHELL_ARM64_SHA256=a8d4e386dfafda385d0604045eed03ce6f3a843d45fc8f0b9588b836ca17cdb8
+ARG GITHUB_MCP_VERSION=2.0.2
+ARG GITHUB_MCP_X86_64_SHA256=815e27d931c796af0c97f24fd211e14f8a4607d4528377719a5ad2352086b0b0
+ARG GITHUB_MCP_ARM64_SHA256=73f5e76c6a3b5e0d731e1134a7c38575df6ec96c646192095a3be2d4d0d6c1fc
+ARG POWERSHELL_VERSION=7.6.7
+ARG POWERSHELL_X64_SHA256=6896f9e3a6b0a354bf470835a96da76d2f801cd50dcf047ad7c4563bf93bf431
+ARG POWERSHELL_ARM64_SHA256=ba465efdfb0984c1c5dc5ed9eb0b79a7e91a1b52c45f99377058c0659b84d3f1
 # Keep YQ/TAPLO versions in sync with .github/workflows/doc-validation.yml.
-ARG YQ_VERSION=v4.53.2
-ARG YQ_AMD64_SHA256=d56bf5c6819e8e696340c312bd70f849dc1678a7cda9c2ad63eebd906371d56b
-ARG YQ_ARM64_SHA256=03061b2a50c7a498de2bbb92d7cb078ce433011f085a4994117c2726be4106ea
+ARG YQ_VERSION=v4.54.1
+ARG YQ_AMD64_SHA256=8e34fc298390875de416e6a4afcb8cabeceb25d9aa8506c1a2f9353cf702ea5f
+ARG YQ_ARM64_SHA256=189088da0c6429ec5178dfaab1a114805f6cab0b61b165ab236efedf1d57a71b
 ARG TAPLO_CLI_VERSION=0.10.0
 
 # System dependencies for building with mold linker, TLS, validation tooling,
@@ -218,7 +218,7 @@ RUN --mount=type=cache,id=signal-fish-cargo-registry-v2,target=/usr/local/cargo/
     cargo-watch \
     cargo-expand \
     cargo-llvm-cov \
-    cargo-nextest@0.9.143 \
+    cargo-nextest@0.9.148 \
     cargo-mutants@27.1.0 \
     cargo-fuzz \
     && cargo install --locked taplo-cli --version "$TAPLO_CLI_VERSION" \

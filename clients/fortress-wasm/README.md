@@ -1,9 +1,9 @@
 # Fortress + Signal Fish Godot/WASM interoperability fixture
 
 This standalone fixture is the browser half of the issue-242 regression. It
-compiles the registry releases `fortress-rollback` 0.12.0,
-`signal-fish-client` 0.13.0, and `signal-fish-client-godot` 0.13.0 into a Godot
-4.5 GDExtension for
+compiles the registry releases `fortress-rollback` 0.13.0,
+`signal-fish-client` 0.14.0, and `signal-fish-client-godot` 0.14.0 into a Godot
+4.7.2 GDExtension for
 `wasm32-unknown-emscripten`, exports with the official no-thread web template,
 and drives two independent browser processes through the server built from the
 current checkout. Chromium is the required pull-request gate. A weekly Firefox
@@ -25,9 +25,11 @@ Run the complete gate with:
 bash scripts/run-fortress-wasm-interop.sh
 ```
 
-The runner requires Emscripten 3.1.74, Godot 4.5 stable with its official web
-templates, and Rust `nightly-2026-03-01` plus `rust-src`. The adapter's declared
-Rust floor is 1.94.0, intentionally higher than the standalone server crate's
+Run this timing gate without concurrent builds.
+
+The runner requires Emscripten 6.0.12, Godot 4.7.2 stable with its official web
+templates, and Rust `nightly-2026-10-16` plus `rust-src`. The adapter's declared
+Rust floor is 1.94.0, matching the standalone server crate's
 MSRV. The primary cell requires both peers to satisfy every healthy throughput,
 progress, queue-age, conservation, rollback, checksum, cadence, and runtime
 identity gate. Any missing report or invariant violation fails closed as
@@ -38,10 +40,6 @@ healthy run, while any systematic stalling regression still fails. Wait
 recommendations remain forbidden, as do every existing
 loss, overflow, throughput, queue-age, lag, rollback, checksum, and conservation
 violation. The native Fortress gate retains its stricter zero-stall boundary.
-
-Exact-head CI with the released 0.13.0 graph passed the complete primary cell:
-both reports satisfied every health and identity invariant and printed
-`HEALTHY`. The following capped control printed its expected `BUSTED` verdict.
 
 The runner then executes a one-admission-per-callback negative control and
 requires the same healthy validator to classify that run as the expected
@@ -68,7 +66,9 @@ Firefox, allowing exact-head verification before merge.
 
 The Godot web export requires a WebGL2 context, and CI runners have no GPU.
 Chromium reaches its own software rasterizer (SwiftShader) through
-`--enable-webgl --ignore-gpu-blocklist`. Firefox has no such fallback: it asks
+`--enable-webgl --ignore-gpu-blocklist`. In a Wayland devcontainer, run
+`env -u DISPLAY -u WAYLAND_DISPLAY bash scripts/run-fortress-wasm-interop.sh`
+to keep the headless browser on this path. Firefox has no such fallback: it asks
 the platform for a GL device and, finding none, reports
 `Exhausted GL driver options (FEATURE_FAILURE_WEBGL_EXHAUSTED_DRIVERS)`. It
 needs two things:

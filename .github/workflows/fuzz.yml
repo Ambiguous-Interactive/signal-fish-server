@@ -92,7 +92,7 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@v2.87.22
+        uses: taiki-e/install-action@v2.87.28
         with:
           tool: cargo-fuzz
 
@@ -134,7 +134,7 @@ jobs:
 
       - name: Upload decode_protocol failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: fuzz-artifacts-decode_protocol
           path: |
@@ -144,7 +144,7 @@ jobs:
 
       - name: Upload validate_inputs failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: fuzz-artifacts-validate_inputs
           path: |
@@ -154,7 +154,7 @@ jobs:
 
       - name: Upload fuzz_session_machine failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: fuzz-artifacts-fuzz_session_machine
           path: |
@@ -164,7 +164,7 @@ jobs:
 
       - name: Upload fuzz_reconnect_tokens failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: fuzz-artifacts-fuzz_reconnect_tokens
           path: |

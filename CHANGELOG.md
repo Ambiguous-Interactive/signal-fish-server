@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Require Rust 1.94.0 or newer to build from source with the current dependencies.
+- **Breaking:** Rust library callers using `EncryptionError::Base64Decode` must use base64 0.23.
 - **Breaking:** Opaque reference-client sends now include an application sender header; upgrade both probe clients (#678).
 - **Breaking:** Native MessagePack runs now encode valid payloads and emit decoded receipt values
   instead of base64 wrappers (#678).
@@ -24,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Keep native reference-client relay sessions alive when an exchange send races a closed data channel (#1000).
+- Keep native reference-client relay sessions alive when data-channel exchange sends fail or stall (#1000, #1002).
 - Keep browser crippled-ICE runs on relay fallback when peer SDP includes ICE candidates (#999).
 - Preserve JSON object keys and numeric key conversion in browser MessagePack relay payloads on v2 and v3 (#996).
 - Keep browser opaque relay sessions connected when mixed-room senders use JSON fallback (#994).

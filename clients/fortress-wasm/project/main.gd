@@ -23,7 +23,7 @@ func _ready() -> void:
 	# main loop and a production-like 60 Hz engine cap for `_process` callbacks.
 	RenderingServer.set_render_loop_enabled(false)
 	Engine.max_fps = 60
-	var config_json := JavaScriptBridge.eval(
+	var config_json: Variant = JavaScriptBridge.eval(
 		"JSON.stringify(globalThis.%s ?? null)" % CONFIG_KEY,
 		true,
 	)

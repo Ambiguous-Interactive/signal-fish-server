@@ -245,7 +245,7 @@ jobs:
           fi
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
-        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.91.0)
+        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.94.0)
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
@@ -341,7 +341,7 @@ jobs:
           fi
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
-        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.91.0)
+        # Rust version controlled by rust-toolchain.toml in repository root (currently 1.94.0)
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
@@ -362,16 +362,16 @@ jobs:
       - name: Install cargo-nextest (attempt 1)
         id: install_nextest
         continue-on-error: true
-        uses: taiki-e/install-action@v2.87.22
+        uses: taiki-e/install-action@v2.87.28
         with:
-          tool: cargo-nextest@0.9.143
+          tool: cargo-nextest@0.9.148
       - name: Install cargo-nextest (retry on transient runner failure)
         # Only runs when attempt 1 failed (e.g., the Windows bash-startup flake).
         # No continue-on-error here, so a second failure correctly fails the job.
         if: steps.install_nextest.outcome == 'failure'
-        uses: taiki-e/install-action@v2.87.22
+        uses: taiki-e/install-action@v2.87.28
         with:
-          tool: cargo-nextest@0.9.143
+          tool: cargo-nextest@0.9.148
       - name: Install cargo-mutants (mutation inventory guard)
         # Installs the mutation workflow's pinned cargo-mutants so
         # test_mutation_total_mutants_constant_matches_list enforces the
@@ -380,7 +380,7 @@ jobs:
         # test_ci_nextest_lane_installs_cargo_mutants_for_inventory_guard).
         # Cost: one prebuilt-binary download; no extra compile.
         if: matrix.os == 'ubuntu-latest'
-        uses: taiki-e/install-action@v2.87.22
+        uses: taiki-e/install-action@v2.87.28
         with:
           tool: cargo-mutants@27.1.0
 
@@ -671,7 +671,7 @@ jobs:
           toolchain: ${{ steps.deny-msrv.outputs.version }}
       - name: Install cargo-deny
         if: steps.dep-relevance.outputs.relevant == 'true'
-        uses: taiki-e/install-action@v2.87.22
+        uses: taiki-e/install-action@v2.87.28
         with:
           tool: cargo-deny@0.20.2
       - name: Run cargo-deny
@@ -731,7 +731,7 @@ jobs:
         run: cargo deny --log-level warn --manifest-path clients/fortress-wasm/Cargo.toml --all-features check
       - name: Install Node.js for npm audits
         if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
-        uses: actions/setup-node@v7.0.0
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: "22"
       # `npm audit` cannot ignore advisories, so one unfixable advisory (no
@@ -774,7 +774,7 @@ jobs:
       # nothing.
       - name: Install cargo-audit
         if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
-        uses: taiki-e/install-action@v2.87.22
+        uses: taiki-e/install-action@v2.87.28
         with:
           tool: cargo-audit@0.22.2
           fallback: none
@@ -810,7 +810,7 @@ jobs:
         run: cargo audit --file clients/fortress-wasm/Cargo.lock
       - name: Install cargo-sbom
         if: ${{ !cancelled() && github.event_name != 'schedule' && steps.dep-relevance.outputs.relevant == 'true' }}
-        uses: taiki-e/install-action@v2.87.22
+        uses: taiki-e/install-action@v2.87.28
         with:
           tool: cargo-sbom
 
@@ -824,7 +824,7 @@ jobs:
         # job's cron exclusion, and the relevance gate keeps a
         # dependency-irrelevant pull request from uploading a stale SBOM.
         if: success() && github.event_name != 'schedule' && steps.dep-relevance.outputs.relevant == 'true'
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: sbom-cyclonedx-${{ github.sha }}
           path: sbom.cdx.json
@@ -1114,7 +1114,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2.87.22
+        uses: taiki-e/install-action@v2.87.28
         with:
           tool: cargo-llvm-cov
 
@@ -1135,7 +1135,7 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: coverage-report
           path: lcov.info
