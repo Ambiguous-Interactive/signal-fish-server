@@ -163,19 +163,34 @@ has_item_level_rust() {
 
 is_external_context_compile_error() {
     local error_file="$1"
+    local source_file="$2"
     local external_error_re='^(error\[E(0412|0422|0425|0432|0433|0463)\]|error): (can.t find crate|unresolved import|cannot find|failed to resolve|use of undeclared|no external crate|.*not found in this scope|.*not found)'
+    local inference_error_re='^error\[E028[23]\]: type annotations needed'
 
-    if ! grep -qE '^error(\[[A-Z][0-9]{4}\])?:' "$error_file"; then
+    # Rust can continue type inference after a dependency fails to resolve.
+    # These follow-on errors are incomplete context only when at least one
+    # actual missing-context diagnostic exists. Standalone inference failures
+    # and diagnostics outside these two sets remain failures. A mixed block's
+    # inference errors may also be independent; without its dependencies this
+    # gate proves syntax only and cannot establish diagnostic causality.
+    if ! grep -qE "$external_error_re" "$error_file"; then
         return 1
     fi
 
     if grep -E '^error(\[[A-Z][0-9]{4}\])?:' "$error_file" \
         | grep -vE '^error: aborting due to [0-9]+ previous errors?' \
-        | grep -qEv "$external_error_re"; then
+        | grep -qEv "${external_error_re}|${inference_error_re}"; then
         return 1
     fi
 
-    grep -qE "$external_error_re" "$error_file"
+    if grep -qE "$inference_error_re" "$error_file"; then
+        # Parse the exact compile input independently of name resolution.
+        # --emit stdout accepts formatting differences and leaves the source
+        # unchanged; skip_children avoids needing an omitted module's file.
+        rustfmt --edition 2021 --emit stdout --config skip_children=true \
+            "$source_file" >/dev/null 2>&1 || return 1
+    fi
+    return 0
 }
 
 is_top_level_statement_compile_error() {
@@ -273,7 +288,7 @@ while IFS= read -r md_file; do
                 if ! rustc --edition 2021 --crate-type lib "$compile_file" -o "$TEMP_DIR/test_${total}.rlib" 2>"$TEMP_DIR/compile_err_${total}.txt"; then
                     compile_error_file="$TEMP_DIR/compile_err_${total}.txt"
 
-                    if is_external_context_compile_error "$compile_error_file"; then
+                    if is_external_context_compile_error "$compile_error_file" "$compile_file"; then
                         echo "  - Block at line $line_num requires external context (syntax valid)"
                         warned=$((warned + 1))
                     elif is_top_level_statement_compile_error "$compile_error_file"; then
@@ -290,7 +305,7 @@ while IFS= read -r md_file; do
                         if rustc --edition 2021 "$wrapped_file" -o "$TEMP_DIR/test_${total}" 2>"$TEMP_DIR/wrapped_err_${total}.txt"; then
                             echo "  - Compiled and validated block at line $line_num (wrapped Rustdoc-style snippet)"
                             validated=$((validated + 1))
-                        elif is_external_context_compile_error "$TEMP_DIR/wrapped_err_${total}.txt"; then
+                        elif is_external_context_compile_error "$TEMP_DIR/wrapped_err_${total}.txt" "$wrapped_file"; then
                             echo "  - Block at line $line_num requires external context (syntax valid)"
                             warned=$((warned + 1))
                         else
