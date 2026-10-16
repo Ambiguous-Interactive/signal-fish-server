@@ -4067,3 +4067,40 @@ The final active-wait repair passes two restore and two three-player mesh
 controls in 10.269 seconds. Ten complete streams retain 502 events and exact
 peer/label send and receipt counts, with no errors. Source and all five binary
 and bundle hashes remain fixed during these latest controls.
+
+### F73 — Browser pair retries wait behind the physical link they replace
+
+Issue [#1013](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1013)
+affects the private browser reference orchestrator under A20. F72 separates
+peers' SDP and ICE queues, but a retry still enters the old physical link's
+queue. If that link's browser operation remains pending, the retry waits.
+The old operation's deadline then retires the queue token and discards the
+retry. The peer cannot recover within the original connection window.
+
+The regression on `6aa69c25` holds offer creation, queues old Answer and ICE,
+then sends retry attempt one and replacement Answer and ICE. It fails because
+no replacement link starts before the unchanged deadline. The retained matrix
+covers offer creation, local offer, remote answer, remote offer, answer
+creation, local answer, and live ICE. Each old operation resolves, rejects,
+or remains pending. All 21 repaired histories create a fresh link without
+waiting for the old operation.
+
+The room dispatcher now recognizes an eligible new retry before entering the
+peer queue. It cancels the old queue token and starts a new queue. The existing
+retry handler retires the physical link and keeps its original deadline.
+Both paths use the same eligibility predicate. Old queued SDP and ICE cannot
+reach the replacement. Replacement SDP still precedes ICE. Stale generations,
+unplanned peers, invalid attempts, and duplicate attempts cannot interrupt
+valid work. Late old completion and expiry cannot close the replacement or
+send old SDP. Existing exchange debt and recovery-after-formation controls
+remain in the browser suite.
+
+Browser tests, type checks, formatting, and the build pass. The rebuilt bundle
+passes two retry, two restore, and two three-player mesh controls in 16.983
+seconds. Fourteen complete endpoint streams retain 700 events. Binary and
+bundle hashes remain fixed across these six runs. These bounded successes do
+not establish the spontaneous causes in #853 or #889; both remain open.
+
+Rust, .NET, and Godot SDKs are unaffected because they do not import this
+private browser orchestrator. The server protocol, defaults, and public SDK
+APIs are unchanged. No migration or external-client tracking issue is needed.
