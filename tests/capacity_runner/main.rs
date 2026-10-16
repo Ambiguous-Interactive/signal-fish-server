@@ -2032,6 +2032,103 @@ fn latency_statistics_keep_recipient_tails_and_invalid_arrivals_distinct() {
     }
 }
 
+/// Leaked opaque deliveries still occupy exact coverage and arrival history.
+#[test]
+fn opaque_leaks_preserve_gap_overlap_duplicate_and_order_checks() {
+    let context = unit_context_with_experiment();
+    for case in ["isolated", "gap", "duplicate", "out_of_order"] {
+        let mut records = complete_records(&context.plans);
+        let first = records
+            .receipts
+            .iter()
+            .position(|receipt| receipt.sender == "r0p0")
+            .unwrap();
+        let key = oracle::DeliveryKey {
+            recipient: records.receipts[first].recipient.clone(),
+            sender: "r0p0".into(),
+            epoch: 1,
+            seq: 1,
+        };
+        match case {
+            "isolated" => {}
+            "gap" => records.gaps.push(GapEvent {
+                recipient: key.recipient.clone(),
+                sender: key.sender.clone(),
+                epoch: 1,
+                from_seq: 1,
+                to_seq: 1,
+                reason: DeliveryGapReason::UnsupportedFormat,
+            }),
+            "duplicate" => records.receipts.push(records.receipts[first].clone()),
+            "out_of_order" => records.receipts.swap(first, first + 1),
+            _ => unreachable!(),
+        }
+        let summary = oracle::summarize(
+            &context.plans,
+            &context.roster,
+            &records,
+            1000,
+            96,
+            DeliveryClass::Reliable,
+            &ChurnPlan::default(),
+            context.experiment,
+        );
+        assert!(!summary.valid);
+        let mut leak_key = key.clone();
+        if case == "out_of_order" {
+            leak_key.seq = 2;
+        }
+        assert!(
+            summary
+                .reasons
+                .contains(&oracle::InvalidReason::UnsupportedFormatLeak {
+                    count: 3,
+                    first: leak_key,
+                }),
+            "{case}: {:?}",
+            summary.reasons
+        );
+        assert_eq!(
+            summary.totals.outstanding, 0,
+            "{case}: leaked deliveries still occupy coverage"
+        );
+        assert_eq!(
+            summary.reasons.len(),
+            if case == "isolated" { 1 } else { 2 },
+            "{case}: {:?}",
+            summary.reasons
+        );
+        match case {
+            "gap" => assert!(
+                summary.reasons.iter().any(|reason| matches!(reason,
+                    oracle::InvalidReason::InvalidGapReports { count: 1, first }
+                    if first.recipient == key.recipient && first.sender == key.sender
+                        && first.detail.contains("overlaps an already-covered sequence")
+                )),
+                "{:?}",
+                summary.reasons
+            ),
+            "duplicate" => {
+                assert!(summary
+                    .reasons
+                    .contains(&oracle::InvalidReason::DuplicateDeliveries {
+                        count: 1,
+                        first: key,
+                    }))
+            }
+            "out_of_order" => {
+                assert!(summary
+                    .reasons
+                    .contains(&oracle::InvalidReason::OutOfOrderDeliveries {
+                        count: 1,
+                        first: key,
+                    }))
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Relay coordinates cannot certify the wrong application ledger message.
 #[test]
 fn receipt_ledger_sequence_must_match_the_server_stream_position() {

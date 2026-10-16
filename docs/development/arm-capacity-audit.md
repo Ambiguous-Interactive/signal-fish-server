@@ -3378,6 +3378,13 @@ more memory. Median oracle times at the three sizes were 98,751/92,348,
 These times include the new identity checks. They do not establish a general
 speed improvement or server capacity.
 
+After the opaque-coverage correction, five further alternating pairs at
+1,200,000 receipts pass with identical full summaries. Median peak RSS is
+228,428 KiB (228,312–228,556) for baseline and 217,904 KiB (217,732–218,032)
+for the corrected candidate, a 4.6% reduction. All 40 ordered-workload trials
+remain recorded. The correction keeps opaque leaks in coverage, duplicate,
+and ordering checks; it changes no reliable-workload observations.
+
 A separately registered fragmented-arrival check replays 240,000 receipts,
 placing every stream's odd positions before every stream's even positions.
 Five alternating pairs each reject the exact 240 first inversions. Neither

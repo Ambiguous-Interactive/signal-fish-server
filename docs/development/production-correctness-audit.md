@@ -3905,7 +3905,10 @@ another known ledger sequence, an absent ledger sequence, and a previous-epoch
 sequence after reconnect. A real-socket history is then edited and replayed
 through the public artifact path. Both mutations fail with their exact keys;
 restoring the original events reproduces the complete original summary.
-Existing duplicate, order, gap, missing, churn, and payload-size controls stay
+Opaque leaks still occupy coverage and retain duplicate and ordering evidence.
+A matching omission report must fail as overlap. A four-case control passes on
+the original oracle, fails on the first compact version, and passes after the
+coverage repair. Existing missing, churn, and payload-size controls stay
 separate. The broader A22 and #826 audits remain open.
 
 The same review replaces the per-receipt pointer index with compact stream

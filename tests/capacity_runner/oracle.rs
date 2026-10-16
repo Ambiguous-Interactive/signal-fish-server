@@ -949,10 +949,11 @@ pub fn summarize(
             });
         stream.total += 1;
         stream.first.get_or_insert(receipt.server_seq);
+        // Opaque leaks still owe overlap, duplicate, and order evidence.
+        stream.observe(receipt.server_seq);
         let Some(contract) = stream.contract else {
             continue;
         };
-        stream.observe(receipt.server_seq);
         let stale = contract
             .closed_after
             .is_some_and(|at_us| receipt.received_us > at_us);
