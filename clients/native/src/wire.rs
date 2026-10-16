@@ -153,13 +153,60 @@ pub(crate) fn decode_message_pack_game_data(wire: &[u8], version: u16) -> Result
     })
 }
 
+const OPAQUE_RELAY_PROBE_MAGIC: &[u8; 4] = b"SFRP";
+const OPAQUE_RELAY_PROBE_HEADER_LENGTH: usize = 21;
+
+/// Frame a reference relay probe with application-level sender attribution.
+///
+/// Layout: `SFRP`, version byte 1, sender UUID in 16 network-order bytes,
+/// then the exact application payload. This header is inside the server's
+/// opaque payload on both protocol versions and counts toward its size limit.
+pub fn encode_opaque_relay_probe(from: PlayerId, payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::new();
+    frame.extend_from_slice(OPAQUE_RELAY_PROBE_MAGIC);
+    frame.push(1);
+    frame.extend_from_slice(from.as_bytes());
+    frame.extend_from_slice(payload);
+    frame
+}
+
+/// Decode reference probe attribution without inventing v2 delivery stamps.
+///
+/// A v3 server sender permits old untagged payloads. A tagged probe must agree
+/// with that sender. V2 requires the application header because the server
+/// relays only raw bytes; its sender ID is application metadata.
+pub fn decode_opaque_relay_probe(
+    bytes: &[u8],
+    server_sender: Option<PlayerId>,
+) -> Result<(PlayerId, &[u8])> {
+    if !bytes.starts_with(OPAQUE_RELAY_PROBE_MAGIC) {
+        return server_sender
+            .map(|from| (from, bytes))
+            .ok_or_else(|| anyhow!("v2 opaque relay requires a reference probe header"));
+    }
+    if bytes.get(4) != Some(&1) || bytes.len() < OPAQUE_RELAY_PROBE_HEADER_LENGTH {
+        return Err(anyhow!("invalid opaque reference probe header"));
+    }
+    let sender_bytes = bytes
+        .get(5..OPAQUE_RELAY_PROBE_HEADER_LENGTH)
+        .ok_or_else(|| anyhow!("invalid opaque reference probe header"))?;
+    let from = PlayerId::from_slice(sender_bytes)?;
+    if server_sender.is_some_and(|sender| sender != from) {
+        return Err(anyhow!(
+            "opaque reference probe sender differs from server sender"
+        ));
+    }
+    let payload = bytes
+        .get(OPAQUE_RELAY_PROBE_HEADER_LENGTH..)
+        .ok_or_else(|| anyhow!("invalid opaque reference probe header"))?;
+    Ok((from, payload))
+}
+
 /// Send an opaque game-data payload as one raw binary WebSocket frame.
 ///
 /// Issue #627: with `rkyv`/`protobuf` negotiated, the payload bytes are the
 /// game's business and relay untouched — the frame carries no JSON envelope.
 /// The write and flush share [`WRITE_TIMEOUT`]. Discard the connection on failure.
-/// Requires protocol v3: the strict v3 reply envelope is the only attributed
-/// delivery shape (v2 passthrough has no sender attribution).
 pub async fn send_game_data_binary(ws: &mut WsStream, payload: Vec<u8>) -> Result<()> {
     send_frame(ws, Message::Binary(payload.into())).await
 }
@@ -839,6 +886,50 @@ mod tests {
             assert!(error.contains(&format!("{} bytes", text.len())), "{error}");
             assert!(error.contains("Data error at line 1, column"), "{error}");
         }
+    }
+
+    #[test]
+    fn opaque_reference_probe_shared_vectors_and_version_boundaries() {
+        let sender = PlayerId::parse_str("00112233-4455-6677-8899-aabbccddeeff").unwrap();
+        for payload in [
+            vec![],
+            vec![0, 255, 1],
+            "雪\nSFRP\0".as_bytes().to_vec(),
+            vec![42; 65536],
+        ] {
+            let mut expected = vec![
+                83, 70, 82, 80, 1, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
+                0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+            ];
+            expected.extend_from_slice(&payload);
+            let bytes = encode_opaque_relay_probe(sender, &payload);
+            assert_eq!(bytes, expected);
+            for server_sender in [None, Some(sender)] {
+                assert_eq!(
+                    decode_opaque_relay_probe(&bytes, server_sender).unwrap(),
+                    (sender, payload.as_slice())
+                );
+            }
+        }
+        let valid = encode_opaque_relay_probe(sender, &[7]);
+        for length in 0..21 {
+            assert!(
+                decode_opaque_relay_probe(&valid[..length], None).is_err(),
+                "length={length}"
+            );
+        }
+        for version in [0, 2, 255] {
+            let mut invalid = valid.clone();
+            invalid[4] = version;
+            assert!(decode_opaque_relay_probe(&invalid, Some(sender)).is_err());
+        }
+        assert!(decode_opaque_relay_probe(&valid, Some(PlayerId::new_v4())).is_err());
+        let legacy = [0, 255];
+        assert_eq!(
+            decode_opaque_relay_probe(&legacy, Some(sender)).unwrap(),
+            (sender, legacy.as_slice())
+        );
+        assert!(decode_opaque_relay_probe(&legacy, None).is_err());
     }
 
     #[test]

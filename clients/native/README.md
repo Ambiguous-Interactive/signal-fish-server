@@ -171,8 +171,8 @@ Both versions accept JSON text fallback from mixed-room senders.
 **Migration:** MessagePack runs now emit the decoded value in `payload`,
 replacing the former `{encoding, payload}` base64 wrapper. Consumers must
 read the application value directly. Use `rkyv` or `protobuf` for opaque bytes.
-The opt-in `rkyv` and `protobuf` modes preserve opaque bytes and require v3
-because their v2 passthrough lacks sender attribution.
+The opt-in `rkyv` and `protobuf` modes support v2 and v3 with an application
+sender header. They also accept JSON text fallback. See [opaque relay probes](#opaque-relay-probes).
 
 Peer lifecycle control has priority and may overtake already-queued old-epoch
 data. The client therefore keeps the old cursor long enough to validate that
@@ -498,3 +498,32 @@ investigating a failed connection.
   `--max-runtime-secs` values, so every client process self-bounds with exit 4, and every harness await carries
   a deadline that panics with the child's recent events and stderr — check that diagnostic output first; it
   names the event being awaited.
+
+## Opaque relay probes
+
+Both reference clients use an application header for `--relay-payload` with
+`--game-data-format rkyv|protobuf`. This permits sender attribution on v2,
+where the server relays raw bytes. It does not add a server wire envelope,
+capability, or a general rkyv/protobuf serializer.
+
+| Offset | Length | Content |
+| --- | --- | --- |
+| 0 | 4 | ASCII `SFRP` |
+| 4 | 1 | Probe version `1` |
+| 5 | 16 | Sender UUID in network byte order |
+| 21 | Remaining bytes | Exact UTF-8 bytes from `--relay-payload` |
+
+The header counts toward the server's existing payload limit. Empty payloads
+are valid. Receivers remove exactly one header and preserve every payload byte.
+Events still contain the encoding token and base64 of the original CLI payload.
+V2 emits no delivery stamps or reports. Its sender ID comes from the application
+header. V3 validates its server delivery stamps and requires a tagged probe's
+sender to match the server sender. Compatible JSON fallback has no probe header.
+
+**Migration:** Upgrade both reference clients for opaque v2 or mixed v2/v3
+runs. All new opaque probe senders use this header on both versions. A new v3
+receiver also accepts old untagged payloads, except the reserved `SFRP` prefix.
+Old v3 receivers expose the new header as part of their payload, so upgrade
+both ends when comparing original CLI payloads. Truncated headers and unknown
+probe versions are errors. This framing belongs only to reference probes;
+other applications keep their own opaque payload schemas.

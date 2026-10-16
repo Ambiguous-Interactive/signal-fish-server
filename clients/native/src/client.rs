@@ -59,7 +59,7 @@ use tokio_tungstenite::tungstenite::Message;
 use webrtc::peer_connection::RTCPeerConnectionState;
 
 use crate::accountability::{DeliveryAccountability, GameDataDisposition};
-use crate::cli::{Cli, GameDataFormatArg};
+use crate::cli::Cli;
 use crate::deadline::Deadline;
 use crate::engine::{
     Engine, EngineEvent, Negotiation, SelectedPairProbeResult, RELIABLE_LABEL, UNRELIABLE_LABEL,
@@ -497,20 +497,6 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
     // must not cost a server-side room or a connection.
     cli.join_max_players().map_err(FatalError::protocol)?;
 
-    // Opaque game-data negotiation is v3-only for the reference client
-    // (issue #627): the strict binary envelope is the only delivery shape
-    // that carries the sender attribution and stamps the success criteria
-    // consume — v2 passthrough relays raw payload with no attribution.
-    if matches!(
-        cli.game_data_format,
-        GameDataFormatArg::Rkyv | GameDataFormatArg::Protobuf
-    ) && !cli.is_v3()
-    {
-        return Err(FatalError::protocol(
-            "opaque game data requires --protocol-version 3",
-        ));
-    }
-
     // Resolve an explicitly requested `--ip-family` BEFORE touching the
     // network, so a host that cannot serve it fails the process instead of
     // creating or joining a server-side room it could never have used.
@@ -741,17 +727,6 @@ fn negotiated_version_from(
     if !(2..=3).contains(&version) || version > offered_version {
         return Err(FatalError::protocol(format!(
             "ProtocolInfo.protocol_version {version} is outside 2..=3 or exceeds offered version {offered_version}"
-        )));
-    }
-    if version < 3
-        && matches!(
-            requested_format,
-            GameDataEncoding::Rkyv | GameDataEncoding::Protobuf
-        )
-    {
-        return Err(FatalError::protocol(format!(
-            "{} game data requires protocol version 3; the server negotiated v2",
-            requested_format.as_wire_str()
         )));
     }
     if requested_format != GameDataEncoding::Json
@@ -3328,10 +3303,8 @@ impl Orchestrator<'_> {
 
     /// Send the `--relay-payload` GameData over the relay floor.
     ///
-    /// Issue #627: with an opaque encoding negotiated, the payload's UTF-8
-    /// bytes go out as one raw binary frame (the bytes are the game's
-    /// business; the server relays them untouched) instead of the JSON
-    /// `GameData` envelope.
+    /// Opaque probes carry an application sender header inside their raw
+    /// binary payload, so v2 passthrough can identify the peer as well.
     async fn send_relay_payload(&mut self) -> Result<(), FatalError> {
         let Some(text) = self.cli.relay_payload.clone() else {
             self.relay_sent = true;
@@ -3346,9 +3319,12 @@ impl Orchestrator<'_> {
                 .await
                 .map_err(|error| FatalError::connection(format!("{error:#}")))?;
         } else {
-            wire::send_game_data_binary(&mut self.ws, text.into_bytes())
-                .await
-                .map_err(|error| FatalError::connection(format!("{error:#}")))?;
+            wire::send_game_data_binary(
+                &mut self.ws,
+                wire::encode_opaque_relay_probe(self.my_id, text.as_bytes()),
+            )
+            .await
+            .map_err(|error| FatalError::connection(format!("{error:#}")))?;
         }
         self.relay_sent = true;
         self.relay_send_at = None;
@@ -3356,55 +3332,51 @@ impl Orchestrator<'_> {
         Ok(())
     }
 
-    /// Interpret one binary WebSocket frame under an opaque game-data
-    /// negotiation (issue #627): the strict v3 envelope is decoded, the
-    /// delivery ledger advances exactly as it does for text `GameData`, and
-    /// the opaque payload surfaces base64-rendered in the event stream
-    /// (lossless, encoding-explicit — the bytes are never guessed at).
+    /// Decode a version-specific relay envelope and its application probe.
+    /// V3 validates delivery stamps; v2 leaves all delivery metadata absent.
+    /// Events expose the original probe bytes as base64.
     async fn handle_binary_game_data(&mut self, wire_bytes: &[u8]) -> Result<(), FatalError> {
         if self.game_data_encoding == GameDataEncoding::MessagePack {
             let message = wire::decode_message_pack_game_data(wire_bytes, self.negotiated_version)
                 .map_err(|_| FatalError::protocol("invalid MessagePack game data"))?;
             return self.handle_server_message(message).await;
         }
-        let frame = wire::decode_v3_binary_game_data(wire_bytes).map_err(|_| {
-            // Decoder errors can contain untrusted keys or encoding tokens.
-            FatalError::protocol(format!(
-                "invalid v3 binary game-data envelope ({} bytes)",
-                wire_bytes.len()
-            ))
-        })?;
+        let frame = if self.negotiated_version >= 3 {
+            Some(wire::decode_v3_binary_game_data(wire_bytes).map_err(|_| {
+                FatalError::protocol(format!(
+                    "invalid v3 binary game-data envelope ({} bytes)",
+                    wire_bytes.len()
+                ))
+            })?)
+        } else {
+            None
+        };
+        let (from, payload) = wire::decode_opaque_relay_probe(
+            frame
+                .as_ref()
+                .map_or(wire_bytes, |frame| frame.payload.as_slice()),
+            frame.as_ref().map(|frame| frame.from_player),
+        )
+        .map_err(|error| FatalError::protocol(error.to_string()))?;
+        let seq = frame.as_ref().map(|frame| frame.seq);
+        let epoch = frame.as_ref().map(|frame| frame.epoch);
+        let encoding = frame
+            .as_ref()
+            .map_or(self.game_data_encoding, |frame| frame.encoding);
         let disposition = self
             .accountability
-            .record_game_data(
-                frame.from_player,
-                Some(frame.seq),
-                Some(frame.epoch),
-                None,
-                None,
-            )
+            .record_game_data(from, seq, epoch, None, None)
             .map_err(FatalError::protocol)?;
         if disposition == GameDataDisposition::Stale {
-            tracing::debug!(
-                from = %frame.from_player,
-                epoch = frame.epoch,
-                seq = frame.seq,
-                "discarding stale trailing opaque GameData"
-            );
+            tracing::debug!(%from, ?epoch, ?seq, "discarding stale trailing opaque GameData");
             return Ok(());
         }
-        // Opaque frames only exist on the `--relay-payload` flow, so a
-        // non-stale frame from a peer satisfies the relay-receipt criterion
-        // the same way a text `{"relay_msg": ..}` payload does.
-        self.relay_received_from.insert(frame.from_player);
+        self.relay_received_from.insert(from);
         emit(&Event::GameDataReceived {
-            from: frame.from_player,
-            payload: json!({
-                "encoding": frame.encoding.as_wire_str(),
-                "payload": BASE64_STANDARD.encode(frame.payload),
-            }),
-            seq: Some(frame.seq),
-            epoch: Some(frame.epoch),
+            from,
+            payload: json!({ "encoding": encoding.as_wire_str(), "payload": BASE64_STANDARD.encode(payload) }),
+            seq,
+            epoch,
             class: None,
             key: None,
         });
@@ -5698,33 +5670,15 @@ mod tests {
     }
 
     #[test]
-    fn opaque_request_on_a_v2_negotiation_is_refused() {
-        // The advertisement arm covers v3; the absent-version (v2) sentinel
-        // must refuse opaque on the client's own v3-only wire-shape
-        // constraint (issue #627), regardless of what the deployment
-        // advertises (`game_data_formats` is not version-gated on the wire).
-        let v2_info = serde_json::from_value::<ServerMessage>(json!({
-            "type": "ProtocolInfo",
-            "data": { "game_data_formats": ["json", "rkyv"] },
-        }))
-        .unwrap();
-        assert_eq!(
-            negotiated_version_from(v2_info, 3, GameDataEncoding::Rkyv)
-                .unwrap_err()
-                .code,
-            EXIT_PROTOCOL_ERROR
-        );
-
-        // JSON requests keep negotiating v2.
-        let v2_info = serde_json::from_value::<ServerMessage>(json!({
-            "type": "ProtocolInfo",
-            "data": { "game_data_formats": ["json", "rkyv"] },
-        }))
-        .unwrap();
-        assert_eq!(
-            negotiated_version_from(v2_info, 3, GameDataEncoding::Json).unwrap(),
-            2
-        );
+    fn opaque_request_on_a_v2_negotiation_is_supported() {
+        for encoding in [GameDataEncoding::Rkyv, GameDataEncoding::Protobuf] {
+            let info = serde_json::from_value::<ServerMessage>(json!({
+                "type": "ProtocolInfo",
+                "data": { "game_data_formats": ["json", encoding.as_wire_str()] },
+            }))
+            .unwrap();
+            assert_eq!(negotiated_version_from(info, 3, encoding).unwrap(), 2);
+        }
     }
 
     #[test]

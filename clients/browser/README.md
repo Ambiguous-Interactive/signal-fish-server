@@ -91,7 +91,11 @@ JSON-source data stays on text in mixed rooms. MessagePack integers
 outside JavaScript's exact integer range and non-JSON payload types are rejected.
 With `--game-data-format rkyv|protobuf`, the client preserves opaque binary
 payloads and also accepts JSON text fallback from compatible senders.
-Opaque modes require v3 because their v2 passthrough lacks sender attribution.
+Both versions use the [reference probe sender header](../native/README.md#opaque-relay-probes).
+**Migration:** Upgrade both reference clients for opaque v2 or mixed v2/v3 runs;
+new opaque sends include this application header on both versions.
+Receipt events still contain the original CLI payload bytes. New v3 receivers
+also accept older untagged payloads except the reserved `SFRP` prefix.
 When the server refuses a requested format, the client applies its JSON
 downgrade notice and continues on the text floor.
 

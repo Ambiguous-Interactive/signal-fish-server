@@ -116,6 +116,41 @@ export function sendMessagePackGameData(
   sendOpaqueGameData(sendBinary, encode(normalizeOutgoingJsonValue(data)));
 }
 
+const OPAQUE_RELAY_PROBE_MAGIC = Uint8Array.of(83, 70, 82, 80);
+const OPAQUE_RELAY_PROBE_HEADER_LENGTH = 21;
+
+/** Application probe framing: SFRP, version 1, UUID bytes, exact payload. */
+export function encodeOpaqueRelayProbe(from: string, payload: Uint8Array): Uint8Array {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(from))
+    throw new Error('invalid opaque reference probe sender');
+  const frame = new Uint8Array(OPAQUE_RELAY_PROBE_HEADER_LENGTH + payload.byteLength);
+  frame.set(OPAQUE_RELAY_PROBE_MAGIC);
+  frame[4] = 1;
+  frame.set(
+    Uint8Array.from(from.replaceAll('-', '').match(/../g) ?? [], (byte) => parseInt(byte, 16)),
+    5,
+  );
+  frame.set(payload, OPAQUE_RELAY_PROBE_HEADER_LENGTH);
+  return frame;
+}
+
+/** V2 requires application attribution; v3 can also read old untagged probes. */
+export function decodeOpaqueRelayProbe(
+  bytes: Uint8Array,
+  serverSender?: string,
+): { from: string; payload: Uint8Array } {
+  if (!OPAQUE_RELAY_PROBE_MAGIC.every((byte, index) => bytes[index] === byte)) {
+    if (serverSender !== undefined) return { from: serverSender, payload: bytes };
+    throw new Error('v2 opaque relay requires a reference probe header');
+  }
+  if (bytes[4] !== 1 || bytes.byteLength < OPAQUE_RELAY_PROBE_HEADER_LENGTH)
+    throw new Error('invalid opaque reference probe header');
+  const from = decodeUuidBytes(bytes.subarray(5, OPAQUE_RELAY_PROBE_HEADER_LENGTH));
+  if (serverSender !== undefined && serverSender !== from)
+    throw new Error('opaque reference probe sender differs from server sender');
+  return { from, payload: bytes.subarray(OPAQUE_RELAY_PROBE_HEADER_LENGTH) };
+}
+
 const messagePackKeyTextDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /** Prefix decoded map keys until Object.fromEntries restores their exact names. */
@@ -675,14 +710,34 @@ function classifyTextServerInput(data: string, format: string): ServerFrame {
 
 /**
  * Parse the mixed stream selected by an opaque `game_data_format` (#627):
- * server control frames stay on text, game data arrives as strict v3 binary
- * envelopes, and compatible senders can deliver JSON text fallback.
+ * control and JSON fallback stay on text. V2 binary frames carry application
+ * probes directly; v3 adds the strict server envelope and delivery stamps.
  */
-export function classifyOpaqueNegotiatedServerInput(data: unknown): ServerFrame {
+export function classifyOpaqueNegotiatedServerInput(
+  data: unknown,
+  version = 3,
+  format: GameDataFormat = 'rkyv',
+): ServerFrame {
   if (typeof data === 'string') return classifyTextServerInput(data, 'opaque');
   if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
     try {
-      return parseV3BinaryGameDataFrame(data);
+      if (version < 3) {
+        const bytes =
+          data instanceof ArrayBuffer
+            ? new Uint8Array(data)
+            : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+        const probe = decodeOpaqueRelayProbe(bytes);
+        return {
+          type: 'GameDataBinary',
+          data: { from_player: probe.from, encoding: format, payload: probe.payload },
+        };
+      }
+      const frame = parseV3BinaryGameDataFrame(data);
+      const probe = decodeOpaqueRelayProbe(
+        frame.data['payload'] as Uint8Array,
+        frame.data['from_player'] as string,
+      );
+      return { type: frame.type, data: { ...frame.data, payload: probe.payload } };
     } catch (error) {
       throw new Error(
         `received an invalid binary GameData frame while an opaque game_data_format was ` +

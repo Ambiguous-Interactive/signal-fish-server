@@ -224,11 +224,11 @@ pub struct Cli {
     /// legacy text wire shape byte-identical; `message_pack` is the standard
     /// v2/v3 binary encoding (enabled by default; a deployment opts out via
     /// `protocol.enable_message_pack_game_data`); `rkyv`/`protobuf` are the
-    /// server's opt-in opaque encodings: the payload relays as untouched
-    /// bytes and arrives in the strict protocol-v3 binary envelope, so the
-    /// opaque modes require `--protocol-version 3` (v2 passthrough carries
-    /// no sender attribution) and a deployment that advertises them
-    /// (`protocol.enable_rkyv_game_data` / `protocol.enable_protobuf_game_data`).
+    /// server's opt-in opaque encodings. Reference probes add application
+    /// sender attribution on both v2 and v3. The server preserves these
+    /// bytes; receipt events expose the original CLI payload. The deployment
+    /// must advertise the format (`protocol.enable_rkyv_game_data` /
+    /// `protocol.enable_protobuf_game_data`).
     #[arg(long, value_enum, default_value_t = GameDataFormatArg::Json)]
     pub game_data_format: GameDataFormatArg,
 

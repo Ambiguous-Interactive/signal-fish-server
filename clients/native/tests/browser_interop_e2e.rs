@@ -107,7 +107,7 @@ use base64::Engine as _;
 static SCENARIO_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Number of scenarios queueing behind [`SCENARIO_SERIAL`] (keep in sync with
 /// the scenarios that acquire `SCENARIO_SERIAL` in this file).
-const SCENARIO_COUNT: u64 = 19;
+const SCENARIO_COUNT: u64 = 29;
 /// Generous ceiling for ONE scenario in a fully degraded run: server spawn
 /// (up to 3 attempts x 15 s health deadline = 45 s) plus one client wave
 /// hard-bounded by `--max-runtime-secs 90`, with the rest absorbing Chromium
@@ -1746,17 +1746,26 @@ async fn run_browser_mixed_inputs(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn browser_rkyv_accepts_json_and_message_pack_fallback() {
-    run_browser_mixed_inputs("rkyv", "SIGNAL_FISH__PROTOCOL__ENABLE_RKYV_GAME_DATA", "3").await;
+    for version in ["2", "3"] {
+        run_browser_mixed_inputs(
+            "rkyv",
+            "SIGNAL_FISH__PROTOCOL__ENABLE_RKYV_GAME_DATA",
+            version,
+        )
+        .await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn browser_protobuf_accepts_json_and_message_pack_fallback() {
-    run_browser_mixed_inputs(
-        "protobuf",
-        "SIGNAL_FISH__PROTOCOL__ENABLE_PROTOBUF_GAME_DATA",
-        "3",
-    )
-    .await;
+    for version in ["2", "3"] {
+        run_browser_mixed_inputs(
+            "protobuf",
+            "SIGNAL_FISH__PROTOCOL__ENABLE_PROTOBUF_GAME_DATA",
+            version,
+        )
+        .await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1982,25 +1991,25 @@ async fn browser_creator_open_capacity_seat_fill_relay_floor() {
     }
 }
 
-/// Issue #627, browser half: with the server's matching opaque-encoding opt-in
-/// on, two browser reference clients negotiate `--game-data-format <encoding>`
-/// in `Authenticate`, each `--relay-payload` leaves as one raw binary frame,
-/// and each arrives at the peer in the strict v3 envelope — surfaced as a
-/// `game_data_received` event carrying the encoding token plus the base64
-/// payload (lossless; the client never guesses at the opaque bytes). The relay
-/// floor carries the whole proof (relay-only advertisements, no WebRTC), both
-/// processes meet the standard success criteria, and the receipt feeds the
-/// same ledger criterion as JSON — mirroring the native suite's scenario 10
-/// on the Chromium wire stack.
+/// Qualify exact opaque probe receipts across browser/native and v2/v3 pairs.
 async fn run_opaque_browser_relay_pair(
     encoding: &'static str,
     encoding_env: (&'static str, String),
     game_name: &'static str,
+    versions: [u16; 2],
+    native_joiner: bool,
 ) {
     let _serial = acquire_serial().await;
     let server = spawn_server_with_extra_env("relay", &[encoding_env]).await;
     let workdir = tempfile::tempdir().expect("create client workdir");
-    let url = server.v3_ws_url();
+    let urls = versions.map(|version| {
+        if version == 2 {
+            server.v2_ws_url()
+        } else {
+            server.v3_ws_url()
+        }
+    });
+    let version_args = versions.map(|version| version.to_string());
     let success_release_file = workdir.path().join("release-successful-clients");
     let success_release_path = success_release_file
         .to_str()
@@ -2019,31 +2028,46 @@ async fn run_opaque_browser_relay_pair(
         .chain(["--success-release-file", success_release_path])
         .collect();
 
+    let creator_args: Vec<&str> = client_args
+        .iter()
+        .copied()
+        .chain(["--protocol-version", version_args[0].as_str()])
+        .collect();
+    let joiner_args: Vec<&str> = client_args
+        .iter()
+        .copied()
+        .chain(["--protocol-version", version_args[1].as_str()])
+        .collect();
     let mut creator = spawn_browser_client(
         &ClientSpec {
             name: CLIENT_NAMES[0],
-            server_url: &url,
+            server_url: &urls[0],
             game_name,
             join_code: None,
             peers: 2,
             exchange: false,
             relay_payload: Some(&relay_payload_for(CLIENT_NAMES[0])),
-            extra_args: &client_args,
+            extra_args: &creator_args,
         },
         workdir.path(),
     );
     let created = creator.await_event("room_created", EVENT_TIMEOUT).await;
     let room_code = str_field(&created, "room_code").to_string();
-    let mut joiner = spawn_browser_client(
+    let spawn_joiner = if native_joiner {
+        spawn_client
+    } else {
+        spawn_browser_client
+    };
+    let mut joiner = spawn_joiner(
         &ClientSpec {
             name: CLIENT_NAMES[1],
-            server_url: &url,
+            server_url: &urls[1],
             game_name,
             join_code: Some(&room_code),
             peers: 2,
             exchange: false,
             relay_payload: Some(&relay_payload_for(CLIENT_NAMES[1])),
-            extra_args: &client_args,
+            extra_args: &joiner_args,
         },
         workdir.path(),
     );
@@ -2069,6 +2093,18 @@ async fn run_opaque_browser_relay_pair(
 
     for (index, who) in CLIENT_NAMES[..2].iter().enumerate() {
         let log = &clients[index].events;
+        assert_eq!(
+            single_event(log, "protocol_info", who)["negotiated_version"],
+            versions[index]
+        );
+        if versions[index] == 2 {
+            for name in ["session_plan", "delivery_report", "relay_stats"] {
+                assert!(
+                    events_named(log, name).is_empty(),
+                    "v2 must not emit {name}"
+                );
+            }
+        }
         let sender = CLIENT_NAMES[1 - index];
         // The sender's id lives in the SENDER's own `room_joined` event.
         let sender_id = player_id_of(&clients[1 - index].events, sender);
@@ -2111,9 +2147,13 @@ async fn run_opaque_browser_relay_pair(
             .keys()
             .map(String::as_str)
             .collect();
+        let expected_keys = if index == 1 && native_joiner && versions[index] >= 3 {
+            BTreeSet::from(["event", "from", "payload", "seq", "epoch"])
+        } else {
+            BTreeSet::from(["event", "from", "payload"])
+        };
         assert_eq!(
-            event_keys,
-            BTreeSet::from(["event", "from", "payload"]),
+            event_keys, expected_keys,
             "{who}: the browser receipt event shape changed deliberately or by accident: {event}"
         );
         let payload_keys: BTreeSet<&str> = payload
@@ -2148,6 +2188,8 @@ async fn opaque_rkyv_negotiation_relays_end_to_end_between_browser_clients() {
             "true".to_string(),
         ),
         "interop-browser-opaque-rkyv",
+        [3, 3],
+        false,
     )
     .await;
 }
@@ -2162,8 +2204,44 @@ async fn opaque_protobuf_negotiation_relays_end_to_end_between_browser_clients()
             "true".to_string(),
         ),
         "interop-browser-opaque-protobuf",
+        [3, 3],
+        false,
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn opaque_rkyv_v2_browser_native_relay_matrix() {
+    for versions in [[2, 2], [2, 3], [3, 2], [3, 3]] {
+        run_opaque_browser_relay_pair(
+            "rkyv",
+            (
+                "SIGNAL_FISH__PROTOCOL__ENABLE_RKYV_GAME_DATA",
+                "true".into(),
+            ),
+            "opaque-rkyv-v2-matrix",
+            versions,
+            true,
+        )
+        .await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn opaque_protobuf_v2_browser_native_relay_matrix() {
+    for versions in [[2, 2], [2, 3], [3, 2], [3, 3]] {
+        run_opaque_browser_relay_pair(
+            "protobuf",
+            (
+                "SIGNAL_FISH__PROTOCOL__ENABLE_PROTOBUF_GAME_DATA",
+                "true".into(),
+            ),
+            "opaque-protobuf-v2-matrix",
+            versions,
+            true,
+        )
+        .await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
