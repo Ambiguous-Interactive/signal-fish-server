@@ -12,6 +12,8 @@ import {
   negotiatedProtocolVersion,
   parseV3BinaryGameDataFrame,
   sendOpaqueGameData,
+  encodeOpaqueRelayProbe,
+  decodeOpaqueRelayProbe,
   type ServerFrame,
 } from './wire.js';
 
@@ -530,4 +532,84 @@ for (const version of [2, 3]) {
       ),
     'not a finite number',
   );
+}
+
+// #678: both reference clients use these exact application bytes on v2/v3.
+{
+  for (const payload of [
+    new Uint8Array(),
+    Uint8Array.of(0, 255, 1),
+    new TextEncoder().encode('雪\nSFRP\u0000'),
+    new Uint8Array(65536).fill(42),
+  ]) {
+    const expected = Uint8Array.from([83, 70, 82, 80, 1, ...SENDER_BYTES, ...payload]);
+    const bytes = encodeOpaqueRelayProbe(SENDER, payload);
+    assert(
+      bytes.length === expected.length &&
+        bytes.every((byte, index) => byte === expected[index]),
+      'exact shared header vector',
+    );
+    for (const serverSender of [undefined, SENDER]) {
+      const probe = decodeOpaqueRelayProbe(bytes, serverSender);
+      assert(
+        probe.from === SENDER && bytesToBase64(probe.payload) === bytesToBase64(payload),
+        'lossless opaque probe',
+      );
+    }
+    for (const format of ['rkyv', 'protobuf'] as const) {
+      for (const version of [2, 3]) {
+        const input = version === 2 ? bytes : binaryEnvelope(format, bytes);
+        const storage = Uint8Array.from([9, ...input, 8]);
+        const frame = classifyOpaqueNegotiatedServerInput(
+          new DataView(storage.buffer, 1, input.length),
+          version,
+          format,
+        );
+        assert(
+          frame.data['from_player'] === SENDER && frame.data['encoding'] === format,
+          'version-specific probe attribution',
+        );
+        assert(
+          bytesToBase64(frame.data['payload'] as Uint8Array) === bytesToBase64(payload),
+          'header is not application payload',
+        );
+        assert(
+          'seq' in frame.data === (version === 3) && 'epoch' in frame.data === (version === 3),
+          'v2 never invents delivery metadata',
+        );
+      }
+    }
+  }
+  const valid = encodeOpaqueRelayProbe(SENDER, Uint8Array.of(7));
+  for (let length = 0; length < 21; length++) {
+    expectError(
+      () => decodeOpaqueRelayProbe(valid.subarray(0, length)),
+      length < 4
+        ? 'requires a reference probe header'
+        : 'invalid opaque reference probe header',
+    );
+  }
+  for (const version of [0, 2, 255]) {
+    const invalid = valid.slice();
+    invalid[4] = version;
+    expectError(
+      () => decodeOpaqueRelayProbe(invalid, SENDER),
+      'invalid opaque reference probe header',
+    );
+  }
+  expectError(
+    () => decodeOpaqueRelayProbe(valid, '11111111-1111-1111-1111-111111111111'),
+    'sender differs',
+  );
+  expectError(
+    () => encodeOpaqueRelayProbe('not-a-uuid', new Uint8Array()),
+    'invalid opaque reference probe sender',
+  );
+  const legacy = Uint8Array.of(0, 255);
+  assert(
+    decodeOpaqueRelayProbe(legacy, SENDER).payload === legacy,
+    'v3 keeps legacy raw bytes',
+  );
+  expectError(() => decodeOpaqueRelayProbe(legacy), 'requires a reference probe header');
+  console.error('ok - opaque reference probes attribute v2 raw passthrough and v3 envelopes');
 }

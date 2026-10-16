@@ -3649,3 +3649,50 @@ and Godot clients do not import this browser implementation and need no
 migration for this repair. Full hosted CI and final review remain delivery
 gates. Captured passing attempts for #853 and #889 do not establish their
 failure causes; both issues stay open.
+
+### F65 — Opaque reference probes on the frozen v2 wire
+
+At `d82e0818`, both reference clients refuse v2 rkyv/protobuf runs. The server
+already preserves their bytes on v2, but raw passthrough cannot identify the
+sender. A new Chromium matrix fails at the CLI refusal before the repair.
+The browser CLI unit control fails on the same boundary. This continues #678.
+
+Both clients now use the documented application probe header: ASCII `SFRP`,
+version byte 1, a 16-byte sender UUID, then the exact CLI payload. The header
+uses 21 bytes of the existing payload limit. It stays inside the opaque
+payload on both versions. V2 keeps raw passthrough and emits no delivery
+stamps. V3 keeps its server envelope and ledger and checks agreement between
+its server sender and a tagged probe. Receipt events retain the original
+payload bytes and encoding token. JSON and MessagePack behavior is unchanged.
+
+Shared literal vectors cover empty, binary, Unicode, and long payloads.
+Truncation, unknown versions, absent v2 attribution, sender mismatch, offset
+views, and old untagged v3 payloads have separate controls. Live Chromium/native
+pairs cover each opaque format with v2/v2, v2/v3, v3/v2, and v3/v3 endpoints.
+Each endpoint must receive exactly one attributed, byte-exact probe and exit
+successfully. V2 must emit no session plan, delivery report, or relay stats.
+The server's independent 64-path relay and 64-case deployment matrix still
+passes. No encoding, capability, deployment flag, or server wire shape is added.
+
+**Migration:** Upgrade both reference clients for opaque v2 or mixed-version
+runs. New opaque sends include the probe header on both versions. New v3
+receivers also accept old untagged payloads except the reserved `SFRP` prefix.
+Old receivers expose the new header in their payload. This is a reference
+probe schema, not a general rkyv/protobuf serializer. Other applications keep
+their own opaque schemas. See the native README's opaque relay probe contract.
+
+Rust SDK `da8f2d16`, .NET SDK `e467c871`, and Godot SDK `2a74de36` use separate
+binary codecs and do not import these reference probe modules. Their server
+wire and application payload contracts do not change. Each SDK is unaffected
+and needs no migration or acceptance issue for this private probe schema.
+Captured passing attempts for #853 and #889 do not establish their original
+failure causes. Those issues and the broader #826 audit remain open.
+
+Final fixed-binary selection `d4174a39` passes all 12 controls in 10.275
+seconds. It includes eight opaque cross-client version pairs, both original
+browser opaque controls, both-version fallback recipients, native opaque and
+downgrade controls, reversed MessagePack mixed rooms, and the two open WebRTC
+failure histories. Server, native executable, browser CLI, and page bundle
+hashes match before and after. The #853 restore control passes in 3.779 seconds;
+The #889 mesh control passes in 4.816 seconds. Both endpoint streams and server logs are
+retained. These are passing attempts, not repairs of the original failures.

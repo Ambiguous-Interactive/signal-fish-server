@@ -62,6 +62,7 @@ import {
   negotiatedProtocolVersion,
   sendGameData,
   sendOpaqueGameData,
+  encodeOpaqueRelayProbe,
   sendMessagePackGameData,
   type ServerFrame,
 } from './wire.js';
@@ -988,13 +989,6 @@ class Orchestrator {
       } catch (error) {
         throw FatalError.protocol(describe(error));
       }
-      // The opaque wire shape is v3-only for this client (#627): the strict
-      // binary envelope is the only shape that carries sender attribution.
-      if (effectiveFormat !== 'message_pack' && negotiated < 3) {
-        throw FatalError.protocol(
-          `opaque game data requires protocol version 3; the server negotiated v${negotiated}`,
-        );
-      }
     }
     this.emit({
       event: 'protocol_info',
@@ -1194,7 +1188,11 @@ class Orchestrator {
                 data,
                 this.negotiatedVersion ?? this.config.protocolVersion,
               )
-            : classifyOpaqueNegotiatedServerInput(data);
+            : classifyOpaqueNegotiatedServerInput(
+                data,
+                this.negotiatedVersion ?? this.config.protocolVersion,
+                this.effectiveFormat,
+              );
     } catch (error) {
       release();
       this.failFatal(FatalError.protocol(`invalid ServerMessage frame: ${describe(error)}`));
@@ -2370,7 +2368,10 @@ class Orchestrator {
       });
     } else {
       // Opaque negotiation relays the raw payload as one binary frame (#627).
-      sendOpaqueGameData((frame) => this.sendBinaryFrame(frame), this.config.relayPayload);
+      sendOpaqueGameData(
+        (frame) => this.sendBinaryFrame(frame),
+        encodeOpaqueRelayProbe(this.myId, new TextEncoder().encode(this.config.relayPayload)),
+      );
     }
     this.relaySent = true;
     this.relaySendAt = null;

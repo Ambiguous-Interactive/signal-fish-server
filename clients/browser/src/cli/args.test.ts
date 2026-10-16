@@ -161,25 +161,18 @@ for (const value of ['msgpack', 'JSON', '']) {
 
 console.error('ok - browser CLI arguments preserve exact numeric values');
 
-// Opaque game-data negotiation is v3-only (#627, mirroring the native
-// client's pre-flight): a doomed run must fail at parse time.
+// #678: application probe attribution permits the frozen v2 opaque wire.
 for (const value of ['rkyv', 'protobuf'] as const) {
-  let rejected = false;
-  try {
-    parseArgs([
-      '--server-url',
-      'ws://127.0.0.1/v2/ws',
-      '--create-room',
-      '--protocol-version',
-      '2',
-      '--game-data-format',
-      value,
-    ]);
-  } catch (error) {
-    rejected =
-      error instanceof UsageError && error.message.includes('requires --protocol-version 3');
-  }
-  assert(rejected, `--game-data-format ${value} must refuse v2 runs at parse time`);
+  const options = parseArgs([
+    '--server-url',
+    'ws://127.0.0.1/v2/ws',
+    '--create-room',
+    '--protocol-version',
+    '2',
+    '--game-data-format',
+    value,
+  ]);
+  assert(options?.config.gameDataFormat === value, `v2 must accept ${value}`);
 }
 {
   const v3Opaque = parseArgs([

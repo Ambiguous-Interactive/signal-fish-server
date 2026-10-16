@@ -231,21 +231,12 @@ export function parseArgs(argv: string[]): CliOptions | null {
     }
   }
 
-  // Opaque game-data negotiation is v3-only (issue #627, mirroring the
-  // native client's pre-flight): v2 passthrough delivers raw payload with no
-  // sender attribution, so the page's strict-envelope decode could never
-  // satisfy the relay-receipt criterion — a doomed run must fail at parse
-  // time, not cost a server-side room.
   const gameDataFormat = enumFlag<GameDataFormat>(
     '--game-data-format',
     GAME_DATA_FORMATS,
     'json',
   );
   const protocolVersion = numberFlag('--protocol-version', 3);
-  if ((gameDataFormat === 'rkyv' || gameDataFormat === 'protobuf') && protocolVersion < 3) {
-    throw new UsageError('--game-data-format rkyv|protobuf requires --protocol-version 3');
-  }
-
   const p2pRetryCount = numberFlag('--p2p-retry-count', 0);
   if (p2pRetryCount > 255) throw new UsageError('--p2p-retry-count must be from 0 to 255');
 
