@@ -2032,6 +2032,319 @@ fn latency_statistics_keep_recipient_tails_and_invalid_arrivals_distinct() {
     }
 }
 
+/// Leaked opaque deliveries still occupy exact coverage and arrival history.
+#[test]
+fn opaque_leaks_preserve_gap_overlap_duplicate_and_order_checks() {
+    let context = unit_context_with_experiment();
+    for case in ["isolated", "gap", "duplicate", "out_of_order"] {
+        let mut records = complete_records(&context.plans);
+        let first = records
+            .receipts
+            .iter()
+            .position(|receipt| receipt.sender == "r0p0")
+            .unwrap();
+        let key = oracle::DeliveryKey {
+            recipient: records.receipts[first].recipient.clone(),
+            sender: "r0p0".into(),
+            epoch: 1,
+            seq: 1,
+        };
+        match case {
+            "isolated" => {}
+            "gap" => records.gaps.push(GapEvent {
+                recipient: key.recipient.clone(),
+                sender: key.sender.clone(),
+                epoch: 1,
+                from_seq: 1,
+                to_seq: 1,
+                reason: DeliveryGapReason::UnsupportedFormat,
+            }),
+            "duplicate" => records.receipts.push(records.receipts[first].clone()),
+            "out_of_order" => records.receipts.swap(first, first + 1),
+            _ => unreachable!(),
+        }
+        let summary = oracle::summarize(
+            &context.plans,
+            &context.roster,
+            &records,
+            1000,
+            96,
+            DeliveryClass::Reliable,
+            &ChurnPlan::default(),
+            context.experiment,
+        );
+        assert!(!summary.valid);
+        let mut leak_key = key.clone();
+        if case == "out_of_order" {
+            leak_key.seq = 2;
+        }
+        assert!(
+            summary
+                .reasons
+                .contains(&oracle::InvalidReason::UnsupportedFormatLeak {
+                    count: 3,
+                    first: leak_key,
+                }),
+            "{case}: {:?}",
+            summary.reasons
+        );
+        assert_eq!(
+            summary.totals.outstanding, 0,
+            "{case}: leaked deliveries still occupy coverage"
+        );
+        assert_eq!(
+            summary.reasons.len(),
+            if case == "isolated" { 1 } else { 2 },
+            "{case}: {:?}",
+            summary.reasons
+        );
+        match case {
+            "gap" => assert!(
+                summary.reasons.iter().any(|reason| matches!(reason,
+                    oracle::InvalidReason::InvalidGapReports { count: 1, first }
+                    if first.recipient == key.recipient && first.sender == key.sender
+                        && first.detail.contains("overlaps an already-covered sequence")
+                )),
+                "{:?}",
+                summary.reasons
+            ),
+            "duplicate" => {
+                assert!(summary
+                    .reasons
+                    .contains(&oracle::InvalidReason::DuplicateDeliveries {
+                        count: 1,
+                        first: key,
+                    }))
+            }
+            "out_of_order" => {
+                assert!(summary
+                    .reasons
+                    .contains(&oracle::InvalidReason::OutOfOrderDeliveries {
+                        count: 1,
+                        first: key,
+                    }))
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Relay coordinates cannot certify the wrong application ledger message.
+#[test]
+fn receipt_ledger_sequence_must_match_the_server_stream_position() {
+    for class in [
+        DeliveryClass::Reliable,
+        DeliveryClass::Latest,
+        DeliveryClass::Volatile,
+    ] {
+        for replacement in [1, u64::MAX] {
+            let context = unit_context_with_class(class);
+            let mut records = complete_records(&context.plans);
+            let changed = &mut records.receipts[0];
+            assert_eq!(changed.seq, 0);
+            changed.seq = replacement;
+            let expected = oracle::DeliveryKey {
+                recipient: changed.recipient.clone(),
+                sender: changed.sender.clone(),
+                epoch: changed.epoch,
+                seq: changed.server_seq,
+            };
+            let summary = oracle::summarize(
+                &context.plans,
+                &context.roster,
+                &records,
+                1000,
+                96,
+                class,
+                &ChurnPlan::default(),
+                None,
+            );
+            assert!(
+                !summary.valid,
+                "class={class:?}, replacement={replacement}: wrong ledger must fail"
+            );
+            assert!(
+                summary
+                    .reasons
+                    .contains(&oracle::InvalidReason::MisroutedDeliveries {
+                        count: 1,
+                        first: expected,
+                    }),
+                "class={class:?}: {:?}",
+                summary.reasons
+            );
+            assert_eq!(summary.totals.receipts, 48);
+        }
+    }
+}
+
+/// Epoch-local stream positions map to the continuing application ledger.
+#[test]
+fn rejoined_receipt_ledger_cannot_name_a_previous_epoch_send() {
+    for class in [
+        DeliveryClass::Reliable,
+        DeliveryClass::Latest,
+        DeliveryClass::Volatile,
+    ] {
+        let (context, churn) = churn_context(class);
+        let mut records = churned_records(&context, &churn);
+        let receipt = records
+            .receipts
+            .iter_mut()
+            .find(|receipt| receipt.epoch == 2)
+            .unwrap();
+        assert_ne!(receipt.seq + 1, receipt.server_seq);
+        receipt.seq = 0;
+        let expected = oracle::DeliveryKey {
+            recipient: receipt.recipient.clone(),
+            sender: receipt.sender.clone(),
+            epoch: 2,
+            seq: receipt.server_seq,
+        };
+        let summary = oracle::summarize(
+            &context.plans,
+            &context.roster,
+            &records,
+            1000,
+            96,
+            class,
+            &churn,
+            None,
+        );
+        assert!(!summary.valid);
+        assert!(
+            summary
+                .reasons
+                .contains(&oracle::InvalidReason::MisroutedDeliveries {
+                    count: 1,
+                    first: expected,
+                }),
+            "{class:?}: {:?}",
+            summary.reasons
+        );
+    }
+}
+
+/// The public artifact replay path must reject both false-valid histories.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn artifact_replay_rejects_unknown_recipients_and_wrong_ledger_ids() {
+    let output = tempfile::tempdir().expect("replay output");
+    let config = RunConfig {
+        output_dir: output.path().to_path_buf(),
+        ..scenario_config(Encoding::V3Json)
+    };
+    let outcome = runner::run(config).await.expect("valid live history");
+    assert!(outcome.summary.valid, "{:?}", outcome.summary.reasons);
+    let original = artifacts::read_records(output.path()).expect("read complete history");
+    for unknown in [true, false] {
+        let mut records = original.clone();
+        let receipt = if unknown {
+            let mut extra = records.receipts[0].clone();
+            extra.recipient = "outside-the-roster".into();
+            records.receipts.push(extra);
+            records.receipts.last_mut().unwrap()
+        } else {
+            let receipt = &mut records.receipts[0];
+            receipt.seq = u64::MAX;
+            receipt
+        };
+        let expected = oracle::DeliveryKey {
+            recipient: receipt.recipient.clone(),
+            sender: receipt.sender.clone(),
+            epoch: receipt.epoch,
+            seq: receipt.server_seq,
+        };
+        artifacts::write_deliveries(output.path(), &records).expect("write changed history");
+        let replay = artifacts::replay(output.path()).expect("replay changed history");
+        assert!(!replay.valid);
+        assert!(
+            replay
+                .reasons
+                .contains(&oracle::InvalidReason::MisroutedDeliveries {
+                    count: 1,
+                    first: expected,
+                }),
+            "unknown={unknown}: {:?}",
+            replay.reasons
+        );
+        assert_eq!(
+            replay.totals.receipts,
+            config::count_u64(records.receipts.len())
+        );
+        assert_eq!(replay.totals.sent, outcome.summary.totals.sent);
+        assert_eq!(replay.totals.outstanding, 0);
+        assert_eq!(
+            replay.payload_bytes.warmup.egress.application.samples
+                + replay.payload_bytes.measured.egress.application.samples
+                + replay.payload_bytes.unmatched_egress.application.samples,
+            config::count_u64(records.receipts.len())
+        );
+    }
+    artifacts::write_deliveries(output.path(), &original).expect("restore original history");
+    let replay = artifacts::replay(output.path()).expect("replay original history");
+    assert_eq!(
+        serde_json::to_value(replay).unwrap(),
+        serde_json::to_value(outcome.summary).unwrap()
+    );
+}
+
+/// A receipt outside the roster is still evidence and must invalidate the run.
+#[test]
+fn unknown_recipient_deliveries_are_misroutes() {
+    for context in [
+        unit_context_with_class(DeliveryClass::Reliable),
+        unit_context_with_class(DeliveryClass::Latest),
+        unit_context_with_class(DeliveryClass::Volatile),
+        unit_context_with_experiment(),
+    ] {
+        let class = context.delivery_class;
+        let mut records = if context.experiment.is_some() {
+            experiment_complete_records(&context.plans)
+        } else {
+            complete_records(&context.plans)
+        };
+        let before = records.receipts.len();
+        let mut extra = records.receipts[0].clone();
+        extra.recipient = "outside-the-roster".to_string();
+        let expected = oracle::DeliveryKey {
+            recipient: extra.recipient.clone(),
+            sender: extra.sender.clone(),
+            epoch: extra.epoch,
+            seq: extra.server_seq,
+        };
+        records.receipts.push(extra.clone());
+        records.receipts.push(extra);
+        let summary = oracle::summarize(
+            &context.plans,
+            &context.roster,
+            &records,
+            1000,
+            96,
+            class,
+            &ChurnPlan::default(),
+            context.experiment,
+        );
+        assert!(
+            !summary.valid,
+            "class={class:?}: unknown recipients must fail"
+        );
+        assert!(
+            summary
+                .reasons
+                .contains(&oracle::InvalidReason::MisroutedDeliveries {
+                    count: 2,
+                    first: expected,
+                }),
+            "class={class:?}: {:?}",
+            summary.reasons
+        );
+        assert_eq!(summary.totals.receipts, config::count_u64(before + 2));
+        assert_eq!(summary.totals.outstanding, 0);
+        assert_eq!(summary.per_recipient.len(), context.roster.len());
+    }
+}
+
 #[test]
 fn warmup_only_deliveries_have_empty_latency_statistics() {
     let context = unit_context();
