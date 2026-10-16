@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Add opaque relay probes for v2 and mixed v2/v3 reference-client runs (#678).
+- Add attributed opaque relay probes for v2 and mixed v2/v3 reference-client runs (#678).
 - Add browser reference-client MessagePack relay support for protocol v2 and v3 (#678).
 - Find a published live room by application, game, and room code beyond the session-list limit (#992).
 - Report native reference-client channel and ICE observations when P2P establishment times out (#853).

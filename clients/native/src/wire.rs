@@ -187,13 +187,19 @@ pub fn decode_opaque_relay_probe(
     if bytes.get(4) != Some(&1) || bytes.len() < OPAQUE_RELAY_PROBE_HEADER_LENGTH {
         return Err(anyhow!("invalid opaque reference probe header"));
     }
-    let from = PlayerId::from_slice(&bytes[5..OPAQUE_RELAY_PROBE_HEADER_LENGTH])?;
+    let sender_bytes = bytes
+        .get(5..OPAQUE_RELAY_PROBE_HEADER_LENGTH)
+        .ok_or_else(|| anyhow!("invalid opaque reference probe header"))?;
+    let from = PlayerId::from_slice(sender_bytes)?;
     if server_sender.is_some_and(|sender| sender != from) {
         return Err(anyhow!(
             "opaque reference probe sender differs from server sender"
         ));
     }
-    Ok((from, &bytes[OPAQUE_RELAY_PROBE_HEADER_LENGTH..]))
+    let payload = bytes
+        .get(OPAQUE_RELAY_PROBE_HEADER_LENGTH..)
+        .ok_or_else(|| anyhow!("invalid opaque reference probe header"))?;
+    Ok((from, payload))
 }
 
 /// Send an opaque game-data payload as one raw binary WebSocket frame.
