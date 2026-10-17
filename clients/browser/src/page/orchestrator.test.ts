@@ -690,11 +690,8 @@ for (const [membershipEvent, departure, afterCutoff] of [
         'the membership history must create replacement channels',
       );
       assert(
-        channelSends.join(',') ===
-          (peerRestored
-            ? '1:reliable,1:unreliable,2:reliable,2:unreliable'
-            : '1:reliable,1:unreliable'),
-        `restore=${peerRestored}: only a peer restore must resend both labels; got ${channelSends.join(',')}`,
+        channelSends.join(',') === '1:reliable,1:unreliable,2:reliable,2:unreliable',
+        `restore=${peerRestored}: every replacement must resend both labels; got ${channelSends.join(',')}`,
       );
       assert(
         events.filter((event) => event['event'] === 'channel_message').length ===

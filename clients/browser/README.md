@@ -116,7 +116,9 @@ satisfy the receive criterion.
 
 When a peer reconnects or rejoins, `--exchange` requires fresh sends and receipts on both
 data channels. Completed exchanges for other peers remain valid. A transport
-rebuild alone does not reset the exchange. When a new session plan replaces an
+rebuild alone does not reset the exchange. Each replacement link sends the probes
+again within the existing exchange window so a peer can recover a lost old-link
+probe. Duplicate valid probes do not add receive obligations. When a new session plan replaces an
 established link, the client waits for its replacement channels to open or the
 P2P deadline to expire before success. Peer departure clears that wait.
 A retained logical pair emits `p2p_pair_reconnected` once when both replacement

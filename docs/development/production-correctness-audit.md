@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17; Windows backpressure fixtures in F75 |
 
@@ -4696,3 +4696,61 @@ Strict native Clippy and build pass.
 The strengthened snapshot control also passes in Nextest `64315ced`. It
 checks both timing invariants after every rejected snapshot, then checks the
 fresh phase after valid restore. Strict native Clippy and build pass again.
+
+### F87 — Replacement links skip probes lost on the old link
+
+Issue #1035, found at `f95307ed` while continuing #826, #853, and #889.
+Both reference clients use logical sent-label evidence to suppress sends on
+replacement physical links. An accepted local send does not establish remote
+delivery. If the old link loses that probe before delivery, a successful retry
+or authoritative replacement cannot pay the remote endpoint's receipt debt.
+
+The native regression opens real paired channels and injects one accepted,
+undelivered old-link send. Remote channel events establish the missing label.
+The baseline opens a replacement but times out waiting for the missing receipt.
+Four histories cover both labels and retry or authoritative replacement. The
+browser dispatch matrix models accepted old-link sends that never reach its
+remote receipt ledger. The baseline fails the replacement-send assertion.
+
+The clients now track successful sends per physical link separately from
+logical exchange evidence. Fresh channels resend both probes within the existing
+exchange window. Duplicate work on the same channel does not resend. Logical
+sent and received evidence survives replacement; a membership incarnation still
+requires fresh exchange. Existing run and linger cutoffs, release gates, and
+physical callback ownership remain in force.
+
+Review also checks pending replacement sends before success. Old logical
+evidence must not let a client exit while fresh probes wait in its send queue
+or retry loop. Retired links do not keep physical send work due. This check
+preserves the original run and linger cutoffs.
+
+Initial live Nextest `24edb566` passes native restore and the three-player browser
+mesh, with five endpoint streams, server logs, and stable binary and bundle
+hashes retained under `progress/session-469-baseline`. These passing histories
+do not establish the historical causes of #853 or #889. Both issues remain open.
+
+The current external SDK READMEs were inspected through the GitHub connector.
+Rust provides signaling without a WebRTC backend. .NET provides signaling and
+relay. Godot uses its engine-owned mesh. None uses these private reference-client
+send schedulers. Server messages, SDK APIs, channel modes, and defaults do not
+change. Final native Nextest `07c61c30` passes the four real-pair recovery
+histories and 40 send-window histories. Full browser tests, type checks, strict
+native and root Clippy, formatting, and documentation checks pass. Live candidate
+qualification in Nextest `0ac3274f` passes three retries, three restores, and
+three three-player meshes. All 21 endpoint streams and server logs are retained
+under `progress/session-469-qualified-live`, with unchanged before/after hashes.
+Only the native binary and browser bundle differ from baseline. Hosted CI and
+feedback remain delivery gates.
+
+Hosted interop found two late-join assertions that still required one probe
+across all physical links. Both failures retain the expected replacement
+probes. The native reproduction `71369712` fails the same assertion locally.
+The late-join controls now drain each physical exchange before shared release
+and check exact sender/label counts on both sides of the replacement. Each
+incumbent has six sends and six receipts; the joiner has four of each. Logical
+pair formation still occurs once per peer.
+
+The repaired late-join controls pass in native Nextest `3709fe7d` and real
+Chromium/native Nextest `696cbc98`. Targeted strict Clippy, formatting, and
+Markdown checks pass. Production code and the fixed-binary qualification
+artifacts do not change in this follow-up.

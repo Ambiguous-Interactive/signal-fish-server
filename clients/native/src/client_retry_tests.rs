@@ -1755,12 +1755,17 @@ async fn exchange_sends_preserve_the_active_success_window() {
                     "linger-before",
                     "linger-exact",
                     "linger-after",
+                    "replacement-linger-before",
+                    "replacement-linger-exact",
+                    "replacement-linger-after",
                     "released",
                 ]
                 .into_iter()
                 .flat_map(move |phase| ["0", "15"].map(|timeout| (label, phase, timeout)))
             })
     {
+        let previously_sent = phase.starts_with("replacement-");
+        let phase = phase.strip_prefix("replacement-").unwrap_or(phase);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -1810,6 +1815,15 @@ async fn exchange_sends_preserve_the_active_success_window() {
             }
             if other != label {
                 state.exchange_ledger.note_sent(peer, other);
+            }
+        }
+        if previously_sent {
+            state.exchange_ledger.note_sent(peer, label);
+            state.exchange_ledger.note_link_open(peer);
+            for other in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                if other != label {
+                    state.exchange_ledger.note_sent(peer, other);
+                }
             }
         }
         let clock_guard = tokio::spawn(async {
@@ -1874,8 +1888,8 @@ async fn exchange_sends_preserve_the_active_success_window() {
         );
         assert_eq!(
             state.exchange_ledger.has_sent(peer, label),
-            valid,
-            "{label}/{phase}/p2p={p2p_timeout}: completion must fit the active success window"
+            valid || previously_sent,
+            "{label}/{phase}/p2p={p2p_timeout}/previously_sent={previously_sent}: completion must fit the active success window"
         );
         assert_eq!(
             calls,
@@ -1891,6 +1905,8 @@ async fn exchange_sends_preserve_the_active_success_window() {
             state.process_timers().await.unwrap(),
             if valid {
                 None
+            } else if previously_sent {
+                Some(EXIT_SUCCESS)
             } else {
                 Some(EXIT_CRITERIA_UNMET)
             },
@@ -1908,5 +1924,129 @@ async fn exchange_sends_preserve_the_active_success_window() {
         tokio::time::resume();
         state.engine.remove_peer(peer).await.unwrap();
         remote.remove_peer(me).await.unwrap();
+    }
+}
+
+// Regression #1035: a replacement repays remote receipts lost on the old link.
+#[tokio::test]
+async fn physical_replacement_resends_probes_without_erasing_logical_evidence() {
+    for (missing_label, retry) in [RELIABLE_LABEL, UNRELIABLE_LABEL]
+        .into_iter()
+        .flat_map(|label| [false, true].map(|retry| (label, retry)))
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(tcp).await.unwrap()
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let mut server_ws = server.await.unwrap();
+        let cli = Cli::parse_from([
+            "native",
+            "--server-url",
+            &url,
+            "--create-room",
+            "--disable-mdns",
+            "--exchange",
+            "--p2p-retry-count",
+            "1",
+        ]);
+        let peer = PlayerId::from_u128(2);
+        let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+        state.current_session_generation = Some(SessionGeneration::from_u128(3));
+        state.establish_pair(peer, true).await.unwrap();
+        let (mut remote, opens, mut remote_events) =
+            open_physical_pair_with_events(&mut state, &mut server_ws, peer, None).await;
+        for event in opens {
+            state.handle_engine_event(event).await.unwrap();
+        }
+        state.deferred_exchange.clear();
+        state
+            .send_exchange_with(
+                peer,
+                &[RELIABLE_LABEL, UNRELIABLE_LABEL],
+                |channel, text| async move {
+                    if channel.label().await.unwrap() != missing_label {
+                        channel.send_text(&text).await?;
+                    }
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        let mut remote_receipts = BTreeSet::new();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while remote_receipts.is_empty() {
+                if let EngineEvent::ChannelMessage { label, .. } =
+                    remote_events.recv().await.unwrap()
+                {
+                    remote_receipts.insert(label);
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!remote_receipts.contains(missing_label));
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            assert!(state.exchange_ledger.has_sent(peer, label));
+            state.exchange_ledger.note_received(peer, label.to_string());
+        }
+        if retry {
+            state.rebuild_pair(peer, 1, false).await.unwrap();
+        } else {
+            state.prepare_retained_pair_replacement(peer).await;
+            state.establish_pair(peer, true).await.unwrap();
+        }
+        remote.remove_peer(state.my_id).await.unwrap();
+        assert!(state.exchange_ledger.unmet_criteria().is_empty());
+        state.game_started = true;
+        state.members_seen.insert(peer);
+        state.peer_status_from.insert(peer);
+        let original_linger_until = Some(Instant::now() + EXIT_LINGER);
+        state.linger_until = original_linger_until;
+        let (mut replacement, opens, mut replacement_events) =
+            open_physical_pair_with_events(&mut state, &mut server_ws, peer, None).await;
+        for event in opens {
+            state.handle_engine_event(event).await.unwrap();
+        }
+        state.selected_pair_evidence.clear(peer);
+        assert!(state.exchange_ledger.unmet_criteria().is_empty());
+        assert!(
+            !state.criteria_met(),
+            "queued replacement probes must hold success"
+        );
+        state.arm_success_linger(Instant::now()).await.unwrap();
+        assert_eq!(
+            state.linger_until, original_linger_until,
+            "resends retain the original linger cutoff"
+        );
+        while !state.deferred_exchange.is_empty() {
+            state.process_deferred_exchange().await.unwrap();
+        }
+        assert!(state.criteria_met());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while remote_receipts.len() < 2 {
+                if let EngineEvent::ChannelMessage { label, .. } =
+                    replacement_events.recv().await.unwrap()
+                {
+                    remote_receipts.insert(label);
+                }
+            }
+        })
+        .await
+        .expect("replacement must repay the remote endpoint's missing old-link receipt");
+        let mut duplicate_sends = 0;
+        state
+            .send_exchange_with(peer, &[RELIABLE_LABEL, UNRELIABLE_LABEL], |_, _| {
+                duplicate_sends += 1;
+                async { Ok(()) }
+            })
+            .await
+            .unwrap();
+        assert_eq!(duplicate_sends, 0, "one probe per label per physical link");
+        assert!(state.exchange_ledger.unmet_criteria().is_empty());
+        state.remove_pair_obligation(peer).await;
+        replacement.remove_peer(state.my_id).await.unwrap();
     }
 }
