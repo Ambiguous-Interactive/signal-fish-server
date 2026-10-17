@@ -155,10 +155,11 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--runtime <FLAVOR>` | `multi` | Tokio runtime flavor: `multi` (multi-threaded) or `current` (single current-thread runtime — the shape most susceptible to being starved by a blocking game loop) |
 | `--tick-stall-ms <MS>` | `0` | **Fault injection**: block the orchestrator's executor thread for this many ms after each processed input (`std::thread::sleep`, deliberately not async), simulating a game loop that hogs the runtime instead of continuously driving it. Used by the starved-runtime conformance matrix to pin the server's slow-consumer contract and the docs' "continuously drive your runtime" requirement (`docs/protocol.md`, Delivery reliability and backpressure) |
 
-Once the client observes the success-release marker, removing it does not
-restore the hold. A send started during the hold keeps its existing local
-deadline. Queued receipts use their arrival time. New sends use the remaining
-run or linger window.
+Each room restore starts a new success barrier. Once the client observes
+that barrier's release marker, removing it does not restore that hold.
+A send started during the hold keeps its existing local deadline.
+Queued receipts use their arrival time. New sends use the remaining run or
+linger window.
 
 Duration flags accept the complete `u64` seconds range. When a requested
 absolute deadline is later than Tokio can represent on the current platform,

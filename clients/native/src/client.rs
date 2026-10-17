@@ -1780,6 +1780,8 @@ impl Orchestrator<'_> {
         self.exchange_reliable_ready_reported = false;
         self.linger_until = None;
         self.success_criteria_reported = false;
+        self.success_hold_started_at = None;
+        self.success_release_observed_at = None;
         self.success_release_poll_at = None;
         emit(&Event::Reconnected {
             attempt: self.reconnect_attempts,
@@ -5036,12 +5038,16 @@ mod tests {
         });
         let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         let _server_ws = server.await.unwrap();
+        let release_dir = tempfile::tempdir().unwrap();
+        let success_release = release_dir.path().join("success-release");
         let cli = Cli::parse_from([
             "reference-native",
             "--server-url",
             &url,
             "--create-room",
             "--exchange",
+            "--success-release-file",
+            success_release.to_str().unwrap(),
             "--exchange-release-file",
             "/held-exchange",
             "--unreliable-exchange-release-file",
@@ -5080,8 +5086,30 @@ mod tests {
         state
             .exchange_ledger
             .note_received(joined, RELIABLE_LABEL.to_string());
+        let clock_guard = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
+        tokio::time::pause();
+        let hold_started_at = Instant::now();
+        state.run_deadline = Deadline::after(hold_started_at, Duration::ZERO);
         state.success_criteria_reported = true;
-        state.success_hold_started_at = Some(Instant::now());
+        state.success_hold_started_at = Some(hold_started_at);
+        tokio::time::advance(Duration::from_millis(25)).await;
+        let held_receipt_at = Instant::now();
+        tokio::time::advance(Duration::from_millis(25)).await;
+        std::fs::write(&success_release, "release").unwrap();
+        assert!(!state.success_release_pending().await.unwrap());
+        std::fs::remove_file(&success_release).unwrap();
+        assert!(
+            !state.success_release_pending().await.unwrap(),
+            "release is one-way within one room phase"
+        );
+        assert!(state
+            .exchange_window_open_at(held_receipt_at)
+            .await
+            .unwrap());
         state.linger_until = Some(Instant::now());
         let snapshot = serde_json::from_value::<ServerMessage>(json!({
             "type": "Reconnected", "data": {
@@ -5154,6 +5182,17 @@ mod tests {
                 state.present.contains(&departed),
                 "{case} mutated membership"
             );
+            assert!(
+                state
+                    .exchange_window_open_at(held_receipt_at)
+                    .await
+                    .unwrap(),
+                "{case} discarded the previous hold history"
+            );
+            assert!(
+                !state.success_release_pending().await.unwrap(),
+                "{case} reopened the previous release"
+            );
         }
         state.restore_snapshot(*snapshot).await.unwrap();
         assert_eq!(state.present, BTreeSet::from([me, joined]));
@@ -5169,6 +5208,17 @@ mod tests {
         assert!(state.current_session_generation.is_none() && !state.webrtc_plan_seen);
         assert!(state.transport_status.is_none() && state.linger_until.is_none());
         assert!(!state.success_criteria_reported && !state.relay_sent);
+        assert!(
+            !state
+                .exchange_window_open_at(held_receipt_at)
+                .await
+                .unwrap(),
+            "a restored room cannot credit receipts from the prior hold"
+        );
+        assert!(
+            state.success_release_pending().await.unwrap(),
+            "a restored room must observe its own release marker"
+        );
         assert!(
             !state.p2p_rebuild_released
                 && !state.exchange_released
@@ -5198,6 +5248,8 @@ mod tests {
         }})).unwrap();
         let error = state.handle_server_message(unsolicited).await.unwrap_err();
         assert!(error.message.contains("without a pending room restore"));
+        clock_guard.abort();
+        tokio::time::resume();
     }
 
     /// Pins the orchestrator WIRING behind the [`StartGameGate`] (issue #449):

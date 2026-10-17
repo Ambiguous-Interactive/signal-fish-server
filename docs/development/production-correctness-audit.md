@@ -4668,8 +4668,8 @@ Nextest `fc09dafd` proves that separate failure.
 Native sends now keep their captured admission deadline. The client records
 the hold start and first release observation on the monotonic clock. Queued
 receipts retain eligibility inside that completed hold interval. New sends
-use the current window, and a release marker cannot reopen the hold after
-observation. Added boundaries cover arrivals before and exactly at hold start,
+use the current window, and a release marker cannot reopen the same success barrier's
+hold after observation. Added boundaries cover arrivals before and exactly at hold start,
 exactly at release observation, and after release. The native receipt matrix
 now has 80 histories and the send matrix has 28. The browser adds 36 histories.
 
@@ -4679,3 +4679,20 @@ and the native build pass. The rebuilt pair passes another three restores
 and three three-player meshes with stable hashes. Only the native binary
 and browser page bundle differ from baseline. Evidence remains under
 `progress/session-468-owned-qualified-live`.
+
+Room restore starts a fresh success barrier. A further review found that the
+new hold timestamps were not cleared with the existing report and linger
+latches. The restored snapshot now discards both timestamps. Its behavioral
+control first credits an old held receipt and observes a one-way release,
+then restores the room. The old receipt must become ineligible, and the new
+barrier must inspect its release marker again. Invalid snapshots still keep
+the previous state.
+
+Baseline Nextest `23ef9a1f` fails the restored-room receipt check. Final
+Nextest `e5b413fc` passes all 22 focused controls, including both reset
+behaviors, the original invalid-snapshot checks, and all exchange boundaries.
+Strict native Clippy and build pass.
+
+The strengthened snapshot control also passes in Nextest `64315ced`. It
+checks both timing invariants after every rejected snapshot, then checks the
+fresh phase after valid restore. Strict native Clippy and build pass again.
