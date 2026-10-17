@@ -1740,3 +1740,130 @@ fn retry_signal_epochs_preserve_default_wire_and_reject_stale_payloads() {
         );
     }
 }
+
+// Regression #1034: send evidence must fit the actual hold or linger window.
+#[tokio::test]
+async fn exchange_sends_preserve_the_active_success_window() {
+    for (label, phase, p2p_timeout) in
+        [RELIABLE_LABEL, UNRELIABLE_LABEL]
+            .into_iter()
+            .flat_map(|label| {
+                [
+                    "held",
+                    "linger-before",
+                    "linger-exact",
+                    "linger-after",
+                    "released",
+                ]
+                .into_iter()
+                .flat_map(move |phase| ["0", "15"].map(|timeout| (label, phase, timeout)))
+            })
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(tcp).await.unwrap()
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let mut server_ws = server.await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let release = dir.path().join("release");
+        if phase != "held" {
+            std::fs::write(&release, "release").unwrap();
+        }
+        let cli = Cli::parse_from([
+            "native",
+            "--server-url",
+            &url,
+            "--create-room",
+            "--exchange",
+            "--success-release-file",
+            release.to_str().unwrap(),
+            "--p2p-timeout-secs",
+            p2p_timeout,
+        ]);
+        let me = PlayerId::from_u128(1);
+        let peer = PlayerId::from_u128(2);
+        let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
+        state.current_session_generation = Some(SessionGeneration::from_u128(3));
+        state.webrtc_plan_seen = true;
+        state.establish_pair(peer, true).await.unwrap();
+        let (mut remote, opens) = open_physical_pair(&mut state, &mut server_ws, peer, None).await;
+        for event in opens {
+            state.handle_engine_event(event).await.unwrap();
+        }
+        state.deferred_exchange.clear();
+        state.game_started = true;
+        state.members_seen.insert(peer);
+        state.peer_status_from.insert(peer);
+        state.exchange_ledger.reset_incarnation(peer);
+        state.exchange_ledger.note_connected(peer);
+        for other in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            state.exchange_ledger.note_received(peer, other.to_string());
+            if other != label {
+                state.exchange_ledger.note_sent(peer, other);
+            }
+        }
+        let clock_guard = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
+        tokio::time::pause();
+        state.run_deadline = Deadline::after(Instant::now(), Duration::ZERO);
+        state.next_ping_at = Instant::now() + Duration::from_secs(60);
+        state.success_criteria_reported = true;
+        if phase.starts_with("linger-") {
+            state.linger_until = Some(Instant::now() + Duration::from_millis(100));
+        }
+        let elapsed = Duration::from_millis(match phase {
+            "linger-before" => 99,
+            "linger-exact" => 100,
+            _ => 101,
+        });
+        let mut calls = 0;
+        state
+            .send_exchange_with(peer, &[label], |_, _| {
+                calls += 1;
+                async move {
+                    tokio::time::advance(elapsed).await;
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let valid = matches!(phase, "held" | "linger-before");
+        assert_eq!(
+            state.exchange_ledger.has_sent(peer, label),
+            valid,
+            "{label}/{phase}/p2p={p2p_timeout}: completion must fit the active success window"
+        );
+        assert_eq!(
+            calls,
+            usize::from(phase != "released"),
+            "expired sends cannot start"
+        );
+        assert_eq!(
+            state.engine.is_paired(peer),
+            valid,
+            "failed sends retire their physical link"
+        );
+        assert_eq!(
+            state.process_timers().await.unwrap(),
+            if valid {
+                None
+            } else {
+                Some(EXIT_CRITERIA_UNMET)
+            }
+        );
+        if phase == "linger-before" {
+            tokio::time::advance(Duration::from_millis(1)).await;
+            assert_eq!(state.process_timers().await.unwrap(), Some(EXIT_SUCCESS));
+        }
+        clock_guard.abort();
+        tokio::time::resume();
+        state.engine.remove_peer(peer).await.unwrap();
+        remote.remove_peer(me).await.unwrap();
+    }
+}

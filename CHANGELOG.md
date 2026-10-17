@@ -27,8 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Count queued native reference-client exchange receipts at run and linger cutoffs
-  without accepting expired traffic (#1031).
+- Count queued reference-client receipts at run and linger cutoffs, and reject expired exchange
+  sends and receipts (#1031, #1033, #1034).
 - Keep late browser reference-client exchange receipts from reporting success after the run deadline (#1029).
 - Stop browser reference-client exchange retries at the run deadline so late sends cannot report success (#1027).
 - **Breaking:** Keep old signaling from disrupting reference-client peer retries; upgrade both retry-enabled endpoints

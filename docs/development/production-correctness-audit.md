@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17; Windows backpressure fixtures in F75 |
 
@@ -4580,9 +4580,9 @@ relay. Godot uses its engine-owned WebRTC mesh. None uses this native reference
 orchestrator; all three are unaffected. No server message, SDK API, channel
 mode, or default changes.
 
-Final scoped Nextest `4de691c4` passes all 19 exchange, retry, membership, and
-receipt controls. The new matrix covers 68 histories. Baseline and final live
-captures each pass three native restores and three three-player meshes, with
+Native receipt qualification in Nextest `4de691c4` passes all 19 exchange, retry, membership, and
+receipt controls. The new matrix covers 68 histories. Native-only baseline and
+candidate captures each pass three native restores and three three-player meshes, with
 15 endpoint streams, 60 sends, 60 receipts, and stable before/after executable
 and bundle hashes. Only the native binary changes between capture sets.
 Strict native and root Clippy, formatting, CI configuration, Markdown, and
@@ -4602,3 +4602,58 @@ receipt queued during linger and processed at expiry. Both expiry paths now
 share a bounded FIFO drain. Linger keeps its deadline until eligible queued
 receipts have been applied. Added controls reject queued arrivals exactly at
 and after linger expiry while retaining an earlier queued receipt.
+
+### F85 — Browser exchange can continue after success linger expires
+
+Issue #1033, found during the #1031 class sweep at `545fb785`. The browser
+exchange guard treats any non-null linger deadline as active. A callback or
+retry that runs before the overdue timer can pay new exchange debt at or after
+linger expiry. The normal run-window guard does not close this hold exception.
+
+The public-dispatch regression completes initial held exchange, releases at
+1200 ms, and retains the original linger cutoff at 1450 ms. A SessionPlan adds
+an already-present third peer. Its final reliable receipt at 1450 ms produces
+exit zero on the baseline, instead of criteria-unmet. Removing only the repaired
+linger guard also lets a retry send at 1450 ms report success. Both negative
+controls retain the passing 1449 ms history.
+
+The shared browser send and receipt guard now checks the monotonic linger
+deadline. The 36 new histories cover both labels, zero and default P2P windows,
+receipts, retry sends, and queued receipts before, exactly at, and after expiry.
+Timely queued receipts remain eligible after delayed dispatch. Active holds,
+physical-generation checks, original deadlines, and missing-label debt remain
+in force. Full browser tests, build, type checks, and formatting pass.
+
+### F86 — Native held-success sends can pay expired debt
+
+Issue #1034, found in the same sweep at `545fb785`. Native negotiation permits
+operations after reported held success, but the send path does not check the
+actual hold or linger window. A successful local send can pay debt after the
+release marker exists and linger has ended.
+
+Baseline Nextest `f238a1ed` fails at a reliable send completing exactly at the
+100 ms linger cutoff, inside the existing one-second local send budget.
+Active-hold and 99 ms completion controls pass first. The repair derives one
+absolute exchange-window end for send start, send completion, and receipt
+credit. A finite window also caps the local send wait. An active hold keeps
+the original local operation bound. Expired starts never call the sender, and
+late completions retain unpaid debt and existing failed-link cleanup.
+
+Twenty new send histories cover both labels, zero and default P2P windows,
+active hold, timely linger completion, exact and late expiry, and start after
+release without linger. They check invocation, debt, physical ownership, and
+exit behavior. The full focused scope retains the existing real relay, stalled
+send, callback-ordering, retry, and membership controls.
+
+The F84 external SDK assessment also applies to F85 and F86. These changes
+affect only the private reference-client schedulers. Server wire messages,
+SDK APIs, channel modes, and defaults do not change. Neither controlled defect
+identifies the historical causes of #853 or #889; their acceptance stays open.
+
+Final native Nextest `5c1b1bdc` passes all 20 scoped controls, including 68
+receipt histories and 20 new send-window histories. Strict native Clippy and
+build pass. The rebuilt browser and native pair pass three room restores and
+three three-player meshes. Every endpoint stream and server log is retained
+with stable before/after hashes under `progress/session-468-window-qualified-live`.
+Only the native binary and browser page bundle differ from baseline. Hosted
+current-head CI and feedback remain delivery gates.

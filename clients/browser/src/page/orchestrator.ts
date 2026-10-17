@@ -2401,13 +2401,14 @@ class Orchestrator {
   }
 
   private exchangeWindowOpen(): boolean {
+    const now = monotonicNowMs();
     return (
-      monotonicNowMs() < this.runDeadline ||
+      now < this.runDeadline ||
       shouldDeferSuccessAtRunDeadline(
         this.config.successReleaseEnabled,
         this.successCriteriaReported,
         this.successReleaseGranted,
-        this.lingerUntil,
+        this.lingerUntil !== null && now < this.lingerUntil ? this.lingerUntil : null,
       )
     );
   }

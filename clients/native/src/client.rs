@@ -2027,18 +2027,28 @@ impl Orchestrator<'_> {
         Ok(())
     }
 
-    async fn exchange_receipt_within_window(
-        &self,
-        received_at: Instant,
-    ) -> Result<bool, FatalError> {
-        if !self.run_deadline.is_due(received_at) {
+    async fn exchange_window_end(&self) -> Result<Option<Instant>, FatalError> {
+        let run_until = self.run_deadline.finite();
+        if !self.success_criteria_reported {
+            return Ok(run_until);
+        }
+        if self.success_release_pending().await? {
+            return Ok(None);
+        }
+        Ok(run_until.map(|run_until| {
+            self.linger_until
+                .map_or(run_until, |linger_until| run_until.max(linger_until))
+        }))
+    }
+
+    async fn exchange_window_open_at(&self, observed_at: Instant) -> Result<bool, FatalError> {
+        if !self.run_deadline.is_due(observed_at) {
             return Ok(true);
         }
-        Ok(should_defer_success_at_run_deadline(
-            self.success_criteria_reported && self.success_release_pending().await?,
-            self.success_criteria_reported,
-            self.linger_until.is_some_and(|until| received_at < until),
-        ))
+        Ok(self
+            .exchange_window_end()
+            .await?
+            .is_none_or(|until| observed_at < until))
     }
 
     async fn success_release_pending(&self) -> Result<bool, FatalError> {
@@ -2320,6 +2330,7 @@ impl Orchestrator<'_> {
                 r#"{{"from":"{}","channel":"{}","seq":0}}"#,
                 self.my_id, label
             );
+            let window_end = self.exchange_window_end().await?;
             let operation = self.negotiation_deadline(peer);
             let local = Deadline::after(Instant::now(), CHANNEL_SEND_TIMEOUT);
             let deadline = match (operation.finite(), local.finite()) {
@@ -2327,11 +2338,19 @@ impl Orchestrator<'_> {
                 (Some(_), None) => operation,
                 _ => local,
             };
-            let expired = || format!("send on {label} to {peer} exceeded its local deadline");
+            let deadline = match (deadline.finite(), window_end) {
+                (Some(local), Some(window)) => local.min(window).into(),
+                (None, Some(window)) => window.into(),
+                _ => deadline,
+            };
+            let expired = || format!("send on {label} to {peer} exceeded its exchange deadline");
             let result = match self.engine.channel(peer, label) {
                 Some(_) if deadline.is_due(Instant::now()) => Err(expired()),
                 Some(channel) => match deadline.timeout(send(channel, text.clone())).await {
-                    Ok(result) if !deadline.is_due(Instant::now()) => {
+                    Ok(result)
+                        if !deadline.is_due(Instant::now())
+                            && self.exchange_window_open_at(Instant::now()).await? =>
+                    {
                         result.map_err(|error| format!("send on {label} to {peer} failed: {error}"))
                     }
                     _ => Err(expired()),
@@ -2853,7 +2872,7 @@ impl Orchestrator<'_> {
             } => {
                 if self.cli.exchange
                     && is_exchange_probe(peer, &label, &text)
-                    && self.exchange_receipt_within_window(received_at).await?
+                    && self.exchange_window_open_at(received_at).await?
                 {
                     self.exchange_ledger.note_received(peer, label.clone());
                 }
