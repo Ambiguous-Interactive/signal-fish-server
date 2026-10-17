@@ -1032,3 +1032,237 @@ async fn blocked_relay_write_keeps_the_original_run_cutoff() {
         );
     }
 }
+
+// Regression #1039: a ready socket and due run timer may win the same select.
+#[tokio::test]
+async fn relay_receipt_selected_at_run_cutoff_cannot_complete_the_run() {
+    use futures_util::{FutureExt, SinkExt};
+
+    let mut invalid_outcomes = Vec::new();
+    for encoding in [
+        GameDataEncoding::Json,
+        GameDataEncoding::MessagePack,
+        GameDataEncoding::Rkyv,
+        GameDataEncoding::Protobuf,
+    ] {
+        // Either input or timer may win at expiry. Neither may pay late debt.
+        for offset_ms in [1000, 1001] {
+            let (ws, mut server_ws) = crate::socket_tests::websocket_pair().await;
+            let cli = Cli::parse_from([
+                "reference-native",
+                "--server-url",
+                "ws://unused.invalid",
+                "--create-room",
+                "--peers",
+                "2",
+                "--relay-payload",
+                "probe",
+            ]);
+            let me = PlayerId::from_u128(1);
+            let peer = PlayerId::from_u128(2);
+            let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
+            state.game_started = true;
+            state.relay_sent = true;
+            state.present.insert(peer);
+            state.members_seen.insert(peer);
+            state.game_data_encoding = encoding;
+            state.negotiated_version = 3;
+            state.accountability = DeliveryAccountability::new(true);
+            let player = serde_json::from_value(json!({
+                "id": peer, "name": "peer", "is_authority": false,
+                "is_ready": true, "epoch": 1, "seq": 0,
+            }))
+            .unwrap();
+            state.accountability.note_player_joined(&player).unwrap();
+            let frame = relay_receipt_frame(encoding, peer, 3);
+            tokio::time::pause();
+            let clock_guard = tokio::spawn(async {
+                loop {
+                    tokio::task::yield_now().await;
+                }
+            });
+            let started = Instant::now();
+            state.run_deadline = (started + Duration::from_secs(1)).into();
+            let result;
+            {
+                let run = state.run_loop();
+                tokio::pin!(run);
+                assert!(
+                    run.as_mut().now_or_never().is_none(),
+                    "enter the real input select before expiry"
+                );
+                tokio::time::advance(Duration::from_millis(offset_ms)).await;
+                server_ws.send(frame).await.unwrap();
+                for _ in 0..32 {
+                    tokio::task::yield_now().await;
+                }
+                result = if let Some(result) = run.as_mut().now_or_never() {
+                    result.unwrap()
+                } else {
+                    tokio::time::advance(EXIT_LINGER).await;
+                    run.await.unwrap()
+                };
+            }
+            let permitted = offset_ms < 1000;
+            let expected = if permitted {
+                EXIT_SUCCESS
+            } else {
+                EXIT_CRITERIA_UNMET
+            };
+            if result != expected || state.relay_received_from.contains(&peer) != permitted {
+                invalid_outcomes.push((encoding, offset_ms, result));
+            }
+            clock_guard.abort();
+            tokio::time::resume();
+        }
+    }
+    assert!(
+        invalid_outcomes.is_empty(),
+        "selected receipt outcomes violated the run window: {invalid_outcomes:?}"
+    );
+}
+
+fn relay_receipt_frame(encoding: GameDataEncoding, peer: PlayerId, version: u16) -> Message {
+    if encoding == GameDataEncoding::Json {
+        return Message::Text(
+            serde_json::to_string(&ServerMessage::GameData {
+                from_player: peer,
+                data: json!({"relay_msg": "probe"}),
+                seq: (version >= 3).then_some(1),
+                epoch: (version >= 3).then_some(1),
+                class: None,
+                key: None,
+            })
+            .unwrap()
+            .into(),
+        );
+    }
+    let payload = if encoding == GameDataEncoding::MessagePack {
+        rmp_serde::to_vec_named(&json!({"relay_msg": "probe"})).unwrap()
+    } else {
+        wire::encode_opaque_relay_probe(peer, b"probe")
+    };
+    if version == 2 {
+        if encoding == GameDataEncoding::MessagePack {
+            #[derive(serde::Serialize)]
+            struct LegacyFrame {
+                from_player: PlayerId,
+                encoding: GameDataEncoding,
+                payload: serde_bytes::ByteBuf,
+            }
+            return Message::Binary(
+                rmp_serde::to_vec_named(&LegacyFrame {
+                    from_player: peer,
+                    encoding,
+                    payload: payload.into(),
+                })
+                .unwrap()
+                .into(),
+            );
+        }
+        return Message::Binary(payload.into());
+    }
+    Message::Binary(
+        rmp_serde::to_vec_named(&wire::V3BinaryGameDataFrame {
+            from_player: peer,
+            encoding,
+            payload,
+            seq: 1,
+            epoch: 1,
+        })
+        .unwrap()
+        .into(),
+    )
+}
+
+// Regression #1039: decoding after expiry preserves an earlier observation.
+#[tokio::test]
+async fn relay_receipts_keep_their_observed_run_hold_and_linger_windows() {
+    for version in [2, 3] {
+        for encoding in [
+            GameDataEncoding::Json,
+            GameDataEncoding::MessagePack,
+            GameDataEncoding::Rkyv,
+            GameDataEncoding::Protobuf,
+        ] {
+            for (window, observed_ms, processed_ms, permitted) in [
+                ("run", 999, 1001, true),
+                ("run", 1000, 1001, false),
+                ("run", 1001, 1001, false),
+                ("hold", 1001, 1002, true),
+                ("linger", 1249, 1251, true),
+                ("linger", 1250, 1251, false),
+            ] {
+                let (ws, _server_ws) = crate::socket_tests::websocket_pair().await;
+                let mut cli = Cli::parse_from([
+                    "reference-native",
+                    "--server-url",
+                    "ws://unused.invalid",
+                    "--create-room",
+                    "--peers",
+                    "2",
+                    "--relay-payload",
+                    "probe",
+                ]);
+                let directory = tempfile::tempdir().unwrap();
+                let release = directory.path().join("release");
+                if window != "run" {
+                    cli.success_release_file = Some(release.clone());
+                    if window == "linger" {
+                        std::fs::write(&release, "release").unwrap();
+                    }
+                }
+                let peer = PlayerId::from_u128(2);
+                let mut state =
+                    super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+                state.game_data_encoding = encoding;
+                state.negotiated_version = version;
+                state.accountability = DeliveryAccountability::new(version >= 3);
+                let player = serde_json::from_value(json!({
+                "id": peer, "name": "peer", "is_authority": false,
+                "is_ready": true, "epoch": (version >= 3).then_some(1), "seq": (version >= 3).then_some(0),
+            }))
+            .unwrap();
+                state.accountability.note_player_joined(&player).unwrap();
+                tokio::time::pause();
+                let started = Instant::now();
+                state.run_deadline = (started + Duration::from_secs(1)).into();
+                if window != "run" {
+                    state.success_criteria_reported = true;
+                    state.success_hold_started_at = Some(started);
+                    if window == "linger" {
+                        state.linger_until = Some(started + Duration::from_millis(1250));
+                        state.success_release_observed_at = Some(started + Duration::from_secs(1));
+                    }
+                }
+                let observed_at = started + Duration::from_millis(observed_ms);
+                tokio::time::advance(Duration::from_millis(processed_ms)).await;
+                match relay_receipt_frame(encoding, peer, version) {
+                    Message::Text(text) => state
+                        .handle_server_message_at(
+                            wire::decode_server_text(&text).unwrap(),
+                            observed_at,
+                        )
+                        .await
+                        .unwrap(),
+                    Message::Binary(bytes) => state
+                        .handle_binary_game_data(&bytes, observed_at)
+                        .await
+                        .unwrap(),
+                    _ => unreachable!(),
+                }
+                assert_eq!(state.relay_received_from.contains(&peer), permitted,
+                "{encoding:?}/{window}/{observed_ms}: credit uses observation, not decode completion");
+                if version >= 3 {
+                    let error = state
+                        .accountability
+                        .record_game_data(peer, Some(1), Some(1), None, None)
+                        .unwrap_err();
+                    assert!(error.contains("duplicate/backward"),
+                "{encoding:?}/{window}: even ineligible receipts retain delivery accounting: {error}");
+                }
+                tokio::time::resume();
+            }
+        }
+    }
+}

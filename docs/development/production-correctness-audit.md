@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87; expired relay sends in F88 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87; expired relay sends in F88; relay receipt admission in F89 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17; Windows backpressure fixtures in F75 |
 
@@ -4816,3 +4816,52 @@ under local `progress/session-470-final-live`. All executable and bundle hashes
 match before and after. The browser's 28 regression histories, full package
 tests, type checking, build, and formatting pass. Independent final review
 reports no remaining findings.
+
+### F89 — Relay receipt timing can misclassify a run
+
+Issue [#1039](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1039),
+found while sweeping #1037 at `1cf73bbb` under the same #826 audit.
+A browser client joins a two-player lobby, finalizes, and sends its relay probe
+at 350 ms. Its remote receipt remains due. A valid peer GameData frame arrives
+at the exact 1,100 ms absolute run cutoff before the timer callback. The
+real-dispatch regression exits zero instead of the existing criteria-unmet
+code. A 1,099 ms control succeeds as intended.
+
+The opposite browser history also fails: a valid frame arrives at 1,099 ms
+behind held PeerTransportStatus output. When output resumes at 1,101 ms, timer
+processing fails the run before consuming that already-arrived receipt.
+These histories distinguish frame arrival from later queued processing.
+They do not reproduce the historical #853 or #889 incidents.
+
+The native real-socket regression `481cc981` also fails. It enters the actual
+run loop before expiry, advances the clock to the exact cutoff, and sends a
+valid peer frame. All 64 retained baseline histories, 16 in each encoding,
+credit the late receipt and return success. The run loop checks timers before
+selecting input, but a frame can become ready before the due timer is handled.
+This is application observation timing, not an inferred kernel arrival time.
+
+The browser captures relay eligibility at raw input entry before frame sizing
+or decoding. Its retained frame holds one admission marker until dispatch or
+cancellation. A valid queued receipt postpones the cutoff decision until that
+receipt is consumed; stale receipts release the marker without paying debt.
+The native client carries the complete frame's observation time through JSON,
+MessagePack, and opaque decoding. Only success-criterion credit depends on
+eligibility. Delivery validation and normal receipt events remain in place.
+
+Browser controls cover 72 histories: outgoing admission plus v2/v3 receipt
+formats, exact/late boundaries, timely output/decode delays, and stale receipt
+drain. Native `c5c96d50` passes 48 deterministic observation-time cases and
+eight real-socket exact/late histories. V2 opaque table cases check the legacy
+handler; they do not test negotiation. Native `f6e4a20d` passes 13 focused
+regressions, including relay writes, queued exchange, retry, and backpressure.
+Full browser tests, type checking, build, formatting, and strict native Clippy
+pass. Independent adversarial review reports no remaining findings.
+
+Final fixed-artifact Nextest `c6b16e65` passes three restores, three retries,
+and three browser meshes after both send and receipt repairs. All 21 endpoint
+streams retain 78 channel sends and 78 receipts, plus nine relay sends and
+18 relay receipts. Server logs and matching before/after hashes for all four
+executables/bundles remain under local `progress/session-470-receipt-qualified-live`
+and `progress/session-470/receipt-qualified-before.sha256`. The earlier receipt
+candidate `39f6f2f9` rebuilt its native executable during setup; its pre-build
+hash is excluded. Original #853/#889 causes and the broader audit stay open.

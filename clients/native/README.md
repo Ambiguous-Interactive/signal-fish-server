@@ -323,6 +323,11 @@ does not start a relay probe at or after that window ends.
 A failed write ends the session with exit code 3. The client does not retry
 a partial frame on the same connection.
 
+Relay receipt criteria use the time when the client observes a complete frame.
+Timely receipts remain valid through decoding and queued processing.
+Late receipts keep the criterion unpaid. The client still validates and reports
+late frames. Existing successful holds and active linger windows still apply.
+
 Deferred exchange sends let the client read signaling between channel attempts.
 A stalled send keeps its unmet exchange criteria and triggers relay fallback
 for its peer. The run deadline still applies.

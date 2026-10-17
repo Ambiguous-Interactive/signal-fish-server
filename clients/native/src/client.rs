@@ -1184,7 +1184,10 @@ where
 
 /// Input multiplexed by the main loop.
 enum LoopInput {
-    Server(Option<Result<Message, tokio_tungstenite::tungstenite::Error>>),
+    Server(
+        Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
+        Instant,
+    ),
     Engine(Option<EngineEvent>),
     SelectedPair(Option<SelectedPairProbeResult>),
     Tick,
@@ -1486,7 +1489,7 @@ impl Orchestrator<'_> {
                 biased;
                 input = async {
                     tokio::select! {
-                        frame = futures_util::StreamExt::next(&mut self.ws) => LoopInput::Server(frame),
+                        frame = futures_util::StreamExt::next(&mut self.ws) => LoopInput::Server(frame, Instant::now()),
                         event = self.engine_rx.recv() => LoopInput::Engine(event),
                         result = self.selected_pair_rx.recv() => LoopInput::SelectedPair(result),
                         _ = tokio::time::sleep_until(wake_at) => LoopInput::Tick,
@@ -1500,7 +1503,7 @@ impl Orchestrator<'_> {
                 normal_input_burst = normal_input_burst.saturating_add(1);
             }
             match input {
-                LoopInput::Server(Some(Ok(Message::Text(text)))) => {
+                LoopInput::Server(Some(Ok(Message::Text(text))), observed_at) => {
                     // ANY inbound frame proves the connection and the server
                     // are alive, so it satisfies the keepalive liveness check —
                     // not just `Pong`. This is cleared BEFORE dispatch, so the
@@ -1524,15 +1527,15 @@ impl Orchestrator<'_> {
                     // guard in `validate_json_negotiated_server_message` is
                     // sound in that direction and a text-direction guard
                     // would kill mixed rooms (#741).
-                    self.handle_server_message(message).await?;
+                    self.handle_server_message_at(message, observed_at).await?;
                 }
-                LoopInput::Server(Some(Ok(Message::Close(frame)))) => {
+                LoopInput::Server(Some(Ok(Message::Close(frame))), _) => {
                     self.accountability.observe_terminal();
                     return Err(FatalError::connection(format!(
                         "websocket closed by server before success criteria were met: {frame:?}"
                     )));
                 }
-                LoopInput::Server(Some(Ok(Message::Binary(wire)))) => {
+                LoopInput::Server(Some(Ok(Message::Binary(wire))), observed_at) => {
                     self.pong_deadline = None;
                     self.pong_grace_applied = false;
                     self.accountability
@@ -1544,26 +1547,26 @@ impl Orchestrator<'_> {
                             wire.len()
                         )));
                     }
-                    self.handle_binary_game_data(&wire).await?;
+                    self.handle_binary_game_data(&wire, observed_at).await?;
                 }
-                LoopInput::Server(Some(Ok(other)))
+                LoopInput::Server(Some(Ok(other)), _)
                     if wire::is_transparent_transport_control(&other) =>
                 {
                     tracing::debug!("ignoring WebSocket control frame");
                 }
-                LoopInput::Server(Some(Ok(_))) => {
+                LoopInput::Server(Some(Ok(_)), _) => {
                     self.accountability
                         .observe_server_message(false)
                         .map_err(FatalError::protocol)?;
                     tracing::debug!("ignoring non-text application frame");
                 }
-                LoopInput::Server(Some(Err(error))) => {
+                LoopInput::Server(Some(Err(error)), _) => {
                     self.accountability.observe_terminal();
                     return Err(FatalError::connection(format!(
                         "websocket transport error: {error}"
                     )));
                 }
-                LoopInput::Server(None) => {
+                LoopInput::Server(None, _) => {
                     self.accountability.observe_terminal();
                     return Err(FatalError::connection(
                         "websocket closed by server before success criteria were met",
@@ -2415,7 +2418,16 @@ impl Orchestrator<'_> {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn handle_server_message(&mut self, message: ServerMessage) -> Result<(), FatalError> {
+        self.handle_server_message_at(message, Instant::now()).await
+    }
+
+    async fn handle_server_message_at(
+        &mut self,
+        message: ServerMessage,
+        observed_at: Instant,
+    ) -> Result<(), FatalError> {
         validate_json_negotiated_server_message(&message)?;
         let is_unsupported_format_error = matches!(
             &message,
@@ -2669,7 +2681,9 @@ impl Orchestrator<'_> {
                     tracing::debug!(%from_player, ?epoch, ?seq, "discarding stale trailing GameData");
                     return Ok(());
                 }
-                if data.get("relay_msg").is_some() {
+                if data.get("relay_msg").is_some()
+                    && self.exchange_window_open_at(observed_at).await?
+                {
                     self.relay_received_from.insert(from_player);
                 }
                 emit(&Event::GameDataReceived {
@@ -3629,11 +3643,15 @@ impl Orchestrator<'_> {
     /// Decode a version-specific relay envelope and its application probe.
     /// V3 validates delivery stamps; v2 leaves all delivery metadata absent.
     /// Events expose the original probe bytes as base64.
-    async fn handle_binary_game_data(&mut self, wire_bytes: &[u8]) -> Result<(), FatalError> {
+    async fn handle_binary_game_data(
+        &mut self,
+        wire_bytes: &[u8],
+        observed_at: Instant,
+    ) -> Result<(), FatalError> {
         if self.game_data_encoding == GameDataEncoding::MessagePack {
             let message = wire::decode_message_pack_game_data(wire_bytes, self.negotiated_version)
                 .map_err(|_| FatalError::protocol("invalid MessagePack game data"))?;
-            return self.handle_server_message(message).await;
+            return self.handle_server_message_at(message, observed_at).await;
         }
         let frame = if self.negotiated_version >= 3 {
             Some(wire::decode_v3_binary_game_data(wire_bytes).map_err(|_| {
@@ -3665,7 +3683,9 @@ impl Orchestrator<'_> {
             tracing::debug!(%from, ?epoch, ?seq, "discarding stale trailing opaque GameData");
             return Ok(());
         }
-        self.relay_received_from.insert(from);
+        if self.exchange_window_open_at(observed_at).await? {
+            self.relay_received_from.insert(from);
+        }
         emit(&Event::GameDataReceived {
             from,
             payload: json!({ "encoding": encoding.as_wire_str(), "payload": BASE64_STANDARD.encode(payload) }),
