@@ -235,3 +235,105 @@ async fn native_peer_loss_retains_snapshot_before_removal() {
         state.engine.remove_peer(peer).await.unwrap();
     }
 }
+
+// Regression #889: connected exchange debt must retain the live link at cutoff.
+#[tokio::test]
+async fn native_exchange_cutoff_retains_unpaid_peer_snapshots() {
+    for missing in [
+        &[RELIABLE_LABEL][..],
+        &[UNRELIABLE_LABEL][..],
+        &[RELIABLE_LABEL, UNRELIABLE_LABEL][..],
+    ] {
+        for mode in ["sent", "received", "both", "paid", "removed", "disabled"] {
+            let capture = DiagnosticCapture::default();
+            let _subscriber = tracing::subscriber::set_default(capture.subscriber());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                tokio_tungstenite::accept_async(tcp).await.unwrap()
+            });
+            let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            let _server_ws = server.await.unwrap();
+            let mut cli = Cli::parse_from([
+                "native",
+                "--server-url",
+                &url,
+                "--create-room",
+                "--exchange",
+            ]);
+            cli.exchange = mode != "disabled";
+            let peer = PlayerId::from_u128(2);
+            let paid_peer = PlayerId::from_u128(3);
+            let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+            state.engine.pair_with(peer, false, &[]).await.unwrap();
+            state.connected_pairs.insert(peer);
+            for member in [peer, paid_peer] {
+                state.exchange_ledger.note_connected(member);
+                for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                    if member == paid_peer
+                        || !missing.contains(&label)
+                        || !matches!(mode, "sent" | "both")
+                    {
+                        state.exchange_ledger.note_sent(member, label);
+                    }
+                    if member == paid_peer
+                        || !missing.contains(&label)
+                        || !matches!(mode, "received" | "both" | "removed" | "disabled")
+                    {
+                        state.exchange_ledger.note_received(member, label.into());
+                    }
+                }
+            }
+            let expected = state.engine.diagnostic_snapshot(peer);
+            if mode == "removed" {
+                state.engine.remove_peer(peer).await.unwrap();
+                state.connected_pairs.remove(&peer);
+            }
+            state.run_deadline = Deadline::after(Instant::now(), Duration::ZERO);
+            assert_eq!(
+                state.process_timers().await.unwrap(),
+                Some(EXIT_CRITERIA_UNMET)
+            );
+            let text = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+            let records: Vec<_> = text
+                .lines()
+                .filter(|line| line.contains("Exchange timed out"))
+                .collect();
+            if matches!(mode, "paid" | "disabled") {
+                assert!(records.is_empty(), "{mode}: {text}");
+            } else {
+                assert_eq!(records.len(), 1, "{mode}: {text}");
+                let (prefix, snapshot) = records[0].split_once("snapshot=").unwrap();
+                assert!(prefix.contains(&peer.to_string()));
+                let snapshot: serde_json::Value = serde_json::from_str(snapshot).unwrap();
+                let missing_sent = if matches!(mode, "sent" | "both") {
+                    missing.to_vec()
+                } else {
+                    vec![]
+                };
+                let missing_received = if mode == "sent" {
+                    vec![]
+                } else {
+                    missing.to_vec()
+                };
+                assert_eq!(snapshot["missing_sent"], json!(missing_sent), "{mode}");
+                assert_eq!(
+                    snapshot["missing_received"],
+                    json!(missing_received),
+                    "{mode}"
+                );
+                assert_eq!(snapshot["connected"], mode != "removed");
+                assert_eq!(
+                    snapshot["link"],
+                    if mode == "removed" {
+                        serde_json::Value::Null
+                    } else {
+                        expected
+                    }
+                );
+            }
+            state.engine.remove_peer(peer).await.unwrap();
+        }
+    }
+}

@@ -365,6 +365,13 @@ impl ExchangeLedger {
             })
     }
 
+    fn missing_labels(labels: Option<&BTreeSet<String>>) -> Vec<&'static str> {
+        [RELIABLE_LABEL, UNRELIABLE_LABEL]
+            .into_iter()
+            .filter(|label| !labels.is_some_and(|labels| labels.contains(*label)))
+            .collect()
+    }
+
     fn unmet_criteria(&self) -> Vec<String> {
         let mut unmet = Vec::new();
         for peer in &self.obligations {
@@ -372,10 +379,7 @@ impl ExchangeLedger {
                 ("sent to", self.sent.get(peer)),
                 ("received from", self.received.get(peer)),
             ] {
-                let missing: Vec<&str> = [RELIABLE_LABEL, UNRELIABLE_LABEL]
-                    .into_iter()
-                    .filter(|label| !labels.is_some_and(|labels| labels.contains(*label)))
-                    .collect();
+                let missing = Self::missing_labels(labels);
                 if !missing.is_empty() {
                     unmet.push(format!(
                         "exchange incomplete ({direction} {peer}; missing {})",
@@ -1951,6 +1955,27 @@ impl Orchestrator<'_> {
             }
             if self.criteria_met() {
                 return Ok(Some(EXIT_SUCCESS));
+            }
+            if self.cli.exchange {
+                for peer in &self.exchange_ledger.obligations {
+                    let missing_sent =
+                        ExchangeLedger::missing_labels(self.exchange_ledger.sent.get(peer));
+                    let missing_received =
+                        ExchangeLedger::missing_labels(self.exchange_ledger.received.get(peer));
+                    if missing_sent.is_empty() && missing_received.is_empty() {
+                        continue;
+                    }
+                    tracing::warn!(
+                        %peer,
+                        snapshot = %json!({
+                            "missing_sent": missing_sent,
+                            "missing_received": missing_received,
+                            "connected": self.connected_pairs.contains(peer),
+                            "link": self.engine.diagnostic_snapshot(*peer),
+                        }),
+                        "Exchange timed out"
+                    );
+                }
             }
             emit(&Event::Error {
                 message: format!(

@@ -508,6 +508,13 @@ the physical link was already removed. The snapshot does not wait for the
 WebRTC driver. Compare both endpoints and their `pc_state` events when
 investigating a failed connection.
 
+At run timeout, stderr also reports a snapshot for each peer with missing
+exchange sends or receipts, including connected peers and departed peers with
+unpaid exchange debt. Each report names missing sends, missing receipts, and
+logical connection state. A `link: null` field means the physical link was removed.
+Compare the reports with both endpoints' `channel_message_sent` and
+`channel_message` events. A report does not prove the cause of a missing receipt.
+
 - **`SIGNAL_FISH_SERVER_BIN is not set` panic:** the interop tests drive the real server binary. Run
   `cargo build --bin signal-fish-server` at the repository root and export
   `SIGNAL_FISH_SERVER_BIN=<repo>/target/debug/signal-fish-server`, or just use

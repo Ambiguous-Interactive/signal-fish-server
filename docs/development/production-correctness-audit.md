@@ -4346,3 +4346,63 @@ hashes match before and after the controls. Full endpoint and server logs
 remain under `progress/session-463-live`. Neither original spontaneous failure
 recurs, so #853 and #889 remain open. Root and native strict full lint gates,
 browser type checking, and the browser suite and build pass.
+
+### F80 — Retain peer state when gameplay exchange misses the run cutoff
+
+Continues A20 in [#826](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/826),
+[#853](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/853), and
+[#889](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/889).
+Baseline `fac957f1`. The original #889 history has connected channels but unpaid
+exchange receipts at the end of the run. Existing peer snapshots cover formation
+timeouts and physical-link loss. Neither reference client captures a snapshot
+for a link that stays connected with unpaid gameplay exchange at run timeout.
+The final error names missing labels, but cannot recover the lost channel state.
+This is a confirmed diagnostic gap, not a confirmed cause of the historical
+missing receipt or establishment failure.
+
+Both reference clients now report each unpaid exchange peer before run teardown.
+Each report includes missing send and receipt labels, logical connection state,
+and the existing physical-link snapshot. Completed peers are excluded. Departed
+peers keep their logical debt and report a null link. Exchange-disabled runs
+emit no exchange report. Output uses the existing bounded diagnostic path and
+does not query or wait for the WebRTC driver. Original run cutoffs, exit codes,
+exchange assertions, and retry behavior remain unchanged.
+
+The same final browser regression fails against baseline source with
+`missing-reliable: snapshot only unpaid peers once`. The repaired controls
+cover missing sends and receipts on each required label, live and removed
+links, paid obligations, and the original zero/default P2P deadline histories.
+A blocked send retains its earlier 50 ms retry wake; delivering that wake late
+at the original run cutoff still captures the live unpaid link. Browser build,
+tests, type checking, and formatting pass. Native baseline Nextest `171e1247`
+fails because a connected unpaid peer emits no snapshot. Repaired Nextest
+`0e22cab6` passes both focused controls in 0.188 seconds, with reliable,
+unreliable, and both-label debt in both directions, completed and disabled
+exchange, and removed links. Root and native strict full lint gates pass.
+Independent source review found no remaining issues.
+
+The new native real-wire control holds unreliable exchange release at both
+connected endpoints. Both complete reliable exchange before the cutoff client
+exits with the original criteria-unmet code. The incumbent remains live.
+Nextest `15e88bb0` passes in 8.358 seconds. The report names only unreliable
+send and receipt debt and retains both registered, open-observed channels.
+A separate browser/native control holds the native unreliable send. Chromium
+exits with code one while the native remains live. Its report has no missing
+send, one missing unreliable receipt, connected PC/ICE/SCTP, and both required
+channels open with zero buffered bytes. Four binary/bundle hashes match before
+and after. A first attempt with the old browser bundle correctly lacks the new
+report; it remains recorded separately. These are controlled omissions, not
+reproductions of the original spontaneous failures. Full logs remain under
+`progress/session-464-native-cutoff`, `progress/session-464-browser-cutoff`,
+and `progress/session-464-browser-cutoff-stale-bundle`.
+
+Twenty fresh baseline fixed-binary histories also pass in 45.793 seconds: ten
+restores for #853 and ten three-player meshes for #889. Fifty complete endpoint
+streams retain 2,517 events, 200 channel opens, 200 sends, 200 receipts, fifty
+success barriers, fifty exits with code zero, and ten native restores. Five
+executable/bundle hashes match before and after. All attempts and server logs
+remain under `progress/session-464-live`. These baseline runs do not validate
+later source changes or explain either historical failure. Both issues and the
+broader A20 and #826 audits remain open. Rust, .NET, and Godot SDKs need no
+change: this repair adds only private reference-client stderr reports and
+changes no server API, wire message, or SDK event contract.

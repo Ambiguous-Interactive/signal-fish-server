@@ -12,9 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add attributed opaque relay probes for v2 and mixed v2/v3 reference-client runs (#678).
 - Add browser reference-client MessagePack relay support for protocol v2 and v3 (#678).
 - Find a published live room by application, game, and room code beyond the session-list limit (#992).
-- Report native reference-client channel and ICE observations at P2P timeouts and before failed links are removed
-  (#853, #889, #1019).
-- Report browser reference-client connection and channel state before failed peer links are removed (#853, #889).
+- Report reference-client peer and channel state at P2P timeouts, incomplete gameplay exchange timeouts,
+  and before failed links are removed (#853, #889, #1019).
 
 ### Changed
 
