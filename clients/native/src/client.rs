@@ -2021,6 +2021,20 @@ impl Orchestrator<'_> {
         Ok(())
     }
 
+    async fn exchange_receipt_within_window(
+        &self,
+        received_at: Instant,
+    ) -> Result<bool, FatalError> {
+        if !self.run_deadline.is_due(received_at) {
+            return Ok(true);
+        }
+        Ok(should_defer_success_at_run_deadline(
+            self.success_criteria_reported && self.success_release_pending().await?,
+            self.success_criteria_reported,
+            self.linger_until.is_some_and(|until| received_at < until),
+        ))
+    }
+
     async fn success_release_pending(&self) -> Result<bool, FatalError> {
         Self::release_file_pending(
             self.cli.success_release_file.as_deref(),
@@ -2831,11 +2845,9 @@ impl Orchestrator<'_> {
                 received_at,
                 ..
             } => {
-                let within_exchange_window = !self.run_deadline.is_due(received_at)
-                    || (self.success_criteria_reported && self.cli.success_release_file.is_some());
                 if self.cli.exchange
-                    && within_exchange_window
                     && is_exchange_probe(peer, &label, &text)
+                    && self.exchange_receipt_within_window(received_at).await?
                 {
                     self.exchange_ledger.note_received(peer, label.clone());
                 }

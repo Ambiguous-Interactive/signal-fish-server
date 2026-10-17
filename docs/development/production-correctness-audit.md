@@ -4580,11 +4580,18 @@ relay. Godot uses its engine-owned WebRTC mesh. None uses this native reference
 orchestrator; all three are unaffected. No server message, SDK API, channel
 mode, or default changes.
 
-Final scoped Nextest `2988f038` passes all 19 exchange, retry, membership, and
-receipt controls. The new matrix covers 44 histories. Baseline and final live
+Final scoped Nextest `e684c350` passes all 19 exchange, retry, membership, and
+receipt controls. The new matrix covers 56 histories. Baseline and final live
 captures each pass three native restores and three three-player meshes, with
 15 endpoint streams, 60 sends, 60 receipts, and stable before/after executable
 and bundle hashes. Only the native binary changes between capture sets.
 Strict native and root Clippy, formatting, CI configuration, Markdown, and
 documentation checks pass. Hosted current-head CI and feedback remain delivery
 gates.
+
+PR review found that the first hold exception stayed active after release
+and after linger ended. Nextest `9f86ce54` reproduces the gap: a late reliable
+receipt pays fresh debt after release. Receipt eligibility now uses the
+existing cutoff-deferral rule with the current hold state and the receipt's
+position before the linger deadline. Added cases retain held and active-linger
+exchange, and reject late receipts after release or at an expired linger.
