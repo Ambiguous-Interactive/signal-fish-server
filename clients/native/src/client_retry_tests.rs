@@ -350,12 +350,20 @@ async fn deferred_exchange_mesh_services_pong_and_relay_between_held_sends() {
 #[tokio::test]
 async fn immediate_exchange_services_relay_before_the_next_label() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let address = listener.local_addr().unwrap();
+    let url = format!("ws://{address}");
     let server = tokio::spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
         tokio_tungstenite::accept_async(tcp).await.unwrap()
     });
-    let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let tcp = tokio::net::TcpStream::connect(address).await.unwrap();
+    let tcp = tcp.into_std().unwrap();
+    let observer = tokio::net::TcpStream::from_std(tcp.try_clone().unwrap()).unwrap();
+    let tcp = tokio::net::TcpStream::from_std(tcp).unwrap();
+    let (ws, _) =
+        tokio_tungstenite::client_async(&url, tokio_tungstenite::MaybeTlsStream::Plain(tcp))
+            .await
+            .unwrap();
     let mut server_ws = server.await.unwrap();
     let cli = Cli::parse_from([
         "native",
@@ -372,16 +380,26 @@ async fn immediate_exchange_services_relay_before_the_next_label() {
     let (mut remote, opens) = open_physical_pair(&mut state, &mut server_ws, peer, None).await;
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-    let mut first = Some((started_tx, release_rx));
+    let mut first = Some((started_tx, release_rx, observer));
     let sends = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let send_count = sends.clone();
     state.exchange_send_hook = Some(Box::new(move |channel, text| {
         send_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let first = first.take();
         Box::pin(async move {
-            if let Some((started, release)) = first {
+            if let Some((started, release, observer)) = first {
                 started.send(()).unwrap();
                 release.await.unwrap();
+                // Server writes do not prove client readiness; peek through the empty Close frame.
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let count = observer.peek(&mut buffer).await.unwrap();
+                    assert!(count > 0, "the signaling peer remains live");
+                    if buffer[..count].ends_with(&[0x88, 0x00]) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
             }
             channel.send_text(&text).await
         })

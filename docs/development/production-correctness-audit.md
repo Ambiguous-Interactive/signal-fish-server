@@ -4457,3 +4457,12 @@ production code in Nextest `21299aec`: two sends start instead of one.
 The production repair is unchanged.
 The corrected fixture passes 20 consecutive focused stress runs. All 15
 retry/exchange controls and strict native Clippy pass again.
+The next hosted run retains the socket and consumes the relay, but still
+starts two sends. Server write completion does not establish readiness on
+the client socket. The final fixture peeks through the empty server Close
+frame on a duplicated client socket before releasing the first send. It
+consumes no input; the real run loop must still process every queued frame.
+This removes the transport-arrival assumption without adding a sleep or
+changing the send-order assertion.
+The socket-readiness fixture passes 20 consecutive focused runs and remains
+red against the original handler in Nextest `17245b3d` (two sends versus one).
