@@ -4793,7 +4793,7 @@ historical causes of #853 or #889. Their original acceptance remains open.
 The Rust, .NET, and Godot SDKs own independent send APIs and do not import these
 private reference-client process timers. No server protocol or SDK API changes.
 
-Final fixed-binary Nextest `97236547` passes three restores, three link retries,
+Initial fixed-binary Nextest `97236547` passes three restores, three link retries,
 and three browser meshes. All 21 endpoint streams and server logs are retained
 under local `progress/session-470-fixed-live`, with 78 sends and 78 receipts.
 Before/after hashes match for the server, native process, browser CLI, and page
@@ -4801,3 +4801,18 @@ bundle. The earlier candidate `2c3307c1` rebuilt the native process at setup;
 its pre-build hash is excluded. Native scoped `9bf9bb10`, full browser tests,
 and strict native/root lint also pass. Hosted CI and PR feedback remain the
 publication gates.
+
+Final review found another boundary in the initial browser repair: payload
+preparation runs after the early window check. Encoding work or process
+preemption can cross the cutoff before the prepared frame reaches the socket.
+The browser also checks the window in the encoded-frame callback and retains
+send debt if that final admission fails. Controlled payload preparation crosses
+the exact cutoff in each encoding; this checks elapsed work between admission
+and send without claiming a spontaneous browser incident.
+
+After that final-admission repair, fixed-binary Nextest `06ad856b` passes the
+same nine live cells. All 21 endpoint streams retain 78 sends and 78 receipts
+under local `progress/session-470-final-live`. All executable and bundle hashes
+match before and after. The browser's 28 regression histories, full package
+tests, type checking, build, and formatting pass. Independent final review
+reports no remaining findings.

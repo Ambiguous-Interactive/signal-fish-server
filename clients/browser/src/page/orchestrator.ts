@@ -2562,21 +2562,28 @@ class Orchestrator {
       this.relaySent = true;
       return;
     }
+    let sent = false;
+    const sendEncodedFrame = (frame: string | ArrayBuffer) => {
+      if (!this.exchangeWindowOpen()) return;
+      this.sendRawFrame(frame);
+      sent = true;
+    };
     if (this.effectiveFormat === 'json') {
-      sendGameData((frame) => this.sendFrame(frame), {
+      sendGameData(sendEncodedFrame, {
         relay_msg: this.config.relayPayload,
       });
     } else if (this.effectiveFormat === 'message_pack') {
-      sendMessagePackGameData((frame) => this.sendBinaryFrame(frame), {
+      sendMessagePackGameData(sendEncodedFrame, {
         relay_msg: this.config.relayPayload,
       });
     } else {
       // Opaque negotiation relays the raw payload as one binary frame (#627).
       sendOpaqueGameData(
-        (frame) => this.sendBinaryFrame(frame),
+        sendEncodedFrame,
         encodeOpaqueRelayProbe(this.myId, new TextEncoder().encode(this.config.relayPayload)),
       );
     }
+    if (!sent) return;
     this.relaySent = true;
     this.relaySendAt = null;
     this.emit({ event: 'game_data_sent' });
@@ -2597,10 +2604,6 @@ class Orchestrator {
   }
 
   private sendFrame(frame: string): void {
-    this.sendRawFrame(frame);
-  }
-
-  private sendBinaryFrame(frame: ArrayBuffer): void {
     this.sendRawFrame(frame);
   }
 

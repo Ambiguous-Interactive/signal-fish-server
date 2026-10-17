@@ -13,13 +13,14 @@ function assert(condition: boolean, message: string): void {
 
 // Regression #1037: a delayed relay timer cannot complete an expired run.
 for (const format of GAME_DATA_FORMATS) {
-  for (const [sendAt, held] of [
-    [350, false],
-    [1099, false],
-    [1100, false],
-    [1101, false],
-    [350, true],
-    [1099, true],
+  for (const [sendAt, held, preparationCrossesCutoff] of [
+    [350, false, false],
+    [1099, false, false],
+    [1100, false, false],
+    [1101, false, false],
+    [350, true, false],
+    [1099, true, false],
+    [350, false, true],
   ] as const) {
     const originalSocket = globalThis.WebSocket;
     const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
@@ -151,8 +152,18 @@ for (const format of GAME_DATA_FORMATS) {
         }
         await turn();
       };
+      if (preparationCrossesCutoff) {
+        // Model CPU time or preemption after timer admission and before the
+        // encoded frame reaches WebSocket.send. All formats read this payload.
+        Object.defineProperty(config, 'relayPayload', {
+          get: () => {
+            now = 1100;
+            return 'probe';
+          },
+        });
+      }
       await advance(sendAt);
-      const expectedSends = sendAt < 1100 ? 1 : 0;
+      const expectedSends = sendAt < 1100 && !preparationCrossesCutoff ? 1 : 0;
       assert(
         relayFrames.length === expectedSends,
         `${format}/${sendAt}: expired relay timer sent ${relayFrames.length} probes; expected ${expectedSends}`,
@@ -205,13 +216,13 @@ for (const format of GAME_DATA_FORMATS) {
         );
         await advance(1550);
       } else {
-        await advance(sendAt + 249);
+        await advance((preparationCrossesCutoff ? 1100 : sendAt) + 249);
         if (expectedSends === 1 && sendAt + 249 < 1100)
           assert(
             result === undefined,
             'a permitted relay send retains its exit linger before the cutoff',
           );
-        await advance(sendAt + 250);
+        await advance((preparationCrossesCutoff ? 1100 : sendAt) + 250);
       }
       assert(
         relayFrames.length === expectedSends,
