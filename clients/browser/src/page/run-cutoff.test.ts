@@ -3,7 +3,7 @@ import { EXIT_CRITERIA_UNMET, type RunConfig } from '../shared/types.js';
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
-// Regressions #1011/#1027: delayed wakes cannot pay expired exchange debt.
+// Regressions #1011/#1027/#1029: delayed wakes cannot pay expired exchange debt.
 for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
   [
     'fallback',
@@ -14,6 +14,14 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
     'live-sent-unreliable',
     'late-sent-reliable',
     'late-sent-unreliable',
+    'late-received-reliable',
+    'late-received-unreliable',
+    'queued-received-reliable',
+    'queued-received-unreliable',
+    'queued-retired-reliable',
+    'queued-retired-unreliable',
+    'recovered-received-reliable',
+    'recovered-received-unreliable',
     'recovered-sent-reliable',
     'recovered-sent-unreliable',
     'live-received-reliable',
@@ -22,6 +30,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
   ] as const
 ).flatMap((scenario) =>
   (scenario === 'answered' ||
+  scenario.startsWith('queued-') ||
   scenario.startsWith('live-') ||
   scenario.startsWith('late-') ||
   scenario.startsWith('recovered-')
@@ -38,6 +47,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
   const originalError = console.error;
   const diagnostics: string[] = [];
   const live =
+    scenario.startsWith('queued-') ||
     scenario.startsWith('live-') ||
     scenario.startsWith('late-') ||
     scenario.startsWith('recovered-');
@@ -55,6 +65,12 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
   const events: Record<string, unknown>[] = [];
   const transportStatuses: boolean[] = [];
   let cutoffOnAnswer = false;
+  let holdOutput = false;
+  let outputHeld = false;
+  let releaseOutput!: () => void;
+  const outputReady = new Promise<void>((resolve) => {
+    releaseOutput = resolve;
+  });
   const channels: Channel[] = [];
   const timers = new Map<number, { at: number; callback: () => void }>();
   let timerId = 0;
@@ -188,7 +204,12 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
       configurable: true,
       value: {
         __sf_emit: (line: string) => {
-          events.push(JSON.parse(line));
+          const event = JSON.parse(line);
+          events.push(event);
+          if (holdOutput && event['event'] === 'channel_message') {
+            outputHeld = true;
+            return outputReady;
+          }
         },
       },
     });
@@ -239,7 +260,14 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
         connection.ondatachannel?.({ channel });
         channel.readyState = 'open';
         channel.onopen?.();
-        if (scenario !== `missing-${label}` && scenario !== `live-received-${label}`)
+        if (
+          scenario !== `missing-${label}` &&
+          scenario !== `live-received-${label}` &&
+          scenario !== `late-received-${label}` &&
+          scenario !== `queued-received-${label}` &&
+          scenario !== `queued-retired-${label}` &&
+          scenario !== `recovered-received-${label}`
+        )
           channel.onmessage?.({ data: JSON.stringify({ from: peer, channel: label, seq: 0 }) });
       }
       if (scenario === 'answered') {
@@ -284,6 +312,38 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
         }
       await turn();
     }
+    if (scenario.startsWith('queued-') || scenario.startsWith('recovered-received-')) {
+      const channel = channels.find((channel) => scenario.endsWith(`-${channel.label}`));
+      assert(channel !== undefined, 'find the exact missing label');
+      if (scenario.startsWith('queued-')) {
+        holdOutput = true;
+        const other = channels.find((other) => other !== channel)!;
+        other.onmessage?.({ data: 'unrelated traffic' });
+        await turn();
+        assert(outputHeld, 'the prior input handler waits for output acknowledgment');
+      }
+      now = 1099;
+      if (scenario.startsWith('queued-retired-')) {
+        socket.deliver('PlayerLeft', { player_id: peer, epoch: 1, final_seq: 0 });
+      }
+      channel!.onmessage?.({
+        data: JSON.stringify({ from: peer, channel: channel!.label, seq: 0 }),
+      });
+      if (scenario.startsWith('queued-')) now = 1101;
+      holdOutput = false;
+      releaseOutput();
+      await turn();
+      if (scenario.startsWith('recovered-')) {
+        now = 1500;
+        socket.deliver('Pong');
+        await turn();
+      }
+      assert(
+        result === (scenario.startsWith('queued-retired-') ? EXIT_CRITERIA_UNMET : 0),
+        `${scenario}: pre-cutoff arrival retains only current-link exchange evidence; observed ${result}`,
+      );
+      continue;
+    }
     if (scenario.startsWith('recovered-')) {
       now = 800;
       socket.deliver('Pong');
@@ -301,6 +361,33 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
     }
     assert(result === undefined, `${scenario}: pending work keeps the run live before cutoff`);
     now = cutoff;
+    if (scenario.startsWith('late-received-')) {
+      const channel = channels.find((channel) => scenario === `late-received-${channel.label}`);
+      channel?.onmessage?.({
+        data: JSON.stringify({ from: peer, channel: channel.label, seq: 0 }),
+      });
+      await turn();
+      assert(
+        result === EXIT_CRITERIA_UNMET,
+        `${scenario}: receipt at ${cutoff} cannot pay expired debt; observed ${result}`,
+      );
+      assert(
+        events.some(
+          (event) => event['event'] === 'channel_message' && event['label'] === channel?.label,
+        ),
+        `${scenario}: late traffic remains observable`,
+      );
+      const snapshots = diagnostics.filter((line) =>
+        line.startsWith(`Exchange timeout for ${peer}: `),
+      );
+      assert(snapshots.length === 1, `${scenario}: retain the unpaid peer snapshot`);
+      const snapshot = JSON.parse(snapshots[0]!.split(': ').slice(1).join(': '));
+      assert(
+        JSON.stringify(snapshot.missing_received) === JSON.stringify([channel!.label]),
+        `${scenario}: retain the exact missing receipt label`,
+      );
+      continue;
+    }
     // Deliver the latest room wake first. Leave the due peer timer uncalled.
     const wake = [...timers.values()].at(-1);
     // A blocked send keeps its 50 ms retry wake. Deliver it late at the run
@@ -403,6 +490,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
     await turn();
     assert(events.length === eventCount, `${scenario}: late completion cannot change cutoff`);
   } finally {
+    releaseOutput();
     release();
     socket?.onclose?.();
     await running;
