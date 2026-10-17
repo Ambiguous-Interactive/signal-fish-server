@@ -134,6 +134,11 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
   }
   class Connection {
     closed = false;
+    connectionState = 'connected';
+    signalingState = 'stable';
+    iceConnectionState = 'connected';
+    iceGatheringState = 'complete';
+    sctp = { state: 'connected', transport: { state: 'connected' } };
     ondatachannel: ((event: { channel: Channel }) => void) | null = null;
     constructor() {
       connection = this;
@@ -591,6 +596,16 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
         'name missing receipts',
       );
       if (live) {
+        assert(
+          snapshot.link.signalingState === 'stable' &&
+            snapshot.link.iceGatheringState === 'complete' &&
+            snapshot.link.dtlsState === 'connected' &&
+            snapshot.link.sctpState === 'connected' &&
+            snapshot.link.remoteDescriptionSet === true &&
+            snapshot.link.remoteCandidateCount === 0 &&
+            snapshot.link.pendingRemoteCandidates === 0,
+          `${scenario}: emitted timeout retains the current negotiation phases`,
+        );
         for (const label of ['reliable', 'unreliable']) {
           assert(
             snapshot.link.channels[label].readyState === 'open',

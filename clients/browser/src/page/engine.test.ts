@@ -351,3 +351,134 @@ for (const crippled of [false, true]) {
 console.error(
   'ok - crippled offer and answer ignore embedded ICE while healthy SDP stays intact',
 );
+
+// Establishment diagnostics must separate SDP, trickle ICE, and transport phases.
+for (const path of ['offer', 'answer'] as const) {
+  const originalPc = globalThis.RTCPeerConnection;
+  let connection!: TestConnection;
+  let rejectCandidate: ((error: Error) => void) | undefined;
+  let holdCandidate = false;
+  class TestConnection {
+    connectionState = 'connecting';
+    signalingState = 'stable';
+    iceConnectionState = 'checking';
+    iceGatheringState = 'gathering';
+    sctp: { state: string; transport: { state: string } } | null = {
+      state: 'connecting',
+      transport: { state: 'connecting' },
+    };
+    constructor() {
+      connection = this;
+    }
+    async setRemoteDescription(description: RTCSessionDescriptionInit): Promise<void> {
+      this.signalingState = description.type === 'offer' ? 'have-remote-offer' : 'stable';
+    }
+    async addIceCandidate(): Promise<void> {
+      if (holdCandidate)
+        await new Promise<void>((_resolve, reject) => {
+          rejectCandidate = reject;
+        });
+    }
+    createDataChannel(label: string): object {
+      return { label, readyState: 'connecting' };
+    }
+    async createOffer(): Promise<RTCSessionDescriptionInit> {
+      return { type: 'offer', sdp: 'local-offer' };
+    }
+    async createAnswer(): Promise<RTCSessionDescriptionInit> {
+      return { type: 'answer', sdp: 'local-answer' };
+    }
+    async setLocalDescription(description: RTCSessionDescriptionInit): Promise<void> {
+      this.signalingState = description.type === 'offer' ? 'have-local-offer' : 'stable';
+    }
+    close(): void {}
+  }
+  try {
+    globalThis.RTCPeerConnection = TestConnection as unknown as typeof RTCPeerConnection;
+    const engine = new Engine(false, {
+      onLocalCandidate: () => {},
+      onPcState: () => {},
+      onChannelOpen: () => {},
+      onChannelClosed: () => {},
+      onChannelMessage: () => {},
+    });
+    const snapshot = () => engine.diagnosticSnapshot('peer') as Record<string, unknown>;
+    assert(engine.diagnosticSnapshot('peer') === null, 'absent link has no phase snapshot');
+    await engine.pairWith('peer', path === 'answer', []);
+    let state = snapshot();
+    assert(
+      state['signalingState'] === (path === 'answer' ? 'have-local-offer' : 'stable') &&
+        state['iceGatheringState'] === 'gathering' &&
+        state['dtlsState'] === 'connecting' &&
+        state['remoteDescriptionSet'] === false &&
+        state['remoteCandidateCount'] === 0 &&
+        state['pendingRemoteCandidates'] === 0,
+      `${path}: snapshot exposes SDP and transport phases before remote negotiation`,
+    );
+    const candidate = JSON.stringify({ candidate: 'candidate-content', sdpMLineIndex: 0 });
+    await engine.handleRemoteCandidate('peer', candidate);
+    state = snapshot();
+    assert(
+      state['remoteCandidateCount'] === 1 && state['pendingRemoteCandidates'] === 1,
+      `${path}: snapshot identifies ICE waiting for the remote description`,
+    );
+    if (path === 'offer') await engine.handleOffer('peer', 'remote-sdp-content');
+    else await engine.handleAnswer('peer', 'remote-sdp-content');
+    holdCandidate = true;
+    const applying = engine.handleRemoteCandidate('peer', candidate);
+    state = snapshot();
+    assert(
+      state['remoteCandidateCount'] === 2 && state['pendingRemoteCandidates'] === 0,
+      'an admitted candidate can wait in the stack after leaving the engine queue',
+    );
+    rejectCandidate?.(new Error('stack rejected the candidate'));
+    let rejected = false;
+    try {
+      await applying;
+    } catch {
+      rejected = true;
+    }
+    assert(rejected, 'candidate application reports the stack rejection');
+    connection.iceGatheringState = 'complete';
+    connection.iceConnectionState = 'connected';
+    connection.sctp!.transport.state = 'connected';
+    state = snapshot();
+    assert(
+      state['signalingState'] === 'stable' &&
+        state['iceGatheringState'] === 'complete' &&
+        state['iceConnectionState'] === 'connected' &&
+        state['dtlsState'] === 'connected' &&
+        state['sctpState'] === 'connecting' &&
+        state['remoteDescriptionSet'] === true &&
+        state['remoteCandidateCount'] === 2 &&
+        state['pendingRemoteCandidates'] === 0,
+      `${path}: snapshot shows completed ICE and DTLS while SCTP still waits`,
+    );
+    const text = JSON.stringify(state);
+    assert(
+      !text.includes('candidate-content') && !text.includes('remote-sdp-content'),
+      'phase snapshot contains no negotiation payloads',
+    );
+    connection.sctp = null;
+    state = snapshot();
+    assert(
+      state['dtlsState'] === null && state['sctpState'] === null,
+      'unavailable transports remain explicit null states',
+    );
+    engine.removePeer('peer');
+    assert(engine.diagnosticSnapshot('peer') === null, 'retired link has no phase snapshot');
+    await engine.pairWith('peer', false, []);
+    state = snapshot();
+    assert(
+      state['generation'] === 2 &&
+        state['remoteDescriptionSet'] === false &&
+        state['remoteCandidateCount'] === 0 &&
+        state['pendingRemoteCandidates'] === 0,
+      'replacement diagnostics start a fresh physical negotiation',
+    );
+    engine.removePeer('peer');
+  } finally {
+    globalThis.RTCPeerConnection = originalPc;
+  }
+}
+console.error('ok - browser phase snapshots distinguish SDP, ICE, DTLS, and SCTP progress');
