@@ -418,12 +418,13 @@ console.error('ok - join handshake excludes credential tags from event and stder
 
 // Regressions #851/#937: a restored peer needs fresh traffic from a fresh link.
 // Drive the real dispatcher; a generation-only rebuild keeps prior receipts.
-for (const [membershipEvent, departure] of [
-  ['PlayerReconnected', true],
-  ['PlayerJoined', true],
-  ['PlayerReconnected', false],
-  ['PlayerJoined', false],
-  [null, false],
+for (const [membershipEvent, departure, afterCutoff] of [
+  ['PlayerReconnected', true, false],
+  ['PlayerJoined', true, false],
+  ['PlayerReconnected', false, false],
+  ['PlayerJoined', false, false],
+  [null, false, false],
+  ['PlayerReconnected', false, true],
 ] as const) {
   const peerRestored = membershipEvent !== null;
   const originalSocket = globalThis.WebSocket;
@@ -586,9 +587,15 @@ for (const [membershipEvent, departure] of [
           const event = JSON.parse(line) as Record<string, unknown>;
           events.push(event);
           const receipts = events.filter((item) => item['event'] === 'channel_message');
-          if (!restoreSent && receipts.length === invalidReceiptCount + 2) {
+          if (
+            !restoreSent &&
+            (afterCutoff
+              ? event['event'] === 'success_criteria_met'
+              : receipts.length === invalidReceiptCount + 2)
+          ) {
             restoreSent = true;
             queueMicrotask(() => {
+              if (afterCutoff) virtualNow += 3000;
               if (peerRestored) {
                 if (departure) {
                   socket.deliver({
@@ -696,7 +703,7 @@ for (const [membershipEvent, departure] of [
       );
       // A host task turn drains the input chain. The virtual clock owns all
       // deadlines, so host scheduling cannot race receipts against the linger.
-      released = true;
+      released = !afterCutoff;
       virtualNow += 100;
       socket.deliver({ type: 'Pong' });
       await turn();
@@ -719,6 +726,12 @@ for (const [membershipEvent, departure] of [
             : { type: 'PlayerJoined', data: { player: { id: peer, epoch: 2, seq: 0 } } },
         );
         await turn();
+        released = true;
+        virtualNow += 300;
+        socket.deliver({ type: 'Pong' });
+        await turn();
+      }
+      if (afterCutoff) {
         virtualNow += 300;
         socket.deliver({ type: 'Pong' });
         await turn();

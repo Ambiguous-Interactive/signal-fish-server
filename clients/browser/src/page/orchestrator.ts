@@ -2407,6 +2407,17 @@ class Orchestrator {
     let complete = true;
     for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL]) {
       this.assertActive();
+      if (
+        monotonicNowMs() >= this.runDeadline &&
+        !shouldDeferSuccessAtRunDeadline(
+          this.config.successReleaseEnabled,
+          this.successCriteriaReported,
+          this.successReleaseGranted,
+          this.lingerUntil,
+        )
+      ) {
+        return false;
+      }
       if (this.exchangeLedger.hasSent(peer, label)) {
         continue;
       }
