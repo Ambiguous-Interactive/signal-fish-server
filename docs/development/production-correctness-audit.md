@@ -4447,3 +4447,13 @@ All executable and bundle hashes match before and after those runs; only the
 native binary differs from the baseline capture. Native and root strict
 Clippy, formatting, CI configuration, Markdown, and documentation checks pass.
 Hosted final-head CI and feedback remain publication gates.
+
+The first hosted native run passes 244 unit controls but the new fixture
+misses queued relay input. Its server task drops the socket immediately after
+sending Close, while client output can remain unread. The fixture now retains
+the socket until the client stops and checks the intended close reason.
+With that lifetime fix, the regression still fails against the original
+production code in Nextest `21299aec`: two sends start instead of one.
+The production repair is unchanged.
+The corrected fixture passes 20 consecutive focused stress runs. All 15
+retry/exchange controls and strict native Clippy pass again.

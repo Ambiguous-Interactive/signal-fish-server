@@ -387,6 +387,7 @@ async fn immediate_exchange_services_relay_before_the_next_label() {
         })
     }));
     state.pong_deadline = Some(Instant::now() + PONG_TIMEOUT);
+    let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {
         started_rx.await.unwrap();
         for message in [
@@ -409,6 +410,7 @@ async fn immediate_exchange_services_relay_before_the_next_label() {
         }
         server_ws.send(Message::Close(None)).await.unwrap();
         release_tx.send(()).unwrap();
+        finished_rx.await.unwrap();
     });
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         for event in opens {
@@ -418,8 +420,13 @@ async fn immediate_exchange_services_relay_before_the_next_label() {
     })
     .await
     .expect("signaling must remain responsive during immediate exchange");
+    finished_tx.send(()).unwrap();
     task.await.unwrap();
-    assert!(result.is_err(), "the queued close must end the session");
+    let error = result.expect_err("the queued close must end the session");
+    assert!(
+        error.message.contains("websocket closed by server"),
+        "{error:?}"
+    );
     assert!(
         state.relay_received_from.contains(&peer),
         "apply queued relay traffic"
