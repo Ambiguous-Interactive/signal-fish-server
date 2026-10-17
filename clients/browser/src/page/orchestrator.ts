@@ -770,6 +770,8 @@ class Orchestrator {
   private readonly exchangeSentChannels = new WeakSet<RTCDataChannel>();
   private readonly pendingExchangePeers = new Set<string>();
   private pendingExchangeReceipts = 0;
+  private readonly admittedRelayReceipts = new WeakSet<ServerFrame>();
+  private pendingRelayReceipts = 0;
   private readonly reportedExchangeDiagnostics = new Set<string>();
   private exchangeRetryAt: number | null = null;
   private readonly pendingSignals = new Map<string, unknown[]>();
@@ -1201,6 +1203,8 @@ class Orchestrator {
   }
 
   private onServerInput(data: unknown): void {
+    // Arrival owns relay eligibility even when decoding or output runs late.
+    const relayWindowOpen = this.exchangeWindowOpen();
     if (this.finished || this.handshakeFatal !== null) return;
     const wireBytes =
       typeof data === 'string'
@@ -1238,7 +1242,24 @@ class Orchestrator {
       this.failFatal(FatalError.protocol(`invalid ServerMessage frame: ${describe(error)}`));
       return;
     }
-    this.routeServerFrame({ frame, release });
+    const payload = frame.data['data'];
+    const isRelayReceipt =
+      frame.type === 'GameDataBinary' ||
+      (frame.type === 'GameData' &&
+        typeof payload === 'object' &&
+        payload !== null &&
+        'relay_msg' in payload);
+    if (relayWindowOpen && this.config.relayPayload !== null && isRelayReceipt) {
+      this.admittedRelayReceipts.add(frame);
+      this.pendingRelayReceipts += 1;
+    }
+    this.routeServerFrame({
+      frame,
+      release: () => {
+        if (this.admittedRelayReceipts.delete(frame)) this.pendingRelayReceipts -= 1;
+        release();
+      },
+    });
   }
 
   private routeServerFrame(retained: RetainedServerFrame): void {
@@ -1407,8 +1428,9 @@ class Orchestrator {
       return;
     }
     const now = monotonicNowMs();
-    // Drain already-arrived exchange receipts before judging the cutoff.
-    if (now >= this.runDeadline && this.pendingExchangeReceipts > 0) return;
+    // Drain already-arrived gameplay receipts before judging the cutoff.
+    if (now >= this.runDeadline && this.pendingExchangeReceipts + this.pendingRelayReceipts > 0)
+      return;
 
     // Mandatory keepalive: send `Ping` on cadence and demand a timely `Pong`.
     // An unanswered ping is a broken connection or control path — fail loudly
@@ -1595,6 +1617,8 @@ class Orchestrator {
   // -------------------------------------------------------------------------
 
   private async handleServerMessage(frame: ServerFrame): Promise<void> {
+    const admittedRelayReceipt = this.admittedRelayReceipts.delete(frame);
+    if (admittedRelayReceipt) this.pendingRelayReceipts -= 1;
     // ANY inbound frame proves the connection and the server are alive, so it
     // satisfies the keepalive liveness check — not just `Pong`. Cleared BEFORE
     // dispatch, so the very frame that kicks off a long handler (e.g. WebRTC
@@ -1822,7 +1846,7 @@ class Orchestrator {
           payload !== null &&
           'relay_msg' in (payload as Record<string, unknown>)
         ) {
-          this.relayReceivedFrom.add(from);
+          if (admittedRelayReceipt) this.relayReceivedFrom.add(from);
         }
         this.emit({ event: 'game_data_received', from, payload });
         break;
@@ -1844,7 +1868,7 @@ class Orchestrator {
         // frames, so every decoded frame from a peer satisfies the
         // relay-received criterion exactly like the text `relay_msg` arm
         // (#627); the opaque payload cannot be inspected for that key.
-        this.relayReceivedFrom.add(from);
+        if (admittedRelayReceipt) this.relayReceivedFrom.add(from);
         // Event-stream parity with the native client (#627): surface the
         // receipt losslessly (encoding token + base64 payload) instead of
         // guessing at the opaque bytes.
@@ -2557,25 +2581,33 @@ class Orchestrator {
 
   /** Send the `--relay-payload` GameData over the relay floor. */
   private sendRelayPayload(): void {
+    if (!this.exchangeWindowOpen()) return;
     if (this.config.relayPayload === null) {
       this.relaySent = true;
       return;
     }
+    let sent = false;
+    const sendEncodedFrame = (frame: string | ArrayBuffer) => {
+      if (!this.exchangeWindowOpen()) return;
+      this.sendRawFrame(frame);
+      sent = true;
+    };
     if (this.effectiveFormat === 'json') {
-      sendGameData((frame) => this.sendFrame(frame), {
+      sendGameData(sendEncodedFrame, {
         relay_msg: this.config.relayPayload,
       });
     } else if (this.effectiveFormat === 'message_pack') {
-      sendMessagePackGameData((frame) => this.sendBinaryFrame(frame), {
+      sendMessagePackGameData(sendEncodedFrame, {
         relay_msg: this.config.relayPayload,
       });
     } else {
       // Opaque negotiation relays the raw payload as one binary frame (#627).
       sendOpaqueGameData(
-        (frame) => this.sendBinaryFrame(frame),
+        sendEncodedFrame,
         encodeOpaqueRelayProbe(this.myId, new TextEncoder().encode(this.config.relayPayload)),
       );
     }
+    if (!sent) return;
     this.relaySent = true;
     this.relaySendAt = null;
     this.emit({ event: 'game_data_sent' });
@@ -2596,10 +2628,6 @@ class Orchestrator {
   }
 
   private sendFrame(frame: string): void {
-    this.sendRawFrame(frame);
-  }
-
-  private sendBinaryFrame(frame: ArrayBuffer): void {
     this.sendRawFrame(frame);
   }
 
