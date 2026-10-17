@@ -30,6 +30,8 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
     'linger-received-unreliable',
     'linger-sent-reliable',
     'linger-sent-unreliable',
+    'linger-replacement-sent-reliable',
+    'linger-replacement-sent-unreliable',
     'linger-queued-received-reliable',
     'linger-queued-received-unreliable',
     'answered',
@@ -57,6 +59,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
   const originalError = console.error;
   const diagnostics: string[] = [];
   const linger = scenario.startsWith('linger-');
+  const replacementLinger = scenario.startsWith('linger-replacement-');
   let successReleased = false;
   let freshExchange = false;
   const latePeer = '00000000-0000-0000-0000-000000000003';
@@ -116,7 +119,10 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
       sendAttempts.push({ label: this.label, at: now });
       if (
         scenario === `live-sent-${this.label}` ||
-        (freshExchange && scenario === `linger-sent-${this.label}` && now < cutoff) ||
+        (freshExchange &&
+          scenario.includes('sent-') &&
+          scenario.endsWith(`-${this.label}`) &&
+          now < cutoff) ||
         (scenario === `late-sent-${this.label}` && now < 1100) ||
         (scenario === `recovered-sent-${this.label}` && now < 500)
       )
@@ -353,18 +359,23 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
         'release arms the original linger cutoff',
       );
       freshExchange = true;
+      const freshPeer = replacementLinger ? peer : latePeer;
+      const freshGeneration = replacementLinger ? latePeer : me;
       socket.deliver('SessionPlan', {
-        generation: me,
+        generation: freshGeneration,
         topology: 'mesh',
         transport: 'webrtc',
         fallback: 'relay',
         ice_servers: [],
-        peers: [peer, latePeer].map((player_id) => ({ player_id, initiate: false })),
+        peers: (replacementLinger ? [peer] : [peer, latePeer]).map((player_id) => ({
+          player_id,
+          initiate: false,
+        })),
       });
       await turn();
       socket.deliver('Signal', {
-        from: latePeer,
-        generation: me,
+        from: freshPeer,
+        generation: freshGeneration,
         signal: { Offer: 'extra-peer' },
       });
       await turn();
@@ -375,13 +386,13 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
         connection.ondatachannel?.({ channel });
         channel.readyState = 'open';
         channel.onopen?.();
-        if (scenario.startsWith('linger-sent-') || !scenario.endsWith(`-${label}`))
+        if (scenario.includes('sent-') || !scenario.endsWith(`-${label}`))
           channel.onmessage?.({
-            data: JSON.stringify({ from: latePeer, channel: label, seq: 0 }),
+            data: JSON.stringify({ from: freshPeer, channel: label, seq: 0 }),
           });
       }
       socket.deliver('PeerTransportStatus', {
-        peer_id: latePeer,
+        peer_id: freshPeer,
         transport: 'webrtc',
         connected: true,
       });
@@ -397,11 +408,11 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
         assert(outputHeld, 'prior output holds the fresh receipt handler');
       }
       now = cutoff;
-      if (scenario.startsWith('linger-sent-')) {
+      if (scenario.includes('sent-')) {
         socket.deliver('Pong');
       } else {
         missing.onmessage?.({
-          data: JSON.stringify({ from: latePeer, channel: missing.label, seq: 0 }),
+          data: JSON.stringify({ from: freshPeer, channel: missing.label, seq: 0 }),
         });
       }
       if (scenario.startsWith('linger-queued-')) {
@@ -460,7 +471,9 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
       await turn();
       assert(result === 0, `${scenario}: successful pre-cutoff retry can complete the run`);
       assert(
-        sendAttempts.some((attempt) => attempt.at === 500 && scenario.endsWith(attempt.label)),
+        sendAttempts.some(
+          (attempt) => attempt.at === 500 && scenario.endsWith(`-${attempt.label}`),
+        ),
         `${scenario}: retry the unpaid label before cutoff`,
       );
       assert(

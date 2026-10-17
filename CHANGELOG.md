@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Resend reference-client gameplay probes on replacement peer links so lost old-link probes can recover (#1035).
 - Count timely queued reference-client receipts and valid pending sends within their exchange windows,
   including after room restore (#1031, #1033, #1034).
 - Keep late browser reference-client exchange receipts from reporting success after the run deadline (#1029).

@@ -130,7 +130,7 @@ Exactly one of `--create-room` / `--join-code` is required; everything else has 
 | `--player-name <NAME>` | `RefNative` | Display name |
 | `--app-id <ID>` | `reference-native-app` | Public `Authenticate.app_id` (interop servers use an open app-ID policy) |
 | `--platform <P>` | `reference-native` | `Authenticate.platform` |
-| `--exchange` | off | When a P2P pair fully opens, send exactly one text message per channel and require the symmetric receives (see success criteria) |
+| `--exchange` | off | When each physical P2P pair fully opens, send one text message per channel and require the symmetric receives (see success criteria) |
 | `--exchange-release-file <PATH>` | — | Test harness only; requires `--exchange`. Establish every planned pair and finish local ICE gathering, emit `exchange_ready`, then hold the exact channel exchange until PATH exists. Normal exchange behavior is unchanged when omitted |
 | `--p2p-rebuild-release-file <PATH>` | — | Loss-harness only; requires `--exchange-release-file` and a nonzero `--p2p-retry-count`. The final retry attempt is reserved: after `exchange_ready`, wait for PATH, then have each pair's designated initiator trigger that coordinated clean-path PairRetry rebuild before exchange release |
 | `--unreliable-exchange-release-file <PATH>` | — | Loss-harness only; requires `--exchange-release-file`. After its first gate opens, send and receive the exact reliable message across every planned pair and emit `exchange_reliable_ready`, then hold the exact unreliable message until PATH exists |
@@ -230,6 +230,9 @@ state; sender watermarks establish the post-restore delivery baseline.
 When another peer reconnects or rejoins with the same ID, `--exchange` requires
 fresh sends and receipts on both channels for that peer. Other peers retain
 their completed exchange. A transport rebuild alone retains exchange evidence.
+Each replacement link sends the probes again within the existing exchange window.
+This lets a peer recover a probe lost with the old link. Duplicate valid probes
+do not add new receive obligations.
 
 The client keeps the first data channel for each label in a peer connection.
 It closes duplicate channels so they cannot replace a working channel.

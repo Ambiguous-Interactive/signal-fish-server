@@ -209,8 +209,15 @@ async fn native_retry_rebuilds_browser_link_before_gameplay() {
     assert_eq!(native_plan["peers"][0]["initiate"], true);
     std::fs::write(&rebuild, b"rebuild").unwrap();
     let (native_retry, browser_retry) = tokio::join!(
-        std::panic::AssertUnwindSafe(native.await_event("p2p_pair_reconnected", EVENT_TIMEOUT))
-            .catch_unwind(),
+        std::panic::AssertUnwindSafe(async {
+            native
+                .await_event("p2p_pair_reconnected", EVENT_TIMEOUT)
+                .await;
+            while events_named(&native.events, "channel_message").len() < 4 {
+                native.await_event("channel_message", EVENT_TIMEOUT).await;
+            }
+        })
+        .catch_unwind(),
         std::panic::AssertUnwindSafe(async {
             while events_named(&browser.events, "channel_open").len() < 4 {
                 browser.await_event("channel_open", EVENT_TIMEOUT).await;
@@ -255,10 +262,23 @@ async fn native_retry_rebuilds_browser_link_before_gameplay() {
         );
         assert_eq!(
             events_named(&client.events, "channel_message_sent").len(),
-            2
+            if client.name == "retry-browser-host" {
+                4
+            } else {
+                2
+            }
         );
         let messages = events_named(&client.events, "channel_message");
-        assert_eq!(messages.len(), 2, "{}", client.diagnostics());
+        assert_eq!(
+            messages.len(),
+            if client.name == "retry-browser-host" {
+                2
+            } else {
+                4
+            },
+            "{}",
+            client.diagnostics()
+        );
         let remote = if client.name == "retry-browser-host" {
             &native_id
         } else {

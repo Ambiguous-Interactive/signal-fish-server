@@ -1,10 +1,11 @@
-import { run } from './orchestrator.js';
+import { ExchangeLedger, run } from './orchestrator.js';
 import { EXIT_CONNECTION_ERROR, EXIT_CRITERIA_UNMET, type RunConfig } from '../shared/types.js';
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
+// Regression #1035: replacement probes can pay receipts lost on the old link.
 // Drive real dispatch and engine callbacks in both server-assigned roles.
 // Clock steps must preserve run, retry, and replacement deadlines (#921, #925).
 const retryScenarios = (
@@ -37,6 +38,16 @@ const authoritativeScenarios = ([false, true] as const).flatMap((initiate) =>
 for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep, retryAuthoritative] of [
   ...retryScenarios.map((scenario) => [...scenario, true] as const),
   ...runTimeoutScenarios.map((scenario) => [...scenario, true] as const),
+  ...([false, true] as const).flatMap((initiate) =>
+    (
+      [
+        'deferred-reliable',
+        'deferred-unreliable',
+        'retired-reliable',
+        'retired-unreliable',
+      ] as const
+    ).map((outcome) => [initiate, false, outcome, 0, false] as const),
+  ),
   ...authoritativeScenarios,
   ...([false, true] as const).map(
     (initiate) => [initiate, false, 'send-failed', 0, false] as const,
@@ -63,12 +74,18 @@ for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep, retryAuth
   let released = false;
   let settled = false;
   let failWrites = false;
+  let resendAllowed = false;
+  const deferredResend =
+    replacementOutcome.startsWith('deferred-') || replacementOutcome.startsWith('retired-');
   let socket!: Socket;
   let guard: ReturnType<typeof setTimeout> | undefined;
   const connections: Connection[] = [];
   const events: Record<string, unknown>[] = [];
   const sent: Record<string, unknown>[] = [];
   const turn = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const remoteExchange = new ExchangeLedger();
+  remoteExchange.noteConnected(me);
+  for (const label of ['reliable', 'unreliable']) remoteExchange.noteSent(me, label);
   class Channel {
     readyState = 'connecting';
     bufferedAmount = 0;
@@ -82,7 +99,20 @@ for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep, retryAuth
       this.ordered = label === 'reliable';
       this.maxRetransmits = this.ordered ? null : 0;
     }
-    send(): void {}
+    send(): void {
+      const physicalLink = connections.findIndex((connection) =>
+        connection.channels.includes(this),
+      );
+      if (
+        deferredResend &&
+        physicalLink === 2 &&
+        replacementOutcome.endsWith(`-${this.label}`) &&
+        !resendAllowed
+      )
+        throw new Error('replacement send is not ready');
+      // The old transport accepts these probes but loses them before delivery.
+      if (physicalLink >= 2) remoteExchange.noteReceived(me, this.label);
+    }
     close(): void {
       this.readyState = 'closed';
       this.onclose?.();
@@ -386,6 +416,10 @@ for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep, retryAuth
         events.filter((e) => e['event'] === 'channel_message').length === 2,
         'replacement exchanges both labels',
       );
+      assert(
+        remoteExchange.unpaidPeers().includes(me),
+        'accepted old-link sends can leave the remote exchange unpaid',
+      );
       // UDP channel close can arrive before the retry marker on the signaling socket.
       if (closeBeforeRetry) {
         replacement?.channels[0]?.close();
@@ -433,13 +467,62 @@ for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep, retryAuth
       await turn();
       rebuilt?.open();
       await turn();
+      if (deferredResend) {
+        released = true;
+        now += 100;
+        socket.deliver({ type: 'Pong' });
+        await turn();
+        now += 300;
+        socket.deliver({ type: 'Pong' });
+        await turn();
+        assert(
+          !settled,
+          'old logical evidence cannot finish while replacement sends are pending',
+        );
+        assert(
+          remoteExchange.unpaidPeers().includes(me),
+          'the deferred replacement still owes a remote receipt',
+        );
+        if (replacementOutcome.startsWith('retired-')) {
+          socket.deliver({
+            type: 'PlayerLeft',
+            data: { player_id: peer, epoch: 1, final_seq: 0 },
+          });
+          await turn();
+        } else {
+          resendAllowed = true;
+          now += 50;
+          socket.deliver({ type: 'Pong' });
+          await turn();
+          assert(
+            remoteExchange.unpaidPeers().length === 0,
+            'the successful retry pays the remote receipt',
+          );
+          assert(
+            events.filter((event) => event['event'] === 'channel_message_sent').length === 4,
+            'retry only the unpaid physical label',
+          );
+        }
+        now += 249;
+        socket.deliver({ type: 'Pong' });
+        await turn();
+        assert(!settled, 'the replacement completion starts a full exit linger');
+        now += 1;
+        socket.deliver({ type: 'Pong' });
+        assert((await running) === 0, 'completed or retired physical sends permit success');
+        return;
+      }
       assert(
         events.filter((e) => e['event'] === 'p2p_pair_connected').length === 1,
         'physical retries keep one logical pair event',
       );
       assert(
-        events.filter((e) => e['event'] === 'channel_message_sent').length === 2,
-        'physical retry preserves completed exchange debt',
+        events.filter((e) => e['event'] === 'channel_message_sent').length === 4,
+        'physical retry sends both probes once on the replacement link',
+      );
+      assert(
+        remoteExchange.unpaidPeers().length === 0,
+        'replacement probes pay remote receipt debt without clearing local evidence',
       );
       assert(
         rebuilt?.offers === (initiate ? 1 : 0) && rebuilt?.answers === (initiate ? 0 : 1),
@@ -506,8 +589,8 @@ for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep, retryAuth
           'replacement retains one logical pair event',
         );
         assert(
-          events.filter((e) => e['event'] === 'channel_message_sent').length === 2,
-          'replacement retains the logical exchange',
+          events.filter((e) => e['event'] === 'channel_message_sent').length === 6,
+          'authoritative replacement sends both probes once despite duplicate open callbacks',
         );
       } else if (replacementOutcome === 'timeout') {
         now += 1000;

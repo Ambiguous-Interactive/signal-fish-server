@@ -327,6 +327,7 @@ fn is_exchange_probe(peer: PlayerId, label: &str, text: &str) -> bool {
 struct ExchangeLedger {
     obligations: BTreeSet<PlayerId>,
     sent: BTreeMap<PlayerId, BTreeSet<String>>,
+    sent_on_current_link: BTreeMap<PlayerId, BTreeSet<String>>,
     received: BTreeMap<PlayerId, BTreeSet<String>>,
 }
 
@@ -339,17 +340,33 @@ impl ExchangeLedger {
     /// but require fresh bidirectional traffic instead of old receipts.
     fn reset_incarnation(&mut self, peer: PlayerId) {
         self.sent.remove(&peer);
+        self.sent_on_current_link.remove(&peer);
         self.received.remove(&peer);
     }
 
+    #[cfg(test)]
     fn has_sent(&self, peer: PlayerId, label: &str) -> bool {
         self.sent
             .get(&peer)
             .is_some_and(|labels| labels.contains(label))
     }
 
+    fn note_link_open(&mut self, peer: PlayerId) {
+        self.sent_on_current_link.remove(&peer);
+    }
+
+    fn has_sent_on_current_link(&self, peer: PlayerId, label: &str) -> bool {
+        self.sent_on_current_link
+            .get(&peer)
+            .is_some_and(|labels| labels.contains(label))
+    }
+
     fn note_sent(&mut self, peer: PlayerId, label: &str) {
         self.sent.entry(peer).or_default().insert(label.to_string());
+        self.sent_on_current_link
+            .entry(peer)
+            .or_default()
+            .insert(label.to_string());
     }
 
     fn note_received(&mut self, peer: PlayerId, label: String) {
@@ -2347,7 +2364,7 @@ impl Orchestrator<'_> {
         SendFuture: Future<Output = webrtc::error::Result<()>>,
     {
         for &label in labels {
-            if self.exchange_ledger.has_sent(peer, label) {
+            if self.exchange_ledger.has_sent_on_current_link(peer, label) {
                 continue;
             }
             let text = format!(
@@ -3378,6 +3395,7 @@ impl Orchestrator<'_> {
         }
         if self.cli.exchange {
             self.exchange_ledger.note_connected(peer);
+            self.exchange_ledger.note_link_open(peer);
         }
         if self.cli.exchange && self.exchange_released {
             let labels = if self.unreliable_exchange_released {
@@ -3750,6 +3768,20 @@ impl Orchestrator<'_> {
             // exchange vacuously successful. Never-connected fallback peers
             // create no debt and remain governed by transport status.
             unmet.extend(self.exchange_ledger.unmet_criteria());
+            if self.exchange_released {
+                for peer in &self.connected_pairs {
+                    for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                        if label == UNRELIABLE_LABEL && !self.unreliable_exchange_released {
+                            continue;
+                        }
+                        if !self.exchange_ledger.has_sent_on_current_link(*peer, label) {
+                            unmet.push(format!(
+                                "exchange probe pending on current {label} channel to {peer}"
+                            ));
+                        }
+                    }
+                }
+            }
         }
         if self.cli.relay_payload.is_some() {
             if !self.relay_sent {

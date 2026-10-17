@@ -767,6 +767,7 @@ class Orchestrator {
   private readonly relayReceivedFrom = new Set<string>();
   private readonly peerStatusFrom = new Set<string>();
   private readonly exchangeLedger = new ExchangeLedger();
+  private readonly exchangeSentChannels = new WeakSet<RTCDataChannel>();
   private readonly pendingExchangePeers = new Set<string>();
   private pendingExchangeReceipts = 0;
   private readonly reportedExchangeDiagnostics = new Set<string>();
@@ -2424,7 +2425,8 @@ class Orchestrator {
   }
 
   /**
-   * Try to send all still-unsent exchange labels for a connected pair.
+   * Send each exchange probe once per physical channel. Logical evidence
+   * survives rebuilds, but a successful old-link send may never reach the peer.
    *
    * Browser data-channel open callbacks and `send()` readiness can be slightly
    * reordered in Chromium under load. The pair remains valid; defer the send
@@ -2438,9 +2440,6 @@ class Orchestrator {
       if (!this.exchangeWindowOpen()) {
         return false;
       }
-      if (this.exchangeLedger.hasSent(peer, label)) {
-        continue;
-      }
       const channel = this.engine.channel(peer, label);
       if (channel === undefined) {
         const diagnosticKey = `missing\0${peer}\0${label}`;
@@ -2452,6 +2451,9 @@ class Orchestrator {
           });
         }
         complete = false;
+        continue;
+      }
+      if (this.exchangeSentChannels.has(channel)) {
         continue;
       }
       if (channel.readyState !== 'open') {
@@ -2475,6 +2477,7 @@ class Orchestrator {
         complete = false;
         continue;
       }
+      this.exchangeSentChannels.add(channel);
       this.exchangeLedger.noteSent(peer, label);
       this.emit({ event: 'channel_message_sent', peer, label, text });
     }
@@ -2671,6 +2674,11 @@ class Orchestrator {
       // A connected peer's logical debt survives later membership or physical
       // transport teardown. Never-connected fallback peers create no debt.
       unmet.push(...this.exchangeLedger.unmetCriteria());
+      for (const peer of this.pendingExchangePeers) {
+        if (this.connectedPairs.has(peer)) {
+          unmet.push(`exchange sends pending (${peer})`);
+        }
+      }
     }
     if (this.config.relayPayload !== null) {
       if (!this.relaySent) {
