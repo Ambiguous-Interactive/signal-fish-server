@@ -347,6 +347,7 @@ async fn flood_until_rejected(
                     label,
                     text,
                     queue_permit,
+                    ..
                 } => {
                     assert_eq!(peer, pair.sender_id);
                     assert_eq!(generation, pair.receiver.peers[&pair.sender_id].generation);

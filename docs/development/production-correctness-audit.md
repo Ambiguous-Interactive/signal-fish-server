@@ -4549,3 +4549,42 @@ relay. Godot uses its engine-owned WebRTC mesh. None uses this private browser
 run scheduler, so all three are unaffected. No server message, SDK API, channel
 mode, or default changes. Hosted current-head CI and feedback remain delivery
 gates.
+
+### F84 — Queued native receipts can miss the run cutoff
+
+Issue #1031, found at `5933b6be` while continuing #826, #853, and #889.
+The native loop checks its run deadline before consuming queued engine events.
+A required receipt already queued before expiry can remain unpaid, causing
+criteria-unmet exit despite completed exchange. The receive handler also lacks
+arrival evidence, so draining alone could count a late receipt as timely.
+
+Baseline Nextest `1dd55357` fails with exit one instead of zero while the last
+reliable receipt is queued. The engine now records monotonic publication time
+on each message. At expiry, the orchestrator consumes the existing callback
+queue in FIFO order before judging success. It credits only pre-cutoff receipts
+from the current physical link. Late traffic remains visible in event output.
+The queue snapshot bounds the drain; new traffic cannot renew the run window.
+
+Controls cover both labels, zero and default P2P windows, arrivals one
+millisecond before, exactly at, and one millisecond after expiry, queued
+receipts, stale and removed links, close-before-message and message-before-close
+ordering, and fresh exchange during explicit held-success restore. Removing
+only the arrival guard makes the exact-cutoff control fail. Existing deadlines,
+missing-label debt, callback permits, and held-success behavior remain in force.
+This is a controlled history; it does not identify the historical causes of
+issues #853 or #889. Both remain open with their original acceptance.
+
+Current external SDK READMEs were inspected through the GitHub connector.
+Rust supplies signaling without a WebRTC backend. .NET supplies signaling and
+relay. Godot uses its engine-owned WebRTC mesh. None uses this native reference
+orchestrator; all three are unaffected. No server message, SDK API, channel
+mode, or default changes.
+
+Final scoped Nextest `2988f038` passes all 19 exchange, retry, membership, and
+receipt controls. The new matrix covers 44 histories. Baseline and final live
+captures each pass three native restores and three three-player meshes, with
+15 endpoint streams, 60 sends, 60 receipts, and stable before/after executable
+and bundle hashes. Only the native binary changes between capture sets.
+Strict native and root Clippy, formatting, CI configuration, Markdown, and
+documentation checks pass. Hosted current-head CI and feedback remain delivery
+gates.

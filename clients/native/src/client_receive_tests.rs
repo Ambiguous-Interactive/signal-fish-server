@@ -341,6 +341,7 @@ async fn fresh_membership_retires_old_links_before_the_replacement_plan() {
                     label: label.to_string(),
                     text: json!({"from": peer, "channel": label, "seq": 0}).to_string(),
                     queue_permit: crate::engine::MessageQueuePermit::for_test(),
+                    received_at: tokio::time::Instant::now(),
                 })
                 .await
                 .unwrap();
@@ -403,6 +404,7 @@ async fn fresh_membership_retires_old_links_before_the_replacement_plan() {
                     label: label.to_string(),
                     text: json!({"from": peer, "channel": label, "seq": 0}).to_string(),
                     queue_permit: crate::engine::MessageQueuePermit::for_test(),
+                    received_at: tokio::time::Instant::now(),
                 })
                 .await
                 .unwrap();
@@ -635,5 +637,141 @@ async fn handshake_writes_reject_expired_commands_without_polling_the_sink() {
         let result = send_handshake_message(&mut sink, &ClientMessage::Ping, deadline).await;
         assert_eq!(result.unwrap_err().code, EXIT_CONNECTION_ERROR);
         assert_eq!(calls.get(), 0, "expired commands cannot reach the sink");
+    }
+}
+
+// Regression #1031: queue service must preserve the original receipt window.
+#[tokio::test]
+async fn queued_exchange_receipts_complete_before_the_run_cutoff() {
+    for (label, mode, p2p_timeout) in
+        [RELIABLE_LABEL, UNRELIABLE_LABEL]
+            .into_iter()
+            .flat_map(|label| {
+                [
+                    "queued",
+                    "on-time",
+                    "exact",
+                    "late",
+                    "queued-exact",
+                    "queued-late",
+                    "stale",
+                    "retired",
+                    "closed-before",
+                    "closed-after",
+                    "held-restore",
+                ]
+                .into_iter()
+                .flat_map(move |mode| ["0", "15"].map(|timeout| (label, mode, timeout)))
+            })
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(tcp).await.unwrap()
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let _server_ws = server.await.unwrap();
+        let release_dir = tempfile::tempdir().unwrap();
+        let release_file = release_dir.path().join("release");
+        let mut args = vec![
+            "reference-native",
+            "--server-url",
+            &url,
+            "--create-room",
+            "--exchange",
+            "--peers",
+            "1",
+            "--p2p-timeout-secs",
+            p2p_timeout,
+        ];
+        if mode == "held-restore" {
+            args.extend(["--success-release-file", release_file.to_str().unwrap()]);
+        }
+        let cli = Cli::parse_from(args);
+        let peer = PlayerId::from_u128(2);
+        let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+        state.engine.pair_with(peer, false, &[]).await.unwrap();
+        state.game_started = true;
+        state.connected_pairs.insert(peer);
+        state.exchange_ledger.note_connected(peer);
+        for other in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            state.exchange_ledger.note_sent(peer, other);
+            if other != label {
+                state.exchange_ledger.note_received(peer, other.to_string());
+            }
+        }
+        if mode == "retired" {
+            state.engine.remove_peer(peer).await.unwrap();
+        }
+        let (events, queued) = tokio::sync::mpsc::unbounded_channel();
+        state.engine_rx = queued;
+        tokio::time::pause();
+        state.run_deadline = Deadline::after(Instant::now(), Duration::from_secs(1));
+        state.next_ping_at = Instant::now() + Duration::from_secs(60);
+        let elapsed = match mode {
+            "exact" | "queued-exact" => Duration::from_secs(1),
+            "late" | "queued-late" | "held-restore" => Duration::from_millis(1001),
+            _ => Duration::from_millis(999),
+        };
+        tokio::time::advance(elapsed).await;
+        state.success_criteria_reported = mode == "held-restore";
+        let event = EngineEvent::ChannelMessage {
+            peer,
+            generation: if mode == "stale" { 0 } else { 1 },
+            label: label.to_string(),
+            text: json!({"from": peer, "channel": label, "seq": 0}).to_string(),
+            queue_permit: crate::engine::MessageQueuePermit::for_test(),
+            received_at: Instant::now(),
+        };
+        let closed = || EngineEvent::ChannelClosed {
+            peer,
+            generation: 1,
+            label: label.to_string(),
+        };
+        if mode == "closed-before" {
+            events.send(closed()).unwrap();
+        }
+        if matches!(mode, "on-time" | "exact" | "late" | "held-restore") {
+            state.handle_engine_event(event).await.unwrap();
+        } else {
+            events.send(event).unwrap();
+        }
+        if mode == "closed-after" {
+            events.send(closed()).unwrap();
+        }
+        if elapsed < Duration::from_secs(1) {
+            tokio::time::advance(Duration::from_secs(1) - elapsed).await;
+        }
+        let result = state.process_timers().await.unwrap();
+        let valid = matches!(mode, "queued" | "on-time" | "closed-after" | "held-restore");
+        assert_eq!(
+            state.exchange_ledger.unmet_criteria().is_empty(),
+            valid,
+            "{label}/{mode}/p2p={p2p_timeout}: arrival and physical generation own eligibility"
+        );
+        if mode == "held-restore" {
+            assert_eq!(result, None, "held success keeps serving fresh exchange");
+            std::fs::write(&release_file, "release").unwrap();
+            assert_eq!(state.process_timers().await.unwrap(), None);
+            tokio::time::advance(EXIT_LINGER).await;
+            assert_eq!(state.process_timers().await.unwrap(), Some(EXIT_SUCCESS));
+        } else {
+            assert_eq!(
+                result,
+                Some(if valid {
+                    EXIT_SUCCESS
+                } else {
+                    EXIT_CRITERIA_UNMET
+                }),
+                "{label}/{mode}/p2p={p2p_timeout}: retain original cutoff"
+            );
+        }
+        assert!(
+            state.engine_rx.is_empty(),
+            "cutoff must consume the queued events"
+        );
+        tokio::time::resume();
+        state.engine.remove_peer(peer).await.unwrap();
     }
 }

@@ -1920,13 +1920,14 @@ impl Orchestrator<'_> {
         self.process_selected_pair_evidence(now);
         let ready_probes = take_ready_selected_pair_probes(&mut self.selected_pair_rx);
         let run_deadline = self.run_deadline;
-        let run_deadline_due = apply_selected_pair_probes_before_run_deadline(
+        apply_selected_pair_probes_before_run_deadline(
             ready_probes,
             |result| self.handle_selected_pair_probe(result),
             now,
             run_deadline,
         );
 
+        let now = Instant::now();
         self.arm_success_linger(now).await?;
         if self.linger_until.is_some_and(|at| now >= at) {
             // Criteria can regress during the linger: an authoritative plan or
@@ -1944,7 +1945,15 @@ impl Orchestrator<'_> {
             self.linger_until = None;
         }
 
-        if run_deadline_due {
+        if self.run_deadline.is_due(Instant::now()) {
+            let queued_events = self.engine_rx.len();
+            for _ in 0..queued_events {
+                let Ok(event) = self.engine_rx.try_recv() else {
+                    break;
+                };
+                self.handle_engine_event(event).await?;
+            }
+            self.arm_success_linger(Instant::now()).await?;
             let release_pending = self.success_release_pending().await?;
             if should_defer_success_at_run_deadline(
                 release_pending,
@@ -2819,9 +2828,15 @@ impl Orchestrator<'_> {
                 label,
                 text,
                 queue_permit,
+                received_at,
                 ..
             } => {
-                if self.cli.exchange && is_exchange_probe(peer, &label, &text) {
+                let within_exchange_window = !self.run_deadline.is_due(received_at)
+                    || (self.success_criteria_reported && self.cli.success_release_file.is_some());
+                if self.cli.exchange
+                    && within_exchange_window
+                    && is_exchange_probe(peer, &label, &text)
+                {
                     self.exchange_ledger.note_received(peer, label.clone());
                 }
                 emit(&Event::ChannelMessage { peer, label, text });
@@ -4566,6 +4581,7 @@ mod tests {
                         label: label.to_string(),
                         text: text.clone(),
                         queue_permit: crate::engine::MessageQueuePermit::for_test(),
+                        received_at: tokio::time::Instant::now(),
                     })
                     .await
                     .unwrap();
@@ -4588,6 +4604,7 @@ mod tests {
                     label: label.to_string(),
                     text: text.clone(),
                     queue_permit: crate::engine::MessageQueuePermit::for_test(),
+                    received_at: tokio::time::Instant::now(),
                 })
                 .await
                 .unwrap();
@@ -4606,6 +4623,7 @@ mod tests {
                     label: label.to_string(),
                     text,
                     queue_permit: crate::engine::MessageQueuePermit::for_test(),
+                    received_at: tokio::time::Instant::now(),
                 })
                 .await
                 .unwrap();

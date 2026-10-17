@@ -166,12 +166,14 @@ pub enum EngineEvent {
     },
     /// A text message arrived on an open data channel. Keep `queue_permit`
     /// until its text is consumed or discarded, including asynchronous output.
+    /// `received_at` records the monotonic engine publication time.
     ChannelMessage {
         peer: PlayerId,
         generation: u64,
         label: String,
         text: String,
         queue_permit: MessageQueuePermit,
+        received_at: tokio::time::Instant,
     },
     /// Receive limits failed; the orchestrator must retire this physical link.
     ChannelReceiveRejected {
@@ -1457,6 +1459,7 @@ fn spawn_channel_event_loop(
                             label: label.clone(),
                             text,
                             queue_permit,
+                            received_at: tokio::time::Instant::now(),
                         })
                         .is_err()
                     {
@@ -2673,6 +2676,7 @@ mod tests {
                 label: RELIABLE_LABEL.to_string(),
                 text: "stale".to_string(),
                 queue_permit: crate::engine::MessageQueuePermit::for_test(),
+                received_at: tokio::time::Instant::now(),
             },
             EngineEvent::ChannelReceiveRejected {
                 peer,

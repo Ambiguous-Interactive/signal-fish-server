@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Count queued native reference-client exchange receipts within the original run window (#1031).
 - Keep late browser reference-client exchange receipts from reporting success after the run deadline (#1029).
 - Stop browser reference-client exchange retries at the run deadline so late sends cannot report success (#1027).
 - **Breaking:** Keep old signaling from disrupting reference-client peer retries; upgrade both retry-enabled endpoints
