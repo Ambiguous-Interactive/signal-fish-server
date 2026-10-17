@@ -1930,6 +1930,7 @@ impl Orchestrator<'_> {
         let now = Instant::now();
         self.arm_success_linger(now).await?;
         if self.linger_until.is_some_and(|at| now >= at) {
+            self.drain_queued_engine_events().await?;
             // Criteria can regress during the linger: an authoritative plan or
             // a freshly connected pair adds new obligations (exchange,
             // peer-status). Re-validate at expiry; on regression clear the
@@ -1946,13 +1947,7 @@ impl Orchestrator<'_> {
         }
 
         if self.run_deadline.is_due(Instant::now()) {
-            let queued_events = self.engine_rx.len();
-            for _ in 0..queued_events {
-                let Ok(event) = self.engine_rx.try_recv() else {
-                    break;
-                };
-                self.handle_engine_event(event).await?;
-            }
+            self.drain_queued_engine_events().await?;
             self.arm_success_linger(Instant::now()).await?;
             let release_pending = self.success_release_pending().await?;
             if should_defer_success_at_run_deadline(
@@ -1995,6 +1990,17 @@ impl Orchestrator<'_> {
             return Ok(Some(EXIT_CRITERIA_UNMET));
         }
         Ok(None)
+    }
+
+    async fn drain_queued_engine_events(&mut self) -> Result<(), FatalError> {
+        let queued_events = self.engine_rx.len();
+        for _ in 0..queued_events {
+            let Ok(event) = self.engine_rx.try_recv() else {
+                break;
+            };
+            self.handle_engine_event(event).await?;
+        }
+        Ok(())
     }
 
     async fn arm_success_linger(&mut self, now: Instant) -> Result<(), FatalError> {
