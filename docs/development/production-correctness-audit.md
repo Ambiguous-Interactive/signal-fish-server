@@ -4466,3 +4466,44 @@ This removes the transport-arrival assumption without adding a sleep or
 changing the send-order assertion.
 The socket-readiness fixture passes 20 consecutive focused runs and remains
 red against the original handler in Nextest `17245b3d` (two sends versus one).
+
+### F82 — Browser exchange retries can pay expired send debt
+
+Issue #1027, found at `26adb27c` while continuing #826, #853, and #889.
+The browser room timer flushes pending exchange sends before it evaluates
+its run deadline. A channel can reject a probe before expiry and accept it
+when a delayed retry wake runs at expiry. The late send clears the last
+required debt, so the client reports success outside its original window.
+
+The final regression fails against baseline source because an exchange send
+starts at the cutoff. The initial control also observes exit zero instead
+of the existing criteria-unmet code. This controlled channel-readiness
+history does not explain either original spontaneous interop failure.
+
+Each exchange label now checks the original monotonic run cutoff before
+it starts a send. An expired run retains its missing-label debt, the live
+peer snapshot, and the existing failure code. The explicit success hold
+keeps its existing deadline deferral and permits fresh exchange after a
+peer restore. No timeout or exchange requirement changes.
+
+The expanded controls cover reliable and unreliable send recovery at the
+exact cutoff and one millisecond later, both zero and default P2P windows,
+and successful retries before expiry. A held-success restore control crosses
+the original run deadline, sends both fresh labels, requires both new
+receipts, and exits only after release and linger.
+
+The Rust SDK owns no WebRTC backend. The .NET SDK handles signaling and relay.
+Godot uses its own engine mesh. None uses this private browser run scheduler;
+all three are unaffected. Server messages, SDK APIs, and defaults are unchanged.
+
+Fresh fixed-binary baseline captures pass three browser/native restores and
+three three-player meshes. All endpoint streams, server logs, and binary
+and bundle hashes are retained under `progress/session-466-baseline-live`.
+The rebuilt browser bundle also passes three restores and three meshes:
+15 endpoint streams, 759 events, and 60 exact sends and receipts. Hashes match
+before and after each capture set; only the browser page bundle differs
+between the two sets. The browser build, full tests, type checks, and formatting
+pass. Root strict Clippy, formatting, CI configuration, and documentation
+checks pass. Manual adversarial review finds no remaining issue in this diff.
+Passing captures do not explain the historical failures; #853, #889, and the
+broader #826 audit remain open. Hosted CI and feedback remain delivery gates.

@@ -3,8 +3,8 @@ import { EXIT_CRITERIA_UNMET, type RunConfig } from '../shared/types.js';
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
-// The room wake can reach the cutoff before an equally due peer-operation timer.
-for (const [scenario, timerOrder, p2pTimeoutSecs] of (
+// Regressions #1011/#1027: delayed wakes cannot pay expired exchange debt.
+for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
   [
     'fallback',
     'paid',
@@ -12,22 +12,38 @@ for (const [scenario, timerOrder, p2pTimeoutSecs] of (
     'missing-unreliable',
     'live-sent-reliable',
     'live-sent-unreliable',
+    'late-sent-reliable',
+    'late-sent-unreliable',
+    'recovered-sent-reliable',
+    'recovered-sent-unreliable',
     'live-received-reliable',
     'live-received-unreliable',
     'answered',
   ] as const
 ).flatMap((scenario) =>
-  (scenario === 'answered' || scenario.startsWith('live-')
+  (scenario === 'answered' ||
+  scenario.startsWith('live-') ||
+  scenario.startsWith('late-') ||
+  scenario.startsWith('recovered-')
     ? (['room-first'] as const)
     : (['room-first', 'peer-first'] as const)
   ).flatMap((timerOrder) =>
-    [0, 15].map((p2pTimeoutSecs) => [scenario, timerOrder, p2pTimeoutSecs] as const),
+    [0, 15].flatMap((p2pTimeoutSecs) =>
+      (scenario.startsWith('late-') ? [1100, 1101] : [1100]).map(
+        (cutoff) => [scenario, timerOrder, p2pTimeoutSecs, cutoff] as const,
+      ),
+    ),
   ),
 )) {
   const originalError = console.error;
   const diagnostics: string[] = [];
-  const live = scenario.startsWith('live-');
-  const unpaid = scenario.startsWith('missing-') || live;
+  const live =
+    scenario.startsWith('live-') ||
+    scenario.startsWith('late-') ||
+    scenario.startsWith('recovered-');
+  const unpaid =
+    scenario.startsWith('missing-') || (live && !scenario.startsWith('recovered-'));
+  const sendAttempts: { label: string; at: number }[] = [];
   const originalPc = globalThis.RTCPeerConnection;
   const originalSocket = globalThis.WebSocket;
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
@@ -66,7 +82,13 @@ for (const [scenario, timerOrder, p2pTimeoutSecs] of (
       this.maxRetransmits = this.ordered ? null : 0;
     }
     send() {
-      if (scenario === `live-sent-${this.label}`) throw new Error('not ready');
+      sendAttempts.push({ label: this.label, at: now });
+      if (
+        scenario === `live-sent-${this.label}` ||
+        (scenario === `late-sent-${this.label}` && now < 1100) ||
+        (scenario === `recovered-sent-${this.label}` && now < 500)
+      )
+        throw new Error('not ready');
     }
     close() {
       this.readyState = 'closed';
@@ -262,13 +284,29 @@ for (const [scenario, timerOrder, p2pTimeoutSecs] of (
         }
       await turn();
     }
+    if (scenario.startsWith('recovered-')) {
+      now = 800;
+      socket.deliver('Pong');
+      await turn();
+      assert(result === 0, `${scenario}: successful pre-cutoff retry can complete the run`);
+      assert(
+        sendAttempts.some((attempt) => attempt.at === 500 && scenario.endsWith(attempt.label)),
+        `${scenario}: retry the unpaid label before cutoff`,
+      );
+      assert(
+        !diagnostics.some((line) => line.startsWith('Exchange timeout')),
+        `${scenario}: completed exchange has no unpaid timeout`,
+      );
+      continue;
+    }
     assert(result === undefined, `${scenario}: pending work keeps the run live before cutoff`);
-    now = 1100;
+    now = cutoff;
     // Deliver the latest room wake first. Leave the due peer timer uncalled.
     const wake = [...timers.values()].at(-1);
     // A blocked send keeps its 50 ms retry wake. Deliver it late at the run
     // cutoff, as a delayed browser task would, without extending the run.
-    const expectedWake = scenario.startsWith('live-sent-') ? 550 : now;
+    const expectedWake =
+      scenario.startsWith('live-sent-') || scenario.startsWith('late-sent-') ? 550 : 1100;
     assert(
       wake !== undefined && wake.at === expectedWake,
       `${scenario}: room wake targets the next retry or cutoff; observed ${wake?.at}`,
@@ -283,6 +321,10 @@ for (const [scenario, timerOrder, p2pTimeoutSecs] of (
     }
     wake?.callback();
     await turn();
+    assert(
+      sendAttempts.every((attempt) => attempt.at < 1100),
+      `${scenario}: no exchange send starts at or after cutoff`,
+    );
     assert(
       result === (unpaid ? EXIT_CRITERIA_UNMET : 0),
       `${scenario}: cutoff uses logical debt, observed exit ${result}`,
@@ -322,8 +364,14 @@ for (const [scenario, timerOrder, p2pTimeoutSecs] of (
       const snapshot = JSON.parse(snapshots[0]!.split(': ').slice(1).join(': '));
       assert(snapshot.connected === live, 'snapshot identifies current pair membership');
       const missingLabel = scenario.endsWith('unreliable') ? 'unreliable' : 'reliable';
-      const missingSent = scenario.startsWith('live-sent-') ? [missingLabel] : [];
-      const missingReceived = scenario.startsWith('live-sent-') ? [] : [missingLabel];
+      const missingSent =
+        scenario.startsWith('live-sent-') || scenario.startsWith('late-sent-')
+          ? [missingLabel]
+          : [];
+      const missingReceived =
+        scenario.startsWith('live-sent-') || scenario.startsWith('late-sent-')
+          ? []
+          : [missingLabel];
       assert(
         JSON.stringify(snapshot.missing_sent) === JSON.stringify(missingSent),
         'name missing sends',
