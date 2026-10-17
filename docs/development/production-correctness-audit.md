@@ -144,10 +144,9 @@ is added to the snapshot. Native snapshots retain their existing scope: its
 wrapper state getters are asynchronous, so this change adds no timeout-path
 waits to native clients.
 
-The initial fixed-artifact live run `65fb28c3` passes room restore and the
+The initial live run `65fb28c3` passes room restore and the
 three-player browser mesh. All five endpoint streams and server logs are
-retained under local `progress/session-471-baseline`; the server, native
-process, browser CLI, and page hashes match before and after. Passing histories
+retained under local `progress/session-471-baseline`. Passing histories
 do not establish the original #853 or #889 failure causes. Both remain open.
 
 Final fixed-artifact runs `56f2da1e`, `f3b78434`, and `e0e97285` pass three
