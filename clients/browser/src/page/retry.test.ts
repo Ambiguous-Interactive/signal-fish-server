@@ -371,7 +371,8 @@ for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep, retryAuth
         replacement?.offers === (initiate ? 1 : 0),
         'retry preserves the server-assigned offerer role',
       );
-      if (!initiate) signal({ Offer: 'replacement-offer' });
+      if (!initiate)
+        signal({ RetrySignal: { attempt: 1, signal: { Offer: 'replacement-offer' } } });
       await turn();
       replacement?.open();
       await turn();
@@ -427,7 +428,8 @@ for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep, retryAuth
         events.filter((e) => e['event'] === 'channel_message').length === 2,
         'retired callbacks cannot satisfy receipts',
       );
-      if (!initiate) signal({ Offer: 'rebuilt-offer' });
+      if (!initiate)
+        signal({ RetrySignal: { attempt: 2, signal: { Offer: 'rebuilt-offer' } } });
       await turn();
       rebuilt?.open();
       await turn();
@@ -471,7 +473,12 @@ for (const [initiate, closeBeforeRetry, replacementOutcome, clockStep, retryAuth
         );
       }
       const finalLink = connections[retryAuthoritative ? 4 : 3];
-      if (!initiate) signal({ Offer: 'final-offer' });
+      if (!initiate)
+        signal(
+          retryAuthoritative
+            ? { RetrySignal: { attempt: 1, signal: { Offer: 'final-offer' } } }
+            : { Offer: 'final-offer' },
+        );
       await turn();
       if (replacementOutcome === 'open' || replacementOutcome === 'late-open') {
         if (replacementOutcome === 'late-open') {

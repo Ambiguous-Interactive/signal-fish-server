@@ -277,6 +277,37 @@ fn is_coordinated_p2p_rebuild_attempt(
     rebuild_configured && retry_count > 0 && attempt == retry_count
 }
 
+fn signal_for_retry_attempt(signal: serde_json::Value, attempt: u8) -> Option<serde_json::Value> {
+    if SignalKind::classify(&signal) == SignalKind::PairRetry {
+        return Some(signal);
+    }
+    if attempt == 0 {
+        return signal.get("RetrySignal").is_none().then_some(signal);
+    }
+    let envelope = signal.as_object()?;
+    if envelope.len() != 1 {
+        return None;
+    }
+    let envelope = envelope.get("RetrySignal")?.as_object()?;
+    if envelope.len() != 2 || envelope.get("attempt")?.as_u64()? != u64::from(attempt) {
+        return None;
+    }
+    let inner = envelope.get("signal")?;
+    matches!(
+        SignalKind::classify(inner),
+        SignalKind::Offer | SignalKind::Answer | SignalKind::IceCandidate
+    )
+    .then(|| inner.clone())
+}
+
+fn wrap_retry_signal(signal: serde_json::Value, attempt: u8) -> serde_json::Value {
+    if attempt == 0 || SignalKind::classify(&signal) == SignalKind::PairRetry {
+        signal
+    } else {
+        json!({ "RetrySignal": { "attempt": attempt, "signal": signal } })
+    }
+}
+
 fn is_exchange_probe(peer: PlayerId, label: &str, text: &str) -> bool {
     if label != RELIABLE_LABEL && label != UNRELIABLE_LABEL {
         return false;
@@ -3121,6 +3152,11 @@ impl Orchestrator<'_> {
             );
             return Ok(());
         }
+        let attempt = self.pair_retry_attempts.get(&from).copied().unwrap_or(0);
+        let Some(signal) = signal_for_retry_attempt(signal, attempt) else {
+            tracing::debug!(%from, attempt, "discarding signal outside current retry attempt");
+            return Ok(());
+        };
         let kind = SignalKind::classify(&signal);
         emit(&Event::SignalReceived { from, kind });
         if kind == SignalKind::PairRetry {
@@ -3523,6 +3559,8 @@ impl Orchestrator<'_> {
                 "cannot signal peer {to} before an authoritative SessionPlan"
             ))
         })?;
+        let attempt = self.pair_retry_attempts.get(&to).copied().unwrap_or(0);
+        let signal = wrap_retry_signal(signal, attempt);
         self.send_message(&ClientMessage::Signal {
             to,
             generation,

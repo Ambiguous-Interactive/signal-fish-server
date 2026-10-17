@@ -45,7 +45,13 @@ import {
   scheduleDeadline,
   type ScheduledDeadline,
 } from '../shared/deadline.js';
-import { classifySignal, emit, type SignalKind } from './events.js';
+import {
+  classifySignal,
+  emit,
+  signalForRetryAttempt,
+  tagRetrySignal,
+  type SignalKind,
+} from './events.js';
 import { Engine, RELIABLE_LABEL, UNRELIABLE_LABEL, type PlanIceServer } from './engine.js';
 import { DeliveryAccountability, DeliveryAccountabilityViolation } from './accountability.js';
 import {
@@ -2204,6 +2210,8 @@ class Orchestrator {
       );
       return;
     }
+    signal = signalForRetryAttempt(signal, this.pairRetryState.get(from)?.attempt ?? 0);
+    if (signal === undefined) return;
     const kind = classifySignal(signal);
     this.emit({ event: 'signal_received', from, kind });
     this.assertActive();
@@ -2519,7 +2527,7 @@ class Orchestrator {
       clientFrame('Signal', {
         to,
         generation: this.currentSessionGeneration,
-        signal,
+        signal: tagRetrySignal(signal, this.pairRetryState.get(to)?.attempt ?? 0),
       }),
     );
     this.emit({ event: 'signal_sent', to, kind });

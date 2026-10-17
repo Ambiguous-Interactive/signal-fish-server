@@ -9,6 +9,7 @@ for (const entryPoint of [
   'src/page/engine.test.ts',
   'src/page/orchestrator.test.ts',
   'src/page/retry.test.ts',
+  'src/page/retry-signals.test.ts',
   'src/page/ingress.test.ts',
   'src/page/handshake.test.ts',
   'src/page/output-cancellation.test.ts',

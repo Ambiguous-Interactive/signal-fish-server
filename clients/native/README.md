@@ -350,6 +350,13 @@ unknown generation are discarded.
   generation while retaining the server-authored glare role. The default is
   zero because this coordination extension is only safe when both endpoints
   implement it; general interoperability must not assume that.
+- After `PairRetry`, peers send SDP and ICE as
+  `{"RetrySignal":{"attempt":1,"signal":{"Answer":"..."}}}`.
+  The attempt must match the current retry. Peers drop bare SDP/ICE after a retry
+  and discard envelopes for other attempts. Initial signaling stays bare.
+  This prevents an old answer in flight from changing the replacement link.
+  **Migration:** Both peers in an opt-in retry session must implement this envelope.
+  The server still relays the payload unchanged.
 - A peer that formed in the current server generation can accept a newer
   in-budget remote retry after its original window expires, including when
   the old channel closes before the marker arrives. The receiver needs no
