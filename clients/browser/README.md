@@ -301,6 +301,14 @@ runner script's `console.log` grep (stdout purity); an eslint toolchain would ou
 
 ## Troubleshooting
 
+P2P timeout, incomplete exchange, and failed-link diagnostics include a snapshot
+of the current physical link before teardown. The browser reports signaling,
+ICE gathering, ICE connection, DTLS, SCTP, and required-channel states. It also
+reports whether the remote description was applied, how many remote candidates
+were admitted, and how many still wait for that description. An absent SCTP or
+DTLS transport is `null`. These values describe one observation, not a failure
+cause. Retain both endpoint logs and server logs to compare a failed exchange.
+
 - **`SIGNAL_FISH_BROWSER_CLI is not set` panic:** run `npm ci && npm run build` here and export
   `SIGNAL_FISH_BROWSER_CLI=<repo>/clients/browser/dist/cli.js`, or just use
   `bash scripts/run-browser-interop.sh`, which does everything.

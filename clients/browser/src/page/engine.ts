@@ -280,8 +280,14 @@ export class Engine {
     return {
       generation: link.generation,
       connectionState: link.pc.connectionState,
+      signalingState: link.pc.signalingState,
       iceConnectionState: link.pc.iceConnectionState,
+      iceGatheringState: link.pc.iceGatheringState,
+      dtlsState: link.pc.sctp?.transport?.state ?? null,
       sctpState: link.pc.sctp?.state ?? null,
+      remoteDescriptionSet: link.remoteDescriptionSet,
+      remoteCandidateCount: link.remoteCandidateCount,
+      pendingRemoteCandidates: link.pendingCandidates.length,
       channels: Object.fromEntries(
         [RELIABLE_LABEL, UNRELIABLE_LABEL].map((label) => {
           const channel = link.channels.get(label);

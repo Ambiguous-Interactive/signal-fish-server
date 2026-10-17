@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add browser reference-client MessagePack relay support for protocol v2 and v3 (#678).
 - Find a published live room by application, game, and room code beyond the session-list limit (#992).
 - Report reference-client peer and channel state at P2P timeouts, incomplete gameplay exchange timeouts,
-  and before failed links are removed (#853, #889, #1019).
+  and before failed links are removed, including browser SDP, ICE, and DTLS progress (#853, #889, #1019).
 
 ### Changed
 

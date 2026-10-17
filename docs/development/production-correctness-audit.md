@@ -50,11 +50,11 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10 |
 | A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; embedded receiver-loss rollback in F18; size-refusal rollback in F21; known socket-close rollback in F22; stale expiry cleanup in F32 |
 | A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
-| A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32 |
-| A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial; two ordered concurrent unready/start histories and recovery checked in session 456 |
+| A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32; concurrent join/start histories in session 471 |
+| A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial; two ordered concurrent unready/start histories and recovery checked in session 456; concurrent join/start histories in session 471 |
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial |
 | A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31 |
-| A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38 |
+| A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471 |
 | A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial |
 | A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial |
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
@@ -99,6 +99,74 @@ baseline. It maps audit ownership; it does not certify these operations.
 | `TransferAuthority` | A09, A11 | Eligible live member, replay/publication order, transport-host independence |
 
 ## Bounded histories without a confirmed defect
+
+### A07/A08/A11 — Concurrent join and game start
+
+At `62a9dfa5`, two ready mesh members and one joiner contend on the same room
+event gate. The real join and StartGame handlers run in both FIFO orders.
+Before release, the joiner has no room, storage still has two members, and
+all three output queues are empty. The lifecycle barrier and competing
+operation waits are bounded; no sleep chooses the order.
+
+When join wins, the new member remains unready and StartGame returns
+GAME_START_NOT_READY. The joiner's ready toggle then allows a successful
+three-member start. When StartGame wins, GameStarting names the original two
+members. The finalized-room join then publishes the new membership and fresh
+mesh plans. Both histories check exact baseline readiness, peer sets,
+generation agreement and replacement, offerer roles, publication order,
+storage/coordinator readiness, and empty output tails.
+
+The initial scoped run `5669d011` passes both histories. A temporary control
+that makes StartGame acquire an unrelated room gate fails in `fef6a03f`
+because output appears before the contested gate is released. The original
+production source is restored. This is evidence for two controlled handler
+and queue histories, not TCP delivery, all storage backends, or all schedules.
+No new server defect is claimed; A07, A08, A11, and #826 remain incomplete.
+
+Final focused run `4d9b7dc4` passes the join/start histories, the prior
+unready/start histories, and the sequential join/readiness control. The
+three tests pass without changes to production code.
+
+### A20 — Browser establishment phase evidence
+
+At `62a9dfa5`, the browser failure snapshot reports ICE connection, SCTP, and
+channel state but omits signaling, ICE gathering, DTLS, remote-description
+readiness, and queued candidate counts. The #853 and #889 investigations need
+these observations to separate establishment phases. The snapshot now reads
+those fields without awaiting the browser stack. It remains stderr evidence;
+it does not alter exchange criteria, deadlines, retries, or exit codes.
+
+The admitted candidate count includes candidates whose later stack application
+fails. The pending count covers candidates still queued for the remote
+description, not an in-flight stack call. Neither count proves a usable ICE
+path. Absent SCTP and DTLS transports report `null`. No candidate or SDP content
+is added to the snapshot. Native snapshots retain their existing scope: its
+wrapper state getters are asynchronous, so this change adds no timeout-path
+waits to native clients.
+
+The initial fixed-artifact live run `65fb28c3` passes room restore and the
+three-player browser mesh. All five endpoint streams and server logs are
+retained under local `progress/session-471-baseline`; the server, native
+process, browser CLI, and page hashes match before and after. Passing histories
+do not establish the original #853 or #889 failure causes. Both remain open.
+
+Final fixed-artifact runs `56f2da1e`, `f3b78434`, and `e0e97285` pass three
+restores, three retries, three browser meshes, and one controlled crippled-ICE
+fallback. The 24 retained endpoint streams contain 82 channel sends and 82
+receipts, plus 12 relay sends and 24 relay receipts. Eight real browser timeout
+snapshots include every new phase field. They distinguish an absent transport
+from applied remote SDP with DTLS still new. Before/after hashes match for all
+four executable/bundle artifacts; endpoint and server logs remain under local
+`progress/session-471-qualified-{1,2,3}`. Earlier candidate `41a75599` passes
+the four cells but rebuilds two executables; its pre-build hashes are excluded.
+
+The browser phase regression fails against the original snapshot and passes
+after the added observations. Full browser tests, build, type checking, and
+formatting pass. Final root `43f8e794` passes the three focused ready/join
+controls; source-policy `f333b8f2` passes all 11 checks. Strict root Clippy and
+independent adversarial review pass. Rust and .NET SDKs own signaling/relay;
+Godot owns its engine mesh. None imports this browser stderr snapshot, and no
+server or SDK behavior changes. Hosted CI and feedback remain delivery gates.
 
 ### A08 — Concurrent unready and game start
 

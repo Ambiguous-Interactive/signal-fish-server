@@ -1698,3 +1698,317 @@ async fn concurrent_unready_and_start_follow_room_gate_order() {
         }
     }
 }
+
+// Audit #826: a new member and game start must share one membership boundary.
+#[tokio::test]
+async fn concurrent_join_and_start_follow_room_membership_order() {
+    use std::collections::BTreeSet;
+
+    fn mesh_plan_generation(
+        message: &ServerMessage,
+        recipient: PlayerId,
+        members: &BTreeSet<PlayerId>,
+    ) -> crate::protocol::SessionGeneration {
+        let ServerMessage::SessionPlan(plan) = message else {
+            panic!("expected mesh session plan, received {message:?}");
+        };
+        assert_eq!(plan.topology, Topology::Mesh);
+        assert_eq!(plan.transport, Transport::WebRtc);
+        assert_eq!(
+            plan.peers
+                .iter()
+                .map(|p| p.player_id)
+                .collect::<BTreeSet<_>>(),
+            members
+                .iter()
+                .copied()
+                .filter(|id| *id != recipient)
+                .collect(),
+        );
+        for peer in &plan.peers {
+            assert_eq!(peer.initiate, recipient < peer.player_id);
+        }
+        plan.generation
+    }
+
+    for start_first in [true, false] {
+        let server = create_test_server_with_session(mesh_session_config()).await;
+        let (starter, mut starter_messages) = register_client(&server).await;
+        let (member, mut member_messages) = register_client(&server).await;
+        let (joiner, mut joiner_messages) = register_client(&server).await;
+        for id in [starter, member, joiner] {
+            server.set_client_protocol(&id, v3_webrtc());
+        }
+        for (id, name) in [(starter, "Starter"), (member, "Member")] {
+            server
+                .handle_join_room(
+                    &id,
+                    "join-start-contention".into(),
+                    Some("JOIN08".into()),
+                    name.into(),
+                    Some(3),
+                    Some(false),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+        }
+        server.handle_player_ready(&starter).await;
+        server.handle_player_ready(&member).await;
+        drain_pending(&mut starter_messages);
+        drain_pending(&mut member_messages);
+        let room_id = server.get_client_room(&starter).await.unwrap();
+        let incumbents = BTreeSet::from([starter, member]);
+        let everyone = BTreeSet::from([starter, member, joiner]);
+        let gate = server
+            .message_coordinator
+            .lock_room_event_mutation(&room_id)
+            .await;
+        let start = server.handle_start_game(&starter);
+        tokio::pin!(start);
+        if start_first {
+            assert!(futures_util::poll!(&mut start).is_pending());
+        }
+        let lifecycle = server.connection_manager.client_lifecycle(&joiner).unwrap();
+        let attempts = lifecycle.lock_attempt_count_for_test();
+        let joining_server = Arc::clone(&server);
+        let join = tokio::spawn(async move {
+            joining_server
+                .handle_join_room(
+                    &joiner,
+                    "join-start-contention".into(),
+                    Some("JOIN08".into()),
+                    "Joiner".into(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(true),
+                )
+                .await;
+        });
+        /*
+         * The owned join runs on this current-thread runtime until it waits
+         * at the held room gate. Its lifecycle notification establishes that
+         * the worker started; no sleep or transport arrival assumption is used.
+         */
+        timeout(
+            Duration::from_secs(1),
+            lifecycle.wait_for_lock_attempt_after_for_test(attempts),
+        )
+        .await
+        .expect("owned join must reach its lifecycle before release");
+        if !start_first {
+            assert!(futures_util::poll!(&mut start).is_pending());
+        }
+        assert_eq!(server.get_client_room(&joiner).await, None);
+        assert_eq!(
+            server
+                .database
+                .get_room_by_id(&room_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .players
+                .len(),
+            2
+        );
+        for messages in [
+            &mut starter_messages,
+            &mut member_messages,
+            &mut joiner_messages,
+        ] {
+            let pending = messages.try_recv();
+            assert!(
+                matches!(pending, Err(mpsc::error::TryRecvError::Empty)),
+                "unexpected frame in start-first={start_first} history: {pending:?}"
+            );
+        }
+        drop(gate);
+        let (_, joined) = timeout(Duration::from_secs(1), async { tokio::join!(start, join) })
+            .await
+            .expect("join and start must finish after room gate release");
+        joined.unwrap();
+
+        /*
+         * The actor baseline names exactly the committed membership and keeps
+         * the new member unready in either serialization.
+         */
+        let baseline = recv(&mut joiner_messages).await;
+        let ServerMessage::RoomJoined(snapshot) = baseline.as_ref() else {
+            panic!("joiner expected RoomJoined, received {baseline:?}");
+        };
+        assert_eq!(
+            snapshot
+                .current_players
+                .iter()
+                .map(|p| p.id)
+                .collect::<BTreeSet<_>>(),
+            everyone
+        );
+        assert_eq!(
+            snapshot
+                .ready_players
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            incumbents
+        );
+        assert!(
+            !snapshot
+                .current_players
+                .iter()
+                .find(|p| p.id == joiner)
+                .unwrap()
+                .is_ready
+        );
+        assert_eq!(
+            snapshot.lobby_state,
+            if start_first {
+                LobbyState::Finalized
+            } else {
+                LobbyState::Lobby
+            }
+        );
+
+        let mut initial_generation = None;
+        for (recipient, messages) in [
+            (starter, &mut starter_messages),
+            (member, &mut member_messages),
+        ] {
+            if start_first {
+                match recv(messages).await.as_ref() {
+                    ServerMessage::GameStarting { peer_connections } => {
+                        assert_eq!(
+                            peer_connections
+                                .iter()
+                                .map(|p| p.player_id)
+                                .collect::<BTreeSet<_>>(),
+                            incumbents
+                        );
+                    }
+                    other => panic!("expected original GameStarting, received {other:?}"),
+                }
+                let generation =
+                    mesh_plan_generation(recv(messages).await.as_ref(), recipient, &incumbents);
+                assert_eq!(*initial_generation.get_or_insert(generation), generation);
+            }
+            match recv(messages).await.as_ref() {
+                ServerMessage::PlayerJoined { player } => {
+                    assert_eq!(player.id, joiner);
+                    assert!(!player.is_ready);
+                    assert_eq!(player.epoch, Some(1));
+                }
+                other => panic!("expected join publication, received {other:?}"),
+            }
+        }
+        if !start_first {
+            assert!(matches!(
+                recv(&mut starter_messages).await.as_ref(),
+                ServerMessage::Error {
+                    error_code: Some(ErrorCode::GameStartNotReady),
+                    ..
+                }
+            ));
+            for messages in [
+                &mut starter_messages,
+                &mut member_messages,
+                &mut joiner_messages,
+            ] {
+                let pending = messages.try_recv();
+                assert!(
+                    matches!(pending, Err(mpsc::error::TryRecvError::Empty)),
+                    "unexpected frame after start rejection: {pending:?}"
+                );
+            }
+            server.handle_player_ready(&joiner).await;
+            for messages in [
+                &mut starter_messages,
+                &mut member_messages,
+                &mut joiner_messages,
+            ] {
+                match recv(messages).await.as_ref() {
+                    ServerMessage::LobbyStateChanged {
+                        ready_players,
+                        all_ready,
+                        ..
+                    } => {
+                        assert!(*all_ready);
+                        assert_eq!(
+                            ready_players.iter().copied().collect::<BTreeSet<_>>(),
+                            everyone
+                        );
+                    }
+                    other => panic!("expected recovered readiness, received {other:?}"),
+                }
+            }
+            server.handle_start_game(&starter).await;
+            for messages in [
+                &mut starter_messages,
+                &mut member_messages,
+                &mut joiner_messages,
+            ] {
+                match recv(messages).await.as_ref() {
+                    ServerMessage::GameStarting { peer_connections } => {
+                        assert_eq!(
+                            peer_connections
+                                .iter()
+                                .map(|p| p.player_id)
+                                .collect::<BTreeSet<_>>(),
+                            everyone
+                        );
+                    }
+                    other => panic!("expected recovered GameStarting, received {other:?}"),
+                }
+            }
+        }
+        let mut final_generation = None;
+        for (recipient, messages) in [
+            (starter, &mut starter_messages),
+            (member, &mut member_messages),
+            (joiner, &mut joiner_messages),
+        ] {
+            let generation =
+                mesh_plan_generation(recv(messages).await.as_ref(), recipient, &everyone);
+            assert_eq!(*final_generation.get_or_insert(generation), generation);
+            if let Some(initial) = initial_generation {
+                assert_ne!(generation, initial);
+            }
+            let pending = messages.try_recv();
+            assert!(
+                matches!(pending, Err(mpsc::error::TryRecvError::Empty)),
+                "unexpected frame in start-first={start_first} history: {pending:?}"
+            );
+        }
+        let stored = server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.lobby_state, LobbyState::Finalized);
+        assert_eq!(
+            stored.players.keys().copied().collect::<BTreeSet<_>>(),
+            everyone
+        );
+        let expected_ready = if start_first { incumbents } else { everyone };
+        assert_eq!(
+            stored
+                .ready_players
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            expected_ready
+        );
+        assert_eq!(
+            server
+                .room_coordinator
+                .current_ready_players(&room_id)
+                .await
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            expected_ready
+        );
+    }
+}
