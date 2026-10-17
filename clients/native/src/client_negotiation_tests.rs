@@ -116,6 +116,7 @@ async fn held_negotiation(step: &'static str, budget: Budget, initiate: bool) {
     ));
     if budget == Budget::HeldSuccess {
         state.success_criteria_reported = true;
+        state.success_hold_started_at = Some(now);
         state.run_deadline = Deadline::after(now, Duration::from_millis(100));
     }
     let old_generation = 1;

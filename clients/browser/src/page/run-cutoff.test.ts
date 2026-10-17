@@ -3,7 +3,7 @@ import { EXIT_CRITERIA_UNMET, type RunConfig } from '../shared/types.js';
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
-// Regressions #1011/#1027/#1029: delayed wakes cannot pay expired exchange debt.
+// Regressions #1011/#1027/#1029/#1033: delayed wakes cannot pay expired exchange debt.
 for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
   [
     'fallback',
@@ -26,11 +26,18 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
     'recovered-sent-unreliable',
     'live-received-reliable',
     'live-received-unreliable',
+    'linger-received-reliable',
+    'linger-received-unreliable',
+    'linger-sent-reliable',
+    'linger-sent-unreliable',
+    'linger-queued-received-reliable',
+    'linger-queued-received-unreliable',
     'answered',
   ] as const
 ).flatMap((scenario) =>
   (scenario === 'answered' ||
   scenario.startsWith('queued-') ||
+  scenario.startsWith('linger-') ||
   scenario.startsWith('live-') ||
   scenario.startsWith('late-') ||
   scenario.startsWith('recovered-')
@@ -38,15 +45,23 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
     : (['room-first', 'peer-first'] as const)
   ).flatMap((timerOrder) =>
     [0, 15].flatMap((p2pTimeoutSecs) =>
-      (scenario.startsWith('late-') ? [1100, 1101] : [1100]).map(
-        (cutoff) => [scenario, timerOrder, p2pTimeoutSecs, cutoff] as const,
-      ),
+      (scenario.startsWith('linger-')
+        ? [1449, 1450, 1451]
+        : scenario.startsWith('late-')
+          ? [1100, 1101]
+          : [1100]
+      ).map((cutoff) => [scenario, timerOrder, p2pTimeoutSecs, cutoff] as const),
     ),
   ),
 )) {
   const originalError = console.error;
   const diagnostics: string[] = [];
+  const linger = scenario.startsWith('linger-');
+  let successReleased = false;
+  let freshExchange = false;
+  const latePeer = '00000000-0000-0000-0000-000000000003';
   const live =
+    linger ||
     scenario.startsWith('queued-') ||
     scenario.startsWith('live-') ||
     scenario.startsWith('late-') ||
@@ -101,6 +116,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
       sendAttempts.push({ label: this.label, at: now });
       if (
         scenario === `live-sent-${this.label}` ||
+        (freshExchange && scenario === `linger-sent-${this.label}` && now < cutoff) ||
         (scenario === `late-sent-${this.label}` && now < 1100) ||
         (scenario === `recovered-sent-${this.label}` && now < 500)
       )
@@ -175,7 +191,11 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
             room_code: 'TEST',
             lobby_state: 'finalized',
             ready_players: [],
-            current_players: [me, peer].map((id) => ({ id, epoch: 1, seq: 0 })),
+            current_players: (linger ? [me, peer, latePeer] : [me, peer]).map((id) => ({
+              id,
+              epoch: 1,
+              seq: 0,
+            })),
           });
           this.deliver('SessionPlan', {
             generation: me,
@@ -203,6 +223,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
     Object.defineProperty(globalThis, 'window', {
       configurable: true,
       value: {
+        __sf_success_released: async () => successReleased,
         __sf_emit: (line: string) => {
           const event = JSON.parse(line);
           events.push(event);
@@ -225,7 +246,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
       serverUrl: 'ws://mock.invalid/v3/ws',
       createRoom: true,
       joinCode: null,
-      peers: 2,
+      peers: linger ? 3 : 2,
       maxPlayers: null,
       expectTotalPeers: null,
       leaveOnGameStart: false,
@@ -239,7 +260,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
       p2pTimeoutSecs,
       p2pRetryCount: 0,
       runForSecs: 1,
-      successReleaseEnabled: false,
+      successReleaseEnabled: linger,
       protocolVersion: 3,
       supportedTopologies: ['mesh'],
       supportedTransports: ['webrtc', 'relay'],
@@ -311,6 +332,95 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
           timer.callback();
         }
       await turn();
+    }
+    if (linger) {
+      assert(
+        events.some((event) => event['event'] === 'success_criteria_met'),
+        'initial exchange reaches held success',
+      );
+      successReleased = true;
+      now = 1200;
+      for (const [id, timer] of [...timers])
+        if (timer.at <= now) {
+          timers.delete(id);
+          timer.callback();
+        }
+      await turn();
+      socket.deliver('Pong');
+      await turn();
+      assert(
+        [...timers.values()].some((timer) => timer.at === 1450),
+        'release arms the original linger cutoff',
+      );
+      freshExchange = true;
+      socket.deliver('SessionPlan', {
+        generation: me,
+        topology: 'mesh',
+        transport: 'webrtc',
+        fallback: 'relay',
+        ice_servers: [],
+        peers: [peer, latePeer].map((player_id) => ({ player_id, initiate: false })),
+      });
+      await turn();
+      socket.deliver('Signal', {
+        from: latePeer,
+        generation: me,
+        signal: { Offer: 'extra-peer' },
+      });
+      await turn();
+      const fresh: Channel[] = [];
+      for (const label of ['reliable', 'unreliable']) {
+        const channel = new Channel(label);
+        fresh.push(channel);
+        connection.ondatachannel?.({ channel });
+        channel.readyState = 'open';
+        channel.onopen?.();
+        if (scenario.startsWith('linger-sent-') || !scenario.endsWith(`-${label}`))
+          channel.onmessage?.({
+            data: JSON.stringify({ from: latePeer, channel: label, seq: 0 }),
+          });
+      }
+      socket.deliver('PeerTransportStatus', {
+        peer_id: latePeer,
+        transport: 'webrtc',
+        connected: true,
+      });
+      await turn();
+      assert(result === undefined, 'the added peer has unpaid exchange debt during linger');
+      const missing = fresh.find((channel) => scenario.endsWith(`-${channel.label}`))!;
+      if (scenario.startsWith('linger-queued-')) {
+        holdOutput = true;
+        fresh
+          .find((channel) => channel !== missing)!
+          .onmessage?.({ data: 'unrelated traffic' });
+        await turn();
+        assert(outputHeld, 'prior output holds the fresh receipt handler');
+      }
+      now = cutoff;
+      if (scenario.startsWith('linger-sent-')) {
+        socket.deliver('Pong');
+      } else {
+        missing.onmessage?.({
+          data: JSON.stringify({ from: latePeer, channel: missing.label, seq: 0 }),
+        });
+      }
+      if (scenario.startsWith('linger-queued-')) {
+        now = 1451;
+        holdOutput = false;
+        releaseOutput();
+      }
+      await turn();
+      if (cutoff < 1450 && !scenario.startsWith('linger-queued-')) {
+        assert(result === undefined, 'timely exchange keeps the original linger');
+        now = 1450;
+        socket.deliver('Pong');
+        await turn();
+      }
+      assert(
+        result === (cutoff < 1450 ? 0 : EXIT_CRITERIA_UNMET),
+        `${scenario}/${cutoff}: exchange must complete before linger expiry; observed ${result}`,
+      );
+      continue;
     }
     if (scenario.startsWith('queued-') || scenario.startsWith('recovered-received-')) {
       const channel = channels.find((channel) => scenario.endsWith(`-${channel.label}`));

@@ -658,6 +658,8 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         run_deadline,
         linger_until: None,
         success_criteria_reported: false,
+        success_hold_started_at: None,
+        success_release_observed_at: None,
         success_release_poll_at: None,
         next_ping_at: checked_deadline(Instant::now(), PING_INTERVAL),
         pong_deadline: None,
@@ -1434,6 +1436,8 @@ struct Orchestrator<'a> {
     linger_until: Option<Instant>,
     /// Whether the stable machine event announcing complete criteria was sent.
     success_criteria_reported: bool,
+    success_hold_started_at: Option<Instant>,
+    success_release_observed_at: Option<Instant>,
     /// Next poll for an optional harness-controlled release-file barrier.
     success_release_poll_at: Option<Instant>,
     /// Next keepalive `Ping` send (the mandatory client keepalive contract).
@@ -1776,6 +1780,8 @@ impl Orchestrator<'_> {
         self.exchange_reliable_ready_reported = false;
         self.linger_until = None;
         self.success_criteria_reported = false;
+        self.success_hold_started_at = None;
+        self.success_release_observed_at = None;
         self.success_release_poll_at = None;
         emit(&Event::Reconnected {
             attempt: self.reconnect_attempts,
@@ -1920,15 +1926,17 @@ impl Orchestrator<'_> {
         self.process_selected_pair_evidence(now);
         let ready_probes = take_ready_selected_pair_probes(&mut self.selected_pair_rx);
         let run_deadline = self.run_deadline;
-        let run_deadline_due = apply_selected_pair_probes_before_run_deadline(
+        apply_selected_pair_probes_before_run_deadline(
             ready_probes,
             |result| self.handle_selected_pair_probe(result),
             now,
             run_deadline,
         );
 
+        let now = Instant::now();
         self.arm_success_linger(now).await?;
         if self.linger_until.is_some_and(|at| now >= at) {
+            self.drain_queued_engine_events().await?;
             // Criteria can regress during the linger: an authoritative plan or
             // a freshly connected pair adds new obligations (exchange,
             // peer-status). Re-validate at expiry; on regression clear the
@@ -1944,7 +1952,9 @@ impl Orchestrator<'_> {
             self.linger_until = None;
         }
 
-        if run_deadline_due {
+        if self.run_deadline.is_due(Instant::now()) {
+            self.drain_queued_engine_events().await?;
+            self.arm_success_linger(Instant::now()).await?;
             let release_pending = self.success_release_pending().await?;
             if should_defer_success_at_run_deadline(
                 release_pending,
@@ -1988,6 +1998,17 @@ impl Orchestrator<'_> {
         Ok(None)
     }
 
+    async fn drain_queued_engine_events(&mut self) -> Result<(), FatalError> {
+        let queued_events = self.engine_rx.len();
+        for _ in 0..queued_events {
+            let Ok(event) = self.engine_rx.try_recv() else {
+                break;
+            };
+            self.handle_engine_event(event).await?;
+        }
+        Ok(())
+    }
+
     async fn arm_success_linger(&mut self, now: Instant) -> Result<(), FatalError> {
         if !self.criteria_met() {
             let release_pending =
@@ -1999,6 +2020,7 @@ impl Orchestrator<'_> {
         if self.cli.success_release_file.is_some() && !self.success_criteria_reported {
             emit(&Event::SuccessCriteriaMet);
             self.success_criteria_reported = true;
+            self.success_hold_started_at = Some(now);
         }
         if self.success_release_pending().await? {
             self.linger_until = None;
@@ -2012,12 +2034,53 @@ impl Orchestrator<'_> {
         Ok(())
     }
 
-    async fn success_release_pending(&self) -> Result<bool, FatalError> {
-        Self::release_file_pending(
+    async fn exchange_window_end(&mut self) -> Result<Option<Instant>, FatalError> {
+        let run_until = self.run_deadline.finite();
+        if !self.success_criteria_reported {
+            return Ok(run_until);
+        }
+        if self.success_release_pending().await? {
+            return Ok(None);
+        }
+        Ok(run_until.map(|run_until| {
+            self.linger_until
+                .map_or(run_until, |linger_until| run_until.max(linger_until))
+        }))
+    }
+
+    async fn exchange_window_open_at(&mut self, observed_at: Instant) -> Result<bool, FatalError> {
+        if !self.run_deadline.is_due(observed_at) {
+            return Ok(true);
+        }
+        self.success_release_pending().await?;
+        let during_hold = self.cli.success_release_file.is_some()
+            && self.success_hold_started_at.is_some_and(|started_at| {
+                observed_at >= started_at
+                    && self
+                        .success_release_observed_at
+                        .is_none_or(|released_at| observed_at < released_at)
+            });
+        let during_linger = self.linger_until.is_some_and(|until| {
+            until
+                .checked_sub(EXIT_LINGER)
+                .is_some_and(|started_at| observed_at >= started_at && observed_at < until)
+        });
+        Ok(during_hold || (self.success_criteria_reported && during_linger))
+    }
+
+    async fn success_release_pending(&mut self) -> Result<bool, FatalError> {
+        if self.success_release_observed_at.is_some() {
+            return Ok(false);
+        }
+        let pending = Self::release_file_pending(
             self.cli.success_release_file.as_deref(),
             "--success-release-file",
         )
-        .await
+        .await?;
+        if self.cli.success_release_file.is_some() && !pending {
+            self.success_release_observed_at = Some(Instant::now());
+        }
+        Ok(pending)
     }
 
     async fn exchange_release_pending(&self) -> Result<bool, FatalError> {
@@ -2291,6 +2354,8 @@ impl Orchestrator<'_> {
                 r#"{{"from":"{}","channel":"{}","seq":0}}"#,
                 self.my_id, label
             );
+            /* An admitted send keeps its captured deadline across harness release. */
+            let window_end = self.exchange_window_end().await?;
             let operation = self.negotiation_deadline(peer);
             let local = Deadline::after(Instant::now(), CHANNEL_SEND_TIMEOUT);
             let deadline = match (operation.finite(), local.finite()) {
@@ -2298,7 +2363,12 @@ impl Orchestrator<'_> {
                 (Some(_), None) => operation,
                 _ => local,
             };
-            let expired = || format!("send on {label} to {peer} exceeded its local deadline");
+            let deadline = match (deadline.finite(), window_end) {
+                (Some(local), Some(window)) => local.min(window).into(),
+                (None, Some(window)) => window.into(),
+                _ => deadline,
+            };
+            let expired = || format!("send on {label} to {peer} exceeded its exchange deadline");
             let result = match self.engine.channel(peer, label) {
                 Some(_) if deadline.is_due(Instant::now()) => Err(expired()),
                 Some(channel) => match deadline.timeout(send(channel, text.clone())).await {
@@ -2819,9 +2889,13 @@ impl Orchestrator<'_> {
                 label,
                 text,
                 queue_permit,
+                received_at,
                 ..
             } => {
-                if self.cli.exchange && is_exchange_probe(peer, &label, &text) {
+                if self.cli.exchange
+                    && is_exchange_probe(peer, &label, &text)
+                    && self.exchange_window_open_at(received_at).await?
+                {
                     self.exchange_ledger.note_received(peer, label.clone());
                 }
                 emit(&Event::ChannelMessage { peer, label, text });
@@ -4484,6 +4558,8 @@ mod tests {
             ),
             linger_until: None,
             success_criteria_reported: false,
+            success_hold_started_at: None,
+            success_release_observed_at: None,
             success_release_poll_at: None,
             next_ping_at: checked_deadline(tokio::time::Instant::now(), PING_INTERVAL),
             pong_deadline: None,
@@ -4566,6 +4642,7 @@ mod tests {
                         label: label.to_string(),
                         text: text.clone(),
                         queue_permit: crate::engine::MessageQueuePermit::for_test(),
+                        received_at: tokio::time::Instant::now(),
                     })
                     .await
                     .unwrap();
@@ -4588,6 +4665,7 @@ mod tests {
                     label: label.to_string(),
                     text: text.clone(),
                     queue_permit: crate::engine::MessageQueuePermit::for_test(),
+                    received_at: tokio::time::Instant::now(),
                 })
                 .await
                 .unwrap();
@@ -4606,6 +4684,7 @@ mod tests {
                     label: label.to_string(),
                     text,
                     queue_permit: crate::engine::MessageQueuePermit::for_test(),
+                    received_at: tokio::time::Instant::now(),
                 })
                 .await
                 .unwrap();
@@ -4959,12 +5038,16 @@ mod tests {
         });
         let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         let _server_ws = server.await.unwrap();
+        let release_dir = tempfile::tempdir().unwrap();
+        let success_release = release_dir.path().join("success-release");
         let cli = Cli::parse_from([
             "reference-native",
             "--server-url",
             &url,
             "--create-room",
             "--exchange",
+            "--success-release-file",
+            success_release.to_str().unwrap(),
             "--exchange-release-file",
             "/held-exchange",
             "--unreliable-exchange-release-file",
@@ -5003,7 +5086,30 @@ mod tests {
         state
             .exchange_ledger
             .note_received(joined, RELIABLE_LABEL.to_string());
+        let clock_guard = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
+        tokio::time::pause();
+        let hold_started_at = Instant::now();
+        state.run_deadline = Deadline::after(hold_started_at, Duration::ZERO);
         state.success_criteria_reported = true;
+        state.success_hold_started_at = Some(hold_started_at);
+        tokio::time::advance(Duration::from_millis(25)).await;
+        let held_receipt_at = Instant::now();
+        tokio::time::advance(Duration::from_millis(25)).await;
+        std::fs::write(&success_release, "release").unwrap();
+        assert!(!state.success_release_pending().await.unwrap());
+        std::fs::remove_file(&success_release).unwrap();
+        assert!(
+            !state.success_release_pending().await.unwrap(),
+            "release is one-way within one room phase"
+        );
+        assert!(state
+            .exchange_window_open_at(held_receipt_at)
+            .await
+            .unwrap());
         state.linger_until = Some(Instant::now());
         let snapshot = serde_json::from_value::<ServerMessage>(json!({
             "type": "Reconnected", "data": {
@@ -5076,6 +5182,17 @@ mod tests {
                 state.present.contains(&departed),
                 "{case} mutated membership"
             );
+            assert!(
+                state
+                    .exchange_window_open_at(held_receipt_at)
+                    .await
+                    .unwrap(),
+                "{case} discarded the previous hold history"
+            );
+            assert!(
+                !state.success_release_pending().await.unwrap(),
+                "{case} reopened the previous release"
+            );
         }
         state.restore_snapshot(*snapshot).await.unwrap();
         assert_eq!(state.present, BTreeSet::from([me, joined]));
@@ -5091,6 +5208,17 @@ mod tests {
         assert!(state.current_session_generation.is_none() && !state.webrtc_plan_seen);
         assert!(state.transport_status.is_none() && state.linger_until.is_none());
         assert!(!state.success_criteria_reported && !state.relay_sent);
+        assert!(
+            !state
+                .exchange_window_open_at(held_receipt_at)
+                .await
+                .unwrap(),
+            "a restored room cannot credit receipts from the prior hold"
+        );
+        assert!(
+            state.success_release_pending().await.unwrap(),
+            "a restored room must observe its own release marker"
+        );
         assert!(
             !state.p2p_rebuild_released
                 && !state.exchange_released
@@ -5120,6 +5248,8 @@ mod tests {
         }})).unwrap();
         let error = state.handle_server_message(unsolicited).await.unwrap_err();
         assert!(error.message.contains("without a pending room restore"));
+        clock_guard.abort();
+        tokio::time::resume();
     }
 
     /// Pins the orchestrator WIRING behind the [`StartGameGate`] (issue #449):
