@@ -1750,6 +1750,8 @@ async fn exchange_sends_preserve_the_active_success_window() {
             .flat_map(|label| {
                 [
                     "held",
+                    "released-during-send",
+                    "queued-release-during-send",
                     "linger-before",
                     "linger-exact",
                     "linger-after",
@@ -1769,7 +1771,10 @@ async fn exchange_sends_preserve_the_active_success_window() {
         let mut server_ws = server.await.unwrap();
         let dir = tempfile::tempdir().unwrap();
         let release = dir.path().join("release");
-        if phase != "held" {
+        if !matches!(
+            phase,
+            "held" | "released-during-send" | "queued-release-during-send"
+        ) {
             std::fs::write(&release, "release").unwrap();
         }
         let cli = Cli::parse_from([
@@ -1800,7 +1805,9 @@ async fn exchange_sends_preserve_the_active_success_window() {
         state.exchange_ledger.reset_incarnation(peer);
         state.exchange_ledger.note_connected(peer);
         for other in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
-            state.exchange_ledger.note_received(peer, other.to_string());
+            if phase != "queued-release-during-send" || other != label {
+                state.exchange_ledger.note_received(peer, other.to_string());
+            }
             if other != label {
                 state.exchange_ledger.note_sent(peer, other);
             }
@@ -1814,6 +1821,12 @@ async fn exchange_sends_preserve_the_active_success_window() {
         state.run_deadline = Deadline::after(Instant::now(), Duration::ZERO);
         state.next_ping_at = Instant::now() + Duration::from_secs(60);
         state.success_criteria_reported = true;
+        state.success_hold_started_at = Some(Instant::now());
+        let (messages, queued) = tokio::sync::mpsc::unbounded_channel();
+        if phase == "queued-release-during-send" {
+            state.engine_rx = queued;
+            assert!(state.engine.is_current_generation(peer, 1));
+        }
         if phase.starts_with("linger-") {
             state.linger_until = Some(Instant::now() + Duration::from_millis(100));
         }
@@ -1826,14 +1839,39 @@ async fn exchange_sends_preserve_the_active_success_window() {
         state
             .send_exchange_with(peer, &[label], |_, _| {
                 calls += 1;
+                let release = release.clone();
+                let messages = messages.clone();
                 async move {
-                    tokio::time::advance(elapsed).await;
+                    if matches!(phase, "released-during-send" | "queued-release-during-send") {
+                        tokio::time::advance(Duration::from_millis(25)).await;
+                        if phase == "queued-release-during-send" {
+                            messages
+                                .send(EngineEvent::ChannelMessage {
+                                    peer,
+                                    generation: 1,
+                                    label: label.to_string(),
+                                    text: json!({"from": peer, "channel": label, "seq": 0})
+                                        .to_string(),
+                                    queue_permit: crate::engine::MessageQueuePermit::for_test(),
+                                    received_at: Instant::now(),
+                                })
+                                .unwrap();
+                        }
+                        tokio::time::advance(Duration::from_millis(25)).await;
+                        std::fs::write(release, "release").unwrap();
+                        tokio::time::advance(elapsed - Duration::from_millis(50)).await;
+                    } else {
+                        tokio::time::advance(elapsed).await;
+                    }
                     Ok(())
                 }
             })
             .await
             .unwrap();
-        let valid = matches!(phase, "held" | "linger-before");
+        let valid = matches!(
+            phase,
+            "held" | "linger-before" | "released-during-send" | "queued-release-during-send"
+        );
         assert_eq!(
             state.exchange_ledger.has_sent(peer, label),
             valid,
@@ -1855,8 +1893,13 @@ async fn exchange_sends_preserve_the_active_success_window() {
                 None
             } else {
                 Some(EXIT_CRITERIA_UNMET)
-            }
+            },
+            "{label}/{phase}/p2p={p2p_timeout}: timers preserve admission and arrival ownership"
         );
+        if matches!(phase, "released-during-send" | "queued-release-during-send") {
+            tokio::time::advance(EXIT_LINGER).await;
+            assert_eq!(state.process_timers().await.unwrap(), Some(EXIT_SUCCESS));
+        }
         if phase == "linger-before" {
             tokio::time::advance(Duration::from_millis(1)).await;
             assert_eq!(state.process_timers().await.unwrap(), Some(EXIT_SUCCESS));

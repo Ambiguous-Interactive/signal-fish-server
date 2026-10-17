@@ -4633,15 +4633,16 @@ release marker exists and linger has ended.
 
 Baseline Nextest `f238a1ed` fails at a reliable send completing exactly at the
 100 ms linger cutoff, inside the existing one-second local send budget.
-Active-hold and 99 ms completion controls pass first. The repair derives one
-absolute exchange-window end for send start, send completion, and receipt
-credit. A finite window also caps the local send wait. An active hold keeps
-the original local operation bound. Expired starts never call the sender, and
-late completions retain unpaid debt and existing failed-link cleanup.
+Active-hold and 99 ms completion controls pass first. The repair captures
+an exchange-window end when each send starts and caps its local wait. A send
+admitted during a hold keeps its original local deadline across release.
+Expired starts never call the sender, and completions past the captured
+deadline retain unpaid debt and existing failed-link cleanup.
 
-Twenty new send histories cover both labels, zero and default P2P windows,
+Twenty-eight new send histories cover both labels, zero and default P2P windows,
 active hold, timely linger completion, exact and late expiry, and start after
-release without linger. They check invocation, debt, physical ownership, and
+release without linger, plus release during a send and a queued held receipt.
+They check invocation, debt, physical ownership, and
 exit behavior. The full focused scope retains the existing real relay, stalled
 send, callback-ordering, retry, and membership controls.
 
@@ -4650,10 +4651,31 @@ affect only the private reference-client schedulers. Server wire messages,
 SDK APIs, channel modes, and defaults do not change. Neither controlled defect
 identifies the historical causes of #853 or #889; their acceptance stays open.
 
-Final native Nextest `5c1b1bdc` passes all 20 scoped controls, including 68
+The combined candidate in Nextest `5c1b1bdc` passes all 20 scoped controls, including 68
 receipt histories and 20 new send-window histories. Strict native Clippy and
 build pass. The rebuilt browser and native pair pass three room restores and
 three three-player meshes. Every endpoint stream and server log is retained
 with stable before/after hashes under `progress/session-468-window-qualified-live`.
 Only the native binary and browser page bundle differ from baseline. Hosted
 current-head CI and feedback remain delivery gates.
+
+Review also exposed a release-observation race. A live release check at send
+completion can revoke a valid admitted send before linger is armed. The
+negative control in Nextest `782ef184` reproduces that failure. Dropping held
+receipt history also loses a queued receipt that arrived before release;
+Nextest `fc09dafd` proves that separate failure.
+
+Native sends now keep their captured admission deadline. The client records
+the hold start and first release observation on the monotonic clock. Queued
+receipts retain eligibility inside that completed hold interval. New sends
+use the current window, and a release marker cannot reopen the hold after
+observation. Added boundaries cover arrivals before and exactly at hold start,
+exactly at release observation, and after release. The native receipt matrix
+now has 80 histories and the send matrix has 28. The browser adds 36 histories.
+
+Owned-window qualification in Nextest `4bc0e448` passes all 21 focused
+controls, including 80 receipt and 28 send histories. Strict native Clippy
+and the native build pass. The rebuilt pair passes another three restores
+and three three-player meshes with stable hashes. Only the native binary
+and browser page bundle differ from baseline. Evidence remains under
+`progress/session-468-owned-qualified-live`.

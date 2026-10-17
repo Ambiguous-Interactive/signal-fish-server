@@ -659,6 +659,9 @@ async fn queued_exchange_receipts_complete_before_the_run_cutoff() {
                     "closed-before",
                     "closed-after",
                     "held-restore",
+                    "before-held",
+                    "at-held-start",
+                    "at-release-observation",
                     "released",
                     "released-linger",
                     "expired-linger",
@@ -693,14 +696,22 @@ async fn queued_exchange_receipts_complete_before_the_run_cutoff() {
         ];
         if matches!(
             mode,
-            "held-restore" | "released" | "released-linger" | "expired-linger"
+            "held-restore"
+                | "released"
+                | "released-linger"
+                | "expired-linger"
+                | "before-held"
+                | "at-held-start"
+                | "at-release-observation"
         ) || mode.starts_with("queued-linger")
         {
             args.extend(["--success-release-file", release_file.to_str().unwrap()]);
         }
         let cli = Cli::parse_from(args);
-        if matches!(mode, "released" | "released-linger" | "expired-linger")
-            || mode.starts_with("queued-linger")
+        if matches!(
+            mode,
+            "released" | "released-linger" | "expired-linger" | "at-release-observation"
+        ) || mode.starts_with("queued-linger")
         {
             std::fs::write(&release_file, "release").unwrap();
         }
@@ -722,7 +733,8 @@ async fn queued_exchange_receipts_complete_before_the_run_cutoff() {
         let (events, queued) = tokio::sync::mpsc::unbounded_channel();
         state.engine_rx = queued;
         tokio::time::pause();
-        state.run_deadline = Deadline::after(Instant::now(), Duration::from_secs(1));
+        let started_at = Instant::now();
+        state.run_deadline = Deadline::after(started_at, Duration::from_secs(1));
         state.next_ping_at = Instant::now() + Duration::from_secs(60);
         let elapsed = match mode {
             "exact" | "queued-exact" => Duration::from_secs(1),
@@ -732,6 +744,9 @@ async fn queued_exchange_receipts_complete_before_the_run_cutoff() {
             | "released"
             | "released-linger"
             | "expired-linger"
+            | "before-held"
+            | "at-held-start"
+            | "at-release-observation"
             | "queued-linger"
             | "queued-linger-exact"
             | "queued-linger-late" => Duration::from_millis(1001),
@@ -740,8 +755,28 @@ async fn queued_exchange_receipts_complete_before_the_run_cutoff() {
         tokio::time::advance(elapsed).await;
         state.success_criteria_reported = matches!(
             mode,
-            "held-restore" | "released" | "released-linger" | "expired-linger"
+            "held-restore"
+                | "released"
+                | "released-linger"
+                | "expired-linger"
+                | "before-held"
+                | "at-held-start"
+                | "at-release-observation"
         ) || mode.starts_with("queued-linger");
+        if state.success_criteria_reported {
+            state.success_hold_started_at = Some(match mode {
+                "before-held" => Instant::now() + Duration::from_millis(1),
+                "at-held-start" => Instant::now(),
+                _ => started_at,
+            });
+            if !matches!(mode, "held-restore" | "before-held" | "at-held-start") {
+                state.success_release_observed_at = Some(match mode {
+                    "at-release-observation" => Instant::now(),
+                    "released" => Instant::now() - Duration::from_millis(1),
+                    _ => started_at,
+                });
+            }
+        }
         if matches!(mode, "released-linger" | "queued-linger") {
             state.linger_until = Some(Instant::now() + EXIT_LINGER);
         } else if matches!(mode, "expired-linger" | "queued-linger-exact") {
@@ -784,6 +819,8 @@ async fn queued_exchange_receipts_complete_before_the_run_cutoff() {
         }
         if mode == "queued-linger" {
             tokio::time::advance(EXIT_LINGER).await;
+        } else if mode == "before-held" {
+            tokio::time::advance(Duration::from_millis(2)).await;
         }
         if elapsed < Duration::from_secs(1) {
             tokio::time::advance(Duration::from_secs(1) - elapsed).await;
@@ -795,6 +832,7 @@ async fn queued_exchange_receipts_complete_before_the_run_cutoff() {
                 | "on-time"
                 | "closed-after"
                 | "held-restore"
+                | "at-held-start"
                 | "released-linger"
                 | "queued-linger"
         );
@@ -803,7 +841,17 @@ async fn queued_exchange_receipts_complete_before_the_run_cutoff() {
             valid,
             "{label}/{mode}/p2p={p2p_timeout}: arrival and physical generation own eligibility"
         );
-        if mode == "held-restore" {
+        if mode == "before-held" {
+            assert_eq!(
+                result, None,
+                "the current hold stays active without old receipt credit"
+            );
+            std::fs::write(&release_file, "release").unwrap();
+            assert_eq!(
+                state.process_timers().await.unwrap(),
+                Some(EXIT_CRITERIA_UNMET)
+            );
+        } else if matches!(mode, "held-restore" | "at-held-start") {
             assert_eq!(result, None, "held success keeps serving fresh exchange");
             std::fs::write(&release_file, "release").unwrap();
             assert_eq!(state.process_timers().await.unwrap(), None);

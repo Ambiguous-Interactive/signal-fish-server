@@ -658,6 +658,8 @@ async fn run_inner(cli: &Cli) -> Result<i32, FatalError> {
         run_deadline,
         linger_until: None,
         success_criteria_reported: false,
+        success_hold_started_at: None,
+        success_release_observed_at: None,
         success_release_poll_at: None,
         next_ping_at: checked_deadline(Instant::now(), PING_INTERVAL),
         pong_deadline: None,
@@ -1434,6 +1436,8 @@ struct Orchestrator<'a> {
     linger_until: Option<Instant>,
     /// Whether the stable machine event announcing complete criteria was sent.
     success_criteria_reported: bool,
+    success_hold_started_at: Option<Instant>,
+    success_release_observed_at: Option<Instant>,
     /// Next poll for an optional harness-controlled release-file barrier.
     success_release_poll_at: Option<Instant>,
     /// Next keepalive `Ping` send (the mandatory client keepalive contract).
@@ -2014,6 +2018,7 @@ impl Orchestrator<'_> {
         if self.cli.success_release_file.is_some() && !self.success_criteria_reported {
             emit(&Event::SuccessCriteriaMet);
             self.success_criteria_reported = true;
+            self.success_hold_started_at = Some(now);
         }
         if self.success_release_pending().await? {
             self.linger_until = None;
@@ -2027,7 +2032,7 @@ impl Orchestrator<'_> {
         Ok(())
     }
 
-    async fn exchange_window_end(&self) -> Result<Option<Instant>, FatalError> {
+    async fn exchange_window_end(&mut self) -> Result<Option<Instant>, FatalError> {
         let run_until = self.run_deadline.finite();
         if !self.success_criteria_reported {
             return Ok(run_until);
@@ -2041,22 +2046,39 @@ impl Orchestrator<'_> {
         }))
     }
 
-    async fn exchange_window_open_at(&self, observed_at: Instant) -> Result<bool, FatalError> {
+    async fn exchange_window_open_at(&mut self, observed_at: Instant) -> Result<bool, FatalError> {
         if !self.run_deadline.is_due(observed_at) {
             return Ok(true);
         }
-        Ok(self
-            .exchange_window_end()
-            .await?
-            .is_none_or(|until| observed_at < until))
+        self.success_release_pending().await?;
+        let during_hold = self.cli.success_release_file.is_some()
+            && self.success_hold_started_at.is_some_and(|started_at| {
+                observed_at >= started_at
+                    && self
+                        .success_release_observed_at
+                        .is_none_or(|released_at| observed_at < released_at)
+            });
+        let during_linger = self.linger_until.is_some_and(|until| {
+            until
+                .checked_sub(EXIT_LINGER)
+                .is_some_and(|started_at| observed_at >= started_at && observed_at < until)
+        });
+        Ok(during_hold || (self.success_criteria_reported && during_linger))
     }
 
-    async fn success_release_pending(&self) -> Result<bool, FatalError> {
-        Self::release_file_pending(
+    async fn success_release_pending(&mut self) -> Result<bool, FatalError> {
+        if self.success_release_observed_at.is_some() {
+            return Ok(false);
+        }
+        let pending = Self::release_file_pending(
             self.cli.success_release_file.as_deref(),
             "--success-release-file",
         )
-        .await
+        .await?;
+        if self.cli.success_release_file.is_some() && !pending {
+            self.success_release_observed_at = Some(Instant::now());
+        }
+        Ok(pending)
     }
 
     async fn exchange_release_pending(&self) -> Result<bool, FatalError> {
@@ -2330,6 +2352,7 @@ impl Orchestrator<'_> {
                 r#"{{"from":"{}","channel":"{}","seq":0}}"#,
                 self.my_id, label
             );
+            /* An admitted send keeps its captured deadline across harness release. */
             let window_end = self.exchange_window_end().await?;
             let operation = self.negotiation_deadline(peer);
             let local = Deadline::after(Instant::now(), CHANNEL_SEND_TIMEOUT);
@@ -2347,10 +2370,7 @@ impl Orchestrator<'_> {
             let result = match self.engine.channel(peer, label) {
                 Some(_) if deadline.is_due(Instant::now()) => Err(expired()),
                 Some(channel) => match deadline.timeout(send(channel, text.clone())).await {
-                    Ok(result)
-                        if !deadline.is_due(Instant::now())
-                            && self.exchange_window_open_at(Instant::now()).await? =>
-                    {
+                    Ok(result) if !deadline.is_due(Instant::now()) => {
                         result.map_err(|error| format!("send on {label} to {peer} failed: {error}"))
                     }
                     _ => Err(expired()),
@@ -4536,6 +4556,8 @@ mod tests {
             ),
             linger_until: None,
             success_criteria_reported: false,
+            success_hold_started_at: None,
+            success_release_observed_at: None,
             success_release_poll_at: None,
             next_ping_at: checked_deadline(tokio::time::Instant::now(), PING_INTERVAL),
             pong_deadline: None,
@@ -5059,6 +5081,7 @@ mod tests {
             .exchange_ledger
             .note_received(joined, RELIABLE_LABEL.to_string());
         state.success_criteria_reported = true;
+        state.success_hold_started_at = Some(Instant::now());
         state.linger_until = Some(Instant::now());
         let snapshot = serde_json::from_value::<ServerMessage>(json!({
             "type": "Reconnected", "data": {
