@@ -193,10 +193,15 @@ for (const phase of [
       const errorsBeforeRetry = events.filter((event) => event['event'] === 'error').length;
       now = 700;
       socket.signal({ PairRetry: 1 });
-      socket.signal(
-        initiate ? { Answer: 'replacement-answer' } : { Offer: 'replacement-offer' },
-      );
-      socket.signal({ IceCandidate: 'replacement-candidate' });
+      socket.signal({
+        RetrySignal: {
+          attempt: 1,
+          signal: initiate ? { Answer: 'replacement-answer' } : { Offer: 'replacement-offer' },
+        },
+      });
+      socket.signal({
+        RetrySignal: { attempt: 1, signal: { IceCandidate: 'replacement-candidate' } },
+      });
       await turn();
       assert(
         connections.length === 2 && connections[0]?.closed === true,

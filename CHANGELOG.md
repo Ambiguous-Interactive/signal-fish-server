@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Breaking:** Keep old signaling from disrupting reference-client peer retries; upgrade both retry-enabled endpoints
+  together (#1022).
 - Stop retired browser reference-client signals from reaching replacement peer links (#1015).
 - Let browser reference-client pair retries recover from stalled negotiation before the connection deadline (#1013).
 - Keep browser reference-client relay traffic and other peers moving during stalled negotiation,

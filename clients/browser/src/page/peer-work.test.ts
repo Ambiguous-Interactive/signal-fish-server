@@ -219,8 +219,12 @@ for (const oldOutcome of ['resolve', 'reject', 'pending', 'backlog'] as const) {
     if (oldOutcome === 'resolve') {
       socket.signal(healthy, { PairRetry: 1 });
       await turn();
-      socket.signal(healthy, { Answer: 'retry-answer' });
-      socket.signal(healthy, { IceCandidate: 'retry-candidate' });
+      socket.signal(healthy, {
+        RetrySignal: { attempt: 1, signal: { Answer: 'retry-answer' } },
+      });
+      socket.signal(healthy, {
+        RetrySignal: { attempt: 1, signal: { IceCandidate: 'retry-candidate' } },
+      });
       await turn();
       assert(
         connections.length === 3 &&

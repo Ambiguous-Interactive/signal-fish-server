@@ -139,7 +139,13 @@ keeps the server-assigned offerer role. An active retry must finish or reach its
 P2P deadline before success. Retry offer creation and local description use the
 remaining original establishment window. A connected peer can request a
 coordinated rebuild with a new window after the old window
-ends, even if its old channel closes before the retry marker arrives. Use this extension only with peers that support it.
+ends, even if its old channel closes before the retry marker arrives.
+After a retry, both peers wrap each Offer, Answer, and IceCandidate as
+`{"RetrySignal":{"attempt":1,"signal":{"Offer":"..."}}}` with the current
+attempt number (#1022). They discard raw or wrong-attempt signals after the
+marker. The marker stays `{"PairRetry":1}`. Initial signals keep the normal
+Matchbox shape. Use matching reference client versions for this extension;
+older versions do not support retry envelopes.
 
 The client keeps the first data channel for each label in a peer connection.
 It closes duplicate channels so they cannot replace a working channel.

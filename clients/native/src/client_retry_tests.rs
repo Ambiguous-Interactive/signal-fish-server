@@ -869,7 +869,11 @@ pub(super) async fn open_physical_pair_with_events(
             let frame = server_ws.next().await.unwrap().unwrap();
             if let tokio_tungstenite::tungstenite::Message::Text(text) = frame {
                 let message: serde_json::Value = serde_json::from_str(&text).unwrap();
-                if let Some(sdp) = message["data"]["signal"]["Offer"].as_str() {
+                let signal = &message["data"]["signal"];
+                let attempt = state.pair_retry_attempts.get(&peer).copied().unwrap_or(0);
+                let signal = signal_for_retry_attempt(signal.clone(), attempt)
+                    .unwrap_or(serde_json::Value::Null);
+                if let Some(sdp) = signal["Offer"].as_str() {
                     offer = Some(sdp.to_string());
                 }
                 if message["type"] == "Ping" {
@@ -888,7 +892,21 @@ pub(super) async fn open_physical_pair_with_events(
             .handle_offer(state.my_id, offer.expect("initiator sent its SDP offer"))
             .await
             .unwrap();
-        state.engine.handle_answer(peer, answer).await.unwrap();
+        let attempt = state.pair_retry_attempts.get(&peer).copied().unwrap_or(0);
+        if attempt > 0 {
+            let generation = state.current_session_generation.unwrap();
+            state
+                .handle_signal(
+                    peer,
+                    generation,
+                    wrap_retry_signal(json!({"Answer": answer}), attempt),
+                )
+                .await
+                .unwrap();
+        } else {
+            assert_eq!(attempt, 0);
+            state.engine.handle_answer(peer, answer).await.unwrap();
+        }
     } else {
         let offer = remote
             .pair_with(state.my_id, true, &[])
@@ -930,7 +948,14 @@ pub(super) async fn open_physical_pair_with_events(
                 }
                 event = remote_events.recv() => match event.unwrap() {
                     EngineEvent::LocalCandidate { candidate_json, .. } => {
-                        state.engine.handle_remote_candidate(peer, &candidate_json).await.unwrap();
+                        let attempt = state.pair_retry_attempts.get(&peer).copied().unwrap_or(0);
+                        if attempt > 0 {
+                            let generation = state.current_session_generation.unwrap();
+                            state.handle_signal(peer, generation, wrap_retry_signal(json!({"IceCandidate": candidate_json}), attempt)).await.unwrap();
+                        } else {
+                            assert_eq!(attempt, 0);
+                            state.engine.handle_remote_candidate(peer, &candidate_json).await.unwrap();
+                        }
                     }
                     EngineEvent::RemoteChannel { label, channel, .. } => {
                         remote.store_remote_channel(state.my_id, label, channel).await;
@@ -1428,4 +1453,172 @@ async fn remote_retry_preserves_terminal_websocket_write_errors() {
         .await
         .expect_err("a failed fallback write must not become a nonfatal signal error");
     assert_eq!(error.code, EXIT_CONNECTION_ERROR);
+}
+
+/*
+    Regression #1022: the retry marker and old answer cross in opposite
+    directions. Sender FIFO cannot fence the replacement link.
+*/
+#[tokio::test]
+async fn retry_discards_crossing_old_answer_before_fresh_answer() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        tokio_tungstenite::accept_async(tcp).await.unwrap()
+    });
+    let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let mut server_ws = server.await.unwrap();
+    let cli = Cli::parse_from([
+        "reference-native",
+        "--server-url",
+        &url,
+        "--create-room",
+        "--disable-mdns",
+        "--p2p-retry-count",
+        "1",
+    ]);
+    let me = PlayerId::from_u128(1);
+    let peer = PlayerId::from_u128(2);
+    let generation = SessionGeneration::from_u128(3);
+    let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
+    state.current_session_generation = Some(generation);
+    state.establish_pair(peer, true).await.unwrap();
+    let offer = server_ws
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .into_text()
+        .unwrap();
+    let offer: serde_json::Value = serde_json::from_str(&offer).unwrap();
+    let (remote_tx, _remote_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut remote = Engine::new(cli.engine_settings(), remote_tx).unwrap();
+    remote.pair_with(me, false, &[]).await.unwrap();
+    let delayed_answer = remote
+        .handle_offer(
+            me,
+            offer["data"]["signal"]["Offer"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        )
+        .await
+        .unwrap();
+
+    state.request_pair_retry(peer, 1).await.unwrap();
+    // The marker precedes this offer on the requester's own wire.
+    let marker = server_ws
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .into_text()
+        .unwrap();
+    let marker: serde_json::Value = serde_json::from_str(&marker).unwrap();
+    assert_eq!(marker["data"]["signal"]["PairRetry"], 1);
+    let offer = server_ws
+        .next()
+        .await
+        .unwrap()
+        .unwrap()
+        .into_text()
+        .unwrap();
+    let offer: serde_json::Value = serde_json::from_str(&offer).unwrap();
+    // The delayed answer was already in flight before the remote saw the marker.
+    state
+        .handle_signal(peer, generation, json!({"Answer": delayed_answer}))
+        .await
+        .unwrap();
+
+    remote.remove_peer(me).await.unwrap();
+    assert_eq!(offer["data"]["signal"]["RetrySignal"]["attempt"], 1);
+    let fresh_offer = offer["data"]["signal"]["RetrySignal"]["signal"]["Offer"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (mut fresh_remote, opens, mut remote_events) =
+        open_physical_pair_with_events(&mut state, &mut server_ws, peer, Some(fresh_offer)).await;
+    assert_eq!(opens.len(), 2);
+    for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+        fresh_remote
+            .channel(me, label)
+            .unwrap()
+            .send_text("fresh gameplay")
+            .await
+            .unwrap();
+        state
+            .engine
+            .channel(peer, label)
+            .unwrap()
+            .send_text("fresh reply")
+            .await
+            .unwrap();
+    }
+    let mut local_received = BTreeSet::new();
+    let mut remote_received = BTreeSet::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while local_received.len() < 2 || remote_received.len() < 2 {
+            tokio::select! {
+                event = state.engine_rx.recv() => if let EngineEvent::ChannelMessage { label, text, .. } = event.unwrap() {
+                    assert_eq!(text, "fresh gameplay");
+                    local_received.insert(label);
+                },
+                event = remote_events.recv() => if let EngineEvent::ChannelMessage { label, text, .. } = event.unwrap() {
+                    assert_eq!(text, "fresh reply");
+                    remote_received.insert(label);
+                },
+            }
+        }
+    }).await.expect("replacement channels exchange fresh gameplay in both directions");
+    state.engine.remove_peer(peer).await.unwrap();
+    fresh_remote.remove_peer(me).await.unwrap();
+}
+
+#[test]
+fn retry_signal_epochs_preserve_default_wire_and_reject_stale_payloads() {
+    for payload in [
+        json!({"Offer":"sdp"}),
+        json!({"Answer":"sdp"}),
+        json!({"IceCandidate":"ice"}),
+    ] {
+        assert_eq!(wrap_retry_signal(payload.clone(), 0), payload);
+        assert_eq!(
+            signal_for_retry_attempt(payload.clone(), 0),
+            Some(payload.clone())
+        );
+        assert!(signal_for_retry_attempt(payload.clone(), 1).is_none());
+        for attempt in [1, 2, u8::MAX] {
+            let wrapped = wrap_retry_signal(payload.clone(), attempt);
+            assert_eq!(
+                signal_for_retry_attempt(wrapped.clone(), attempt),
+                Some(payload.clone())
+            );
+            assert!(signal_for_retry_attempt(wrapped.clone(), 0).is_none());
+            assert!(signal_for_retry_attempt(wrapped, attempt.saturating_sub(1)).is_none());
+        }
+    }
+    let marker = json!({"PairRetry": 2});
+    for attempt in [0, 1, 2] {
+        assert_eq!(wrap_retry_signal(marker.clone(), attempt), marker);
+        assert_eq!(
+            signal_for_retry_attempt(marker.clone(), attempt),
+            Some(marker.clone())
+        );
+    }
+    for invalid in [
+        json!({"RetrySignal":{"attempt":0,"signal":{"Answer":"sdp"}}}),
+        json!({"RetrySignal":{"attempt":2,"signal":{"Answer":"sdp"}}}),
+        json!({"RetrySignal":{"attempt":"1","signal":{"Answer":"sdp"}}}),
+        json!({"RetrySignal":{"attempt":1,"signal":{"PairRetry":1}}}),
+        json!({"RetrySignal":{"attempt":1,"signal":{"Other":"sdp"}}}),
+        json!({"RetrySignal":{"attempt":1}}),
+        json!({"RetrySignal":{"attempt":1,"signal":{"Answer":"sdp"},"extra":true}}),
+        json!({"RetrySignal":{"attempt":1,"signal":{"Answer":"sdp"}},"extra":true}),
+    ] {
+        assert!(
+            signal_for_retry_attempt(invalid.clone(), 1).is_none(),
+            "accepted {invalid}"
+        );
+    }
 }

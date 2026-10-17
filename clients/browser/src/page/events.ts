@@ -35,6 +35,36 @@ export function classifySignal(signal: unknown): SignalKind {
   }
 }
 
+/** Keep default Matchbox signals unchanged; identify each opt-in retry link. */
+export function signalForRetryAttempt(signal: unknown, attempt: number): unknown {
+  const kind = classifySignal(signal);
+  if (kind === 'pair_retry') return signal;
+  if (typeof signal !== 'object' || signal === null || Array.isArray(signal)) {
+    return attempt === 0 ? signal : undefined;
+  }
+  if (!Object.hasOwn(signal, 'RetrySignal')) return attempt === 0 ? signal : undefined;
+  if (attempt === 0 || Object.keys(signal).length !== 1) return undefined;
+  const envelope = (signal as Record<string, unknown>)['RetrySignal'];
+  if (typeof envelope !== 'object' || envelope === null || Array.isArray(envelope))
+    return undefined;
+  const tagged = envelope as Record<string, unknown>;
+  if (Object.keys(tagged).length !== 2 || tagged['attempt'] !== attempt) return undefined;
+  const payload = tagged['signal'];
+  const payloadKind = classifySignal(payload);
+  return payloadKind === 'offer' || payloadKind === 'answer' || payloadKind === 'ice_candidate'
+    ? payload
+    : undefined;
+}
+
+export function tagRetrySignal(
+  signal: Record<string, unknown>,
+  attempt: number,
+): Record<string, unknown> {
+  return attempt > 0 && classifySignal(signal) !== 'pair_retry'
+    ? { RetrySignal: { attempt, signal } }
+    : signal;
+}
+
 declare global {
   interface Window {
     /** stdout bridge exposed by the CLI before the page bundle is injected. */

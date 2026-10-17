@@ -4294,3 +4294,55 @@ hashes match before and after the six runs. Full endpoint and server logs
 remain under `progress/session-462-lockfix-interop`. These runs also provide
 new #853 and #889 attempts on the updated graph; neither original failure
 recurs, so neither investigation is complete.
+
+### F79 — A crossed old answer replaces fresh retry state
+
+Issue [#1022](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1022).
+Baseline `24487aee`. A20. The native reference client can request a physical
+peer retry while an old answer travels back from the remote peer. The server
+preserves each sender's FIFO order, but cannot order those opposite directions.
+The local callback generation fences retired callbacks. The server session
+generation remains unchanged across the physical retry. Neither excludes the
+old answer carried by the signaling socket.
+
+A real-engine experiment creates Offer0 and Answer0, holds Answer0, replaces
+the initiator, and creates Offer1. The replacement accepts held Answer0. After
+the responder replaces its link, its fresh Answer1 fails because the initiator
+is already in the stable signaling state. The experiment uses the repository's
+qualified RTC, SCTP, and WebRTC sources. This confirms a new retry defect;
+it does not identify the original no-retry failures in #853 or #889.
+
+The repair carries an attempt number on post-retry SDP and ICE signals in both
+reference clients. Each endpoint applies only traffic for its current physical
+attempt. Bare Matchbox signals remain valid before the first retry. Retry
+markers, configured limits, server generations, and server-assigned roles
+keep their existing meaning. Retry-enabled endpoints must upgrade together.
+The default retry count remains zero.
+
+The baseline native orchestrator regression fails in 0.654 seconds (Nextest
+`53131252`): the old answer consumes the replacement offer's answer slot.
+The repaired regression rejects that old answer, applies a tagged fresh answer
+and ICE through the orchestrator, opens both replacement channels, and delivers
+fresh gameplay in both directions. The 52 scoped native retry and negotiation
+controls pass in 16.587 seconds. The shared test helper keeps its direct-engine
+path for initial links whose earlier client deadlines deliberately expired.
+Post-retry links use the tagged orchestrator path.
+
+Browser dispatch controls cover both offerer roles, default bare signaling,
+successive retries, wrong attempts, and malformed envelopes. Stale browser
+inputs in this test are defensive controls: the browser only accepts retries
+from peers, so its own sender FIFO excludes the native requester's crossed
+answer history. Existing stalled-work, retirement, and authoritative-reset
+assertions remain intact. Independent reviews found no remaining source
+findings. These controls establish attempt isolation, not the causes of #853
+or #889, and do not complete A20 or #826.
+
+Eight fixed-binary live controls pass in 24.918 seconds: two native/native
+retries, two browser/native retries, two browser/native restores for #853,
+and two three-player meshes for #889. Eighteen complete endpoint streams retain
+922 events, 56 sends, 56 receipts, eighteen success barriers, and eighteen
+exits with code zero. No endpoint emits an error. All six executable and bundle
+hashes match before and after the controls. Full endpoint and server logs
+remain under `progress/session-463-live`. Neither original spontaneous failure
+recurs, so #853 and #889 remain open. Root and native strict full lint gates,
+browser type checking, and the browser suite and build pass.

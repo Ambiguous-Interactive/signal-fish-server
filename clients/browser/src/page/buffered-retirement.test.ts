@@ -342,8 +342,13 @@ for (const phase of ['remote-offer', 'answer', 'local-answer', 'candidate'] as c
         }
         if (replacement === 'incarnation')
           socket.deliver('NewPeer', { peer_id: peer, you_initiate: false });
-        socket.signal({ Offer: 'replacement-offer' }, replacementGeneration);
-        socket.signal({ IceCandidate: 'replacement-candidate' }, replacementGeneration);
+        const replacementSignal = (signal: Record<string, unknown>) =>
+          replacement === 'retry' ? { RetrySignal: { attempt: 1, signal } } : signal;
+        socket.signal(replacementSignal({ Offer: 'replacement-offer' }), replacementGeneration);
+        socket.signal(
+          replacementSignal({ IceCandidate: 'replacement-candidate' }),
+          replacementGeneration,
+        );
         await turn();
         assert(
           connections.length === 3 && connections[1]?.closed === true,
