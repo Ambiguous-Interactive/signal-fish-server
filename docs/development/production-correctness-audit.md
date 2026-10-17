@@ -4741,3 +4741,16 @@ three three-player meshes. All 21 endpoint streams and server logs are retained
 under `progress/session-469-qualified-live`, with unchanged before/after hashes.
 Only the native binary and browser bundle differ from baseline. Hosted CI and
 feedback remain delivery gates.
+
+Hosted interop found two late-join assertions that still required one probe
+across all physical links. Both failures retain the expected replacement
+probes. The native reproduction `71369712` fails the same assertion locally.
+The late-join controls now drain each physical exchange before shared release
+and check exact sender/label counts on both sides of the replacement. Each
+incumbent has six sends and six receipts; the joiner has four of each. Logical
+pair formation still occurs once per peer.
+
+The repaired late-join controls pass in native Nextest `3709fe7d` and real
+Chromium/native Nextest `696cbc98`. Targeted strict Clippy, formatting, and
+Markdown checks pass. Production code and the fixed-binary qualification
+artifacts do not change in this follow-up.

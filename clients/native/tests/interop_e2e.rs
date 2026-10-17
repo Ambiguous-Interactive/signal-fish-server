@@ -1290,6 +1290,9 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
                 .await_event_or_recorded(event_name, EVENT_TIMEOUT)
                 .await;
         }
+        for name in ["channel_message", "channel_message_sent"] {
+            await_event_count(incumbent, name, 2, EVENT_TIMEOUT).await;
+        }
     }
     let pre_join_status_counts = [
         events_named(&inc0.events, "transport_status_sent").len(),
@@ -1321,6 +1324,11 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
         client
             .await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)
             .await;
+    }
+    for incumbent in [&mut inc0, &mut inc1] {
+        for name in ["channel_message", "channel_message_sent"] {
+            await_event_count(incumbent, name, 6, EVENT_TIMEOUT).await;
+        }
     }
     let held_incumbent_statuses = [
         transport_status_sequence(&inc0.events, "inc0"),
@@ -1590,8 +1598,19 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
 
         let live_pairs: BTreeSet<&str> = BTreeSet::from([other_id, joiner_id.as_str()]);
         assert_pair_connected_exactly(&incumbent.events, who, &live_pairs);
-        assert_exchange_received_from(&incumbent.events, who, &live_pairs);
-        assert_exchange_sent_to(&incumbent.events, who, &live_pairs);
+        let replan_at = incumbent
+            .events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| event["event"] == "session_plan")
+            .nth(1)
+            .map(|(index, _)| index)
+            .expect("the authoritative replacement plan is present");
+        let original_pair = BTreeSet::from([other_id]);
+        assert_exchange_received_from(&incumbent.events[..replan_at], who, &original_pair);
+        assert_exchange_sent_to(&incumbent.events[..replan_at], who, &original_pair);
+        assert_exchange_received_from(&incumbent.events[replan_at..], who, &live_pairs);
+        assert_exchange_sent_to(&incumbent.events[replan_at..], who, &live_pairs);
         assert_transport_status_true(incumbent_windows[index], who);
         let expected_reports: BTreeMap<&str, Vec<bool>> = BTreeMap::from([
             (other_id, incumbent_transport_statuses[1 - index].clone()),
@@ -1623,15 +1642,15 @@ async fn late_join_authoritative_replan_real_webrtc_n3() {
         );
     }
 
-    // The full 12-message channel matrix across the 3 live session members:
-    // each received one message per label from each of its 2 pairs.
+    // The original incumbent link contributes four receipts. The refreshed
+    // three-member mesh contributes twelve receipts on its fresh links.
     let total_received: usize = [&inc0.events, &inc1.events, &joiner.events]
         .into_iter()
         .map(|events| events_named(events, "channel_message").len())
         .sum();
     assert_eq!(
-        total_received, 12,
-        "3 members x 2 pairs x 2 channels = 12 channel_message receive events"
+        total_received, 16,
+        "4 original-link receipts + 12 refreshed-mesh receipts = 16 receive events"
     );
 }
 

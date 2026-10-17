@@ -545,7 +545,8 @@ async fn native_restore_restarts_browser_bidirectional_exchange() {
 }
 
 /// Regression #930: a late join replaces the retained native/browser physical
-/// link without a PairRetry marker, while its logical exchange stays complete.
+/// link without a PairRetry marker. Each replacement resends both probes
+/// while its logical exchange stays complete (#1035).
 #[tokio::test(flavor = "multi_thread")]
 async fn late_join_reports_retained_browser_native_pair_recovery() {
     let _serial = acquire_serial().await;
@@ -628,18 +629,32 @@ async fn late_join_reports_retained_browser_native_pair_recovery() {
         native.diagnostics(),
         browser.diagnostics()
     );
-    // Keep every endpoint live until the new two-peer exchanges also complete.
-    let formed = collect_client_outcomes([&mut native, &mut browser, &mut joiner].into_iter().map(
-        |client| async move {
-            tokio::time::timeout(EVENT_TIMEOUT, async {
-                while events_named(&client.events, "channel_message").len() < 4 {
-                    client.await_event("channel_message", EVENT_TIMEOUT).await;
-                }
-            })
-            .await
-            .expect("both logical peer exchanges");
-        },
-    ))
+    // Each incumbent exchanges on the original pair, its replacement, and
+    // the new pair. The joiner exchanges on its two new pairs. Drain sends
+    // and receipts before release.
+    let formed = collect_client_outcomes(
+        [&mut native, &mut browser, &mut joiner]
+            .into_iter()
+            .zip([6, 6, 4])
+            .map(|(client, expected)| async move {
+                tokio::time::timeout(EVENT_TIMEOUT, async {
+                    for event in ["channel_message_sent", "channel_message"] {
+                        while events_named(&client.events, event).len() < expected {
+                            client.await_event(event, EVENT_TIMEOUT).await;
+                        }
+                        assert_eq!(
+                            events_named(&client.events, event).len(),
+                            expected,
+                            "{}: expected one {event} per physical channel; {}",
+                            client.name,
+                            client.diagnostics()
+                        );
+                    }
+                })
+                .await
+                .expect("all physical peer exchanges");
+            }),
+    )
     .await;
     assert!(
         formed.iter().all(Result::is_ok),
@@ -648,6 +663,7 @@ async fn late_join_reports_retained_browser_native_pair_recovery() {
         browser.diagnostics(),
         joiner.diagnostics()
     );
+    let joiner_id = player_id_of(&joiner.events, "late-native");
     std::fs::write(success, b"release").unwrap();
     for (index, client) in [&mut native, &mut browser].into_iter().enumerate() {
         drain_expect_success(client).await;
@@ -664,12 +680,15 @@ async fn late_join_reports_retained_browser_native_pair_recovery() {
                 .count(),
             1
         );
+        let retained_peer = BTreeSet::from([ids[1 - index].as_str()]);
+        let initial = &client.events[..initial_lengths[index]];
+        assert_exchange_sent_to(initial, &client.name, &retained_peer);
+        assert_exchange_received_from(initial, &client.name, &retained_peer);
+        let fresh_peers = BTreeSet::from([ids[1 - index].as_str(), joiner_id.as_str()]);
+        assert_exchange_sent_to(fresh, &client.name, &fresh_peers);
+        assert_exchange_received_from(fresh, &client.name, &fresh_peers);
         for event in ["channel_message_sent", "channel_message"] {
-            assert_eq!(
-                events_named(&client.events, event).len(),
-                4,
-                "retained exchange cannot repeat"
-            );
+            assert_eq!(events_named(&client.events, event).len(), 6);
         }
         assert!(
             events_named(&client.events, "error").is_empty(),
@@ -678,6 +697,12 @@ async fn late_join_reports_retained_browser_native_pair_recovery() {
         );
     }
     drain_expect_success(&mut joiner).await;
+    let incumbents = BTreeSet::from([ids[0].as_str(), ids[1].as_str()]);
+    assert_exchange_sent_to(&joiner.events, &joiner.name, &incumbents);
+    assert_exchange_received_from(&joiner.events, &joiner.name, &incumbents);
+    for event in ["channel_message_sent", "channel_message"] {
+        assert_eq!(events_named(&joiner.events, event).len(), 4);
+    }
     assert!(
         events_named(&joiner.events, "p2p_pair_reconnected").is_empty(),
         "new obligations are initial formations"
