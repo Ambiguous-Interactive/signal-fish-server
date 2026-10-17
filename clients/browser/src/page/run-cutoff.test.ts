@@ -1,19 +1,33 @@
-import { run } from './orchestrator.js';
+import { ExchangeLedger, run } from './orchestrator.js';
 import { EXIT_CRITERIA_UNMET, type RunConfig } from '../shared/types.js';
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 // The room wake can reach the cutoff before an equally due peer-operation timer.
 for (const [scenario, timerOrder, p2pTimeoutSecs] of (
-  ['fallback', 'paid', 'missing-reliable', 'missing-unreliable', 'answered'] as const
+  [
+    'fallback',
+    'paid',
+    'missing-reliable',
+    'missing-unreliable',
+    'live-sent-reliable',
+    'live-sent-unreliable',
+    'live-received-reliable',
+    'live-received-unreliable',
+    'answered',
+  ] as const
 ).flatMap((scenario) =>
-  (scenario === 'answered'
+  (scenario === 'answered' || scenario.startsWith('live-')
     ? (['room-first'] as const)
     : (['room-first', 'peer-first'] as const)
   ).flatMap((timerOrder) =>
     [0, 15].map((p2pTimeoutSecs) => [scenario, timerOrder, p2pTimeoutSecs] as const),
   ),
 )) {
+  const originalError = console.error;
+  const diagnostics: string[] = [];
+  const live = scenario.startsWith('live-');
+  const unpaid = scenario.startsWith('missing-') || live;
   const originalPc = globalThis.RTCPeerConnection;
   const originalSocket = globalThis.WebSocket;
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
@@ -51,7 +65,9 @@ for (const [scenario, timerOrder, p2pTimeoutSecs] of (
       this.ordered = label === 'reliable';
       this.maxRetransmits = this.ordered ? null : 0;
     }
-    send() {}
+    send() {
+      if (scenario === `live-sent-${this.label}`) throw new Error('not ready');
+    }
     close() {
       this.readyState = 'closed';
     }
@@ -143,6 +159,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs] of (
     }
   }
   try {
+    console.error = (...args: unknown[]) => diagnostics.push(args.map(String).join(' '));
     globalThis.RTCPeerConnection = Connection as unknown as typeof RTCPeerConnection;
     globalThis.WebSocket = Socket as unknown as typeof WebSocket;
     Object.defineProperty(globalThis, 'window', {
@@ -200,7 +217,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs] of (
         connection.ondatachannel?.({ channel });
         channel.readyState = 'open';
         channel.onopen?.();
-        if (scenario === 'paid' || scenario !== `missing-${label}`)
+        if (scenario !== `missing-${label}` && scenario !== `live-received-${label}`)
           channel.onmessage?.({ data: JSON.stringify({ from: peer, channel: label, seq: 0 }) });
       }
       if (scenario === 'answered') {
@@ -225,11 +242,12 @@ for (const [scenario, timerOrder, p2pTimeoutSecs] of (
         );
         continue;
       }
-      socket.deliver('Signal', {
-        from: peer,
-        generation: me,
-        signal: { IceCandidate: 'held' },
-      });
+      if (!live)
+        socket.deliver('Signal', {
+          from: peer,
+          generation: me,
+          signal: { IceCandidate: 'held' },
+        });
       await turn();
       assert(
         events.some((event) => event['event'] === 'p2p_pair_connected'),
@@ -248,7 +266,13 @@ for (const [scenario, timerOrder, p2pTimeoutSecs] of (
     now = 1100;
     // Deliver the latest room wake first. Leave the due peer timer uncalled.
     const wake = [...timers.values()].at(-1);
-    assert(wake !== undefined && wake.at === now, `${scenario}: room wake targets cutoff`);
+    // A blocked send keeps its 50 ms retry wake. Deliver it late at the run
+    // cutoff, as a delayed browser task would, without extending the run.
+    const expectedWake = scenario.startsWith('live-sent-') ? 550 : now;
+    assert(
+      wake !== undefined && wake.at === expectedWake,
+      `${scenario}: room wake targets the next retry or cutoff; observed ${wake?.at}`,
+    );
     if (timerOrder === 'peer-first') {
       const peerTimer = [...timers.values()].find(
         (timer) => timer !== wake && timer.at === now,
@@ -260,12 +284,15 @@ for (const [scenario, timerOrder, p2pTimeoutSecs] of (
     wake?.callback();
     await turn();
     assert(
-      result === (scenario.startsWith('missing-') ? EXIT_CRITERIA_UNMET : 0),
+      result === (unpaid ? EXIT_CRITERIA_UNMET : 0),
       `${scenario}: cutoff uses logical debt, observed exit ${result}`,
     );
     assert(connection.closed, `${scenario}: cutoff retires the pending link`);
-    const expectedStatuses =
-      scenario === 'fallback'
+    const expectedStatuses = live
+      ? p2pTimeoutSecs === 0
+        ? [false, true]
+        : [true]
+      : scenario === 'fallback'
         ? [false]
         : p2pTimeoutSecs === 0
           ? [false, true, false]
@@ -280,10 +307,45 @@ for (const [scenario, timerOrder, p2pTimeoutSecs] of (
       'active expired work preserves fallback event ordering',
     );
     assert(
-      !scenario.startsWith('missing-') ||
+      !unpaid ||
         events.some((event) => String(event['message']).includes('exchange incomplete')),
       'unpaid receipts remain required',
     );
+    const snapshots = diagnostics.filter((line) =>
+      line.startsWith(`Exchange timeout for ${peer}: `),
+    );
+    assert(
+      snapshots.length === (unpaid ? 1 : 0),
+      `${scenario}: snapshot only unpaid peers once`,
+    );
+    if (unpaid) {
+      const snapshot = JSON.parse(snapshots[0]!.split(': ').slice(1).join(': '));
+      assert(snapshot.connected === live, 'snapshot identifies current pair membership');
+      const missingLabel = scenario.endsWith('unreliable') ? 'unreliable' : 'reliable';
+      const missingSent = scenario.startsWith('live-sent-') ? [missingLabel] : [];
+      const missingReceived = scenario.startsWith('live-sent-') ? [] : [missingLabel];
+      assert(
+        JSON.stringify(snapshot.missing_sent) === JSON.stringify(missingSent),
+        'name missing sends',
+      );
+      assert(
+        JSON.stringify(snapshot.missing_received) === JSON.stringify(missingReceived),
+        'name missing receipts',
+      );
+      if (live) {
+        for (const label of ['reliable', 'unreliable']) {
+          assert(
+            snapshot.link.channels[label].readyState === 'open',
+            `${scenario}: capture live ${label} before teardown`,
+          );
+          assert(
+            snapshot.link.channels[label].openObserved,
+            `${scenario}: retain observed ${label} open`,
+          );
+        }
+      } else
+        assert(snapshot.link === null, 'retired unpaid peer is retained with no physical link');
+    }
     const eventCount = events.length;
     release();
     for (const channel of channels)
@@ -297,6 +359,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs] of (
     socket?.onclose?.();
     await running;
     await turn();
+    console.error = originalError;
     performance.now = originalNow;
     globalThis.setTimeout = originalSetTimeout;
     globalThis.clearTimeout = originalClearTimeout;
@@ -307,3 +370,25 @@ for (const [scenario, timerOrder, p2pTimeoutSecs] of (
   }
 }
 console.error('ok - run cutoff retires peer work and preserves logical exchange debt');
+
+// Ignore completed obligations and traffic from a peer that never connected.
+{
+  const ledger = new ExchangeLedger();
+  for (const peer of ['paid', 'unsent', 'unreceived']) ledger.noteConnected(peer);
+  for (const label of ['reliable', 'unreliable']) {
+    ledger.noteSent('paid', label);
+    ledger.noteReceived('paid', label);
+    ledger.noteReceived('unsent', label);
+    ledger.noteSent('unreceived', label);
+    ledger.noteSent('unplanned', label);
+  }
+  assert(
+    ledger.unpaidPeers().join(',') === 'unsent,unreceived',
+    'only unpaid obligations need snapshots',
+  );
+  ledger.resetIncarnation('paid');
+  assert(
+    ledger.unpaidPeers().join(',') === 'paid,unsent,unreceived',
+    'a restored incarnation owes fresh exchange',
+  );
+}

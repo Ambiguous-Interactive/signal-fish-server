@@ -142,10 +142,12 @@ static SCENARIO_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new((
 ///    `--max-runtime-secs 90` watchdog (see `spawn_client`) = 90 s;
 ///  - joiner wave: bounded by its own 90 s watchdog = 90 s.
 const LATE_JOIN_SCENARIO_CEILING_SECS: u64 = 45 + 90 + 90;
-/// Each of the nine ordinary one-wave scenarios is bounded by server startup
+/// Each ordinary one-wave scenario is bounded by server startup
 /// plus one 90 s client watchdog; the departure regression uses 30 s clients.
 const STANDARD_SCENARIO_CEILING_SECS: u64 = 45 + 90;
 const DEPARTURE_SCENARIO_CEILING_SECS: u64 = 45 + 30;
+// Connected cutoff cell: server startup plus its longer-lived incumbent.
+const EXCHANGE_CUTOFF_SCENARIO_CEILING_SECS: u64 = 45 + 45;
 // The opaque cell reuses its server for one additional bounded relay-only wave.
 const UNSUPPORTED_FORMAT_WAVE_SECS: u64 = 30;
 /// Restore cells: two 45 s client watchdogs and one 90 s WebRTC watchdog,
@@ -159,6 +161,7 @@ const SERIAL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(
     2 * LATE_JOIN_SCENARIO_CEILING_SECS
         + 10 * STANDARD_SCENARIO_CEILING_SECS
         + DEPARTURE_SCENARIO_CEILING_SECS
+        + EXCHANGE_CUTOFF_SCENARIO_CEILING_SECS
         + UNSUPPORTED_FORMAT_WAVE_SECS
         + RESTORE_SCENARIO_CEILING_SECS,
 );
@@ -2448,6 +2451,89 @@ async fn two_peer_mesh_exchanges_over_live_webrtc() {
         assert_exchange_received_from(&run.logs[index], who, &peers);
         assert_transport_status_true(&run.logs[index], who);
     }
+}
+
+// Regression #889: retain connected channel observations when only exchange debt expires.
+#[tokio::test(flavor = "multi_thread")]
+async fn connected_peer_exchange_cutoff_keeps_live_channel_snapshot() {
+    let _serial = acquire_serial().await;
+    let mut server = spawn_server("mesh").await;
+    let workdir = tempfile::tempdir().expect("create client workdir");
+    let reliable = workdir.path().join("release-reliable");
+    let unreliable = workdir.path().join("hold-unreliable");
+    std::fs::write(&reliable, b"release").unwrap();
+    let args = [
+        "--exchange-release-file",
+        reliable.to_str().unwrap(),
+        "--unreliable-exchange-release-file",
+        unreliable.to_str().unwrap(),
+    ];
+    let url = server.v3_ws_url();
+    let mut cutoff = spawn_client_with_windows(
+        &ClientSpec {
+            name: "cutoff",
+            server_url: &url,
+            game_name: "interop-connected-exchange-cutoff",
+            join_code: None,
+            peers: 2,
+            exchange: true,
+            relay_payload: None,
+            extra_args: &args,
+        },
+        workdir.path(),
+        8,
+        30,
+    );
+    let created = cutoff.await_event("room_created", EVENT_TIMEOUT).await;
+    let mut incumbent = spawn_client_with_windows(
+        &ClientSpec {
+            name: "incumbent",
+            server_url: &url,
+            game_name: "interop-connected-exchange-cutoff",
+            join_code: Some(str_field(&created, "room_code")),
+            peers: 2,
+            exchange: true,
+            relay_payload: None,
+            extra_args: &args,
+        },
+        workdir.path(),
+        30,
+        45,
+    );
+    cutoff
+        .await_event("exchange_reliable_ready", EVENT_TIMEOUT)
+        .await;
+    incumbent
+        .await_event("exchange_reliable_ready", EVENT_TIMEOUT)
+        .await;
+    let peer = player_id_of(&incumbent.events, &incumbent.name);
+    assert_eq!(
+        cutoff.drain_to_exit(Duration::from_secs(12)).await,
+        1,
+        "{}",
+        cutoff.diagnostics()
+    );
+    incumbent.assert_running("the cutoff must precede remote departure");
+    let stderr = cutoff.stderr_text();
+    let records: Vec<_> = stderr
+        .lines()
+        .filter(|line| line.contains("Exchange timed out"))
+        .collect();
+    assert_eq!(records.len(), 1, "{stderr}");
+    let (prefix, snapshot) = records[0]
+        .split_once("snapshot=")
+        .expect("exchange snapshot");
+    assert!(prefix.contains(&peer), "{stderr}");
+    let snapshot: Value = serde_json::from_str(snapshot).expect("snapshot JSON");
+    assert_eq!(snapshot["missing_sent"], json!(["unreliable"]));
+    assert_eq!(snapshot["missing_received"], json!(["unreliable"]));
+    assert_eq!(snapshot["connected"], true);
+    for label in ["reliable", "unreliable"] {
+        assert_eq!(snapshot["link"]["channels"][label]["registered"], true);
+        assert_eq!(snapshot["link"]["channels"][label]["open_observed"], true);
+    }
+    incumbent.terminate().await;
+    server.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

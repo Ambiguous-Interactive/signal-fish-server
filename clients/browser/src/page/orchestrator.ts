@@ -523,6 +523,24 @@ export class ExchangeLedger {
     labels.add(label);
   }
 
+  unpaidPeers(): string[] {
+    return [...this.obligations].filter((peer) => {
+      const debt = this.diagnosticSnapshot(peer);
+      return debt.missing_sent.length !== 0 || debt.missing_received.length !== 0;
+    });
+  }
+
+  diagnosticSnapshot(peer: string): { missing_sent: string[]; missing_received: string[] } {
+    return {
+      missing_sent: [RELIABLE_LABEL, UNRELIABLE_LABEL].filter(
+        (label) => !this.sent.get(peer)?.has(label),
+      ),
+      missing_received: [RELIABLE_LABEL, UNRELIABLE_LABEL].filter(
+        (label) => !this.received.get(peer)?.has(label),
+      ),
+    };
+  }
+
   unmetCriteria(): string[] {
     const unmet: string[] = [];
     for (const peer of this.obligations) {
@@ -1474,6 +1492,16 @@ class Orchestrator {
       if (this.criteriaMet()) {
         this.finish(EXIT_SUCCESS);
         return;
+      }
+      if (this.config.exchange) {
+        for (const peer of this.exchangeLedger.unpaidPeers()) {
+          const snapshot = {
+            ...this.exchangeLedger.diagnosticSnapshot(peer),
+            connected: this.connectedPairs.has(peer),
+            link: this.engine.diagnosticSnapshot(peer),
+          };
+          console.error(`Exchange timeout for ${peer}: ${JSON.stringify(snapshot)}`);
+        }
       }
       this.emit({
         event: 'error',

@@ -236,6 +236,12 @@ ICE, SCTP, and required data-channel states. The report includes channel buffer
 sizes and observed open callbacks. It excludes SDP, addresses, and credentials.
 The report records the timeout state; it does not identify the failure cause.
 The client can still accept a late connection within its run window.
+At run timeout, stderr also reports a snapshot for each peer with missing
+exchange sends or receipts, including connected peers and departed peers with
+unpaid exchange debt. Each report names missing sends, missing receipts, and
+logical connection state. A `link: null` field means the physical link was removed.
+Compare the reports with both endpoints' `channel_message_sent` and
+`channel_message` events. A report does not prove the cause of a missing receipt.
 Pending browser offer, answer, and ICE operations use the remaining P2P window,
 or a fresh `--p2p-timeout-secs` budget after that window expires. The active run
 window also bounds these waits. A zero P2P timeout reports fallback immediately
