@@ -2557,6 +2557,7 @@ class Orchestrator {
 
   /** Send the `--relay-payload` GameData over the relay floor. */
   private sendRelayPayload(): void {
+    if (!this.exchangeWindowOpen()) return;
     if (this.config.relayPayload === null) {
       this.relaySent = true;
       return;

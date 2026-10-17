@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87; expired relay sends in F88 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17; Windows backpressure fixtures in F75 |
 
@@ -4754,3 +4754,50 @@ The repaired late-join controls pass in native Nextest `3709fe7d` and real
 Chromium/native Nextest `696cbc98`. Targeted strict Clippy, formatting, and
 Markdown checks pass. Production code and the fixed-binary qualification
 artifacts do not change in this follow-up.
+
+### F88 — Relay timers can complete expired reference-client runs
+
+Issue [#1037](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1037),
+found at `c6d7bd90` while continuing #826, #853, and #889.
+Both reference clients process the relay-settle timer before judging the run
+cutoff. A delayed timer can send the final required probe at expiry and then
+arm a fresh success linger. Native relay writes also capture a fresh wire
+limit instead of the remaining run window.
+
+Native Nextest `3510270a` fails because `relay_sent` becomes true at the exact
+cutoff. The browser real-dispatch regression fails at `json/1100`: one probe
+reaches the socket after its run expires, instead of zero. A separate native
+real-socket control fills the outbound path before starting the relay write.
+The original source does not end that pending write at the run cutoff. The
+control retains the original 20-second wire limit and shortens only the test's
+run window; it does not emulate a WebRTC driver stall.
+
+The browser now checks its existing run/hold/linger window immediately before
+the probe. Native admission uses the same existing window policy and passes
+its captured absolute cutoff to the common wire sender. That sender still
+caps work at 20 seconds and rejects late completions. A canceled native write
+ends the signaling connection with exit code 3; it cannot safely reuse a
+partially written frame. A timer that has already expired keeps unpaid send
+debt and the existing criteria-unmet exit code. No duration is renewed.
+
+Boundary controls cover JSON, MessagePack, rkyv, and protobuf, valid sends,
+exact cutoff, delayed timer wakes, established successful holds, and active
+and expired linger. Socket controls cover all four native encoding paths and
+retain unpaid debt after write cancellation. Payload assertions preserve the
+old JSON envelope, MessagePack value, and opaque sender header.
+
+The live baseline passes room restore and the three-player browser mesh,
+with all five endpoint streams and server logs retained under local
+`progress/session-470-baseline`. These controlled defects do not identify the
+historical causes of #853 or #889. Their original acceptance remains open.
+The Rust, .NET, and Godot SDKs own independent send APIs and do not import these
+private reference-client process timers. No server protocol or SDK API changes.
+
+Final fixed-binary Nextest `97236547` passes three restores, three link retries,
+and three browser meshes. All 21 endpoint streams and server logs are retained
+under local `progress/session-470-fixed-live`, with 78 sends and 78 receipts.
+Before/after hashes match for the server, native process, browser CLI, and page
+bundle. The earlier candidate `2c3307c1` rebuilt the native process at setup;
+its pre-build hash is excluded. Native scoped `9bf9bb10`, full browser tests,
+and strict native/root lint also pass. Hosted CI and PR feedback remain the
+publication gates.

@@ -317,6 +317,9 @@ Each `Authenticate`, `JoinRoom`, and `Reconnect` command has one 20-second
 response window. Prelude frames and old-socket cleanup retries do not restart
 it. Expiry ends the run with exit code 3. Start a fresh client after this failure.
 Runtime WebSocket writes also have a 20-second limit, including their flush.
+Relay probes also use the remaining run window. An established successful
+harness hold or active exit linger keeps its allowed extension. The client
+does not start a relay probe at or after that window ends.
 A failed write ends the session with exit code 3. The client does not retry
 a partial frame on the same connection.
 

@@ -20,6 +20,10 @@ It closes other remote labels without retaining them or starting callbacks.
 handling. This restriction belongs to these reference clients; the server
 continues to relay opaque signaling payloads.
 
+Relay probes do not start at or after the run deadline. A delayed relay timer
+keeps the missing send criterion and exits with code 1. An existing successful
+harness hold or active exit linger keeps its allowed window.
+
 ## Quick start
 
 One line from the repository root (build server + native client → lint/build the browser client → install the

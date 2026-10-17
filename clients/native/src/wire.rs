@@ -223,7 +223,11 @@ where
     .await
 }
 
-async fn send_frame_until<S>(ws: &mut S, frame: Message, deadline: Deadline) -> Result<()>
+pub(crate) async fn send_frame_until<S>(
+    ws: &mut S,
+    frame: Message,
+    deadline: Deadline,
+) -> Result<()>
 where
     S: Sink<Message, Error = WebSocketError> + Unpin,
 {

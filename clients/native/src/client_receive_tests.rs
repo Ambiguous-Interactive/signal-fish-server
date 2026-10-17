@@ -880,3 +880,155 @@ async fn queued_exchange_receipts_complete_before_the_run_cutoff() {
         state.engine.remove_peer(peer).await.unwrap();
     }
 }
+
+// Regression #1037: delayed relay timers cannot complete expired runs.
+#[tokio::test]
+async fn relay_timer_cannot_pay_send_debt_at_or_after_run_cutoff() {
+    use futures_util::FutureExt;
+
+    for encoding in [
+        GameDataEncoding::Json,
+        GameDataEncoding::MessagePack,
+        GameDataEncoding::Rkyv,
+        GameDataEncoding::Protobuf,
+    ] {
+        for (window, offset_ms, permitted) in [
+            ("run", 999, true),
+            ("run", 1000, false),
+            ("run", 1001, false),
+            ("hold", 1001, true),
+            ("linger", 1001, true),
+            ("expired-linger", 1250, false),
+        ] {
+            let (ws, mut server_ws) = crate::socket_tests::websocket_pair().await;
+            let mut cli = Cli::parse_from([
+                "reference-native",
+                "--server-url",
+                "ws://unused.invalid",
+                "--create-room",
+                "--peers",
+                "1",
+                "--relay-payload",
+                "cutoff-probe",
+            ]);
+            let directory = tempfile::tempdir().unwrap();
+            let release = directory.path().join("release");
+            if window != "run" {
+                cli.success_release_file = Some(release.clone());
+                if window != "hold" {
+                    std::fs::write(&release, "release").unwrap();
+                }
+            }
+            let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+            state.game_started = true;
+            state.game_data_encoding = encoding;
+            let started = Instant::now();
+            state.run_deadline = (started + Duration::from_secs(1)).into();
+            state.relay_send_at = Some(started + RELAY_SEND_SETTLE);
+            if window != "run" {
+                // Keep the established harness window policy as a compatibility
+                // control at the relay timer seam.
+                state.success_criteria_reported = true;
+                state.success_hold_started_at = Some(started);
+                if window != "hold" {
+                    state.linger_until = Some(started + Duration::from_millis(1250));
+                }
+            }
+            state.next_ping_at = started + Duration::from_secs(30);
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_millis(offset_ms)).await;
+            let outcome = state.process_timers().await.unwrap();
+            if permitted {
+                assert!(
+                    state.relay_sent,
+                    "{encoding:?}: on-time relay remains available"
+                );
+                assert!(outcome.is_none());
+                let frame = server_ws.next().await.unwrap().unwrap();
+                match encoding {
+                    GameDataEncoding::Json => assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(frame.to_text().unwrap())
+                            .unwrap(),
+                        json!({"type":"GameData", "data":{"data":{"relay_msg":"cutoff-probe"}}}),
+                    ),
+                    GameDataEncoding::MessagePack => assert_eq!(
+                        rmp_serde::from_slice::<serde_json::Value>(&frame.into_data()).unwrap(),
+                        json!({"relay_msg":"cutoff-probe"}),
+                    ),
+                    GameDataEncoding::Rkyv | GameDataEncoding::Protobuf => {
+                        assert_eq!(
+                            frame.into_data().as_ref(),
+                            wire::encode_opaque_relay_probe(
+                                PlayerId::from_u128(1),
+                                b"cutoff-probe"
+                            )
+                        );
+                    }
+                }
+            } else {
+                assert!(
+                    !state.relay_sent,
+                    "{encoding:?}/{offset_ms}: expired relay must retain send debt"
+                );
+                assert_eq!(outcome, Some(EXIT_CRITERIA_UNMET));
+                assert!(
+                    server_ws.next().now_or_never().is_none(),
+                    "expired relay must not reach the socket"
+                );
+            }
+            tokio::time::resume();
+        }
+    }
+}
+
+// Regression #1037: a socket write cannot renew the run window.
+#[tokio::test]
+async fn blocked_relay_write_keeps_the_original_run_cutoff() {
+    for encoding in [
+        GameDataEncoding::Json,
+        GameDataEncoding::MessagePack,
+        GameDataEncoding::Rkyv,
+        GameDataEncoding::Protobuf,
+    ] {
+        let (mut ws, _server_ws) = crate::socket_tests::websocket_pair().await;
+        let frame = Message::Binary(vec![42; 8 * 1024 * 1024].into());
+        crate::socket_tests::queue_until_blocked(&mut ws, frame).await;
+        let cli = Cli::parse_from([
+            "reference-native",
+            "--server-url",
+            "ws://unused.invalid",
+            "--create-room",
+            "--peers",
+            "1",
+            "--relay-payload",
+            "blocked-probe",
+        ]);
+        let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+        state.game_data_encoding = encoding;
+        let started = Instant::now();
+        state.run_deadline = (started + Duration::from_secs(1)).into();
+        {
+            let write = state.send_relay_payload();
+            tokio::pin!(write);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(25), &mut write)
+                    .await
+                    .is_err(),
+                "fixture must block before the run cutoff"
+            );
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::time::resume();
+            let result = tokio::time::timeout(Duration::from_millis(100), &mut write).await;
+            assert!(
+                result.is_ok(),
+                "{encoding:?}: blocked relay write must stop at the original cutoff"
+            );
+            assert_eq!(result.unwrap().unwrap_err().code, EXIT_CONNECTION_ERROR);
+        }
+        assert!(
+            !state.relay_sent,
+            "{encoding:?}: a canceled write keeps its debt"
+        );
+    }
+}

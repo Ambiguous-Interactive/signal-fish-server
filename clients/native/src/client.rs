@@ -3592,22 +3592,34 @@ impl Orchestrator<'_> {
             self.relay_sent = true;
             return Ok(());
         };
-        if self.game_data_encoding == GameDataEncoding::Json {
-            wire::send_game_data(&mut self.ws, json!({ "relay_msg": text }))
-                .await
-                .map_err(|error| FatalError::connection(format!("{error:#}")))?;
-        } else if self.game_data_encoding == GameDataEncoding::MessagePack {
-            wire::send_message_pack_game_data(&mut self.ws, json!({ "relay_msg": text }))
-                .await
-                .map_err(|error| FatalError::connection(format!("{error:#}")))?;
-        } else {
-            wire::send_game_data_binary(
-                &mut self.ws,
-                wire::encode_opaque_relay_probe(self.my_id, text.as_bytes()),
-            )
+        let window_end = self.exchange_window_end().await?;
+        let deadline = window_end.map_or_else(
+            || Deadline::after(Instant::now(), wire::WRITE_TIMEOUT),
+            Deadline::from,
+        );
+        if deadline.is_due(Instant::now()) {
+            return Ok(());
+        }
+        let frame = match self.game_data_encoding {
+            GameDataEncoding::Json => Message::Text(
+                serde_json::to_string(&wire::game_data_message(json!({ "relay_msg": text })))
+                    .map_err(|error| FatalError::protocol(error.to_string()))?
+                    .into(),
+            ),
+            GameDataEncoding::MessagePack => Message::Binary(
+                rmp_serde::to_vec_named(&json!({ "relay_msg": text }))
+                    .map_err(|error| FatalError::protocol(error.to_string()))?
+                    .into(),
+            ),
+            GameDataEncoding::Rkyv | GameDataEncoding::Protobuf => {
+                Message::Binary(wire::encode_opaque_relay_probe(self.my_id, text.as_bytes()).into())
+            }
+        };
+        // A canceled write can leave a partial frame. End this connection on
+        // expiry instead of retrying or counting the relay as sent.
+        wire::send_frame_until(&mut self.ws, frame, deadline)
             .await
             .map_err(|error| FatalError::connection(format!("{error:#}")))?;
-        }
         self.relay_sent = true;
         self.relay_send_at = None;
         emit(&Event::GameDataSent);
