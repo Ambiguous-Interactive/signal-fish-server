@@ -768,6 +768,7 @@ class Orchestrator {
   private readonly peerStatusFrom = new Set<string>();
   private readonly exchangeLedger = new ExchangeLedger();
   private readonly pendingExchangePeers = new Set<string>();
+  private pendingExchangeReceipts = 0;
   private readonly reportedExchangeDiagnostics = new Set<string>();
   private exchangeRetryAt: number | null = null;
   private readonly pendingSignals = new Map<string, unknown[]>();
@@ -856,19 +857,31 @@ class Orchestrator {
           textBytes > MAX_PENDING_CHANNEL_MESSAGE_BYTES - this.pendingChannelMessageBytes
         )
           return false;
+        // Arrival owns the receipt window, even if output delays its handler.
+        const exchangeReceipt =
+          this.config.exchange &&
+          this.exchangeWindowOpen() &&
+          isExchangeProbe(peer, label, text);
+        let receiptPending = exchangeReceipt;
+        if (receiptPending) this.pendingExchangeReceipts += 1;
         this.pendingChannelMessages += 1;
         this.pendingChannelMessageBytes += textBytes;
         this.enqueue(
           async () => {
+            if (receiptPending) {
+              receiptPending = false;
+              this.pendingExchangeReceipts -= 1;
+            }
             if (!this.engine.isCurrentGeneration(peer, generation)) {
               return;
             }
-            if (this.config.exchange && isExchangeProbe(peer, label, text)) {
+            if (exchangeReceipt) {
               this.exchangeLedger.noteReceived(peer, label);
             }
             await this.emit({ event: 'channel_message', peer, label, text }, true);
           },
           () => {
+            if (receiptPending) this.pendingExchangeReceipts -= 1;
             this.pendingChannelMessages -= 1;
             this.pendingChannelMessageBytes -= textBytes;
           },
@@ -1393,6 +1406,8 @@ class Orchestrator {
       return;
     }
     const now = monotonicNowMs();
+    // Drain already-arrived exchange receipts before judging the cutoff.
+    if (now >= this.runDeadline && this.pendingExchangeReceipts > 0) return;
 
     // Mandatory keepalive: send `Ping` on cadence and demand a timely `Pong`.
     // An unanswered ping is a broken connection or control path — fail loudly
@@ -2385,6 +2400,18 @@ class Orchestrator {
     }
   }
 
+  private exchangeWindowOpen(): boolean {
+    return (
+      monotonicNowMs() < this.runDeadline ||
+      shouldDeferSuccessAtRunDeadline(
+        this.config.successReleaseEnabled,
+        this.successCriteriaReported,
+        this.successReleaseGranted,
+        this.lingerUntil,
+      )
+    );
+  }
+
   private flushPendingExchangeSends(): void {
     for (const peer of Array.from(this.pendingExchangePeers)) {
       if (this.trySendExchange(peer)) {
@@ -2407,15 +2434,7 @@ class Orchestrator {
     let complete = true;
     for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL]) {
       this.assertActive();
-      if (
-        monotonicNowMs() >= this.runDeadline &&
-        !shouldDeferSuccessAtRunDeadline(
-          this.config.successReleaseEnabled,
-          this.successCriteriaReported,
-          this.successReleaseGranted,
-          this.lingerUntil,
-        )
-      ) {
+      if (!this.exchangeWindowOpen()) {
         return false;
       }
       if (this.exchangeLedger.hasSent(peer, label)) {

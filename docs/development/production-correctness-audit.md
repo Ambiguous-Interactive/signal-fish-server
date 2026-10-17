@@ -4507,3 +4507,45 @@ pass. Root strict Clippy, formatting, CI configuration, and documentation
 checks pass. Manual adversarial review finds no remaining issue in this diff.
 Passing captures do not explain the historical failures; #853, #889, and the
 broader #826 audit remain open. Hosted CI and feedback remain delivery gates.
+
+### F83 — Late browser receipts can pay expired exchange debt
+
+Issue #1029, found at `f8098558` while continuing #826, #853, and #889.
+The browser fences exchange sends at its run cutoff, but accepts receipts
+without checking their arrival time. A last receive callback can clear missing
+exchange debt before its handler runs the overdue timer. The client can report
+success outside its original window.
+
+The final regression fails against baseline source: a reliable receipt at the
+exact cutoff produces exit zero instead of criteria-unmet. The clock starts at
+100 ms and the one-second cutoff is 1100 ms. Both local sends and the other
+receipt have completed. This is a controlled callback history, not a capture
+of either historical interop failure.
+
+Send and receipt paths now share the original monotonic exchange window and
+its explicit held-success deferral. Receipt eligibility belongs to arrival;
+eligible queued receipts drain before the cutoff decision. Each handler still
+checks its physical-link generation before crediting the receipt. Late traffic
+remains observable and the missing label stays in the timeout snapshot.
+
+Controls cover both required labels at cutoff and one millisecond later,
+zero and default P2P windows, pre-cutoff receipt success, queued receipts behind
+blocked output, and queued receipts from retired links. Removing the drain
+safeguard makes the queued reliable-receipt control fail with exit one. Existing
+held-success restore controls still require fresh sends and receipts after the
+original deadline. No timeout or success criterion is relaxed.
+
+Fixed-binary baseline capture passes three native restores and three
+three-player meshes. The rebuilt browser passes the same six controls. Each
+capture retains every endpoint stream, server log, and before/after executable
+and bundle hash. Only the browser page bundle changes between capture sets.
+The full browser tests, build, type checks, and formatting pass. Root strict
+Clippy, formatting, CI configuration, and documentation checks pass.
+These bounded passes do not explain #853 or #889; both remain open.
+
+Current external SDK READMEs were inspected through the GitHub connector.
+Rust supplies signaling without a WebRTC backend. .NET supplies signaling and
+relay. Godot uses its engine-owned WebRTC mesh. None uses this private browser
+run scheduler, so all three are unaffected. No server message, SDK API, channel
+mode, or default changes. Hosted current-head CI and feedback remain delivery
+gates.
