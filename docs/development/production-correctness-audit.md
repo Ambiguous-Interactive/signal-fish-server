@@ -4406,3 +4406,44 @@ later source changes or explain either historical failure. Both issues and the
 broader A20 and #826 audits remain open. Rust, .NET, and Godot SDKs need no
 change: this repair adds only private reference-client stderr reports and
 changes no server API, wire message, or SDK event contract.
+
+### F81 — Initial native exchange bypasses per-label signaling service
+
+Issue #1025, found at `496d020a` while continuing #826, #853, and #889.
+The release gates queue exchange labels separately, but `on_pair_connected`
+still awaits both labels within one engine-event handler. Signaling that
+arrives during the first send cannot run before the next label starts.
+Each local send can consume its existing one-second limit.
+
+The new real-WebRTC and loopback-socket control holds the first successful
+send. The signaling peer queues Pong, relay GameData, and Close before it
+releases that send. Baseline Nextest `3409c37a` fails with two send calls
+instead of one. The assertion checks causal ordering without a timing bound.
+This is a controlled scheduling history, not a captured spontaneous stall.
+
+Formation now queues its labels through the existing scheduler. Initial and
+replacement links use the same channel-identity fencing, one-label dispatch,
+input-burst bound, send deadlines, failure cleanup, and unpaid exchange debt
+as the release gates. The existing manual recovery fixture now drives queued
+sends before checking its exact send and receipt evidence.
+
+Three fresh fixed-binary restore attempts and three three-player mesh attempts
+pass at the baseline. Every endpoint stream and server log is retained, with
+matching executable and bundle hashes before and after capture. These passes
+neither validate the later source change nor explain the original failures.
+Issues #853 and #889 remain open with their original acceptance.
+
+The Rust SDK provides signaling without a WebRTC backend. The .NET SDK ships
+its own signaling assembly. Godot uses its engine-owned WebRTC mesh. None
+uses this private native reference orchestrator. All three are unaffected;
+server wire messages, SDK APIs, defaults, and deadlines are unchanged.
+
+Final scoped Nextest `d9da2b9e` passes all 15 retry and exchange controls,
+including this regression, both release gates, stalled sends, expired and
+replaced channels, ready-callback bursts, signaling failure, and real retry
+recovery. The rebuilt native binary passes three restore and three mesh
+controls: 15 endpoint streams, 758 events, and 60 exact sends and receipts.
+All executable and bundle hashes match before and after those runs; only the
+native binary differs from the baseline capture. Native and root strict
+Clippy, formatting, CI configuration, Markdown, and documentation checks pass.
+Hosted final-head CI and feedback remain publication gates.

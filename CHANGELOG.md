@@ -35,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and prevent false run failures and false fallback reports at the run deadline (#1011).
 - Discard native reference-client deferred connections when peers leave or session plans remove them (#1010).
 - Keep native reference-client relay sessions responsive when data-channel exchange sends fail or stall across peers
-  (#1000, #1002, #1003).
+  (#1000, #1002, #1003, #1025).
 - Keep browser crippled-ICE runs on relay fallback when peer SDP includes ICE candidates (#999).
 - Preserve JSON object keys and numeric key conversion in browser MessagePack relay payloads on v2 and v3 (#996).
 - Keep browser opaque relay sessions connected when mixed-room senders use JSON fallback (#994).

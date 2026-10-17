@@ -346,6 +346,96 @@ async fn deferred_exchange_mesh_services_pong_and_relay_between_held_sends() {
     }
 }
 
+// Regression #1025: initial pair exchange must service queued signaling between labels.
+#[tokio::test]
+async fn immediate_exchange_services_relay_before_the_next_label() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        tokio_tungstenite::accept_async(tcp).await.unwrap()
+    });
+    let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let mut server_ws = server.await.unwrap();
+    let cli = Cli::parse_from([
+        "native",
+        "--server-url",
+        &url,
+        "--create-room",
+        "--exchange",
+    ]);
+    let peer = PlayerId::from_u128(2);
+    let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+    state.current_session_generation = Some(SessionGeneration::from_u128(3));
+    state.webrtc_plan_seen = true;
+    state.establish_pair(peer, true).await.unwrap();
+    let (mut remote, opens) = open_physical_pair(&mut state, &mut server_ws, peer, None).await;
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let mut first = Some((started_tx, release_rx));
+    let sends = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let send_count = sends.clone();
+    state.exchange_send_hook = Some(Box::new(move |channel, text| {
+        send_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let first = first.take();
+        Box::pin(async move {
+            if let Some((started, release)) = first {
+                started.send(()).unwrap();
+                release.await.unwrap();
+            }
+            channel.send_text(&text).await
+        })
+    }));
+    state.pong_deadline = Some(Instant::now() + PONG_TIMEOUT);
+    let task = tokio::spawn(async move {
+        started_rx.await.unwrap();
+        for message in [
+            ServerMessage::Pong,
+            ServerMessage::GameData {
+                from_player: peer,
+                data: json!({"relay_msg": "during immediate exchange"}),
+                seq: None,
+                epoch: None,
+                class: None,
+                key: None,
+            },
+        ] {
+            server_ws
+                .send(Message::Text(
+                    serde_json::to_string(&message).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+        }
+        server_ws.send(Message::Close(None)).await.unwrap();
+        release_tx.send(()).unwrap();
+    });
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        for event in opens {
+            state.handle_engine_event(event).await.unwrap();
+        }
+        state.run_loop().await
+    })
+    .await
+    .expect("signaling must remain responsive during immediate exchange");
+    task.await.unwrap();
+    assert!(result.is_err(), "the queued close must end the session");
+    assert!(
+        state.relay_received_from.contains(&peer),
+        "apply queued relay traffic"
+    );
+    assert!(state.pong_deadline.is_none(), "consume the queued Pong");
+    assert_eq!(
+        sends.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "consume signaling queued during the first send before starting the next label"
+    );
+    assert!(state.exchange_ledger.has_sent(peer, RELIABLE_LABEL));
+    assert!(!state.exchange_ledger.has_sent(peer, UNRELIABLE_LABEL));
+    assert!(!state.exchange_ledger.unmet_criteria().is_empty());
+    remote.remove_peer(state.my_id).await.unwrap();
+}
+
 // A continuously ready callback stream must still let queued exchange advance.
 #[tokio::test]
 async fn deferred_exchange_advances_before_a_ready_callback_burst_finishes() {
@@ -768,6 +858,9 @@ async fn exchange_send_after_channel_close_preserves_relay_and_debt() {
             state.handle_engine_event(event).await.unwrap();
         }
         assert!(state.connected_pairs.contains(&peer));
+        while !state.deferred_exchange.is_empty() {
+            state.process_deferred_exchange().await.unwrap();
+        }
         for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
             assert!(state.exchange_ledger.has_sent(peer, label));
             replacement

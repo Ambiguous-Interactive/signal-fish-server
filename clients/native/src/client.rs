@@ -3311,7 +3311,7 @@ impl Orchestrator<'_> {
             } else {
                 &[RELIABLE_LABEL][..]
             };
-            self.send_exchange(peer, labels).await?;
+            self.queue_exchange(peer, labels);
         }
         // Initial resolution waits for all pairs; after any prior resolution,
         // one late pair is enough to change the overall any-pair state.
