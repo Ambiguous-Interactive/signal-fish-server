@@ -100,6 +100,53 @@ baseline. It maps audit ownership; it does not certify these operations.
 
 ## Bounded histories without a confirmed defect
 
+### A20/A22 — Partial-channel receipt and replacement histories
+
+At `c5e63448`, new controls investigate open #826, #853, and #889. A valid
+probe can arrive on one data channel before the second channel's open callback
+is applied. Receiving it must not create pair connectivity or start local
+probes. If the pair later forms, the timely receipt must retain its credit.
+A wrong-player probe must leave receive debt unpaid.
+
+The browser control dispatches both first-label orders through the real
+orchestrator with a controlled browser stack and monotonic clock. It holds
+receipt output, then announces the second channel. Separate close and error
+histories retire the first channel while that output is held. These histories
+must report fallback without forming a pair or sending probes. The live pair
+must send both probes and complete; wrong-player receipts must fail criteria.
+Eight histories pass. Temporary in-memory controls that discard early receipt
+credit or ignore required-channel loss fail the corresponding histories.
+No production source change is needed for these bounded schedules.
+The browser runner retains them in `partial-channel.test.ts`.
+
+The native control uses real paired WebRTC channels. It holds local open
+callbacks, applies one probe, and retains the other probe across required-channel
+closure and physical-link replacement. Both offerer roles and both first labels
+are covered. It checks that old queued sends do not credit the replacement and
+that the retired-generation receipt cannot pay missing debt. Fresh replacement
+traffic must repay that debt while the already-applied logical receipt survives.
+Native Nextest `e8d26cf3` passes the four histories in
+`probe_before_open_and_loss_before_send_preserve_debt_until_replacement`.
+A temporary control that bypasses the deferred-send channel identity check
+fails because an old queued send credits the replacement. The production file
+is restored byte for byte before the passing run. Independent review found no
+required changes in either client control.
+
+Live baseline `f83bfd9d` passes restore and browser mesh. Fixed-artifact
+`5523971c` passes restore, retry, and mesh. Fixed-artifact stress `e9c824cb`
+passes ten serial repetitions each of restore and mesh. All endpoint streams
+and server logs remain under local `progress/session-473-{baseline,fixed-baseline,repeated-baseline}`.
+Before/after hashes match for the server, native client, browser CLI, and page
+bundle in the fixed-artifact runs. The initial baseline rebuilt the native
+binary and has no pre-build hash claim. These passes neither reproduce nor
+explain the original #853 or #889 incidents. Both issues and the wider #826
+audit remain open. Tests and audit evidence change; shipped behavior does not.
+
+Publication exposed [#1043](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1043):
+the changelog gate requires release notes for browser unit tests and their test
+runner. The classifiers need the same internal-test scope in the hook, checker,
+and CI detector. Runtime source and build scripts retain their existing rules.
+
 ### A07/A08/A11 — Concurrent join and game start
 
 At `62a9dfa5`, two ready mesh members and one joiner contend on the same room
