@@ -1467,6 +1467,13 @@ fn spawn_channel_event_loop(
                     });
                 }
                 DataChannelEvent::OnMessage(message) => {
+                    /*
+                        Prior observed loss stops new input admission while
+                        lifecycle events still drain. Loss can race this check.
+                    */
+                    if admission.terminal.load(Ordering::Relaxed) {
+                        continue;
+                    }
                     let Some((text, queue_permit)) = admission.decode_and_reserve(&message.data)
                     else {
                         *rejected = true;

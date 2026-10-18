@@ -5274,3 +5274,59 @@ sends, and 18 relay receipts. Complete endpoint/server logs remain under local
 server, native process, browser CLI, and page bundle. These passing runs do
 not establish the original historical failure causes. Hosted CI and feedback
 remain publication gates.
+
+### F94 — Native sibling messages can enter a terminal pair
+
+Issue [#1053](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1053),
+found at `e5b6d62c` while continuing open #826, #853, and #889.
+The native required-channel producer checks receive rejection before publishing
+messages, but does not check the shared physical pair's terminal flag. A required
+channel closes while its sibling stays open. With application teardown held,
+the sibling can still decode, reserve shared receive capacity, and publish
+new gameplay callbacks after the engine observes loss.
+
+The real-channel negative control closes the unreliable channel and observes
+its actual close notification. It sends a reliable sibling message, waits for
+SCTP acknowledgement, then closes that stream as a drain marker. The original
+engine publishes the post-terminal message and fails the assertion in Nextest
+`dbe27707`. The first
+control closed the sender immediately and passed; that result did not establish
+message arrival and is excluded from defect evidence. Reliable acknowledgement
+before reset and the wrapper's message-before-close queue order supply the
+revised arrival and drain boundaries.
+
+This proves engine admission after loss. Ordinary FIFO application handles a
+close by removing the physical generation and ignores later callbacks. The
+experiment does not establish visible application receipt credit or explain
+the historical #853/#889 incidents. Those incidents remain open.
+
+The repair checks shared terminal state before decoding or reserving incoming
+gameplay messages. It keeps draining lifecycle events, retains callbacks admitted
+before loss, and leaves generation checks and exchange debt unchanged. A failure
+can still occur after admission; this is not cancellation of accepted input.
+
+Current external SDK README assessments confirm separate implementations: Rust
+has no WebRTC backend, .NET owns signaling and relay, and Godot owns its engine
+mesh. None imports this private native reference-client event loop. No server
+wire, SDK API, default, or migration requirement changes.
+
+The data-driven regression covers both receiving roles, actual unreliable-channel
+closure, and Failed/Closed production peer callbacks on real open channels.
+The callback cases inject state observations; they do not claim physical PC
+state transitions. Disconnected remains a positive control. Each case retains
+an earlier message and its receive permit through loss, drains the later
+reliable message through acknowledgement/reset, then verifies a fresh generation
+admits traffic. Existing remote-close controls check bidirectional recovery on
+both required labels. Independent adversarial review found no further scoped
+issue in the guard, arrival/drain oracle, or evidence claims.
+
+Final scoped native Nextest `9e771fdd` passes six controls in 13.305 seconds.
+Root and native strict all-target lint checks, formatting, Markdown, and document
+consistency pass. Fixed-artifact Nextest `6685f5cb` passes three restores, three
+retries, and three browser meshes in 13.975 seconds. All 21 endpoint streams
+exit zero and retain 78 channel sends and 78 receipts, nine relay sends, and
+18 relay receipts. Server, native executable, browser CLI, and page hashes
+match before and after. Complete streams remain in local
+`progress/session-479-fixed-live`. An earlier passing run rebuilt the native
+executable while enabling the interop feature; its differing hashes are retained
+and excluded from this fixed-artifact claim. Hosted CI remains a publication gate.
