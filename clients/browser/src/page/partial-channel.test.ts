@@ -5,7 +5,7 @@ function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
-// Regression #1046, audit #853/#889: an incoming probe can precede the second required channel.
+// Regressions #1046/#1051, audit #853/#889: an incoming probe can precede the second required channel.
 const histories = [
   'live',
   'wrong-probe',
@@ -15,6 +15,8 @@ const histories = [
   'queued-error-second',
   'queued-close-first',
   'queued-close-second',
+  'queued-closing-first',
+  'queued-closing-second',
   'queued-pc-failed',
   'queued-pc-closed',
   'queued-pc-disconnected',
@@ -55,6 +57,7 @@ for (const firstLabel of ['reliable', 'unreliable']) {
       readonly maxRetransmits: number | null;
       onmessage: ((event: { data: string }) => void) | null = null;
       onclose: (() => void) | null = null;
+      onclosing: (() => void) | null = null;
       onerror: (() => void) | null = null;
       constructor(readonly label: string) {
         this.ordered = label === 'reliable';
@@ -200,7 +203,10 @@ for (const firstLabel of ['reliable', 'unreliable']) {
         connection.onconnectionstatechange?.();
       } else if (scenario.startsWith('queued-')) {
         const failed = scenario.endsWith('first') ? first : second;
-        if (scenario.startsWith('queued-close')) {
+        if (scenario.startsWith('queued-closing')) {
+          failed.readyState = 'closing';
+          failed.onclosing?.();
+        } else if (scenario.startsWith('queued-close')) {
           failed.close();
           failed.onclose?.();
         } else failed.onerror?.();
@@ -246,6 +252,8 @@ for (const firstLabel of ['reliable', 'unreliable']) {
         });
         await turn();
         // Old terminal callbacks must not retire the fresh generation.
+        first.onclosing?.();
+        second.onclosing?.();
         first.onerror?.();
         second.onclose?.();
         const fresh = [new Channel('reliable'), new Channel('unreliable')];

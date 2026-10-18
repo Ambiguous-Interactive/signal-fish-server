@@ -484,6 +484,7 @@ export class Engine {
         this.callbacks.onChannelClosed(peer, callbackLink.generation, label);
       }
     };
+    channel.onclosing = notifyClosed;
     channel.onclose = notifyClosed;
     channel.onerror = notifyClosed;
     if (channel.readyState === 'closing' || channel.readyState === 'closed') {
