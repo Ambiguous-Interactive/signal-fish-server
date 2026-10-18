@@ -1215,8 +1215,9 @@ for (const [initiate, alreadyOpen] of [
     connection?.ondatachannel?.({ channel: afterClose });
     assert(afterClose.readyState === 'closed', 'closed original keeps its label reserved');
     assert(
-      engine.channel('peer', RELIABLE_LABEL) === required,
-      'closed original stays selected',
+      engine.channel('peer', RELIABLE_LABEL) === undefined &&
+        engine.channel('peer', UNRELIABLE_LABEL) === undefined,
+      'terminal links cannot expose either channel for sends',
     );
     engine.removePeer('peer');
     await engine.pairWith('peer', false, []);

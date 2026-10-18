@@ -65,7 +65,8 @@ interface PeerLink {
   remoteCandidateBytes: number;
   remoteDescriptionSet: boolean;
   pairConnected: boolean;
-  receiveFailed: boolean;
+  /** Observed failure fences queued work before the orchestrator retires this link. */
+  terminal: boolean;
 }
 
 /** The per-client WebRTC engine (single-threaded; owned by the orchestrator). */
@@ -134,7 +135,7 @@ export class Engine {
       remoteCandidateBytes: 0,
       remoteDescriptionSet: false,
       pairConnected: false,
-      receiveFailed: false,
+      terminal: false,
     };
     this.peers.set(peer, link);
     this.registerPcHandlers(peer, link);
@@ -251,6 +252,7 @@ export class Engine {
       console.error(`channel ${label} open for unknown peer ${peer}`);
       return false;
     }
+    if (link.terminal) return false;
     link.openLabels.add(label);
     const reliable = link.channels.get(RELIABLE_LABEL);
     const unreliable = link.channels.get(UNRELIABLE_LABEL);
@@ -266,9 +268,10 @@ export class Engine {
     return false;
   }
 
-  /** Look up a stored channel by peer and label. */
+  /** Look up a usable channel by peer and label. */
   channel(peer: string, label: string): RTCDataChannel | undefined {
-    return this.peers.get(peer)?.channels.get(label);
+    const link = this.peers.get(peer);
+    return link?.terminal === false ? link.channels.get(label) : undefined;
   }
 
   /** Local transport state only; excludes signaling payloads and ICE addresses. */
@@ -313,14 +316,15 @@ export class Engine {
 
   private linkOf(peer: string, what: string): PeerLink {
     const link = this.peers.get(peer);
-    if (link === undefined) {
-      throw new Error(`${what} from unpaired peer ${peer}`);
+    if (link === undefined || link.terminal) {
+      throw new Error(`${what} from unpaired or terminal peer ${peer}`);
     }
     return link;
   }
 
   private assertCurrentLink(peer: string, link: PeerLink): void {
-    if (this.peers.get(peer) !== link) throw new Error('the peer link was retired');
+    if (this.peers.get(peer) !== link || link.terminal)
+      throw new Error('the peer link was retired or terminated');
   }
 
   private async flushPendingCandidates(peer: string, link: PeerLink): Promise<void> {
@@ -341,11 +345,19 @@ export class Engine {
       if (this.peers.get(peer) !== link) {
         return;
       }
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        link.terminal = true;
+      }
       this.callbacks.onPcState(peer, link.generation, pc.connectionState);
     };
     pc.onicecandidate = (event) => {
       // `null` marks end-of-gathering; crippled mode drops everything.
-      if (this.peers.get(peer) !== link || this.crippled || event.candidate === null) {
+      if (
+        this.peers.get(peer) !== link ||
+        link.terminal ||
+        this.crippled ||
+        event.candidate === null
+      ) {
         return;
       }
       this.callbacks.onLocalCandidate(
@@ -370,7 +382,9 @@ export class Engine {
         event.channel.close();
         return;
       }
-      if (this.peers.get(peer) !== link) {
+      if (this.peers.get(peer) !== link) return;
+      if (link.terminal) {
+        channel.close();
         return;
       }
       // Labels are application names, not unique WebRTC channel identifiers.
@@ -402,7 +416,7 @@ export class Engine {
       const link = this.peers.get(peer);
       if (
         !openNotified &&
-        !callbackLink.receiveFailed &&
+        !callbackLink.terminal &&
         channel.readyState === 'open' &&
         link === callbackLink &&
         link.channels.get(label) === channel
@@ -417,7 +431,7 @@ export class Engine {
     }
     channel.onmessage = (event: MessageEvent<unknown>) => {
       const link = this.peers.get(peer);
-      if (link !== callbackLink || link.receiveFailed || link.channels.get(label) !== channel) {
+      if (link !== callbackLink || link.terminal || link.channels.get(label) !== channel) {
         return;
       }
       // Preflight allocations; UTF-16 length bounds UTF-8 length from below.
@@ -457,23 +471,16 @@ export class Engine {
     // A required data channel can fail while the peer connection itself stays
     // `connected`. Treat close/error as a terminal pair signal so the
     // orchestrator reports relay fallback and permits a later plan to rebuild.
-    let terminalNotified = false;
     const rejectMessage = (reason: string) => {
-      if (callbackLink.receiveFailed) return;
-      callbackLink.receiveFailed = true;
-      terminalNotified = true;
+      if (callbackLink.terminal) return;
+      callbackLink.terminal = true;
       this.callbacks.onChannelClosed(peer, callbackLink.generation, label, reason);
       for (const required of callbackLink.channels.values()) required.close();
     };
     const notifyClosed = () => {
       const link = this.peers.get(peer);
-      if (
-        !terminalNotified &&
-        link === callbackLink &&
-        !link.receiveFailed &&
-        link.channels.get(label) === channel
-      ) {
-        terminalNotified = true;
+      if (link === callbackLink && !link.terminal && link.channels.get(label) === channel) {
+        callbackLink.terminal = true;
         this.callbacks.onChannelClosed(peer, callbackLink.generation, label);
       }
     };

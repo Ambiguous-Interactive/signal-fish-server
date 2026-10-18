@@ -7,6 +7,7 @@ fn receive_budget_is_shared_across_links_and_releases_when_payloads_drop() {
     let links = [0, 1].map(|_| ChannelReceiveAdmission {
         budget: engine.message_budget.clone(),
         rejected: Mutex::new(false),
+        terminal: AtomicBool::new(false),
     });
     // The default SCTP message cap prevents live raw-oversize delivery.
     assert!(links[0]

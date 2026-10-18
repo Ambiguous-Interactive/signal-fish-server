@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Prevent reference clients from forming WebRTC pairs after they observe a required-channel or peer-connection failure (#1046).
 - Apply queued reference-client room updates before reporting success so new peers and restored links
   are not skipped (#1041).
 - Keep reference-client relay sends and receipts within the run window, including slow payload preparation
