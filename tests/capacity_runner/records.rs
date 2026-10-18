@@ -7,8 +7,10 @@
 //! delivery class, so "replay the artifacts" and "summarize the run" are
 //! literally the same code path.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::sync::Arc;
+use std::sync::Mutex;
 #[cfg(test)]
 use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -38,98 +40,6 @@ pub struct SentEvent {
     pub phase: Phase,
 }
 
-/// A receipt identity shared within one collected or replayed run.
-/// Serialization stays a JSON string, including names outside the run roster.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-// Arc<String> keeps each stored name to one pointer; Arc<str> needs two.
-// Only the first occurrence of a distinct name allocates an Arc header.
-pub struct ReceiptName(Arc<String>);
-
-impl ReceiptName {
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-impl From<String> for ReceiptName {
-    fn from(name: String) -> Self {
-        Self(Arc::new(name))
-    }
-}
-
-impl From<&str> for ReceiptName {
-    fn from(name: &str) -> Self {
-        name.to_string().into()
-    }
-}
-
-impl std::ops::Deref for ReceiptName {
-    type Target = str;
-
-    fn deref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl std::borrow::Borrow<str> for ReceiptName {
-    fn borrow(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl<T: AsRef<str> + ?Sized> PartialEq<T> for ReceiptName {
-    fn eq(&self, other: &T) -> bool {
-        self.as_str() == other.as_ref()
-    }
-}
-
-impl std::fmt::Display for ReceiptName {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl serde::Serialize for ReceiptName {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for ReceiptName {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        String::deserialize(deserializer).map(Self::from)
-    }
-}
-
-/// Run-local names only. The log's existing mutex covers collection; replay
-/// owns its pool directly. Each receipt needs two O(log distinct names) lookups.
-#[derive(Default)]
-pub(super) struct ReceiptNames(BTreeSet<ReceiptName>);
-
-impl ReceiptNames {
-    fn intern(&mut self, name: String) -> ReceiptName {
-        if let Some(shared) = self.0.get(name.as_str()) {
-            return shared.clone();
-        }
-        let shared = ReceiptName::from(name);
-        self.0.insert(shared.clone());
-        shared
-    }
-
-    pub(super) fn share(&mut self, receipt: ReceiptEvent<String>) -> ReceiptEvent {
-        ReceiptEvent {
-            recipient: self.intern(receipt.recipient),
-            sender: self.intern(receipt.sender),
-            seq: receipt.seq,
-            epoch: receipt.epoch,
-            server_seq: receipt.server_seq,
-            received_us: receipt.received_us,
-            application_bytes: receipt.application_bytes,
-            encoded_frame_body_bytes: receipt.encoded_frame_body_bytes,
-        }
-    }
-}
-
 /// One delivery a recipient task actually read off the socket.
 ///
 /// `seq` is the sender-stamped ledger sequence (unique across the whole run,
@@ -137,10 +47,9 @@ impl ReceiptNames {
 /// per-`(sender, epoch)` relay stamps read off the v3 wire frame — the
 /// stream-identity pair the oracle validates.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-// Collection and replay parse owned strings, then intern before storing events.
-pub struct ReceiptEvent<Name = ReceiptName> {
-    pub recipient: Name,
-    pub sender: Name,
+pub struct ReceiptEvent {
+    pub recipient: String,
+    pub sender: String,
     pub seq: u64,
     pub epoch: u32,
     pub server_seq: u64,
@@ -253,7 +162,6 @@ pub struct ReceiptTimingObservation {
     started_offset_ns: u64,
     finished_offset_ns: u64,
     acquire_wait_ns: u64,
-    intern_ns: u64,
     receipt_push_ns: u64,
     measured_lock_hold_ns: u64,
     receipt_len_before: usize,
@@ -265,7 +173,6 @@ pub struct ReceiptTimingObservation {
 impl ReceiptTimingObservation {
     fn score(&self) -> u64 {
         self.acquire_wait_ns
-            .max(self.intern_ns)
             .max(self.receipt_push_ns)
             .max(self.measured_lock_hold_ns)
     }
@@ -282,11 +189,9 @@ pub struct ReceiptTimingLagPrefix {
     observed_us: u64,
     bound_us: u64,
     acquire_wait: TimingAggregate,
-    intern: TimingAggregate,
     receipt_push: TimingAggregate,
     measured_lock_hold: TimingAggregate,
     worst_acquire_wait: Option<ReceiptTimingObservation>,
-    worst_intern: Option<ReceiptTimingObservation>,
     worst_receipt_push: Option<ReceiptTimingObservation>,
     worst_measured_lock_hold: Option<ReceiptTimingObservation>,
 }
@@ -301,13 +206,11 @@ pub struct ReceiptTimingSnapshot {
     workload_epoch_offset_ns: Option<u64>,
     first_accepted_lag_prefix: Option<Box<ReceiptTimingLagPrefix>>,
     worst_acquire_wait: Option<ReceiptTimingObservation>,
-    worst_intern: Option<ReceiptTimingObservation>,
     worst_receipt_push: Option<ReceiptTimingObservation>,
     worst_measured_lock_hold: Option<ReceiptTimingObservation>,
     slow_threshold_ns: u64,
     slow_observation_limit: usize,
     pub acquire_wait: TimingAggregate,
-    pub intern: TimingAggregate,
     pub receipt_push: TimingAggregate,
     pub measured_lock_hold: TimingAggregate,
     slow_observations_seen: u64,
@@ -325,20 +228,18 @@ impl ReceiptTimingSnapshot {
         let after = elapsed_ns(start);
         Self {
             enabled: true,
-            notes: "Opt-in diagnostics add clock reads and bookkeeping. All stage durations are elapsed wall-clock time and include descheduling. Acquire wait does not distinguish mutex contention from scheduling delay. Offsets start at EventLog construction; workload_epoch_offset_ns maps the armed workload epoch when provided. The wall anchor lies within its before/after monotonic offset bracket. Intern includes duplicate String cleanup and Arc updates. Measured lock hold ends before its final counter update, slow-observation finalization, and unlock. Retains the first 64 slow observations plus one worst observation per stage; aggregates cover every receipt. Observation rows retain scalar receipt positions; exact names are resolved only after collection. No TCP attribution.",
+            notes: "Opt-in diagnostics add clock reads and bookkeeping. All stage durations are elapsed wall-clock time and include descheduling. Acquire wait does not distinguish mutex contention from scheduling delay. Offsets start at EventLog construction; workload_epoch_offset_ns maps the armed workload epoch when provided. The wall anchor lies within its before/after monotonic offset bracket. Measured lock hold ends before its final counter update, slow-observation finalization, and unlock. Retains the first 64 slow observations plus one worst observation per measured stage; aggregates cover every receipt. At most 70 observation rows are retained across the slow buffer, three final maxima, and three frozen prefix maxima. Observation rows retain scalar receipt positions; exact names are resolved only after collection. No TCP attribution.",
             wall_anchor_unix_ns: wall,
             wall_anchor_offset_before_ns: before,
             wall_anchor_offset_after_ns: after,
             workload_epoch_offset_ns: None,
             first_accepted_lag_prefix: None,
             worst_acquire_wait: None,
-            worst_intern: None,
             worst_receipt_push: None,
             worst_measured_lock_hold: None,
             slow_threshold_ns: SLOW_RECEIPT_NS,
             slow_observation_limit: MAX_SLOW_RECEIPT_TIMINGS,
             acquire_wait: TimingAggregate::default(),
-            intern: TimingAggregate::default(),
             receipt_push: TimingAggregate::default(),
             measured_lock_hold: TimingAggregate::default(),
             slow_observations_seen: 0,
@@ -372,7 +273,6 @@ impl ReceiptTimingSnapshot {
             .map_err(|error| format!("Serialize receipt timings: {error}"))?;
         for field in [
             "worst_acquire_wait",
-            "worst_intern",
             "worst_receipt_push",
             "worst_measured_lock_hold",
         ] {
@@ -396,13 +296,6 @@ impl ReceiptTimingSnapshot {
             .is_none_or(|old| observation.acquire_wait_ns > old.acquire_wait_ns)
         {
             self.worst_acquire_wait = Some(observation.clone());
-        }
-        if self
-            .worst_intern
-            .as_ref()
-            .is_none_or(|old| observation.intern_ns > old.intern_ns)
-        {
-            self.worst_intern = Some(observation.clone());
         }
         if self
             .worst_receipt_push
@@ -443,7 +336,6 @@ fn elapsed_ns(start: Instant) -> u64 {
 #[derive(Default)]
 struct ReceiptTimingHooks {
     wait_started: Option<std::sync::mpsc::SyncSender<()>>,
-    intern_delay: Duration,
     push_delay: Duration,
     bookkeeping_delay: Duration,
 }
@@ -468,7 +360,6 @@ pub struct EventLog {
 #[derive(Default)]
 struct EventState {
     receipt_timings: Option<ReceiptTimingSnapshot>,
-    receipt_names: ReceiptNames,
     sent: Vec<SentEvent>,
     receipts: Vec<ReceiptEvent>,
     gaps: Vec<GapEvent>,
@@ -553,11 +444,9 @@ impl EventLog {
             observed_us,
             bound_us,
             acquire_wait: timings.acquire_wait.clone(),
-            intern: timings.intern.clone(),
             receipt_push: timings.receipt_push.clone(),
             measured_lock_hold: timings.measured_lock_hold.clone(),
             worst_acquire_wait: timings.worst_acquire_wait.clone(),
-            worst_intern: timings.worst_intern.clone(),
             worst_receipt_push: timings.worst_receipt_push.clone(),
             worst_measured_lock_hold: timings.worst_measured_lock_hold.clone(),
         }));
@@ -581,10 +470,9 @@ impl EventLog {
             .push(event);
     }
 
-    pub fn push_receipt(&self, event: ReceiptEvent<String>) {
+    pub fn push_receipt(&self, event: ReceiptEvent) {
         let Some(start) = self.receipt_timing_start else {
             let mut state = self.state.lock().expect("event log poisoned");
-            let event = state.receipt_names.share(event);
             state.receipts.push(event);
             return;
         };
@@ -597,11 +485,7 @@ impl EventLog {
         let acquired = elapsed_ns(start);
         let len_before = state.receipts.len();
         let capacity_before = state.receipts.capacity();
-        let intern_started = elapsed_ns(start);
-        #[cfg(test)]
-        pause_receipt_timing(self.receipt_timing_hooks.intern_delay);
-        let event = state.receipt_names.share(event);
-        let interned = elapsed_ns(start);
+        let push_started = elapsed_ns(start);
         #[cfg(test)]
         pause_receipt_timing(self.receipt_timing_hooks.push_delay);
         state.receipts.push(event);
@@ -613,29 +497,23 @@ impl EventLog {
                 .acquire_wait
                 .record(acquired.saturating_sub(waiting));
             timings
-                .intern
-                .record(interned.saturating_sub(intern_started));
-            timings.receipt_push.record(pushed.saturating_sub(interned));
+                .receipt_push
+                .record(pushed.saturating_sub(push_started));
         }
         #[cfg(test)]
         pause_receipt_timing(self.receipt_timing_hooks.bookkeeping_delay);
         let finished = elapsed_ns(start);
         let hold = finished.saturating_sub(acquired);
         let wait = acquired.saturating_sub(waiting);
-        let intern = interned.saturating_sub(intern_started);
-        let push = pushed.saturating_sub(interned);
+        let push = pushed.saturating_sub(push_started);
         // Capture scalar receipt positions only for retained rows or new stage maxima.
-        let is_slow = wait.max(intern).max(push).max(hold) >= SLOW_RECEIPT_NS;
+        let is_slow = wait.max(push).max(hold) >= SLOW_RECEIPT_NS;
         let needs_observation = state.receipt_timings.as_ref().is_some_and(|timings| {
             (is_slow && timings.slow_observations.len() < MAX_SLOW_RECEIPT_TIMINGS)
                 || timings
                     .worst_acquire_wait
                     .as_ref()
                     .is_none_or(|old| wait > old.acquire_wait_ns)
-                || timings
-                    .worst_intern
-                    .as_ref()
-                    .is_none_or(|old| intern > old.intern_ns)
                 || timings
                     .worst_receipt_push
                     .as_ref()
@@ -656,7 +534,6 @@ impl EventLog {
                     started_offset_ns: waiting,
                     finished_offset_ns: finished,
                     acquire_wait_ns: wait,
-                    intern_ns: intern,
                     receipt_push_ns: push,
                     measured_lock_hold_ns: hold,
                     receipt_len_before: len_before,
@@ -803,7 +680,6 @@ impl EventLog {
             faults: std::mem::take(&mut state.faults),
             registry: std::mem::take(&mut state.registry),
         };
-        state.receipt_names = ReceiptNames::default();
         records
             .sent
             .sort_by(|a, b| (&a.sender, a.seq).cmp(&(&b.sender, b.seq)));
@@ -896,101 +772,7 @@ impl RunRecords {
 mod tests {
     use super::*;
 
-    // Regression #775: fan-out must not retain two new identity strings per receipt.
-    #[test]
-    fn receipt_names_share_storage_in_collection_and_artifact_replay() {
-        let log = EventLog::new();
-        for (recipient, sender, seq) in [
-            ("r0p1", "r0p0", 0),
-            ("r0p1", "r0p0", 1),
-            ("r0p0", "r0p1", 0),
-            ("未知\"\\\n", "outside-the-roster", 7),
-            ("outside-the-roster", "未知\"\\\n", 7),
-            ("r0p1", "r0p0", 1), // Preserve duplicate observations.
-        ] {
-            log.push_receipt(ReceiptEvent {
-                recipient: recipient.into(),
-                sender: sender.into(),
-                seq,
-                epoch: 1,
-                server_seq: seq + 1,
-                received_us: 10 + seq,
-                application_bytes: 96,
-                encoded_frame_body_bytes: 250,
-            });
-        }
-        assert_eq!(log.state.lock().expect("log").receipt_names.0.len(), 4);
-        let collected = log.take_records();
-        assert!(log.state.lock().expect("log").receipt_names.0.is_empty());
-        // A later collection has a separate pool, even while old evidence lives.
-        log.push_receipt(ReceiptEvent {
-            recipient: "r0p1".into(),
-            sender: "r0p0".into(),
-            seq: 8,
-            epoch: 1,
-            server_seq: 9,
-            received_us: 18,
-            application_bytes: 96,
-            encoded_frame_body_bytes: 250,
-        });
-        let later = log.take_records();
-        assert_ne!(
-            collected.receipts[0].sender.as_str().as_ptr(),
-            later.receipts[0].sender.as_str().as_ptr(),
-            "the log must release its old pool after transferring records"
-        );
-        assert!(
-            std::mem::size_of::<ReceiptEvent>() < std::mem::size_of::<ReceiptEvent<String>>(),
-            "stored receipts must use less inline space than raw string receipts"
-        );
-        let output = tempfile::tempdir().expect("artifact directory");
-        crate::artifacts::write_deliveries(output.path(), &collected).expect("write receipts");
-        let replayed = crate::artifacts::read_records(output.path()).expect("read receipts");
-        assert_eq!(
-            serde_json::to_value(&collected).expect("collected"),
-            serde_json::to_value(&replayed).expect("replayed"),
-            "identity sharing must preserve every raw receipt"
-        );
-        for (path, records) in [("collection", collected), ("replay", replayed)] {
-            let receipts = records.receipts;
-            assert_eq!(receipts.len(), 6, "{path}: retain every arrival");
-            assert_eq!(receipts[3].recipient.as_str(), "未知\"\\\n");
-            assert_eq!(receipts[3].sender.as_str(), "outside-the-roster");
-            assert_eq!(
-                receipts[3].recipient.as_str().as_ptr(),
-                receipts[4].sender.as_str().as_ptr()
-            );
-            assert_eq!(
-                receipts[1].seq, receipts[5].seq,
-                "{path}: retain duplicate keys"
-            );
-            for receipt in &receipts {
-                for name in [&receipt.recipient, &receipt.sender] {
-                    assert_eq!(
-                        serde_json::to_vec(name).expect("shared name"),
-                        serde_json::to_vec(name.as_str()).expect("raw string")
-                    );
-                }
-            }
-            assert_eq!(
-                receipts[0].sender.as_str().as_ptr(),
-                receipts[1].sender.as_str().as_ptr(),
-                "{path}: repeated sender identities must share storage"
-            );
-            assert_eq!(
-                receipts[0].recipient.as_str().as_ptr(),
-                receipts[2].sender.as_str().as_ptr(),
-                "{path}: an identity must share storage across roles"
-            );
-            assert_ne!(
-                receipts[0].recipient.as_str(),
-                receipts[0].sender.as_str(),
-                "{path}: distinct identities must remain distinct"
-            );
-        }
-    }
-
-    fn timing_receipt(seq: u64) -> ReceiptEvent<String> {
+    fn timing_receipt(seq: u64) -> ReceiptEvent {
         ReceiptEvent {
             recipient: "r0p1".into(),
             sender: "r0p0".into(),
@@ -1004,16 +786,14 @@ mod tests {
     }
 
     #[test]
-    fn receipt_timings_measure_intern_push_and_hold_stages_separately() {
+    fn receipt_timings_measure_push_and_hold_stages_separately() {
         let mut log = EventLog::with_receipt_timings(true);
-        log.receipt_timing_hooks.intern_delay = Duration::from_millis(10);
         log.receipt_timing_hooks.push_delay = Duration::from_millis(15);
         log.receipt_timing_hooks.bookkeeping_delay = Duration::from_millis(20);
         log.push_receipt(timing_receipt(7));
         let timings = log.take_receipt_timings().expect("enabled timings");
         for stage in [
             &timings.acquire_wait,
-            &timings.intern,
             &timings.receipt_push,
             &timings.measured_lock_hold,
         ] {
@@ -1021,12 +801,8 @@ mod tests {
             assert_eq!(stage.max_ns, stage.total_ns);
             assert!(!stage.overflowed);
         }
-        assert!(timings.intern.total_ns >= 10_000_000);
         assert!(timings.receipt_push.total_ns >= 15_000_000);
-        assert!(
-            timings.measured_lock_hold.total_ns
-                >= timings.intern.total_ns + timings.receipt_push.total_ns + 20_000_000
-        );
+        assert!(timings.measured_lock_hold.total_ns >= timings.receipt_push.total_ns + 20_000_000);
         let row = &timings.slow_observations[0];
         assert_eq!((row.seq, row.epoch), (7, 1));
         assert_eq!((row.receipt_len_before, row.receipt_len_after), (0, 1));
@@ -1142,7 +918,6 @@ mod tests {
             started_offset_ns: seq * 10_000_000,
             finished_offset_ns: seq * 10_000_000 + duration * 2,
             acquire_wait_ns: duration,
-            intern_ns: duration,
             receipt_push_ns: duration,
             measured_lock_hold_ns: duration,
             receipt_len_before: usize::try_from(seq).expect("small fixture"),
@@ -1159,7 +934,6 @@ mod tests {
         assert_eq!(timings.slow_observations_not_retained, 1);
         for worst in [
             &timings.worst_acquire_wait,
-            &timings.worst_intern,
             &timings.worst_receipt_push,
             &timings.worst_measured_lock_hold,
         ] {
@@ -1188,20 +962,20 @@ mod tests {
             );
             assert_eq!((prefix.observed_us, prefix.bound_us), (400_000, 250_000));
             assert!(prefix.capture_offset_ns >= prefix.request_offset_ns);
-            assert_eq!(prefix.intern.count, 1);
-            assert_eq!(prefix.worst_intern.as_ref().unwrap().seq, 7);
+            assert_eq!(prefix.receipt_push.count, 1);
+            assert_eq!(prefix.worst_receipt_push.as_ref().unwrap().seq, 7);
             serde_json::to_value(prefix).expect("frozen prefix")
         };
         log.push_receipt(timing_receipt(8));
         {
             let mut state = log.state.lock().expect("update later maximum");
             let timings = state.receipt_timings.as_mut().unwrap();
-            let mut later = timings.worst_intern.as_ref().unwrap().clone();
+            let mut later = timings.worst_receipt_push.as_ref().unwrap().clone();
             later.seq = 99;
-            later.intern_ns = u64::MAX;
+            later.receipt_push_ns = u64::MAX;
             timings.retain_observation(later);
-            assert_eq!(timings.intern.count, 2);
-            assert_eq!(timings.worst_intern.as_ref().unwrap().seq, 99);
+            assert_eq!(timings.receipt_push.count, 2);
+            assert_eq!(timings.worst_receipt_push.as_ref().unwrap().seq, 99);
         }
         for seq in 43..143 {
             log.capture_receipt_timings_at_send_lag(
@@ -1217,7 +991,7 @@ mod tests {
             serde_json::to_value(timings.first_accepted_lag_prefix).unwrap(),
             frozen
         );
-        assert_eq!(timings.intern.count, 2);
+        assert_eq!(timings.receipt_push.count, 2);
         assert_eq!(log.take_records().receipts.len(), 2);
     }
 
@@ -1265,8 +1039,8 @@ mod tests {
             .into_evidence(&records)
             .expect("resolve timing names");
         for row in [
-            &evidence["worst_intern"],
-            &evidence["first_accepted_lag_prefix"]["worst_intern"],
+            &evidence["worst_receipt_push"],
+            &evidence["first_accepted_lag_prefix"]["worst_receipt_push"],
         ] {
             assert_eq!(row["receipt_index"], 0);
             assert_eq!(row["recipient"], "未知\"\\\n");

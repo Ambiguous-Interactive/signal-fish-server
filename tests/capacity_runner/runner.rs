@@ -2295,7 +2295,7 @@ mod session_poll_tests {
         for field in ["sender", "seq", "stage", "observed_us", "bound_us"] {
             assert_eq!(prefix[field], original[field], "trigger field {field}");
         }
-        assert_eq!(prefix["intern"]["count"], 0);
+        assert_eq!(prefix["receipt_push"]["count"], 0);
     }
 
     #[test]
