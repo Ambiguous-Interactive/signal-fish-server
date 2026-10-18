@@ -5288,8 +5288,7 @@ new gameplay callbacks after the engine observes loss.
 The real-channel negative control closes the unreliable channel and observes
 its actual close notification. It sends a reliable sibling message, waits for
 SCTP acknowledgement, then closes that stream as a drain marker. The original
-engine publishes the post-terminal message and fails the assertion in Nextest
-`dbe27707`. The first
+engine publishes the post-terminal message and fails the assertion. The first
 control closed the sender immediately and passed; that result did not establish
 message arrival and is excluded from defect evidence. Reliable acknowledgement
 before reset and the wrapper's message-before-close queue order supply the
