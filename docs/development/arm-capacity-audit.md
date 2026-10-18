@@ -3558,6 +3558,14 @@ receipt-vector insertion, and part of the lock hold. Aggregates cover every
 receipt. Retained rows are bounded to the first 64 slow observations and four
 stage maxima. They keep sequence, clock offset, and vector size/capacity.
 The shared armed epoch and a bracketed wall-clock anchor support alignment.
+Collection retains scalar receipt positions. The runner resolves exact names
+after producers stop, so stored-name types add no diagnostic copying cost
+during ingestion. A single lag-prefix snapshot retains counters and four stage
+maxima before warning formatting or output. At most 72 observation rows remain.
+The snapshot records request and capture offsets. It is the first accepted
+capture under the log mutex, which may differ from the earliest request or
+exact crossing. Capture work starts after a confirmed breach and can affect
+later failure history. The prefix stays fixed while final maxima keep updating.
 
 All durations are elapsed wall time and include descheduling. Acquisition
 time cannot distinguish mutex contention from scheduling delay. Name sharing

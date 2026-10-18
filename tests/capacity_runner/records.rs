@@ -226,7 +226,7 @@ pub struct DisconnectEvent {
 const MAX_SLOW_RECEIPT_TIMINGS: usize = 64;
 const SLOW_RECEIPT_NS: u64 = 1_000_000;
 
-#[derive(Debug, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct TimingAggregate {
     pub count: u64,
     pub total_ns: u64,
@@ -247,8 +247,7 @@ impl TimingAggregate {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ReceiptTimingObservation {
-    recipient: ReceiptName,
-    sender: ReceiptName,
+    receipt_index: usize,
     seq: u64,
     epoch: u32,
     started_offset_ns: u64,
@@ -273,6 +272,26 @@ impl ReceiptTimingObservation {
 }
 
 #[derive(Debug, serde::Serialize)]
+pub struct ReceiptTimingLagPrefix {
+    notes: &'static str,
+    request_offset_ns: u64,
+    capture_offset_ns: u64,
+    sender: String,
+    seq: u64,
+    stage: &'static str,
+    observed_us: u64,
+    bound_us: u64,
+    acquire_wait: TimingAggregate,
+    intern: TimingAggregate,
+    receipt_push: TimingAggregate,
+    measured_lock_hold: TimingAggregate,
+    worst_acquire_wait: Option<ReceiptTimingObservation>,
+    worst_intern: Option<ReceiptTimingObservation>,
+    worst_receipt_push: Option<ReceiptTimingObservation>,
+    worst_measured_lock_hold: Option<ReceiptTimingObservation>,
+}
+
+#[derive(Debug, serde::Serialize)]
 pub struct ReceiptTimingSnapshot {
     enabled: bool,
     notes: &'static str,
@@ -280,6 +299,7 @@ pub struct ReceiptTimingSnapshot {
     wall_anchor_offset_before_ns: u64,
     wall_anchor_offset_after_ns: u64,
     workload_epoch_offset_ns: Option<u64>,
+    first_accepted_lag_prefix: Option<Box<ReceiptTimingLagPrefix>>,
     worst_acquire_wait: Option<ReceiptTimingObservation>,
     worst_intern: Option<ReceiptTimingObservation>,
     worst_receipt_push: Option<ReceiptTimingObservation>,
@@ -305,11 +325,12 @@ impl ReceiptTimingSnapshot {
         let after = elapsed_ns(start);
         Self {
             enabled: true,
-            notes: "Opt-in diagnostics add clock reads and bookkeeping. All stage durations are elapsed wall-clock time and include descheduling. Acquire wait does not distinguish mutex contention from scheduling delay. Offsets start at EventLog construction; workload_epoch_offset_ns maps the armed workload epoch when provided. The wall anchor lies within its before/after monotonic offset bracket. Intern includes duplicate String cleanup and Arc updates. Measured lock hold ends before its final counter update, slow-observation finalization, and unlock. Retains the first 64 slow observations plus one worst observation per stage; aggregates cover every receipt. No TCP attribution.",
+            notes: "Opt-in diagnostics add clock reads and bookkeeping. All stage durations are elapsed wall-clock time and include descheduling. Acquire wait does not distinguish mutex contention from scheduling delay. Offsets start at EventLog construction; workload_epoch_offset_ns maps the armed workload epoch when provided. The wall anchor lies within its before/after monotonic offset bracket. Intern includes duplicate String cleanup and Arc updates. Measured lock hold ends before its final counter update, slow-observation finalization, and unlock. Retains the first 64 slow observations plus one worst observation per stage; aggregates cover every receipt. Observation rows retain scalar receipt positions; exact names are resolved only after collection. No TCP attribution.",
             wall_anchor_unix_ns: wall,
             wall_anchor_offset_before_ns: before,
             wall_anchor_offset_after_ns: after,
             workload_epoch_offset_ns: None,
+            first_accepted_lag_prefix: None,
             worst_acquire_wait: None,
             worst_intern: None,
             worst_receipt_push: None,
@@ -324,6 +345,48 @@ impl ReceiptTimingSnapshot {
             slow_observations_not_retained: 0,
             slow_observations: Vec::with_capacity(MAX_SLOW_RECEIPT_TIMINGS),
         }
+    }
+
+    pub fn into_evidence(self, records: &RunRecords) -> Result<serde_json::Value, String> {
+        fn add_identity(row: &mut serde_json::Value, records: &RunRecords) -> Result<(), String> {
+            if row.is_null() {
+                return Ok(());
+            }
+            let index = row["receipt_index"]
+                .as_u64()
+                .and_then(|index| usize::try_from(index).ok())
+                .ok_or_else(|| {
+                    "Receipt timing observation has an invalid receipt index".to_string()
+                })?;
+            let receipt = records.receipts.get(index).ok_or_else(|| {
+                format!(
+                    "Receipt timing index {index} exceeds {} receipts",
+                    records.receipts.len()
+                )
+            })?;
+            row["recipient"] = serde_json::Value::String(receipt.recipient.to_string());
+            row["sender"] = serde_json::Value::String(receipt.sender.to_string());
+            Ok(())
+        }
+        let mut evidence = serde_json::to_value(self)
+            .map_err(|error| format!("Serialize receipt timings: {error}"))?;
+        for field in [
+            "worst_acquire_wait",
+            "worst_intern",
+            "worst_receipt_push",
+            "worst_measured_lock_hold",
+        ] {
+            add_identity(&mut evidence[field], records)?;
+            if !evidence["first_accepted_lag_prefix"].is_null() {
+                add_identity(&mut evidence["first_accepted_lag_prefix"][field], records)?;
+            }
+        }
+        if let Some(rows) = evidence["slow_observations"].as_array_mut() {
+            for row in rows {
+                add_identity(row, records)?;
+            }
+        }
+        Ok(evidence)
     }
 
     fn retain_observation(&mut self, observation: ReceiptTimingObservation) {
@@ -460,6 +523,46 @@ impl EventLog {
         }
     }
 
+    pub fn capture_receipt_timings_at_send_lag(
+        &self,
+        sender: &str,
+        seq: u64,
+        stage: &'static str,
+        observed_us: u64,
+        bound_us: u64,
+    ) {
+        let Some(start) = self.receipt_timing_start else {
+            return;
+        };
+        let request_offset_ns = elapsed_ns(start);
+        let mut state = self.state.lock().expect("event log poisoned");
+        let Some(timings) = &mut state.receipt_timings else {
+            return;
+        };
+        if timings.first_accepted_lag_prefix.is_some() {
+            return;
+        }
+        let capture_offset_ns = elapsed_ns(start);
+        timings.first_accepted_lag_prefix = Some(Box::new(ReceiptTimingLagPrefix {
+            notes: "First accepted capture under the existing receipt-log mutex, not guaranteed earliest request or exact lag crossing. Counters and stage maxima describe the prefix at acquisition, before warning serialization. Request-to-capture time includes scheduling and mutex delay. Capture allocation and bookkeeping occur after a confirmed bound breach and can affect subsequent failure history.",
+            request_offset_ns,
+            capture_offset_ns,
+            sender: sender.to_string(),
+            seq,
+            stage,
+            observed_us,
+            bound_us,
+            acquire_wait: timings.acquire_wait.clone(),
+            intern: timings.intern.clone(),
+            receipt_push: timings.receipt_push.clone(),
+            measured_lock_hold: timings.measured_lock_hold.clone(),
+            worst_acquire_wait: timings.worst_acquire_wait.clone(),
+            worst_intern: timings.worst_intern.clone(),
+            worst_receipt_push: timings.worst_receipt_push.clone(),
+            worst_measured_lock_hold: timings.worst_measured_lock_hold.clone(),
+        }));
+    }
+
     /// Call only after every evidence producer has stopped. This sidecar never
     /// enters RunRecords, delivery artifacts, or the delivery oracle.
     pub fn take_receipt_timings(&self) -> Option<ReceiptTimingSnapshot> {
@@ -521,7 +624,7 @@ impl EventLog {
         let wait = acquired.saturating_sub(waiting);
         let intern = interned.saturating_sub(intern_started);
         let push = pushed.saturating_sub(interned);
-        // Clone existing identity handles only for slow rows or new stage maxima.
+        // Capture scalar receipt positions only for retained rows or new stage maxima.
         let is_slow = wait.max(intern).max(push).max(hold) >= SLOW_RECEIPT_NS;
         let needs_observation = state.receipt_timings.as_ref().is_some_and(|timings| {
             (is_slow && timings.slow_observations.len() < MAX_SLOW_RECEIPT_TIMINGS)
@@ -547,8 +650,7 @@ impl EventLog {
                 .receipts
                 .last()
                 .map(|receipt| ReceiptTimingObservation {
-                    recipient: receipt.recipient.clone(),
-                    sender: receipt.sender.clone(),
+                    receipt_index: len_before,
                     seq: receipt.seq,
                     epoch: receipt.epoch,
                     started_offset_ns: waiting,
@@ -571,7 +673,7 @@ impl EventLog {
                 timings.retain_observation(observation);
             } else if is_slow {
                 // The first-slow buffer is full and no stage maximum changed.
-                // Count the omitted row without cloning its identity handles.
+                // Count the omitted row without constructing an observation.
                 timings.slow_observations_seen = timings.slow_observations_seen.saturating_add(1);
                 timings.slow_observations_not_retained =
                     timings.slow_observations_not_retained.saturating_add(1);
@@ -1034,8 +1136,7 @@ mod tests {
     fn receipt_timings_keep_late_stage_maxima_after_slow_buffer_fills() {
         let mut timings = ReceiptTimingSnapshot::new(Instant::now());
         let make = |seq: u64, duration: u64| ReceiptTimingObservation {
-            recipient: "r0p1".into(),
-            sender: "r0p0".into(),
+            receipt_index: usize::try_from(seq).expect("small fixture"),
             seq,
             epoch: 1,
             started_offset_ns: seq * 10_000_000,
@@ -1066,5 +1167,119 @@ mod tests {
             assert_eq!(row.seq, 99);
             assert_eq!(row.receipt_capacity_after, 128);
         }
+    }
+    #[test]
+    fn first_accepted_lag_prefix_freezes_counters_context_and_stage_maxima() {
+        let log = EventLog::with_receipt_timings(true);
+        log.push_receipt(timing_receipt(7));
+        log.capture_receipt_timings_at_send_lag("r0p3", 42, "before_write", 400_000, 250_000);
+        let frozen = {
+            let state = log.state.lock().expect("timings");
+            let prefix = state
+                .receipt_timings
+                .as_ref()
+                .unwrap()
+                .first_accepted_lag_prefix
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                (&*prefix.sender, prefix.seq, prefix.stage),
+                ("r0p3", 42, "before_write")
+            );
+            assert_eq!((prefix.observed_us, prefix.bound_us), (400_000, 250_000));
+            assert!(prefix.capture_offset_ns >= prefix.request_offset_ns);
+            assert_eq!(prefix.intern.count, 1);
+            assert_eq!(prefix.worst_intern.as_ref().unwrap().seq, 7);
+            serde_json::to_value(prefix).expect("frozen prefix")
+        };
+        log.push_receipt(timing_receipt(8));
+        {
+            let mut state = log.state.lock().expect("update later maximum");
+            let timings = state.receipt_timings.as_mut().unwrap();
+            let mut later = timings.worst_intern.as_ref().unwrap().clone();
+            later.seq = 99;
+            later.intern_ns = u64::MAX;
+            timings.retain_observation(later);
+            assert_eq!(timings.intern.count, 2);
+            assert_eq!(timings.worst_intern.as_ref().unwrap().seq, 99);
+        }
+        for seq in 43..143 {
+            log.capture_receipt_timings_at_send_lag(
+                "r0p4",
+                seq,
+                "completed_write",
+                900_000,
+                250_000,
+            );
+        }
+        let timings = log.take_receipt_timings().unwrap();
+        assert_eq!(
+            serde_json::to_value(timings.first_accepted_lag_prefix).unwrap(),
+            frozen
+        );
+        assert_eq!(timings.intern.count, 2);
+        assert_eq!(log.take_records().receipts.len(), 2);
+    }
+
+    #[test]
+    fn disabled_lag_prefix_capture_preserves_records_without_acquiring_the_log() {
+        let log = Arc::new(EventLog::with_receipt_timings(false));
+        log.push_receipt(timing_receipt(7));
+        let guard = log.state.lock().expect("hold disabled log");
+        let (done, finished) = std::sync::mpsc::sync_channel(1);
+        let producer = {
+            let log = Arc::clone(&log);
+            std::thread::spawn(move || {
+                log.capture_receipt_timings_at_send_lag(
+                    "r0p3",
+                    42,
+                    "before_write",
+                    400_000,
+                    250_000,
+                );
+                done.send(()).expect("disabled capture completion");
+            })
+        };
+        let completed = finished.recv_timeout(Duration::from_secs(5));
+        drop(guard);
+        completed.expect("disabled capture must not acquire the held mutex");
+        producer.join().expect("disabled capture producer");
+        assert!(log.take_receipt_timings().is_none());
+        let records = log.take_records();
+        assert_eq!(records.receipts.len(), 1);
+        assert_eq!(records.receipts[0].seq, 7);
+    }
+
+    #[test]
+    fn timing_evidence_resolves_exact_names_and_rejects_invalid_receipt_positions() {
+        let log = EventLog::with_receipt_timings(true);
+        log.push_receipt(ReceiptEvent {
+            recipient: "未知\"\\\n".into(),
+            sender: "outside-the-roster".into(),
+            ..timing_receipt(7)
+        });
+        log.capture_receipt_timings_at_send_lag("r0p3", 42, "before_write", 400_000, 250_000);
+        let records = log.take_records();
+        let timings = log.take_receipt_timings().unwrap();
+        let evidence = timings
+            .into_evidence(&records)
+            .expect("resolve timing names");
+        for row in [
+            &evidence["worst_intern"],
+            &evidence["first_accepted_lag_prefix"]["worst_intern"],
+        ] {
+            assert_eq!(row["receipt_index"], 0);
+            assert_eq!(row["recipient"], "未知\"\\\n");
+            assert_eq!(row["sender"], "outside-the-roster");
+            assert_eq!(row["seq"], 7);
+        }
+        let invalid = EventLog::with_receipt_timings(true);
+        invalid.push_receipt(timing_receipt(7));
+        let error = invalid
+            .take_receipt_timings()
+            .unwrap()
+            .into_evidence(&RunRecords::default())
+            .expect_err("missing receipt must fail");
+        assert!(error.contains("index 0 exceeds 0 receipts"), "{error}");
     }
 }
