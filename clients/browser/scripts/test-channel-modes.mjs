@@ -258,7 +258,7 @@ try {
           const engine = new channelEngine.Engine(crippled, {
             onLocalCandidate: () => {},
             onPcState: (_p, _g, state) => events.push(state),
-            onChannelClosed: () => {},
+            onChannelClosed: (_p, _g, label) => events.push(`closed:${label}`),
             onChannelOpen: (_p, _g, label) => events.push(label),
             onChannelMessage: (_p, _g, label, text) => events.push(`${label}:${text}`),
           });
@@ -267,6 +267,7 @@ try {
             while (!condition() && performance.now() < end)
               await new Promise((resolve) => setTimeout(resolve, 10));
           };
+          let closingEvidence;
           try {
             const offer = await engine.pairWith('peer', path === 'answer', []);
             let remoteSdp;
@@ -321,8 +322,42 @@ try {
               await until(received);
               if (!received())
                 throw new Error('healthy pair must exchange both labels in both directions');
+              const closingLabel = path === 'offer' ? 'reliable' : 'unreliable';
+              const closingChannel = engine.channel('peer', closingLabel);
+              closingChannel.addEventListener('closing', () => {
+                closingEvidence = {
+                  state: closingChannel.readyState,
+                  notified: events.includes(`closed:${closingLabel}`),
+                  usable: ['reliable', 'unreliable'].some(
+                    (label) => engine.channel('peer', label) !== undefined,
+                  ),
+                };
+              });
+              remoteChannels.find((channel) => channel.label === closingLabel).close();
+              await until(() => closingEvidence !== undefined);
+              if (
+                closingEvidence?.state !== 'closing' ||
+                !closingEvidence.notified ||
+                closingEvidence.usable
+              )
+                throw new Error(
+                  `closing must retire the pair before close: ${JSON.stringify(closingEvidence)}`,
+                );
+              await until(() => closingChannel.readyState === 'closed');
+              if (
+                closingChannel.readyState !== 'closed' ||
+                events.filter((event) => event.startsWith('closed:')).length !== 1
+              )
+                throw new Error('closing and close must report one pair loss');
             }
-            return { crippled, path, connected, events, sender: remote.connectionState };
+            return {
+              crippled,
+              path,
+              connected,
+              closingEvidence,
+              events,
+              sender: remote.connectionState,
+            };
           } finally {
             engine.removePeer('peer');
             remote.close();

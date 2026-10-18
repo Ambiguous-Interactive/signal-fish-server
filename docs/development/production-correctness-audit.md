@@ -5226,3 +5226,51 @@ process, browser CLI, and page bundle remain under local
 `progress/session-477-qualified-live` and `progress/session-477`.
 These passing runs do not explain the historical browser failures. Hosted CI,
 platform qualification, and PR feedback remain publication gates.
+
+### F93 — Browser required-channel closing does not retire the pair
+
+Issue [#1051](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1051),
+found at `5c85a2a7` while investigating open #826, #853, and #889.
+The browser engine handles required-channel close and error, but does not
+register the earlier closing event. A remote reset puts a registered required
+channel into closing while its sibling remains open. The engine still exposes
+channel handles and admits sibling messages until the later close event.
+That delays relay fallback and allows queued work on an unusable physical pair.
+
+The real Chromium negative control first exchanges both labels in both
+directions. The remote endpoint then closes a required channel. During the
+receiver's actual closing event, its readyState is closing, the pair-loss
+callback has not run, and engine channel lookups still return handles.
+The original engine reports `{state:closing,notified:false,usable:true}`.
+The direct engine regression also admits post-closing input. A held-output
+partial-channel regression admits a sibling message after observed closing.
+These are new histories. They do not explain the original #853/#889 incidents.
+
+The engine now registers closing with its existing close/error handler.
+It marks the physical pair terminal before publishing loss. Closing, close,
+and error share the existing single-notification and generation checks.
+The controls cover either label, held output, unpaid exchange debt, stale
+callbacks, and fresh-link recovery. Real Chromium covers remote reliable
+closure with the engine as answerer and remote unreliable closure with the
+engine as offerer, after healthy bidirectional exchange.
+
+Native source inspection finds OnClosing declared and forwarded by the wrapper,
+but no current core emission. This browser evidence does not establish a native
+runtime defect, so no native behavior changes. The three external SDKs are
+independent: Rust supplies no WebRTC backend, .NET owns signaling and relay,
+and Godot uses its own engine mesh. No server wire, SDK API, default, or
+migration changes are required.
+
+The full browser package tests, type checking, formatting, real Chromium
+controls, strict root Clippy, and documentation checks pass. Main-thread
+adversarial review checks duplicate and retired callbacks, handler ordering,
+input admission, and fresh-link recovery. No further finding remains in scope.
+
+Fixed-artifact Nextest `775d2674` passes three room restores, three retries,
+and three three-player browser meshes in 14.751 seconds. All 21 endpoint
+streams exit zero and retain 78 channel sends and 78 receipts, nine relay
+sends, and 18 relay receipts. Complete endpoint/server logs remain under local
+`progress/session-478-qualified-live`; before/after hashes match for the
+server, native process, browser CLI, and page bundle. These passing runs do
+not establish the original historical failure causes. Hosted CI and feedback
+remain publication gates.

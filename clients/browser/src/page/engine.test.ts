@@ -483,8 +483,14 @@ for (const path of ['offer', 'answer'] as const) {
 }
 console.error('ok - browser phase snapshots distinguish SDP, ICE, DTLS, and SCTP progress');
 
-// Regression #1046: failure is terminal before application callbacks drain.
-for (const failure of ['channel-error', 'channel-close', 'pc-failed', 'pc-closed'] as const) {
+// Regressions #1046/#1051: failure is terminal before application callbacks drain.
+for (const failure of [
+  'channel-error',
+  'channel-close',
+  'channel-closing',
+  'pc-failed',
+  'pc-closed',
+] as const) {
   const originalPc = globalThis.RTCPeerConnection;
   let connection!: Connection;
   const observed: string[] = [];
@@ -495,6 +501,7 @@ for (const failure of ['channel-error', 'channel-close', 'pc-failed', 'pc-closed
     maxPacketLifeTime = null;
     onopen: (() => void) | null = null;
     onclose: (() => void) | null = null;
+    onclosing: (() => void) | null = null;
     onerror: (() => void) | null = null;
     onmessage: ((event: { data: string }) => void) | null = null;
     constructor(readonly label: string) {}
@@ -539,7 +546,10 @@ for (const failure of ['channel-error', 'channel-close', 'pc-failed', 'pc-closed
       connection.connectionState = failure.slice(3);
       connection.onconnectionstatechange?.();
     } else if (failure === 'channel-error') channel.onerror?.();
-    else {
+    else if (failure === 'channel-closing') {
+      channel.readyState = 'closing';
+      channel.onclosing?.();
+    } else {
       channel.close();
       channel.onclose?.();
     }

@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Switch browser reference-client pairs to relay fallback when a required data channel starts closing (#1051).
 - Stop native reference-client deferred gameplay probes after observed channel or peer-connection loss (#1049).
 - Prevent reference clients from forming WebRTC pairs after they observe a required-channel or peer-connection failure (#1046).
 - Apply queued reference-client room updates before reporting success so new peers and restored links
