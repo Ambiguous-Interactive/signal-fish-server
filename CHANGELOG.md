@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Apply queued reference-client room updates before reporting success so new peers and restored links
+  are not skipped (#1041).
 - Keep reference-client relay sends and receipts within the run window, including slow payload preparation
   and socket writes (#1037, #1039).
 - Resend reference-client gameplay probes on replacement peer links so lost old-link probes can recover (#1035).

@@ -55,6 +55,12 @@ output. Native library consumers must retain `EngineEvent::ChannelMessage`'s
 `queue_permit` until the message is handled or discarded, including output waits.
 Handle the new `EngineEvent::ChannelReceiveRejected` by retiring the failed link.
 
+Before deciding success at the run cutoff or exit linger, the client checks
+ready signaling input and queued engine events. New room state can add gameplay
+work. A signaling queue that does not settle within 256 frames ends the run
+with a connection error. Receipt credit still uses the complete frame
+observation time and the original run window.
+
 ## Quick start
 
 One line from the repository root (build server → lint client → run the full suite):

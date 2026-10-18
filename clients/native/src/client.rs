@@ -98,6 +98,13 @@ fn checked_deadline(start: Instant, duration: Duration) -> Instant {
 /// Grace period between meeting all success criteria and exiting, so the last
 /// unreliable-channel sends are not torn down mid-flight for slower siblings.
 const EXIT_LINGER: Duration = Duration::from_millis(250);
+
+/*
+    Exit checks must consume ready signaling without letting a continuous input
+    stream postpone the run cutoff forever. An unread authoritative frame could
+    invalidate the previous success criteria.
+*/
+const MAX_EXIT_SERVER_FRAMES: usize = 256;
 /// Poll cadence for an optional harness-controlled success release file.
 const SUCCESS_RELEASE_POLL: Duration = Duration::from_millis(100);
 /// Poll cadence for selected ICE-pair evidence after a physical link opens.
@@ -1503,74 +1510,8 @@ impl Orchestrator<'_> {
                 normal_input_burst = normal_input_burst.saturating_add(1);
             }
             match input {
-                LoopInput::Server(Some(Ok(Message::Text(text))), observed_at) => {
-                    // ANY inbound frame proves the connection and the server
-                    // are alive, so it satisfies the keepalive liveness check —
-                    // not just `Pong`. This is cleared BEFORE dispatch, so the
-                    // very frame that kicks off a long handler (e.g. WebRTC
-                    // pairing) already refreshes liveness; the loop cannot then
-                    // declare a still-pending ping dead just because that
-                    // handler ran past the window.
-                    self.pong_deadline = None;
-                    self.pong_grace_applied = false;
-                    let message = wire::decode_server_text(&text).map_err(FatalError::protocol)?;
-                    // A text `GameData` under a negotiated opaque format is
-                    // LEGITIMATE here, so it is applied, not refused: the
-                    // server's text relay lane is format-blind — a JSON
-                    // sender's frame is broadcast as text `GameData` to every
-                    // room member, including opaque-negotiated recipients
-                    // (pinned by
-                    // `mixed_encoding_relay_e2e`), and JSON is also the
-                    // universal cross-format fallback carrier. Only binary
-                    // game data is encoding-tagged
-                    // (`GameDataBinary`/v3 envelope), which is why the mirror
-                    // guard in `validate_json_negotiated_server_message` is
-                    // sound in that direction and a text-direction guard
-                    // would kill mixed rooms (#741).
-                    self.handle_server_message_at(message, observed_at).await?;
-                }
-                LoopInput::Server(Some(Ok(Message::Close(frame))), _) => {
-                    self.accountability.observe_terminal();
-                    return Err(FatalError::connection(format!(
-                        "websocket closed by server before success criteria were met: {frame:?}"
-                    )));
-                }
-                LoopInput::Server(Some(Ok(Message::Binary(wire))), observed_at) => {
-                    self.pong_deadline = None;
-                    self.pong_grace_applied = false;
-                    self.accountability
-                        .observe_server_message(false)
-                        .map_err(FatalError::protocol)?;
-                    if self.game_data_encoding == GameDataEncoding::Json {
-                        return Err(FatalError::protocol(format!(
-                            "received {}-byte binary WebSocket frame while game_data_format=json was negotiated",
-                            wire.len()
-                        )));
-                    }
-                    self.handle_binary_game_data(&wire, observed_at).await?;
-                }
-                LoopInput::Server(Some(Ok(other)), _)
-                    if wire::is_transparent_transport_control(&other) =>
-                {
-                    tracing::debug!("ignoring WebSocket control frame");
-                }
-                LoopInput::Server(Some(Ok(_)), _) => {
-                    self.accountability
-                        .observe_server_message(false)
-                        .map_err(FatalError::protocol)?;
-                    tracing::debug!("ignoring non-text application frame");
-                }
-                LoopInput::Server(Some(Err(error)), _) => {
-                    self.accountability.observe_terminal();
-                    return Err(FatalError::connection(format!(
-                        "websocket transport error: {error}"
-                    )));
-                }
-                LoopInput::Server(None, _) => {
-                    self.accountability.observe_terminal();
-                    return Err(FatalError::connection(
-                        "websocket closed by server before success criteria were met",
-                    ));
+                LoopInput::Server(frame, observed_at) => {
+                    self.handle_server_input(frame, observed_at).await?;
                 }
                 LoopInput::Engine(Some(event)) => self.handle_engine_event(event).await?,
                 LoopInput::Engine(None) => {
@@ -1602,6 +1543,97 @@ impl Orchestrator<'_> {
                 std::thread::sleep(Duration::from_millis(self.cli.tick_stall_ms));
             }
         }
+    }
+
+    async fn handle_server_input(
+        &mut self,
+        frame: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
+        observed_at: Instant,
+    ) -> Result<(), FatalError> {
+        match frame {
+            Some(Ok(Message::Text(text))) => {
+                // ANY inbound frame proves the connection and the server
+                // are alive, so it satisfies the keepalive liveness check —
+                // not just `Pong`. This is cleared BEFORE dispatch, so the
+                // very frame that kicks off a long handler (e.g. WebRTC
+                // pairing) already refreshes liveness; the loop cannot then
+                // declare a still-pending ping dead just because that
+                // handler ran past the window.
+                self.pong_deadline = None;
+                self.pong_grace_applied = false;
+                let message = wire::decode_server_text(&text).map_err(FatalError::protocol)?;
+                // A text `GameData` under a negotiated opaque format is
+                // LEGITIMATE here, so it is applied, not refused: the
+                // server's text relay lane is format-blind — a JSON
+                // sender's frame is broadcast as text `GameData` to every
+                // room member, including opaque-negotiated recipients
+                // (pinned by
+                // `mixed_encoding_relay_e2e`), and JSON is also the
+                // universal cross-format fallback carrier. Only binary
+                // game data is encoding-tagged
+                // (`GameDataBinary`/v3 envelope), which is why the mirror
+                // guard in `validate_json_negotiated_server_message` is
+                // sound in that direction and a text-direction guard
+                // would kill mixed rooms (#741).
+                self.handle_server_message_at(message, observed_at).await?;
+            }
+            Some(Ok(Message::Close(frame))) => {
+                self.accountability.observe_terminal();
+                return Err(FatalError::connection(format!(
+                    "websocket closed by server before success criteria were met: {frame:?}"
+                )));
+            }
+            Some(Ok(Message::Binary(wire))) => {
+                self.pong_deadline = None;
+                self.pong_grace_applied = false;
+                self.accountability
+                    .observe_server_message(false)
+                    .map_err(FatalError::protocol)?;
+                if self.game_data_encoding == GameDataEncoding::Json {
+                    return Err(FatalError::protocol(format!(
+                    "received {}-byte binary WebSocket frame while game_data_format=json was negotiated",
+                    wire.len()
+                )));
+                }
+                self.handle_binary_game_data(&wire, observed_at).await?;
+            }
+            Some(Ok(other)) if wire::is_transparent_transport_control(&other) => {
+                tracing::debug!("ignoring WebSocket control frame");
+            }
+            Some(Ok(_)) => {
+                self.accountability
+                    .observe_server_message(false)
+                    .map_err(FatalError::protocol)?;
+                tracing::debug!("ignoring non-text application frame");
+            }
+            Some(Err(error)) => {
+                self.accountability.observe_terminal();
+                return Err(FatalError::connection(format!(
+                    "websocket transport error: {error}"
+                )));
+            }
+            None => {
+                self.accountability.observe_terminal();
+                return Err(FatalError::connection(
+                    "websocket closed by server before success criteria were met",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn drain_ready_server_input(&mut self) -> Result<(), FatalError> {
+        use futures_util::{FutureExt, StreamExt};
+
+        for _ in 0..MAX_EXIT_SERVER_FRAMES {
+            let Some(frame) = self.ws.next().now_or_never() else {
+                return Ok(());
+            };
+            self.handle_server_input(frame, Instant::now()).await?;
+        }
+        Err(FatalError::connection(
+            "server input did not settle before exit",
+        ))
     }
 
     async fn maybe_reconnect(&mut self) -> Result<(), FatalError> {
@@ -1953,6 +1985,10 @@ impl Orchestrator<'_> {
             run_deadline,
         );
 
+        let now = Instant::now();
+        if self.run_deadline.is_due(now) || self.linger_until.is_some_and(|at| now >= at) {
+            self.drain_ready_server_input().await?;
+        }
         let now = Instant::now();
         self.arm_success_linger(now).await?;
         if self.linger_until.is_some_and(|at| now >= at) {

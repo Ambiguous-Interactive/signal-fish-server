@@ -29,6 +29,11 @@ Timely receipts remain valid through decoding and queued processing.
 Late receipts keep the criterion unpaid. The client still validates and reports
 late frames. Existing successful holds and active linger windows still apply.
 
+The client drains input admitted within the active run window before deciding
+success at the run cutoff or exit linger. Queued membership changes, plans,
+and channel callbacks can add new gameplay work. Late input does not extend
+the original receipt window.
+
 ## Quick start
 
 One line from the repository root (build server + native client → lint/build the browser client → install the

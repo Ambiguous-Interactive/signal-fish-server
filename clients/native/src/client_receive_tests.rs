@@ -2,6 +2,131 @@ use super::*;
 use clap::Parser;
 use futures_util::StreamExt;
 
+/*
+    Regression #1041: apply complete authoritative frames before a timer can
+    declare success from the previous membership or pairing state.
+*/
+#[tokio::test]
+async fn ready_authoritative_frames_prevent_success_from_obsolete_state() {
+    use futures_util::SinkExt;
+
+    let mut failures = Vec::new();
+    for window in ["cutoff", "linger"] {
+        for kind in ["none", "pong", "reconnect", "plan"] {
+            for prefix in [0, 32, 256] {
+                let (ws, mut server_ws) = crate::socket_tests::websocket_pair().await;
+                let directory = tempfile::tempdir().unwrap();
+                let mut cli = Cli::parse_from([
+                    "reference-native",
+                    "--server-url",
+                    "ws://unused.invalid",
+                    "--create-room",
+                    "--peers",
+                    "1",
+                ]);
+                cli.p2p_release_file = Some(directory.path().join("hold-p2p"));
+                let me = PlayerId::from_u128(1);
+                let peer = PlayerId::from_u128(2);
+                let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
+                state.negotiated_version = 3;
+                state.accountability = DeliveryAccountability::new(true);
+                state.game_started = true;
+                state.lobby_state = Some(LobbyState::Finalized);
+                state.p2p_released = false;
+                state.next_ping_at = Instant::now() + Duration::from_secs(30);
+                assert!(
+                    state.criteria_met(),
+                    "{window}/{kind}: establish old success"
+                );
+                let message = if matches!(kind, "none" | "pong") {
+                    ServerMessage::Pong
+                } else if kind == "reconnect" {
+                    ServerMessage::PlayerReconnected {
+                        player_id: peer,
+                        epoch: Some(2),
+                    }
+                } else {
+                    serde_json::from_value(json!({
+                        "type": "SessionPlan", "data": {
+                            "generation": SessionGeneration::from_u128(2),
+                            "topology": "mesh", "transport": "webrtc", "fallback": "relay",
+                            "peers": [{"player_id": peer, "player_name": "peer",
+                                "is_authority": false, "initiate": false}]
+                        }
+                    }))
+                    .unwrap()
+                };
+                let text = serde_json::to_string(&message).unwrap();
+                let mut frame_size = if kind == "none" {
+                    0
+                } else {
+                    text.len() + if text.len() < 126 { 2 } else { 4 }
+                };
+                let pong = serde_json::to_string(&ServerMessage::Pong).unwrap();
+                for _ in 0..prefix {
+                    server_ws
+                        .send(Message::Text(pong.clone().into()))
+                        .await
+                        .unwrap();
+                    frame_size += pong.len() + 2;
+                }
+                if kind != "none" {
+                    server_ws.send(Message::Text(text.into())).await.unwrap();
+                }
+                let tokio_tungstenite::MaybeTlsStream::Plain(tcp) = state.ws.get_ref() else {
+                    panic!("fixture must use plain TCP");
+                };
+                let mut peeked = [0_u8; 16384];
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    loop {
+                        if frame_size == 0 || tcp.peek(&mut peeked).await.unwrap() >= frame_size {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("complete authoritative frame must be readable before timers");
+                let now = Instant::now();
+                state.run_deadline = if window == "cutoff" {
+                    now.into()
+                } else {
+                    state.linger_until = Some(now);
+                    (now + Duration::from_millis(50)).into()
+                };
+                let result = tokio::time::timeout(Duration::from_secs(1), state.run_loop())
+                    .await
+                    .expect("ready input must not postpone the run cutoff forever");
+                if prefix == 256 {
+                    match result {
+                        Err(error) if error.code == EXIT_CONNECTION_ERROR
+                            && error.message.contains("server input did not settle") => {},
+                        other => failures.push(format!("{window}/{kind}/{prefix}: expected unsettled input error, got {other:?}")),
+                    }
+                    continue;
+                }
+                let result = result.unwrap();
+                let harmless = matches!(kind, "none" | "pong");
+                let expected = if harmless {
+                    EXIT_SUCCESS
+                } else {
+                    EXIT_CRITERIA_UNMET
+                };
+                if result != expected || state.criteria_met() != harmless {
+                    failures.push(format!(
+                        "{window}/{kind}/{prefix}: exit={result}, expected={expected}, unmet={:?}",
+                        state.unmet_criteria()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "ready frame histories failed: {failures:#?}"
+    );
+}
+
 // Regression #990: readiness recovery must not wait for a delayed rejection.
 #[tokio::test]
 async fn readiness_recovery_reissues_start_before_a_delayed_rejection() {
