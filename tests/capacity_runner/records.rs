@@ -9,6 +9,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::oracle::InvalidReason;
 use crate::schedule::Phase;
@@ -219,15 +222,189 @@ pub struct DisconnectEvent {
     pub observation: DisconnectObservation,
 }
 
+/// Diagnostics are opt-in and bounded independently of receipt count.
+const MAX_SLOW_RECEIPT_TIMINGS: usize = 64;
+const SLOW_RECEIPT_NS: u64 = 1_000_000;
+
+#[derive(Debug, Default, serde::Serialize)]
+pub struct TimingAggregate {
+    pub count: u64,
+    pub total_ns: u64,
+    pub max_ns: u64,
+    pub overflowed: bool,
+}
+
+impl TimingAggregate {
+    fn record(&mut self, elapsed_ns: u64) {
+        let (count, count_overflow) = self.count.overflowing_add(1);
+        let (total, total_overflow) = self.total_ns.overflowing_add(elapsed_ns);
+        self.overflowed |= count_overflow || total_overflow;
+        self.count = if count_overflow { u64::MAX } else { count };
+        self.total_ns = if total_overflow { u64::MAX } else { total };
+        self.max_ns = self.max_ns.max(elapsed_ns);
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReceiptTimingObservation {
+    recipient: ReceiptName,
+    sender: ReceiptName,
+    seq: u64,
+    epoch: u32,
+    started_offset_ns: u64,
+    finished_offset_ns: u64,
+    acquire_wait_ns: u64,
+    intern_ns: u64,
+    receipt_push_ns: u64,
+    measured_lock_hold_ns: u64,
+    receipt_len_before: usize,
+    receipt_capacity_before: usize,
+    receipt_len_after: usize,
+    receipt_capacity_after: usize,
+}
+
+impl ReceiptTimingObservation {
+    fn score(&self) -> u64 {
+        self.acquire_wait_ns
+            .max(self.intern_ns)
+            .max(self.receipt_push_ns)
+            .max(self.measured_lock_hold_ns)
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ReceiptTimingSnapshot {
+    enabled: bool,
+    notes: &'static str,
+    wall_anchor_unix_ns: Option<u64>,
+    wall_anchor_offset_before_ns: u64,
+    wall_anchor_offset_after_ns: u64,
+    workload_epoch_offset_ns: Option<u64>,
+    worst_acquire_wait: Option<ReceiptTimingObservation>,
+    worst_intern: Option<ReceiptTimingObservation>,
+    worst_receipt_push: Option<ReceiptTimingObservation>,
+    worst_measured_lock_hold: Option<ReceiptTimingObservation>,
+    slow_threshold_ns: u64,
+    slow_observation_limit: usize,
+    pub acquire_wait: TimingAggregate,
+    pub intern: TimingAggregate,
+    pub receipt_push: TimingAggregate,
+    pub measured_lock_hold: TimingAggregate,
+    slow_observations_seen: u64,
+    slow_observations_not_retained: u64,
+    slow_observations: Vec<ReceiptTimingObservation>,
+}
+
+impl ReceiptTimingSnapshot {
+    fn new(start: Instant) -> Self {
+        let before = elapsed_ns(start);
+        let wall = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| u64::try_from(elapsed.as_nanos()).ok());
+        let after = elapsed_ns(start);
+        Self {
+            enabled: true,
+            notes: "Opt-in diagnostics add clock reads and bookkeeping. All stage durations are elapsed wall-clock time and include descheduling. Acquire wait does not distinguish mutex contention from scheduling delay. Offsets start at EventLog construction; workload_epoch_offset_ns maps the armed workload epoch when provided. The wall anchor lies within its before/after monotonic offset bracket. Intern includes duplicate String cleanup and Arc updates. Measured lock hold ends before its final counter update, slow-observation finalization, and unlock. Retains the first 64 slow observations plus one worst observation per stage; aggregates cover every receipt. No TCP attribution.",
+            wall_anchor_unix_ns: wall,
+            wall_anchor_offset_before_ns: before,
+            wall_anchor_offset_after_ns: after,
+            workload_epoch_offset_ns: None,
+            worst_acquire_wait: None,
+            worst_intern: None,
+            worst_receipt_push: None,
+            worst_measured_lock_hold: None,
+            slow_threshold_ns: SLOW_RECEIPT_NS,
+            slow_observation_limit: MAX_SLOW_RECEIPT_TIMINGS,
+            acquire_wait: TimingAggregate::default(),
+            intern: TimingAggregate::default(),
+            receipt_push: TimingAggregate::default(),
+            measured_lock_hold: TimingAggregate::default(),
+            slow_observations_seen: 0,
+            slow_observations_not_retained: 0,
+            slow_observations: Vec::with_capacity(MAX_SLOW_RECEIPT_TIMINGS),
+        }
+    }
+
+    fn retain_observation(&mut self, observation: ReceiptTimingObservation) {
+        if self
+            .worst_acquire_wait
+            .as_ref()
+            .is_none_or(|old| observation.acquire_wait_ns > old.acquire_wait_ns)
+        {
+            self.worst_acquire_wait = Some(observation.clone());
+        }
+        if self
+            .worst_intern
+            .as_ref()
+            .is_none_or(|old| observation.intern_ns > old.intern_ns)
+        {
+            self.worst_intern = Some(observation.clone());
+        }
+        if self
+            .worst_receipt_push
+            .as_ref()
+            .is_none_or(|old| observation.receipt_push_ns > old.receipt_push_ns)
+        {
+            self.worst_receipt_push = Some(observation.clone());
+        }
+        if self
+            .worst_measured_lock_hold
+            .as_ref()
+            .is_none_or(|old| observation.measured_lock_hold_ns > old.measured_lock_hold_ns)
+        {
+            self.worst_measured_lock_hold = Some(observation.clone());
+        }
+        self.retain_slow(observation);
+    }
+
+    fn retain_slow(&mut self, observation: ReceiptTimingObservation) {
+        if observation.score() < SLOW_RECEIPT_NS {
+            return;
+        }
+        self.slow_observations_seen = self.slow_observations_seen.saturating_add(1);
+        if self.slow_observations.len() < MAX_SLOW_RECEIPT_TIMINGS {
+            self.slow_observations.push(observation);
+        } else {
+            self.slow_observations_not_retained =
+                self.slow_observations_not_retained.saturating_add(1);
+        }
+    }
+}
+
+fn elapsed_ns(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct ReceiptTimingHooks {
+    wait_started: Option<std::sync::mpsc::SyncSender<()>>,
+    intern_delay: Duration,
+    push_delay: Duration,
+    bookkeeping_delay: Duration,
+}
+
+#[cfg(test)]
+fn pause_receipt_timing(delay: Duration) {
+    if !delay.is_zero() {
+        std::thread::sleep(delay);
+    }
+}
+
 /// Every event one run recorded. Collectors push through an
 /// `Arc<EventLog>`; the mutex is never held across an `.await`.
 #[derive(Default)]
 pub struct EventLog {
     state: Mutex<EventState>,
+    receipt_timing_start: Option<Instant>,
+    #[cfg(test)]
+    receipt_timing_hooks: ReceiptTimingHooks,
 }
 
 #[derive(Default)]
 struct EventState {
+    receipt_timings: Option<ReceiptTimingSnapshot>,
     receipt_names: ReceiptNames,
     sent: Vec<SentEvent>,
     receipts: Vec<ReceiptEvent>,
@@ -253,6 +430,46 @@ impl EventLog {
         Self::default()
     }
 
+    pub fn with_receipt_timings(enabled: bool) -> Self {
+        let mut log = Self::new();
+        if enabled {
+            let start = Instant::now();
+            log.receipt_timing_start = Some(start);
+            log.state
+                .get_mut()
+                .expect("event log poisoned")
+                .receipt_timings = Some(ReceiptTimingSnapshot::new(start));
+        }
+        log
+    }
+
+    pub fn set_workload_epoch(&self, epoch: Instant) {
+        let Some(start) = self.receipt_timing_start else {
+            return;
+        };
+        let offset = epoch
+            .checked_duration_since(start)
+            .and_then(|duration| u64::try_from(duration.as_nanos()).ok());
+        if let Some(timings) = &mut self
+            .state
+            .lock()
+            .expect("event log poisoned")
+            .receipt_timings
+        {
+            timings.workload_epoch_offset_ns = offset;
+        }
+    }
+
+    /// Call only after every evidence producer has stopped. This sidecar never
+    /// enters RunRecords, delivery artifacts, or the delivery oracle.
+    pub fn take_receipt_timings(&self) -> Option<ReceiptTimingSnapshot> {
+        self.state
+            .lock()
+            .expect("event log poisoned")
+            .receipt_timings
+            .take()
+    }
+
     pub fn push_sent(&self, event: SentEvent) {
         self.state
             .lock()
@@ -262,9 +479,104 @@ impl EventLog {
     }
 
     pub fn push_receipt(&self, event: ReceiptEvent<String>) {
+        let Some(start) = self.receipt_timing_start else {
+            let mut state = self.state.lock().expect("event log poisoned");
+            let event = state.receipt_names.share(event);
+            state.receipts.push(event);
+            return;
+        };
+        let waiting = elapsed_ns(start);
+        #[cfg(test)]
+        if let Some(entered) = &self.receipt_timing_hooks.wait_started {
+            entered.send(()).expect("receipt timing test entry");
+        }
         let mut state = self.state.lock().expect("event log poisoned");
+        let acquired = elapsed_ns(start);
+        let len_before = state.receipts.len();
+        let capacity_before = state.receipts.capacity();
+        let intern_started = elapsed_ns(start);
+        #[cfg(test)]
+        pause_receipt_timing(self.receipt_timing_hooks.intern_delay);
         let event = state.receipt_names.share(event);
+        let interned = elapsed_ns(start);
+        #[cfg(test)]
+        pause_receipt_timing(self.receipt_timing_hooks.push_delay);
         state.receipts.push(event);
+        let pushed = elapsed_ns(start);
+        let len_after = state.receipts.len();
+        let capacity_after = state.receipts.capacity();
+        if let Some(timings) = &mut state.receipt_timings {
+            timings
+                .acquire_wait
+                .record(acquired.saturating_sub(waiting));
+            timings
+                .intern
+                .record(interned.saturating_sub(intern_started));
+            timings.receipt_push.record(pushed.saturating_sub(interned));
+        }
+        #[cfg(test)]
+        pause_receipt_timing(self.receipt_timing_hooks.bookkeeping_delay);
+        let finished = elapsed_ns(start);
+        let hold = finished.saturating_sub(acquired);
+        let wait = acquired.saturating_sub(waiting);
+        let intern = interned.saturating_sub(intern_started);
+        let push = pushed.saturating_sub(interned);
+        // Clone existing identity handles only for slow rows or new stage maxima.
+        let is_slow = wait.max(intern).max(push).max(hold) >= SLOW_RECEIPT_NS;
+        let needs_observation = state.receipt_timings.as_ref().is_some_and(|timings| {
+            (is_slow && timings.slow_observations.len() < MAX_SLOW_RECEIPT_TIMINGS)
+                || timings
+                    .worst_acquire_wait
+                    .as_ref()
+                    .is_none_or(|old| wait > old.acquire_wait_ns)
+                || timings
+                    .worst_intern
+                    .as_ref()
+                    .is_none_or(|old| intern > old.intern_ns)
+                || timings
+                    .worst_receipt_push
+                    .as_ref()
+                    .is_none_or(|old| push > old.receipt_push_ns)
+                || timings
+                    .worst_measured_lock_hold
+                    .as_ref()
+                    .is_none_or(|old| hold > old.measured_lock_hold_ns)
+        });
+        let slow = if needs_observation {
+            state
+                .receipts
+                .last()
+                .map(|receipt| ReceiptTimingObservation {
+                    recipient: receipt.recipient.clone(),
+                    sender: receipt.sender.clone(),
+                    seq: receipt.seq,
+                    epoch: receipt.epoch,
+                    started_offset_ns: waiting,
+                    finished_offset_ns: finished,
+                    acquire_wait_ns: wait,
+                    intern_ns: intern,
+                    receipt_push_ns: push,
+                    measured_lock_hold_ns: hold,
+                    receipt_len_before: len_before,
+                    receipt_capacity_before: capacity_before,
+                    receipt_len_after: len_after,
+                    receipt_capacity_after: capacity_after,
+                })
+        } else {
+            None
+        };
+        if let Some(timings) = &mut state.receipt_timings {
+            timings.measured_lock_hold.record(hold);
+            if let Some(observation) = slow {
+                timings.retain_observation(observation);
+            } else if is_slow {
+                // The first-slow buffer is full and no stage maximum changed.
+                // Count the omitted row without cloning its identity handles.
+                timings.slow_observations_seen = timings.slow_observations_seen.saturating_add(1);
+                timings.slow_observations_not_retained =
+                    timings.slow_observations_not_retained.saturating_add(1);
+            }
+        }
     }
 
     pub fn push_gap(&self, event: GapEvent) {
@@ -573,6 +885,186 @@ mod tests {
                 receipts[0].sender.as_str(),
                 "{path}: distinct identities must remain distinct"
             );
+        }
+    }
+
+    fn timing_receipt(seq: u64) -> ReceiptEvent<String> {
+        ReceiptEvent {
+            recipient: "r0p1".into(),
+            sender: "r0p0".into(),
+            seq,
+            epoch: 1,
+            server_seq: seq + 1,
+            received_us: 10 + seq,
+            application_bytes: 96,
+            encoded_frame_body_bytes: 250,
+        }
+    }
+
+    #[test]
+    fn receipt_timings_measure_intern_push_and_hold_stages_separately() {
+        let mut log = EventLog::with_receipt_timings(true);
+        log.receipt_timing_hooks.intern_delay = Duration::from_millis(10);
+        log.receipt_timing_hooks.push_delay = Duration::from_millis(15);
+        log.receipt_timing_hooks.bookkeeping_delay = Duration::from_millis(20);
+        log.push_receipt(timing_receipt(7));
+        let timings = log.take_receipt_timings().expect("enabled timings");
+        for stage in [
+            &timings.acquire_wait,
+            &timings.intern,
+            &timings.receipt_push,
+            &timings.measured_lock_hold,
+        ] {
+            assert_eq!(stage.count, 1);
+            assert_eq!(stage.max_ns, stage.total_ns);
+            assert!(!stage.overflowed);
+        }
+        assert!(timings.intern.total_ns >= 10_000_000);
+        assert!(timings.receipt_push.total_ns >= 15_000_000);
+        assert!(
+            timings.measured_lock_hold.total_ns
+                >= timings.intern.total_ns + timings.receipt_push.total_ns + 20_000_000
+        );
+        let row = &timings.slow_observations[0];
+        assert_eq!((row.seq, row.epoch), (7, 1));
+        assert_eq!((row.receipt_len_before, row.receipt_len_after), (0, 1));
+        assert_eq!(row.receipt_capacity_before, 0);
+        assert!(row.receipt_capacity_after >= 1);
+        assert_eq!(
+            row.finished_offset_ns - row.started_offset_ns,
+            row.acquire_wait_ns + row.measured_lock_hold_ns
+        );
+        assert!(timings.wall_anchor_offset_after_ns >= timings.wall_anchor_offset_before_ns);
+    }
+
+    #[test]
+    fn receipt_timings_separate_real_mutex_contention_from_lock_hold() {
+        let mut log = EventLog::with_receipt_timings(true);
+        let (entered, waiting) = std::sync::mpsc::sync_channel(1);
+        log.receipt_timing_hooks.wait_started = Some(entered);
+        let log = Arc::new(log);
+        let guard = log.state.lock().expect("hold event log");
+        let (done, finished) = std::sync::mpsc::sync_channel(1);
+        let producer = {
+            let log = log.clone();
+            std::thread::spawn(move || {
+                log.push_receipt(timing_receipt(0));
+                done.send(()).expect("producer completion");
+            })
+        };
+        if let Err(error) = waiting.recv_timeout(Duration::from_secs(5)) {
+            drop(guard);
+            panic!("producer did not begin acquisition: {error}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        drop(guard);
+        finished
+            .recv_timeout(Duration::from_secs(5))
+            .expect("producer completed after unlock");
+        producer.join().expect("receipt producer");
+        let timings = log.take_receipt_timings().expect("enabled timings");
+        assert!(timings.acquire_wait.total_ns >= 20_000_000);
+        let row = &timings.slow_observations[0];
+        assert_eq!(row.acquire_wait_ns, timings.acquire_wait.total_ns);
+        assert_eq!(
+            row.measured_lock_hold_ns,
+            timings.measured_lock_hold.total_ns
+        );
+    }
+
+    #[test]
+    fn receipt_timings_bound_slow_rows_but_aggregate_every_receipt() {
+        let mut log = EventLog::with_receipt_timings(true);
+        log.receipt_timing_hooks.bookkeeping_delay = Duration::from_millis(2);
+        for seq in 0..80 {
+            log.push_receipt(timing_receipt(seq));
+        }
+        let timings = log.take_receipt_timings().expect("enabled timings");
+        assert_eq!(timings.slow_observations.len(), MAX_SLOW_RECEIPT_TIMINGS);
+        assert_eq!(
+            timings.slow_observations.capacity(),
+            MAX_SLOW_RECEIPT_TIMINGS
+        );
+        assert_eq!(timings.slow_observations_seen, 80);
+        assert_eq!(timings.slow_observations_not_retained, 16);
+        assert_eq!(timings.measured_lock_hold.count, 80);
+        assert!(timings.measured_lock_hold.max_ns >= 2_000_000);
+        assert_eq!(timings.slow_observations[0].seq, 0);
+        assert_eq!(timings.slow_observations[63].seq, 63);
+        assert_eq!(log.take_records().receipts.len(), 80);
+    }
+
+    #[test]
+    fn disabled_receipt_timings_keep_exact_records_and_allocate_no_observation_buffer() {
+        let ordinary = EventLog::new();
+        let disabled = EventLog::with_receipt_timings(false);
+        let enabled = EventLog::with_receipt_timings(true);
+        for seq in 0..5 {
+            for log in [&ordinary, &disabled, &enabled] {
+                log.push_receipt(timing_receipt(seq));
+            }
+        }
+        assert!(disabled.receipt_timing_start.is_none());
+        assert!(disabled.take_receipt_timings().is_none());
+        assert!(ordinary.take_receipt_timings().is_none());
+        let expected = serde_json::to_vec(&ordinary.take_records()).expect("ordinary records");
+        assert_eq!(
+            serde_json::to_vec(&disabled.take_records()).expect("disabled records"),
+            expected
+        );
+        assert_eq!(
+            serde_json::to_vec(&enabled.take_records()).expect("enabled records"),
+            expected
+        );
+        assert!(enabled.take_receipt_timings().is_some());
+    }
+
+    #[test]
+    fn receipt_timing_aggregates_report_overflow_instead_of_wrapping() {
+        let mut aggregate = TimingAggregate::default();
+        aggregate.record(u64::MAX);
+        aggregate.record(1);
+        assert_eq!(aggregate.total_ns, u64::MAX);
+        assert_eq!(aggregate.max_ns, u64::MAX);
+        assert_eq!(aggregate.count, 2);
+        assert!(aggregate.overflowed);
+    }
+
+    #[test]
+    fn receipt_timings_keep_late_stage_maxima_after_slow_buffer_fills() {
+        let mut timings = ReceiptTimingSnapshot::new(Instant::now());
+        let make = |seq: u64, duration: u64| ReceiptTimingObservation {
+            recipient: "r0p1".into(),
+            sender: "r0p0".into(),
+            seq,
+            epoch: 1,
+            started_offset_ns: seq * 10_000_000,
+            finished_offset_ns: seq * 10_000_000 + duration * 2,
+            acquire_wait_ns: duration,
+            intern_ns: duration,
+            receipt_push_ns: duration,
+            measured_lock_hold_ns: duration,
+            receipt_len_before: usize::try_from(seq).expect("small fixture"),
+            receipt_capacity_before: 128,
+            receipt_len_after: usize::try_from(seq).expect("small fixture") + 1,
+            receipt_capacity_after: 128,
+        };
+        for seq in 0..64 {
+            timings.retain_observation(make(seq, SLOW_RECEIPT_NS));
+        }
+        timings.retain_observation(make(99, SLOW_RECEIPT_NS * 10));
+        assert_eq!(timings.slow_observations.len(), 64);
+        assert_eq!(timings.slow_observations[63].seq, 63);
+        assert_eq!(timings.slow_observations_not_retained, 1);
+        for worst in [
+            &timings.worst_acquire_wait,
+            &timings.worst_intern,
+            &timings.worst_receipt_push,
+            &timings.worst_measured_lock_hold,
+        ] {
+            let row = worst.as_ref().expect("late maximum");
+            assert_eq!(row.seq, 99);
+            assert_eq!(row.receipt_capacity_after, 128);
         }
     }
 }

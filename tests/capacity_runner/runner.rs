@@ -336,7 +336,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     }
     std::fs::create_dir_all(&config.output_dir)
         .map_err(|error| format!("create output dir {}: {error}", config.output_dir.display()))?;
-    let log = Arc::new(EventLog::new());
+    let log = Arc::new(EventLog::with_receipt_timings(config.receipt_timings));
 
     // Server: spawn the compiled binary or connect to an external endpoint.
     let server_slot: Arc<tokio::sync::Mutex<Option<ServerProcess>>> =
@@ -668,6 +668,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         &mut auxiliary_handles,
     )
     .await?;
+    log.set_workload_epoch(epoch.into_std());
     // This covers schedule, declared hooks, lag allowance, and delivery drain.
     let hard_deadline = epoch + Duration::from_micros(quiescence_us + hook_extra_us + 5_000_000);
 
@@ -717,6 +718,13 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     artifacts::write_intervals(&config.output_dir, &interval_samples)?;
     artifacts::write_histogram(&config.output_dir, &records)?;
     artifacts::write_json(config.output_dir.join(artifacts::SUMMARY_FILE), &summary)?;
+    if config.receipt_timings {
+        if let Some(timings) = log.take_receipt_timings() {
+            // Every producer has joined. No formatting or diagnostic file writes
+            // occur in receipt ingestion or while its mutex is held.
+            artifacts::write_json(config.output_dir.join("receipt-timings.json"), &timings)?;
+        }
+    }
 
     let final_counters = interval_samples
         .iter()

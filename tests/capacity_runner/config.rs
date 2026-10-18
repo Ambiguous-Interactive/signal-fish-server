@@ -295,6 +295,9 @@ pub struct RunConfig {
     /// Interval between server resource samples (scrape + RSS).
     #[serde(with = "duration_micros")]
     pub sample_interval: Duration,
+    /// Adds bounded receipt-stage timing diagnostics in a separate sidecar.
+    #[serde(default, skip_serializing_if = "receipt_timings_disabled")]
+    pub receipt_timings: bool,
     /// Deep-merged over the shared harness base config for spawned servers.
     pub server_overlay: Value,
     /// Negative-control hook: pause senders once (scheduled-send latency).
@@ -331,6 +334,18 @@ pub struct RunConfig {
     /// run ID before any join; serialized for audit only.
     #[serde(default)]
     pub room_code_prefix: Option<String>,
+}
+
+fn receipt_timings_disabled(enabled: &bool) -> bool {
+    !enabled
+}
+
+fn parse_receipt_timings(raw: &str) -> Result<bool, String> {
+    match raw {
+        "1" | "true" => Ok(true),
+        "0" | "false" => Ok(false),
+        _ => Err("CAPACITY_RUNNER_RECEIPT_TIMINGS must be 0, 1, false, or true".to_string()),
+    }
 }
 
 /// Default coalescing-key count: one key per sender (the newest-value cell).
@@ -641,6 +656,10 @@ impl RunConfig {
             .transpose()
             .map_err(|error| format!("CAPACITY_RUNNER_SAMPLE_INTERVAL_MS: {error}"))?;
 
+        let receipt_timings = var("RECEIPT_TIMINGS")?
+            .map(|raw| parse_receipt_timings(&raw))
+            .transpose()?
+            .unwrap_or(false);
         Ok(RunConfig {
             endpoint,
             external_host_evidence,
@@ -661,6 +680,7 @@ impl RunConfig {
             generator_lag_bound: Duration::from_millis(lag_bound_ms.unwrap_or(250)),
             drain_grace: Duration::from_secs(2),
             sample_interval: Duration::from_millis(sample_ms.unwrap_or(250)),
+            receipt_timings,
             server_overlay: if experiment.is_some() {
                 Self::unsupported_format_overlay()
             } else {
@@ -674,5 +694,35 @@ impl RunConfig {
             kill_server_after: None,
             room_code_prefix: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod receipt_timing_tests {
+    use super::*;
+
+    #[test]
+    fn receipt_timing_option_is_explicit_and_old_config_bytes_round_trip() {
+        for (raw, expected) in [("0", false), ("false", false), ("1", true), ("true", true)] {
+            assert_eq!(parse_receipt_timings(raw).expect("valid option"), expected);
+        }
+        for raw in ["", "yes", "2"] {
+            assert!(parse_receipt_timings(raw).is_err());
+        }
+        let mut config = crate::scenario_config(Encoding::V3Json);
+        let old_bytes = serde_json::to_vec(&config).expect("default config");
+        let value: serde_json::Value = serde_json::from_slice(&old_bytes).expect("config JSON");
+        assert!(value.get("receipt_timings").is_none());
+        let restored: RunConfig = serde_json::from_slice(&old_bytes).expect("old config shape");
+        assert!(!restored.receipt_timings);
+        assert_eq!(
+            serde_json::to_vec(&restored).expect("restored config"),
+            old_bytes
+        );
+        config.receipt_timings = true;
+        assert_eq!(
+            serde_json::to_value(config).expect("enabled config")["receipt_timings"],
+            true
+        );
     }
 }
