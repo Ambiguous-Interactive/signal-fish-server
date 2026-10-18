@@ -1,5 +1,172 @@
 use super::*;
 
+// Regression #1053: required-channel loss must stop sibling input admission.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_pair_does_not_admit_later_sibling_messages() {
+    for failure in [
+        None,
+        Some(RTCPeerConnectionState::Failed),
+        Some(RTCPeerConnectionState::Closed),
+        Some(RTCPeerConnectionState::Disconnected),
+    ] {
+        for initiator_receives in [false, true] {
+            let mut pair = LivePair::connect().await;
+            if initiator_receives {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+            }
+            let reliable = pair
+                .sender
+                .channel(pair.receiver_id, RELIABLE_LABEL)
+                .unwrap();
+            reliable.send_text("before-sibling-loss").await.unwrap();
+            let early = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let event @ EngineEvent::ChannelMessage { .. } =
+                        pair.receiver_events.recv().await.unwrap()
+                    {
+                        break event;
+                    }
+                }
+            })
+            .await
+            .expect("the healthy pair admits early input");
+            let terminal = failure != Some(RTCPeerConnectionState::Disconnected);
+            if let Some(state) = failure {
+                let link = &pair.receiver.peers[&pair.sender_id];
+                let handler = PeerHandler {
+                    peer: pair.sender_id,
+                    generation: link.generation,
+                    crippled: false,
+                    events: pair.receiver.events.clone(),
+                    channel_admission: link.channel_admission.clone(),
+                    receive_admission: link.receive_admission.clone(),
+                };
+                // Exercise the production callback on real open channels. This
+                // injects the observation; it does not change physical PC state.
+                handler.on_connection_state_change(state).await;
+            } else {
+                pair.sender
+                    .channel(pair.receiver_id, UNRELIABLE_LABEL)
+                    .unwrap()
+                    .close()
+                    .await
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if let EngineEvent::ChannelClosed { label, .. } =
+                            pair.receiver_events.recv().await.unwrap()
+                        {
+                            assert_eq!(label, UNRELIABLE_LABEL);
+                            break;
+                        }
+                    }
+                })
+                .await
+                .expect("the engine observes actual sibling loss before the new message");
+            }
+            assert_eq!(
+                pair.receiver.peers[&pair.sender_id]
+                    .receive_admission
+                    .terminal
+                    .load(Ordering::Relaxed),
+                terminal
+            );
+
+            // Keep application-level loss handling held. Await SCTP acknowledgement
+            // before reset. The driver preserves message/close FIFO per channel,
+            // so the receiver's close event marks a completed message drain.
+            let reliable = pair
+                .sender
+                .channel(pair.receiver_id, RELIABLE_LABEL)
+                .unwrap();
+            reliable.send_text("after-sibling-loss").await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while reliable.outstanding_bytes().await.unwrap() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the reliable probe reaches SCTP acknowledgement before reset");
+            reliable.close().await.unwrap();
+            let mut late_messages = 0;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match pair.receiver_events.recv().await.unwrap() {
+                        EngineEvent::ChannelMessage { text, .. } => {
+                            assert!(
+                                !terminal,
+                                "a terminal pair must not publish new gameplay input"
+                            );
+                            assert_eq!(text, "after-sibling-loss");
+                            late_messages += 1;
+                        }
+                        EngineEvent::ChannelReceiveRejected { .. } => {
+                            panic!("terminal input must not consume or exhaust receive capacity")
+                        }
+                        EngineEvent::ChannelClosed { label, .. } => {
+                            assert_eq!(label, RELIABLE_LABEL);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("the surviving channel drains and closes");
+            assert_eq!(late_messages, usize::from(!terminal));
+            assert_eq!(
+                pair.receiver.message_budget.messages.available_permits(),
+                255
+            );
+            if let EngineEvent::ChannelMessage { text, .. } = &early {
+                assert_eq!(
+                    text, "before-sibling-loss",
+                    "loss preserves already admitted input"
+                );
+            }
+            drop(early);
+            assert_eq!(
+                pair.receiver.message_budget.messages.available_permits(),
+                256
+            );
+
+            let old_generation = pair.receiver.peers[&pair.sender_id].generation;
+            pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+            pair.receiver.remove_peer(pair.sender_id).await.unwrap();
+            pair.negotiate().await;
+            assert_ne!(
+                pair.receiver.peers[&pair.sender_id].generation,
+                old_generation
+            );
+            pair.sender
+                .channel(pair.receiver_id, RELIABLE_LABEL)
+                .unwrap()
+                .send_text("fresh-after-loss")
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match pair.receiver_events.recv().await.unwrap() {
+                        EngineEvent::ChannelMessage { text, .. } => {
+                            assert_eq!(text, "fresh-after-loss");
+                            break;
+                        }
+                        EngineEvent::ChannelReceiveRejected { .. } => {
+                            panic!("fresh input must be admitted")
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("a fresh link admits gameplay input");
+            pair.cleanup().await;
+        }
+    }
+}
+
 #[test]
 fn receive_budget_is_shared_across_links_and_releases_when_payloads_drop() {
     let (events, _receiver) = mpsc::unbounded_channel();
