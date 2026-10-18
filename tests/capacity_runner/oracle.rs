@@ -918,8 +918,8 @@ pub fn summarize(
         let epoch = receipt.epoch;
         if !member_names.contains(recipient) {
             unknown_recipients.record(DeliveryKey {
-                recipient: receipt.recipient.clone(),
-                sender: receipt.sender.clone(),
+                recipient: receipt.recipient.to_string(),
+                sender: receipt.sender.to_string(),
                 epoch,
                 seq: receipt.server_seq,
             });
@@ -936,7 +936,7 @@ pub fn summarize(
                     None
                 } else {
                     let view = views.get(recipient).expect("roster peer has a churn view");
-                    let stream_key = (receipt.sender.clone(), epoch);
+                    let stream_key = (receipt.sender.to_string(), epoch);
                     Some(ArrivalContract {
                         closed_after: view.closed_at.get(&stream_key).copied(),
                         floor: view.floors.get(&stream_key).copied(),

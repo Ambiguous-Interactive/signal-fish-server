@@ -1567,7 +1567,9 @@ async fn exact_payload_cells_record_actual_ingress_and_egress_sizes_and_replay()
                 let (id, _) = records
                     .registry
                     .iter()
-                    .find(|(_, (name, epoch))| name == &receipt.sender && *epoch == receipt.epoch)
+                    .find(|(_, (name, epoch))| {
+                        name == receipt.sender.as_str() && *epoch == receipt.epoch
+                    })
                     .expect("sender identity");
                 let data = runner::ledger_application_data(&receipt.sender, receipt.seq, bytes)
                     .expect("received data");
@@ -1601,7 +1603,7 @@ async fn exact_payload_cells_record_actual_ingress_and_egress_sizes_and_replay()
                     .iter()
                     .filter(|receipt| {
                         records.sent.iter().any(|sent| {
-                            sent.sender == receipt.sender
+                            sent.sender == receipt.sender.as_str()
                                 && sent.seq == receipt.seq
                                 && sent.phase == phase
                         })
@@ -1950,7 +1952,7 @@ fn latency_statistics_keep_recipient_tails_and_invalid_arrivals_distinct() {
         for receipt in &mut records.receipts {
             let latency = expected
                 .iter()
-                .find(|(name, _)| *name == receipt.recipient)
+                .find(|(name, _)| *name == receipt.recipient.as_str())
                 .expect("known recipient")
                 .1;
             receipt.received_us += latency - 8;
@@ -1966,7 +1968,7 @@ fn latency_statistics_keep_recipient_tails_and_invalid_arrivals_distinct() {
                 + records
                     .sent
                     .iter()
-                    .find(|sent| sent.sender == extra.sender && sent.seq == extra.seq)
+                    .find(|sent| sent.sender == extra.sender.as_str() && sent.seq == extra.seq)
                     .expect("matching send")
                     .intended_us;
             records.receipts.push(extra);
@@ -2044,7 +2046,7 @@ fn opaque_leaks_preserve_gap_overlap_duplicate_and_order_checks() {
             .position(|receipt| receipt.sender == "r0p0")
             .unwrap();
         let key = oracle::DeliveryKey {
-            recipient: records.receipts[first].recipient.clone(),
+            recipient: records.receipts[first].recipient.to_string(),
             sender: "r0p0".into(),
             epoch: 1,
             seq: 1,
@@ -2144,8 +2146,8 @@ fn receipt_ledger_sequence_must_match_the_server_stream_position() {
             assert_eq!(changed.seq, 0);
             changed.seq = replacement;
             let expected = oracle::DeliveryKey {
-                recipient: changed.recipient.clone(),
-                sender: changed.sender.clone(),
+                recipient: changed.recipient.to_string(),
+                sender: changed.sender.to_string(),
                 epoch: changed.epoch,
                 seq: changed.server_seq,
             };
@@ -2196,8 +2198,8 @@ fn rejoined_receipt_ledger_cannot_name_a_previous_epoch_send() {
         assert_ne!(receipt.seq + 1, receipt.server_seq);
         receipt.seq = 0;
         let expected = oracle::DeliveryKey {
-            recipient: receipt.recipient.clone(),
-            sender: receipt.sender.clone(),
+            recipient: receipt.recipient.to_string(),
+            sender: receipt.sender.to_string(),
             epoch: 2,
             seq: receipt.server_seq,
         };
@@ -2250,8 +2252,8 @@ async fn artifact_replay_rejects_unknown_recipients_and_wrong_ledger_ids() {
             receipt
         };
         let expected = oracle::DeliveryKey {
-            recipient: receipt.recipient.clone(),
-            sender: receipt.sender.clone(),
+            recipient: receipt.recipient.to_string(),
+            sender: receipt.sender.to_string(),
             epoch: receipt.epoch,
             seq: receipt.server_seq,
         };
@@ -2306,10 +2308,10 @@ fn unknown_recipient_deliveries_are_misroutes() {
         };
         let before = records.receipts.len();
         let mut extra = records.receipts[0].clone();
-        extra.recipient = "outside-the-roster".to_string();
+        extra.recipient = "outside-the-roster".into();
         let expected = oracle::DeliveryKey {
-            recipient: extra.recipient.clone(),
-            sender: extra.sender.clone(),
+            recipient: extra.recipient.to_string(),
+            sender: extra.sender.to_string(),
             epoch: extra.epoch,
             seq: extra.server_seq,
         };
@@ -2515,8 +2517,8 @@ fn a_duplicate_delivery_invalidates_the_run_naming_the_duplicate() {
     let duplicate = ReceiptEvent {
         application_bytes: 96,
         encoded_frame_body_bytes: 250,
-        recipient: "r0p0".to_string(),
-        sender: "r0p1".to_string(),
+        recipient: "r0p0".into(),
+        sender: "r0p1".into(),
         seq: 1,
         epoch: 1,
         server_seq: 2,
@@ -2559,8 +2561,8 @@ fn a_misrouted_cross_room_delivery_invalidates_the_run() {
     records.receipts.push(ReceiptEvent {
         application_bytes: 96,
         encoded_frame_body_bytes: 250,
-        recipient: "r0p0".to_string(),
-        sender: "r9p9".to_string(),
+        recipient: "r0p0".into(),
+        sender: "r9p9".into(),
         seq: 0,
         epoch: 1,
         server_seq: 1,
@@ -3227,8 +3229,8 @@ fn a_payload_from_the_opaque_sender_is_the_leak_class() {
     records.receipts.push(ReceiptEvent {
         application_bytes: 96,
         encoded_frame_body_bytes: 250,
-        recipient: "r0p1".to_string(),
-        sender: "r0p0".to_string(),
+        recipient: "r0p1".into(),
+        sender: "r0p0".into(),
         seq: 2,
         epoch: 1,
         server_seq: 3,
@@ -4447,8 +4449,8 @@ fn a_stale_epoch_delivery_after_the_senders_rejoin_is_a_misroute() {
     records.receipts.push(ReceiptEvent {
         application_bytes: 96,
         encoded_frame_body_bytes: 250,
-        recipient: "r0p0".to_string(),
-        sender: "r0p1".to_string(),
+        recipient: "r0p0".into(),
+        sender: "r0p1".into(),
         seq: 0,
         epoch: 1,
         server_seq: 1,
@@ -4614,8 +4616,8 @@ fn a_below_tail_delivery_after_the_recipients_rejoin_is_a_misroute() {
     records.receipts.push(ReceiptEvent {
         application_bytes: 96,
         encoded_frame_body_bytes: 250,
-        recipient: "r0p0".to_string(),
-        sender: "r0p1".to_string(),
+        recipient: "r0p0".into(),
+        sender: "r0p1".into(),
         seq: 1,
         epoch: 1,
         server_seq: 2,

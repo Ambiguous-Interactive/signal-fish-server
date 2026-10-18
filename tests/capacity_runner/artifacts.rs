@@ -559,6 +559,7 @@ pub fn read_records(output_dir: &Path) -> Result<RunRecords, String> {
     let file =
         fs::File::open(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
     let mut records = RunRecords::default();
+    let mut receipt_names = crate::records::ReceiptNames::default();
     visit_jsonl(BufReader::new(file), &path, |line| {
         let value: Value = serde_json::from_slice(line)
             .map_err(|error| format!("parse a {} line: {error}", path.display()))?;
@@ -572,10 +573,11 @@ pub fn read_records(output_dir: &Path) -> Result<RunRecords, String> {
                 serde_json::from_value(value)
                     .map_err(|error| format!("parse sent event: {error}"))?,
             ),
-            "receipt" => records.receipts.push(
-                serde_json::from_value(value)
-                    .map_err(|error| format!("parse receipt event: {error}"))?,
-            ),
+            "receipt" => {
+                let receipt = serde_json::from_value(value)
+                    .map_err(|error| format!("parse receipt event: {error}"))?;
+                records.receipts.push(receipt_names.share(receipt));
+            }
             "gap" => records.gaps.push(
                 serde_json::from_value(value)
                     .map_err(|error| format!("parse gap event: {error}"))?,

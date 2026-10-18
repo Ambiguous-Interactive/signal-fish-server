@@ -3429,3 +3429,108 @@ unknown. [Issue #1009](https://github.com/Ambiguous-Interactive/signal-fish-serv
 tracks the required scheduling, CPU, allocator, and host-clock investigation.
 Keep the original offered work, lag bound, and full failed histories. No valid
 ten-minute capacity cell or workload-wide memory bound is established here.
+
+### C3 receipt identity storage
+
+At `16eff7ff`, each retained receipt owns separate sender and recipient strings.
+The collection and file replay paths now share exact names within one run.
+Stored receipt names use one pointer each. Raw input strings enter the existing
+log mutex and pool before shared storage is allocated. Each receipt performs
+two tree lookups. Each repeated name adds a reference and no shared allocation.
+The pool resets when the log transfers its records. Replay owns a separate pool.
+Unknown names, Unicode, escaped text, duplicate arrivals, and arrival order stay
+in the evidence. JSON names remain strings. No roster filter removes evidence.
+
+The existing ignored `generator_memory_profile_on_complete_fanout` probe uses
+16 peers with 100, 1,000, and 5,000 sends each. Separate collection and replay
+cohorts alternate fixed baseline and candidate executables. Each small size has
+three pairs per cohort; the largest has five. All 44 measured processes exit
+zero and reproduce the same complete summary. The two fixture producers at
+each size also emit byte-identical JSONL artifacts. Linux child procfs measures
+RSS after collection or reading, before oracle evaluation:
+
+| Receipts | Collection median KiB before / after | Replay median KiB before / after |
+| --- | --- | --- |
+| 24,000 | 14,432 / 11,036 | 15,988 / 12,124 |
+| 240,000 | 49,640 / 26,052 | 51,184 / 27,144 |
+| 1,200,000 | 206,768 / 93,052 | 208,048 / 94,148 |
+
+At 1.2 million receipts, `wait4` median peak RSS changes from 217,460 to
+102,876 KiB for collection and 217,444 to 103,136 KiB for replay. This is about
+53% less peak memory. The host is shared ARM64 Linux under WSL2, with Rust 1.94
+and the debug test profile. An earlier cohort inherited the controller's large
+RSS after whole-file hashing; its peak observations are excluded. Its logs and
+all later attempts remain under local `/tmp/capacity-intern-evidence/`.
+The corrected controller hashes files in chunks. A brief Markdown check overlaps
+profiling; no local Rust builds overlap the measured cohort.
+
+Memory savings have a processing cost. At the largest size, median process wall
+time minus the probe's oracle time rises from 0.569 to 1.325 seconds for
+collection and 11.370 to 12.937 seconds for replay. These residuals include
+startup, teardown, output, and input work; they are not isolated collection
+CPU time. Shared-host timing variation prevents a throughput or stall-cause
+claim. The implementation adds no new mutex but performs its lookups under the
+existing log mutex.
+
+The storage-sharing regression fails against the original collector and passes
+after the repair. It checks collection and replay sharing across both identity
+roles, exact JSON strings, unknown/escaped names, retained duplicates, inline
+receipt size, and pool release between collections. Independent review found
+no remaining correctness issue. The existing missing, duplicate, misroute,
+ordering, gap, incarnation, and replay controls remain required.
+
+This is partial progress on [#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775).
+Retained events, sent indexes, distinct names, and fragmented validation state
+still grow with the offered workload. This change does not enforce a general
+memory budget or identify the historical #1009 stall cause.
+
+### C3 fixed-binary long-run comparison
+
+Two new registered trials use the same planned 16-player workload as #1009:
+one room, 60 sends/s per player, 96-byte reliable v3 JSON data, seed 1,
+120 seconds of warm-up, and 600 seconds of measurement. Each offers 691,232
+sends and 10,368,480 recipient deliveries. The generator has four runtime
+workers. Generator and server inherit CPUs 0–7; external observers use CPUs
+8–11. CPU and memory cgroup limits are unlimited. The ARM64 WSL2 host remains
+shared. No local builds or tests overlap either trial.
+
+| Fixed binary | Verdict | Sent | Unsent | Receipts | Max observed lag us | Peak child KiB |
+| --- | --- | --- | --- | --- | --- | --- |
+| Original collector | Valid | 691,232 | 0 | 10,368,480 | 66,462 | 2,453,272 |
+| Shared receipt names | Invalid | 341,448 | 349,784 | 5,121,720 | 973,809 | 422,428 |
+
+Both trials retain zero outstanding deliveries and reproduce their complete
+summaries through exact artifact replay. The candidate also records completed
+send lag of 290,025 us. Its first pre-write violation is 271,164 us near ledger
+sequence 21,340; further delayed sends reach the table's maximum. The original
+250,000 us lag bound remains unchanged. The candidate stops sending early, so
+its partial-run peak must not be compared with the baseline's full-run peak.
+A successful test-process exit means replay matched; it does not validate the
+candidate workload.
+
+External observations during the failure show a server CPU burst of 6.547 CPU
+seconds over 0.900 seconds, with stable RSS and no new page faults. Generator
+workers continue some execution. At the stall, observer gaps stay below 84 ms
+and monotonic/raw clocks show no one-second step. This excludes a shared
+one-second observation pause in those traces, but does not identify sender
+waits or attribute the failure to receipt sharing. The full candidate trace
+also retains a later 584 ms observer gap. The server log has no entry at the
+stall. Timestamp alignment from the last warning's file time is approximate.
+
+The original main-thread child lookup missed server startup observations.
+A supplemental observer finds the server under the libtest worker thread and
+retains both complete server logs. Startup scheduler coverage is incomplete;
+generator and host samples remain available throughout. All registrations,
+raw events, manifests, logs, summaries, executable hashes, and observations stay
+under local `progress/session-474/long-{before,after}`. The baseline completes
+in 1,132.202 seconds and the candidate in 1,068.902 seconds, including replay.
+These are debug-binary qualification histories, not server capacity points.
+
+The memory reduction is measured separately by the matched synthetic cohorts.
+The initial long pair leaves a possible live-performance regression unresolved.
+Existing uninterned failures in #1009 also predate this change. Neither fact
+establishes a cause. Further fixed-binary qualification and attribution belong
+to [#1009](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1009);
+[#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775)
+remains open for workload-wide memory bounds. A later passing repetition must
+not be called a repair of this failed history.

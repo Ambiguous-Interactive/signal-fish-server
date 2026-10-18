@@ -7,8 +7,8 @@
 //! delivery class, so "replay the artifacts" and "summarize the run" are
 //! literally the same code path.
 
-use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
 use crate::oracle::InvalidReason;
 use crate::schedule::Phase;
@@ -35,6 +35,98 @@ pub struct SentEvent {
     pub phase: Phase,
 }
 
+/// A receipt identity shared within one collected or replayed run.
+/// Serialization stays a JSON string, including names outside the run roster.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+// Arc<String> keeps each stored name to one pointer; Arc<str> needs two.
+// Only the first occurrence of a distinct name allocates an Arc header.
+pub struct ReceiptName(Arc<String>);
+
+impl ReceiptName {
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl From<String> for ReceiptName {
+    fn from(name: String) -> Self {
+        Self(Arc::new(name))
+    }
+}
+
+impl From<&str> for ReceiptName {
+    fn from(name: &str) -> Self {
+        name.to_string().into()
+    }
+}
+
+impl std::ops::Deref for ReceiptName {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::borrow::Borrow<str> for ReceiptName {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl<T: AsRef<str> + ?Sized> PartialEq<T> for ReceiptName {
+    fn eq(&self, other: &T) -> bool {
+        self.as_str() == other.as_ref()
+    }
+}
+
+impl std::fmt::Display for ReceiptName {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl serde::Serialize for ReceiptName {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ReceiptName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self::from)
+    }
+}
+
+/// Run-local names only. The log's existing mutex covers collection; replay
+/// owns its pool directly. Each receipt needs two O(log distinct names) lookups.
+#[derive(Default)]
+pub(super) struct ReceiptNames(BTreeSet<ReceiptName>);
+
+impl ReceiptNames {
+    fn intern(&mut self, name: String) -> ReceiptName {
+        if let Some(shared) = self.0.get(name.as_str()) {
+            return shared.clone();
+        }
+        let shared = ReceiptName::from(name);
+        self.0.insert(shared.clone());
+        shared
+    }
+
+    pub(super) fn share(&mut self, receipt: ReceiptEvent<String>) -> ReceiptEvent {
+        ReceiptEvent {
+            recipient: self.intern(receipt.recipient),
+            sender: self.intern(receipt.sender),
+            seq: receipt.seq,
+            epoch: receipt.epoch,
+            server_seq: receipt.server_seq,
+            received_us: receipt.received_us,
+            application_bytes: receipt.application_bytes,
+            encoded_frame_body_bytes: receipt.encoded_frame_body_bytes,
+        }
+    }
+}
+
 /// One delivery a recipient task actually read off the socket.
 ///
 /// `seq` is the sender-stamped ledger sequence (unique across the whole run,
@@ -42,9 +134,10 @@ pub struct SentEvent {
 /// per-`(sender, epoch)` relay stamps read off the v3 wire frame — the
 /// stream-identity pair the oracle validates.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ReceiptEvent {
-    pub recipient: String,
-    pub sender: String,
+// Collection and replay parse owned strings, then intern before storing events.
+pub struct ReceiptEvent<Name = ReceiptName> {
+    pub recipient: Name,
+    pub sender: Name,
     pub seq: u64,
     pub epoch: u32,
     pub server_seq: u64,
@@ -135,6 +228,7 @@ pub struct EventLog {
 
 #[derive(Default)]
 struct EventState {
+    receipt_names: ReceiptNames,
     sent: Vec<SentEvent>,
     receipts: Vec<ReceiptEvent>,
     gaps: Vec<GapEvent>,
@@ -167,12 +261,10 @@ impl EventLog {
             .push(event);
     }
 
-    pub fn push_receipt(&self, event: ReceiptEvent) {
-        self.state
-            .lock()
-            .expect("event log poisoned")
-            .receipts
-            .push(event);
+    pub fn push_receipt(&self, event: ReceiptEvent<String>) {
+        let mut state = self.state.lock().expect("event log poisoned");
+        let event = state.receipt_names.share(event);
+        state.receipts.push(event);
     }
 
     pub fn push_gap(&self, event: GapEvent) {
@@ -297,6 +389,7 @@ impl EventLog {
             faults: std::mem::take(&mut state.faults),
             registry: std::mem::take(&mut state.registry),
         };
+        state.receipt_names = ReceiptNames::default();
         records
             .sent
             .sort_by(|a, b| (&a.sender, a.seq).cmp(&(&b.sender, b.seq)));
@@ -382,5 +475,104 @@ impl RunRecords {
             .chain(std::iter::once(DeliveryEvent::Registry {
                 senders: self.registry.clone(),
             }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression #775: fan-out must not retain two new identity strings per receipt.
+    #[test]
+    fn receipt_names_share_storage_in_collection_and_artifact_replay() {
+        let log = EventLog::new();
+        for (recipient, sender, seq) in [
+            ("r0p1", "r0p0", 0),
+            ("r0p1", "r0p0", 1),
+            ("r0p0", "r0p1", 0),
+            ("未知\"\\\n", "outside-the-roster", 7),
+            ("outside-the-roster", "未知\"\\\n", 7),
+            ("r0p1", "r0p0", 1), // Preserve duplicate observations.
+        ] {
+            log.push_receipt(ReceiptEvent {
+                recipient: recipient.into(),
+                sender: sender.into(),
+                seq,
+                epoch: 1,
+                server_seq: seq + 1,
+                received_us: 10 + seq,
+                application_bytes: 96,
+                encoded_frame_body_bytes: 250,
+            });
+        }
+        assert_eq!(log.state.lock().expect("log").receipt_names.0.len(), 4);
+        let collected = log.take_records();
+        assert!(log.state.lock().expect("log").receipt_names.0.is_empty());
+        // A later collection has a separate pool, even while old evidence lives.
+        log.push_receipt(ReceiptEvent {
+            recipient: "r0p1".into(),
+            sender: "r0p0".into(),
+            seq: 8,
+            epoch: 1,
+            server_seq: 9,
+            received_us: 18,
+            application_bytes: 96,
+            encoded_frame_body_bytes: 250,
+        });
+        let later = log.take_records();
+        assert_ne!(
+            collected.receipts[0].sender.as_str().as_ptr(),
+            later.receipts[0].sender.as_str().as_ptr(),
+            "the log must release its old pool after transferring records"
+        );
+        assert!(
+            std::mem::size_of::<ReceiptEvent>() < std::mem::size_of::<ReceiptEvent<String>>(),
+            "stored receipts must use less inline space than raw string receipts"
+        );
+        let output = tempfile::tempdir().expect("artifact directory");
+        crate::artifacts::write_deliveries(output.path(), &collected).expect("write receipts");
+        let replayed = crate::artifacts::read_records(output.path()).expect("read receipts");
+        assert_eq!(
+            serde_json::to_value(&collected).expect("collected"),
+            serde_json::to_value(&replayed).expect("replayed"),
+            "identity sharing must preserve every raw receipt"
+        );
+        for (path, records) in [("collection", collected), ("replay", replayed)] {
+            let receipts = records.receipts;
+            assert_eq!(receipts.len(), 6, "{path}: retain every arrival");
+            assert_eq!(receipts[3].recipient.as_str(), "未知\"\\\n");
+            assert_eq!(receipts[3].sender.as_str(), "outside-the-roster");
+            assert_eq!(
+                receipts[3].recipient.as_str().as_ptr(),
+                receipts[4].sender.as_str().as_ptr()
+            );
+            assert_eq!(
+                receipts[1].seq, receipts[5].seq,
+                "{path}: retain duplicate keys"
+            );
+            for receipt in &receipts {
+                for name in [&receipt.recipient, &receipt.sender] {
+                    assert_eq!(
+                        serde_json::to_vec(name).expect("shared name"),
+                        serde_json::to_vec(name.as_str()).expect("raw string")
+                    );
+                }
+            }
+            assert_eq!(
+                receipts[0].sender.as_str().as_ptr(),
+                receipts[1].sender.as_str().as_ptr(),
+                "{path}: repeated sender identities must share storage"
+            );
+            assert_eq!(
+                receipts[0].recipient.as_str().as_ptr(),
+                receipts[2].sender.as_str().as_ptr(),
+                "{path}: an identity must share storage across roles"
+            );
+            assert_ne!(
+                receipts[0].recipient.as_str(),
+                receipts[0].sender.as_str(),
+                "{path}: distinct identities must remain distinct"
+            );
+        }
     }
 }
