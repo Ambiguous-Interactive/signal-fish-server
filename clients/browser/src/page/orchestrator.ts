@@ -772,6 +772,9 @@ class Orchestrator {
   private pendingExchangeReceipts = 0;
   private readonly admittedRelayReceipts = new WeakSet<ServerFrame>();
   private pendingRelayReceipts = 0;
+  private readonly admittedServerFrames = new WeakSet<ServerFrame>();
+  private pendingAdmittedServerFrames = 0;
+  private pendingAdmittedTasks = 0;
   private readonly reportedExchangeDiagnostics = new Set<string>();
   private exchangeRetryAt: number | null = null;
   private readonly pendingSignals = new Map<string, unknown[]>();
@@ -1253,10 +1256,15 @@ class Orchestrator {
       this.admittedRelayReceipts.add(frame);
       this.pendingRelayReceipts += 1;
     }
+    if (relayWindowOpen) {
+      this.admittedServerFrames.add(frame);
+      this.pendingAdmittedServerFrames += 1;
+    }
     this.routeServerFrame({
       frame,
       release: () => {
         if (this.admittedRelayReceipts.delete(frame)) this.pendingRelayReceipts -= 1;
+        if (this.admittedServerFrames.delete(frame)) this.pendingAdmittedServerFrames -= 1;
         release();
       },
     });
@@ -1323,18 +1331,27 @@ class Orchestrator {
       this.failFatal(FatalError.connection('browser input task backlog limit exceeded'));
       return;
     }
+    let admittedTask = this.exchangeWindowOpen();
+    if (admittedTask) this.pendingAdmittedTasks += 1;
+    const consumeAdmission = () => {
+      if (!admittedTask) return;
+      admittedTask = false;
+      this.pendingAdmittedTasks -= 1;
+    };
     this.chain = this.chain
       .then(async () => {
         try {
           if (this.finished) {
             return;
           }
+          consumeAdmission();
           await task();
           await this.output.flush();
           if (this.finished) return;
           this.processTimers();
           this.scheduleWake();
         } finally {
+          consumeAdmission();
           release?.();
           releaseTask();
         }
@@ -1428,8 +1445,18 @@ class Orchestrator {
       return;
     }
     const now = monotonicNowMs();
-    // Drain already-arrived gameplay receipts before judging the cutoff.
-    if (now >= this.runDeadline && this.pendingExchangeReceipts + this.pendingRelayReceipts > 0)
+    /*
+      Arrived server frames and engine callbacks can change lifecycle debt.
+      Late traffic holds no marker, so it cannot keep an expired run alive.
+    */
+    const terminalDecisionDue =
+      now >= this.runDeadline || (this.lingerUntil !== null && now >= this.lingerUntil);
+    if (
+      terminalDecisionDue &&
+      (this.pendingAdmittedTasks > 0 ||
+        this.pendingAdmittedServerFrames > 0 ||
+        this.pendingExchangeReceipts + this.pendingRelayReceipts > 0)
+    )
       return;
 
     // Mandatory keepalive: send `Ping` on cadence and demand a timely `Pong`.
@@ -1617,6 +1644,7 @@ class Orchestrator {
   // -------------------------------------------------------------------------
 
   private async handleServerMessage(frame: ServerFrame): Promise<void> {
+    if (this.admittedServerFrames.delete(frame)) this.pendingAdmittedServerFrames -= 1;
     const admittedRelayReceipt = this.admittedRelayReceipts.delete(frame);
     if (admittedRelayReceipt) this.pendingRelayReceipts -= 1;
     // ANY inbound frame proves the connection and the server are alive, so it

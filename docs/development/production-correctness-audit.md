@@ -4932,3 +4932,80 @@ executables/bundles remain under local `progress/session-470-receipt-qualified-l
 and `progress/session-470/receipt-qualified-before.sha256`. The earlier receipt
 candidate `39f6f2f9` rebuilt its native executable during setup; its pre-build
 hash is excluded. Original #853/#889 causes and the broader audit stay open.
+
+### F90 — Queued room state can be skipped at successful exit
+
+Issue [#1041](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1041)
+continues A20 and A22 at `d47f236a`. Both reference clients can decide success
+from old room state while a newer authoritative update is already available.
+This investigation advances open #826, #853, and #889. It does not establish
+the cause of either historical browser incident.
+
+The browser arms an exit linger from an initial relay plan at monotonic
+100 ms, then blocks on output at 200 ms. A PlayerJoined, fresh-epoch
+PlayerReconnected, or replacement WebRTC SessionPlan arrives at 300 ms.
+Output resumes at 400 ms, after the 350 ms linger expiry. The old source exits
+zero without dispatching the arrived update. A separate channel-open history
+shows that queued engine callbacks can also add skipped exchange debt.
+The final baseline control fails both linger and run-cutoff histories, plus
+controls that require consumption of 255 timely benign frames.
+
+The browser now retains admission markers for raw server input and queued
+callback tasks. Markers use the existing run, hold, and linger window. A
+handler consumes its marker before applying state. Cancellation also releases
+the marker. Terminal timer decisions wait for admitted input to drain.
+Post-window input has no marker and cannot extend the run. The existing
+backlog limits still apply. Gameplay receipt credit retains its own original
+arrival check; processing late never renews eligibility.
+
+The native regression uses a real WebSocket pair. A nonconsuming TCP peek
+confirms complete frames before the run loop evaluates an expired run or
+linger. The old loop skips those frames and exits zero. It drains queued
+engine callbacks but never polls signaling before its terminal decision.
+The repair uses one common server-frame dispatcher for ordinary input and
+terminal drainage. It checks at most 256 ready frames and fails with a
+connection error if input does not settle. This deliberately rejects even an
+exactly full 256-frame frontier rather than claiming an unread tail is empty.
+A shorter harmless prefix can still finish successfully. Receipt timestamps
+remain complete-frame observation times; this does not infer kernel arrival.
+
+Browser controls cover membership, reconnect, replacement plans, pair-open
+callbacks, a full admitted backlog, and late input at both terminal boundaries.
+Native controls cover empty input, harmless replies, reconnect, and plans,
+with zero, 32, and 256 prefix frames at both boundaries. Exact and late relay
+receipts keep their original windows. These are controlled histories, not a
+claim that either historical incident has been reproduced.
+
+The Rust, .NET, and Godot SDK assessments were refreshed at `da8f2d16`,
+`e467c871`, and `2a74de36`. Rust provides no WebRTC backend. .NET owns signaling
+and relay. Godot owns its engine mesh. None imports these private reference
+process exit schedulers. No server protocol or SDK API changes, migration, or
+client acceptance issue is required. The broader audit stays open.
+
+Final native negative `7b927756` fails all eight authoritative zero/32-prefix
+histories and all eight unsettled-frontier controls. Eight harmless histories
+remain successful. Candidate `ac6cb9e5` passes all 24 cases and seven nearby
+receipt and deferred-exchange regressions. All 12 browser histories, the full
+browser package tests, type checking, formatting, and strict native/root
+Clippy pass. Independent review found no remaining issues.
+
+Fixed-artifact `bc2a4a55`, `6cc3edb1`, and `17e179ad` pass three restores, three
+retries, three browser meshes, and one controlled fallback. All 24 endpoint
+streams exit zero and retain 82 channel sends, 82 receipts, 12 relay sends,
+and 24 relay receipts. Complete streams, server logs, and matching before/after
+hashes for all four executable/bundle files remain under local
+`progress/session-472-qualified-{2,3,4}` and `progress/session-472`.
+The first candidate `e718fdbf` passes but setup rebuilds its native binary;
+its pre-build manifest is excluded. Final comment formatting changes no
+executable or test logic; independent review verifies this distinction.
+
+After that formatting correction, rebuilt-artifact `e29fb93b` passes restore,
+retry, mesh, and controlled fallback again. All ten endpoints exit zero.
+The native binary rebuilds during this setup, so its pre-build manifest is
+excluded. The final source hashes, endpoint streams, and server logs remain
+under local `progress/session-472` and `progress/session-472-qualified-5`.
+
+Final fixed-artifact `e609e1d4` passes restore, mesh, and retry on the formatted
+source. All seven endpoints exit zero. The final-fixed-before and
+final-fixed-after manifests match for all four files; retain these manifests
+with `progress/session-472-qualified-6` as the final source qualification.
