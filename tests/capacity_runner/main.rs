@@ -61,6 +61,73 @@ use records::{EventLog, GapEvent, ReceiptEvent, RunRecords, SentEvent};
 use schedule::{build_run_shape, ChurnPlan, SenderPlan};
 use signal_fish_server::protocol::{DeliveryGapReason, ServerMessage};
 
+/// Exercise config -> live receipt collection -> bounded sidecar, while
+/// keeping replay dependent only on the ordinary delivery artifacts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn opt_in_receipt_timings_write_complete_sidecar_without_changing_replay() {
+    for sidecar_failure in [false, true] {
+        let output = tempfile::tempdir().expect("receipt timing output");
+        let mut config = wire_correctness_config(Encoding::V3Json);
+        config.receipt_timings = true;
+        config.output_dir = output.path().to_path_buf();
+        let sidecar = output.path().join("receipt-timings.json");
+        if sidecar_failure {
+            std::fs::create_dir(&sidecar).expect("blocked sidecar path");
+        }
+        let result = runner::run(config).await;
+        let summary: oracle::OutcomeSummary = serde_json::from_slice(
+            &std::fs::read(output.path().join(artifacts::SUMMARY_FILE))
+                .expect("primary summary survives"),
+        )
+        .expect("summary JSON");
+        assert!(summary.valid, "{:?}", summary.reasons);
+        assert!(output.path().join(artifacts::DELIVERIES_FILE).exists());
+        if sidecar_failure {
+            let error = result.expect_err("diagnostic write must fail");
+            assert!(error.contains("receipt-timings.json"), "{error}");
+            std::fs::remove_dir(sidecar).expect("remove blocked diagnostic path");
+        } else {
+            let outcome = result.expect("instrumented small scenario");
+            let timings: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&sidecar).expect("diagnostic sidecar"))
+                    .expect("sidecar JSON");
+            assert_eq!(timings["enabled"], true);
+            let epoch = timings["workload_epoch_offset_ns"]
+                .as_u64()
+                .expect("armed epoch anchor");
+            assert!(timings.get("intern").is_none());
+            assert!(timings.get("worst_intern").is_none());
+            for stage in ["acquire_wait", "receipt_push", "measured_lock_hold"] {
+                assert_eq!(
+                    timings[stage]["count"].as_u64().expect("aggregate count"),
+                    outcome.summary.totals.receipts,
+                    "stage {stage}"
+                );
+                let worst = &timings[format!("worst_{stage}")];
+                assert!(
+                    worst["started_offset_ns"]
+                        .as_u64()
+                        .expect("worst timestamp")
+                        >= epoch
+                );
+            }
+            std::fs::remove_file(sidecar).expect("remove optional diagnostics");
+        }
+        assert!(
+            artifacts::read_manifest(output.path())
+                .expect("manifest")
+                .config
+                .receipt_timings
+        );
+        let replay = artifacts::replay(output.path()).expect("replay without sidecar");
+        assert_eq!(
+            serde_json::to_value(replay).expect("replayed summary"),
+            serde_json::to_value(summary).expect("live summary")
+        );
+    }
+}
+
 /// The small scenario at the heart of the C2 acceptance gate: one room, four
 /// v3 clients, reliable relay traffic over real sockets, artifacts written,
 /// and a replay of those artifacts reproducing the recorded summary exactly.
@@ -108,6 +175,10 @@ async fn small_reliable_relay_scenario_passes_and_artifacts_replay_to_the_same_s
     ] {
         assert!(output.path().join(file).exists(), "missing artifact {file}");
     }
+    assert!(
+        !output.path().join("receipt-timings.json").exists(),
+        "ordinary runs must not write diagnostic sidecars"
+    );
     // The manifest pins the run's identity and inputs.
     let manifest = artifacts::read_manifest(output.path()).expect("read manifest");
     assert_eq!(manifest.run_id, outcome.run_id);
@@ -5610,6 +5681,7 @@ fn scenario_config(encoding: Encoding) -> RunConfig {
         generator_lag_bound: Duration::from_millis(250),
         drain_grace: Duration::from_millis(1_500),
         sample_interval: Duration::from_millis(250),
+        receipt_timings: false,
         server_overlay: RunConfig::default_server_overlay(),
         pause_sends: None,
         pause_reads: None,

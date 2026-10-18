@@ -336,7 +336,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     }
     std::fs::create_dir_all(&config.output_dir)
         .map_err(|error| format!("create output dir {}: {error}", config.output_dir.display()))?;
-    let log = Arc::new(EventLog::new());
+    let log = Arc::new(EventLog::with_receipt_timings(config.receipt_timings));
 
     // Server: spawn the compiled binary or connect to an external endpoint.
     let server_slot: Arc<tokio::sync::Mutex<Option<ServerProcess>>> =
@@ -668,6 +668,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         &mut auxiliary_handles,
     )
     .await?;
+    log.set_workload_epoch(epoch.into_std());
     // This covers schedule, declared hooks, lag allowance, and delivery drain.
     let hard_deadline = epoch + Duration::from_micros(quiescence_us + hook_extra_us + 5_000_000);
 
@@ -717,6 +718,14 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     artifacts::write_intervals(&config.output_dir, &interval_samples)?;
     artifacts::write_histogram(&config.output_dir, &records)?;
     artifacts::write_json(config.output_dir.join(artifacts::SUMMARY_FILE), &summary)?;
+    if config.receipt_timings {
+        if let Some(timings) = log.take_receipt_timings() {
+            // Every producer has joined. No formatting or diagnostic file writes
+            // occur in receipt ingestion or while its mutex is held.
+            let evidence = timings.into_evidence(&records)?;
+            artifacts::write_json(config.output_dir.join("receipt-timings.json"), &evidence)?;
+        }
+    }
 
     let final_counters = interval_samples
         .iter()
@@ -928,7 +937,14 @@ fn send_lag_observation<'a>(
     }
 }
 
-fn report_send_lag(observation: &SendLagObservation<'_>) {
+fn report_send_lag(log: &EventLog, observation: &SendLagObservation<'_>) {
+    log.capture_receipt_timings_at_send_lag(
+        observation.sender,
+        observation.seq,
+        observation.stage,
+        observation.observed_us,
+        observation.bound_us,
+    );
     let evidence = serde_json::to_string(observation).expect("send lag evidence serializes");
     eprintln!("capacity generator lag: {evidence}");
 }
@@ -1429,13 +1445,16 @@ async fn peer_task(
                     let wake_us = micros(epoch.elapsed());
                     let lag = wake_us.saturating_sub(send.intended_us);
                     if lag > facts.generator_lag_bound_us {
-                        report_send_lag(&send_lag_observation(
-                            &plan.name,
-                            send,
-                            facts.generator_lag_bound_us,
-                            wake_us,
-                            None,
-                        ));
+                        report_send_lag(
+                            &log,
+                            &send_lag_observation(
+                                &plan.name,
+                                send,
+                                facts.generator_lag_bound_us,
+                                wake_us,
+                                None,
+                            ),
+                        );
                         log.push_fault(InvalidReason::GeneratorSaturated {
                             max_lag_us: lag,
                             bound_us: facts.generator_lag_bound_us,
@@ -1503,13 +1522,16 @@ async fn peer_task(
                     }
                     let sent_us = micros(epoch.elapsed());
                     if sent_us.saturating_sub(send.intended_us) > facts.generator_lag_bound_us {
-                        report_send_lag(&send_lag_observation(
-                            &plan.name,
-                            send,
-                            facts.generator_lag_bound_us,
-                            wake_us,
-                            Some((write_start_us, sent_us)),
-                        ));
+                        report_send_lag(
+                            &log,
+                            &send_lag_observation(
+                                &plan.name,
+                                send,
+                                facts.generator_lag_bound_us,
+                                wake_us,
+                                Some((write_start_us, sent_us)),
+                            ),
+                        );
                     }
                     log.push_sent(SentEvent {
                         sender: plan.name.clone(),
@@ -2250,6 +2272,30 @@ mod session_poll_tests {
             assert_eq!(bytes, count_u64(reference_body.len()));
             assert_eq!(frame, Message::Binary(reference_body.into()));
         }
+    }
+
+    #[test]
+    fn reporting_send_lag_freezes_receipt_prefix_without_changing_warning_fields() {
+        let log = EventLog::with_receipt_timings(true);
+        let send = ScheduledSend {
+            seq: 17,
+            intended_us: 100_000,
+            phase: crate::schedule::Phase::Measured,
+        };
+        let observation = send_lag_observation("r0p3", send, 250_000, 517_628, None);
+        let original = serde_json::to_value(&observation).expect("original warning");
+        report_send_lag(&log, &observation);
+        assert_eq!(serde_json::to_value(&observation).unwrap(), original);
+        let timings = log
+            .take_receipt_timings()
+            .unwrap()
+            .into_evidence(&RunRecords::default())
+            .expect("empty prefix evidence");
+        let prefix = &timings["first_accepted_lag_prefix"];
+        for field in ["sender", "seq", "stage", "observed_us", "bound_us"] {
+            assert_eq!(prefix[field], original[field], "trigger field {field}");
+        }
+        assert_eq!(prefix["receipt_push"]["count"], 0);
     }
 
     #[test]

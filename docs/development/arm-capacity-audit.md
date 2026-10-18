@@ -3429,3 +3429,202 @@ unknown. [Issue #1009](https://github.com/Ambiguous-Interactive/signal-fish-serv
 tracks the required scheduling, CPU, allocator, and host-clock investigation.
 Keep the original offered work, lag bound, and full failed histories. No valid
 ten-minute capacity cell or workload-wide memory bound is established here.
+
+### C3 receipt identity storage experiment — not landed
+
+At `16eff7ff`, each retained receipt owned separate sender and recipient strings.
+The unlanded pooling experiment at `9a88737a` shared exact names during
+collection and replay. Stored names used one pointer each. The collector
+performed two tree lookups under its existing log mutex. The pool reset when
+the log transferred its records. Unknown names, Unicode, escaped text,
+duplicate arrivals, arrival order, and JSON string values stayed intact.
+Pooling failed default-path live qualification and was removed from the
+delivery change. The final source keeps the original String receipt storage.
+
+The existing ignored `generator_memory_profile_on_complete_fanout` probe used
+16 peers with 100, 1,000, and 5,000 sends each. Separate collection and replay
+cohorts alternated fixed baseline and candidate executables. Each small size had
+three pairs per cohort; the largest had five. All 44 measured processes exited
+zero and reproduced the same complete summary. The two fixture producers at
+each size also emitted byte-identical JSONL artifacts. Linux child procfs measured
+RSS after collection or reading, before oracle evaluation:
+
+| Receipts | Collection median KiB before / after | Replay median KiB before / after |
+| --- | --- | --- |
+| 24,000 | 14,432 / 11,036 | 15,988 / 12,124 |
+| 240,000 | 49,640 / 26,052 | 51,184 / 27,144 |
+| 1,200,000 | 206,768 / 93,052 | 208,048 / 94,148 |
+
+At 1.2 million receipts, `wait4` median peak RSS fell from 217,460 to
+102,876 KiB for collection and 217,444 to 103,136 KiB for replay. This was about
+53% less peak memory in the synthetic pooling experiment. It is not a memory
+gain in the final source. The host was shared ARM64 Linux under WSL2, with Rust 1.94
+and the debug test profile. An earlier cohort inherited the controller's large
+RSS after whole-file hashing; its peak observations are excluded. Its logs and
+all later attempts remain under local `/tmp/capacity-intern-evidence/`.
+The corrected controller hashed files in chunks. A brief Markdown check overlapped
+profiling; no local Rust builds overlapped the measured cohort.
+
+The experimental memory savings had a processing cost. At the largest size,
+median process wall time minus the probe's oracle time rose from 0.569 to 1.325 seconds for
+collection and 11.370 to 12.937 seconds for replay. These residuals include
+startup, teardown, output, and input work; they are not isolated collection
+CPU time. Shared-host timing variation prevents a throughput or stall-cause
+claim. The experiment added no new mutex but performed its lookups under the
+existing log mutex.
+
+The experimental sharing control failed against the original collector and
+passed with pooling. It checked collection and replay sharing across both identity
+roles, exact JSON strings, unknown/escaped names, retained duplicates, inline
+receipt size, and pool release between collections. Independent review found
+no correctness defect in that implementation. Those controls did not establish
+acceptable live processing cost. Pooling and its sharing control are not in
+the final source.
+
+These measurements advance the investigation in
+[#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775).
+The final source does not reduce receipt-name memory or impose a workload-wide
+memory budget. Retained events, sent indexes, and validation state still grow
+with offered work. The historical #1009 stall cause remains unknown.
+
+### C3 fixed-binary long-run comparison
+
+The first four registered trials used the same planned 16-player workload as #1009:
+one room, 60 sends/s per player, 96-byte reliable v3 JSON data, seed 1,
+120 seconds of warm-up, and 600 seconds of measurement. Each offers 691,232
+sends and 10,368,480 recipient deliveries. The generator has four runtime
+workers. Generator and server inherit CPUs 0–7; external observers use CPUs
+8–11. CPU and memory cgroup limits are unlimited. The ARM64 WSL2 host remains
+shared. No local Rust builds or tests overlap these trials.
+
+| Fixed binary | Verdict | Sent | Unsent | Receipts | Max observed lag us | Peak child KiB |
+| --- | --- | --- | --- | --- | --- | --- |
+| Initial original collector | Valid | 691,232 | 0 | 10,368,480 | 66,462 | 2,453,272 |
+| Initial shared receipt names | Invalid | 341,448 | 349,784 | 5,121,720 | 973,809 | 422,428 |
+| Reverse shared receipt names | Invalid | 369,429 | 321,803 | 5,541,435 | 487,872 | 454,104 |
+| Reverse original collector | Invalid | 115,049 | 576,183 | 1,725,735 | 483,637 | 425,572 |
+
+All trials retain zero outstanding deliveries and reproduce their complete
+summaries through exact artifact replay. The initial candidate records completed
+send lag of 290,025 us. Its first pre-write violation is 271,164 us near ledger
+sequence 21,340; further delayed sends reach the table's maximum. The original
+250,000 us lag bound remains unchanged. The candidate stops sending early, so
+its partial-run peak must not be compared with the baseline's full-run peak.
+A successful test-process exit means replay matched; it does not validate the
+candidate workload.
+
+The reverse pair keeps the same binaries, workload, and limits. Both reverse
+trials add the same external per-thread observer. The shared-name repeat first
+exceeds the bound for one sender near runner second 149, then for the remaining
+senders near second 400. The original collector exceeds it near second 120.
+Their maximum completed-send lags are 331,587 and 357,399 us. These failures
+show that pooling is not necessary for this failure class. They do not show
+that pooling adds no cost. Neither candidate in this first four-trial cohort
+completed the full offered work.
+
+External observations during the failure show a server CPU burst of 6.547 CPU
+seconds over 0.900 seconds, with stable RSS and no new page faults. Generator
+workers continue some execution. At the stall, observer gaps stay below 84 ms
+and monotonic/raw clocks show no one-second step. This excludes a shared
+one-second observation pause in those traces, but does not identify sender
+waits or attribute the failure to receipt sharing. The full candidate trace
+also retains a later 584 ms observer gap. The server log has no entry at the
+stall. Timestamp alignment from the last warning's file time is approximate.
+
+The original main-thread child lookup missed server startup observations.
+A supplemental observer finds the server under the libtest worker thread and
+retains both complete server logs. Startup scheduler coverage is incomplete;
+generator and host samples remain available throughout. All registrations,
+raw events, manifests, logs, summaries, executable hashes, and observations stay
+under local `progress/session-474/long-{before,after,before-repeat,after-repeat}`.
+The initial baseline completes in 1,132.202 seconds and the candidate in
+1,068.902 seconds. The reverse candidate takes 1,011.352 seconds; the reverse
+baseline takes 806.852 seconds. All times include replay. Binary hashes match
+their registrations after every trial. These binaries precede the optional
+receipt-stage diagnostics below.
+These are debug-binary qualification histories, not server capacity points.
+
+The memory reduction is measured separately by the matched synthetic cohorts.
+The four histories leave a possible live-performance regression unresolved.
+Existing uninterned failures in #1009 also predate this change. Neither fact
+establishes a cause. Further fixed-binary qualification and attribution belong
+to [#1009](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1009);
+[#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775)
+remains open for workload-wide memory bounds. A later passing repetition must
+not be called a repair of this failed history.
+
+### C3 additional pooling qualification
+
+The later registered pair retained the same workload and lag bound with
+diagnostics enabled. These historical binaries reported four stages, including
+the experimental name-sharing boundary. They precede the final three-stage
+source below.
+
+| Fixed binary | Verdict | Sent | Unsent | Receipts | Max observed lag us |
+| --- | --- | --- | --- | --- | --- |
+| Shared receipt names, diagnostics on | Valid | 691,232 | 0 | 10,368,480 | 64,727 |
+| Original collector, diagnostics on | Invalid | 323,890 | 367,342 | 4,858,350 | 626,987 |
+| Shared receipt names, diagnostics off | Invalid | 387,722 | 303,510 | 5,815,830 | 620,414 |
+
+All three trials retained zero outstanding and gap-covered deliveries and
+reproduced their summaries through exact replay. Maximum completed-send lags
+were 64,727, 293,672, and 263,257 us, respectively. Binary and controller hashes
+matched their registrations. The default-OFF candidate crossed the unchanged
+250,000 us bound near runner second 404. It completed its original observation
+window and replay; its successful test-process exit did not make the workload
+valid. Pooling was deferred. The diagnostic-ON pass did not clear this failure
+or explain the historical stalls.
+
+The original collector's first accepted lag-prefix capture took 4 us from
+request to acquisition. This measured capture delay after the lag breach.
+It did not measure the earlier stalled interval or identify its cause.
+During the candidate's runner seconds 0–720, the largest observer gap was
+78.935 ms, with zero skipped sample slots. Its global maximum of 536.525 ms
+occurred after the workload. In the baseline's incident window of plus or minus
+one second, the largest gap was 242.780 ms, with nine skipped slots. Its global
+maximum of 412.897 ms occurred near workload second 20.826. These different
+windows must not be treated as equivalent coverage. Sequential external
+samples and incomplete observation limit scheduling attribution.
+
+The first diagnostic-OFF short overhead control exceeded the lag bound. It
+completed 19,106 of 24,016 sends and retained 286,590 receipts. Its raw maximum
+lag was 2,098,986 us. The cohort stopped, so it produced no overhead estimate.
+A separate diagnostic-ON startup control completed all 24,016 sends and
+360,240 receipts, with maximum lag of 6,538 us. That short pass did not qualify
+the default path or measure instrumentation overhead.
+
+All registered histories remain under local `progress/session-475/`, including
+`attempt-comparison.json`, the long-run artifacts, and external observations.
+These are shared-host debug-binary qualification histories. The valid full
+candidate and invalid partial baseline are not a matched full-work memory
+comparison. The final source retains the original collector; these pooled
+executables do not qualify the restored source. Issues #775 and #1009 remain
+open. No historical stall repair is claimed.
+
+### C3 opt-in receipt stage diagnostics
+
+`CAPACITY_RUNNER_RECEIPT_TIMINGS=1` enables a separate `receipt-timings.json`
+report. The runner writes it after evidence producers stop and ordinary
+artifacts are written. It measures receipt-log acquisition (`acquire_wait`),
+receipt-vector insertion (`receipt_push`), and part of the lock hold
+(`measured_lock_hold`). Aggregates cover every receipt. The final collector
+keeps original String names and reports no name-sharing stage. Retained rows
+are bounded to the first 64 slow observations and three final stage maxima.
+They keep sequence, clock offset, and vector size/capacity.
+The shared armed epoch and a bracketed wall-clock anchor support alignment.
+Collection retains scalar receipt positions. The runner resolves exact names
+after producers stop, so stored-name types add no diagnostic copying cost
+during ingestion. A single lag-prefix snapshot retains counters and three stage
+maxima before warning formatting or output. At most 70 observation rows remain.
+The snapshot records request and capture offsets. It is the first accepted
+capture under the log mutex, which may differ from the earliest request or
+exact crossing. Capture work starts after a confirmed breach and can affect
+later failure history. The prefix stays fixed while final maxima keep updating.
+
+All durations are elapsed wall time and include descheduling. Acquisition
+time cannot distinguish mutex contention from scheduling delay. The measured
+hold excludes its final counter update, row finalization, and mutex unlock.
+Enabled observations add clock reads and bookkeeping. They do not identify
+socket readiness or a stall cause. Ordinary runs omit the option from config
+JSON and allocate no observation buffer. Delivery records and replay stay
+unchanged. Compare matched instrumented binaries before attributing a delay.

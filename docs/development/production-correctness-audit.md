@@ -50,8 +50,8 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10 |
 | A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; embedded receiver-loss rollback in F18; size-refusal rollback in F21; known socket-close rollback in F22; stale expiry cleanup in F32 |
 | A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
-| A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32; concurrent join/start histories in session 471 |
-| A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial; two ordered concurrent unready/start histories and recovery checked in session 456; concurrent join/start histories in session 471 |
+| A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32; concurrent join/start histories in session 471; concurrent departure/start histories in session 474 |
+| A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial; two ordered concurrent unready/start histories and recovery checked in session 456; concurrent join/start histories in session 471; concurrent departure/start histories in session 474 |
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial |
 | A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31 |
 | A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471 |
@@ -99,6 +99,44 @@ baseline. It maps audit ownership; it does not certify these operations.
 | `TransferAuthority` | A09, A11 | Eligible live member, replay/publication order, transport-host independence |
 
 ## Bounded histories without a confirmed defect
+
+### A07/A08/A11 — Concurrent departure and game start
+
+At `16eff7ff`, three ready mesh members run StartGame and voluntary departure
+against the same held room event gate. The control polls the two production
+operations in each FIFO order. It holds the departing member's lifecycle gate
+through completion, as the departure contract requires. Before room-gate
+release, all three members remain stored, the departing member remains routed,
+and all output queues stay empty. No sleep selects the order.
+
+When StartGame wins, all three members receive GameStarting and tailored
+SessionPlans before the departing member receives RoomLeft and the remaining
+members receive PlayerLeft. The existing mesh plan stays active; mesh departure
+does not publish a new plan. When departure wins, the remaining members receive
+PlayerLeft before a two-member GameStarting and tailored SessionPlans. Exact
+counts and identities exclude duplicate members and peers. All plan recipients
+agree on their history's generation; each pair uses opposite offerer roles.
+Both histories end with the two remaining members finalized and ready in storage and the
+coordinator, no departed route, and no extra output.
+
+`concurrent_leave_and_start_publish_exact_membership_in_both_orders` passes
+in scoped library Nextest `510c8cb0`. A temporary wrong-room departure lock
+fails the pre-release route assertion in `350ab636`; production source is
+restored before the green run. Independent review corrected the lifecycle
+precondition and found no remaining issue. This adds bounded handler/queue
+coverage for open #826. It does not prove all departure schedules or TCP writes.
+
+New browser and native source audits also examined initial pairing, queued
+channel callbacks, candidate application, replacement probe sends, and terminal
+success arbitration for #853 and #889. No new defect was confirmed. In
+particular, input first observed after the native finite exit frontier is not
+proof that the frontier omitted eligible work. No speculative runtime change
+ships for that hypothesis. Fresh fixed-artifact Nextest `90ceb60b` passes room
+restore, link retry, and the three-player browser mesh. All seven endpoint
+streams and server logs remain under local `progress/session-474-baseline`;
+before/after hashes match for the server, native executable, browser CLI, and
+page bundle. These observations do not explain either historical incident.
+Both issues and the wider correctness campaign remain open.
 
 ### A20/A22 — Partial-channel receipt and replacement histories
 

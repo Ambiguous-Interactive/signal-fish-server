@@ -2012,3 +2012,204 @@ async fn concurrent_join_and_start_follow_room_membership_order() {
         );
     }
 }
+
+#[tokio::test]
+async fn concurrent_leave_and_start_publish_exact_membership_in_both_orders() {
+    use std::collections::BTreeSet;
+
+    fn assert_game_members(message: &ServerMessage, members: &BTreeSet<PlayerId>) {
+        let ServerMessage::GameStarting { peer_connections } = message else {
+            panic!("expected GameStarting, received {message:?}");
+        };
+        assert_eq!(peer_connections.len(), members.len());
+        assert_eq!(
+            peer_connections
+                .iter()
+                .map(|p| p.player_id)
+                .collect::<BTreeSet<_>>(),
+            *members
+        );
+    }
+
+    fn assert_mesh_members(
+        message: &ServerMessage,
+        recipient: PlayerId,
+        members: &BTreeSet<PlayerId>,
+    ) -> crate::protocol::SessionGeneration {
+        let ServerMessage::SessionPlan(plan) = message else {
+            panic!("expected SessionPlan, received {message:?}");
+        };
+        assert_eq!(plan.topology, Topology::Mesh);
+        assert_eq!(plan.transport, Transport::WebRtc);
+        assert_eq!(plan.peers.len(), members.len() - 1);
+        assert_eq!(
+            plan.peers
+                .iter()
+                .map(|p| p.player_id)
+                .collect::<BTreeSet<_>>(),
+            members
+                .iter()
+                .copied()
+                .filter(|id| *id != recipient)
+                .collect()
+        );
+        for peer in &plan.peers {
+            assert_eq!(peer.initiate, recipient < peer.player_id);
+        }
+        plan.generation
+    }
+
+    for start_first in [true, false] {
+        let server = create_test_server_with_session(mesh_session_config()).await;
+        let (starter, mut starter_messages) = register_client(&server).await;
+        let (member, mut member_messages) = register_client(&server).await;
+        let (leaver, mut leaver_messages) = register_client(&server).await;
+        for (id, name) in [(starter, "Starter"), (member, "Member"), (leaver, "Leaver")] {
+            server.set_client_protocol(&id, v3_webrtc());
+            server
+                .handle_join_room(
+                    &id,
+                    "leave-start-contention".into(),
+                    Some("LEAV08".into()),
+                    name.into(),
+                    Some(3),
+                    Some(false),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+        }
+        for id in [starter, member, leaver] {
+            server.handle_player_ready(&id).await;
+        }
+        for messages in [
+            &mut starter_messages,
+            &mut member_messages,
+            &mut leaver_messages,
+        ] {
+            drain_pending(messages);
+        }
+        let room_id = server.get_client_room(&starter).await.unwrap();
+        let everyone = BTreeSet::from([starter, member, leaver]);
+        let remaining = BTreeSet::from([starter, member]);
+        let leaver_lifecycle = server.connection_manager.client_lifecycle(&leaver).unwrap();
+        let _leaver_lifecycle_guard = leaver_lifecycle.lock().await;
+        let gate = server
+            .message_coordinator
+            .lock_room_event_mutation(&room_id)
+            .await;
+        let start = server.handle_start_game(&starter);
+        tokio::pin!(start);
+        if start_first {
+            assert!(futures_util::poll!(&mut start).is_pending());
+        }
+        let leave = server.leave_room_locked(&leaver, true);
+        tokio::pin!(leave);
+        assert!(futures_util::poll!(&mut leave).is_pending());
+        if !start_first {
+            assert!(futures_util::poll!(&mut start).is_pending());
+        }
+        assert_eq!(server.get_client_room(&leaver).await, Some(room_id));
+        assert_eq!(
+            server
+                .database
+                .get_room_by_id(&room_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .players
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            everyone
+        );
+        for messages in [
+            &mut starter_messages,
+            &mut member_messages,
+            &mut leaver_messages,
+        ] {
+            let received = messages.try_recv();
+            assert!(matches!(received, Err(mpsc::error::TryRecvError::Empty)));
+        }
+        drop(gate);
+        timeout(Duration::from_secs(1), async { tokio::join!(start, leave) })
+            .await
+            .expect("leave and start must finish after room gate release");
+
+        let mut original_generation = None;
+        if start_first {
+            for (recipient, messages) in [
+                (starter, &mut starter_messages),
+                (member, &mut member_messages),
+                (leaver, &mut leaver_messages),
+            ] {
+                assert_game_members(recv(messages).await.as_ref(), &everyone);
+                let generation =
+                    assert_mesh_members(recv(messages).await.as_ref(), recipient, &everyone);
+                assert_eq!(*original_generation.get_or_insert(generation), generation);
+            }
+        }
+        assert!(matches!(
+            recv(&mut leaver_messages).await.as_ref(),
+            ServerMessage::RoomLeft
+        ));
+        let mut final_generation = None;
+        for (recipient, messages) in [
+            (starter, &mut starter_messages),
+            (member, &mut member_messages),
+        ] {
+            match recv(messages).await.as_ref() {
+                ServerMessage::PlayerLeft { player_id, .. } => assert_eq!(*player_id, leaver),
+                other => panic!("expected PlayerLeft before current plan, received {other:?}"),
+            }
+            if !start_first {
+                assert_game_members(recv(messages).await.as_ref(), &remaining);
+                let generation =
+                    assert_mesh_members(recv(messages).await.as_ref(), recipient, &remaining);
+                assert_eq!(*final_generation.get_or_insert(generation), generation);
+            }
+        }
+        let active = server.active_session_plan(&room_id).unwrap();
+        assert_eq!(active.topology, Topology::Mesh);
+        assert_eq!(active.transport, Transport::WebRtc);
+        assert_eq!(active.host, None);
+        for messages in [
+            &mut starter_messages,
+            &mut member_messages,
+            &mut leaver_messages,
+        ] {
+            let received = messages.try_recv();
+            assert!(matches!(received, Err(mpsc::error::TryRecvError::Empty)));
+        }
+        assert_eq!(server.get_client_room(&leaver).await, None);
+        let stored = server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.lobby_state, LobbyState::Finalized);
+        assert_eq!(
+            stored.players.keys().copied().collect::<BTreeSet<_>>(),
+            remaining
+        );
+        assert_eq!(
+            stored
+                .ready_players
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            remaining
+        );
+        assert_eq!(
+            server
+                .room_coordinator
+                .current_ready_players(&room_id)
+                .await
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            remaining
+        );
+    }
+}
