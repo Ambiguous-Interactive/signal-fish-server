@@ -841,6 +841,14 @@ impl Engine {
             .cloned()
     }
 
+    pub(crate) fn send_channel(&self, peer: PlayerId, label: &str) -> Option<Arc<dyn DataChannel>> {
+        let link = self.peers.get(&peer)?;
+        if link.receive_admission.terminal.load(Ordering::Relaxed) {
+            return None;
+        }
+        link.channels.get(label).cloned()
+    }
+
     pub(crate) fn report_peer_loss(&self, peer: PlayerId, reason: &str) {
         if self.is_paired(peer) {
             tracing::warn!(

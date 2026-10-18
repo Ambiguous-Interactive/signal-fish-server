@@ -5176,3 +5176,53 @@ control pass in native Nextest `c03304d9`. An intentional priority inversion
 makes the repaired control fail in `5794279d`: it records two sends instead of
 one. Production source is restored byte for byte after that negative control.
 Hosted Windows remains the platform acceptance gate.
+
+### F92 — Native deferred exchange can outlive observed channel loss
+
+Issue [#1049](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1049),
+found at `26850024` while continuing open #826, #853, and #889.
+Both native required channels open, form a pair, and queue their gameplay probes.
+One channel closes. Its producer records terminal state and publishes the close,
+but application of that notification stays held. The other channel remains open.
+The old send path sends and credits its queued probe on the failed physical pair.
+The production loop permits deferred work after 16 ordinary inputs; ordinary
+callback priority does not replace an admission check.
+
+Real-channel Nextest `477d2e68` fails all four loss histories: either required
+label closes, with either offerer role. Both healthy controls deliver the exact
+probe to the remote endpoint. The test drives the production deferred-send path
+before applying its actual close event. It controls callback application order;
+it does not reproduce the original #853 or #889 network incidents.
+
+The native send path now looks up a channel through the engine's terminal-state
+barrier immediately before admission. Queue identity and cleanup retain their
+stored-channel lookups. A refused send keeps its exchange debt and uses the
+existing loss handler. A terminal event can still occur after admission; this
+check does not promise cancellation of a send already in progress.
+
+The controls also check Failed and Closed peer callbacks, recoverable
+Disconnected state, stored handles for cleanup, retired callbacks, and usable
+fresh-link channels. Peer-state controls inject the production handler callback
+on real open channels; they do not claim a physical connection-state transition.
+Existing partial-channel and replacement controls retain the fresh exchange and
+old-generation receipt checks. Historical incident acceptance remains open.
+
+Independent SDK README assessments confirm that Rust supplies no WebRTC backend,
+.NET owns signaling and relay only, and Godot uses its own engine mesh. None
+imports this private native reference-client send scheduler. Server wire formats,
+SDK APIs, defaults, and migration requirements do not change.
+
+Final scoped Nextest `4aa72484` passes seven tests, including actual send-call
+exclusion after loss, healthy delivery, fairness, relay fallback, unpaid debt,
+and fresh-link recovery. Strict root/native Clippy, formatting, Markdown, and
+document consistency checks pass. Main-thread adversarial review found no
+further issue within this admission boundary.
+
+Fixed-artifact Nextest `70f8835c` passes three restores, three retries, and three
+browser meshes in 25.276 seconds. All 21 endpoint logs exit zero and retain
+78 channel sends, 78 receipts, nine relay sends, and 18 relay receipts. Complete
+endpoint/server logs and matching before/after hashes for the server, native
+process, browser CLI, and page bundle remain under local
+`progress/session-477-qualified-live` and `progress/session-477`.
+These passing runs do not explain the historical browser failures. Hosted CI,
+platform qualification, and PR feedback remain publication gates.

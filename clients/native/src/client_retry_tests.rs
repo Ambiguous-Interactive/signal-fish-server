@@ -827,7 +827,7 @@ async fn exchange_send_after_channel_close_preserves_relay_and_debt() {
         assert!(!state.exchange_ledger.has_sent(peer, closed_label));
         assert_eq!(
             state.exchange_ledger.has_sent(peer, RELIABLE_LABEL),
-            closed_label == UNRELIABLE_LABEL
+            trigger == "unreliable_gate"
         );
         assert!(!state.exchange_ledger.unmet_criteria().is_empty());
         wire::send_game_data(&mut state.ws, json!({"after_p2p_failure": trigger}))
@@ -2220,4 +2220,120 @@ async fn probe_before_open_and_loss_before_send_preserve_debt_until_replacement(
             replacement.remove_peer(me).await.unwrap();
         }
     }
+}
+
+// Audit #826/#853/#889: the callback producer can observe loss before dispatch.
+#[tokio::test]
+async fn deferred_exchange_respects_observed_loss_before_close_dispatch() {
+    let mut failures = Vec::new();
+    for initiate in [false, true] {
+        for closed_label in [None, Some(RELIABLE_LABEL), Some(UNRELIABLE_LABEL)] {
+            let (ws, mut server_ws) = crate::socket_tests::websocket_pair().await;
+            let cli = Cli::parse_from([
+                "native",
+                "--server-url",
+                "ws://unused.invalid",
+                "--create-room",
+                "--disable-mdns",
+                "--exchange",
+            ]);
+            let me = PlayerId::from_u128(1);
+            let peer = PlayerId::from_u128(2);
+            let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
+            state.current_session_generation = Some(SessionGeneration::from_u128(3));
+            state.establish_pair(peer, initiate).await.unwrap();
+            let (mut remote, opens, mut remote_events) =
+                open_physical_pair_with_events(&mut state, &mut server_ws, peer, None).await;
+            for event in opens {
+                state.handle_engine_event(event).await.unwrap();
+            }
+            let surviving_label = if closed_label == Some(RELIABLE_LABEL) {
+                UNRELIABLE_LABEL
+            } else {
+                RELIABLE_LABEL
+            };
+            state
+                .deferred_exchange
+                .retain(|send| send.label == surviving_label);
+            assert_eq!(state.deferred_exchange.len(), 1);
+            let survivor = state.engine.channel(peer, surviving_label).unwrap();
+            let closed = if let Some(label) = closed_label {
+                state
+                    .engine
+                    .channel(peer, label)
+                    .unwrap()
+                    .close()
+                    .await
+                    .unwrap();
+                Some(
+                    tokio::time::timeout(Duration::from_secs(2), async {
+                        loop {
+                            let event = state.engine_rx.recv().await.unwrap();
+                            if let EngineEvent::ChannelClosed {
+                                label: observed, ..
+                            } = &event
+                            {
+                                if observed == label {
+                                    break event;
+                                }
+                            }
+                        }
+                    })
+                    .await
+                    .expect("producer observes required-channel loss before dispatch"),
+                )
+            } else {
+                None
+            };
+            assert_eq!(
+                survivor.ready_state().await.unwrap(),
+                rtc::data_channel::RTCDataChannelState::Open
+            );
+            assert!(
+                state.connected_pairs.contains(&peer),
+                "application has not consumed loss"
+            );
+            let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let send_calls = calls.clone();
+            state.exchange_send_hook = Some(Box::new(move |channel, text| {
+                send_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Box::pin(async move { channel.send_text(&text).await })
+            }));
+            state.process_deferred_exchange().await.unwrap();
+            let sent = state
+                .exchange_ledger
+                .has_sent_on_current_link(peer, surviving_label);
+            let calls = calls.load(std::sync::atomic::Ordering::Relaxed);
+            if sent != closed_label.is_none() || calls != usize::from(closed_label.is_none()) {
+                failures.push(format!(
+                    "initiate={initiate}, closed={closed_label:?}: send calls={calls}, credited={sent}"
+                ));
+            }
+            if let Some(closed) = closed {
+                assert!(!state.exchange_ledger.unmet_criteria().is_empty());
+                state.handle_engine_event(closed).await.unwrap();
+                assert!(!state.connected_pairs.contains(&peer));
+            } else {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        if let EngineEvent::ChannelMessage { label, text, .. } =
+                            remote_events.recv().await.unwrap()
+                        {
+                            assert_eq!(label, surviving_label);
+                            assert!(is_exchange_probe(me, &label, &text));
+                            break;
+                        }
+                    }
+                })
+                .await
+                .expect("healthy deferred probe reaches the remote channel");
+            }
+            state.remove_pair_obligation(peer).await;
+            remote.remove_peer(me).await.unwrap();
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "observed-loss histories failed: {failures:#?}"
+    );
 }

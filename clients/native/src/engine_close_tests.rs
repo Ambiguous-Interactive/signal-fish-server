@@ -289,6 +289,17 @@ async fn queued_opens_respect_observed_peer_connection_failure() {
                 receive_admission: link.receive_admission.clone(),
             };
             handler.on_connection_state_change(state).await;
+            for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                assert!(
+                    engine.channel(peer, label).is_some(),
+                    "retain handles for cleanup"
+                );
+                assert_eq!(
+                    engine.send_channel(peer, label).is_some(),
+                    state == RTCPeerConnectionState::Disconnected,
+                    "initiator={initiator}, state={state:?}: observed failure fences channel use"
+                );
+            }
             let mut formed = false;
             for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
                 formed |= engine.note_channel_open(peer, label).await;
@@ -314,6 +325,9 @@ async fn queued_opens_respect_observed_peer_connection_failure() {
             handler
                 .on_connection_state_change(RTCPeerConnectionState::Failed)
                 .await;
+            for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                assert!(fresh_engine.send_channel(fresh_peer, label).is_some());
+            }
             assert!(
                 !fresh_engine
                     .note_channel_open(fresh_peer, RELIABLE_LABEL)
