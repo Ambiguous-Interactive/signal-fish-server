@@ -2129,10 +2129,8 @@ async fn concurrent_leave_and_start_publish_exact_membership_in_both_orders() {
             &mut member_messages,
             &mut leaver_messages,
         ] {
-            assert!(matches!(
-                messages.try_recv(),
-                Err(mpsc::error::TryRecvError::Empty)
-            ));
+            let received = messages.try_recv();
+            assert!(matches!(received, Err(mpsc::error::TryRecvError::Empty)));
         }
         drop(gate);
         timeout(Duration::from_secs(1), async { tokio::join!(start, leave) })
@@ -2181,10 +2179,8 @@ async fn concurrent_leave_and_start_publish_exact_membership_in_both_orders() {
             &mut member_messages,
             &mut leaver_messages,
         ] {
-            assert!(matches!(
-                messages.try_recv(),
-                Err(mpsc::error::TryRecvError::Empty)
-            ));
+            let received = messages.try_recv();
+            assert!(matches!(received, Err(mpsc::error::TryRecvError::Empty)));
         }
         assert_eq!(server.get_client_room(&leaver).await, None);
         let stored = server
