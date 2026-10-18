@@ -2050,3 +2050,188 @@ async fn physical_replacement_resends_probes_without_erasing_logical_evidence() 
         replacement.remove_peer(state.my_id).await.unwrap();
     }
 }
+
+// Audit #826/#853/#889: control probe, open, loss, and replacement dispatch separately.
+#[tokio::test]
+async fn probe_before_open_and_loss_before_send_preserve_debt_until_replacement() {
+    for initiate in [false, true] {
+        for early_label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            let (ws, mut server_ws) = crate::socket_tests::websocket_pair().await;
+            let cli = Cli::parse_from([
+                "native",
+                "--server-url",
+                "ws://unused.invalid",
+                "--create-room",
+                "--disable-mdns",
+                "--exchange",
+                "--p2p-retry-count",
+                "1",
+            ]);
+            let me = PlayerId::from_u128(1);
+            let peer = PlayerId::from_u128(2);
+            let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
+            state.current_session_generation = Some(SessionGeneration::from_u128(3));
+            state.establish_pair(peer, initiate).await.unwrap();
+            let (mut remote, opens, _remote_events) =
+                open_physical_pair_with_events(&mut state, &mut server_ws, peer, None).await;
+            let late_label = if early_label == RELIABLE_LABEL {
+                UNRELIABLE_LABEL
+            } else {
+                RELIABLE_LABEL
+            };
+            let mut delayed_receipt = None;
+            let context = format!("initiate={initiate}, early_label={early_label}");
+            let original_generation = opens[0].peer_generation().1;
+            for label in [early_label, late_label] {
+                remote
+                    .channel(me, label)
+                    .unwrap()
+                    .send_text(&json!({"from": peer, "channel": label, "seq": 0}).to_string())
+                    .await
+                    .unwrap();
+                let receipt = tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        if let event @ EngineEvent::ChannelMessage { .. } =
+                            state.engine_rx.recv().await.unwrap()
+                        {
+                            break event;
+                        }
+                    }
+                })
+                .await
+                .expect("real probe arrives while local open callbacks are held");
+                let EngineEvent::ChannelMessage {
+                    peer: received_peer,
+                    generation,
+                    label: ref received_label,
+                    ..
+                } = receipt
+                else {
+                    unreachable!()
+                };
+                assert_eq!(received_peer, peer, "{context}: receipt sender");
+                assert_eq!(
+                    generation, original_generation,
+                    "{context}: receipt generation"
+                );
+                assert_eq!(received_label, label, "{context}: receipt label");
+                if label == early_label {
+                    state.handle_engine_event(receipt).await.unwrap();
+                } else {
+                    delayed_receipt = Some(receipt);
+                }
+            }
+            assert!(state.connected_pairs.is_empty());
+            assert!(state.exchange_ledger.received[&peer].contains(early_label));
+            for event in opens {
+                state.handle_engine_event(event).await.unwrap();
+            }
+            assert!(state.connected_pairs.contains(&peer));
+            assert_eq!(state.deferred_exchange.len(), 2);
+            assert!(state.exchange_ledger.sent.is_empty());
+            state
+                .engine
+                .channel(peer, early_label)
+                .unwrap()
+                .close()
+                .await
+                .unwrap();
+            let closed = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let event @ EngineEvent::ChannelClosed { .. } =
+                        state.engine_rx.recv().await.unwrap()
+                    {
+                        break event;
+                    }
+                }
+            })
+            .await
+            .expect("required-channel close overtakes deferred sends");
+            let EngineEvent::ChannelClosed {
+                peer: closed_peer,
+                generation,
+                label: ref closed_label,
+            } = closed
+            else {
+                unreachable!()
+            };
+            assert_eq!(closed_peer, peer, "{context}: closed sender");
+            assert_eq!(
+                generation, original_generation,
+                "{context}: closed generation"
+            );
+            assert_eq!(closed_label, early_label, "{context}: closed label");
+            state.handle_engine_event(closed).await.unwrap();
+            assert!(!state.engine.is_paired(peer));
+            assert_eq!(
+                state.deferred_exchange.len(),
+                2,
+                "old sends remain queued for identity fencing"
+            );
+            assert_eq!(state.exchange_ledger.unmet_criteria().len(), 2);
+            assert!(state.exchange_ledger.received[&peer].contains(early_label));
+
+            state.rebuild_pair(peer, 1, false).await.unwrap();
+            remote.remove_peer(me).await.unwrap();
+            let (mut replacement, opens, mut replacement_events) =
+                open_physical_pair_with_events(&mut state, &mut server_ws, peer, None).await;
+            for event in opens {
+                state.handle_engine_event(event).await.unwrap();
+            }
+            state
+                .handle_engine_event(delayed_receipt.unwrap())
+                .await
+                .unwrap();
+            assert!(
+                !state.exchange_ledger.received[&peer].contains(late_label),
+                "{context}: old generation cannot repay missing receive debt"
+            );
+            assert_eq!(state.deferred_exchange.len(), 4);
+            for _ in 0..2 {
+                state.process_deferred_exchange().await.unwrap();
+            }
+            assert!(
+                state.exchange_ledger.sent.is_empty(),
+                "{context}: old queued sends cannot credit the replacement"
+            );
+            while !state.deferred_exchange.is_empty() {
+                state.process_deferred_exchange().await.unwrap();
+            }
+            let mut labels = BTreeSet::new();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while labels.len() < 2 {
+                    if let EngineEvent::ChannelMessage { label, text, .. } =
+                        replacement_events.recv().await.unwrap()
+                    {
+                        assert!(is_exchange_probe(me, &label, &text));
+                        assert!(labels.insert(label), "replacement sends each probe once");
+                    }
+                }
+            })
+            .await
+            .expect("both replacement probes reach the remote endpoint");
+            assert_eq!(
+                state.exchange_ledger.unmet_criteria(),
+                [format!(
+                    "exchange incomplete (received from {peer}; missing {late_label})"
+                )]
+            );
+            replacement
+                .channel(me, late_label)
+                .unwrap()
+                .send_text(&json!({"from": peer, "channel": late_label, "seq": 0}).to_string())
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !state.exchange_ledger.unmet_criteria().is_empty() {
+                    let event = state.engine_rx.recv().await.unwrap();
+                    state.handle_engine_event(event).await.unwrap();
+                }
+            })
+            .await
+            .expect("fresh replacement receipt repays the remaining debt");
+            state.remove_pair_obligation(peer).await;
+            replacement.remove_peer(me).await.unwrap();
+        }
+    }
+}

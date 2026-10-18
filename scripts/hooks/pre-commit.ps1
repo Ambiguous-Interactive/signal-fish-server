@@ -52,6 +52,7 @@ $script:ChangelogInternalPathGlobs = [string[]]@(
     ".github/*", ".githooks/*", ".devcontainer/*", ".config/*", ".vscode/*", ".claude/*",
     # Dev/build/agent directories
     "scripts/*", "tests/*", "test-fixtures/*", "formal/*", ".llm/*", "target/*", "progress/*",
+    "clients/browser/src/*.test.ts", "clients/browser/scripts/test.mjs",
     "clients/browser/tests/*", "clients/native/tests/*", "clients/fortress/tests/*", "clients/fortress-wasm/tests/*",
     "benches/encoding/*",
     # Standalone compatibility fixture sources (both packages publish = false)
