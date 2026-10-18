@@ -260,3 +260,72 @@ async fn queued_channel_opens_do_not_connect_a_closed_pair() {
         }
     }
 }
+
+// Regression #1046: queued opens must honor an already observed terminal state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_opens_respect_observed_peer_connection_failure() {
+    for initiator in [true, false] {
+        for state in [
+            RTCPeerConnectionState::Disconnected,
+            RTCPeerConnectionState::Failed,
+            RTCPeerConnectionState::Closed,
+        ] {
+            let mut pair = LivePair::connect().await;
+            let (engine, peer) = if initiator {
+                (&mut pair.sender, pair.receiver_id)
+            } else {
+                (&mut pair.receiver, pair.sender_id)
+            };
+            let link = engine.peers.get_mut(&peer).unwrap();
+            // Retain real open channels but hold their application-level formation.
+            link.open_labels.clear();
+            link.pair_connected = false;
+            let handler = PeerHandler {
+                peer,
+                generation: link.generation,
+                crippled: false,
+                events: engine.events.clone(),
+                channel_admission: link.channel_admission.clone(),
+                receive_admission: link.receive_admission.clone(),
+            };
+            handler.on_connection_state_change(state).await;
+            let mut formed = false;
+            for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                formed |= engine.note_channel_open(peer, label).await;
+            }
+            assert_eq!(
+                formed,
+                state == RTCPeerConnectionState::Disconnected,
+                "initiator={initiator}, state={state:?}: terminal callback precedes queued opens"
+            );
+            pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+            pair.receiver.remove_peer(pair.sender_id).await.unwrap();
+            pair.negotiate().await;
+            assert_eq!(pair.sender.connected_pair_count(), 1);
+            assert_eq!(pair.receiver.connected_pair_count(), 1);
+            let (fresh_engine, fresh_peer) = if initiator {
+                (&mut pair.sender, pair.receiver_id)
+            } else {
+                (&mut pair.receiver, pair.sender_id)
+            };
+            let fresh_link = fresh_engine.peers.get_mut(&fresh_peer).unwrap();
+            fresh_link.open_labels.clear();
+            fresh_link.pair_connected = false;
+            handler
+                .on_connection_state_change(RTCPeerConnectionState::Failed)
+                .await;
+            assert!(
+                !fresh_engine
+                    .note_channel_open(fresh_peer, RELIABLE_LABEL)
+                    .await
+            );
+            assert!(
+                fresh_engine
+                    .note_channel_open(fresh_peer, UNRELIABLE_LABEL)
+                    .await,
+                "retired callbacks cannot terminate a fresh link"
+            );
+            pair.cleanup().await;
+        }
+    }
+}

@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87; expired relay sends in F88; relay receipt admission in F89 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87; expired relay sends in F88; relay receipt admission in F89; terminal callback formation in F91 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17; Windows backpressure fixtures in F75 |
 
@@ -5094,3 +5094,85 @@ Final fixed-artifact `e609e1d4` passes restore, mesh, and retry on the formatted
 source. All seven endpoints exit zero. The final-fixed-before and
 final-fixed-after manifests match for all four files; retain these manifests
 with `progress/session-472-qualified-6` as the final source qualification.
+
+### F91 — Queued opens can form a pair after observed transport failure
+
+Issue [#1046](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1046),
+found at `bbd9f6ff` while investigating open #826, #853, and #889.
+The browser holds output after an early probe on its first required channel.
+Its second channel opens and queues application work. Either required channel
+then emits an error while its `readyState` remains open. Releasing output lets
+the old engine form a pair and send probes before it applies the queued error.
+That creates receipt debt on a link already observed to have failed.
+A separate control reproduces the same ordering after peer-connection failure.
+
+The real-dispatch browser controls fail on the original engine at
+`reliable/queued-error-first` and `reliable/queued-pc-failed`. Native Nextest
+`d4ad5267` also fails after the production peer handler observes `Failed`.
+Its channels are real and open; its application formation is held. The test
+injects the connection-state callback. It does not reproduce network failure
+or claim that the underlying connection actually changed state.
+
+Both engines now record terminal state before publishing failure notifications.
+Queued opens cannot form a terminal link. Browser callbacks also stop new
+channel input, candidate output, channel access, and negotiation on that link.
+Native channel close, error, receive rejection, and event-stream termination
+mark the same formation barrier. Identity checks still let each orchestrator
+consume its terminal notification and retire the correct physical link.
+A transient `disconnected` state remains recoverable.
+
+Browser controls cover both first-label orders, errors and closes on either
+channel, failed and closed peer connections, held output, healthy input,
+duplicate terminal callbacks, retired callbacks, and successful fresh-link
+exchange. The native controls cover both offerer roles, failed and closed
+callbacks, the disconnected control, and fresh-link formation after retired
+callbacks. These are bounded callback histories. The original #853 and #889
+incidents remain unexplained and their acceptance stays open.
+
+Final native Nextest `c6044e92` passes ten focused controls, including the
+terminal histories, channel shutdown, old-handler recovery, early probes,
+replacement links, receive rejection, and signaling fairness. Browser package
+tests, type checking, formatting, strict native/root Clippy, and documentation
+checks pass. Manual adversarial review found no remaining issue in this scope.
+
+Fixed-artifact Nextest `edf63708` passes three restores, three link retries,
+and three three-player browser meshes. All 21 endpoints exit zero and retain
+78 channel sends and 78 receipts, plus nine relay sends and 18 relay receipts.
+Complete streams and server logs remain under local
+`progress/session-476-qualified-live`. The before/after SHA-256 manifests match
+for the server, native process, browser CLI, and page bundle. These passing
+runs do not explain the original browser incidents.
+
+The external SDK README assessments at blob `112c546c` (Rust), `467024de`
+(.NET), and `d491bcd6` (Godot) show independent implementations. Rust provides
+no WebRTC backend, .NET provides signaling and relay, and Godot owns its
+engine mesh. None imports these private reference-client engines. No server
+protocol, SDK API, default, or migration changes.
+
+### A22 — Decoder-ready signaling control on Windows
+
+Main WebRTC Interop run `39099313438` at `bbd9f6ff` fails only the Windows
+native unit job, `117592132901`. The immediate-exchange control observes two
+sends where it requires one. It still consumes Pong, relay data, and Close.
+Issue [#1047](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1047)
+records the failure and its full acceptance.
+
+The old fixture peeks a cloned TCP socket before releasing its first send.
+That proves kernel-buffered bytes on the peek handle. It does not prove that
+the original WebSocket read future is ready. The production loop prioritizes
+ready input and bounds input bursts to preserve send fairness. The old
+fixture does not establish the readiness its assertion requires. The hosted
+log alone does not identify the exact Windows completion schedule.
+
+The control now completes its first real channel send, then places the same
+Pong, relay, and Close frames in the real WebSocket decoder with
+`from_partially_read`. All original debt, first-label credit, Pong, relay,
+Close, and exact one-send assertions remain. The real-socket mesh-signaling
+and bounded callback-fairness controls remain separate. No sleep, retry,
+platform skip, timeout increase, or production arbitration change is added.
+
+The repaired control, real-socket mesh-signaling control, and callback-fairness
+control pass in native Nextest `c03304d9`. An intentional priority inversion
+makes the repaired control fail in `5794279d`: it records two sends instead of
+one. Production source is restored byte for byte after that negative control.
+Hosted Windows remains the platform acceptance gate.

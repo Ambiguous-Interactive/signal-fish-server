@@ -5,10 +5,28 @@ function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
-// Audit #853/#889: an incoming probe can precede the second required channel.
+// Regression #1046, audit #853/#889: an incoming probe can precede the second required channel.
+const histories = [
+  'live',
+  'wrong-probe',
+  'closed',
+  'error',
+  'queued-error-first',
+  'queued-error-second',
+  'queued-close-first',
+  'queued-close-second',
+  'queued-pc-failed',
+  'queued-pc-closed',
+  'queued-pc-disconnected',
+].flatMap((scenario) => {
+  const recoveries = ['live', 'wrong-probe', 'queued-pc-disconnected'].includes(scenario)
+    ? [false]
+    : [false, true];
+  return recoveries.map((recover) => ({ scenario, recover }));
+});
 for (const firstLabel of ['reliable', 'unreliable']) {
-  for (const scenario of ['live', 'wrong-probe', 'closed', 'error'] as const) {
-    const description = `${firstLabel}/${scenario}`;
+  for (const { scenario, recover } of histories) {
+    const description = `${firstLabel}/${scenario}/recover=${recover}`;
     const originalSocket = globalThis.WebSocket;
     const originalPc = globalThis.RTCPeerConnection;
     const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
@@ -60,6 +78,8 @@ for (const firstLabel of ['reliable', 'unreliable']) {
       }
     }
     class Connection {
+      connectionState = 'new';
+      onconnectionstatechange: (() => void) | null = null;
       ondatachannel: ((event: { channel: Channel }) => void) | null = null;
       constructor() {
         connection = this;
@@ -173,10 +193,25 @@ for (const firstLabel of ['reliable', 'unreliable']) {
       if (scenario === 'error') first.onerror?.();
       connection.ondatachannel?.({ channel: second });
       await turn();
+      // Both open notifications are queued behind receipt output. An error
+      // need not change readyState, so queue order alone cannot fence formation.
+      if (scenario.startsWith('queued-pc-')) {
+        connection.connectionState = scenario.slice('queued-pc-'.length);
+        connection.onconnectionstatechange?.();
+      } else if (scenario.startsWith('queued-')) {
+        const failed = scenario.endsWith('first') ? first : second;
+        if (scenario.startsWith('queued-close')) {
+          failed.close();
+          failed.onclose?.();
+        } else failed.onerror?.();
+      }
       second.receive();
       release();
       await turn();
-      const terminal = scenario === 'closed' || scenario === 'error';
+      const terminal =
+        scenario === 'closed' ||
+        scenario === 'error' ||
+        (scenario.startsWith('queued-') && scenario !== 'queued-pc-disconnected');
       assert(
         probes.length === (terminal ? 0 : 2),
         `${description}: terminal partial pair cannot send probes`,
@@ -198,6 +233,38 @@ for (const firstLabel of ['reliable', 'unreliable']) {
               ['reliable', 'unreliable'].map((channel) => ({ from: me, channel, seq: 0 })),
             ),
           `${description}: send one documented probe on each required channel`,
+        );
+      }
+      if (recover) {
+        socket.deliver('SessionPlan', {
+          generation: peer,
+          topology: 'mesh',
+          transport: 'webrtc',
+          fallback: 'relay',
+          ice_servers: [],
+          peers: [{ player_id: peer, initiate: false }],
+        });
+        await turn();
+        // Old terminal callbacks must not retire the fresh generation.
+        first.onerror?.();
+        second.onclose?.();
+        const fresh = [new Channel('reliable'), new Channel('unreliable')];
+        for (const channel of fresh) connection.ondatachannel?.({ channel });
+        await turn();
+        for (const channel of fresh) channel.receive();
+        await turn();
+        assert(probes.length === 2, `${description}: fresh link sends both probes`);
+        assert(
+          events.filter((event) => event['event'] === 'p2p_pair_connected').length === 1 &&
+            events.filter((event) => event['event'] === 'channel_message').length === 3,
+          `${description}: only the fresh pair creates exchange debt and repays it`,
+        );
+        assert(
+          events.some(
+            (event) =>
+              event['event'] === 'transport_status_sent' && event['connected'] === true,
+          ),
+          `${description}: fresh link restores connected transport`,
         );
       }
       now = 1100;

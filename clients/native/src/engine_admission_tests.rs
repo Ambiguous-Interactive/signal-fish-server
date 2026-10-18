@@ -251,6 +251,7 @@ fn handler_for(
         crippled: true,
         events,
         channel_admission: link.channel_admission.clone(),
+        receive_admission: link.receive_admission.clone(),
     }
 }
 

@@ -38,6 +38,7 @@ async fn required_remote_channels_reject_wrong_delivery_modes() {
                 crippled: true,
                 events: tx,
                 channel_admission: link.channel_admission.clone(),
+                receive_admission: link.receive_admission.clone(),
             };
             let invalid = pc
                 .create_data_channel(

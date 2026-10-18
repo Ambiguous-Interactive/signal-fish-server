@@ -925,8 +925,6 @@ test('removed browser peer links cannot emit callbacks after the same peer is re
 
     // These callbacks are valid when accepted by the engine, but their queued
     // orchestrator work is deliberately held until after replacement.
-    stalePc.connectionState = 'failed';
-    stalePc.onconnectionstatechange?.();
     stalePc.onicecandidate?.({ candidate: { toJSON: () => ({ candidate: 'queued-stale' }) } });
     staleChannel.readyState = 'open';
     staleChannel.onopen?.();
@@ -935,8 +933,10 @@ test('removed browser peer links cannot emit callbacks after the same peer is re
     staleChannel.onerror?.();
     errorFirstChannel.onerror?.();
     errorFirstChannel.onclose?.();
+    stalePc.connectionState = 'failed';
+    stalePc.onconnectionstatechange?.();
     const queuedBeforeReplacement = queued.length;
-    if (queuedBeforeReplacement !== 6 || observed.length !== 0) {
+    if (queuedBeforeReplacement !== 5 || observed.length !== 0) {
       throw new Error('old-link callbacks were not held at the queue boundary');
     }
 

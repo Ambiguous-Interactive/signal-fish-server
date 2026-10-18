@@ -482,3 +482,113 @@ for (const path of ['offer', 'answer'] as const) {
   }
 }
 console.error('ok - browser phase snapshots distinguish SDP, ICE, DTLS, and SCTP progress');
+
+// Regression #1046: failure is terminal before application callbacks drain.
+for (const failure of ['channel-error', 'channel-close', 'pc-failed', 'pc-closed'] as const) {
+  const originalPc = globalThis.RTCPeerConnection;
+  let connection!: Connection;
+  const observed: string[] = [];
+  class Channel {
+    readyState = 'open';
+    ordered = true;
+    maxRetransmits = null;
+    maxPacketLifeTime = null;
+    onopen: (() => void) | null = null;
+    onclose: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    constructor(readonly label: string) {}
+    close(): void {
+      this.readyState = 'closed';
+    }
+  }
+  class Connection {
+    connectionState = 'connected';
+    onconnectionstatechange: (() => void) | null = null;
+    onicecandidate: ((event: { candidate: { toJSON(): object } }) => void) | null = null;
+    ondatachannel: ((event: { channel: Channel }) => void) | null = null;
+    constructor() {
+      connection = this;
+    }
+    close(): void {}
+    async addIceCandidate(): Promise<void> {
+      throw new Error('terminal candidate reached stack');
+    }
+    async setRemoteDescription(): Promise<void> {
+      throw new Error('terminal SDP reached stack');
+    }
+  }
+  try {
+    globalThis.RTCPeerConnection = Connection as unknown as typeof RTCPeerConnection;
+    const engine = new Engine(false, {
+      onLocalCandidate: () => observed.push('candidate'),
+      onPcState: () => observed.push('pc-state'),
+      onChannelOpen: () => observed.push('open'),
+      onChannelClosed: () => observed.push('close'),
+      onChannelMessage: () => {
+        observed.push('message');
+      },
+    });
+    await engine.pairWith('peer', false, []);
+    const channel = new Channel(RELIABLE_LABEL);
+    connection.ondatachannel?.({ channel });
+    await Promise.resolve();
+    channel.onmessage?.({ data: 'before-failure' });
+    assert(observed.join(',') === 'open,message', `${failure}: live input remains visible`);
+    if (failure.startsWith('pc-')) {
+      connection.connectionState = failure.slice(3);
+      connection.onconnectionstatechange?.();
+    } else if (failure === 'channel-error') channel.onerror?.();
+    else {
+      channel.close();
+      channel.onclose?.();
+    }
+    const afterFailure = observed.length;
+    channel.onopen?.();
+    channel.onmessage?.({ data: 'after-failure' });
+    channel.onerror?.();
+    channel.onclose?.();
+    connection.onicecandidate?.({ candidate: { toJSON: () => ({ candidate: 'late' }) } });
+    const late = new Channel(RELIABLE_LABEL);
+    connection.ondatachannel?.({ channel: late });
+    await Promise.resolve();
+    assert(observed.length === afterFailure, `${failure}: terminal input cannot add work`);
+    assert(late.readyState === 'closed', `${failure}: terminal announcements close`);
+    assert(
+      engine.channel('peer', RELIABLE_LABEL) === undefined,
+      `${failure}: no terminal sends`,
+    );
+    for (const operation of [
+      () => engine.handleOffer('peer', 'late'),
+      () => engine.handleAnswer('peer', 'late'),
+      () => engine.handleRemoteCandidate('peer', '{}'),
+    ]) {
+      let error: unknown;
+      try {
+        await operation();
+      } catch (failure) {
+        error = failure;
+      }
+      assert(
+        error instanceof Error && error.message.includes('terminal peer'),
+        `${failure}: reject new negotiation before stack calls`,
+      );
+    }
+    engine.removePeer('peer');
+    await engine.pairWith('peer', false, []);
+    const fresh = new Channel(RELIABLE_LABEL);
+    connection.ondatachannel?.({ channel: fresh });
+    await Promise.resolve();
+    fresh.onmessage?.({ data: 'fresh' });
+    assert(
+      observed.slice(afterFailure).join(',') === 'open,message',
+      `${failure}: fresh link accepts input`,
+    );
+    engine.removePeer('peer');
+  } finally {
+    globalThis.RTCPeerConnection = originalPc;
+  }
+}
+console.error(
+  'ok - terminal browser links reject new input, sends, and negotiation until replacement',
+);

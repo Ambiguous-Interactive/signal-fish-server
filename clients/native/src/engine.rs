@@ -27,6 +27,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -108,6 +109,7 @@ impl MessageQueuePermit {
 struct ChannelReceiveAdmission {
     budget: Arc<MessageQueueBudget>,
     rejected: Mutex<bool>,
+    terminal: AtomicBool,
 }
 
 impl ChannelReceiveAdmission {
@@ -520,6 +522,7 @@ impl Engine {
         let receive_admission = Arc::new(ChannelReceiveAdmission {
             budget: self.message_budget.clone(),
             rejected: Mutex::new(false),
+            terminal: AtomicBool::new(false),
         });
         let handler = Arc::new(PeerHandler {
             peer,
@@ -527,6 +530,7 @@ impl Engine {
             crippled: self.settings.crippled,
             events: self.events.clone(),
             channel_admission: channel_admission.clone(),
+            receive_admission: receive_admission.clone(),
         });
         let udp_addrs = session_udp_addrs(
             self.settings,
@@ -798,6 +802,9 @@ impl Engine {
             tracing::warn!(%peer, label, "channel open for unknown peer");
             return false;
         };
+        if link.receive_admission.terminal.load(Ordering::Relaxed) {
+            return false;
+        }
         link.open_labels.insert(label.to_string());
         let fully_open = link.open_labels.contains(RELIABLE_LABEL)
             && link.open_labels.contains(UNRELIABLE_LABEL);
@@ -818,6 +825,9 @@ impl Engine {
             ) {
                 return false;
             }
+        }
+        if link.receive_admission.terminal.load(Ordering::Relaxed) {
+            return false;
         }
         link.pair_connected = true;
         true
@@ -983,6 +993,7 @@ struct PeerHandler {
     crippled: bool,
     events: mpsc::UnboundedSender<EngineEvent>,
     channel_admission: Arc<Mutex<RequiredChannelAdmission>>,
+    receive_admission: Arc<ChannelReceiveAdmission>,
 }
 
 #[derive(Default)]
@@ -1061,6 +1072,14 @@ impl PeerConnectionEventHandler for PeerHandler {
     }
 
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
+        if matches!(
+            state,
+            RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed
+        ) {
+            self.receive_admission
+                .terminal
+                .store(true, Ordering::Relaxed);
+        }
         let _ = self.events.send(EngineEvent::PcState {
             peer: self.peer,
             generation: self.generation,
@@ -1443,6 +1462,7 @@ fn spawn_channel_event_loop(
                     let Some((text, queue_permit)) = admission.decode_and_reserve(&message.data)
                     else {
                         *rejected = true;
+                        admission.terminal.store(true, Ordering::Relaxed);
                         let _ = events.send(EngineEvent::ChannelReceiveRejected {
                             peer,
                             generation,
@@ -1469,10 +1489,14 @@ fn spawn_channel_event_loop(
                     }
                 }
                 DataChannelEvent::OnError => {
+                    admission.terminal.store(true, Ordering::Relaxed);
                     tracing::warn!(%peer, channel = %label, "data channel became unreadable");
                     break;
                 }
-                DataChannelEvent::OnClose => break,
+                DataChannelEvent::OnClose => {
+                    admission.terminal.store(true, Ordering::Relaxed);
+                    break;
+                }
                 DataChannelEvent::OnClosing
                 | DataChannelEvent::OnBufferedAmountLow
                 | DataChannelEvent::OnBufferedAmountHigh => {}
@@ -1493,6 +1517,7 @@ fn spawn_channel_event_loop(
             Driver shutdown can end streams without OnClose. Shared receive
             rejection already publishes the link's terminal event.
         */
+        admission.terminal.store(true, Ordering::Relaxed);
         let rejected = admission.rejected.lock().await;
         if !*rejected && (label == RELIABLE_LABEL || label == UNRELIABLE_LABEL) {
             let _ = events.send(EngineEvent::ChannelClosed {
@@ -2826,6 +2851,7 @@ mod tests {
             crippled: true,
             events: tx,
             channel_admission: engine.peers[&peer].channel_admission.clone(),
+            receive_admission: engine.peers[&peer].receive_admission.clone(),
         };
         let pc = engine.peers[&peer].pc.clone();
         let labels = [
