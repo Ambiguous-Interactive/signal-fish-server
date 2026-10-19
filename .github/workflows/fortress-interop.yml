@@ -90,7 +90,7 @@ jobs:
         with:
           toolchain: ${{ steps.deny-msrv.outputs.version }}
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.29
         with:
           tool: cargo-deny@0.20.2
       - name: Run cargo-deny (Fortress fixture)
