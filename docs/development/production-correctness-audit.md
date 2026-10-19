@@ -52,7 +52,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
 | A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32; concurrent join/start histories in session 471; concurrent departure/start histories in session 474 |
 | A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial; two ordered concurrent unready/start histories and recovery checked in session 456; concurrent join/start histories in session 471; concurrent departure/start histories in session 474 |
-| A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial |
+| A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial; concurrent transfer/start and host election checked in session 483 |
 | A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31 |
 | A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471 |
 | A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial |
@@ -99,6 +99,64 @@ baseline. It maps audit ownership; it does not certify these operations.
 | `TransferAuthority` | A09, A11 | Eligible live member, replay/publication order, transport-host independence |
 
 ## Bounded histories without a confirmed defect
+
+### A08/A09/A11/A20 — Session 483 gameplay ordering investigations
+
+At `e190bed7`, new histories investigate open #826, #853, and #889.
+No new runtime defect is confirmed. These controls narrow specific hypotheses;
+they do not establish the historical browser incident causes.
+
+The server control queues TransferAuthority and StartGame from different source
+lifecycles against the same held room event gate in both FIFO orders.
+The successor can start only after transfer commits. A premature start must
+leave the lobby and active plan unchanged; a later retry must succeed.
+All three members receive the exact authority snapshot, GameStarting roster,
+and personalized Host/WebRTC plan. Stored authority flags, readiness, host,
+peer sets, offerer directions, common generation, and empty output tails agree.
+The private refusal has no order contract against AuthorityChanged; both orders
+are accepted. Bypassing only the start-role comparison fails negative control
+Nextest `b6aa3863`. Production source is restored before final validation. Scoped Nextest
+`9cb1e2e9` passes this history and three neighboring contention controls.
+After naming empty-queue reads, final `ea685421` passes the new history and
+all 11 source-policy controls pass.
+
+The native control holds either required RemoteChannel admission while a real
+native offerer opens both channels and sends both probes. The admitted sibling
+receives credit before pair formation. The held label's RTC messages_received
+counter must reach one before its application poller starts. The RTC core
+increments this counter after complete message decode; DCEP does not count.
+This proves transport arrival before delayed admission, without a sleep or
+cross-stream ordering assumption. Later admission preserves both receipts,
+forms one pair, and sends exactly two deferred replies. Repeated admission and
+open observation do not add replies. Both replies reach the remote endpoint.
+Dropping receipt credit until pair formation fails Nextest `13b55c0b`.
+Restored source passes `52b478c2`; final `668fc044` also passes.
+This is native/native transport evidence;
+it does not prove Chromium has the same callback schedule.
+
+The browser controls hold remote SDP while candidates arrive before and during
+its application, for both valid offerer roles. Candidates retain their exact
+sdpMid, sdpMLineIndex, and usernameFragment and flush in arrival order only after
+SDP completes. One rejected early candidate must not discard later candidates,
+block stable negotiation, or suppress the correctly addressed and generation
+stamped Answer. Later trickle ICE still reaches the same link. In-memory
+ablations that reverse the queue, drop media binding, or abort on rejection each
+fail the new engine assertions. Aborting on rejection also fails the
+orchestrator control. These are controlled browser-stack histories, not a real
+Chromium reproduction. Local scripts and complete outputs remain in ignored
+`progress/browser-negotiation-validation.*` and `progress/session-483`.
+
+Independent review corrected a private-error ordering assumption and verified
+the real RTC receive barrier. Changes are internal test coverage and audit
+evidence. No runtime, wire, SDK, configuration, or dependency behavior changes;
+no changelog or external SDK migration is required. The wider audit and both
+historical investigations remain open.
+
+Session 483 fixed-artifact qualification passes three restores, three retries,
+and three browser meshes in Nextest `f8529003`, `23ad71a6`, `ce26e9ab`.
+All 21 endpoint streams exit zero, with 78 channel sends and 78 receipts.
+Server, native executable, browser CLI, and page hashes match before and after.
+Complete endpoint streams and server logs remain in local `progress/session-483`.
 
 ### A07/A08/A11 — Concurrent departure and game start
 

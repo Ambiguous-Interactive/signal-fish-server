@@ -897,3 +897,115 @@ console.error(
   }
 }
 console.error('ok - browser live-state fencing permits reentrant failure observers');
+
+// Investigation #853/#889: rejected early ICE must preserve SDP, binding, and FIFO.
+for (const path of ['offer', 'answer'] as const) {
+  const originalPc = globalThis.RTCPeerConnection;
+  const originalError = console.error;
+  const calls: string[] = [];
+  const applied: RTCIceCandidateInit[] = [];
+  let releaseRemote!: () => void;
+  let releaseCandidate!: () => void;
+  const remoteHeld = new Promise<void>((resolve) => {
+    releaseRemote = resolve;
+  });
+  const candidateHeld = new Promise<void>((resolve) => {
+    releaseCandidate = resolve;
+  });
+  const first = {
+    candidate: 'candidate:1 1 udp 1234 192.0.2.1 1234 typ host',
+    sdpMid: 'data',
+    sdpMLineIndex: 0,
+    usernameFragment: 'remote-ufrag',
+  };
+  class Connection {
+    createDataChannel(label: string): object {
+      return { label, readyState: 'connecting' };
+    }
+    async createOffer(): Promise<RTCSessionDescriptionInit> {
+      return { type: 'offer', sdp: 'local-offer' };
+    }
+    async setRemoteDescription(description: RTCSessionDescriptionInit): Promise<void> {
+      calls.push(`remote:${description.type}`);
+      await remoteHeld;
+      calls.push('remote:complete');
+    }
+    async addIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {
+      applied.push(candidate);
+      calls.push(`candidate:${applied.length}`);
+      if (applied.length === 1) {
+        await candidateHeld;
+        throw new Error('one candidate is not usable');
+      }
+    }
+    async createAnswer(): Promise<RTCSessionDescriptionInit> {
+      calls.push('answer');
+      return { type: 'answer', sdp: 'local-answer' };
+    }
+    async setLocalDescription(): Promise<void> {
+      calls.push('local');
+    }
+    close(): void {}
+  }
+  try {
+    globalThis.RTCPeerConnection = Connection as unknown as typeof RTCPeerConnection;
+    console.error = () => {};
+    const engine = new Engine(false, {
+      onLocalCandidate: () => {},
+      onPcState: () => {},
+      onChannelOpen: () => {},
+      onChannelClosed: () => {},
+      onChannelMessage: () => {},
+    });
+    await engine.pairWith('peer', path === 'answer', []);
+    calls.length = 0;
+    await engine.handleRemoteCandidate('peer', JSON.stringify(first));
+    await engine.handleRemoteCandidate('peer', 'bare-candidate');
+    const negotiating =
+      path === 'offer'
+        ? engine.handleOffer('peer', 'remote-offer')
+        : engine.handleAnswer('peer', 'remote-answer');
+    await Promise.resolve();
+    assert(calls.join(',') === `remote:${path}`, `${path}: ICE waits for remote SDP`);
+    await engine.handleRemoteCandidate('peer', 'during-sdp');
+    assert(applied.length === 0, `${path}: ICE arriving during remote SDP also waits`);
+    releaseRemote();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert(
+      calls.join(',') === `remote:${path},remote:complete,candidate:1`,
+      `${path}: later candidates and answer wait for the first candidate`,
+    );
+    releaseCandidate();
+    const answer = await negotiating;
+    assert(
+      JSON.stringify(applied) ===
+        JSON.stringify([
+          first,
+          { candidate: 'bare-candidate', sdpMLineIndex: 0 },
+          { candidate: 'during-sdp', sdpMLineIndex: 0 },
+        ]),
+      `${path}: retain exact media binding and apply early candidates in arrival order`,
+    );
+    assert(
+      calls.join(',') ===
+        `remote:${path},remote:complete,candidate:1,candidate:2,candidate:3${path === 'offer' ? ',answer,local' : ''}`,
+      `${path}: rejected early ICE does not interrupt negotiation`,
+    );
+    assert(
+      answer === (path === 'offer' ? 'local-answer' : undefined),
+      `${path}: offer produces the answer after candidate rejection`,
+    );
+    await engine.handleRemoteCandidate('peer', JSON.stringify(first));
+    assert(applied.length === 4, `${path}: later trickle ICE still reaches the same link`);
+    engine.removePeer('peer');
+  } finally {
+    releaseRemote();
+    releaseCandidate();
+    globalThis.RTCPeerConnection = originalPc;
+    console.error = originalError;
+  }
+}
+console.error(
+  'ok - early ICE preserves media bindings, order, and SDP after candidate rejection',
+);

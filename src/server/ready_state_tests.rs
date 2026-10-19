@@ -2215,3 +2215,273 @@ async fn concurrent_leave_and_start_publish_exact_membership_in_both_orders() {
         );
     }
 }
+
+// The successor may start only after the transfer commits under the room gate.
+#[tokio::test(start_paused = true)]
+async fn concurrent_transfer_and_start_use_committed_authority_in_both_orders() {
+    use crate::protocol::{RoomOperationId, RoomOperationResult};
+    use std::collections::BTreeSet;
+
+    for transfer_first in [true, false] {
+        let server = create_test_server_with_session(SessionConfig {
+            default_topology: Topology::Host,
+            ..SessionConfig::default()
+        })
+        .await;
+        let (authority, mut authority_messages) = register_client(&server).await;
+        let (successor, mut successor_messages) = register_client(&server).await;
+        let (observer, mut observer_messages) = register_client(&server).await;
+        let members = BTreeSet::from([authority, successor, observer]);
+        for (id, name) in [
+            (authority, "Authority"),
+            (successor, "Successor"),
+            (observer, "Observer"),
+        ] {
+            server.set_client_protocol(
+                &id,
+                NegotiatedProtocol {
+                    version: 3,
+                    transports: vec![Transport::Relay, Transport::WebRtc],
+                    topologies: vec![Topology::Relay, Topology::Host],
+                },
+            );
+            server
+                .handle_join_room(
+                    &id,
+                    "transfer-start-contention".into(),
+                    Some("AUTH08".into()),
+                    name.into(),
+                    Some(3),
+                    Some(true),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+        }
+        for id in &members {
+            server.handle_player_ready(id).await;
+        }
+        for messages in [
+            &mut authority_messages,
+            &mut successor_messages,
+            &mut observer_messages,
+        ] {
+            drain_pending(messages);
+        }
+        let room_id = server.get_client_room(&authority).await.unwrap();
+        let operation_id = RoomOperationId::new_v4();
+        let gate = server
+            .message_coordinator
+            .lock_room_event_mutation(&room_id)
+            .await;
+        let transfer =
+            server.handle_transfer_authority_operation(&authority, operation_id, successor);
+        let start = server.handle_start_game(&successor);
+        tokio::pin!(transfer, start);
+        if transfer_first {
+            assert!(futures_util::poll!(&mut transfer).is_pending());
+            assert!(futures_util::poll!(&mut start).is_pending());
+        } else {
+            assert!(futures_util::poll!(&mut start).is_pending());
+            assert!(futures_util::poll!(&mut transfer).is_pending());
+        }
+        let before = server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.authority_player, Some(authority));
+        assert_ne!(before.lobby_state, LobbyState::Finalized);
+        assert!(server.active_session_plan(&room_id).is_none());
+        for messages in [
+            &mut authority_messages,
+            &mut successor_messages,
+            &mut observer_messages,
+        ] {
+            let pending = messages.try_recv();
+            assert!(
+                matches!(pending, Err(mpsc::error::TryRecvError::Empty)),
+                "unexpected room publication: {pending:?}"
+            );
+        }
+        drop(gate);
+        timeout(Duration::from_secs(1), async {
+            tokio::join!(transfer, start)
+        })
+        .await
+        .expect("transfer and start finish after gate release");
+
+        // The private refusal and the room event have no relative-order contract.
+        let mut successor_authority = None;
+        if !transfer_first {
+            let first = recv(&mut successor_messages).await;
+            let second = recv(&mut successor_messages).await;
+            let (refusal, authority_event) =
+                if matches!(first.as_ref(), ServerMessage::Error { .. }) {
+                    (first, second)
+                } else {
+                    (second, first)
+                };
+            assert!(matches!(
+                refusal.as_ref(),
+                ServerMessage::Error {
+                    error_code: Some(ErrorCode::GameStartForbidden),
+                    ..
+                }
+            ));
+            successor_authority = Some(authority_event);
+            let rejected = server
+                .database
+                .get_room_by_id(&room_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_ne!(rejected.lobby_state, LobbyState::Finalized);
+            assert!(server.active_session_plan(&room_id).is_none());
+        }
+        for (recipient, messages) in [
+            (authority, &mut authority_messages),
+            (successor, &mut successor_messages),
+            (observer, &mut observer_messages),
+        ] {
+            let authority_event = if recipient == successor {
+                match successor_authority.take() {
+                    Some(event) => event,
+                    None => recv(messages).await,
+                }
+            } else {
+                recv(messages).await
+            };
+            match authority_event.as_ref() {
+                ServerMessage::AuthorityChanged {
+                    authority_player,
+                    you_are_authority,
+                } => {
+                    assert_eq!(*authority_player, Some(successor));
+                    assert_eq!(*you_are_authority, recipient == successor);
+                }
+                other => panic!("expected committed authority before game start, got {other:?}"),
+            }
+            if recipient == authority {
+                match recv(messages).await.as_ref() {
+                    ServerMessage::RoomOperationResult {
+                        operation_id: actual,
+                        result,
+                    } => {
+                        assert_eq!(*actual, operation_id);
+                        assert!(
+                            matches!(result.as_ref(), RoomOperationResult::AuthorityTransferred { player_id } if *player_id == successor)
+                        );
+                    }
+                    other => panic!("expected correlated transfer result, got {other:?}"),
+                }
+            }
+        }
+        if !transfer_first {
+            for messages in [
+                &mut authority_messages,
+                &mut successor_messages,
+                &mut observer_messages,
+            ] {
+                let pending = messages.try_recv();
+                assert!(
+                    matches!(pending, Err(mpsc::error::TryRecvError::Empty)),
+                    "unexpected room publication: {pending:?}"
+                );
+            }
+            server.handle_start_game(&successor).await;
+        }
+        let mut generation = None;
+        for (recipient, messages) in [
+            (authority, &mut authority_messages),
+            (successor, &mut successor_messages),
+            (observer, &mut observer_messages),
+        ] {
+            match recv(messages).await.as_ref() {
+                ServerMessage::GameStarting { peer_connections } => {
+                    assert_eq!(peer_connections.len(), members.len());
+                    assert_eq!(
+                        peer_connections
+                            .iter()
+                            .map(|p| p.player_id)
+                            .collect::<BTreeSet<_>>(),
+                        members
+                    );
+                    for peer in peer_connections {
+                        assert_eq!(peer.is_authority, peer.player_id == successor);
+                    }
+                }
+                other => panic!("expected GameStarting, got {other:?}"),
+            }
+            match recv(messages).await.as_ref() {
+                ServerMessage::SessionPlan(plan) => {
+                    assert_eq!(plan.topology, Topology::Host);
+                    assert_eq!(plan.transport, Transport::WebRtc);
+                    assert_eq!(plan.host, Some(successor));
+                    assert_eq!(*generation.get_or_insert(plan.generation), plan.generation);
+                    let expected_peers = if recipient == successor {
+                        BTreeSet::from([authority, observer])
+                    } else {
+                        BTreeSet::from([successor])
+                    };
+                    assert_eq!(plan.peers.len(), expected_peers.len());
+                    assert_eq!(
+                        plan.peers
+                            .iter()
+                            .map(|p| p.player_id)
+                            .collect::<BTreeSet<_>>(),
+                        expected_peers
+                    );
+                    assert!(plan
+                        .peers
+                        .iter()
+                        .all(|p| p.initiate == (recipient != successor)));
+                }
+                other => panic!("expected host SessionPlan, got {other:?}"),
+            }
+            let pending = messages.try_recv();
+            assert!(
+                matches!(pending, Err(mpsc::error::TryRecvError::Empty)),
+                "unexpected room publication: {pending:?}"
+            );
+        }
+        let stored = server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.authority_player, Some(successor));
+        assert_eq!(stored.lobby_state, LobbyState::Finalized);
+        assert_eq!(
+            stored.players.keys().copied().collect::<BTreeSet<_>>(),
+            members
+        );
+        for player in stored.players.values() {
+            assert_eq!(player.is_authority, player.id == successor);
+        }
+        assert_eq!(
+            stored
+                .ready_players
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            members
+        );
+        assert_eq!(
+            server
+                .room_coordinator
+                .current_ready_players(&room_id)
+                .await
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            members
+        );
+        assert_eq!(
+            server.active_session_plan(&room_id).unwrap().host,
+            Some(successor)
+        );
+    }
+}

@@ -14,11 +14,13 @@ assert(signalForRetryAttempt(null, 1) === undefined, 'retry raw null is discarde
 
 // Regression #1022: retry markers and fresh signals preserve sender FIFO. The stale inputs below
 // are defensive contract controls; browsers do not request retries themselves.
-for (const [initiate, retryCount] of [
-  [false, 0],
-  [true, 0],
-  [false, 2],
-  [true, 2],
+for (const [initiate, retryCount, rejectEarlyCandidate] of [
+  [false, 0, false],
+  [true, 0, false],
+  [false, 2, false],
+  [true, 2, false],
+  [false, 0, true],
+  [true, 0, true],
 ] as const) {
   const originalPc = globalThis.RTCPeerConnection;
   const originalSocket = globalThis.WebSocket;
@@ -26,6 +28,7 @@ for (const [initiate, retryCount] of [
   const me = '00000000-0000-0000-0000-000000000001';
   const peer = '00000000-0000-0000-0000-000000000002';
   const connections: Connection[] = [];
+  const events: Record<string, unknown>[] = [];
   const sent: Array<{ type: string; data: Record<string, unknown> }> = [];
   let socket!: Socket;
   let running: Promise<number> | undefined;
@@ -58,7 +61,10 @@ for (const [initiate, retryCount] of [
       this.signalingState = description.type === 'offer' ? 'have-remote-offer' : 'stable';
     }
     async addIceCandidate(candidate: unknown) {
+      assert(this.descriptions.length > 0, 'early ICE waits for remote SDP');
       this.candidates.push(candidate);
+      if ((candidate as RTCIceCandidateInit).candidate === 'unusable-early-candidate')
+        throw new Error('stack rejected one early candidate');
     }
     close() {
       this.closed = true;
@@ -146,15 +152,41 @@ for (const [initiate, retryCount] of [
     globalThis.WebSocket = Socket as unknown as typeof WebSocket;
     Object.defineProperty(globalThis, 'window', {
       configurable: true,
-      value: { __sf_emit: () => {} },
+      value: {
+        __sf_emit: (line: string) => {
+          events.push(JSON.parse(line));
+        },
+      },
     });
     running = run(config);
     await turn();
+    if (rejectEarlyCandidate) {
+      socket.signal({ IceCandidate: 'unusable-early-candidate' });
+      socket.signal({ IceCandidate: 'usable-early-candidate' });
+    }
     socket.signal(description('initial'));
     socket.signal({ IceCandidate: 'initial-candidate' });
     await turn();
     assert(connections[0]?.descriptions.join() === 'initial', 'initial raw SDP is accepted');
-    assert(connections[0]?.candidates.length === 1, 'initial raw ICE is accepted');
+    assert(
+      connections[0]?.candidates.length === (rejectEarlyCandidate ? 3 : 1),
+      'initial raw ICE is accepted, including candidates after an early rejection',
+    );
+    if (rejectEarlyCandidate) {
+      assert(
+        JSON.stringify(connections[0]?.candidates) ===
+          JSON.stringify([
+            { candidate: 'unusable-early-candidate', sdpMLineIndex: 0 },
+            { candidate: 'usable-early-candidate', sdpMLineIndex: 0 },
+            { candidate: 'initial-candidate', sdpMLineIndex: 0 },
+          ]),
+        'early and later candidates retain sender order after stack rejection',
+      );
+      assert(
+        !events.some((event) => event['event'] === 'error'),
+        'one rejected early candidate does not fail the peer negotiation',
+      );
+    }
     const initialSignals = sent.filter((frame) => frame.type === 'Signal');
     assert(
       initialSignals.some((frame) =>
@@ -162,6 +194,22 @@ for (const [initiate, retryCount] of [
       ),
       'initial outbound SDP keeps the Matchbox wire shape',
     );
+    if (rejectEarlyCandidate) {
+      assert(
+        connections[0]?.signalingState === 'stable',
+        'remote negotiation reaches stable after early ICE rejection',
+      );
+      if (!initiate)
+        assert(
+          initialSignals.some(
+            (frame) =>
+              frame.data['to'] === peer &&
+              frame.data['generation'] === me &&
+              (frame.data['signal'] as Record<string, unknown>)['Answer'] === 'answer-1',
+          ),
+          'the orchestrator publishes the answer to the correct peer after early ICE rejection',
+        );
+    }
     if (retryCount === 0) continue;
     socket.signal({ PairRetry: 1 });
     await turn();

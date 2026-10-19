@@ -928,3 +928,21 @@ async fn queued_reliable_input_drains_before_its_own_graceful_close() {
         pair.cleanup().await;
     }
 }
+
+impl Engine {
+    /// Observe decoded transport input before a channel's application poller starts.
+    pub(crate) async fn channel_received_messages(&self, peer: PlayerId, label: &str) -> u32 {
+        self.peers[&peer]
+            .pc
+            .get_stats(std::time::Instant::now(), StatsSelector::None)
+            .await
+            .iter()
+            .find_map(|entry| match entry {
+                RTCStatsReportEntry::DataChannel(channel) if channel.label == label => {
+                    Some(channel.messages_received)
+                }
+                _ => None,
+            })
+            .expect("required channel has transport statistics")
+    }
+}
