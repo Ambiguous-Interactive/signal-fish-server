@@ -1391,3 +1391,151 @@ async fn relay_receipts_keep_their_observed_run_hold_and_linger_windows() {
         }
     }
 }
+
+// Audit #853/#889: a remote probe can precede local remote-channel admission.
+#[tokio::test]
+async fn delayed_remote_channel_admission_preserves_early_exchange_probes() {
+    for held_label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+        let (ws, _server_ws) = crate::socket_tests::websocket_pair().await;
+        let cli = Cli::parse_from([
+            "native",
+            "--server-url",
+            "ws://unused.invalid",
+            "--create-room",
+            "--disable-mdns",
+            "--exchange",
+        ]);
+        let me = PlayerId::from_u128(1);
+        let peer = PlayerId::from_u128(2);
+        let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
+        state.current_session_generation = Some(SessionGeneration::from_u128(3));
+        state.establish_pair(peer, false).await.unwrap();
+        let (remote_tx, mut remote_events) = mpsc::unbounded_channel();
+        let mut remote = Engine::new(cli.engine_settings(), remote_tx).unwrap();
+        let offer = remote.pair_with(me, true, &[]).await.unwrap().unwrap();
+        let answer = state.engine.handle_offer(peer, offer).await.unwrap();
+        remote.handle_answer(me, answer).await.unwrap();
+        let mut held_channel = None;
+        let mut remote_opens = BTreeSet::new();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while held_channel.is_none() || remote_opens.len() != 2 {
+                tokio::select! {
+                    event = state.engine_rx.recv() => match event.unwrap() {
+                        EngineEvent::LocalCandidate { candidate_json, .. } => {
+                            remote.handle_remote_candidate(me, &candidate_json).await.unwrap();
+                        }
+                        EngineEvent::RemoteChannel { label, channel, .. } if label == held_label => {
+                            assert!(held_channel.replace(channel).is_none());
+                        }
+                        event => state.handle_engine_event(event).await.unwrap(),
+                    },
+                    event = remote_events.recv() => match event.unwrap() {
+                        EngineEvent::LocalCandidate { candidate_json, .. } => {
+                            state.engine.handle_remote_candidate(peer, &candidate_json).await.unwrap();
+                        }
+                        EngineEvent::ChannelOpen { label, .. } => {
+                            assert!(remote_opens.insert(label));
+                        }
+                        EngineEvent::ChannelClosed { label, .. } => panic!("remote channel closed: {label}"),
+                        _ => {}
+                    },
+                }
+            }
+        }).await.expect("offerer opens both channels while one responder admission is held");
+        assert!(!state.connected_pairs.contains(&peer));
+        assert!(state.engine.channel(peer, held_label).is_none());
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            remote
+                .channel(me, label)
+                .unwrap()
+                .send_text(&json!({"from": peer, "channel": label, "seq": 0}).to_string())
+                .await
+                .unwrap();
+        }
+        let admitted_label = if held_label == RELIABLE_LABEL {
+            UNRELIABLE_LABEL
+        } else {
+            RELIABLE_LABEL
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !state
+                .exchange_ledger
+                .received
+                .get(&peer)
+                .is_some_and(|labels| labels.contains(admitted_label))
+            {
+                let event = state.engine_rx.recv().await.unwrap();
+                state.handle_engine_event(event).await.unwrap();
+            }
+        })
+        .await
+        .expect("the admitted sibling receives its probe before pair formation");
+        assert!(!state.connected_pairs.contains(&peer));
+        assert!(!state.exchange_ledger.received[&peer].contains(held_label));
+        // The stack increments this counter when it decodes a complete SCTP
+        // message, before the application polls the held channel. No sleep or
+        // cross-stream ordering assumption establishes this delivery barrier.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state
+                .engine
+                .channel_received_messages(peer, held_label)
+                .await
+                != 1
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the held probe reaches the receiver before channel admission");
+        let held_channel = held_channel.unwrap();
+        state
+            .engine
+            .store_remote_channel(peer, held_label.into(), held_channel.clone())
+            .await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !state.connected_pairs.contains(&peer)
+                || state.exchange_ledger.received[&peer].len() != 2
+            {
+                let event = state.engine_rx.recv().await.unwrap();
+                state.handle_engine_event(event).await.unwrap();
+            }
+        })
+        .await
+        .expect("late admission drains the already queued open and probe");
+        assert_eq!(
+            state.exchange_ledger.received[&peer],
+            BTreeSet::from([RELIABLE_LABEL.to_string(), UNRELIABLE_LABEL.to_string(),])
+        );
+        assert_eq!(state.deferred_exchange.len(), 2);
+        state
+            .engine
+            .store_remote_channel(peer, held_label.into(), held_channel)
+            .await;
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            assert!(
+                !state.engine.note_channel_open(peer, label).await,
+                "repeated admission and open observation cannot form another pair"
+            );
+        }
+        assert_eq!(state.deferred_exchange.len(), 2);
+        while !state.deferred_exchange.is_empty() {
+            state.process_deferred_exchange().await.unwrap();
+        }
+        assert!(state.exchange_ledger.unmet_criteria().is_empty());
+        let mut receipts = BTreeSet::new();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while receipts.len() != 2 {
+                if let EngineEvent::ChannelMessage { label, text, .. } =
+                    remote_events.recv().await.unwrap()
+                {
+                    assert!(is_exchange_probe(me, &label, &text));
+                    assert!(receipts.insert(label));
+                }
+            }
+        })
+        .await
+        .expect("both reply probes reach the offerer after delayed admission");
+        state.remove_pair_obligation(peer).await;
+        remote.remove_peer(me).await.unwrap();
+    }
+}
