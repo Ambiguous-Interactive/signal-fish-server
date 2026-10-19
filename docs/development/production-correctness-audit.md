@@ -5607,3 +5607,95 @@ Nextest runs `dfef9de8`, `afb5c35a`, and `e3dc6df3` and all endpoint streams
 remain in local `progress/session-482`. Browser tests, typecheck, formatting,
 strict root/native Clippy, and document checks pass. Hosted current-head CI
 and feedback remain publication gates.
+
+### F98 — Native peer retries consume the keepalive drain grace
+
+Issue [#1067](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1067),
+found at `0d25060d` while investigating open #853. A native timer pass arms
+keepalive drain grace and then runs a due peer retry. A slow route operation
+can consume that grace before the socket gets a read. The next timer pass
+then rejects a complete Pong already buffered before the original timeout.
+F97's native assessment excluded the browser's ordered output queue, but did
+not exclude this distinct timer/retry history.
+
+The regression sends a real Ping, seeds complete Pong bytes in the decoder,
+advances to the response deadline, and holds the automatic retry's route stage
+past drain grace. The baseline reports connection failure. The repair polls
+ready socket input before rejecting expired drain grace. It stops after an application
+frame or 256 transparent control frames. The response and grace durations stay
+unchanged. Missing input, control-only input, malformed input, and socket close
+remain failures. A consumed old response cannot erase the next Ping's debt.
+This controlled history does not establish the historical #853 cause.
+
+### F99 — Physical timeout discards an admitted browser gameplay receipt
+
+Issue [#1066](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1066),
+found at `0d25060d` while investigating open #889. A valid required-label
+receipt arrives before its exchange cutoff while earlier output holds the
+ordered handler queue. An outstanding ICE operation expires and retires the
+physical link before the receipt handler runs. The old handler checks that
+retired link and discards the timely evidence despite unchanged membership.
+The baseline reports unmet exchange criteria.
+
+The repair assigns pending receipts an owner for their logical peer obligation.
+Physical transport loss preserves admitted evidence. Departure, fresh peer
+incarnation, and authoritative link replacement invalidate it. Arrival still
+requires the current usable physical link. The history covers both required
+labels, finite and unbounded P2P waits, late-only callbacks, replacement plans,
+and departure. These controls distinguish transport loss from membership loss
+and do not prove the historical three-player incident's cause.
+
+### F100 — Concurrent library transport reports publish stale final state
+
+Issue [#1068](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1068),
+found at `0d25060d` during the #826 A12 audit. Concurrent calls to public
+`EnhancedGameServer::handle_client_message` store transport states in order
+under the source lifecycle gate, then deliver outside it. Pausing the first
+fan-out lets the second publish first. A peer ends with the old state while
+the server stores the newer state. The normal WebSocket reader awaits each
+call, so this reproduced trigger is concurrent library embedding.
+
+The repair serializes transport reports per physical connection through queue
+admission. It releases lifecycle and room gates before backpressure, so leave,
+reconnect, and other messages can proceed. Delivery owns its reservation
+futures directly; caller cancellation drops them instead of leaving a detached
+old enqueue worker. The regression covers both transition directions, caller
+cancellation, duplicate silence, and exact fan-out counts. The existing
+leave/rejoin history checks that old membership still invalidates delivery.
+
+The three repairs leave #826, #853, and #889 open. Their broader acceptance
+conditions and the historical client incident causes remain unproved.
+
+External SDK assessment reads the current README in each sibling repository.
+Rust and .NET own signaling/relay, and Godot owns its engine mesh. None imports
+the private native or browser reference orchestrator, so #1066 and #1067 require
+no SDK migration. Tracking for the server's observable status-order repair is
+[Rust #292](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/292),
+[.NET #143](https://github.com/Ambiguous-Interactive/signal-fish-client-dotnet/issues/143),
+and [Godot #367](https://github.com/Ambiguous-Interactive/signal-fish-client-godot/issues/367).
+The status wire schema stays unchanged. SDK validation remains separate from
+server CI and these tracking issues remain open.
+
+Reproduce F98 with `cargo nextest run --manifest-path clients/native/Cargo.toml
+--lib -E 'test(queued_liveness_survives) | test(keepalive_final_poll)'`.
+Reproduce F99 with `cd clients/browser && npm test`; its `run-cutoff.test.ts`
+scenarios include `queued-expired`, `queued-expired-late`, and `queued-replanned`.
+Reproduce F100 with `cargo nextest run --lib
+-E 'test(concurrent_transport_reports_publish_in_acceptance_order)'`.
+Server baseline run `357c832d` fails on reversed status publication; repaired
+run `40ac63f6` passes the new history and existing membership controls.
+Browser baseline and repaired output plus the exact schedule remain in local
+`progress/session-485/mesh`. Native final validation is recorded below.
+Native run `1b6554cb` passes the retry, bounded-poll, unanswered-Ping, and
+post-write deadline controls. Removing only the final poll makes the stronger
+retry history fail with connection exit 3 in `c3ade767`; production is restored.
+The nine-row frame matrix includes a ready application reply after 32 controls,
+control-only input, the 256-frame cap, malformed input, and socket closure.
+
+Final live qualification `fcfb03f5` passes the browser mesh, native-initiated
+retry, and native room-restore cells. Server, native executable, browser CLI,
+and page bundle hashes match before and after the three-cell run. Full endpoint
+streams remain in local `progress/session-485/interop`. These are integration
+checks; the controlled histories above establish the three specific defects.
+Root and native strict lint, browser tests/typecheck/format, document checks,
+and all 51 source-policy controls pass. Hosted CI and review remain merge gates.

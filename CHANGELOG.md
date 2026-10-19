@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve server transport-status order when library callers report concurrent changes (#1068).
+- Keep timely browser gameplay receipts when a peer-link timeout occurs while output waits (#1066).
+- Read queued native keepalive replies before a slow peer retry causes a false connection timeout (#1067).
 - Keep browser reference-client sessions connected when timely server replies wait behind gameplay output (#1062).
 - Stop browser reference-client gameplay when live channel or peer state closes before its callback (#1055).
 - Stop native reference-client gameplay after pair loss or live sibling-channel closure

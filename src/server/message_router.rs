@@ -66,7 +66,7 @@ pub(super) fn disarm_transport_status_delivery_pause(player_id: &crate::protocol
 
 /// The prepared room fan-out of an accepted transport-state change: the exact
 /// recipient snapshot and the shared event, ready to dispatch once the caller
-/// has released its serialization gates.
+/// has released its lifecycle gate.
 struct TransportStatusFanOut {
     sender: PlayerId,
     room_id: crate::protocol::RoomId,
@@ -76,7 +76,7 @@ struct TransportStatusFanOut {
 }
 
 impl TransportStatusFanOut {
-    /// Deliver outside every serialization gate. Sender and recipient
+    /// Deliver outside the lifecycle and room gates. Sender and recipient
     /// membership are revalidated at queue commit, and each leg
     /// re-checks the recipient's negotiated v3 capability, so a membership
     /// change or a reconnect identity swap that lands after the snapshot
@@ -539,6 +539,7 @@ impl EnhancedGameServer {
         else {
             return;
         };
+        let _report_guard = lifecycle.lock_transport_reports().await;
         let lifecycle_guard = lifecycle.lock().await;
         if lifecycle.player_id() != *player_id
             || !self
@@ -565,8 +566,8 @@ impl EnhancedGameServer {
 
     /// Process a transport report after the caller has fixed the connection
     /// identity and membership with its lifecycle guard. Returns the prepared
-    /// room fan-out to dispatch after the caller releases its serialization
-    /// gates, or `None` when the report fans nothing out.
+    /// room fan-out to dispatch after the caller releases its lifecycle
+    /// gate, or `None` when the report fans nothing out.
     async fn handle_transport_status_under_lifecycle(
         &self,
         player_id: &PlayerId,

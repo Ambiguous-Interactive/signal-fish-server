@@ -485,6 +485,7 @@ function isExchangeProbe(peer: string, label: string, text: string): boolean {
 /** Logical exchange debt survives transport teardown; receipts belong to an incarnation. */
 export class ExchangeLedger {
   private readonly obligations = new Set<string>();
+  private readonly receiptOwners = new Map<string, object>();
   private readonly sent = new Map<string, Set<string>>();
   private readonly received = new Map<string, Set<string>>();
 
@@ -492,8 +493,27 @@ export class ExchangeLedger {
     this.obligations.add(peer);
   }
 
+  /** Pending receipts survive physical loss, but never an authoritative replacement. */
+  receiptOwner(peer: string): object {
+    let owner = this.receiptOwners.get(peer);
+    if (owner === undefined) {
+      owner = {};
+      this.receiptOwners.set(peer, owner);
+    }
+    return owner;
+  }
+
+  ownsReceipt(peer: string, owner: object): boolean {
+    return this.receiptOwners.get(peer) === owner;
+  }
+
+  invalidatePendingReceipts(peer: string): void {
+    this.receiptOwners.delete(peer);
+  }
+
   /** Keep the obligation, but require fresh traffic from a restored player. */
   resetIncarnation(peer: string): void {
+    this.invalidatePendingReceipts(peer);
     this.sent.delete(peer);
     this.received.delete(peer);
   }
@@ -853,7 +873,7 @@ class Orchestrator {
         });
       },
       onChannelMessage: (peer, generation, label, text, textBytes) => {
-        if (this.finished) return;
+        if (this.finished || !this.engine.isCurrentGeneration(peer, generation)) return;
         // Reserve before enqueue retains the message closure.
         if (
           this.pendingChannelMessages >= MAX_PENDING_CHANNEL_MESSAGES ||
@@ -865,6 +885,7 @@ class Orchestrator {
           this.config.exchange &&
           this.exchangeWindowOpen() &&
           isExchangeProbe(peer, label, text);
+        const receiptOwner = exchangeReceipt ? this.exchangeLedger.receiptOwner(peer) : null;
         let receiptPending = exchangeReceipt;
         if (receiptPending) this.pendingExchangeReceipts += 1;
         this.pendingChannelMessages += 1;
@@ -875,7 +896,12 @@ class Orchestrator {
               receiptPending = false;
               this.pendingExchangeReceipts -= 1;
             }
-            if (!this.engine.isCurrentGeneration(peer, generation)) {
+            /* Physical timeout preserves evidence admitted for the current membership. */
+            if (
+              receiptOwner !== null
+                ? !this.exchangeLedger.ownsReceipt(peer, receiptOwner)
+                : !this.engine.isCurrentGeneration(peer, generation)
+            ) {
               return;
             }
             if (exchangeReceipt) {
@@ -2243,6 +2269,7 @@ class Orchestrator {
   }
 
   private removePairObligation(peer: string): void {
+    this.exchangeLedger.invalidatePendingReceipts(peer);
     this.peerTasks.delete(peer);
     this.expectedPeers.delete(peer);
     this.pairRoles.delete(peer);
@@ -2281,6 +2308,7 @@ class Orchestrator {
 
   /** Retire one retained physical link for a newer authoritative generation. */
   private prepareRetainedPairReplacement(peer: string): void {
+    this.exchangeLedger.invalidatePendingReceipts(peer);
     this.pairRetryState.delete(peer);
     this.retryingPairs.add(peer);
     this.retirePeerLink(peer);
