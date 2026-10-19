@@ -827,21 +827,86 @@ impl ClientProcess {
 
     /// Recent events plus captured stderr, for failure messages.
     pub fn diagnostics(&self) -> String {
-        const EVENT_TAIL: usize = 12;
-        let tail_start = self.events.len().saturating_sub(EVENT_TAIL);
-        let recent: Vec<String> = self.events[tail_start..]
-            .iter()
-            .map(|event| event.to_string())
-            .collect();
         let stderr = self.stderr_text();
         format!(
-            "last {} events:\n{}\n--- client {} stderr ---\n{}",
-            recent.len(),
-            recent.join("\n"),
+            "{}\n--- client {} stderr ---\n{}",
+            event_diagnostics(&self.events),
             self.name,
             stderr
         )
     }
+}
+
+/// Format the captured event evidence used in every client failure message.
+pub fn event_diagnostics(events: &[Value]) -> String {
+    const EVENT_TAIL: usize = 12;
+    let tail_start = events.len().saturating_sub(EVENT_TAIL);
+    let recent: Vec<String> = events[tail_start..].iter().map(Value::to_string).collect();
+    format!(
+        "transport event counts (full captured history):\n{}\nlast {} events:\n{}",
+        transport_event_summary(events),
+        recent.len(),
+        recent.join("\n")
+    )
+}
+
+/// Keep pair roles, states and per-label progress even after they leave the
+/// recent-event tail. Counts include retries; they do not assert delivery.
+pub fn transport_event_summary(events: &[Value]) -> String {
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for event in events {
+        if !matches!(
+            event.get("event").and_then(Value::as_str),
+            Some(
+                "session_plan"
+                    | "new_peer"
+                    | "pc_state"
+                    | "channel_open"
+                    | "channel_closed"
+                    | "channel_message_sent"
+                    | "channel_message"
+                    | "p2p_pair_connected"
+                    | "p2p_pair_reconnected"
+                    | "transport_status_sent"
+                    | "peer_transport_status"
+                    | "fallback_engaged"
+            )
+        ) {
+            continue;
+        }
+        let summary: serde_json::Map<String, Value> = [
+            "event",
+            "peer",
+            "peer_id",
+            "label",
+            "state",
+            "you_initiate",
+            "topology",
+            "transport",
+            "host",
+            "peers",
+            "fallback",
+            "connected",
+        ]
+        .into_iter()
+        .filter_map(|field| {
+            event
+                .get(field)
+                .map(|value| (field.to_string(), value.clone()))
+        })
+        .collect();
+        *counts
+            .entry(Value::Object(summary).to_string())
+            .or_default() += 1;
+    }
+    if counts.is_empty() {
+        return "<none>".to_string();
+    }
+    counts
+        .into_iter()
+        .map(|(event, count)| format!("{count} x {event}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ---------------------------------------------------------------------------

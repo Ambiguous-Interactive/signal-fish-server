@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep browser reference-client sessions connected when timely server replies wait behind gameplay output (#1062).
 - Stop browser reference-client gameplay when live channel or peer state closes before its callback (#1055).
 - Stop native reference-client gameplay after pair loss or live sibling-channel closure
   while preserving input queued before its own graceful channel close (#1053, #1059).
