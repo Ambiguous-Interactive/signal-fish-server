@@ -5391,8 +5391,10 @@ The baseline real-channel regression fails at this send-admission assertion.
 The RTC core does not emit its declared `OnClosing` event, so changing the
 native event match alone cannot repair this history.
 
-The repair observes both selected channels before send, receive, and queued-open
-admission. Missing and connecting channels remain valid setup states.
+The repair observes both selected channels before send and queued-open admission.
+Receive admission observes the sibling channel. Each channel preserves its own
+message-before-close event order; the RTC core already refuses later input on
+a closing channel. Missing and connecting channels remain valid setup states.
 Closing, closed, or retired stack handles fence the physical link before a
 loss notification. Each required label reports loss once, including when its
 suspended poller resumes. Live observations cannot prevent a later concurrent
@@ -5411,17 +5413,22 @@ Removing only the live-state receive check reproduces sibling message admission
 in the same real-channel history. Restoring it passes all 12 histories.
 Existing controls also pass for setup, observed peer loss, stream termination,
 poller release, queued receipt cutoffs, and the active exchange-send window.
+An adversarial control catches same-channel input loss in the first repair:
+when no other seam has observed pair loss, reliable input acknowledged before
+graceful reset must drain before its own queue's close notification. The final repair excludes the receiving
+channel's later live state and keeps the sibling check. Both offerer roles cover
+this ordering control. No initial repair was merged.
 Strict root and native Clippy, formatting, and document checks pass.
 External SDK README assessment confirms independent implementations: Rust has no
 WebRTC backend, .NET owns signaling and relay, and Godot owns its engine mesh.
 None uses this private native engine. No server wire, SDK API, configuration,
 dependency, or client migration changes are required.
 
-Fixed-artifact qualification passes three restores, three retries, and three
-three-player browser meshes in 9.809 seconds. All 21 endpoint streams exit zero,
+Final fixed-artifact Nextest `9032acfd` passes three restores, three retries,
+and three three-player browser meshes in 10.605 seconds. All 21 endpoint streams exit zero,
 with 78 channel sends and receipts, nine relay sends, and 18 relay receipts.
 Server, native executable, browser CLI, and page hashes match before and after.
-The first qualification run rebuilt the native CLI after its initial hash;
-it passes but is excluded from fixed-artifact evidence. Both attempts and all
+Earlier qualification attempts rebuilt the native CLI after its initial hash
+or preceded the ordering correction; they do not qualify the final repair. Both attempts and all
 endpoint streams remain in local `progress/session-481`. Hosted CI and review
 remain publication gates.

@@ -831,3 +831,93 @@ async fn live_sibling_closure_fences_gameplay_before_its_poller_runs() {
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_reliable_input_drains_before_its_own_graceful_close() {
+    for initiator_receives in [false, true] {
+        let mut pair = LivePair::connect().await;
+        if initiator_receives {
+            std::mem::swap(&mut pair.sender, &mut pair.receiver);
+            std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+            std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+        }
+        let peer = pair.sender_id;
+        let link = &pair.receiver.peers[&peer];
+        let admission = link.receive_admission.clone();
+        let generation = link.generation;
+        for task in &link.channel_tasks {
+            task.abort();
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !link.channel_tasks.iter().all(|task| task.is_finished()) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let reliable = pair
+            .sender
+            .channel(pair.receiver_id, RELIABLE_LABEL)
+            .unwrap();
+        reliable.send_text("queued-before-own-close").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while reliable.outstanding_bytes().await.unwrap() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("SCTP acknowledges the reliable input before reset");
+        reliable.close().await.unwrap();
+        let local = pair.receiver.channel(peer, RELIABLE_LABEL).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while matches!(
+                local.ready_state().await,
+                Ok(rtc::data_channel::RTCDataChannelState::Open)
+            ) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("live channel state changes while its event poller stays held");
+        assert!(!admission.terminal.load(Ordering::Relaxed));
+        let resumed = spawn_channel_event_loop(
+            &pair.receiver.runtime,
+            &pair.receiver.events,
+            peer,
+            generation,
+            RELIABLE_LABEL.into(),
+            local,
+            admission,
+        );
+        pair.receiver
+            .peers
+            .get_mut(&peer)
+            .unwrap()
+            .channel_tasks
+            .push(resumed);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut messages = 0;
+            loop {
+                match pair.receiver_events.recv().await.unwrap() {
+                    EngineEvent::ChannelMessage { label, text, .. } => {
+                        assert_eq!(label, RELIABLE_LABEL);
+                        assert_eq!(text, "queued-before-own-close");
+                        messages += 1;
+                    }
+                    EngineEvent::ChannelClosed { label, .. } => {
+                        assert_eq!(label, RELIABLE_LABEL);
+                        assert_eq!(
+                            messages, 1,
+                            "same-channel FIFO must retain input before its close"
+                        );
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("queued reliable input drains before its close notification");
+        pair.cleanup().await;
+    }
+}

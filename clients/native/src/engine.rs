@@ -120,6 +120,7 @@ impl ChannelReceiveAdmission {
         events: &mpsc::UnboundedSender<EngineEvent>,
         peer: PlayerId,
         generation: u64,
+        channel_event_label: Option<&str>,
     ) -> bool {
         if self.terminal.load(Ordering::Relaxed) {
             return false;
@@ -138,6 +139,10 @@ impl ChannelReceiveAdmission {
             ]
         };
         for (label, channel) in selected {
+            /* A channel's queued input precedes its own close event. */
+            if channel_event_label == Some(label) {
+                continue;
+            }
             let Some(channel) = channel else { continue };
             if matches!(
                 channel.ready_state().await,
@@ -868,7 +873,7 @@ impl Engine {
         };
         if !link
             .receive_admission
-            .allows_work(&self.events, peer, link.generation)
+            .allows_work(&self.events, peer, link.generation, None)
             .await
         {
             return false;
@@ -917,7 +922,7 @@ impl Engine {
         let link = self.peers.get(&peer)?;
         if !link
             .receive_admission
-            .allows_work(&self.events, peer, link.generation)
+            .allows_work(&self.events, peer, link.generation, None)
             .await
         {
             return None;
@@ -1547,7 +1552,10 @@ fn spawn_channel_event_loop(
                         Prior observed loss stops new input admission while
                         lifecycle events still drain. Loss can race this check.
                     */
-                    if !admission.allows_work(&events, peer, generation).await {
+                    if !admission
+                        .allows_work(&events, peer, generation, Some(&label))
+                        .await
+                    {
                         continue;
                     }
                     let Some((text, queue_permit)) = admission.decode_and_reserve(&message.data)
