@@ -281,6 +281,17 @@ async fn timeout_snapshot_tracks_local_observations_and_replacement() {
     for initiate in [false, true] {
         let offer = engine.pair_with(peer, initiate, &[]).await.unwrap();
         let generation = engine.peers[&peer].generation;
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            assert_eq!(
+                engine.send_channel(peer, label).await.is_some(),
+                initiate,
+                "missing and connecting channels do not terminate setup"
+            );
+        }
+        assert!(!engine.peers[&peer]
+            .receive_admission
+            .terminal
+            .load(Ordering::Relaxed));
         let snapshot = engine.diagnostic_snapshot(peer);
         assert_eq!(snapshot["generation"], generation);
         assert_eq!(snapshot["remote_description_set"], false);

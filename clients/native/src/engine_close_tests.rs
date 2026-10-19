@@ -295,7 +295,7 @@ async fn queued_opens_respect_observed_peer_connection_failure() {
                     "retain handles for cleanup"
                 );
                 assert_eq!(
-                    engine.send_channel(peer, label).is_some(),
+                    engine.send_channel(peer, label).await.is_some(),
                     state == RTCPeerConnectionState::Disconnected,
                     "initiator={initiator}, state={state:?}: observed failure fences channel use"
                 );
@@ -326,7 +326,7 @@ async fn queued_opens_respect_observed_peer_connection_failure() {
                 .on_connection_state_change(RTCPeerConnectionState::Failed)
                 .await;
             for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
-                assert!(fresh_engine.send_channel(fresh_peer, label).is_some());
+                assert!(fresh_engine.send_channel(fresh_peer, label).await.is_some());
             }
             assert!(
                 !fresh_engine
