@@ -20,6 +20,7 @@ for (const entryPoint of [
   'src/page/buffered-retirement.test.ts',
   'src/page/run-cutoff.test.ts',
   'src/page/relay-cutoff.test.ts',
+  'src/page/keepalive-ingress.test.ts',
   'src/cli/args.test.ts',
   'src/cli/output.test.ts',
 ]) {

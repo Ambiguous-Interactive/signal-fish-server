@@ -105,12 +105,9 @@ const PING_INTERVAL_MS = 10_000;
 const PONG_TIMEOUT_MS = 10_000;
 
 /**
- * One-shot drain grace applied when the pong deadline first expires. The
- * deadline check runs in processTimers, BEFORE the chain drains queued
- * frames, so a `Pong` that already arrived could be declared missing without
- * ever being handled (deadline and frame ready in the same wake). The
- * extension guarantees at least one more processing pass. Mirrors the native
- * client's PONG_DRAIN_GRACE.
+ * One-shot grace when a deadline and browser socket tasks become ready
+ * together. Give the socket callback another chance to observe live traffic
+ * before declaring the unanswered Ping fatal. Mirrors the native grace.
  */
 const PONG_DRAIN_GRACE_MS = 1_000;
 
@@ -1245,6 +1242,10 @@ class Orchestrator {
       this.failFatal(FatalError.protocol(`invalid ServerMessage frame: ${describe(error)}`));
       return;
     }
+    // Valid ingress proves server liveness before stdout can delay dispatch.
+    // A queued old frame must never acknowledge a Ping sent after its arrival.
+    this.pongDeadline = null;
+    this.pongGraceApplied = false;
     const payload = frame.data['data'];
     const isRelayReceipt =
       frame.type === 'GameDataBinary' ||
@@ -1647,13 +1648,6 @@ class Orchestrator {
     if (this.admittedServerFrames.delete(frame)) this.pendingAdmittedServerFrames -= 1;
     const admittedRelayReceipt = this.admittedRelayReceipts.delete(frame);
     if (admittedRelayReceipt) this.pendingRelayReceipts -= 1;
-    // ANY inbound frame proves the connection and the server are alive, so it
-    // satisfies the keepalive liveness check — not just `Pong`. Cleared BEFORE
-    // dispatch, so the very frame that kicks off a long handler (e.g. WebRTC
-    // pairing) already refreshes liveness; processTimers cannot then declare a
-    // still-pending ping dead just because that handler ran past the window.
-    this.pongDeadline = null;
-    this.pongGraceApplied = false;
     const data = frame.data;
     const accountability = this.accountabilityState();
     accountability.observeServerMessage(
@@ -2025,9 +2019,7 @@ class Orchestrator {
         break;
       }
       case 'Pong':
-        // Keepalive round-trip complete.
-        this.pongDeadline = null;
-        this.pongGraceApplied = false;
+        // Liveness was recorded at ingress, before queued output.
         break;
       default:
         console.error(

@@ -752,6 +752,48 @@ async fn client_failure_collection_keeps_pending_sibling_results() {
     }
 }
 
+#[test]
+fn transport_failure_summary_retains_roles_states_and_label_counts_beyond_tail() {
+    let plan = json!({"event": "session_plan", "topology": "mesh", "peers": [
+        {"player_id": "offered-to", "initiate": true},
+        {"player_id": "answered-to", "initiate": false}
+    ]});
+    let mut events = vec![
+        plan.clone(),
+        json!({"event": "pc_state", "peer": "answered-to", "state": "failed"}),
+        json!({"event": "channel_open", "peer": "offered-to", "label": "reliable"}),
+        json!({"event": "channel_closed", "peer": "answered-to", "label": "unreliable"}),
+        json!({"event": "channel_message_sent", "peer": "offered-to", "label": "reliable", "text": "payload-one"}),
+        json!({"event": "channel_message_sent", "peer": "offered-to", "label": "reliable", "text": "payload-two"}),
+        json!({"event": "new_peer", "peer_id": "late-peer", "you_initiate": false}),
+        json!({"event": "peer_transport_status", "peer": "answered-to", "transport": "webrtc", "connected": false}),
+        json!({"event": "transport_status_sent", "transport": "webrtc", "connected": false}),
+        json!({"event": "fallback_engaged"}),
+    ];
+    events.extend((0..20).map(|_| json!({"event": "game_data_received", "text": "relay-tail"})));
+    let diagnostics = harness::event_diagnostics(&events);
+    let summary = diagnostics.split("\nlast ").next().unwrap();
+    assert!(summary.contains(&format!("1 x {plan}")), "{summary}");
+    for event in &events[1..4] {
+        assert!(summary.contains(&format!("1 x {event}")), "{summary}");
+    }
+    let sent = json!({"event": "channel_message_sent", "peer": "offered-to", "label": "reliable"});
+    assert!(summary.contains(&format!("2 x {sent}")), "{summary}");
+    for event in &events[6..10] {
+        assert!(summary.contains(&format!("1 x {event}")), "{summary}");
+    }
+    assert_eq!(summary.lines().count(), 10, "{summary}");
+    assert!(!summary.contains("payload"), "{summary}");
+    assert!(!summary.contains("relay-tail"), "{summary}");
+    assert!(diagnostics.contains("last 12 events:"), "{diagnostics}");
+    assert!(diagnostics.contains("relay-tail"), "{diagnostics}");
+    assert_eq!(harness::transport_event_summary(&[]), "<none>");
+    assert_eq!(
+        harness::transport_event_summary(&[json!({"event": "game_data_received"})]),
+        "<none>"
+    );
+}
+
 /// Spawn the server with the given default topology, run the 3-client flow
 /// (creator + 2 joiners by room code, per-client [`ClientConfig`]) to
 /// completion, assert every process exits 0, and return the event logs.

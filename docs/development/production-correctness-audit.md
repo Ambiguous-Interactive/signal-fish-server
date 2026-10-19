@@ -63,9 +63,9 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87; expired relay sends in F88; relay receipt admission in F89; terminal callback formation in F91 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87; expired relay sends in F88; relay receipt admission in F89; terminal callback formation in F91; queued keepalive liveness in F97 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
-| A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17; Windows backpressure fixtures in F75 |
+| A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17; Windows backpressure fixtures in F75; transport failure summaries in F97 |
 
 For each task, record reviewed functions and tests, unresolved hypotheses, and
 the exact scope of any successful experiment. Default, TLS, legacy-fullmesh,
@@ -5432,3 +5432,57 @@ Earlier qualification attempts rebuilt the native CLI after its initial hash
 or preceded the ordering correction; they do not qualify the final repair. Both attempts and all
 endpoint streams remain in local `progress/session-481`. Hosted CI and review
 remain publication gates.
+
+### F97 — Timely browser keepalive replies can expire behind gameplay output
+
+Issue [#1062](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1062),
+found at `d8d35fb4` while investigating open #826, #853, and #889.
+The browser clears outstanding Ping debt when a server-frame handler runs.
+Two gameplay callbacks can hold that ordered chain on stdout acknowledgments.
+A valid Pong already received by the socket then waits past the original
+timeout and drain grace. The client exits with a false connection failure.
+An old queued frame can also clear a Ping sent after that frame arrived.
+
+The regression runs the real orchestrator with controlled socket, channel,
+monotonic clock, and output acknowledgment schedules. Ping is sent at
+10,100 ms. Gameplay output blocks at 11,000 ms. A second callback queues
+ahead of a Pong received at 12,000 ms. Releasing the outputs at 20,100 ms
+and 21,101 ms makes the original source fail with exit 3 before the Pong
+handler runs. The baseline source is injected into the test bundle without
+changing the working source. This is a controlled scheduling reproduction,
+not evidence of the historical incident causes in #853 or #889.
+
+The repair records server liveness immediately after successful synchronous
+frame classification. Neither ordinary dispatch nor the Pong handler clears
+debt again. Six controls cover timely Pong, timely ordinary server traffic,
+old queued Pong versus a newer unanswered Ping, a missing response, malformed
+input, and socket closure while gameplay output waits. The timeout and grace
+constants stay unchanged. The native driver observes frames directly before
+dispatch and has no equivalent browser handler queue; no speculative native
+change is included. Independent source review checks the arrival/dispatch
+ordering and stale-response case.
+
+The #853 and #889 investigation also finds that failure text can omit early
+pair roles and channel observations after they leave its 12-event tail.
+The harness now includes full-captured-history counts for session plans,
+new peers, connection states, required-label opens/closes/sends/receipts,
+pair establishment, transport reports, and fallback. It keeps the chronological
+tail and stderr. Counts include retries; they do not establish event order,
+current state, or delivery. A behavioral regression fails with the old
+tail-only formatter and passes with the repair. Full persisted event streams
+remain the authoritative detailed record.
+
+External SDK README inspection confirms separate implementations. Rust owns
+signaling without a WebRTC backend, .NET owns signaling and relay, and Godot
+owns its engine mesh. None imports this private browser orchestrator or test
+harness. No server wire, SDK API, dependency, or migration changes are required.
+These bounded findings leave A20, #826, #853, and #889 open.
+
+Final fixed-artifact qualification passes three restores, three retries, and
+three three-player browser meshes. All 21 endpoint streams complete, with
+78 channel sends and receipts, nine relay sends, and 18 relay receipts.
+Server, native executable, browser CLI, and page hashes match before and after.
+Nextest runs `dfef9de8`, `afb5c35a`, and `e3dc6df3` and all endpoint streams
+remain in local `progress/session-482`. Browser tests, typecheck, formatting,
+strict root/native Clippy, and document checks pass. Hosted current-head CI
+and feedback remain publication gates.
