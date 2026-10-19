@@ -2425,15 +2425,23 @@ impl Orchestrator<'_> {
                 _ => deadline,
             };
             let expired = || format!("send on {label} to {peer} exceeded its exchange deadline");
-            let result = match self.engine.send_channel(peer, label) {
-                Some(_) if deadline.is_due(Instant::now()) => Err(expired()),
-                Some(channel) => match deadline.timeout(send(channel, text.clone())).await {
-                    Ok(result) if !deadline.is_due(Instant::now()) => {
-                        result.map_err(|error| format!("send on {label} to {peer} failed: {error}"))
+            let result = match deadline
+                .timeout(async {
+                    let channel =
+                        self.engine.send_channel(peer, label).await.ok_or_else(|| {
+                            format!("pair with {peer} has no usable channel {label}")
+                        })?;
+                    if deadline.is_due(Instant::now()) {
+                        return Err(expired());
                     }
-                    _ => Err(expired()),
-                },
-                None => Err(format!("pair with {peer} has no usable channel {label}")),
+                    send(channel, text.clone())
+                        .await
+                        .map_err(|error| format!("send on {label} to {peer} failed: {error}"))
+                })
+                .await
+            {
+                Ok(result) if !deadline.is_due(Instant::now()) => result,
+                _ => Err(expired()),
             };
             if let Err(message) = result {
                 emit(&Event::Error { message });

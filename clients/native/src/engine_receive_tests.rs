@@ -173,6 +173,8 @@ fn receive_budget_is_shared_across_links_and_releases_when_payloads_drop() {
     let engine = Engine::new(EngineSettings::default(), events).unwrap();
     let links = [0, 1].map(|_| ChannelReceiveAdmission {
         budget: engine.message_budget.clone(),
+        channels: Arc::new(Mutex::new(RequiredChannelAdmission::default())),
+        closed_labels: AtomicU8::new(0),
         rejected: Mutex::new(false),
         terminal: AtomicBool::new(false),
     });
@@ -622,4 +624,307 @@ async fn dropped_receive_event_queue_stops_live_channel_producer() {
     .await
     .expect("a dropped application receiver closes the channel producer");
     pair.cleanup().await;
+}
+
+// Regression #1059: live channel loss can precede its queued lifecycle event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_sibling_closure_fences_gameplay_before_its_poller_runs() {
+    for observation in ["send", "receive", "open"] {
+        for closed_label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            for initiator_receives in [false, true] {
+                let mut pair = LivePair::connect().await;
+                if initiator_receives {
+                    std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                    std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+                    std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+                }
+                let peer = pair.sender_id;
+                let link = &pair.receiver.peers[&peer];
+                let generation = link.generation;
+                let admission = link.receive_admission.clone();
+                for task in &link.channel_tasks {
+                    task.abort();
+                }
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !link.channel_tasks.iter().all(|task| task.is_finished()) {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("hold lifecycle observation before real channel closure");
+                let healthy_label = if closed_label == RELIABLE_LABEL {
+                    UNRELIABLE_LABEL
+                } else {
+                    RELIABLE_LABEL
+                };
+                let healthy_task = spawn_channel_event_loop(
+                    &pair.receiver.runtime,
+                    &pair.receiver.events,
+                    peer,
+                    generation,
+                    healthy_label.into(),
+                    pair.receiver.channel(peer, healthy_label).unwrap(),
+                    admission.clone(),
+                );
+                pair.receiver
+                    .peers
+                    .get_mut(&peer)
+                    .unwrap()
+                    .channel_tasks
+                    .push(healthy_task);
+                let remote_healthy = pair
+                    .sender
+                    .channel(pair.receiver_id, healthy_label)
+                    .unwrap();
+                remote_healthy.send_text("before-live-loss").await.unwrap();
+                let early = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if let event @ EngineEvent::ChannelMessage { .. } =
+                            pair.receiver_events.recv().await.unwrap()
+                        {
+                            break event;
+                        }
+                    }
+                })
+                .await
+                .expect("healthy input is admitted before channel loss");
+                let closed = pair.receiver.channel(peer, closed_label).unwrap();
+                closed.close().await.unwrap();
+                assert!(matches!(
+                    closed.ready_state().await,
+                    Ok(rtc::data_channel::RTCDataChannelState::Closing
+                        | rtc::data_channel::RTCDataChannelState::Closed)
+                        | Err(webrtc::error::Error::ErrDataChannelClosed)
+                ));
+                assert!(
+                    !admission.terminal.load(Ordering::Relaxed),
+                    "closed-channel poller remains held"
+                );
+                match observation {
+                    "send" => {
+                        assert!(pair.receiver.send_channel(peer, healthy_label).await.is_none(),
+                        "live sibling closure must prevent a new gameplay send before its callback")
+                    }
+                    "receive" => remote_healthy.send_text("after-live-loss").await.unwrap(),
+                    "open" => {
+                        let link = pair.receiver.peers.get_mut(&peer).unwrap();
+                        link.open_labels.clear();
+                        link.pair_connected = false;
+                        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                            assert!(!pair.receiver.note_channel_open(peer, label).await);
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        match pair.receiver_events.recv().await.unwrap() {
+                            EngineEvent::ChannelMessage { .. } => {
+                                panic!("{observation}: terminal sibling must not admit gameplay")
+                            }
+                            EngineEvent::ChannelClosed {
+                                peer: event_peer,
+                                generation: event_generation,
+                                label,
+                            } => {
+                                assert_eq!(
+                                    (event_peer, event_generation, label.as_str()),
+                                    (peer, generation, closed_label)
+                                );
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                })
+                .await
+                .expect("live state publishes loss before the held poller resumes");
+                for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                    assert!(pair.receiver.send_channel(peer, label).await.is_none());
+                }
+                assert_eq!(
+                    pair.receiver.message_budget.messages.available_permits(),
+                    255
+                );
+                let EngineEvent::ChannelMessage { text, .. } = &early else {
+                    unreachable!()
+                };
+                assert_eq!(text, "before-live-loss");
+                drop(early);
+                assert_eq!(
+                    pair.receiver.message_budget.messages.available_permits(),
+                    256
+                );
+                let resumed = spawn_channel_event_loop(
+                    &pair.receiver.runtime,
+                    &pair.receiver.events,
+                    peer,
+                    generation,
+                    closed_label.into(),
+                    closed,
+                    admission,
+                );
+                pair.receiver
+                    .peers
+                    .get_mut(&peer)
+                    .unwrap()
+                    .channel_tasks
+                    .push(resumed);
+                remote_healthy.close().await.unwrap();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !pair.receiver.peers[&peer]
+                        .channel_tasks
+                        .iter()
+                        .all(|task| task.is_finished())
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("both channel streams drain after the held poller resumes");
+                let mut healthy_closed = 0;
+                loop {
+                    let event = match pair.receiver_events.try_recv() {
+                        Ok(event) => event,
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            panic!("the live engine must retain its event sender")
+                        }
+                    };
+                    match event {
+                        EngineEvent::ChannelClosed { label, .. } => {
+                            assert_eq!(
+                                label, healthy_label,
+                                "resumed closure must not duplicate the observed loss"
+                            );
+                            healthy_closed += 1;
+                        }
+                        EngineEvent::ChannelMessage { .. } => {
+                            panic!("terminal input must stay fenced")
+                        }
+                        _ => {}
+                    }
+                }
+                assert_eq!(healthy_closed, 1);
+                pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+                pair.receiver.remove_peer(peer).await.unwrap();
+                pair.negotiate().await;
+                assert_ne!(pair.receiver.peers[&peer].generation, generation);
+                assert!(pair
+                    .receiver
+                    .send_channel(peer, healthy_label)
+                    .await
+                    .is_some());
+                pair.sender
+                    .channel(pair.receiver_id, RELIABLE_LABEL)
+                    .unwrap()
+                    .send_text("fresh-after-live-loss")
+                    .await
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if let EngineEvent::ChannelMessage { text, .. } =
+                            pair.receiver_events.recv().await.unwrap()
+                        {
+                            assert_eq!(text, "fresh-after-live-loss");
+                            break;
+                        }
+                    }
+                })
+                .await
+                .expect("fresh physical links admit gameplay again");
+                pair.cleanup().await;
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_reliable_input_drains_before_its_own_graceful_close() {
+    for initiator_receives in [false, true] {
+        let mut pair = LivePair::connect().await;
+        if initiator_receives {
+            std::mem::swap(&mut pair.sender, &mut pair.receiver);
+            std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+            std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+        }
+        let peer = pair.sender_id;
+        let link = &pair.receiver.peers[&peer];
+        let admission = link.receive_admission.clone();
+        let generation = link.generation;
+        for task in &link.channel_tasks {
+            task.abort();
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !link.channel_tasks.iter().all(|task| task.is_finished()) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let reliable = pair
+            .sender
+            .channel(pair.receiver_id, RELIABLE_LABEL)
+            .unwrap();
+        reliable.send_text("queued-before-own-close").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while reliable.outstanding_bytes().await.unwrap() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("SCTP acknowledges the reliable input before reset");
+        reliable.close().await.unwrap();
+        let local = pair.receiver.channel(peer, RELIABLE_LABEL).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while matches!(
+                local.ready_state().await,
+                Ok(rtc::data_channel::RTCDataChannelState::Open)
+            ) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("live channel state changes while its event poller stays held");
+        assert!(!admission.terminal.load(Ordering::Relaxed));
+        let resumed = spawn_channel_event_loop(
+            &pair.receiver.runtime,
+            &pair.receiver.events,
+            peer,
+            generation,
+            RELIABLE_LABEL.into(),
+            local,
+            admission,
+        );
+        pair.receiver
+            .peers
+            .get_mut(&peer)
+            .unwrap()
+            .channel_tasks
+            .push(resumed);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut messages = 0;
+            loop {
+                match pair.receiver_events.recv().await.unwrap() {
+                    EngineEvent::ChannelMessage { label, text, .. } => {
+                        assert_eq!(label, RELIABLE_LABEL);
+                        assert_eq!(text, "queued-before-own-close");
+                        messages += 1;
+                    }
+                    EngineEvent::ChannelClosed { label, .. } => {
+                        assert_eq!(label, RELIABLE_LABEL);
+                        assert_eq!(
+                            messages, 1,
+                            "same-channel FIFO must retain input before its close"
+                        );
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("queued reliable input drains before its close notification");
+        pair.cleanup().await;
+    }
 }

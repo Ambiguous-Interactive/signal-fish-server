@@ -28,7 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Stop browser reference-client gameplay when live channel or peer state closes before its callback (#1055).
-- Stop native reference-client gameplay receive admission after observed pair loss (#1053).
+- Stop native reference-client gameplay after pair loss or live sibling-channel closure
+  while preserving input queued before its own graceful channel close (#1053, #1059).
 - Switch browser reference-client pairs to relay fallback when a required data channel starts closing (#1051).
 - Stop native reference-client deferred gameplay probes after observed channel or peer-connection loss (#1049).
 - Prevent reference clients from forming WebRTC pairs after they observe a required-channel or peer-connection failure (#1046).

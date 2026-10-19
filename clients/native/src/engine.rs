@@ -27,7 +27,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -108,11 +108,78 @@ impl MessageQueuePermit {
 
 struct ChannelReceiveAdmission {
     budget: Arc<MessageQueueBudget>,
+    channels: Arc<Mutex<RequiredChannelAdmission>>,
+    closed_labels: AtomicU8,
     rejected: Mutex<bool>,
     terminal: AtomicBool,
 }
 
 impl ChannelReceiveAdmission {
+    async fn allows_work(
+        &self,
+        events: &mpsc::UnboundedSender<EngineEvent>,
+        peer: PlayerId,
+        generation: u64,
+        channel_event_label: Option<&str>,
+    ) -> bool {
+        if self.terminal.load(Ordering::Relaxed) {
+            return false;
+        }
+        let selected = {
+            let channels = self.channels.lock().await;
+            [
+                (
+                    RELIABLE_LABEL,
+                    channels.reliable.as_ref().and_then(Weak::upgrade),
+                ),
+                (
+                    UNRELIABLE_LABEL,
+                    channels.unreliable.as_ref().and_then(Weak::upgrade),
+                ),
+            ]
+        };
+        for (label, channel) in selected {
+            /* A channel's queued input precedes its own close event. */
+            if channel_event_label == Some(label) {
+                continue;
+            }
+            let Some(channel) = channel else { continue };
+            if matches!(
+                channel.ready_state().await,
+                Ok(rtc::data_channel::RTCDataChannelState::Closing
+                    | rtc::data_channel::RTCDataChannelState::Closed)
+                    | Err(_)
+            ) {
+                if !self.terminal.swap(true, Ordering::Relaxed) {
+                    self.report_channel_closed(events, peer, generation, label);
+                }
+                return false;
+            }
+        }
+        !self.terminal.load(Ordering::Relaxed)
+    }
+
+    fn report_channel_closed(
+        &self,
+        events: &mpsc::UnboundedSender<EngineEvent>,
+        peer: PlayerId,
+        generation: u64,
+        label: &str,
+    ) {
+        let bit = match label {
+            RELIABLE_LABEL => 1,
+            UNRELIABLE_LABEL => 2,
+            _ => return,
+        };
+        if self.closed_labels.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+            let _ = events.send(EngineEvent::ChannelClosed {
+                peer,
+                generation,
+                label: label.into(),
+            });
+        }
+    }
+
     fn decode_and_reserve(&self, data: &[u8]) -> Option<(String, MessageQueuePermit)> {
         if data.len() > MAX_CHANNEL_MESSAGE_BYTES {
             return None;
@@ -521,6 +588,8 @@ impl Engine {
         let channel_admission = Arc::new(Mutex::new(RequiredChannelAdmission::default()));
         let receive_admission = Arc::new(ChannelReceiveAdmission {
             budget: self.message_budget.clone(),
+            channels: channel_admission.clone(),
+            closed_labels: AtomicU8::new(0),
             rejected: Mutex::new(false),
             terminal: AtomicBool::new(false),
         });
@@ -802,7 +871,11 @@ impl Engine {
             tracing::warn!(%peer, label, "channel open for unknown peer");
             return false;
         };
-        if link.receive_admission.terminal.load(Ordering::Relaxed) {
+        if !link
+            .receive_admission
+            .allows_work(&self.events, peer, link.generation, None)
+            .await
+        {
             return false;
         }
         link.open_labels.insert(label.to_string());
@@ -841,9 +914,17 @@ impl Engine {
             .cloned()
     }
 
-    pub(crate) fn send_channel(&self, peer: PlayerId, label: &str) -> Option<Arc<dyn DataChannel>> {
+    pub(crate) async fn send_channel(
+        &self,
+        peer: PlayerId,
+        label: &str,
+    ) -> Option<Arc<dyn DataChannel>> {
         let link = self.peers.get(&peer)?;
-        if link.receive_admission.terminal.load(Ordering::Relaxed) {
+        if !link
+            .receive_admission
+            .allows_work(&self.events, peer, link.generation, None)
+            .await
+        {
             return None;
         }
         link.channels.get(label).cloned()
@@ -1471,7 +1552,10 @@ fn spawn_channel_event_loop(
                         Prior observed loss stops new input admission while
                         lifecycle events still drain. Loss can race this check.
                     */
-                    if admission.terminal.load(Ordering::Relaxed) {
+                    if !admission
+                        .allows_work(&events, peer, generation, Some(&label))
+                        .await
+                    {
                         continue;
                     }
                     let Some((text, queue_permit)) = admission.decode_and_reserve(&message.data)
@@ -1534,12 +1618,8 @@ fn spawn_channel_event_loop(
         */
         admission.terminal.store(true, Ordering::Relaxed);
         let rejected = admission.rejected.lock().await;
-        if !*rejected && (label == RELIABLE_LABEL || label == UNRELIABLE_LABEL) {
-            let _ = events.send(EngineEvent::ChannelClosed {
-                peer,
-                generation,
-                label,
-            });
+        if !*rejected {
+            admission.report_channel_closed(&events, peer, generation, &label);
         }
     }))
 }
