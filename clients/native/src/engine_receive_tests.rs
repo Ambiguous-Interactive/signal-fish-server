@@ -783,7 +783,14 @@ async fn live_sibling_closure_fences_gameplay_before_its_poller_runs() {
                 .await
                 .expect("both channel streams drain after the held poller resumes");
                 let mut healthy_closed = 0;
-                while let Ok(event) = pair.receiver_events.try_recv() {
+                loop {
+                    let event = match pair.receiver_events.try_recv() {
+                        Ok(event) => event,
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            panic!("the live engine must retain its event sender")
+                        }
+                    };
                     match event {
                         EngineEvent::ChannelClosed { label, .. } => {
                             assert_eq!(
