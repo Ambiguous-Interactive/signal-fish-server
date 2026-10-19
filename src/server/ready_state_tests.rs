@@ -2485,3 +2485,211 @@ async fn concurrent_transfer_and_start_use_committed_authority_in_both_orders() 
         );
     }
 }
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn concurrent_direct_endpoint_and_start_publish_consistent_generations() {
+    use crate::protocol::{ConnectionInfo, DirectEndpoint};
+    use std::collections::BTreeSet;
+
+    for start_first in [false, true] {
+        let server = create_test_server_with_session(SessionConfig {
+            default_topology: Topology::Host,
+            enable_webrtc: false,
+            enable_direct: true,
+            ..SessionConfig::default()
+        })
+        .await;
+        let (host, mut host_messages) = register_client(&server).await;
+        let (starter, mut starter_messages) = register_client(&server).await;
+        for (id, name) in [(host, "Host"), (starter, "Starter")] {
+            server.set_client_protocol(
+                &id,
+                NegotiatedProtocol {
+                    version: 3,
+                    transports: vec![Transport::Relay, Transport::Direct],
+                    topologies: vec![Topology::Relay, Topology::Host],
+                },
+            );
+            server
+                .handle_join_room(
+                    &id,
+                    "endpoint-start-contention".into(),
+                    Some("DIR484".into()),
+                    name.into(),
+                    Some(2),
+                    Some(false),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            server.handle_player_ready(&id).await;
+        }
+        let old = ConnectionInfo::Direct {
+            host: "192.0.2.10".into(),
+            port: 7000,
+        };
+        let replacement = ConnectionInfo::Direct {
+            host: "192.0.2.20".into(),
+            port: 8000,
+        };
+        server
+            .handle_provide_connection_info(&host, old.clone())
+            .await;
+        drain_pending(&mut host_messages);
+        drain_pending(&mut starter_messages);
+        let room_id = server.get_client_room(&host).await.unwrap();
+        let gate = server
+            .message_coordinator
+            .lock_room_event_mutation(&room_id)
+            .await;
+        let start = server.handle_start_game(&starter);
+        tokio::pin!(start);
+        if start_first {
+            assert!(futures_util::poll!(&mut start).is_pending());
+        }
+        let lifecycle = server.connection_manager.client_lifecycle(&host).unwrap();
+        let updating_server = Arc::clone(&server);
+        let updated = replacement.clone();
+        let update = tokio::spawn(async move {
+            updating_server
+                .handle_provide_connection_info(&host, updated)
+                .await;
+        });
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let probe = lifecycle.lock();
+                tokio::pin!(probe);
+                if futures_util::poll!(&mut probe).is_pending() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("endpoint update must hold its lifecycle at the room gate");
+        if !start_first {
+            assert!(futures_util::poll!(&mut start).is_pending());
+        }
+        let before = server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.lobby_state, LobbyState::Lobby);
+        assert!(server.active_session_plan(&room_id).is_none());
+        assert_eq!(
+            before.players[&host]
+                .connection_info
+                .as_ref()
+                .and_then(DirectEndpoint::from_connection_info),
+            DirectEndpoint::from_connection_info(&old),
+        );
+        drop(gate);
+        let (_, updated) = timeout(Duration::from_secs(1), async {
+            tokio::join!(start, update)
+        })
+        .await
+        .expect("start and endpoint update must finish after room gate release");
+        updated.unwrap();
+
+        let initial_endpoint = if start_first { &old } else { &replacement };
+        let mut initial_generation = None;
+        let mut final_generation = None;
+        for (recipient, messages) in [(host, &mut host_messages), (starter, &mut starter_messages)]
+        {
+            match recv(messages).await.as_ref() {
+                ServerMessage::GameStarting { peer_connections } => {
+                    assert_eq!(
+                        peer_connections
+                            .iter()
+                            .map(|peer| peer.player_id)
+                            .collect::<BTreeSet<_>>(),
+                        BTreeSet::from([host, starter]),
+                    );
+                    let host_info = peer_connections
+                        .iter()
+                        .find(|peer| peer.player_id == host)
+                        .unwrap();
+                    assert_eq!(
+                        host_info
+                            .connection_info
+                            .as_ref()
+                            .and_then(DirectEndpoint::from_connection_info),
+                        DirectEndpoint::from_connection_info(initial_endpoint),
+                    );
+                }
+                other => panic!("expected game start, got {other:?}"),
+            }
+            for (index, expected_endpoint) in std::iter::once(initial_endpoint)
+                .chain(start_first.then_some(&replacement))
+                .enumerate()
+            {
+                match recv(messages).await.as_ref() {
+                    ServerMessage::SessionPlan(plan) => {
+                        assert_eq!(plan.topology, Topology::Host);
+                        assert_eq!(plan.transport, Transport::Direct);
+                        assert_eq!(plan.host, Some(host));
+                        assert_eq!(
+                            plan.direct_endpoint,
+                            DirectEndpoint::from_connection_info(expected_endpoint)
+                        );
+                        assert_eq!(plan.fallback, Transport::Relay);
+                        assert!(plan.ice_servers.is_empty());
+                        assert_eq!(plan.peers.len(), 1);
+                        assert_eq!(
+                            plan.peers[0].player_id,
+                            if recipient == host { starter } else { host }
+                        );
+                        assert_eq!(plan.peers[0].initiate, recipient != host);
+                        if index == 0 {
+                            assert_eq!(
+                                *initial_generation.get_or_insert(plan.generation),
+                                plan.generation
+                            );
+                        }
+                        if !start_first || index == 1 {
+                            assert_eq!(
+                                *final_generation.get_or_insert(plan.generation),
+                                plan.generation
+                            );
+                        }
+                    }
+                    other => panic!("expected direct plan, got {other:?}"),
+                }
+            }
+            let pending = messages.try_recv();
+            assert!(
+                matches!(pending, Err(mpsc::error::TryRecvError::Empty)),
+                "unexpected endpoint/start tail: {pending:?}"
+            );
+        }
+        if start_first {
+            assert_ne!(initial_generation, final_generation);
+        }
+        let stored = server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.lobby_state, LobbyState::Finalized);
+        assert_eq!(
+            stored.ready_players.into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([host, starter])
+        );
+        assert_eq!(
+            stored.players[&host]
+                .connection_info
+                .as_ref()
+                .and_then(DirectEndpoint::from_connection_info),
+            DirectEndpoint::from_connection_info(&replacement)
+        );
+        let active = server.active_session_plan(&room_id).unwrap();
+        assert_eq!(active.topology, Topology::Host);
+        assert_eq!(active.transport, Transport::Direct);
+        assert_eq!(active.host, Some(host));
+    }
+}

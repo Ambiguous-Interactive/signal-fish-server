@@ -100,6 +100,69 @@ baseline. It maps audit ownership; it does not certify these operations.
 
 ## Bounded histories without a confirmed defect
 
+### A08/A11/A20 — Session 484 endpoint, negotiation, and mesh-debt histories
+
+At `9dcbafcf`, fresh investigations continue open #826, #853, and #889.
+No new runtime defect or historical incident cause is confirmed.
+
+The server queues StartGame from one member and a Direct host endpoint update
+from another against a held room event gate, in both orders. The harness waits until the endpoint worker
+holds its own lifecycle. In update-first order, it then queues StartGame. This
+runs on one thread; the worker has no suspending work before the held room gate. An initial
+harness incorrectly observed the `lock_owned` attempt counter for a `lock`
+caller and timed out. The final harness observes that the worker holds its
+lifecycle and verifies unchanged lobby state before releasing the room gate.
+Both recipient queues contain GameStarting with the same membership and
+expected host endpoint. When start commits first, they contain the old endpoint then
+the new endpoint in a fresh common generation. When update commits first, they
+contain one plan with the new endpoint. Peer direction, fallback, stored metadata,
+finalized readiness, and empty output tails agree. Treating every valid endpoint
+change as unchanged suppresses the replacement plan and fails Nextest
+`9bec79f0`. Original production source is restored. Final `853ab427` passes the
+new history plus neighboring readiness/start and transfer/start controls.
+
+The native control injects parse-invalid SDP into the initiator and responder
+in separate runs,
+then buffers malformed ICE before applying the original valid SDP. It rejects
+another malformed candidate after SDP, preserves the same physical generation,
+and opens both real required channels. Reliable messages sent before and after an
+unreliable probe arrive in reliable order in both directions. It awaits each opposite
+endpoint's receive queue. An unreliable receipt alone does not prove reliable
+delivery; this control independently requires both reliable payloads. Propagating
+buffered ICE rejection instead of continuing the Offer flush fails Nextest
+`4cfabc3e`; the independent Answer-only fault fails `302a6c77`. Restored
+Nextest `f65781eb` passes both role histories. This excludes
+these specific parse-level rejection histories as deterministic establishment
+failures. It does not cover every stack error or reproduce Chromium failure.
+
+Eight browser orchestrator histories cover both mixed mesh roles, either
+missing receive label, and recovery versus unpaid exit. UUIDs follow the
+server's lesser-UUID offerer rule. Both pairs send both exact probes. A
+wrong-player payload cannot pay the missing label. One pair's channel error
+retires only that pair; healthy callbacks continue. Without recovery the exit
+names only the unpaid peer/label, and the per-peer exchange snapshot names only
+the missing receive label. Selective retry sends only the rebuilt pair's
+probes and the missing receipt permits success. Three in-memory faults remove
+peer identity validation, ignore exchange debt, or clear all connected pairs
+on one loss; each fails the test. These are controlled application
+histories with mock browser channels, not real Chromium transport evidence.
+
+Independent review corrects browser role realism and verifies root scheduling
+and native role/receive boundaries. All changes are test coverage and evidence.
+No server wire, runtime, SDK API, configuration, or dependency behavior changes;
+no changelog entry or external Rust, .NET, or Godot migration is required.
+The three original issues remain open with their acceptance unchanged.
+
+Final fixed-artifact Nextest `d7597feb` passes native restore, native/browser
+retry, and three-player browser mesh in 3.364 seconds. All seven endpoint
+streams exit zero, with 26 channel sends and 26 receipts. Server, native
+executable, browser CLI, and page hashes match before and after. Full endpoint
+streams and server logs remain in local `progress/session-484/fixed-final`.
+Initial `3d149c39` also passes but rebuilds the native executable during harness
+compilation; it is excluded from the fixed-artifact claim. These passing
+controls do not explain either historical incident. Strict root and native
+lint, browser tests/type checks/build, and source-policy checks pass.
+
 ### A08/A09/A11/A20 — Session 483 gameplay ordering investigations
 
 At `e190bed7`, new histories investigate open #826, #853, and #889.
