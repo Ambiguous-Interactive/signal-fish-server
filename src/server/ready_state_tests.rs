@@ -1700,7 +1700,8 @@ async fn concurrent_unready_and_start_follow_room_gate_order() {
 }
 
 // Audit #826: a new member and game start must share one membership boundary.
-#[tokio::test]
+// Paused time keeps the liveness deadlines independent of interpreter speed.
+#[tokio::test(start_paused = true)]
 async fn concurrent_join_and_start_follow_room_membership_order() {
     use std::collections::BTreeSet;
 
@@ -2013,7 +2014,8 @@ async fn concurrent_join_and_start_follow_room_membership_order() {
     }
 }
 
-#[tokio::test]
+// Exercise both room gate orders without a wall-clock performance deadline.
+#[tokio::test(start_paused = true)]
 async fn concurrent_leave_and_start_publish_exact_membership_in_both_orders() {
     use std::collections::BTreeSet;
 

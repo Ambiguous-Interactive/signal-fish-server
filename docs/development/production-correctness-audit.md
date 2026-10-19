@@ -5329,3 +5329,53 @@ match before and after. Complete streams remain in local
 `progress/session-479-fixed-live`. An earlier passing run rebuilt the native
 executable while enabling the interop feature; its differing hashes are retained
 and excluded from this fixed-artifact claim. Hosted CI remains a publication gate.
+
+### F95 — Browser live terminal state precedes failure callbacks
+
+Issue [#1055](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1055),
+found at `fd623b30` while continuing open #826, #853, and #889.
+The browser engine relies on a cached terminal flag. A required data channel
+can enter `closing` before its close callback runs. In that interval the
+engine still returns the healthy sibling for gameplay sends and admits its
+messages. Live failed or closed peer state has the same gap in controlled
+engine histories.
+
+The real Chromium negative control first exchanges both required labels in
+both directions. It calls a retained channel's actual `close()` method and
+checks its immediate `closing` state before a loss callback runs. Looking up
+the sibling still returns a usable channel, so the new assertion fails on
+original production source. This proves a real send-admission interval.
+Controlled engine histories separately prove message and negotiation admission;
+they inject peer-state observations and do not claim physical connection failure.
+The first fixed-source Chromium harness incorrectly waited for a local `closing`
+event. Chromium emits that event for remote closure; local close changes state
+synchronously. The corrected local control captures the immediate observation
+and waits for the actual close event to verify notification deduplication.
+Both failed experiments remain in local session evidence.
+
+The repair observes live failed/closed peer state and closing/closed retained
+required channels at each engine admission boundary. It marks the link terminal
+before publishing one loss notification. Subsequent callbacks cannot publish a
+second terminal notification or admit work. Missing or connecting required
+channels and transient peer disconnection remain valid setup states. The
+orchestrator keeps already admitted input and can replace the physical link.
+No server wire, API, configuration, or dependency changes.
+
+Current external SDK README assessments confirm separate implementations:
+Rust supplies no WebRTC backend, .NET owns signaling and relay only, and Godot
+owns its engine mesh. None imports this private browser reference engine.
+No external client migration or tracking issue is required for this repair.
+
+Baseline real browser/native restore, retry, and three-player mesh controls
+pass with retained endpoint streams. Passing controls do not diagnose the
+historical incidents in #853 or #889. Those issues and the wider #826 campaign
+remain open.
+
+Fixed-artifact Nextest `812f5f7a` passes three restores, three retries, and three
+browser meshes in 35.165 seconds. All 21 endpoint streams exit zero, with 78
+channel sends and receipts, nine relay sends, and 18 relay receipts. Server,
+native executable, browser CLI, and page hashes match before and after.
+Complete streams remain in local `progress/session-480-fixed-live`. Browser
+unit tests, type checks, real Chromium channel controls, formatting, strict
+root lint, and document checks pass. Independent adversarial review finds no
+further scoped defect. Hosted CI and feedback remain publication gates.

@@ -602,3 +602,298 @@ for (const failure of [
 console.error(
   'ok - terminal browser links reject new input, sends, and negotiation until replacement',
 );
+
+// Regression #1055, audit #826/#853/#889: close() changes state before failure callbacks.
+for (const failure of ['reliable', 'unreliable', 'pc-failed', 'pc-closed'] as const) {
+  for (const admission of [
+    'send',
+    'message',
+    'open',
+    'candidate',
+    'announcement',
+    'offer',
+    'answer',
+    'remote-candidate',
+  ] as const) {
+    const description = `${failure}/${admission}`;
+    const originalPc = globalThis.RTCPeerConnection;
+    let connection!: Connection;
+    const observed: string[] = [];
+    class Channel {
+      readyState = 'open';
+      maxPacketLifeTime = null;
+      readonly ordered: boolean;
+      readonly maxRetransmits: number | null;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclosing: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      constructor(readonly label: string) {
+        this.ordered = label === RELIABLE_LABEL;
+        this.maxRetransmits = this.ordered ? null : 0;
+      }
+      close(): void {
+        // Match RTCDataChannel.close(): state changes now, event arrives later.
+        this.readyState = 'closing';
+      }
+    }
+    class Connection {
+      connectionState = 'connected';
+      onconnectionstatechange: (() => void) | null = null;
+      ondatachannel: ((event: { channel: Channel }) => void) | null = null;
+      onicecandidate: ((event: { candidate: { toJSON(): object } }) => void) | null = null;
+      constructor() {
+        connection = this;
+      }
+      close(): void {
+        this.connectionState = 'closed';
+      }
+      async setRemoteDescription(): Promise<void> {
+        observed.push('stack');
+      }
+      async addIceCandidate(): Promise<void> {
+        observed.push('stack');
+      }
+      async createAnswer(): Promise<{ sdp: string }> {
+        observed.push('stack');
+        return { sdp: 'answer' };
+      }
+      async setLocalDescription(): Promise<void> {
+        observed.push('stack');
+      }
+    }
+    try {
+      globalThis.RTCPeerConnection = Connection as unknown as typeof RTCPeerConnection;
+      const engine = new Engine(false, {
+        onLocalCandidate: () => observed.push('candidate'),
+        onPcState: () => observed.push('loss'),
+        onChannelClosed: () => observed.push('loss'),
+        onChannelOpen: () => observed.push('open'),
+        onChannelMessage: () => {
+          observed.push('message');
+        },
+      });
+      await engine.pairWith('peer', false, []);
+      const channels = [new Channel(RELIABLE_LABEL), new Channel(UNRELIABLE_LABEL)];
+      for (const channel of channels) connection.ondatachannel?.({ channel });
+      await Promise.resolve();
+      for (const channel of channels) engine.noteChannelOpen('peer', channel.label);
+      observed.length = 0;
+      if (failure.startsWith('pc-')) connection.connectionState = failure.slice(3);
+      else channels.find((channel) => channel.label === failure)?.close();
+      const live = channels.find((channel) => channel.label !== failure) ?? channels[0]!;
+      const late = new Channel(RELIABLE_LABEL);
+      let rejected = false;
+      try {
+        switch (admission) {
+          case 'send':
+            assert(
+              engine.channel('peer', live.label) === undefined,
+              `${description}: fence send before callback`,
+            );
+            break;
+          case 'message':
+            live.onmessage?.({ data: 'late gameplay' });
+            break;
+          case 'open':
+            engine.noteChannelOpen('peer', live.label);
+            break;
+          case 'candidate':
+            connection.onicecandidate?.({
+              candidate: { toJSON: () => ({ candidate: 'late' }) },
+            });
+            break;
+          case 'announcement':
+            connection.ondatachannel?.({ channel: late });
+            break;
+          case 'offer':
+            await engine.handleOffer('peer', 'late');
+            break;
+          case 'answer':
+            await engine.handleAnswer('peer', 'late');
+            break;
+          case 'remote-candidate':
+            await engine.handleRemoteCandidate('peer', '{}');
+            break;
+        }
+      } catch (error) {
+        if (!(error instanceof Error) || !error.message.includes('terminal peer')) throw error;
+        rejected = true;
+      }
+      assert(
+        observed.join(',') === 'loss',
+        `${description}: observe loss once before admitting work; got ${observed}`,
+      );
+      assert(
+        rejected === ['offer', 'answer', 'remote-candidate'].includes(admission),
+        `${description}: reject negotiation`,
+      );
+      if (admission === 'announcement')
+        assert(late.readyState === 'closing', `${description}: close late channel`);
+      for (const channel of channels) {
+        channel.onclosing?.();
+        channel.onclose?.();
+        channel.onerror?.();
+        channel.onmessage?.({ data: 'late gameplay' });
+      }
+      connection.onconnectionstatechange?.();
+      assert(
+        observed.join(',') === 'loss',
+        `${description}: queued callbacks cannot duplicate loss`,
+      );
+      const oldConnection = connection;
+      engine.removePeer('peer');
+      await engine.pairWith('peer', false, []);
+      const fresh = new Channel(RELIABLE_LABEL);
+      connection.ondatachannel?.({ channel: fresh });
+      await Promise.resolve();
+      oldConnection.onconnectionstatechange?.();
+      for (const channel of channels) channel.onclosing?.();
+      fresh.onmessage?.({ data: 'fresh gameplay' });
+      assert(
+        observed.join(',') === 'loss,open,message',
+        `${description}: fresh generation survives old callbacks`,
+      );
+      engine.removePeer('peer');
+    } finally {
+      globalThis.RTCPeerConnection = originalPc;
+    }
+  }
+}
+console.error('ok - live terminal state fences browser work before queued failure callbacks');
+
+for (const path of ['pair', 'offer', 'answer'] as const) {
+  const originalPc = globalThis.RTCPeerConnection;
+  let connection!: Connection;
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const stack: string[] = [];
+  let losses = 0;
+  class Connection {
+    connectionState = 'connecting';
+    constructor() {
+      connection = this;
+    }
+    createDataChannel(label: string): object {
+      return { label, readyState: 'connecting' };
+    }
+    async createOffer(): Promise<{ sdp: string }> {
+      stack.push('offer');
+      await blocked;
+      return { sdp: 'offer' };
+    }
+    async setRemoteDescription(): Promise<void> {
+      stack.push('remote');
+      await blocked;
+    }
+    async setLocalDescription(): Promise<void> {
+      stack.push('local');
+    }
+    async addIceCandidate(): Promise<void> {
+      stack.push('candidate');
+    }
+    async createAnswer(): Promise<{ sdp: string }> {
+      stack.push('answer');
+      return { sdp: 'answer' };
+    }
+    close(): void {}
+  }
+  try {
+    globalThis.RTCPeerConnection = Connection as unknown as typeof RTCPeerConnection;
+    const engine = new Engine(false, {
+      onLocalCandidate: () => {},
+      onPcState: () => {
+        losses += 1;
+      },
+      onChannelClosed: () => {
+        losses += 1;
+      },
+      onChannelOpen: () => {},
+      onChannelMessage: () => {},
+    });
+    if (path !== 'pair') {
+      await engine.pairWith('peer', false, []);
+      await engine.handleRemoteCandidate('peer', '{}');
+    }
+    const applying =
+      path === 'pair'
+        ? engine.pairWith('peer', true, [])
+        : path === 'offer'
+          ? engine.handleOffer('peer', 'offer')
+          : engine.handleAnswer('peer', 'answer');
+    connection.connectionState = 'failed';
+    release();
+    let error: unknown;
+    try {
+      await applying;
+    } catch (failure) {
+      error = failure;
+    }
+    assert(
+      error instanceof Error && error.message.includes('terminated'),
+      `${path}: reject resumed terminal negotiation`,
+    );
+    assert(
+      stack.length === 1 && losses === 1,
+      `${path}: no later SDP or candidate work before failure callback`,
+    );
+    engine.removePeer('peer');
+  } finally {
+    release();
+    globalThis.RTCPeerConnection = originalPc;
+  }
+}
+console.error(
+  'ok - resumed browser negotiations observe live failure before browser callbacks',
+);
+
+// Failure observers may synchronously inspect and replace their physical link.
+{
+  const originalPc = globalThis.RTCPeerConnection;
+  let connection!: Connection;
+  let engine!: Engine;
+  let losses = 0;
+  class Connection {
+    connectionState = 'connected';
+    constructor() {
+      connection = this;
+    }
+    close(): void {}
+  }
+  try {
+    globalThis.RTCPeerConnection = Connection as unknown as typeof RTCPeerConnection;
+    engine = new Engine(false, {
+      onLocalCandidate: () => {},
+      onPcState: () => {
+        losses += 1;
+        assert(
+          engine.channel('peer', RELIABLE_LABEL) === undefined,
+          'fence before reentrant observer',
+        );
+        engine.removePeer('peer');
+        void engine.pairWith('peer', false, []);
+      },
+      onChannelClosed: () => {},
+      onChannelOpen: () => {},
+      onChannelMessage: () => {},
+    });
+    await engine.pairWith('peer', false, []);
+    const generation = engine.generationOf('peer');
+    connection.connectionState = 'closed';
+    assert(
+      engine.channel('peer', RELIABLE_LABEL) === undefined,
+      'old lookup cannot expose replacement',
+    );
+    assert(
+      losses === 1 && engine.generationOf('peer') !== generation,
+      'observer replaces terminal generation once',
+    );
+    engine.removePeer('peer');
+  } finally {
+    globalThis.RTCPeerConnection = originalPc;
+  }
+}
+console.error('ok - browser live-state fencing permits reentrant failure observers');
