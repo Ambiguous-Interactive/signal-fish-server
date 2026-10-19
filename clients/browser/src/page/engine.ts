@@ -252,7 +252,7 @@ export class Engine {
       console.error(`channel ${label} open for unknown peer ${peer}`);
       return false;
     }
-    if (link.terminal) return false;
+    if (!this.usableLink(peer, link)) return false;
     link.openLabels.add(label);
     const reliable = link.channels.get(RELIABLE_LABEL);
     const unreliable = link.channels.get(UNRELIABLE_LABEL);
@@ -271,7 +271,9 @@ export class Engine {
   /** Look up a usable channel by peer and label. */
   channel(peer: string, label: string): RTCDataChannel | undefined {
     const link = this.peers.get(peer);
-    return link?.terminal === false ? link.channels.get(label) : undefined;
+    return link !== undefined && this.usableLink(peer, link)
+      ? link.channels.get(label)
+      : undefined;
   }
 
   /** Local transport state only; excludes signaling payloads and ICE addresses. */
@@ -316,15 +318,36 @@ export class Engine {
 
   private linkOf(peer: string, what: string): PeerLink {
     const link = this.peers.get(peer);
-    if (link === undefined || link.terminal) {
+    if (link === undefined || !this.usableLink(peer, link)) {
       throw new Error(`${what} from unpaired or terminal peer ${peer}`);
     }
     return link;
   }
 
   private assertCurrentLink(peer: string, link: PeerLink): void {
-    if (this.peers.get(peer) !== link || link.terminal)
+    if (!this.usableLink(peer, link))
       throw new Error('the peer link was retired or terminated');
+  }
+
+  /** Observe synchronous state changes before their browser events are delivered. */
+  private usableLink(peer: string, link: PeerLink): boolean {
+    if (this.peers.get(peer) !== link || link.terminal) return false;
+    const state = link.pc.connectionState;
+    if (state === 'failed' || state === 'closed') {
+      // Fence first: callbacks may synchronously inspect or replace this link.
+      link.terminal = true;
+      this.callbacks.onPcState(peer, link.generation, state);
+      return false;
+    }
+    for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL]) {
+      const channel = link.channels.get(label);
+      if (channel?.readyState === 'closing' || channel?.readyState === 'closed') {
+        link.terminal = true;
+        this.callbacks.onChannelClosed(peer, link.generation, label);
+        return false;
+      }
+    }
+    return true;
   }
 
   private async flushPendingCandidates(peer: string, link: PeerLink): Promise<void> {
@@ -342,22 +365,12 @@ export class Engine {
   private registerPcHandlers(peer: string, link: PeerLink): void {
     const pc = link.pc;
     pc.onconnectionstatechange = () => {
-      if (this.peers.get(peer) !== link) {
-        return;
-      }
-      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-        link.terminal = true;
-      }
+      if (!this.usableLink(peer, link)) return;
       this.callbacks.onPcState(peer, link.generation, pc.connectionState);
     };
     pc.onicecandidate = (event) => {
       // `null` marks end-of-gathering; crippled mode drops everything.
-      if (
-        this.peers.get(peer) !== link ||
-        link.terminal ||
-        this.crippled ||
-        event.candidate === null
-      ) {
+      if (!this.usableLink(peer, link) || this.crippled || event.candidate === null) {
         return;
       }
       this.callbacks.onLocalCandidate(
@@ -383,7 +396,7 @@ export class Engine {
         return;
       }
       if (this.peers.get(peer) !== link) return;
-      if (link.terminal) {
+      if (!this.usableLink(peer, link)) {
         channel.close();
         return;
       }
@@ -416,7 +429,7 @@ export class Engine {
       const link = this.peers.get(peer);
       if (
         !openNotified &&
-        !callbackLink.terminal &&
+        this.usableLink(peer, callbackLink) &&
         channel.readyState === 'open' &&
         link === callbackLink &&
         link.channels.get(label) === channel
@@ -431,7 +444,11 @@ export class Engine {
     }
     channel.onmessage = (event: MessageEvent<unknown>) => {
       const link = this.peers.get(peer);
-      if (link !== callbackLink || link.terminal || link.channels.get(label) !== channel) {
+      if (
+        link !== callbackLink ||
+        !this.usableLink(peer, link) ||
+        link.channels.get(label) !== channel
+      ) {
         return;
       }
       // Preflight allocations; UTF-16 length bounds UTF-8 length from below.

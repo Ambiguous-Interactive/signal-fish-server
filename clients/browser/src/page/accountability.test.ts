@@ -936,7 +936,9 @@ test('removed browser peer links cannot emit callbacks after the same peer is re
     stalePc.connectionState = 'failed';
     stalePc.onconnectionstatechange?.();
     const queuedBeforeReplacement = queued.length;
-    if (queuedBeforeReplacement !== 5 || observed.length !== 0) {
+    // #1055: channel loss owns the one terminal notification; the later PC
+    // failure cannot add another notification for the same physical link.
+    if (queuedBeforeReplacement !== 4 || observed.length !== 0) {
       throw new Error('old-link callbacks were not held at the queue boundary');
     }
 

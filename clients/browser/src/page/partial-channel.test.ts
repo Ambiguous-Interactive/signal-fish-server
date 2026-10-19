@@ -20,8 +20,18 @@ const histories = [
   'queued-pc-failed',
   'queued-pc-closed',
   'queued-pc-disconnected',
+  'state-closing-first',
+  'state-closing-second',
+  'state-pc-failed',
+  'state-pc-closed',
+  'state-pc-disconnected',
 ].flatMap((scenario) => {
-  const recoveries = ['live', 'wrong-probe', 'queued-pc-disconnected'].includes(scenario)
+  const recoveries = [
+    'live',
+    'wrong-probe',
+    'queued-pc-disconnected',
+    'state-pc-disconnected',
+  ].includes(scenario)
     ? [false]
     : [false, true];
   return recoveries.map((recover) => ({ scenario, recover }));
@@ -211,13 +221,21 @@ for (const firstLabel of ['reliable', 'unreliable']) {
           failed.onclose?.();
         } else failed.onerror?.();
       }
+      if (scenario.startsWith('state-pc-')) {
+        connection.connectionState = scenario.slice('state-pc-'.length);
+      } else if (scenario.startsWith('state-closing-')) {
+        const failed = scenario.endsWith('first') ? first : second;
+        failed.readyState = 'closing';
+      }
+      // The state changed, but no browser failure callback has run yet.
       second.receive();
       release();
       await turn();
       const terminal =
         scenario === 'closed' ||
         scenario === 'error' ||
-        (scenario.startsWith('queued-') && scenario !== 'queued-pc-disconnected');
+        ((scenario.startsWith('queued-') || scenario.startsWith('state-')) &&
+          !scenario.endsWith('pc-disconnected'));
       assert(
         probes.length === (terminal ? 0 : 2),
         `${description}: terminal partial pair cannot send probes`,

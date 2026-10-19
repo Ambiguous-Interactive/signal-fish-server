@@ -245,128 +245,150 @@ try {
   }
   // Regression #999: embedded candidates must preserve deterministic relay fallback.
   for (const crippled of [false, true])
-    for (const path of ['offer', 'answer']) {
-      const result = await page.evaluate(
-        async ({ crippled, path }) => {
-          const events = [];
-          const remote = new RTCPeerConnection();
-          const remoteChannels = [];
-          remote.ondatachannel = ({ channel }) => {
-            remoteChannels.push(channel);
-            channel.onmessage = ({ data }) => events.push(`remote:${channel.label}:${data}`);
-          };
-          const engine = new channelEngine.Engine(crippled, {
-            onLocalCandidate: () => {},
-            onPcState: (_p, _g, state) => events.push(state),
-            onChannelClosed: (_p, _g, label) => events.push(`closed:${label}`),
-            onChannelOpen: (_p, _g, label) => events.push(label),
-            onChannelMessage: (_p, _g, label, text) => events.push(`${label}:${text}`),
-          });
-          const until = async (condition, milliseconds = 8000) => {
-            const end = performance.now() + milliseconds;
-            while (!condition() && performance.now() < end)
-              await new Promise((resolve) => setTimeout(resolve, 10));
-          };
-          let closingEvidence;
-          try {
-            const offer = await engine.pairWith('peer', path === 'answer', []);
-            let remoteSdp;
-            if (path === 'offer') {
-              for (const channel of [
-                remote.createDataChannel('reliable'),
-                remote.createDataChannel('unreliable', { ordered: false, maxRetransmits: 0 }),
-              ]) {
-                remoteChannels.push(channel);
-                channel.onmessage = ({ data }) =>
-                  events.push(`remote:${channel.label}:${data}`);
-              }
-              await remote.setLocalDescription(await remote.createOffer());
-              await until(() => remote.iceGatheringState === 'complete');
-              remoteSdp = remote.localDescription.sdp;
-              const answer = await engine.handleOffer('peer', remoteSdp);
-              await remote.setRemoteDescription({ type: 'answer', sdp: answer });
-            } else {
-              await remote.setRemoteDescription({ type: 'offer', sdp: offer });
-              await remote.setLocalDescription(await remote.createAnswer());
-              await until(() => remote.iceGatheringState === 'complete');
-              remoteSdp = remote.localDescription.sdp;
-              await engine.handleAnswer('peer', remoteSdp);
-            }
-            if (!remoteSdp.includes('a=candidate:'))
-              throw new Error('probe requires embedded candidates');
-            await until(
-              () => events.includes('reliable') && events.includes('unreliable'),
-              crippled ? 1500 : 8000,
-            );
-            const connected = events.includes('reliable') && events.includes('unreliable');
-            if (connected === crippled)
-              throw new Error(
-                `incorrect result: ${JSON.stringify({ crippled, path, events })}`,
-              );
-            if (!crippled) {
-              await until(
-                () =>
-                  remoteChannels.length === 2 &&
-                  remoteChannels.every((channel) => channel.readyState === 'open'),
-              );
-              for (const channel of remoteChannels) {
-                channel.send('to-engine');
-                engine.channel('peer', channel.label).send('to-remote');
-              }
-              const received = () =>
-                ['reliable', 'unreliable'].every(
-                  (label) =>
-                    events.includes(`${label}:to-engine`) &&
-                    events.includes(`remote:${label}:to-remote`),
-                );
-              await until(received);
-              if (!received())
-                throw new Error('healthy pair must exchange both labels in both directions');
-              const closingLabel = path === 'offer' ? 'reliable' : 'unreliable';
-              const closingChannel = engine.channel('peer', closingLabel);
-              closingChannel.addEventListener('closing', () => {
-                closingEvidence = {
-                  state: closingChannel.readyState,
-                  notified: events.includes(`closed:${closingLabel}`),
-                  usable: ['reliable', 'unreliable'].some(
-                    (label) => engine.channel('peer', label) !== undefined,
-                  ),
-                };
-              });
-              remoteChannels.find((channel) => channel.label === closingLabel).close();
-              await until(() => closingEvidence !== undefined);
-              if (
-                closingEvidence?.state !== 'closing' ||
-                !closingEvidence.notified ||
-                closingEvidence.usable
-              )
-                throw new Error(
-                  `closing must retire the pair before close: ${JSON.stringify(closingEvidence)}`,
-                );
-              await until(() => closingChannel.readyState === 'closed');
-              if (
-                closingChannel.readyState !== 'closed' ||
-                events.filter((event) => event.startsWith('closed:')).length !== 1
-              )
-                throw new Error('closing and close must report one pair loss');
-            }
-            return {
-              crippled,
-              path,
-              connected,
-              closingEvidence,
-              events,
-              sender: remote.connectionState,
+    for (const path of ['offer', 'answer'])
+      for (const closeLocally of crippled ? [false] : [false, true]) {
+        const result = await page.evaluate(
+          async ({ crippled, path, closeLocally }) => {
+            const events = [];
+            const remote = new RTCPeerConnection();
+            const remoteChannels = [];
+            remote.ondatachannel = ({ channel }) => {
+              remoteChannels.push(channel);
+              channel.onmessage = ({ data }) => events.push(`remote:${channel.label}:${data}`);
             };
-          } finally {
-            engine.removePeer('peer');
-            remote.close();
-          }
-        },
-        { crippled, path },
-      );
-      console.error(`ok - Chromium embedded SDP fallback ${JSON.stringify(result)}`);
-    }
+            const engine = new channelEngine.Engine(crippled, {
+              onLocalCandidate: () => {},
+              onPcState: (_p, _g, state) => events.push(state),
+              onChannelClosed: (_p, _g, label) => events.push(`closed:${label}`),
+              onChannelOpen: (_p, _g, label) => events.push(label),
+              onChannelMessage: (_p, _g, label, text) => events.push(`${label}:${text}`),
+            });
+            const until = async (condition, milliseconds = 8000) => {
+              const end = performance.now() + milliseconds;
+              while (!condition() && performance.now() < end)
+                await new Promise((resolve) => setTimeout(resolve, 10));
+            };
+            let closingEvidence;
+            try {
+              const offer = await engine.pairWith('peer', path === 'answer', []);
+              let remoteSdp;
+              if (path === 'offer') {
+                for (const channel of [
+                  remote.createDataChannel('reliable'),
+                  remote.createDataChannel('unreliable', { ordered: false, maxRetransmits: 0 }),
+                ]) {
+                  remoteChannels.push(channel);
+                  channel.onmessage = ({ data }) =>
+                    events.push(`remote:${channel.label}:${data}`);
+                }
+                await remote.setLocalDescription(await remote.createOffer());
+                await until(() => remote.iceGatheringState === 'complete');
+                remoteSdp = remote.localDescription.sdp;
+                const answer = await engine.handleOffer('peer', remoteSdp);
+                await remote.setRemoteDescription({ type: 'answer', sdp: answer });
+              } else {
+                await remote.setRemoteDescription({ type: 'offer', sdp: offer });
+                await remote.setLocalDescription(await remote.createAnswer());
+                await until(() => remote.iceGatheringState === 'complete');
+                remoteSdp = remote.localDescription.sdp;
+                await engine.handleAnswer('peer', remoteSdp);
+              }
+              if (!remoteSdp.includes('a=candidate:'))
+                throw new Error('probe requires embedded candidates');
+              await until(
+                () => events.includes('reliable') && events.includes('unreliable'),
+                crippled ? 1500 : 8000,
+              );
+              const connected = events.includes('reliable') && events.includes('unreliable');
+              if (connected === crippled)
+                throw new Error(
+                  `incorrect result: ${JSON.stringify({ crippled, path, events })}`,
+                );
+              if (!crippled) {
+                await until(
+                  () =>
+                    remoteChannels.length === 2 &&
+                    remoteChannels.every((channel) => channel.readyState === 'open'),
+                );
+                for (const channel of remoteChannels) {
+                  channel.send('to-engine');
+                  engine.channel('peer', channel.label).send('to-remote');
+                }
+                const received = () =>
+                  ['reliable', 'unreliable'].every(
+                    (label) =>
+                      events.includes(`${label}:to-engine`) &&
+                      events.includes(`remote:${label}:to-remote`),
+                  );
+                await until(received);
+                if (!received())
+                  throw new Error('healthy pair must exchange both labels in both directions');
+                const closingLabel = path === 'offer' ? 'reliable' : 'unreliable';
+                const closingChannel = engine.channel('peer', closingLabel);
+                closingChannel.addEventListener('closing', () => {
+                  closingEvidence = {
+                    state: closingChannel.readyState,
+                    notified: events.includes(`closed:${closingLabel}`),
+                    usable: ['reliable', 'unreliable'].some(
+                      (label) => engine.channel('peer', label) !== undefined,
+                    ),
+                  };
+                });
+                if (closeLocally) {
+                  closingChannel.close();
+                  if (closingChannel.readyState !== 'closing')
+                    throw new Error('local close must enter closing before its event task');
+                  if (events.some((event) => event.startsWith('closed:')))
+                    throw new Error('the close callback must not have run');
+                  const siblingLabel = closingLabel === 'reliable' ? 'unreliable' : 'reliable';
+                  if (engine.channel('peer', siblingLabel) !== undefined)
+                    throw new Error(
+                      'live closing state must fence sibling sends before the event',
+                    );
+                  closingEvidence = {
+                    state: closingChannel.readyState,
+                    notified: events.includes(`closed:${closingLabel}`),
+                    usable: ['reliable', 'unreliable'].some(
+                      (label) => engine.channel('peer', label) !== undefined,
+                    ),
+                  };
+                } else {
+                  remoteChannels.find((channel) => channel.label === closingLabel).close();
+                }
+                await until(() => closingEvidence !== undefined);
+                if (
+                  closingEvidence?.state !== 'closing' ||
+                  !closingEvidence.notified ||
+                  closingEvidence.usable
+                )
+                  throw new Error(
+                    `closing must retire the pair before close: ${JSON.stringify(closingEvidence)}`,
+                  );
+                await until(() => closingChannel.readyState === 'closed');
+                if (
+                  closingChannel.readyState !== 'closed' ||
+                  events.filter((event) => event.startsWith('closed:')).length !== 1
+                )
+                  throw new Error('closing and close must report one pair loss');
+              }
+              return {
+                crippled,
+                path,
+                closeLocally,
+                connected,
+                closingEvidence,
+                events,
+                sender: remote.connectionState,
+              };
+            } finally {
+              engine.removePeer('peer');
+              remote.close();
+            }
+          },
+          { crippled, path, closeLocally },
+        );
+        console.error(`ok - Chromium embedded SDP fallback ${JSON.stringify(result)}`);
+      }
 } finally {
   await browser.close();
 }
