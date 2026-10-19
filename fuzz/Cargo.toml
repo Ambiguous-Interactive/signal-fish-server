@@ -41,7 +41,7 @@ uuid = { version = "1.28.0", features = ["v4"] }
 
 [dependencies.signal-fish-server]
 path = ".."
-version = "0.11.0"
+version = "0.12.0"
 
 # Detach from the parent crate so the nightly fuzz build is fully independent of
 # the pinned-stable workspace.
