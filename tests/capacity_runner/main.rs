@@ -61,6 +61,29 @@ use records::{EventLog, GapEvent, ReceiptEvent, ReceiptName, RunRecords, SentEve
 use schedule::{build_run_shape, ChurnPlan, SenderPlan};
 use signal_fish_server::protocol::{DeliveryGapReason, ServerMessage};
 
+#[tokio::test]
+async fn planned_record_budget_refuses_large_work_before_artifacts_or_connections() {
+    let parent = tempfile::tempdir().expect("output parent");
+    let output = parent.path().join("refused");
+    let mut config = scenario_config(Encoding::V3Json);
+    config.endpoint = Some("ws://127.0.0.1:1".into());
+    config.rooms = 999;
+    config.players_per_room = 16;
+    config.send_rate_per_sender = 60.0;
+    config.warmup = Duration::from_secs(120);
+    config.duration = Duration::from_secs(600);
+    config.output_dir = output.clone();
+    let error = runner::run(config)
+        .await
+        .expect_err("large workload refused");
+    assert!(error.contains("11048652288"), "full offered count: {error}");
+    assert!(
+        error.contains("planned_record_budget is 32000000"),
+        "{error}"
+    );
+    assert!(!output.exists(), "refusal must not create a run directory");
+}
+
 /// Exercise config -> live receipt collection -> bounded sidecar, while
 /// keeping replay dependent only on the ordinary delivery artifacts.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3655,6 +3678,26 @@ fn the_environment_parser_shapes_a_run_and_rejects_unknown_values() {
     assert!(config.players_per_room >= 2);
     assert!(config.send_rate_per_sender > 0.0);
 
+    for (raw, expected) in [
+        ("1234", Some(1234)),
+        ("0", Some(0)),
+        ("-1", None),
+        ("abc", None),
+    ] {
+        std::env::set_var("CAPACITY_RUNNER_PLANNED_RECORD_BUDGET", raw);
+        let result = RunConfig::from_env();
+        match expected {
+            Some(expected) => assert_eq!(
+                result.expect("budget parses").planned_record_budget,
+                expected
+            ),
+            None => assert!(result
+                .expect_err("invalid budget")
+                .contains("PLANNED_RECORD_BUDGET")),
+        }
+    }
+    std::env::remove_var("CAPACITY_RUNNER_PLANNED_RECORD_BUDGET");
+
     // Unknown enum values fail loudly, naming the accepted values.
     std::env::set_var("CAPACITY_RUNNER_ENCODING", "cbor");
     assert!(RunConfig::from_env().is_err());
@@ -5686,6 +5729,7 @@ fn scenario_config(encoding: Encoding) -> RunConfig {
         drain_grace: Duration::from_millis(1_500),
         sample_interval: Duration::from_millis(250),
         receipt_timings: false,
+        planned_record_budget: config::default_planned_record_budget(),
         server_overlay: RunConfig::default_server_overlay(),
         pause_sends: None,
         pause_reads: None,

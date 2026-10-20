@@ -306,19 +306,13 @@ impl RTCDataChannel<'_> {
             .get(&self.id)
             .ok_or(Error::ErrDataChannelClosed)?;
 
-        if matches!(
-            dc.ready_state,
-            RTCDataChannelState::Closing | RTCDataChannelState::Closed
-        ) {
-            return Err(Error::ErrDataChannelClosed);
+        match dc.ready_state {
+            RTCDataChannelState::Open => {}
+            RTCDataChannelState::Connecting => return Err(Error::ErrDataChannelNotOpen),
+            _ => return Err(Error::ErrDataChannelClosed),
         }
         if dc.data_channel.is_none() {
-            // No stream yet: either it is still being negotiated, or it is already gone.
-            return Err(if dc.ready_state == RTCDataChannelState::Connecting {
-                Error::ErrDataChannelNotOpen
-            } else {
-                Error::ErrDataChannelClosed
-            });
+            return Err(Error::ErrDataChannelClosed);
         }
 
         // W3C `send()`: data larger than `maxMessageSize` throws.
@@ -340,8 +334,8 @@ impl RTCDataChannel<'_> {
     ///
     /// # Errors
     ///
-    /// - [`Error::ErrDataChannelNotOpen`] if the channel's SCTP stream has not been established
-    ///   yet — wait for the channel's open event before sending.
+    /// - [`Error::ErrDataChannelNotOpen`] if the channel has not opened yet, including while its
+    ///   allocated stream awaits the DCEP acknowledgment — wait for its open event.
     /// - [`Error::ErrDataChannelClosed`] once the channel is gone.
     /// - [`Error::ErrOutboundPacketTooLarge`] if `data` is larger than the negotiated
     ///   [`max_message_size`](crate::peer_connection::transport::RTCSctpTransport::max_message_size).

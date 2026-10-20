@@ -223,6 +223,82 @@ mod tests {
     use datachannel::message::message_channel_open::{ChannelType, DataChannelOpen};
     use shared::marshal::{Marshal, Unmarshal};
 
+    fn acknowledge_channel(
+        pc: &mut crate::peer_connection::RTCPeerConnection,
+        now: Instant,
+    ) -> Result<()> {
+        use crate::peer_connection::message::internal::{
+            DTLSMessage, RTCMessageInternal, TaggedRTCMessageInternal,
+        };
+        use datachannel::message::message_channel_ack::DataChannelAck;
+        let ack = Message::DataChannelAck(DataChannelAck {}).marshal()?;
+        pc.get_datachannel_handler()
+            .handle_read(TaggedRTCMessageInternal {
+                now,
+                transport: Default::default(),
+                message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(
+                    datachannel::data_channel::DataChannelMessage {
+                        association_handle: 0,
+                        stream_id: 0,
+                        ppi: PayloadProtocolIdentifier::Dcep,
+                        payload: bytes::BytesMut::from(&ack[..]),
+                        negotiated: false,
+                    },
+                )),
+            })
+    }
+
+    // Regression #1091: allocated streams still wait for DCEP before gameplay.
+    #[test]
+    fn post_connected_channel_rejects_gameplay_until_dcep_ack() -> Result<()> {
+        for ordered in [true, false] {
+            for text in [true, false] {
+                let now = Instant::now();
+                let mut pc = RTCPeerConnectionBuilder::new().build(now)?;
+                let mut internal = RTCDataChannelInternal::new(DataChannelParameters {
+                    ordered,
+                    max_retransmits: (!ordered).then_some(0),
+                    ..Default::default()
+                });
+                internal.stream_id = Some(0);
+                internal.dial(0)?;
+                assert_eq!(internal.ready_state, RTCDataChannelState::Connecting);
+                assert!(internal.data_channel.is_some());
+                let id = pc.data_channels.insert(internal);
+                let mut channel = pc.data_channel(id).expect("registered connecting channel");
+                let result = if text {
+                    channel.send_text(now, "before-ack")
+                } else {
+                    channel.send(now, bytes::BytesMut::from("before-ack"))
+                };
+                assert!(
+                    matches!(result, Err(Error::ErrDataChannelNotOpen)),
+                    "Connecting stream accepted gameplay: ordered={ordered}, text={text}, result={result:?}"
+                );
+                assert_eq!(channel.outstanding_bytes(), 0);
+                assert!(
+                    pc.get_endpoint_handler().poll_write().is_none(),
+                    "rejected send must not enqueue gameplay"
+                );
+                acknowledge_channel(&mut pc, now)?;
+                let mut channel = pc.data_channel(id).expect("acknowledged channel");
+                assert_eq!(channel.ready_state(), RTCDataChannelState::Open);
+                if text {
+                    channel.send_text(now, "after-ack")?;
+                } else {
+                    channel.send(now, bytes::BytesMut::from("after-ack"))?;
+                }
+                assert_eq!(channel.outstanding_bytes(), 9);
+                channel.close()?;
+                assert!(matches!(
+                    channel.send_text(now, "closed"),
+                    Err(Error::ErrDataChannelClosed)
+                ));
+            }
+        }
+        Ok(())
+    }
+
     // Regression #1075: remote reset cannot overtake input accepted on the same stream.
     #[test]
     fn remote_stream_reset_preserves_queued_input_order() -> Result<()> {
@@ -313,6 +389,9 @@ mod tests {
                 while dc.data_channel.as_mut().unwrap().poll_write().is_some() {}
             }
             let id = pc.data_channels.insert(dc);
+            if !negotiated {
+                acknowledge_channel(&mut pc, now)?;
+            }
             pc.data_channel(id)
                 .unwrap()
                 .send_text(now, "final-before-reset")?;

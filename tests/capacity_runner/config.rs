@@ -298,6 +298,13 @@ pub struct RunConfig {
     /// Adds bounded receipt-stage timing diagnostics in a separate sidecar.
     #[serde(default, skip_serializing_if = "receipt_timings_disabled")]
     pub receipt_timings: bool,
+    /// Maximum planned send records plus recipient delivery records.
+    /// This is a workload admission budget, not a process RSS limit.
+    #[serde(
+        default = "default_planned_record_budget",
+        skip_serializing_if = "planned_record_budget_is_default"
+    )]
+    pub planned_record_budget: u64,
     /// Deep-merged over the shared harness base config for spawned servers.
     pub server_overlay: Value,
     /// Negative-control hook: pause senders once (scheduled-send latency).
@@ -334,6 +341,14 @@ pub struct RunConfig {
     /// run ID before any join; serialized for audit only.
     #[serde(default)]
     pub room_code_prefix: Option<String>,
+}
+
+pub(crate) fn default_planned_record_budget() -> u64 {
+    32_000_000
+}
+
+fn planned_record_budget_is_default(value: &u64) -> bool {
+    *value == default_planned_record_budget()
 }
 
 fn receipt_timings_disabled(enabled: &bool) -> bool {
@@ -506,6 +521,33 @@ impl RunConfig {
         micros(self.duration).div_ceil(self.period_micros())
     }
 
+    pub fn validate_planned_record_budget(&self) -> Result<u64, String> {
+        if !self.send_rate_per_sender.is_finite() || self.send_rate_per_sender <= 0.0 {
+            return Err("send rate must be finite and positive".to_string());
+        }
+        Duration::try_from_secs_f64(1.0 / self.send_rate_per_sender)
+            .map_err(|_| "send period exceeds the run clock".to_string())?;
+        if self.warmup.as_micros() > u128::from(u64::MAX)
+            || self.duration.as_micros() > u128::from(u64::MAX)
+        {
+            return Err("schedule duration exceeds the run clock".to_string());
+        }
+        let planned = self
+            .warmup_sends_per_sender()
+            .checked_add(self.measured_sends_per_sender())
+            .and_then(|sends| sends.checked_mul(u64::from(self.rooms)))
+            .and_then(|sends| sends.checked_mul(u64::from(self.players_per_room)))
+            .and_then(|sends| sends.checked_mul(u64::from(self.players_per_room)))
+            .ok_or_else(|| "planned record count overflows".to_string())?;
+        if self.planned_record_budget == 0 || planned > self.planned_record_budget {
+            return Err(format!(
+                "planned workload needs {planned} send and delivery records; planned_record_budget is {}. Reduce the workload or explicitly set CAPACITY_RUNNER_PLANNED_RECORD_BUDGET for a provisioned host",
+                self.planned_record_budget
+            ));
+        }
+        Ok(planned)
+    }
+
     /// Build the run config from `CAPACITY_RUNNER_*` environment
     /// variables so the runner is standalone on a capacity host:
     ///
@@ -517,7 +559,7 @@ impl RunConfig {
     /// `DURATION_SECS`, `CHURN` (`none` | `reconnect-burst` |
     /// `room-replacement`) with `CHURN_FRACTION_PERCENT`,
     /// `CHURN_START_MS`, `CHURN_WINDOW_MS`, `CHURN_INTERVAL_MS`,
-    /// `OUTPUT_DIR`, `LAG_BOUND_MS`, `SAMPLE_INTERVAL_MS`. Absent optional
+    /// `OUTPUT_DIR`, `LAG_BOUND_MS`, `SAMPLE_INTERVAL_MS`, `PLANNED_RECORD_BUDGET`. Absent optional
     /// variables fall back to the small default scenario; required scalars
     /// fall back to the same defaults so a bare invocation just works. Each
     /// run needs a FRESH `OUTPUT_DIR` (a directory that already holds a run
@@ -660,6 +702,11 @@ impl RunConfig {
             .map(|raw| parse_receipt_timings(&raw))
             .transpose()?
             .unwrap_or(false);
+        let planned_record_budget = var("PLANNED_RECORD_BUDGET")?
+            .map(|raw| raw.parse::<u64>())
+            .transpose()
+            .map_err(|error| format!("CAPACITY_RUNNER_PLANNED_RECORD_BUDGET: {error}"))?
+            .unwrap_or_else(default_planned_record_budget);
         Ok(RunConfig {
             endpoint,
             external_host_evidence,
@@ -681,6 +728,7 @@ impl RunConfig {
             drain_grace: Duration::from_secs(2),
             sample_interval: Duration::from_millis(sample_ms.unwrap_or(250)),
             receipt_timings,
+            planned_record_budget,
             server_overlay: if experiment.is_some() {
                 Self::unsupported_format_overlay()
             } else {
@@ -702,6 +750,64 @@ mod receipt_timing_tests {
     use super::*;
 
     #[test]
+    fn planned_record_budget_matches_the_full_offered_work_and_boundaries() {
+        for (rooms, players, rate, warmup, duration) in [
+            (1, 2, 10.0, 0, 1),
+            (3, 4, 20.0, 1, 2),
+            (1, 16, 60.0, 120, 600),
+        ] {
+            let mut config = crate::scenario_config(Encoding::V3Json);
+            config.rooms = rooms;
+            config.players_per_room = players;
+            config.send_rate_per_sender = rate;
+            config.warmup = Duration::from_secs(warmup);
+            config.duration = Duration::from_secs(duration);
+            let (plans, _) = crate::schedule::build_run_shape(&config).expect("schedule");
+            let sends: u64 = plans.iter().map(|plan| count_u64(plan.sends.len())).sum();
+            let expected = sends + sends * u64::from(players - 1);
+            if players == 16 {
+                assert_eq!(expected, 11_059_712, "original long workload is unchanged");
+            }
+            for budget in [0, expected - 1, expected, expected + 1] {
+                config.planned_record_budget = budget;
+                let result = config.validate_planned_record_budget();
+                if budget >= expected {
+                    assert_eq!(result.expect("admitted workload"), expected);
+                } else {
+                    assert!(result
+                        .expect_err("refused workload")
+                        .contains(&expected.to_string()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn planned_record_budget_rejects_overflow_and_invalid_clocks_without_allocating() {
+        let mut config = crate::scenario_config(Encoding::V3Json);
+        config.planned_record_budget = u64::MAX;
+        config.rooms = 999;
+        config.players_per_room = u32::MAX;
+        config.duration = Duration::from_micros(u64::MAX);
+        config.warmup = Duration::ZERO;
+        config.send_rate_per_sender = 1_000_000.0;
+        assert_eq!(
+            config.validate_planned_record_budget().unwrap_err(),
+            "planned record count overflows"
+        );
+        for rate in [f64::NAN, f64::INFINITY, -1.0, 0.0, f64::MIN_POSITIVE] {
+            config.send_rate_per_sender = rate;
+            assert!(
+                config.validate_planned_record_budget().is_err(),
+                "rate {rate}"
+            );
+        }
+        config.send_rate_per_sender = 20.0;
+        config.duration = Duration::MAX;
+        assert!(config.validate_planned_record_budget().is_err());
+    }
+
+    #[test]
     fn receipt_timing_option_is_explicit_and_old_config_bytes_round_trip() {
         for (raw, expected) in [("0", false), ("false", false), ("1", true), ("true", true)] {
             assert_eq!(parse_receipt_timings(raw).expect("valid option"), expected);
@@ -713,12 +819,17 @@ mod receipt_timing_tests {
         let old_bytes = serde_json::to_vec(&config).expect("default config");
         let value: serde_json::Value = serde_json::from_slice(&old_bytes).expect("config JSON");
         assert!(value.get("receipt_timings").is_none());
+        assert!(value.get("planned_record_budget").is_none());
         let restored: RunConfig = serde_json::from_slice(&old_bytes).expect("old config shape");
         assert!(!restored.receipt_timings);
         assert_eq!(
             serde_json::to_vec(&restored).expect("restored config"),
             old_bytes
         );
+        config.planned_record_budget = 1234;
+        let custom = serde_json::to_vec(&config).expect("custom budget");
+        let restored: RunConfig = serde_json::from_slice(&custom).expect("custom config");
+        assert_eq!(restored.planned_record_budget, 1234);
         config.receipt_timings = true;
         assert_eq!(
             serde_json::to_value(config).expect("enabled config")["receipt_timings"],

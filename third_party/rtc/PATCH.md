@@ -132,3 +132,12 @@ Controls cover both roles, disabled timeouts, public event-first consumers,
 paired-wire payloads, and stream reuse.
 See [#1086](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1086).
 Published replacement qualification in #912 must retain these controls.
+
+Public text and binary sends require the channel to be `Open`. An allocated
+in-band stream stays `Connecting` until the remote DCEP acknowledgment arrives.
+Rejected pre-ACK sends queue no payload and charge no outstanding bytes.
+Controls process an actual DCEP ACK through the handler, then verify successful
+sends and terminal closure. Negotiated channels retain immediate opening.
+The reset-order control now completes its in-band handshake before sending.
+See [#1091](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1091).
+Published replacement qualification in #912 must retain these controls.
