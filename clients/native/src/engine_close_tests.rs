@@ -557,7 +557,14 @@ async fn local_channel_closing_retires_pair_before_remote_reset() {
             .await
             .expect("both local channel producers finish");
             let mut sibling_closes = 0;
-            while let Ok(event) = pair.sender_events.try_recv() {
+            loop {
+                let event = match pair.sender_events.try_recv() {
+                    Ok(event) => event,
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        panic!("the retained engine must keep its event sender")
+                    }
+                };
                 match event {
                     EngineEvent::ChannelClosed { label, .. } => {
                         assert_eq!(

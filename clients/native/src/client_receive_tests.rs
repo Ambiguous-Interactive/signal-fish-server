@@ -781,6 +781,9 @@ async fn queued_exchange_receipts_complete_before_the_run_cutoff() {
                     "queued-late",
                     "stale",
                     "retired",
+                    "retired-exact",
+                    "retired-late",
+                    "logical-replacement",
                     "closed-before",
                     "closed-after",
                     "held-restore",
@@ -852,9 +855,6 @@ async fn queued_exchange_receipts_complete_before_the_run_cutoff() {
                 state.exchange_ledger.note_received(peer, other.to_string());
             }
         }
-        if mode == "retired" {
-            state.engine.remove_peer(peer).await.unwrap();
-        }
         let (events, queued) = tokio::sync::mpsc::unbounded_channel();
         state.engine_rx = queued;
         tokio::time::pause();
@@ -862,8 +862,9 @@ async fn queued_exchange_receipts_complete_before_the_run_cutoff() {
         state.run_deadline = Deadline::after(started_at, Duration::from_secs(1));
         state.next_ping_at = Instant::now() + Duration::from_secs(60);
         let elapsed = match mode {
-            "exact" | "queued-exact" => Duration::from_secs(1),
+            "exact" | "queued-exact" | "retired-exact" => Duration::from_secs(1),
             "late"
+            | "retired-late"
             | "queued-late"
             | "held-restore"
             | "released"
@@ -917,6 +918,13 @@ async fn queued_exchange_receipts_complete_before_the_run_cutoff() {
             queue_permit: crate::engine::MessageQueuePermit::for_test(),
             received_at: Instant::now(),
         };
+        // Capture the admitted receipt before physical or logical retirement.
+        // Physical loss preserves it; a newer authoritative link invalidates it.
+        if mode.starts_with("retired") {
+            state.engine.remove_peer(peer).await.unwrap();
+        } else if mode == "logical-replacement" {
+            state.prepare_retained_pair_replacement(peer).await;
+        }
         let closed = || EngineEvent::ChannelClosed {
             peer,
             generation: 1,
@@ -956,6 +964,8 @@ async fn queued_exchange_receipts_complete_before_the_run_cutoff() {
             "queued"
                 | "on-time"
                 | "closed-after"
+                | "closed-before"
+                | "retired"
                 | "held-restore"
                 | "at-held-start"
                 | "released-linger"
@@ -964,7 +974,7 @@ async fn queued_exchange_receipts_complete_before_the_run_cutoff() {
         assert_eq!(
             state.exchange_ledger.unmet_criteria().is_empty(),
             valid,
-            "{label}/{mode}/p2p={p2p_timeout}: arrival and physical generation own eligibility"
+            "{label}/{mode}/p2p={p2p_timeout}: arrival and logical obligation own eligibility"
         );
         if mode == "before-held" {
             assert_eq!(
