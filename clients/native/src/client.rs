@@ -2370,6 +2370,14 @@ impl Orchestrator<'_> {
             channel: queued_channel,
         }) = self.deferred_exchange.pop_front()
         {
+            /* A returning member can re-arm gates while sibling sends are queued.
+             * Release queues live peers again, so discard held work without
+             * recording a send. */
+            if !self.exchange_released
+                || (label == UNRELIABLE_LABEL && !self.unreliable_exchange_released)
+            {
+                return Ok(());
+            }
             let current_channel = self.engine.channel(peer, label);
             let same_channel = match (&queued_channel, &current_channel) {
                 (Some(queued), Some(current)) => std::sync::Arc::ptr_eq(queued, current),

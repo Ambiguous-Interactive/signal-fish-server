@@ -6417,3 +6417,36 @@ closure controls pass. Strict native and direct RTC/SCTP production lint pass.
 Independent code review has no unresolved finding. The rebuilt native/browser
 restore, retry, and three-player mesh histories pass in Nextest run
 `af20d0f7-11f3-47a4-8778-bf1910a32e41`. Hosted full qualification is separate.
+
+### F117 — Queued native probes bypass re-armed exchange gates
+
+Baseline `b84508f7`. Finding [#1097](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1097)
+continues A20 and [#826](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/826).
+A returning room member re-arms the native CLI's global exchange release gates.
+A queued probe to a retained sibling still has the same physical channel and
+connected membership. Deferred dispatch checked those properties but ignored
+the re-armed gates. It could send gameplay before the operator released the
+new exchange phase.
+
+Dispatch now rechecks the global exchange gate and the label-specific
+unreliable gate. Held work leaves the sent ledger unchanged. Gate release
+requeues current connected peers; the ledger prevents duplicate probes.
+Channel-identity and connection checks still fence retired work. This repair
+changes only the native reference CLI's file-release options. It does not
+change the server wire, room lifecycle, or SDK contracts, and it does not
+explain the historical #853 or #889 failures.
+
+The Rust external client at `da8f2d16` supplies its own WebRTC backend. The .NET
+SDK at `e467c871` provides signaling and relay. Godot's mesh source blob
+`0d4fb588` uses engine WebRTC objects. None implements these reference CLI
+release gates or uses the offline server capacity oracle. All three clients
+are unaffected and need no migration.
+
+The new `deferred_exchange_obeys_rearmed_incarnation_gates` regression dispatches
+an actual returning `PlayerJoined` while a physical sibling channel has queued
+work. It fails on the baseline with one send instead of zero. The repaired
+history passes six cases: both required labels under the main gate, the
+separate unreliable gate, and no gate. It verifies unsent debt while held,
+exactly one send after release, and an actual remote channel receipt. The
+independent source and regression review has no open finding. Hosted full
+interop remains a separate qualification gate.

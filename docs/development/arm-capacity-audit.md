@@ -4000,3 +4000,79 @@ Executable SHA-256:
 
 - baseline: `71d46b551425e9d261849ff71c7404313e8a54ba40c5c85616fa8ab304801769`.
 - candidate: `242ac8deb75ce83e69458d821249b0f1ea47eebd486ab23fd2ec81dd5d1485cb`.
+
+### Keep contiguous oracle coverage inline
+
+Session 495 advances [#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775)
+and [#636](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/636)
+from `b84508f7`. The oracle now keeps one contiguous coverage range inline.
+It uses a tree only when a stream has separate ranges. It extends existing
+ranges in place and restores inline coverage when a repaired hole leaves one
+range. It retains the empty tree root for reuse if another hole appears.
+Duplicate, overlap, ordering, floor, and first-hole rules stay exact.
+
+An isolated allocation counter runs the extracted baseline and candidate
+`StreamCoverage` code with `rustc --edition=2021 -O`. For 240 ordered streams
+with 5,000 receipts each, tree allocations fall from 240 to zero, and allocated
+bytes fall from 46,080 to zero. The baseline reuses its tree root; it does
+**not** allocate once per receipt. Each coverage value grows from 24 to 48
+bytes on this ARM64 host. A stream that never fragments saves 168 bytes
+after that cost.
+For 100,000 streams with 16 receipts each, tree allocations fall from 100,000
+to zero, saving 16.8 MB after the larger coverage values. A separate control
+leaves a low hole in every stream: both versions allocate 46,080 tree bytes
+for 240 streams, and the candidate costs 24 more inline bytes per stream.
+A review control repeats 5,000 fragment/repair cycles on 240 streams. Both
+baseline and final candidate allocate 240 roots (46,080 bytes). An earlier
+candidate released each empty root; that version allocated 1,200,000 roots
+(230,400,000 bytes). The final candidate retains the root and avoids this
+regression. A healed stream keeps that allocation and the extra inline bytes.
+These counters measure coverage state only. They do not measure process RSS.
+
+The registered full-oracle cohort uses 16 senders, 80,000 sends, and
+1,200,000 receipts. Three fresh-process pairs alternate baseline/candidate,
+candidate/baseline, and baseline/candidate. Builds and other tests finish
+before measurement. All six processes pass, and all complete summaries match.
+Source and executable hashes match before and after the cohort.
+
+| Metric | Baseline median | Candidate median |
+| --- | ---: | ---: |
+| Oracle evaluation, s | 4.705 | 3.644 |
+| Process wall time, s | 4.974 | 3.930 |
+| Process CPU time, s | 4.966 | 3.922 |
+| Process peak RSS, KiB | 95,156 | 94,780 |
+
+Oracle time falls 22.6% in this cohort. Peak RSS falls only 376 KiB (0.40%);
+this small difference does not establish a material process-memory gain.
+These debug processes collect synthetic events and run the oracle. They do
+not decode replay files or exercise a live server. The shared ARM64 WSL2
+host limits timing claims. The isolated counters prove the range-storage
+change, not a long-run generator memory bound or a server capacity point.
+The historical #1009 stalls and the full #775 long workload remain unproven.
+Both campaigns remain open.
+
+The focused suite passes 13 coverage, send-index, and latency controls.
+A new control covers 100,000 ascending and descending receipts, rejected
+overlaps, fragmentation, a long stream with a low hole, and 2,000 repeated
+fragment/repair cycles. Existing exhaustive controls compare exact coverage
+with independent sets,
+including zero and sequence limits. Independent review has no open finding.
+
+Registration, all six process observations and summaries, source copies,
+allocation harnesses, counters, and focused-test output remain under
+`/tmp/capacity-495/`. The final registered cohort is in `final-cohort/`.
+The first six-process cohort remains in the parent directory; it measures
+the discarded root-release candidate and is excluded from the final claim.
+The next six-process cohort remains in `retained-cohort/`; it predates a
+comment-only source change and is also excluded from the final claim.
+Two earlier exploratory full-oracle runs remain there as `fanout-before.txt`
+and `fanout-after.txt`; they are excluded from the
+registered cohort. Exploratory allocation timing observations are not used
+for the timing claim. Baseline source SHA-256:
+`29a71361e49629604dcdfff576dd41fe309ffbbb0f42a7e35b2835e97bb3aed2`.
+Candidate source SHA-256:
+`07e76e57a5004ef9b823a3cd05a03cf76b9ab953c3783557271d04a7a8509736`.
+Executable SHA-256:
+
+- baseline: `242ac8deb75ce83e69458d821249b0f1ea47eebd486ab23fd2ec81dd5d1485cb`.
+- candidate: `a6b463bfbeb15b901307cf61d13612fd2f7a8f524383d8b5ce415e1f0b1f9679`.

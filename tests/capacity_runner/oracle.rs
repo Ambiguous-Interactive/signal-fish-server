@@ -1616,6 +1616,8 @@ impl ArrivalCoverage {
 /// Reject an overlapping report in full before changing coverage.
 #[derive(Default)]
 struct StreamCoverage {
+    // Ordered deliveries and compact gap reports need no tree allocation.
+    inline: Option<(u64, u64)>,
     ranges: BTreeMap<u64, u64>,
 }
 
@@ -1628,9 +1630,28 @@ struct CoverageAccounting {
 }
 
 impl StreamCoverage {
-    fn insert(&mut self, mut from: u64, mut to: u64) -> bool {
+    fn insert(&mut self, from: u64, mut to: u64) -> bool {
         if from == 0 || from > to {
             return false;
+        }
+        if self.ranges.is_empty() {
+            let Some((start, end)) = self.inline else {
+                self.inline = Some((from, to));
+                return true;
+            };
+            if from <= end && to >= start {
+                return false;
+            }
+            if end.checked_add(1) == Some(from) {
+                self.inline = Some((start, to));
+            } else if to.checked_add(1) == Some(start) {
+                self.inline = Some((from, end));
+            } else {
+                self.inline = None;
+                self.ranges.insert(start, end);
+                self.ranges.insert(from, to);
+            }
+            return true;
         }
         // The last range beginning at or below `to` is the only candidate
         // needed to prove overlap in this disjoint, ordered map.
@@ -1642,18 +1663,25 @@ impl StreamCoverage {
         {
             return false;
         }
-        if let Some((&start, &end)) = self.ranges.range(..from).next_back() {
-            if end.checked_add(1) == Some(from) {
-                self.ranges.remove(&start);
-                from = start;
-            }
-        }
         if let Some(next) = to.checked_add(1) {
             if let Some(end) = self.ranges.remove(&next) {
                 to = end;
             }
         }
-        self.ranges.insert(from, to);
+        // Extend an existing range in place without removing its key.
+        if let Some((_, end)) = self.ranges.range_mut(..from).next_back() {
+            if end.checked_add(1) == Some(from) {
+                *end = to;
+            } else {
+                self.ranges.insert(from, to);
+            }
+        } else {
+            self.ranges.insert(from, to);
+        }
+        if self.ranges.len() == 1 {
+            self.inline = self.ranges.pop_first();
+            // Keep the empty root to reuse it across fragment/repair cycles.
+        }
         true
     }
 
@@ -1664,7 +1692,12 @@ impl StreamCoverage {
             first_hole: None,
             highest: floor,
         };
-        for (&start, &end) in &self.ranges {
+        for (start, end) in self
+            .inline
+            .iter()
+            .copied()
+            .chain(self.ranges.iter().map(|(&start, &end)| (start, end)))
+        {
             if end <= floor {
                 continue;
             }
@@ -1683,7 +1716,7 @@ impl StreamCoverage {
 
     #[cfg(test)]
     fn stored_ranges(&self) -> usize {
-        self.ranges.len()
+        self.ranges.len() + usize::from(self.inline.is_some())
     }
 }
 
@@ -2006,6 +2039,66 @@ mod coverage_tests {
             assert_eq!(arrivals.observe(sequence), None);
         }
         assert_eq!(arrivals.covered.above(0).covered, 100_000);
+    }
+
+    // #775/#636: ordered receipt coverage needs no tree nodes.
+    // A repaired hole must return to inline storage too.
+    #[test]
+    fn contiguous_coverage_stays_inline_across_fragmentation_and_repair() {
+        for descending in [false, true] {
+            let mut coverage = StreamCoverage::default();
+            for offset in 0..100_000 {
+                let seq = if descending {
+                    100_000 - offset
+                } else {
+                    offset + 1
+                };
+                assert!(coverage.insert(seq, seq));
+                assert!(
+                    coverage.ranges.is_empty(),
+                    "seq={seq} descending={descending}"
+                );
+            }
+            assert_eq!(coverage.inline, Some((1, 100_000)));
+            assert!(!coverage.insert(50_000, 100_001));
+            assert_eq!(coverage.inline, Some((1, 100_000)));
+            assert!(coverage.insert(100_002, 100_002));
+            assert!(coverage.inline.is_none());
+            assert_eq!(coverage.ranges.len(), 2);
+            assert!(coverage.insert(100_001, 100_001));
+            assert!(coverage.ranges.is_empty());
+            assert_eq!(coverage.inline, Some((1, 100_002)));
+            assert_eq!(coverage.above(99_999).covered, 3);
+        }
+        let mut fragmented = StreamCoverage::default();
+        assert!(fragmented.insert(1, 1));
+        for seq in 3..=100_000 {
+            assert!(fragmented.insert(seq, seq));
+            assert_eq!(fragmented.ranges.len(), 2);
+            assert!(fragmented.inline.is_none());
+        }
+        assert_eq!(
+            fragmented.above(0),
+            CoverageAccounting {
+                covered: 99_999,
+                holes: 1,
+                first_hole: Some(2),
+                highest: 100_000,
+            }
+        );
+        assert!(fragmented.insert(2, 2));
+        assert!(fragmented.ranges.is_empty());
+        assert_eq!(fragmented.inline, Some((1, 100_000)));
+        for cycle in 0..2_000 {
+            let base = 100_000 + cycle * 3;
+            for seq in [base + 1, base + 3, base + 2] {
+                assert!(fragmented.insert(seq, seq));
+            }
+            assert_eq!(fragmented.inline, Some((1, base + 3)));
+            assert!(fragmented.ranges.is_empty());
+            assert!(!fragmented.insert(base + 2, base + 4));
+            assert_eq!(fragmented.above(base).covered, 3);
+        }
     }
 
     /// Compare the old independent position-set and unique-window rules on
