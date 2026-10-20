@@ -111,7 +111,7 @@ pub enum Event {
     PcState { peer: PlayerId, state: String },
     /// One data channel reached the open state.
     ChannelOpen { peer: PlayerId, label: String },
-    /// A required data channel closed or became unreadable.
+    /// A required data channel started closing, closed, or became unreadable.
     ChannelClosed { peer: PlayerId, label: String },
     /// An `--exchange` message was sent over an open channel.
     ChannelMessageSent {

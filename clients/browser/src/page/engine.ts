@@ -31,6 +31,17 @@ const MAX_REMOTE_CANDIDATES = 128;
 const MAX_REMOTE_CANDIDATE_BYTES = 64 * 1024;
 const MAX_CANDIDATE_PAYLOAD_BYTES = 4096;
 const MAX_CHANNEL_MESSAGE_BYTES = 64 * 1024;
+// Keep timeout diagnostics below the CLI's 16000-unit diagnostic limit.
+const MAX_TRANSPORT_STATE_HISTORY = 32;
+
+type TransportState = Pick<
+  RTCPeerConnection,
+  'connectionState' | 'signalingState' | 'iceConnectionState' | 'iceGatheringState'
+>;
+
+interface TransportObservation extends TransportState {
+  elapsedMs: number;
+}
 
 /** Callbacks from engine-owned browser event handlers to the orchestrator. */
 export interface EngineCallbacks {
@@ -58,6 +69,8 @@ export interface PlanIceServer {
 interface PeerLink {
   generation: number;
   pc: RTCPeerConnection;
+  startedAt: number;
+  transportStateHistory: TransportObservation[];
   channels: Map<string, RTCDataChannel>;
   openLabels: Set<string>;
   pendingCandidates: RTCIceCandidateInit[];
@@ -128,6 +141,8 @@ export class Engine {
     const link: PeerLink = {
       generation: this.nextGeneration,
       pc,
+      startedAt: performance.now(),
+      transportStateHistory: [],
       channels: new Map(),
       openLabels: new Set(),
       pendingCandidates: [],
@@ -138,6 +153,7 @@ export class Engine {
       terminal: false,
     };
     this.peers.set(peer, link);
+    this.recordTransportState(peer, link);
     this.registerPcHandlers(peer, link);
 
     if (!initiate) {
@@ -282,8 +298,10 @@ export class Engine {
     if (link === undefined) {
       return null;
     }
+    this.recordTransportState(peer, link);
     return {
       generation: link.generation,
+      transportStateHistory: link.transportStateHistory.map((entry) => ({ ...entry })),
       connectionState: link.pc.connectionState,
       signalingState: link.pc.signalingState,
       iceConnectionState: link.pc.iceConnectionState,
@@ -335,6 +353,7 @@ export class Engine {
     const state = link.pc.connectionState;
     if (state === 'failed' || state === 'closed') {
       // Fence first: callbacks may synchronously inspect or replace this link.
+      this.recordTransportState(peer, link);
       link.terminal = true;
       this.callbacks.onPcState(peer, link.generation, state);
       return false;
@@ -362,9 +381,44 @@ export class Engine {
     }
   }
 
+  /** Record observed states only; never enqueue orchestrator work. */
+  private recordTransportState(peer: string, link: PeerLink): void {
+    if (this.peers.get(peer) !== link) return;
+    const state: TransportState = {
+      connectionState: link.pc.connectionState,
+      signalingState: link.pc.signalingState,
+      iceConnectionState: link.pc.iceConnectionState,
+      iceGatheringState: link.pc.iceGatheringState,
+    };
+    const previous = link.transportStateHistory.at(-1);
+    if (
+      previous !== undefined &&
+      previous.connectionState === state.connectionState &&
+      previous.signalingState === state.signalingState &&
+      previous.iceConnectionState === state.iceConnectionState &&
+      previous.iceGatheringState === state.iceGatheringState
+    ) {
+      return;
+    }
+    link.transportStateHistory.push({
+      elapsedMs: Math.max(
+        previous?.elapsedMs ?? 0,
+        Math.round(performance.now() - link.startedAt),
+      ),
+      ...state,
+    });
+    if (link.transportStateHistory.length > MAX_TRANSPORT_STATE_HISTORY) {
+      link.transportStateHistory.shift();
+    }
+  }
+
   private registerPcHandlers(peer: string, link: PeerLink): void {
     const pc = link.pc;
+    pc.oniceconnectionstatechange = () => this.recordTransportState(peer, link);
+    pc.onicegatheringstatechange = () => this.recordTransportState(peer, link);
+    pc.onsignalingstatechange = () => this.recordTransportState(peer, link);
     pc.onconnectionstatechange = () => {
+      this.recordTransportState(peer, link);
       if (!this.usableLink(peer, link)) return;
       this.callbacks.onPcState(peer, link.generation, pc.connectionState);
     };

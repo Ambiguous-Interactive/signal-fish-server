@@ -223,6 +223,16 @@ enum StageOutcome {
     NoLiveReceiver,
 }
 
+// An announced channel whose receiver was dropped cannot register again after
+// local close. A channel still awaiting OnOpen retains its registration rights.
+fn data_channel_can_register(
+    channel_exists: bool,
+    announced: bool,
+    event: &DataChannelEvent,
+) -> bool {
+    channel_exists && !(announced && matches!(event, DataChannelEvent::OnClosing))
+}
+
 /// Hand `event` to `channel_id`'s consumer, retaining it in `pending` when it cannot
 /// be delivered right now.
 ///
@@ -311,10 +321,11 @@ fn flush_staged_data_channel_events(
     let mut blocked = false;
     for (channel_id, queued) in pending.iter_mut() {
         let Some(evt_tx) = senders.get(channel_id) else {
-            if queued
-                .iter()
-                .any(|event| matches!(event, DataChannelEvent::OnClose))
-            {
+            if queued.iter().any(|event| {
+                matches!(event, DataChannelEvent::OnClose)
+                    || (announced.contains(channel_id)
+                        && matches!(event, DataChannelEvent::OnClosing))
+            }) {
                 queued.clear();
                 continue;
             }
@@ -1610,6 +1621,16 @@ where
         // does not need it yet, but discarding it here would be the wrong default.
         let TaggedRTCMessage { now: _, message } = message;
         match message {
+            RTCMessage::DataChannelClosed(channel_id) => {
+                self.handle_rtc_event(RTCPeerConnectionEvent::OnDataChannel(
+                    RTCDataChannelEvent::OnClose(channel_id),
+                ))
+                .await;
+            }
+            RTCMessage::DataChannelClosing(channel_id) => {
+                self.deliver_data_channel_event(channel_id, DataChannelEvent::OnClosing)
+                    .await;
+            }
             RTCMessage::DataChannelMessage(channel_id, dc_message) => {
                 // overflow: retained — **this was webrtc#858**. A reliable ordered channel
                 // promises delivery; this used to discard it on a full queue. Now the
@@ -1905,13 +1926,18 @@ where
                 .await
                 .data_channel(channel_id)
                 .is_some();
+            let can_register = data_channel_can_register(
+                channel_exists,
+                self.announced_data_channels.contains(&channel_id),
+                &event,
+            );
             let data_channels = self.inner.data_channel_events_tx.lock().await;
             stage_data_channel_event(
                 &data_channels,
                 &mut self.pending_data_channel_events,
                 channel_id,
                 event,
-                channel_exists,
+                can_register,
             )
         };
         match outcome {
@@ -2477,6 +2503,40 @@ mod tests {
     }
 
     #[test]
+    fn announced_local_closing_without_receiver_retires_queued_messages() {
+        let announced = HashSet::from([0]);
+        for closing_already_queued in [false, true] {
+            let senders = HashMap::new();
+            let mut queued = VecDeque::from([test_message(1)]);
+            if closing_already_queued {
+                queued.push_back(DataChannelEvent::OnClosing);
+            }
+            let mut pending = HashMap::from([(0, queued)]);
+            if !closing_already_queued {
+                assert_eq!(
+                    stage_data_channel_event(
+                        &senders,
+                        &mut pending,
+                        0,
+                        DataChannelEvent::OnClosing,
+                        data_channel_can_register(true, true, &DataChannelEvent::OnClosing),
+                    ),
+                    StageOutcome::NoLiveReceiver
+                );
+            }
+            assert!(!flush_staged_data_channel_events(
+                &senders,
+                &mut pending,
+                &announced
+            ));
+            assert!(
+                pending.is_empty(),
+                "local closing cannot wait for a reciprocal reset"
+            );
+        }
+    }
+
+    #[test]
     fn late_events_for_retired_unregistered_handle_are_discarded() {
         let senders = HashMap::new();
         let mut pending = HashMap::new();
@@ -2514,6 +2574,7 @@ mod tests {
         let mut pending = HashMap::new();
         stage_data_channel_event(&senders, &mut pending, 0, test_message(1), true);
         stage_data_channel_event(&senders, &mut pending, 0, test_message(2), true);
+        stage_data_channel_event(&senders, &mut pending, 0, DataChannelEvent::OnClosing, true);
         stage_data_channel_event(&senders, &mut pending, 0, DataChannelEvent::OnClose, true);
         assert!(flush_staged_data_channel_events(
             &senders,
@@ -2527,6 +2588,12 @@ mod tests {
             }
             flush_staged_data_channel_events(&senders, &mut pending, &HashSet::new());
         }
+        assert!(matches!(rx.try_recv(), Ok(DataChannelEvent::OnClosing)));
+        assert!(!flush_staged_data_channel_events(
+            &senders,
+            &mut pending,
+            &HashSet::new()
+        ));
         assert!(matches!(rx.try_recv(), Ok(DataChannelEvent::OnClose)));
         assert!(pending.is_empty());
     }

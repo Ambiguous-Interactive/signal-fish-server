@@ -55,7 +55,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial; concurrent transfer/start and host election checked in session 483 |
 | A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31 |
 | A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471 |
-| A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial |
+| A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial; concurrent library transport-status publication in F100 |
 | A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial |
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
 | A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; aggregate reconnect admission bound in F21; socket close before queue commit in F22 |
@@ -63,7 +63,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
-| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87; expired relay sends in F88; relay receipt admission in F89; terminal callback formation in F91; queued keepalive liveness in F97 |
+| A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87; expired relay sends in F88; relay receipt admission in F89; terminal callback formation in F91; queued keepalive liveness in F97; admitted native receipt retention in F101; local closing notification in F102; browser state history in session 486 |
 | A21 | `formal/`, `trace_validation.rs` | Model/source correspondence, fairness, finite bounds, trace completeness, negative controls | Initial |
 | A22 | Tests, helpers, fuzz targets, CI | Oracle independence, missing/duplicate events, skips, mutations, features and platforms | Initial; registry preparation failures recorded in F11; false exchange-success oracle recorded in F17; Windows backpressure fixtures in F75; transport failure summaries in F97 |
 
@@ -5699,3 +5699,111 @@ streams remain in local `progress/session-485/interop`. These are integration
 checks; the controlled histories above establish the three specific defects.
 Root and native strict lint, browser tests/typecheck/format, document checks,
 and all 51 source-policy controls pass. Hosted CI and review remain merge gates.
+
+### F101 — Native physical retirement discards admitted gameplay evidence
+
+Issue [#1070](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1070),
+found at `71093de2` while investigating #889. The native engine publishes a
+required-label gameplay receipt with its arrival time and queue permit. A
+negotiation timeout or physical loss removes the link before the orchestrator
+handles that receipt. The old physical-generation check discards the event,
+although the logical peer obligation and original receipt window still apply.
+
+Baseline run `84a36c5f` rejects both timely channel labels after loss and timeout.
+The repair retains a constant-size generation interval per logical peer so
+admitted message events survive physical retirement and ordinary retry. Other
+event kinds still require the current physical generation. Authoritative plan
+replacement, departure, fresh incarnation, and room restore invalidate old
+pending receipts. Arrival cutoffs and exchange payload validation stay intact.
+
+Run `8c6b1271` passes the strengthened receipt matrix and a real WebRTC history.
+The matrix interleaves another peer's generation before retry, rejects old
+lifecycle events, and accepts fresh receipts after logical invalidation. The
+real history receives both required probes from a live remote engine, retains
+the published events and queue permits, expires negotiation, and then processes
+those receipts after physical removal. These histories prove this failure mode;
+they do not establish the historical #889 cause.
+
+### A20 follow-up — Retain browser establishment state transitions
+
+Open #853 records an establishment failure whose endpoint evidence cannot show
+which browser transition occurred before the final failure. The reference
+browser now retains the newest 32 observed signaling, ICE gathering, ICE
+connection, and peer-connection state changes per physical link. Observations
+use relative monotonic milliseconds. Duplicate observations add no entries;
+old-link callbacks cannot alter a replacement's history. Timeout and loss
+snapshots include this history before teardown.
+
+The negative baseline lacks the history and fails the new control. The repaired
+browser suite checks chronology, all four callbacks, the exact retention bound,
+snapshot mutation isolation, replacement, and terminal-state visibility before
+loss callbacks. History-only callbacks add no orchestrator tasks. The longest
+realistic history serializes to 5,505 UTF-16 units, below the CLI diagnostic cap.
+Browser events can combine state changes; this is an observation history, not a
+proof of the historical failure cause. #853 remains open.
+
+External SDK assessment reads the current sibling README files through the
+GitHub connector. Rust provides signaling and relay without a WebRTC backend;
+.NET also scopes itself to signaling and relay. Godot uses its own GDScript and
+engine mesh. None imports the private reference engines or vendored RTC stack.
+These reference-client changes require no SDK migration or wire change.
+
+### F102 — Native local closing waits for reciprocal reset before fallback
+
+Issue [#1071](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1071),
+found at `71093de2` during #826. The RTC layer defines a closing event but does
+not produce it on local close. The native poller also ignores that event.
+A required channel can therefore remain logically connected while its stream
+waits for the remote SCTP reset to complete.
+
+Baseline `095403d1` connects real peer engines, pauses only the remote reactor,
+closes a local required channel, and receives no pair-loss event while reset
+is held. The repaired history `df302193` covers both initiator roles and both
+required labels. It receives one loss event while the channel is still Closing,
+fences sibling sends and input, resumes the remote reactor, and rejects any
+duplicate loss notification. Existing peer-shutdown and ended-stream controls
+also pass.
+
+RTC now queues local closing behind previously published channel input. Local
+reset completion follows the same read queue instead of overtaking it through
+the separate event queue. The wrapper forwards final close through its existing
+closure handler. Core control `cddcedfd` injects immediate reciprocal completion
+and observes input, closing, then final close, with one reset after two close
+calls. The wrapper retains FIFO for registered receivers. Its missing-receiver
+cleanup distinguishes a first registration still in flight from a dropped
+receiver after announcement. The latter can release queued input at closing
+without waiting for reset. The former retains its original input history.
+
+These controls establish the local established-channel failure mode. They do
+not prove the historical #853 or #889 causes. The broader #826 audit and
+published-package replacement qualification #912 remain open.
+
+The same review found that closing before SCTP exists reaches Closed directly
+and has no reciprocal reset to supply its final notification. Baseline
+`c26c0e5a` fails that history. The repair publishes closing then closed, records
+one lifetime closure and closed summary, and suppresses later teardown
+notification. Run `669a548d` passes both in-band and explicitly negotiated
+pre-SCTP cases plus the established reset-order control. The wrapper's 25 driver
+controls pass after a causal negative check for announced receiver cleanup;
+the original pre-registration retention control stays unchanged.
+
+Final native run `6e325b8d` passes receipt, held-reset, and loss-snapshot controls.
+Live qualification `01e07010` passes the three-player browser mesh, native retry,
+and native room restore. Server, native executable, browser CLI, and page bundle
+hashes match before and after all three cells. All seven endpoint streams remain
+in local `progress/session-486/interop`. Initial run `63541ce3` also passed, but
+Cargo relinked the native executable before the tests; that attempt is retained
+separately and is not the fixed-artifact qualification. Root and native strict
+lint, browser build/typecheck/format, and document checks pass. Hosted CI and
+review remain publication gates.
+
+Hosted CI exposed two older native controls that treated every retired physical
+generation as an invalid receipt. One already held a real engine-published
+message before loss. The revised histories preserve that timely physical-retry
+receipt, reject exact/late arrivals and authoritative replacement, and retain
+old-send fencing. Run `ae3c364e` passes both revised controls and both new receipt
+controls. The cutoff matrix captures arrival before teardown. The real retry
+matrix covers both roles, both labels, and timely, late, and logical-replacement
+histories. No production change was needed. The root source-policy scan also
+required an explicit empty/disconnected result when draining the new close
+control; all six scanner controls pass in `f21a24a2`.

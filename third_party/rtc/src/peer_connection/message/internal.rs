@@ -14,6 +14,7 @@ pub(crate) enum DataChannelEvent {
     Open,
     Message(RTCDataChannelMessage),
     Close,
+    ClosedAfterLocalClose,
     BufferedAmountLow,
     BufferedAmountHigh,
 }
@@ -114,6 +115,7 @@ impl RTCMessageInternal {
                 DTLSMessage::DataChannel(app_msg) => match &app_msg.data_channel_event {
                     DataChannelEvent::Open
                     | DataChannelEvent::Close
+                    | DataChannelEvent::ClosedAfterLocalClose
                     | DataChannelEvent::BufferedAmountLow
                     | DataChannelEvent::BufferedAmountHigh => 0,
                     DataChannelEvent::Message(rtc_dcm) => rtc_dcm.data.len(),

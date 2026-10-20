@@ -307,15 +307,17 @@ impl RTCPeerConnection {
         while let Some(msg) = intermediate_routs.pop_front() {
             let rtc_message = match msg.message {
                 RTCMessageInternal::Dtls(DTLSMessage::DataChannel(application_message)) => {
-                    if let DataChannelEvent::Message(data_channel_message) =
-                        application_message.data_channel_event
-                    {
-                        Some(RTCMessage::DataChannelMessage(
-                            application_message.data_channel_id,
-                            data_channel_message,
-                        ))
-                    } else {
-                        None
+                    match application_message.data_channel_event {
+                        DataChannelEvent::Message(data_channel_message) => {
+                            Some(RTCMessage::DataChannelMessage(
+                                application_message.data_channel_id,
+                                data_channel_message,
+                            ))
+                        }
+                        DataChannelEvent::ClosedAfterLocalClose => Some(
+                            RTCMessage::DataChannelClosed(application_message.data_channel_id),
+                        ),
+                        _ => None,
                     }
                 }
                 RTCMessageInternal::Rtp(RTPMessage::TrackPacket(track_packet)) => {
@@ -342,7 +344,7 @@ impl RTCPeerConnection {
                 // Routed by kind, so a caller can decline data-channel output — the only way
                 // to apply SCTP back-pressure — without also declining media.
                 match &tagged.message {
-                    RTCMessage::DataChannelMessage(..) => {
+                    RTCMessage::DataChannelMessage(..) | RTCMessage::DataChannelClosed(..) => {
                         self.pipeline_context.data_read_outs.push_back(tagged)
                     }
                     _ => self.pipeline_context.media_read_outs.push_back(tagged),
@@ -433,6 +435,11 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         let now = msg.now;
         self.pipeline_context.observe(now);
         let rtc_message_internal = match msg.message {
+            RTCMessage::DataChannelClosing(_) | RTCMessage::DataChannelClosed(_) => {
+                return Err(Error::Other(
+                    "data channel closing is a receive-only notification".into(),
+                ));
+            }
             RTCMessage::DataChannelMessage(data_channel_id, data_channel_message) => {
                 RTCMessageInternal::Dtls(DTLSMessage::DataChannel(ApplicationMessage {
                     data_channel_id,

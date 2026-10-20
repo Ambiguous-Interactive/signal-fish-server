@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add browser reference-client MessagePack relay support for protocol v2 and v3 (#678).
 - Find a published live room by application, game, and room code beyond the session-list limit (#992).
 - Report reference-client peer and channel state at P2P timeouts, incomplete gameplay exchange timeouts,
-  and before failed links are removed, including browser SDP, ICE, and DTLS progress (#853, #889, #1019).
+  and before failed links are removed, including bounded browser state history and SDP, ICE, and DTLS progress
+  (#853, #889, #1019).
 
 ### Changed
 
@@ -27,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve timely native gameplay receipts through link loss, negotiation timeout, and ordinary retry (#1070).
+- Report native channel loss before a remote reset completes so relay fallback can proceed (#1071).
 - Preserve server transport-status order when library callers report concurrent changes (#1068).
 - Keep timely browser gameplay receipts when a peer-link timeout occurs while output waits (#1066).
 - Read queued native keepalive replies before a slow peer retry causes a false connection timeout (#1067).

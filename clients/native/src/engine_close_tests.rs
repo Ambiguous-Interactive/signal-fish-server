@@ -343,3 +343,244 @@ async fn queued_opens_respect_observed_peer_connection_failure() {
         }
     }
 }
+
+type RuntimeFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+#[derive(Debug)]
+struct PausableReactor {
+    inner: Arc<dyn Runtime>,
+    paused: Arc<AtomicBool>,
+    reactor_selected: AtomicBool,
+    waker: Arc<std::sync::Mutex<Option<std::task::Waker>>>,
+    held: Arc<tokio::sync::Notify>,
+}
+
+impl PausableReactor {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: default_runtime().unwrap(),
+            paused: Arc::new(AtomicBool::new(false)),
+            reactor_selected: AtomicBool::new(false),
+            waker: Arc::new(std::sync::Mutex::new(None)),
+            held: Arc::new(tokio::sync::Notify::new()),
+        })
+    }
+
+    async fn pause(&self) {
+        self.paused.store(true, Ordering::SeqCst);
+        self.waker.lock().unwrap().as_ref().unwrap().wake_by_ref();
+        tokio::time::timeout(Duration::from_secs(5), self.held.notified())
+            .await
+            .expect("the remote reactor acknowledges the hold");
+    }
+
+    fn resume(&self) {
+        self.paused.store(false, Ordering::SeqCst);
+        self.waker.lock().unwrap().as_ref().unwrap().wake_by_ref();
+    }
+}
+
+impl Runtime for PausableReactor {
+    fn spawn(
+        &self,
+        future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    ) -> Box<dyn JoinHandle> {
+        if !self.reactor_selected.swap(true, Ordering::Relaxed) {
+            self.spawn_reactor(0, future)
+        } else {
+            self.inner.spawn(future)
+        }
+    }
+
+    fn spawn_reactor(
+        &self,
+        pool: usize,
+        mut future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    ) -> Box<dyn JoinHandle> {
+        let paused = self.paused.clone();
+        let waker = self.waker.clone();
+        let held = self.held.clone();
+        self.inner.spawn_reactor(
+            pool,
+            Box::pin(std::future::poll_fn(move |cx| {
+                *waker.lock().unwrap() = Some(cx.waker().clone());
+                if paused.load(Ordering::SeqCst) {
+                    held.notify_one();
+                    return std::task::Poll::Pending;
+                }
+                future.as_mut().poll(cx)
+            })),
+        )
+    }
+
+    fn wrap_udp_socket(
+        &self,
+        socket: std::net::UdpSocket,
+    ) -> std::io::Result<Arc<dyn webrtc::runtime::AsyncUdpSocket>> {
+        self.inner.wrap_udp_socket(socket)
+    }
+    fn wrap_tcp_listener(
+        &self,
+        listener: std::net::TcpListener,
+    ) -> std::io::Result<Arc<dyn webrtc::runtime::AsyncTcpListener>> {
+        self.inner.wrap_tcp_listener(listener)
+    }
+    fn connect_tcp<'a>(
+        &'a self,
+        address: SocketAddr,
+    ) -> RuntimeFuture<'a, std::io::Result<Arc<dyn webrtc::runtime::AsyncTcpStream>>> {
+        self.inner.connect_tcp(address)
+    }
+    fn resolve_host<'a>(
+        &'a self,
+        host: &'a str,
+    ) -> RuntimeFuture<'a, std::io::Result<Vec<SocketAddr>>> {
+        self.inner.resolve_host(host)
+    }
+    fn sleep(
+        &self,
+        duration: Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
+        self.inner.sleep(duration)
+    }
+    fn interval(&self, duration: Duration) -> Box<dyn webrtc::runtime::AsyncInterval> {
+        self.inner.interval(duration)
+    }
+    fn block_on(&self, future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>>) {
+        self.inner.block_on(future);
+    }
+}
+
+// Regression #1071: local closing must retire the pair before reciprocal reset.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_channel_closing_retires_pair_before_remote_reset() {
+    for initiator_closes in [true, false] {
+        for closed_label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            let (sender_tx, sender_events) = mpsc::unbounded_channel();
+            let (receiver_tx, receiver_events) = mpsc::unbounded_channel();
+            let settings = EngineSettings {
+                disable_mdns: true,
+                ..EngineSettings::default()
+            };
+            let remote_runtime = PausableReactor::new();
+            let mut sender = Engine::new(settings, sender_tx).unwrap();
+            let mut receiver = Engine::new(settings, receiver_tx).unwrap();
+            if initiator_closes {
+                receiver.runtime = remote_runtime.clone();
+            } else {
+                sender.runtime = remote_runtime.clone();
+            }
+            let mut pair = LivePair {
+                sender,
+                receiver,
+                sender_events,
+                receiver_events,
+                sender_id: PlayerId::from_u128(0x826),
+                receiver_id: PlayerId::from_u128(0x827),
+            };
+            pair.negotiate().await;
+            if !initiator_closes {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+            }
+            remote_runtime.pause().await;
+            let generation = pair.sender.peers[&pair.receiver_id].generation;
+            let channel = pair.sender.channel(pair.receiver_id, closed_label).unwrap();
+            channel.close().await.unwrap();
+            channel.close().await.unwrap();
+            assert_eq!(
+                channel.ready_state().await.unwrap(),
+                rtc::data_channel::RTCDataChannelState::Closing
+            );
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let EngineEvent::ChannelClosed {
+                        peer,
+                        generation: event_generation,
+                        label,
+                    } = pair.sender_events.recv().await.unwrap()
+                    {
+                        assert_eq!(
+                            (peer, event_generation, label.as_str()),
+                            (pair.receiver_id, generation, closed_label)
+                        );
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("local close publishes pair loss while the remote reset is held");
+            assert_eq!(
+                channel.ready_state().await.unwrap(),
+                rtc::data_channel::RTCDataChannelState::Closing
+            );
+            assert!(pair.sender.peers[&pair.receiver_id]
+                .receive_admission
+                .terminal
+                .load(Ordering::Relaxed));
+            for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                assert!(pair
+                    .sender
+                    .send_channel(pair.receiver_id, label)
+                    .await
+                    .is_none());
+            }
+            remote_runtime.resume();
+            let sibling_label = if closed_label == RELIABLE_LABEL {
+                UNRELIABLE_LABEL
+            } else {
+                RELIABLE_LABEL
+            };
+            let sibling = pair
+                .receiver
+                .channel(pair.sender_id, sibling_label)
+                .unwrap();
+            sibling.send_text("after-local-close").await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while sibling.outstanding_bytes().await.unwrap() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the sibling probe reaches SCTP before its reset");
+            sibling.close().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !pair.sender.peers[&pair.receiver_id]
+                    .channel_tasks
+                    .iter()
+                    .all(|task| task.is_finished())
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("both local channel producers finish");
+            let mut sibling_closes = 0;
+            loop {
+                let event = match pair.sender_events.try_recv() {
+                    Ok(event) => event,
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        panic!("the retained engine must keep its event sender")
+                    }
+                };
+                match event {
+                    EngineEvent::ChannelClosed { label, .. } => {
+                        assert_eq!(
+                            label, sibling_label,
+                            "the closing channel must not publish twice"
+                        );
+                        sibling_closes += 1;
+                    }
+                    EngineEvent::ChannelMessage { .. } => {
+                        panic!("closing fences later sibling input")
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(sibling_closes, 1);
+            pair.cleanup().await;
+        }
+    }
+}
