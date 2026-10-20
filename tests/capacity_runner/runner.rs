@@ -1543,7 +1543,7 @@ async fn peer_task(
                         );
                     }
                     log.push_sent(SentEvent {
-                        sender: plan.name.clone(),
+                        sender: receipt_recipient.clone(),
                         room: plan.room,
                         seq: send.seq,
                         epoch: incarnation,
@@ -2280,6 +2280,89 @@ mod session_poll_tests {
                 encode_application_frame(data, None, None, true).expect("opaque frame");
             assert_eq!(bytes, count_u64(reference_body.len()));
             assert_eq!(frame, Message::Binary(reference_body.into()));
+        }
+    }
+
+    #[tokio::test]
+    async fn outbound_sends_share_task_and_registry_names_at_source() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let address = listener.local_addr().expect("mock address");
+        let (client, mut server) = tokio::join!(
+            tokio_tungstenite::connect_async(format!("ws://{address}")),
+            async {
+                let (socket, _) = listener.accept().await.expect("accept mock peer");
+                tokio_tungstenite::accept_async(socket)
+                    .await
+                    .expect("handshake")
+            }
+        );
+        let (sink, reader) = client.expect("client handshake").0.split();
+        let plan = crate::unit_context().plans.remove(0);
+        let scheduled: Vec<_> = plan.sends.iter().map(|send| send.intended_us).collect();
+        let registry = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+        let log = Arc::new(EventLog::new());
+        tokio::time::pause();
+        let epoch = Instant::now();
+        let (_start, receiver) = tokio::sync::watch::channel(Some(epoch));
+        let (ready, readiness) = tokio::sync::oneshot::channel();
+        let peer = tokio::spawn(peer_task(
+            plan.name.clone(),
+            plan,
+            PeerFacts {
+                ws_url: format!("ws://{address}"),
+                encoding: Encoding::V2Json,
+                players_per_room: 4,
+                payload_bytes: 96,
+                delivery_class: DeliveryClass::Reliable,
+                latest_keys_per_sender: 1,
+                generator_lag_bound_us: 1_000_000,
+                pause_sends: None,
+                stall_senders: None,
+                experiment: ExperimentContext {
+                    active: false,
+                    opaque_sender: false,
+                },
+                game_data_format: None,
+            },
+            Vec::new(),
+            receiver,
+            ready,
+            Arc::clone(&registry),
+            (sink, reader, "player-id".to_string(), BTreeMap::new()),
+            Arc::clone(&log),
+            1_000_000,
+            None,
+            false,
+        ));
+        poll_without_clock_advance(readiness)
+            .await
+            .expect("peer ready");
+        for intended_us in &scheduled {
+            tokio::time::advance(
+                epoch + Duration::from_micros(intended_us + 2_000) - Instant::now(),
+            )
+            .await;
+            assert!(matches!(
+                poll_without_clock_advance(server.next())
+                    .await
+                    .expect("outbound frame")
+                    .expect("frame"),
+                Message::Text(_)
+            ));
+        }
+        tokio::time::advance(epoch + Duration::from_millis(1_002) - Instant::now()).await;
+        poll_without_clock_advance(peer)
+            .await
+            .expect("peer completes");
+        let records = log.take_records();
+        assert!(records.faults.is_empty(), "{:?}", records.faults);
+        assert_eq!(records.sent.len(), scheduled.len());
+        let registry = registry.lock().expect("registry");
+        let identity = &registry["player-id"].0;
+        for event in &records.sent {
+            assert_eq!(event.sender.as_ptr(), identity.as_ptr());
         }
     }
 

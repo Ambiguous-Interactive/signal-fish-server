@@ -811,6 +811,143 @@ mod handler_test {
         );
     }
 
+    // Issue #1093: event-first callers must receive queued gameplay before
+    // channel closure on DTLS teardown and legacy SCTP stream events.
+    #[test]
+    fn stream_reset_transport_close_preserves_queued_gameplay_before_close() {
+        use crate::data_channel::RTCDataChannelInit;
+        use crate::peer_connection::event::TaggedRTCEventInternal;
+        use crate::peer_connection::transport::RTCDtlsRole;
+        use ::datachannel::data_channel::DataChannelMessage;
+        use ::datachannel::message::{Message, message_channel_ack::DataChannelAck};
+        use ::sctp::PayloadProtocolIdentifier;
+        use shared::marshal::Marshal;
+
+        for negotiated in [true, false] {
+            for ordered in [true, false] {
+                for dtls_close in [false, true] {
+                    let base = Instant::now();
+                    let mut pc = RTCPeerConnectionBuilder::new().build(base).unwrap();
+                    let id = pc
+                        .create_data_channel(
+                            "gameplay",
+                            Some(RTCDataChannelInit {
+                                negotiated: negotiated.then_some(1),
+                                ordered,
+                                max_retransmits: (!ordered).then_some(0),
+                                ..Default::default()
+                            }),
+                        )
+                        .unwrap()
+                        .id();
+                    while pc.poll_event().is_some() {}
+                    pc.dtls_transport_mut().dtls_role = RTCDtlsRole::Server;
+                    pc.pipeline_context
+                        .sctp_handler_context
+                        .event_outs
+                        .push_back(TaggedRTCEventInternal {
+                            now: base,
+                            event: RTCEventInternal::SCTPHandshakeComplete(0),
+                        });
+                    while pc.poll_event().is_some() {}
+                    if !negotiated {
+                        let ack = Message::DataChannelAck(DataChannelAck {})
+                            .marshal()
+                            .unwrap();
+                        pc.get_datachannel_handler()
+                            .handle_read(TaggedRTCMessageInternal {
+                                now: base,
+                                transport: TransportContext::default(),
+                                message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(
+                                    DataChannelMessage {
+                                        association_handle: 0,
+                                        stream_id: 1,
+                                        ppi: PayloadProtocolIdentifier::Dcep,
+                                        payload: BytesMut::from(&ack[..]),
+                                        negotiated: false,
+                                    },
+                                )),
+                            })
+                            .unwrap();
+                        pc.pump_reads(None);
+                    }
+                    assert!(matches!(pc.poll_data_read().unwrap().message,
+                    RTCMessage::DataChannelOpened(opened) if opened == id));
+
+                    pc.get_datachannel_handler()
+                        .handle_read(TaggedRTCMessageInternal {
+                            now: base,
+                            transport: TransportContext::default(),
+                            message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(
+                                DataChannelMessage {
+                                    association_handle: 0,
+                                    stream_id: 1,
+                                    ppi: PayloadProtocolIdentifier::Binary,
+                                    payload: BytesMut::from(&b"last-gameplay"[..]),
+                                    negotiated,
+                                },
+                            )),
+                        })
+                        .unwrap();
+                    pc.pump_reads(None);
+                    let closure = || {
+                        if dtls_close {
+                            RTCEventInternal::DTLSClosed
+                        } else {
+                            RTCEventInternal::SCTPStreamClosed(0, 1)
+                        }
+                    };
+                    pc.pipeline_context
+                        .sctp_handler_context
+                        .event_outs
+                        .push_back(TaggedRTCEventInternal {
+                            now: base,
+                            event: closure(),
+                        });
+                    while let Some(event) = pc.poll_event() {
+                        assert!(
+                            !matches!(
+                                event,
+                                RTCPeerConnectionEvent::OnDataChannel(
+                                    RTCDataChannelEvent::OnClose(_)
+                                )
+                            ),
+                            "negotiated={negotiated}, ordered={ordered}, dtls_close={dtls_close}: close overtook input"
+                        );
+                    }
+                    assert!(matches!(pc.poll_data_read().unwrap().message,
+                    RTCMessage::DataChannelMessage(channel, payload)
+                    if channel == id && payload.data == b"last-gameplay"[..]));
+                    assert!(matches!(pc.poll_data_read().unwrap().message,
+                    RTCMessage::DataChannelClosed(closed) if closed == id));
+                    assert!(pc.poll_data_read().is_none());
+                    assert!(pc.data_channel(id).is_none());
+                    assert_eq!(
+                        pc.pipeline_context
+                            .stats
+                            .peer_connection
+                            .data_channels_closed,
+                        1
+                    );
+                    pc.get_datachannel_handler()
+                        .handle_event(TaggedRTCEventInternal {
+                            now: base,
+                            event: closure(),
+                        })
+                        .unwrap();
+                    assert!(pc.poll_data_read().is_none(), "duplicate close");
+                    assert_eq!(
+                        pc.pipeline_context
+                            .stats
+                            .peer_connection
+                            .data_channels_closed,
+                        1
+                    );
+                }
+            }
+        }
+    }
+
     /// Check that messages in the `read_out` queues don't get stuck until the next incoming packet triggers `handle_read`.
     #[test]
     fn pump_read_outs() {

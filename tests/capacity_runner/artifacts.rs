@@ -619,7 +619,7 @@ pub fn read_records(output_dir: &Path) -> Result<RunRecords, String> {
     let mut receipt_names = crate::records::ReceiptNames::default();
     visit_jsonl(BufReader::new(file), &path, |line| {
         match read_delivery_event(line, &path)? {
-            DeliveryEvent::Sent(event) => records.sent.push(event),
+            DeliveryEvent::Sent(event) => records.sent.push(receipt_names.share_sent(event)),
             DeliveryEvent::Receipt(event) => records.receipts.push(receipt_names.share(event)),
             DeliveryEvent::Gap(event) => records.gaps.push(event),
             DeliveryEvent::UnsupportedNotice(event) => records.unsupported_notices.push(event),

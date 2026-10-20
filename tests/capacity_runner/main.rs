@@ -3171,11 +3171,12 @@ fn experiment_complete_records(plans: &[SenderPlan]) -> RunRecords {
         .find(|plan| plan.player == 0)
         .expect("peer 0 is the opaque sender");
     for plan in plans {
+        let sent_name = ReceiptName::from(plan.name.as_str());
         for send in &plan.sends {
             log.push_sent(SentEvent {
                 application_bytes: 96,
                 encoded_frame_body_bytes: 150,
-                sender: plan.name.clone(),
+                sender: sent_name.clone(),
                 room: plan.room,
                 seq: send.seq,
                 epoch: 1,
@@ -4495,6 +4496,7 @@ fn churned_records(context: &UnitContext, churn: &ChurnPlan) -> RunRecords {
         ]),
     });
     let mut epoch_positions: BTreeMap<u32, u64> = BTreeMap::new();
+    let sent_name = ReceiptName::from(plan.name.as_str());
     for send in &plan.sends {
         let epoch = u32::from(send.intended_us >= reconnect_us) + 1;
         let epoch_ledger = *epoch_positions.get(&epoch).unwrap_or(&0);
@@ -4502,7 +4504,7 @@ fn churned_records(context: &UnitContext, churn: &ChurnPlan) -> RunRecords {
         log.push_sent(SentEvent {
             application_bytes: 96,
             encoded_frame_body_bytes: 150,
-            sender: plan.name.clone(),
+            sender: sent_name.clone(),
             room: plan.room,
             seq: send.seq,
             epoch,
@@ -4924,7 +4926,7 @@ fn replacement_records(plans: &[SenderPlan], churn: &ChurnPlan) -> RunRecords {
         log.push_sent(SentEvent {
             application_bytes: 96,
             encoded_frame_body_bytes: 150,
-            sender: plan.name.clone(),
+            sender: plan.name.clone().into(),
             room: plan.room,
             seq: scheduled.seq,
             epoch: *epoch,
@@ -5358,11 +5360,12 @@ fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
         epoch: Some(2),
         tails: BTreeMap::new(),
     });
+    let sent_name = ReceiptName::from(plan.name.as_str());
     for send in &plan.sends {
         log.push_sent(SentEvent {
             application_bytes: 96,
             encoded_frame_body_bytes: 150,
-            sender: plan.name.clone(),
+            sender: sent_name.clone(),
             room: plan.room,
             seq: send.seq,
             epoch: 1,
@@ -5459,11 +5462,12 @@ fn a_member_omitted_from_the_rejoin_snapshot_is_floored_by_send_times() {
         epoch: Some(2),
         tails: BTreeMap::new(),
     });
+    let sent_name = ReceiptName::from(plan.name.as_str());
     for send in &plan.sends {
         log.push_sent(SentEvent {
             application_bytes: 96,
             encoded_frame_body_bytes: 150,
-            sender: plan.name.clone(),
+            sender: sent_name.clone(),
             room: plan.room,
             seq: send.seq,
             epoch: 1,
@@ -5583,6 +5587,7 @@ fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
         tails: BTreeMap::from([("r0p1".to_string(), ("id-r0p1-bump".to_string(), 1))]),
     });
     let mut epoch_positions: BTreeMap<u32, u64> = BTreeMap::new();
+    let sent_name = ReceiptName::from(plan.name.as_str());
     for send in &plan.sends {
         let epoch = u32::from(send.intended_us >= 150_000) + 1;
         let server_seq = {
@@ -5593,7 +5598,7 @@ fn a_snapshot_tail_resolves_to_the_exact_incarnation_of_its_player_id() {
         log.push_sent(SentEvent {
             application_bytes: 96,
             encoded_frame_body_bytes: 150,
-            sender: plan.name.clone(),
+            sender: sent_name.clone(),
             room: plan.room,
             seq: send.seq,
             epoch,
@@ -5825,11 +5830,12 @@ fn unit_context_with_experiment() -> UnitContext {
 fn complete_records(plans: &[SenderPlan]) -> RunRecords {
     let log = EventLog::new();
     for plan in plans {
+        let sent_name = ReceiptName::from(plan.name.as_str());
         for send in &plan.sends {
             log.push_sent(SentEvent {
                 application_bytes: 96,
                 encoded_frame_body_bytes: 150,
-                sender: plan.name.clone(),
+                sender: sent_name.clone(),
                 room: plan.room,
                 seq: send.seq,
                 epoch: 1,

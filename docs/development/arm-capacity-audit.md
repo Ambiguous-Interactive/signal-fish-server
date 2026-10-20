@@ -3905,3 +3905,49 @@ wait channels, clock samples, and host pressure. The host remains shared.
 There is no replacement attempt or matched baseline comparison. The complete
 outcome and any overlap are recorded on #775 and #1009; a pass cannot explain
 the historical stalls.
+
+### Share retained send identities
+
+Session 493 continues [#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775)
+and [#636](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/636)
+from `dac8e4ae`. Each retained send still owned a separate sender `String`.
+The collector now clones its existing shared peer identity. Replay interns
+send and receipt names in the same run-local pool. Its sender handle shrinks
+from 24 to 8 bytes on this ARM64 build and no longer retains its own name buffer.
+The JSONL schema and arbitrary identity evidence remain unchanged.
+
+A storage regression fails on the old record size. A real WebSocket peer-task
+control verifies that actual outbound sends share the registry identity.
+Replay controls preserve unknown Unicode names, duplicate sends across epochs,
+send/receipt identity sharing, independent runs, and allocation release.
+All 24 selected capacity controls pass, including reliable, lossy, and
+room-replacement socket histories. Independent review reports no open finding.
+
+The registered cohort uses 16 senders and three alternating baseline/candidate
+pairs at each size. All 18 measured processes exit successfully. All nine full
+summary pairs match. All three separately produced fixture pairs have identical
+JSONL bytes. Frozen executable and fixture hashes match after the cohort.
+Measurements start only after local builds, tests, and live interop end.
+
+| Receipts | Baseline / candidate wall, s | Baseline / candidate CPU, s | Baseline / candidate peak RSS, KiB |
+| --- | ---: | ---: | ---: |
+| 24,000 | 0.320 / 0.320 | 0.310 / 0.315 | 14,588 / 14,476 |
+| 240,000 | 2.833 / 3.194 | 2.822 / 3.146 | 29,552 / 28,952 |
+| 1,200,000 | 15.761 / 16.103 | 15.634 / 16.036 | 97,020 / 93,328 |
+
+Values are medians of three fresh processes. At 1.2 million receipts, peak RSS
+falls 3,692 KiB (3.8%). Wall time increases 2.2% and CPU increases 2.6%.
+The smaller cohort also shows a larger time cost. This is a retained-memory
+improvement with a measured replay-time tradeoff, not a throughput gain.
+Times include startup, decoding, oracle evaluation, and output. The shared
+ARM64 WSL2 host and debug builds limit interpretation. This synthetic replay
+cohort does not bound live collection RSS, unexpected-event state, or the full
+long workload. It does not identify the historical #1009 stalls or qualify a
+server capacity point. Both campaigns remain open.
+
+Registration, release marker, raw process observations, summaries, fixture
+hashes, and comparison results remain under `/tmp/capacity-send-sharing/`.
+Executable SHA-256:
+
+- baseline: `c94afacd796bdc081ed409037c71c1f242d4dae85973b1b153ac7f7c1aac21d0`.
+- candidate: `71d46b551425e9d261849ff71c7404313e8a54ba40c5c85616fa8ab304801769`.

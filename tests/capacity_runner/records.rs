@@ -25,8 +25,8 @@ use crate::schedule::Phase;
 /// rejoin bumps it) — the wire `(epoch, server seq)` stream key pairs with
 /// it.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SentEvent {
-    pub sender: String,
+pub struct SentEvent<Name = ReceiptName> {
+    pub sender: Name,
     pub room: u32,
     pub seq: u64,
     pub epoch: u32,
@@ -39,7 +39,7 @@ pub struct SentEvent {
     pub phase: Phase,
 }
 
-/// A receipt identity shared within one collected or replayed run.
+/// An event identity shared within one collected or replayed run.
 /// Serialization stays a JSON string, including names outside the run roster.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 // Arc<String> keeps each stored name to one pointer; Arc<str> needs two.
@@ -102,7 +102,7 @@ impl<'de> serde::Deserialize<'de> for ReceiptName {
     }
 }
 
-/// Replay-only names. Live tasks clone their recipient and registry names
+/// Replay-only send and receipt names. Live tasks clone their peer and registry names
 /// directly, without a pool lookup or duplicate-string cleanup in the log.
 #[derive(Default)]
 pub(super) struct ReceiptNames(BTreeSet<ReceiptName>);
@@ -115,6 +115,20 @@ impl ReceiptNames {
         let shared = ReceiptName::from(name);
         self.0.insert(shared.clone());
         shared
+    }
+
+    pub(super) fn share_sent(&mut self, sent: SentEvent<String>) -> SentEvent {
+        SentEvent {
+            sender: self.intern(sent.sender),
+            room: sent.room,
+            seq: sent.seq,
+            epoch: sent.epoch,
+            intended_us: sent.intended_us,
+            sent_us: sent.sent_us,
+            application_bytes: sent.application_bytes,
+            encoded_frame_body_bytes: sent.encoded_frame_body_bytes,
+            phase: sent.phase,
+        }
     }
 
     pub(super) fn share(&mut self, receipt: ReceiptEvent<String>) -> ReceiptEvent {
@@ -805,7 +819,7 @@ pub struct RunRecords {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event_kind", rename_all = "snake_case")]
 pub enum DeliveryEvent<Name = ReceiptName> {
-    Sent(SentEvent),
+    Sent(SentEvent<Name>),
     Receipt(ReceiptEvent<Name>),
     Gap(GapEvent),
     UnsupportedNotice(UnsupportedNoticeEvent),
@@ -863,6 +877,31 @@ impl RunRecords {
 mod tests {
     use super::*;
 
+    // #775: send retention must not allocate a name for every ledger row.
+    #[test]
+    fn send_records_share_live_and_replayed_identity_storage() {
+        assert!(std::mem::size_of::<SentEvent>() <= 72);
+        let context = crate::unit_context();
+        let records = crate::complete_records(&context.plans);
+        let output = tempfile::tempdir().expect("send artifacts");
+        crate::artifacts::write_deliveries(output.path(), &records).unwrap();
+        let replayed = crate::artifacts::read_records(output.path()).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&records).unwrap(),
+            serde_json::to_vec(&replayed).unwrap()
+        );
+        for collected in [&records, &replayed] {
+            let first = &collected.sent[0];
+            let next = collected
+                .sent
+                .iter()
+                .skip(1)
+                .find(|event| event.sender == first.sender)
+                .unwrap();
+            assert_eq!(first.sender.as_ptr(), next.sender.as_ptr());
+        }
+    }
+
     // #775: replay must share exact names without changing arbitrary evidence.
     #[test]
     fn replay_name_sharing_preserves_unknown_unicode_duplicates_and_run_lifetimes() {
@@ -885,6 +924,23 @@ mod tests {
                 encoded_frame_body_bytes: 250,
             });
         }
+        for (sender, seq, epoch) in [
+            (unknown.clone(), 7, 3),
+            (unknown.clone(), 7, 99),
+            (known.clone(), u64::MAX, 3),
+        ] {
+            log.push_sent(SentEvent {
+                sender,
+                room: 42,
+                seq,
+                epoch,
+                intended_us: 2,
+                sent_us: 5,
+                application_bytes: 96,
+                encoded_frame_body_bytes: 150,
+                phase: Phase::Measured,
+            });
+        }
         let collected = log.take_records();
         let output = tempfile::tempdir().expect("artifacts");
         crate::artifacts::write_deliveries(output.path(), &collected).expect("write records");
@@ -895,6 +951,23 @@ mod tests {
                 serde_json::to_vec(&collected).unwrap(),
                 serde_json::to_vec(replayed).unwrap()
             );
+            assert_eq!(replayed.sent.len(), 3);
+            let unknown_sends: Vec<_> = replayed
+                .sent
+                .iter()
+                .filter(|sent| sent.sender == unknown)
+                .collect();
+            assert_eq!(unknown_sends.len(), 2);
+            assert_eq!(unknown_sends[0].seq, unknown_sends[1].seq);
+            assert_eq!((unknown_sends[0].epoch, unknown_sends[1].epoch), (3, 99));
+            assert!(Arc::ptr_eq(
+                &unknown_sends[0].sender.0,
+                &unknown_sends[1].sender.0
+            ));
+            assert!(Arc::ptr_eq(
+                &unknown_sends[0].sender.0,
+                &replayed.receipts[0].sender.0
+            ));
             assert_eq!(replayed.receipts.len(), 3);
             assert_eq!(replayed.receipts[0].sender.as_str(), "未知\"\\\n");
             assert_eq!(replayed.receipts[0].seq, replayed.receipts[1].seq);
