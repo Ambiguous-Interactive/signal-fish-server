@@ -3845,8 +3845,8 @@ measurement shape needs 11,059,712 planned records and fits the default. The
 999-room shape needs 11,048,652,288 and is refused. Controls compare the cost
 with the actual lazy schedules, exercise exact admission boundaries, and reject
 count overflow and invalid clocks. Removing the budget guard fails the boundary
-control. A runner control uses an unreachable endpoint and proves the budget
-refusal precedes connection attempts and output-directory creation. Old
+control. A runner control reserves an ephemeral listener and proves that
+budget refusal opens no connection and creates no output directory. Old
 manifests omit the default field and keep their serialized bytes. Custom
 budgets round-trip in the config.
 

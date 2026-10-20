@@ -65,8 +65,15 @@ use signal_fish_server::protocol::{DeliveryGapReason, ServerMessage};
 async fn planned_record_budget_refuses_large_work_before_artifacts_or_connections() {
     let parent = tempfile::tempdir().expect("output parent");
     let output = parent.path().join("refused");
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("test listener");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
     let mut config = scenario_config(Encoding::V3Json);
-    config.endpoint = Some("ws://127.0.0.1:1".into());
+    config.endpoint = Some(format!(
+        "ws://{}",
+        listener.local_addr().expect("test address")
+    ));
     config.rooms = 999;
     config.players_per_room = 16;
     config.send_rate_per_sender = 60.0;
@@ -82,6 +89,13 @@ async fn planned_record_budget_refuses_large_work_before_artifacts_or_connection
         "{error}"
     );
     assert!(!output.exists(), "refusal must not create a run directory");
+    assert_eq!(
+        listener
+            .accept()
+            .expect_err("refusal must not connect")
+            .kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }
 
 /// Exercise config -> live receipt collection -> bounded sidecar, while
