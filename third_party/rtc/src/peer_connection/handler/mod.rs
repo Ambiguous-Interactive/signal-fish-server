@@ -308,13 +308,16 @@ impl RTCPeerConnection {
             let rtc_message = match msg.message {
                 RTCMessageInternal::Dtls(DTLSMessage::DataChannel(application_message)) => {
                     match application_message.data_channel_event {
+                        DataChannelEvent::Open => Some(RTCMessage::DataChannelOpened(
+                            application_message.data_channel_id,
+                        )),
                         DataChannelEvent::Message(data_channel_message) => {
                             Some(RTCMessage::DataChannelMessage(
                                 application_message.data_channel_id,
                                 data_channel_message,
                             ))
                         }
-                        DataChannelEvent::ClosedAfterLocalClose => Some(
+                        DataChannelEvent::Close | DataChannelEvent::ClosedAfterLocalClose => Some(
                             RTCMessage::DataChannelClosed(application_message.data_channel_id),
                         ),
                         _ => None,
@@ -344,7 +347,9 @@ impl RTCPeerConnection {
                 // Routed by kind, so a caller can decline data-channel output — the only way
                 // to apply SCTP back-pressure — without also declining media.
                 match &tagged.message {
-                    RTCMessage::DataChannelMessage(..) | RTCMessage::DataChannelClosed(..) => {
+                    RTCMessage::DataChannelOpened(..)
+                    | RTCMessage::DataChannelMessage(..)
+                    | RTCMessage::DataChannelClosed(..) => {
                         self.pipeline_context.data_read_outs.push_back(tagged)
                     }
                     _ => self.pipeline_context.media_read_outs.push_back(tagged),
@@ -435,9 +440,11 @@ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCP
         let now = msg.now;
         self.pipeline_context.observe(now);
         let rtc_message_internal = match msg.message {
-            RTCMessage::DataChannelClosing(_) | RTCMessage::DataChannelClosed(_) => {
+            RTCMessage::DataChannelOpened(_)
+            | RTCMessage::DataChannelClosing(_)
+            | RTCMessage::DataChannelClosed(_) => {
                 return Err(Error::Other(
-                    "data channel closing is a receive-only notification".into(),
+                    "data channel lifecycle is a receive-only notification".into(),
                 ));
             }
             RTCMessage::DataChannelMessage(data_channel_id, data_channel_message) => {
@@ -739,12 +746,10 @@ mod handler_test {
         assert_ne!(queued.now, t(0), "and not the construction instant either");
     }
 
-    /// The open of a negotiated data channel is queued as a read message while
-    /// `SCTPHandshakeComplete` is being handled, i.e. inside `poll_event`. That same `poll_event`
-    /// call must return the `OnOpen`: the async `webrtc` driver drains events until `poll_event`
-    /// returns `None` and then waits for the next packet or timer.
+    /// Handling the negotiated channel handshake must pump its open marker into
+    /// the ordered read queue in the same turn, without another incoming packet.
     #[test]
-    fn negotiated_channel_opens_within_the_same_poll_event() {
+    fn negotiated_channel_open_is_readable_after_the_same_poll_event() {
         use crate::data_channel::RTCDataChannelInit;
         use crate::peer_connection::event::TaggedRTCEventInternal;
         use crate::peer_connection::transport::RTCDtlsRole;
@@ -780,18 +785,29 @@ mod handler_test {
                 event: RTCEventInternal::SCTPHandshakeComplete(0),
             });
 
-        let mut opened = false;
         while let Some(event) = pc.poll_event() {
-            if matches!(
-                event,
-                RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(opened_id)) if opened_id == id
-            ) {
-                opened = true;
-            }
+            assert!(
+                !matches!(
+                    event,
+                    RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(_))
+                ),
+                "open must share the ordered read queue with input and close"
+            );
         }
+        let opened = pc
+            .poll_data_read()
+            .expect("open must not wait for the next incoming packet");
+        assert_eq!(opened.now, base);
         assert!(
-            opened,
-            "the open must not wait for the next incoming packet"
+            matches!(opened.message, RTCMessage::DataChannelOpened(opened_id) if opened_id == id)
+        );
+        assert!(
+            pc.poll_data_read().is_none(),
+            "open is announced exactly once"
+        );
+        assert!(
+            pc.poll_event().is_none(),
+            "no duplicate lifecycle event remains"
         );
     }
 
@@ -823,18 +839,16 @@ mod handler_test {
                 })),
             });
 
-        // call `poll_read` to pump the read outs
-        let msg = pc.poll_read();
+        // `poll_read` pumps and returns the marker without another packet.
+        let msg = pc
+            .poll_read()
+            .expect("the open marker must be immediately readable");
+        assert_eq!(msg.now, t(5));
+        assert!(matches!(msg.message, RTCMessage::DataChannelOpened(42)));
+        assert!(pc.poll_read().is_none(), "open is announced exactly once");
         assert!(
-            msg.is_none(),
-            "The message should be consumed by the enpoint handler"
+            pc.poll_event().is_none(),
+            "open cannot bypass queued channel input"
         );
-
-        // we should get a channel opened event
-        let event = pc.poll_event().expect("should have an event");
-        assert!(matches!(
-            event,
-            RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(42))
-        ));
     }
 }

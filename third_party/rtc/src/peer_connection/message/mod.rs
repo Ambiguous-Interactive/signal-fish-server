@@ -545,10 +545,13 @@ pub enum RTCMessage {
     /// ```
     DataChannelMessage(RTCDataChannelId, RTCDataChannelMessage),
 
+    /// The channel opened, before its queued input and later channel lifetimes.
+    DataChannelOpened(RTCDataChannelId),
+
     /// The local channel started closing, after previously queued channel input.
     DataChannelClosing(RTCDataChannelId),
 
-    /// A locally closed channel finished closing.
+    /// The channel finished closing, after previously queued channel input.
     DataChannelClosed(RTCDataChannelId),
 }
 

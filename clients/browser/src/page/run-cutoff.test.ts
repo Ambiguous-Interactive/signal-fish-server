@@ -4,6 +4,7 @@ function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 // Regressions #1011/#1027/#1029/#1033/#1066: admit timely receipts across physical timeout.
+// Regression #1073, audit #853/#889: raw arrival owns the cutoff across UTF-8 decoding.
 for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
   [
     'fallback',
@@ -16,6 +17,10 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
     'late-sent-unreliable',
     'late-received-reliable',
     'late-received-unreliable',
+    'queued-decoded-text-reliable',
+    'queued-decoded-text-unreliable',
+    'queued-decoded-binary-reliable',
+    'queued-decoded-binary-unreliable',
     'queued-received-reliable',
     'queued-received-unreliable',
     'queued-expired-reliable',
@@ -55,9 +60,11 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
     [0, 15].flatMap((p2pTimeoutSecs) =>
       (scenario.startsWith('linger-')
         ? [1449, 1450, 1451]
-        : scenario.startsWith('late-')
-          ? [1100, 1101]
-          : [1100]
+        : scenario.startsWith('queued-decoded-')
+          ? [1099, 1100, 1101]
+          : scenario.startsWith('late-')
+            ? [1100, 1101]
+            : [1100]
       ).map((cutoff) => [scenario, timerOrder, p2pTimeoutSecs, cutoff] as const),
     ),
   ),
@@ -82,6 +89,8 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
   const originalSocket = globalThis.WebSocket;
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
   const originalNow = performance.now;
+  const originalEncode = TextEncoder.prototype.encode;
+  const originalDecode = TextDecoder.prototype.decode;
   const originalSetTimeout = globalThis.setTimeout;
   const originalClearTimeout = globalThis.clearTimeout;
   const me = '00000000-0000-0000-0000-000000000001';
@@ -115,7 +124,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
     readonly ordered: boolean;
     readonly maxRetransmits: number | null;
     onopen: (() => void) | null = null;
-    onmessage: ((event: { data: string }) => void) | null = null;
+    onmessage: ((event: { data: string | ArrayBuffer }) => void) | null = null;
     constructor(readonly label: string) {
       channels.push(this);
       this.ordered = label === 'reliable';
@@ -302,6 +311,8 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
           scenario !== `missing-${label}` &&
           scenario !== `live-received-${label}` &&
           scenario !== `late-received-${label}` &&
+          scenario !== `queued-decoded-text-${label}` &&
+          scenario !== `queued-decoded-binary-${label}` &&
           scenario !== `queued-received-${label}` &&
           scenario !== `queued-expired-${label}` &&
           scenario !== `queued-expired-late-${label}` &&
@@ -457,7 +468,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
         await turn();
         assert(outputHeld, 'the prior input handler waits for output acknowledgment');
       }
-      now = 1099;
+      now = scenario.startsWith('queued-decoded-') ? cutoff : 1099;
       if (scenario.startsWith('queued-replanned-')) {
         socket.deliver('SessionPlan', {
           generation: latePeer,
@@ -471,10 +482,33 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
       if (scenario.startsWith('queued-retired-')) {
         socket.deliver('PlayerLeft', { player_id: peer, epoch: 1, final_seq: 0 });
       }
-      if (!scenario.startsWith('queued-expired-late-'))
-        channel!.onmessage?.({
-          data: JSON.stringify({ from: peer, channel: channel!.label, seq: 0 }),
-        });
+      if (!scenario.startsWith('queued-expired-late-')) {
+        const text = JSON.stringify({ from: peer, channel: channel!.label, seq: 0 });
+        const data = scenario.startsWith('queued-decoded-binary-')
+          ? new TextEncoder().encode(text).buffer
+          : text;
+        if (scenario.startsWith('queued-decoded-')) {
+          // Raw arrival precedes cutoff; ordinary UTF-8 normalization finishes later.
+          if (scenario.startsWith('queued-decoded-binary-')) {
+            TextDecoder.prototype.decode = function (input, options) {
+              const decoded = originalDecode.call(this, input, options);
+              now = 1101;
+              return decoded;
+            };
+          } else {
+            TextEncoder.prototype.encode = function (input) {
+              const bytes = originalEncode.call(this, input);
+              now = 1101;
+              return bytes;
+            };
+          }
+        }
+        channel!.onmessage?.({ data });
+        if (scenario.startsWith('queued-decoded-'))
+          assert(now === 1101, 'UTF-8 normalization completes after the run cutoff');
+        TextEncoder.prototype.encode = originalEncode;
+        TextDecoder.prototype.decode = originalDecode;
+      }
       if (scenario.startsWith('queued-')) now = 1101;
       if (scenario.startsWith('queued-expired-')) {
         for (const [id, timer] of [...timers])
@@ -503,7 +537,8 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
       }
       assert(
         result ===
-          (scenario.startsWith('queued-retired-') ||
+          ((scenario.startsWith('queued-decoded-') && cutoff >= 1100) ||
+          scenario.startsWith('queued-retired-') ||
           scenario.startsWith('queued-replanned-') ||
           scenario.startsWith('queued-expired-late-')
             ? EXIT_CRITERIA_UNMET
@@ -688,6 +723,8 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
     await turn();
     console.error = originalError;
     performance.now = originalNow;
+    TextEncoder.prototype.encode = originalEncode;
+    TextDecoder.prototype.decode = originalDecode;
     globalThis.setTimeout = originalSetTimeout;
     globalThis.clearTimeout = originalClearTimeout;
     globalThis.RTCPeerConnection = originalPc;

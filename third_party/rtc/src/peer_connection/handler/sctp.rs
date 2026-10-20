@@ -1337,18 +1337,14 @@ mod tests {
             matches!(pc.poll_event(), Some(RTCPeerConnectionEvent::OnDataChannel(
             RTCDataChannelEvent::OnBufferedAmountHigh(id))) if id == old_id)
         );
-        assert!(
-            matches!(pc.poll_event(), Some(RTCPeerConnectionEvent::OnDataChannel(
-            RTCDataChannelEvent::OnClose(id))) if id == old_id)
-        );
         let new_id = pc
             .data_channels
             .handle_of_stream(&0)
             .expect("new DCEP survives the old handle's completion event");
         assert_ne!(new_id, old_id);
         assert!(
-            matches!(pc.poll_event(), Some(RTCPeerConnectionEvent::OnDataChannel(
-            RTCDataChannelEvent::OnOpen(id))) if id == new_id)
+            pc.poll_event().is_none(),
+            "lifetime markers stay with input"
         );
         assert_eq!(pc.data_channel(new_id).unwrap().label(), "new-generation");
         assert_eq!(
@@ -1360,6 +1356,10 @@ mod tests {
         assert!(matches!(pc.poll_read().unwrap().message,
             crate::peer_connection::message::RTCMessage::DataChannelMessage(id, payload)
                 if id == old_id && &payload.data[..] == b"final-old-payload"));
+        assert!(matches!(pc.poll_read().unwrap().message,
+            crate::peer_connection::message::RTCMessage::DataChannelClosed(id) if id == old_id));
+        assert!(matches!(pc.poll_read().unwrap().message,
+            crate::peer_connection::message::RTCMessage::DataChannelOpened(id) if id == new_id));
         assert!(matches!(pc.poll_read().unwrap().message,
             crate::peer_connection::message::RTCMessage::DataChannelMessage(id, payload)
                 if id == new_id && &payload.data[..] == b"new-game-payload"));

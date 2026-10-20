@@ -46,3 +46,12 @@ through the same retained delivery path as channel input. Earlier queued input
 keeps its order. The native engine retires the pair before reciprocal reset
 finishes. See [#1071](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1071).
 Replacement qualification in #912 must retain these controls.
+
+The wrapper maps ordered RTC opening and closure markers to its existing
+`OnOpen` and `OnClose` events. Its core drain stops at each closed lifetime and
+waits for retained output to reach registered receivers before the next lifetime
+opens. This preserves earlier input, old close, new announcement, and new input
+when SCTP reuses a stream. The production driver control checks registered
+receiver delivery and replacement registration. See
+[#1075](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1075).
+Published replacement qualification in #912 must retain these controls.

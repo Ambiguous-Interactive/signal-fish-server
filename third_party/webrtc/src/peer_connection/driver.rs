@@ -962,10 +962,22 @@ where
             let consumed_listener = (!self.pending_data_channel_events.is_empty())
                 .then(|| self.inner.data_channel_consumed.listen());
             let delivery_blocked = match consumed_listener {
-                Some(listener) => self
-                    .flush_pending_data_channel_events()
-                    .await
-                    .then_some(listener),
+                Some(listener) => {
+                    let was_blocked = self
+                        .inner
+                        .data_channel_delivery_blocked
+                        .load(Ordering::Acquire);
+                    if self.flush_pending_data_channel_events().await {
+                        Some(listener)
+                    } else if was_blocked {
+                        // A registered receiver held the next lifetime in the
+                        // core. Retry reads now that it has capacity. An orphan
+                        // queue stays nonblocking and must still reach select.
+                        continue;
+                    } else {
+                        None
+                    }
+                }
                 None => None,
             };
             let consumed = async move {
@@ -1621,6 +1633,12 @@ where
         // does not need it yet, but discarding it here would be the wrong default.
         let TaggedRTCMessage { now: _, message } = message;
         match message {
+            RTCMessage::DataChannelOpened(channel_id) => {
+                self.handle_rtc_event(RTCPeerConnectionEvent::OnDataChannel(
+                    RTCDataChannelEvent::OnOpen(channel_id),
+                ))
+                .await;
+            }
             RTCMessage::DataChannelClosed(channel_id) => {
                 self.handle_rtc_event(RTCPeerConnectionEvent::OnDataChannel(
                     RTCDataChannelEvent::OnClose(channel_id),
@@ -2014,7 +2032,13 @@ where
         let mut messages = Vec::new();
         let mut core = inner.core.lock().await;
         while let Some(message) = core.poll_data_read() {
+            let closes_lifetime = matches!(message.message, RTCMessage::DataChannelClosed(_));
             messages.push(message);
+            // Leave the next lifetime's open in the core until this close has
+            // reached its registered receiver, including a slow receiver.
+            if closes_lifetime {
+                break;
+            }
         }
         messages
     }
@@ -2258,8 +2282,17 @@ where
             return Ok(());
         }
 
-        for message in Self::drain_core_data(self.inner.clone()).await {
-            self.handle_rtc_message(message).await;
+        loop {
+            let messages = Self::drain_core_data(self.inner.clone()).await;
+            if messages.is_empty() {
+                break;
+            }
+            for message in messages {
+                self.handle_rtc_message(message).await;
+            }
+            if self.flush_pending_data_channel_events().await {
+                break;
+            }
         }
 
         Ok(())
@@ -2294,6 +2327,181 @@ mod tests {
     use super::*;
     use crate::data_channel::RTCDataChannelMessage;
     use crate::runtime::channel;
+
+    // A slow old receiver must leave the next lifetime's markers in the core.
+    #[cfg(any(feature = "crypto-ring", feature = "crypto-aws-lc-rs"))]
+    #[test]
+    fn slow_receiver_holds_later_lifetime_markers_in_core() {
+        let runtime = crate::runtime::default_runtime().unwrap();
+        runtime.block_on(Box::pin(async {
+            let (inner, _events) = crate::peer_connection::new_test_peer_connection().await;
+            let (first, second) = {
+                let mut core = inner.core.lock().await;
+                let first = core.create_data_channel("first", None).unwrap().id();
+                let second = core.create_data_channel("second", None).unwrap().id();
+                core.data_channel(first).unwrap().close().unwrap();
+                core.data_channel(second).unwrap().close().unwrap();
+                (first, second)
+            };
+            let (first_tx, mut first_rx) = channel(1);
+            let (second_tx, mut second_rx) = channel(1);
+            inner
+                .data_channel_events_tx
+                .lock()
+                .await
+                .extend([(first, first_tx), (second, second_tx)]);
+            let mut driver = PeerConnectionDriver::<SocketAddr>::new(
+                inner,
+                Vec::new(),
+                Vec::new(),
+                MulticastDnsMode::Disabled,
+                Vec::new(),
+                RTCIceTransportPolicy::All,
+                rtc::crypto::default_provider().unwrap(),
+                false,
+                None,
+            );
+            driver.poll_reads().await.unwrap();
+            assert!(
+                second_rx.try_recv().is_err(),
+                "later lifetime overtook a retained close"
+            );
+            assert!(matches!(
+                first_rx.try_recv(),
+                Ok(DataChannelEvent::OnClosing)
+            ));
+            driver.poll_reads().await.unwrap();
+            assert!(matches!(first_rx.try_recv(), Ok(DataChannelEvent::OnClose)));
+            assert!(matches!(
+                second_rx.try_recv(),
+                Ok(DataChannelEvent::OnClosing)
+            ));
+            driver.poll_reads().await.unwrap();
+            assert!(matches!(
+                second_rx.try_recv(),
+                Ok(DataChannelEvent::OnClose)
+            ));
+            assert!(first_rx.try_recv().is_err());
+            assert!(second_rx.try_recv().is_err());
+            assert!(driver.pending_data_channel_events.is_empty());
+            // Missing receivers retain a pending registration but must not
+            // trigger the registered-blockage retry at the late flush.
+            driver
+                .pending_data_channel_events
+                .insert(second, VecDeque::from([test_message(9)]));
+            driver
+                .inner
+                .data_channel_events_tx
+                .lock()
+                .await
+                .remove(&second);
+            for _ in 0..2 {
+                assert!(!driver.flush_pending_data_channel_events().await);
+                assert!(
+                    !driver
+                        .inner
+                        .data_channel_delivery_blocked
+                        .load(Ordering::Acquire)
+                );
+                assert!(driver.pending_data_channel_events.contains_key(&second));
+            }
+        }));
+    }
+
+    // Regression #1075: lifetime markers use the same production delivery route.
+    #[cfg(any(feature = "crypto-ring", feature = "crypto-aws-lc-rs"))]
+    #[test]
+    fn ordered_lifetime_markers_deliver_input_close_then_replacement_open() {
+        struct Handler {
+            old_events: crate::runtime::Mutex<crate::runtime::Receiver<DataChannelEvent>>,
+            announced: crate::runtime::Mutex<Vec<Arc<dyn crate::data_channel::DataChannel>>>,
+        }
+        #[async_trait::async_trait]
+        impl crate::peer_connection::PeerConnectionEventHandler for Handler {
+            async fn on_data_channel(&self, channel: Arc<dyn crate::data_channel::DataChannel>) {
+                let mut old = self.old_events.lock().await;
+                assert!(
+                    matches!(old.try_recv(), Ok(DataChannelEvent::OnMessage(message))
+                    if message.data == b"before-reset"[..])
+                );
+                assert!(matches!(old.try_recv(), Ok(DataChannelEvent::OnClose)));
+                assert!(old.try_recv().is_err());
+                self.announced.lock().await.push(channel);
+            }
+        }
+        let runtime = crate::runtime::default_runtime().unwrap();
+        runtime.block_on(Box::pin(async {
+            let (mut inner, _events) = crate::peer_connection::new_test_peer_connection().await;
+            let (old_tx, old_rx) = channel(4);
+            let handler = Arc::new(Handler {
+                old_events: crate::runtime::Mutex::new(old_rx),
+                announced: crate::runtime::Mutex::new(Vec::new()),
+            });
+            Arc::get_mut(&mut inner).unwrap().handler = handler.clone();
+            let (old_id, new_id) = {
+                let mut core = inner.core.lock().await;
+                (
+                    core.create_data_channel("old", None).unwrap().id(),
+                    core.create_data_channel("new", None).unwrap().id(),
+                )
+            };
+            inner
+                .data_channel_events_tx
+                .lock()
+                .await
+                .insert(old_id, old_tx);
+            let mut driver = PeerConnectionDriver::<SocketAddr>::new(
+                inner.clone(),
+                Vec::new(),
+                Vec::new(),
+                MulticastDnsMode::Disabled,
+                Vec::new(),
+                RTCIceTransportPolicy::All,
+                rtc::crypto::default_provider().unwrap(),
+                false,
+                None,
+            );
+            driver.announced_data_channels.insert(old_id);
+            for message in [
+                RTCMessage::DataChannelMessage(
+                    old_id,
+                    RTCDataChannelMessage {
+                        is_string: true,
+                        data: bytes::BytesMut::from("before-reset"),
+                    },
+                ),
+                RTCMessage::DataChannelClosed(old_id),
+                RTCMessage::DataChannelOpened(new_id),
+                RTCMessage::DataChannelMessage(
+                    new_id,
+                    RTCDataChannelMessage {
+                        is_string: true,
+                        data: bytes::BytesMut::from("after-reset"),
+                    },
+                ),
+            ] {
+                driver
+                    .handle_rtc_message(TaggedRTCMessage {
+                        now: inner.runtime.now(),
+                        message,
+                    })
+                    .await;
+            }
+            let channels = handler.announced.lock().await;
+            assert_eq!(channels.len(), 1);
+            let channel = &channels[0];
+            assert_eq!(channel.id(), new_id);
+            assert!(matches!(
+                channel.poll().await,
+                Some(DataChannelEvent::OnOpen)
+            ));
+            assert!(
+                matches!(channel.poll().await, Some(DataChannelEvent::OnMessage(message))
+                if message.data == b"after-reset"[..])
+            );
+            assert!(driver.pending_data_channel_events.is_empty());
+        }));
+    }
 
     #[test]
     fn insert_data_channel_event_sender_replaces_closed_sender() {

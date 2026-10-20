@@ -1903,7 +1903,8 @@ impl RTCPeerConnection {
     ///
     /// A channel created here is not immediately usable: unless it was negotiated
     /// out-of-band, its SCTP stream is established by the in-band DCEP handshake, and sending
-    /// before then fails. Wait for [`RTCDataChannelEvent::OnOpen`].
+    /// before then fails. Wait for [`RTCMessage::DataChannelOpened`](crate::peer_connection::message::RTCMessage::DataChannelOpened) from
+    /// [`Self::poll_data_read`] before sending.
     ///
     /// # Parameters
     ///
@@ -1923,7 +1924,6 @@ impl RTCPeerConnection {
     ///
     /// [`RTCDataChannelId`]: crate::data_channel::RTCDataChannelId
     /// [`RTCDataChannel::id`]: crate::data_channel::RTCDataChannel::id
-    /// [`RTCDataChannelEvent::OnOpen`]: crate::peer_connection::event::RTCDataChannelEvent::OnOpen
     pub fn create_data_channel(
         &mut self,
         label: &str,

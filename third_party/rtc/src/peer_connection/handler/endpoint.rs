@@ -262,11 +262,13 @@ impl<'a> EndpointHandler<'a> {
         data_channel_id: RTCDataChannelId,
     ) -> Result<()> {
         debug!("data channel is open for {:?}", transport_context);
-        self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+        self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
             now,
-            event: RTCEventInternal::RTCPeerConnectionEvent(RTCPeerConnectionEvent::OnDataChannel(
-                RTCDataChannelEvent::OnOpen(data_channel_id),
-            )),
+            transport: transport_context,
+            message: RTCMessageInternal::Dtls(DTLSMessage::DataChannel(ApplicationMessage {
+                data_channel_id,
+                data_channel_event: DataChannelEvent::Open,
+            })),
         });
 
         Ok(())
@@ -279,11 +281,15 @@ impl<'a> EndpointHandler<'a> {
         data_channel_id: RTCDataChannelId,
     ) -> Result<()> {
         debug!("data channel is close for {:?}", transport_context);
-        self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+        // A reset follows input from the same stream. Keep both on the read
+        // queue so consumers that poll lifecycle events first cannot invert them.
+        self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
             now,
-            event: RTCEventInternal::RTCPeerConnectionEvent(RTCPeerConnectionEvent::OnDataChannel(
-                RTCDataChannelEvent::OnClose(data_channel_id),
-            )),
+            transport: transport_context,
+            message: RTCMessageInternal::Dtls(DTLSMessage::DataChannel(ApplicationMessage {
+                data_channel_id,
+                data_channel_event: DataChannelEvent::Close,
+            })),
         });
 
         Ok(())

@@ -15,6 +15,7 @@ The reference engine accepts only `reliable` and `unreliable` data channels.
 The engine closes channels with other delivery settings before admission.
 **Migration:** Custom peers must use these settings for the required labels.
 The engine cancels their polling tasks when it removes a peer or stops.
+Remote channel resets follow earlier queued input before reporting closure.
 A remote close or a stopped channel event stream triggers link cleanup and
 relay fallback. A missing channel, failed send, or stalled exchange send uses
 the same cleanup and keeps the signaling session live. Each local exchange
@@ -334,8 +335,10 @@ Timely receipts remain valid through decoding and queued processing.
 Late receipts keep the criterion unpaid. The client still validates and reports
 late frames. Existing successful holds and active linger windows still apply.
 
-Data-channel receipts keep their engine publication time and logical peer
-ownership through physical loss, negotiation timeout, and ordinary retry.
+Data-channel receipts use the time when the channel poll completes, before
+receive admission and text decoding. Admission waits cannot make timely input late.
+Receipts keep this time and logical peer ownership through physical loss,
+negotiation timeout, and ordinary retry.
 A newer authoritative plan, departure, or fresh incarnation invalidates queued
 old-link receipts. The original receipt cutoff still applies.
 

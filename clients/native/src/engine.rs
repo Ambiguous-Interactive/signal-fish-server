@@ -107,6 +107,8 @@ impl MessageQueuePermit {
 }
 
 struct ChannelReceiveAdmission {
+    #[cfg(test)]
+    message_observed: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
     budget: Arc<MessageQueueBudget>,
     channels: Arc<Mutex<RequiredChannelAdmission>>,
     closed_labels: AtomicU8,
@@ -235,7 +237,7 @@ pub enum EngineEvent {
     },
     /// A text message arrived on an open data channel. Keep `queue_permit`
     /// until its text is consumed or discarded, including asynchronous output.
-    /// `received_at` records the monotonic engine publication time.
+    /// `received_at` records the monotonic channel-poll completion time.
     ChannelMessage {
         peer: PlayerId,
         generation: u64,
@@ -599,6 +601,8 @@ impl Engine {
         }
         let channel_admission = Arc::new(Mutex::new(RequiredChannelAdmission::default()));
         let receive_admission = Arc::new(ChannelReceiveAdmission {
+            #[cfg(test)]
+            message_observed: std::sync::Mutex::new(None),
             budget: self.message_budget.clone(),
             channels: channel_admission.clone(),
             closed_labels: AtomicU8::new(0),
@@ -1551,6 +1555,16 @@ fn spawn_channel_event_loop(
     let events = events.clone();
     runtime.spawn(Box::pin(async move {
         while let Some(event) = channel.poll().await {
+            // Admission can suspend; publication time must not replace arrival.
+            let received_at = tokio::time::Instant::now();
+            #[cfg(test)]
+            if matches!(event, DataChannelEvent::OnMessage(_)) {
+                if let Ok(observed) = admission.message_observed.lock() {
+                    if let Some(observed) = observed.as_ref() {
+                        observed.notify_one();
+                    }
+                }
+            }
             let mut rejected = admission.rejected.lock().await;
             if *rejected {
                 return;
@@ -1594,7 +1608,7 @@ fn spawn_channel_event_loop(
                             label: label.clone(),
                             text,
                             queue_permit,
-                            received_at: tokio::time::Instant::now(),
+                            received_at,
                         })
                         .is_err()
                     {

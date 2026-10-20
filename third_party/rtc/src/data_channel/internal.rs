@@ -223,6 +223,77 @@ mod tests {
     use datachannel::message::message_channel_open::{ChannelType, DataChannelOpen};
     use shared::marshal::Marshal;
 
+    // Regression #1075: remote reset cannot overtake input accepted on the same stream.
+    #[test]
+    fn remote_stream_reset_preserves_queued_input_order() -> Result<()> {
+        use crate::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+        use crate::peer_connection::message::{
+            RTCMessage,
+            internal::{
+                DTLSMessage, RTCMessageInternal, SctpStreamEvent, TaggedRTCMessageInternal,
+            },
+        };
+        for ordered in [true, false] {
+            let now = Instant::now();
+            let mut pc = RTCPeerConnectionBuilder::new().build(now)?;
+            let mut dc = RTCDataChannelInternal::new(DataChannelParameters {
+                ordered,
+                max_retransmits: (!ordered).then_some(0),
+                negotiated: Some(0),
+                ..Default::default()
+            });
+            dc.dial(0)?;
+            dc.ready_state = RTCDataChannelState::Open;
+            let id = pc.data_channels.insert(dc);
+            for message in [
+                RTCMessageInternal::Dtls(DTLSMessage::Sctp(
+                    datachannel::data_channel::DataChannelMessage {
+                        association_handle: 0,
+                        stream_id: 0,
+                        ppi: PayloadProtocolIdentifier::String,
+                        payload: bytes::BytesMut::from("last-gameplay-receipt"),
+                        negotiated: true,
+                    },
+                )),
+                RTCMessageInternal::Dtls(DTLSMessage::SctpStreamEvent(SctpStreamEvent::Closed(
+                    0, 0,
+                ))),
+            ] {
+                pc.get_datachannel_handler()
+                    .handle_read(TaggedRTCMessageInternal {
+                        now,
+                        transport: Default::default(),
+                        message,
+                    })?;
+            }
+            pc.handle_read(shared::TaggedBytesMut {
+                now,
+                transport: Default::default(),
+                message: Default::default(),
+            })?;
+            // Match the wrapper: lifecycle output is polled before input.
+            while let Some(event) = pc.poll_event() {
+                assert!(
+                    !matches!(event, RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnClose(event_id)) if event_id == id),
+                    "remote reset overtook earlier input: ordered={ordered}"
+                );
+            }
+            let first = pc
+                .poll_data_read()
+                .expect("earlier input remains available");
+            assert!(
+                matches!(first.message, RTCMessage::DataChannelMessage(event_id, ref message)
+                if event_id == id && message.data == b"last-gameplay-receipt"[..])
+            );
+            assert!(
+                matches!(pc.poll_data_read().expect("remote reset follows input").message,
+                RTCMessage::DataChannelClosed(event_id) if event_id == id)
+            );
+            assert!(pc.poll_data_read().is_none());
+        }
+        Ok(())
+    }
+
     #[test]
     fn stream_reset_local_close_stays_closing_and_repeated_close_queues_one_reset() -> Result<()> {
         let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;

@@ -60,3 +60,13 @@ closure once. Later transport teardown adds no duplicate notification or count.
 The retained controls check input order, one notification, and a held reciprocal
 reset in the native engine. See [#1071](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1071).
 Replacement qualification in #912 must retain these controls.
+
+Channel opening and remote stream reset queue `RTCMessage::DataChannelOpened`
+and `DataChannelClosed` beside channel input. The endpoint no longer moves these
+markers to the separate lifecycle queue. Event-first consumers cannot observe
+remote closure before earlier input or a reused stream's new open before its old
+close. The delta changes `src/peer_connection/handler/endpoint.rs`, `mod.rs`,
+`sctp.rs`, and `src/peer_connection/message/mod.rs`. The core controls cover both
+required channel modes and input/close/open/input on a reused stream.
+See [#1075](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1075).
+Published replacement qualification in #912 must retain these controls.
