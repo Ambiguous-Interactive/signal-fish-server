@@ -584,3 +584,139 @@ async fn local_channel_closing_retires_pair_before_remote_reset() {
         }
     }
 }
+
+// Regression #1076: retain immediate send/close while the receiver cannot progress.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn immediate_send_then_close_with_remote_reactor_paused() {
+    for initiator_sends in [true, false] {
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            for acknowledged in [false, true] {
+                let (sender_tx, sender_events) = mpsc::unbounded_channel();
+                let (receiver_tx, receiver_events) = mpsc::unbounded_channel();
+                let settings = EngineSettings {
+                    disable_mdns: true,
+                    ..EngineSettings::default()
+                };
+                let remote_runtime = PausableReactor::new();
+                let mut sender = Engine::new(settings, sender_tx).unwrap();
+                let mut receiver = Engine::new(settings, receiver_tx).unwrap();
+                if initiator_sends {
+                    receiver.runtime = remote_runtime.clone();
+                } else {
+                    sender.runtime = remote_runtime.clone();
+                }
+                let mut pair = LivePair {
+                    sender,
+                    receiver,
+                    sender_events,
+                    receiver_events,
+                    sender_id: PlayerId::from_u128(0x826),
+                    receiver_id: PlayerId::from_u128(0x827),
+                };
+                pair.negotiate().await;
+                if !initiator_sends {
+                    std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                    std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+                    std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+                }
+                let channel = pair.sender.channel(pair.receiver_id, label).unwrap();
+                if !acknowledged {
+                    remote_runtime.pause().await;
+                }
+                channel.send_text("final-before-reset").await.unwrap();
+                if acknowledged {
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while channel.outstanding_bytes().await.unwrap() != 0 {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("control reaches transport acknowledgment before closing");
+                    remote_runtime.pause().await;
+                }
+                assert_eq!(
+                    channel.outstanding_bytes().await.unwrap(),
+                    if acknowledged { 0 } else { 18 },
+                    "paused receiver cannot acknowledge pending payload"
+                );
+                channel.close().await.unwrap();
+                channel.close().await.unwrap();
+                assert!(channel.send_text("after-close").await.is_err());
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if let EngineEvent::ChannelClosed { label: closed, .. } =
+                            pair.sender_events.recv().await.unwrap()
+                        {
+                            assert_eq!(closed, label);
+                            break;
+                        }
+                    }
+                })
+                .await
+                .expect("local closing notification does not wait for the receiver");
+                remote_runtime.resume();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    let mut received = 0;
+                    loop {
+                        match pair.receiver_events.recv().await.unwrap() {
+                            EngineEvent::ChannelMessage { text, label: received_label, .. } => {
+                                assert_eq!(received_label, label);
+                                assert_eq!(text, "final-before-reset");
+                                received += 1;
+                            }
+                            EngineEvent::ChannelClosed { label: closed, .. } if closed == label => {
+                                assert_eq!(received, 1, "initiator={initiator_sends}, label={label}, acked={acknowledged}: accepted input precedes close");
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }).await.expect("remote reset follows accepted input");
+                let reports = pair.receiver.peers[&pair.sender_id]
+                    .pc
+                    .get_stats(std::time::Instant::now(), StatsSelector::None)
+                    .await;
+                let summary = reports
+                    .iter()
+                    .find_map(|entry| match entry {
+                        RTCStatsReportEntry::DataChannel(channel) if channel.label == label => {
+                            Some(channel)
+                        }
+                        _ => None,
+                    })
+                    .expect("closed summary remains available");
+                assert_eq!(summary.messages_received, 1);
+                assert_eq!(summary.bytes_received, 18);
+                assert_eq!(
+                    summary.state,
+                    rtc::data_channel::RTCDataChannelState::Closed
+                );
+                pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+                pair.receiver.remove_peer(pair.sender_id).await.unwrap();
+                pair.negotiate().await;
+                for fresh_label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+                    pair.sender
+                        .channel(pair.receiver_id, fresh_label)
+                        .unwrap()
+                        .send_text("fresh-after-close")
+                        .await
+                        .unwrap();
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        loop {
+                            if let EngineEvent::ChannelMessage { label, text, .. } =
+                                pair.receiver_events.recv().await.unwrap()
+                            {
+                                assert_eq!(label, fresh_label);
+                                assert_eq!(text, "fresh-after-close");
+                                break;
+                            }
+                        }
+                    })
+                    .await
+                    .expect("fresh link recovers both required channel modes");
+                }
+                pair.cleanup().await;
+            }
+        }
+    }
+}

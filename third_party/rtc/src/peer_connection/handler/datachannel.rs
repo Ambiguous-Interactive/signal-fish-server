@@ -485,6 +485,13 @@ impl<'a>
                         message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(data_channel_message)),
                     });
                 }
+            } else if matches!(message.data_channel_event, DataChannelEvent::Close) {
+                /*
+                    Preceding accepted writes must enter SCTP output before reset.
+                */
+                if let Some(dc) = self.data_channels.get_mut(&message.data_channel_id) {
+                    dc.close()?;
+                }
             } else {
                 warn!(
                     "drop unsupported DATACHANNEL message to {}",

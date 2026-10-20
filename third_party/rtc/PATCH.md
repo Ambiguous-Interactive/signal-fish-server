@@ -70,3 +70,15 @@ close. The delta changes `src/peer_connection/handler/endpoint.rs`, `mod.rs`,
 required channel modes and input/close/open/input on a reused stream.
 See [#1075](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1075).
 Published replacement qualification in #912 must retain these controls.
+
+Local close puts its reset command in the endpoint write queue after accepted
+sends. The channel enters `Closing` at once and rejects new sends. The handler
+passes prior payload to SCTP before requesting reset. This prevents accepted
+outbound input from reaching a stream after that stream stops accepting writes.
+The delta changes `src/data_channel/mod.rs` and
+`src/peer_connection/handler/datachannel.rs`. Controls retain the original
+paused-receiver workload, both roles and required modes, pending and acknowledged
+sends, closed statistics, reset/reuse, and fresh links. Boundary controls inspect
+DATA before RECONFIG and the reset's sender TSN. See
+[#1076](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1076).
+Published replacement qualification in #912 must retain these controls.

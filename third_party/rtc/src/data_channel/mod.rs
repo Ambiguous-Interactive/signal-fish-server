@@ -306,6 +306,12 @@ impl RTCDataChannel<'_> {
             .get(&self.id)
             .ok_or(Error::ErrDataChannelClosed)?;
 
+        if matches!(
+            dc.ready_state,
+            RTCDataChannelState::Closing | RTCDataChannelState::Closed
+        ) {
+            return Err(Error::ErrDataChannelClosed);
+        }
         if dc.data_channel.is_none() {
             // No stream yet: either it is still being negotiated, or it is already gone.
             return Err(if dc.ready_state == RTCDataChannelState::Connecting {
@@ -421,7 +427,15 @@ impl RTCDataChannel<'_> {
                 return Ok(());
             }
             dc.ready_state = RTCDataChannelState::Closing;
-            dc.close()?;
+            /*
+                Accepted writes and their reset must share the endpoint FIFO.
+                Public state changes before the driver processes either queue.
+            */
+            let defer_reset = dc.data_channel.is_some();
+            if !defer_reset {
+                dc.close()?;
+            }
+            dc.handshake_deadline = None;
             let closed_immediately = dc.ready_state == RTCDataChannelState::Closed;
             if closed_immediately {
                 dc.close_emitted = true;
@@ -429,6 +443,25 @@ impl RTCDataChannel<'_> {
                 stats.peer_connection.on_data_channel_closed();
                 stats.get_or_create_data_channel(self.id, &dc.label, &dc.protocol);
                 stats.mark_data_channel_closed(self.id);
+            }
+            if defer_reset {
+                use crate::peer_connection::message::internal::{
+                    ApplicationMessage, DTLSMessage, DataChannelEvent, RTCMessageInternal,
+                    TaggedRTCMessageInternal,
+                };
+                let now = self.peer_connection.pipeline_context.now;
+                self.peer_connection.get_endpoint_handler().handle_write(
+                    TaggedRTCMessageInternal {
+                        now,
+                        transport: Default::default(),
+                        message: RTCMessageInternal::Dtls(DTLSMessage::DataChannel(
+                            ApplicationMessage {
+                                data_channel_id: self.id,
+                                data_channel_event: DataChannelEvent::Close,
+                            },
+                        )),
+                    },
+                )?;
             }
             self.peer_connection
                 .pipeline_context
