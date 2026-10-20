@@ -257,12 +257,20 @@ impl<'a> SctpHandler<'a> {
                         SctpStreamEvent::BufferedAmountHigh(ch.0, id),
                     ));
                 }
-                Event::Stream(StreamEvent::BufferedAmountReleased { id, n_bytes }) => {
-                    // Forward the exact released byte count so the data
-                    // channel handler can decrement its synchronous
-                    // send back-pressure counter (see DataChannelHandler).
+                Event::Stream(StreamEvent::BufferedAmountReleased {
+                    id,
+                    data_channel_bytes,
+                    ..
+                }) => {
+                    /*
+                        RTC charges application payload bytes at send admission.
+                        DCEP and empty-message fillers release SCTP wire storage
+                        without releasing pending gameplay (see DataChannelHandler).
+                    */
                     messages.push(SctpMessage::StreamEvent(SctpStreamEvent::BufferReleased(
-                        ch.0, id, n_bytes,
+                        ch.0,
+                        id,
+                        data_channel_bytes,
                     )));
                 }
                 _ => {}
@@ -1943,6 +1951,142 @@ mod tests {
             handler.ctx.pending_readable.is_empty(),
             "a stopped reader must not block reset event drain or retry forever"
         );
+    }
+
+    // Regression #1095: transport acknowledgments must credit only gameplay bytes.
+    #[test]
+    fn transport_control_ack_preserves_pending_gameplay_accounting() {
+        use crate::data_channel::{
+            internal::RTCDataChannelInternal, parameters::DataChannelParameters,
+        };
+        use crate::peer_connection::RTCPeerConnectionBuilder;
+        let open = Message::DataChannelOpen(DataChannelOpen {
+            channel_type: ChannelType::Reliable,
+            priority: CHANNEL_PRIORITY_NORMAL,
+            reliability_parameter: 0,
+            label: b"gameplay".to_vec(),
+            protocol: Vec::new(),
+        })
+        .marshal()
+        .unwrap();
+        for (ppi, first) in [
+            (PayloadProtocolIdentifier::Dcep, open),
+            (PayloadProtocolIdentifier::Dcep, BytesMut::from(&[2][..])), // DCEP ACK
+            (
+                PayloadProtocolIdentifier::StringEmpty,
+                BytesMut::from(&[0][..]),
+            ),
+            (
+                PayloadProtocolIdentifier::BinaryEmpty,
+                BytesMut::from(&[0][..]),
+            ),
+            (PayloadProtocolIdentifier::Binary, BytesMut::from(&[7][..])),
+        ] {
+            let now = Instant::now();
+            let mut pair = establish();
+            let ch = pair.client_ch;
+            let mut pc = RTCPeerConnectionBuilder::new().build(now).unwrap();
+            pc.pipeline_context.sctp_handler_context =
+                client_ctx(now, pair.client_ep, ch, pair.client_conn);
+            let mut dc = RTCDataChannelInternal::new(DataChannelParameters {
+                negotiated: Some(0),
+                ordered: true,
+                ..Default::default()
+            });
+            dc.dial(ch.0).unwrap();
+            // The fixture installs an already-created SCTP stream below.
+            while dc.data_channel.as_mut().unwrap().poll_write().is_some() {}
+            let id = pc.data_channels.insert(dc);
+            // DCEP and empty-message fillers do not charge RTC's gameplay
+            // counter. Earlier binary gameplay provides a positive control.
+            let first = first.freeze();
+            pc.pipeline_context
+                .sctp_handler_context
+                .sctp_transport
+                .sctp_associations
+                .get_mut(&ch)
+                .unwrap()
+                .open_stream(0, ppi)
+                .unwrap()
+                .write_sctp(now, &first, ppi)
+                .unwrap();
+            if ppi == PayloadProtocolIdentifier::Binary {
+                pc.data_channels.get_mut(&id).unwrap().outstanding_bytes = first.len();
+            }
+            let outbound = drain_transmits(
+                pc.pipeline_context
+                    .sctp_handler_context
+                    .sctp_transport
+                    .sctp_associations
+                    .get_mut(&ch)
+                    .unwrap(),
+                now,
+            );
+            assert!(!outbound.is_empty());
+            for raw in outbound {
+                if let Some((_, DatagramEvent::AssociationEvent(event))) =
+                    pair.server_ep.handle(now, client_addr(), None, raw)
+                {
+                    pair.server_conn.handle_event(event);
+                }
+            }
+            // Queue gameplay before the earlier transport SACK reaches RTC.
+            pc.data_channel(id)
+                .unwrap()
+                .send_text(now, "still-pending-gameplay")
+                .unwrap();
+            let later = now + Duration::from_millis(500);
+            pair.server_conn.handle_timeout(later);
+            let sacks = drain_transmits(&mut pair.server_conn, later);
+            assert!(
+                sacks.iter().any(|raw| raw[12] == CT_SACK),
+                "{ppi:?}: actual transport acknowledgment"
+            );
+            for raw in sacks {
+                pc.get_sctp_handler()
+                    .handle_read(raw_read(later, raw))
+                    .unwrap();
+            }
+            while let Some(event) = pc.get_sctp_handler().poll_read() {
+                pc.get_datachannel_handler().handle_read(event).unwrap();
+            }
+            assert_eq!(
+                pc.data_channel(id).unwrap().outstanding_bytes(),
+                "still-pending-gameplay".len(),
+                "{ppi:?}: only acknowledged gameplay releases its charge"
+            );
+            while let Some(message) = pc.get_endpoint_handler().poll_write() {
+                pc.get_datachannel_handler().handle_write(message).unwrap();
+            }
+            while let Some(message) = pc.get_datachannel_handler().poll_write() {
+                pc.get_sctp_handler().handle_write(message).unwrap();
+            }
+            while let Some(message) = pc.get_sctp_handler().poll_write() {
+                if let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = message.message {
+                    if let Some((_, DatagramEvent::AssociationEvent(event))) = pair
+                        .server_ep
+                        .handle(later, client_addr(), None, raw.freeze())
+                    {
+                        pair.server_conn.handle_event(event);
+                    }
+                }
+            }
+            let acknowledged = later + Duration::from_millis(500);
+            pair.server_conn.handle_timeout(acknowledged);
+            for raw in drain_transmits(&mut pair.server_conn, acknowledged) {
+                pc.get_sctp_handler()
+                    .handle_read(raw_read(acknowledged, raw))
+                    .unwrap();
+            }
+            while let Some(event) = pc.get_sctp_handler().poll_read() {
+                pc.get_datachannel_handler().handle_read(event).unwrap();
+            }
+            assert_eq!(
+                pc.data_channel(id).unwrap().outstanding_bytes(),
+                0,
+                "{ppi:?}: gameplay acknowledgment releases the complete charge"
+            );
+        }
     }
 
     // Regression #1076: inspect the complete accepted-write -> SCTP wire boundary.

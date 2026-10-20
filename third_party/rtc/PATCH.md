@@ -150,3 +150,9 @@ statistics. It does not establish delivery across an independent failed peer
 connection. The delta changes `src/peer_connection/handler/datachannel.rs` and
 `mod.rs`. See [#1093](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1093).
 Published replacement qualification in #912 must retain these controls.
+
+The #1095 repair consumes PPID-aware application-byte release credit from SCTP.
+DCEP OPEN/ACK bytes and empty-message filler bytes do not reduce pending gameplay
+bytes. Real paired SCTP acknowledgments preserve queued gameplay until its own
+acknowledgment releases it. SCTP fragment, gap-ACK, duplicate, and abandonment
+controls retain separate application and transport byte totals.

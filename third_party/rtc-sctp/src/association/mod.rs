@@ -67,6 +67,28 @@ pub(crate) mod timer;
 #[cfg(test)]
 mod association_test;
 
+/*
+    SCTP buffers wire payloads; RTC charges only nonempty application payloads.
+    Keep both deltas at the chunk boundary, where PPID and generation are known.
+*/
+#[derive(Debug, Default)]
+struct ReleasedBytes {
+    wire: i64,
+    data_channel: usize,
+}
+
+impl ReleasedBytes {
+    fn add(&mut self, ppi: PayloadProtocolIdentifier, bytes: i64) {
+        self.wire += bytes;
+        if matches!(
+            ppi,
+            PayloadProtocolIdentifier::String | PayloadProtocolIdentifier::Binary
+        ) {
+            self.data_channel += bytes as usize;
+        }
+    }
+}
+
 /// Reasons why an association might be lost
 #[derive(Debug, Error, Clone, PartialEq)]
 #[non_exhaustive]
@@ -2103,8 +2125,8 @@ impl Association {
         &mut self,
         d: &ChunkSelectiveAck,
         now: Instant,
-    ) -> Result<(FxHashMap<u16, i64>, i64, u32)> {
-        let mut bytes_acked_per_stream = FxHashMap::default();
+    ) -> Result<(FxHashMap<u16, ReleasedBytes>, i64, u32)> {
+        let mut bytes_acked_per_stream: FxHashMap<u16, ReleasedBytes> = FxHashMap::default();
         let mut total_bytes_acked = 0;
         let mut newly_acked_data = false;
         // Abandoned DATA can precede the earliest outstanding TSN. RFC 9260
@@ -2130,9 +2152,10 @@ impl Association {
                     // A late SACK for a retired stream must not release bytes
                     // belonging to a new channel that reused its SID.
                     if self.is_current_stream_data(&c) {
-                        *bytes_acked_per_stream
+                        bytes_acked_per_stream
                             .entry(c.stream_identifier)
-                            .or_default() += n_bytes_acked;
+                            .or_default()
+                            .add(c.payload_type, n_bytes_acked);
                     }
 
                     // RFC 4960 sec 6.3.1.  RTO Calculation
@@ -2192,9 +2215,10 @@ impl Association {
                         newly_acked_data |= c.nsent > 0;
                         total_bytes_acked += n_bytes_acked;
                         if self.is_current_stream_data(c) {
-                            *bytes_acked_per_stream
+                            bytes_acked_per_stream
                                 .entry(c.stream_identifier)
-                                .or_default() += n_bytes_acked;
+                                .or_default()
+                                .add(c.payload_type, n_bytes_acked);
                         }
 
                         trace!("[{}] tsn={} has been sacked", self.side, c.tsn);
@@ -3029,8 +3053,9 @@ impl Association {
         Ok(())
     }
 
-    fn release_stream_buffers(&mut self, bytes_acked_per_stream: &FxHashMap<u16, i64>) {
-        for (si, n_bytes_acked) in bytes_acked_per_stream {
+    fn release_stream_buffers(&mut self, bytes_acked_per_stream: &FxHashMap<u16, ReleasedBytes>) {
+        for (si, released) in bytes_acked_per_stream {
+            let n_bytes_acked = &released.wire;
             if *n_bytes_acked > 0 {
                 // Report the exact bytes released for this stream (acknowledged OR
                 // abandoned — both funnel through bytes_acked_per_stream) so upper
@@ -3041,6 +3066,7 @@ impl Association {
                     .push_back(Event::Stream(StreamEvent::BufferedAmountReleased {
                         id: *si,
                         n_bytes: *n_bytes_acked as usize,
+                        data_channel_bytes: released.data_channel,
                     }));
             }
             if let Some(s) = self.streams.get_mut(si)
@@ -3179,7 +3205,7 @@ impl Association {
             || self.inflight_queue.message_tsns(message.id),
             |tsn| vec![tsn],
         );
-        let mut released_per_stream = FxHashMap::default();
+        let mut released_per_stream: FxHashMap<u16, ReleasedBytes> = FxHashMap::default();
         let mut changed = false;
         let tail = self.pending_queue.drain_message(message.id)?;
         let assign_tsns = !inflight.is_empty()
@@ -3193,8 +3219,10 @@ impl Association {
                 self.inflight_queue.push_no_check(c);
             } else {
                 if self.is_current_stream_data(&c) {
-                    *released_per_stream.entry(c.stream_identifier).or_default() +=
-                        c.user_data.len() as i64;
+                    released_per_stream
+                        .entry(c.stream_identifier)
+                        .or_default()
+                        .add(c.payload_type, c.user_data.len() as i64);
                 }
                 changed = true;
             }
@@ -3203,7 +3231,8 @@ impl Association {
             if let Some(c) = self.inflight_queue.get_mut(tsn) {
                 changed |= !c.abandoned();
                 c.mark_abandoned();
-                let (si, generation) = (c.stream_identifier, c.stream_generation);
+                let (si, generation, ppi) =
+                    (c.stream_identifier, c.stream_generation, c.payload_type);
                 let released = self.inflight_queue.release_payload(tsn) as i64;
                 if released > 0
                     && self
@@ -3211,7 +3240,10 @@ impl Association {
                         .get(&si)
                         .is_some_and(|s| s.generation == generation)
                 {
-                    *released_per_stream.entry(si).or_default() += released;
+                    released_per_stream
+                        .entry(si)
+                        .or_default()
+                        .add(ppi, released);
                 }
             }
         }

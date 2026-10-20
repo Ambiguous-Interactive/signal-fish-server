@@ -3951,3 +3951,52 @@ Executable SHA-256:
 
 - baseline: `c94afacd796bdc081ed409037c71c1f242d4dae85973b1b153ac7f7c1aac21d0`.
 - candidate: `71d46b551425e9d261849ff71c7404313e8a54ba40c5c85616fa8ab304801769`.
+
+### Borrow replay identities before pooling
+
+Session 494 continues [#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775)
+and [#636](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/636)
+from `26b80054`. Replay still allocated temporary sender and recipient strings
+for each receipt before finding their existing pooled identities. The decoder
+now borrows plain names from its current JSONL line. The pool copies each
+new identity once. Escaped JSON names still need a temporary decoded string.
+Stored events own shared identities before the line buffer is reused.
+
+The borrowing control fails when decoding owns every name. Its restored form
+covers plain text, Unicode, explicit JSON Unicode escapes, quotes, backslashes,
+and newlines. Existing controls preserve all nine event kinds, duplicate fields
+with last-value behavior, malformed-input diagnostics, exact arrival order,
+unknown identities, and independent run lifetimes. All 21 selected artifact and
+replay controls pass, including live reliable and lossy socket histories. The
+final extended decoder and storage controls pass all eight cases. Independent
+review has no open finding.
+
+The registered cohort uses 16 senders and three alternating pairs at each
+size. All 18 measured processes pass. All nine full-summary pairs match.
+All three independently produced fixture pairs have identical JSONL bytes.
+Executable and fixture hashes match after measurement. No other builds or
+tests run during measured replay; an unrelated native build is paused for the cohort.
+
+| Receipts | Baseline / candidate wall, s | Baseline / candidate CPU, s | Baseline / candidate peak RSS, KiB |
+| --- | ---: | ---: | ---: |
+| 24,000 | 0.343 / 0.331 | 0.334 / 0.328 | 14,488 / 14,728 |
+| 240,000 | 3.072 / 3.023 | 3.068 / 3.003 | 28,952 / 29,192 |
+| 1,200,000 | 15.809 / 15.508 | 15.733 / 15.435 | 93,144 / 93,448 |
+
+Values are medians of three fresh processes. The largest cell replaces
+2,480,000 temporary owned name fields with borrowed text. Its median wall
+and CPU time fall 1.9%, while peak RSS rises 304 KiB. One candidate process
+takes 16.761 seconds, slower than every baseline process in that cell; it
+remains in the cohort. These small timing differences on the shared ARM64
+WSL2 debug host do not establish a throughput gain. This change removes
+repeated plain-name allocations; it does not reduce retained event storage.
+Escaped names still allocate during decoding. Times include startup, reading,
+oracle evaluation, and output. No live capacity point, long-run memory bound,
+or historical stall cause is established. Both campaigns remain open.
+
+Registration, all attempts, raw summaries, release evidence, negative control,
+and fixture hashes remain under `/tmp/capacity-borrowed-replay/`.
+Executable SHA-256:
+
+- baseline: `71d46b551425e9d261849ff71c7404313e8a54ba40c5c85616fa8ab304801769`.
+- candidate: `242ac8deb75ce83e69458d821249b0f1ea47eebd486ab23fd2ec81dd5d1485cb`.

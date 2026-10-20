@@ -77,3 +77,10 @@ Remove the vendored package and path patches after a published release passes
 these controls and the RTC/native close-and-reopen controls.
 Track replacement with the existing dependency follow-up
 [#912](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/912).
+
+The #1095 repair adds `data_channel_bytes` to `BufferedAmountReleased`.
+The existing `n_bytes` and stream buffer thresholds retain physical payload
+accounting. The new delta counts String and Binary application payloads only.
+DCEP and empty-message filler bytes receive zero application credit.
+Cumulative ACK, gap ACK, and abandonment compute both deltas from each released
+chunk's PPID. Existing generation checks still exclude retired stream data.

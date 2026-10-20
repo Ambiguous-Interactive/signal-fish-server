@@ -62,15 +62,18 @@ pub enum StreamEvent {
         id: StreamId,
     },
     /// Outgoing buffered data was released (acknowledged OR abandoned), carrying
-    /// the exact number of user payload bytes freed for this stream. Unlike the
+    /// the exact number of SCTP payload bytes freed for this stream. Unlike the
     /// edge-triggered [`StreamEvent::BufferedAmountLow`], this fires on every
     /// release with the byte delta, so upper layers can keep their own
     /// send-buffer accounting (e.g. a synchronous back-pressure counter) exact.
     BufferedAmountReleased {
         /// Which stream released buffered bytes
         id: StreamId,
-        /// User payload bytes released
+        /// SCTP payload bytes released, including DCEP and empty-message fillers.
         n_bytes: usize,
+        /// Nonempty WebRTC application bytes released. DCEP and empty-message
+        /// filler bytes do not count toward the data channel send counter.
+        data_channel_bytes: usize,
     },
 }
 

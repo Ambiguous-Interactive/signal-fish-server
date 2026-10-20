@@ -314,3 +314,133 @@ fn reset_follows_expired_pending_tail_after_partial_ack() -> Result<()> {
     }
     Ok(())
 }
+
+// Regression #1095: transport and WebRTC application release credit differ.
+#[test]
+fn data_channel_credit_tracks_ppid_through_fragment_ack_and_abandonment() -> Result<()> {
+    for abandon in [false, true] {
+        let now = Instant::now();
+        let mut sender = timed_test_association();
+        let mut receiver = timed_test_association();
+        receiver.peer_last_tsn = sender.my_next_tsn.wrapping_sub(1);
+        sender.cwnd = u32::MAX;
+        let fragment_size = sender.max_payload_size as usize;
+        let text = Bytes::from(vec![b't'; fragment_size * 2 + 17]);
+        let binary = Bytes::from(vec![7; fragment_size * 2 + 19]);
+        let mut stream = sender.open_stream(1, PayloadProtocolIdentifier::Dcep)?;
+        stream.set_reliability_params(false, ReliabilityType::Timed, 100)?;
+        for (ppi, bytes) in [
+            (
+                PayloadProtocolIdentifier::Dcep,
+                Bytes::from_static(b"setup-control"),
+            ),
+            (
+                PayloadProtocolIdentifier::StringEmpty,
+                Bytes::from_static(&[0]),
+            ),
+            (
+                PayloadProtocolIdentifier::BinaryEmpty,
+                Bytes::from_static(&[0]),
+            ),
+            (PayloadProtocolIdentifier::String, text.clone()),
+            (PayloadProtocolIdentifier::Binary, binary.clone()),
+        ] {
+            stream.write_sctp(now, &bytes, ppi)?;
+        }
+        if abandon {
+            // Send the controls and only the first gameplay fragment. The
+            // retirement must release both its in-flight head and queued tail.
+            sender.cwnd = (fragment_size + 15) as u32;
+        }
+        let sent = transmitted_data(&sender.gather_outbound(now).0);
+        assert!(
+            sent.iter()
+                .any(|chunk| chunk.payload_type == PayloadProtocolIdentifier::String)
+        );
+        let later = now + Duration::from_millis(100);
+        let expected_gameplay = if abandon {
+            let candidates =
+                sender.unretransmittable_messages(later, ChunkPayloadData::is_outstanding)?;
+            assert!(!candidates.is_empty());
+            for message in candidates {
+                assert!(sender.abandon_message(message)?);
+                assert!(
+                    !sender.abandon_message(message)?,
+                    "duplicate retirement releases no bytes"
+                );
+            }
+            text.len() // binary remains entirely pending and was not selected
+        } else {
+            // Acknowledge gameplay before the older DCEP chunk. This produces
+            // a gap SACK and proves overhead cannot be subtracted as a FIFO.
+            for chunk in sent
+                .iter()
+                .filter(|chunk| chunk.payload_type != PayloadProtocolIdentifier::Dcep)
+            {
+                receiver.handle_data(chunk)?;
+            }
+            let sack = receiver.create_selective_ack_chunk();
+            assert!(!sack.gap_ack_blocks.is_empty());
+            sender.handle_sack(&sack, later)?;
+            sender.handle_sack(&sack, later)?; // duplicate ACK is not a release
+            text.len() + binary.len()
+        };
+        let mut wire_released = 0;
+        let mut gameplay_released = 0;
+        while let Some(event) = sender.poll() {
+            if let Event::Stream(StreamEvent::BufferedAmountReleased {
+                n_bytes,
+                data_channel_bytes,
+                ..
+            }) = event
+            {
+                wire_released += n_bytes;
+                gameplay_released += data_channel_bytes;
+            }
+        }
+        assert_eq!(
+            gameplay_released, expected_gameplay,
+            "abandon={abandon}: exact application credit"
+        );
+        if !abandon {
+            assert_eq!(
+                wire_released,
+                expected_gameplay + 2,
+                "empty fillers release transport storage only"
+            );
+            let control = sent
+                .iter()
+                .find(|chunk| chunk.payload_type == PayloadProtocolIdentifier::Dcep)
+                .unwrap();
+            receiver.handle_data(control)?;
+            sender.handle_sack(&receiver.create_selective_ack_chunk(), later)?;
+            let mut control_credit = 0;
+            while let Some(event) = sender.poll() {
+                if let Event::Stream(StreamEvent::BufferedAmountReleased {
+                    data_channel_bytes,
+                    ..
+                }) = event
+                {
+                    control_credit += data_channel_bytes;
+                }
+            }
+            assert_eq!(
+                control_credit, 0,
+                "late DCEP release cannot credit newer gameplay"
+            );
+            assert_eq!(sender.stream(1)?.buffered_amount()?, 0);
+        } else {
+            assert_eq!(
+                wire_released,
+                expected_gameplay + 2,
+                "selected gameplay and empty fillers release transport storage"
+            );
+            assert_eq!(
+                sender.stream(1)?.buffered_amount()?,
+                13 + binary.len(),
+                "DCEP and unsent binary remain charged to SCTP"
+            );
+        }
+    }
+    Ok(())
+}

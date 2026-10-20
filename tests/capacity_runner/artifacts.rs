@@ -554,9 +554,6 @@ pub fn read_intervals(output_dir: &Path) -> Result<Vec<IntervalSample>, String> 
 }
 
 fn read_delivery_event(line: &[u8], path: &Path) -> Result<DeliveryEvent<String>, String> {
-    if let Ok(event) = serde_json::from_slice(line) {
-        return Ok(event);
-    }
     /* Preserve historical last-key-wins decoding and error messages. */
     let value: Value = serde_json::from_slice(line)
         .map_err(|error| format!("parse a {} line: {error}", path.display()))?;
@@ -610,6 +607,36 @@ fn read_delivery_event(line: &[u8], path: &Path) -> Result<DeliveryEvent<String>
     }
 }
 
+/// Borrow ordinary JSON names from the current line. Escaped JSON names own
+/// their decoded value until the run-local pool shares it. The pool copies
+/// each distinct identity once and does not keep the line buffer alive.
+#[derive(serde::Deserialize)]
+struct ReplayName<'a>(#[serde(borrow)] std::borrow::Cow<'a, str>);
+
+impl AsRef<str> for ReplayName<'_> {
+    fn as_ref(&self) -> &str {
+        self.0.as_ref()
+    }
+}
+
+fn append_delivery_event(
+    records: &mut RunRecords,
+    names: &mut crate::records::ReceiptNames,
+    event: DeliveryEvent<impl AsRef<str>>,
+) {
+    match event {
+        DeliveryEvent::Sent(event) => records.sent.push(names.share_sent(event)),
+        DeliveryEvent::Receipt(event) => records.receipts.push(names.share(event)),
+        DeliveryEvent::Gap(event) => records.gaps.push(event),
+        DeliveryEvent::UnsupportedNotice(event) => records.unsupported_notices.push(event),
+        DeliveryEvent::Disconnect(event) => records.disconnects.push(event),
+        DeliveryEvent::Churn(event) => records.churn.push(event),
+        DeliveryEvent::JoinFailure { detail } => records.join_failures.push(detail),
+        DeliveryEvent::Fault(event) => records.faults.push(event),
+        DeliveryEvent::Registry { senders } => records.registry = senders,
+    }
+}
+
 /// Read the deliveries event log back from an output directory.
 pub fn read_records(output_dir: &Path) -> Result<RunRecords, String> {
     let path = output_dir.join(DELIVERIES_FILE);
@@ -618,16 +645,15 @@ pub fn read_records(output_dir: &Path) -> Result<RunRecords, String> {
     let mut records = RunRecords::default();
     let mut receipt_names = crate::records::ReceiptNames::default();
     visit_jsonl(BufReader::new(file), &path, |line| {
-        match read_delivery_event(line, &path)? {
-            DeliveryEvent::Sent(event) => records.sent.push(receipt_names.share_sent(event)),
-            DeliveryEvent::Receipt(event) => records.receipts.push(receipt_names.share(event)),
-            DeliveryEvent::Gap(event) => records.gaps.push(event),
-            DeliveryEvent::UnsupportedNotice(event) => records.unsupported_notices.push(event),
-            DeliveryEvent::Disconnect(event) => records.disconnects.push(event),
-            DeliveryEvent::Churn(event) => records.churn.push(event),
-            DeliveryEvent::JoinFailure { detail } => records.join_failures.push(detail),
-            DeliveryEvent::Fault(event) => records.faults.push(event),
-            DeliveryEvent::Registry { senders } => records.registry = senders,
+        if let Ok(event) = serde_json::from_slice::<DeliveryEvent<ReplayName<'_>>>(line) {
+            append_delivery_event(&mut records, &mut receipt_names, event);
+        } else {
+            // Keep historical last-key-wins decoding and precise error text.
+            append_delivery_event(
+                &mut records,
+                &mut receipt_names,
+                read_delivery_event(line, &path)?,
+            );
         }
         Ok(())
     })?;
@@ -705,6 +731,59 @@ mod tests {
         );
         for (file, result) in results {
             assert!(result.expect_err("write failure").contains(file));
+        }
+    }
+
+    // #775/#636: repeated names must borrow the replay line before pooling,
+    // while escaped identities must still decode to their exact original text.
+    #[test]
+    fn replay_names_borrow_plain_text_and_preserve_escaped_identities() {
+        let context = crate::unit_context();
+        let records = crate::complete_records(&context.plans);
+        for (name, borrows, unicode_escape) in [
+            ("r0p0", true, false),
+            ("未知", true, false),
+            ("未知", false, true),
+            ("quote\"\\\n", false, false),
+        ] {
+            for event in [
+                DeliveryEvent::Sent(records.sent[0].clone()),
+                DeliveryEvent::Receipt(records.receipts[0].clone()),
+            ] {
+                let mut value = serde_json::to_value(event).expect("event");
+                value["sender"] = name.into();
+                if value["event_kind"] == "receipt" {
+                    value["recipient"] = name.into();
+                }
+                let mut line = serde_json::to_vec(&value).expect("replay line");
+                if unicode_escape {
+                    line = String::from_utf8(line)
+                        .expect("UTF-8 JSON")
+                        .replace("未知", "\\u672a\\u77e5")
+                        .into_bytes();
+                }
+                let borrowed: DeliveryEvent<ReplayName<'_>> =
+                    serde_json::from_slice(&line).expect("borrowed event");
+                let names = match &borrowed {
+                    DeliveryEvent::Sent(event) => vec![&event.sender],
+                    DeliveryEvent::Receipt(event) => vec![&event.sender, &event.recipient],
+                    _ => unreachable!("fixture only contains sends and receipts"),
+                };
+                for decoded in names {
+                    assert_eq!(decoded.as_ref(), name);
+                    assert_eq!(matches!(decoded.0, std::borrow::Cow::Borrowed(_)), borrows);
+                }
+                let mut actual = RunRecords::default();
+                let mut pool = crate::records::ReceiptNames::default();
+                append_delivery_event(&mut actual, &mut pool, borrowed);
+                // The next line may overwrite or release the entire read buffer.
+                drop(line);
+                assert_eq!(
+                    serde_json::to_value(actual.events().next().expect("pooled event"))
+                        .expect("pooled JSON"),
+                    value
+                );
+            }
         }
     }
 
@@ -787,6 +866,26 @@ mod tests {
                 .join_failures,
             vec!["last"]
         );
+        // Repeated identity fields also retain the last value through fallback.
+        for event in [
+            DeliveryEvent::Sent(expected.sent[0].clone()),
+            DeliveryEvent::Receipt(expected.receipts[0].clone()),
+        ] {
+            let mut raw = serde_json::to_string(&event).expect("event");
+            raw.pop();
+            raw.push_str(r#","sender":"最终","recipient":"最终"}"#);
+            fs::write(output.path().join(DELIVERIES_FILE), &raw).expect("duplicate names");
+            let actual = read_records(output.path()).expect("last identity wins");
+            let mut value = serde_json::to_value(event).expect("expected event");
+            value["sender"] = "最终".into();
+            if value["event_kind"] == "receipt" {
+                value["recipient"] = "最终".into();
+            }
+            assert_eq!(
+                serde_json::to_value(actual.events().next().unwrap()).unwrap(),
+                value
+            );
+        }
         let samples = [
             serde_json::json!({"t_us":9,"counters":{"x":1}}),
             serde_json::json!({"t_us":3,"counters":{"x":2}}),
