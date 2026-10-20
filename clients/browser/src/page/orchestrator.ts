@@ -872,7 +872,7 @@ class Orchestrator {
           this.handlePeerTransportLoss(peer, `required channel ${label} closed or failed`);
         });
       },
-      onChannelMessage: (peer, generation, label, text, textBytes) => {
+      onChannelMessage: (peer, generation, label, text, textBytes, arrivedAt) => {
         if (this.finished || !this.engine.isCurrentGeneration(peer, generation)) return;
         // Reserve before enqueue retains the message closure.
         if (
@@ -883,7 +883,7 @@ class Orchestrator {
         // Arrival owns the receipt window, even if output delays its handler.
         const exchangeReceipt =
           this.config.exchange &&
-          this.exchangeWindowOpen() &&
+          this.exchangeWindowOpen(arrivedAt) &&
           isExchangeProbe(peer, label, text);
         const receiptOwner = exchangeReceipt ? this.exchangeLedger.receiptOwner(peer) : null;
         let receiptPending = exchangeReceipt;
@@ -2473,8 +2473,7 @@ class Orchestrator {
     }
   }
 
-  private exchangeWindowOpen(): boolean {
-    const now = monotonicNowMs();
+  private exchangeWindowOpen(now = monotonicNowMs()): boolean {
     return (
       now < this.runDeadline ||
       shouldDeferSuccessAtRunDeadline(

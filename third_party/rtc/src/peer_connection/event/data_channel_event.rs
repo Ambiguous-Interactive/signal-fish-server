@@ -7,8 +7,9 @@ use crate::data_channel::RTCDataChannelId;
 /// Events that can be emitted by an RTCDataChannel.
 ///
 /// These events track the lifecycle and buffer state of data channels.
-/// Applications should poll these events from `RTCPeerConnectionEvent::OnDataChannel`
-/// to manage data channel connections and implement flow control.
+/// Poll `RTCPeerConnectionEvent::OnDataChannel` for errors and buffer changes.
+/// Normal opening, input, and graceful closure share the ordered data-read path.
+/// Async adapters map those read markers to the lifecycle variants below.
 ///
 /// # Lifecycle Events
 ///
@@ -25,26 +26,20 @@ use crate::data_channel::RTCDataChannelId;
 ///
 /// # Examples
 ///
-/// ## Handling data channel events in event loop
+/// ## Handling channel lifecycle in order with input
+///
+/// Normal opening and graceful closure use the data-read path. The async
+/// adapter converts these markers to `OnOpen` and `OnClose` callbacks.
 ///
 /// ```
-/// use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCDataChannelEvent};
+/// use rtc::peer_connection::message::RTCMessage;
 ///
-/// # fn example(event: RTCPeerConnectionEvent) {
-/// match event {
-///     RTCPeerConnectionEvent::OnDataChannel(dc_event) => {
-///         match dc_event {
-///             RTCDataChannelEvent::OnOpen(channel_id) => {
-///                 println!("Data channel opened: {:?}", channel_id);
-///             }
-///             RTCDataChannelEvent::OnClose(channel_id) => {
-///                 println!("Data channel closed: {:?}", channel_id);
-///             }
-///             RTCDataChannelEvent::OnError(channel_id) => {
-///                 eprintln!("Data channel error: {:?}", channel_id);
-///             }
-///             _ => {}
-///         }
+/// # fn example(message: RTCMessage) {
+/// match message {
+///     RTCMessage::DataChannelOpened(id) => println!("Data channel opened: {id:?}"),
+///     RTCMessage::DataChannelClosed(id) => println!("Data channel closed: {id:?}"),
+///     RTCMessage::DataChannelMessage(id, data) => {
+///         println!("Channel {id:?} received {} bytes", data.data.len());
 ///     }
 ///     _ => {}
 /// }

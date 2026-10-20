@@ -172,6 +172,7 @@ fn receive_budget_is_shared_across_links_and_releases_when_payloads_drop() {
     let (events, _receiver) = mpsc::unbounded_channel();
     let engine = Engine::new(EngineSettings::default(), events).unwrap();
     let links = [0, 1].map(|_| ChannelReceiveAdmission {
+        message_observed: std::sync::Mutex::new(None),
         budget: engine.message_budget.clone(),
         channels: Arc::new(Mutex::new(RequiredChannelAdmission::default())),
         closed_labels: AtomicU8::new(0),
@@ -944,5 +945,64 @@ impl Engine {
                 _ => None,
             })
             .expect("required channel has transport statistics")
+    }
+}
+
+// Regression #1074: channel-poll arrival precedes a suspended admission.
+#[tokio::test]
+async fn channel_receipt_time_precedes_admission_wait() {
+    for initiator_receives in [false, true] {
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            let mut pair = LivePair::connect().await;
+            if initiator_receives {
+                std::mem::swap(&mut pair.sender, &mut pair.receiver);
+                std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+                std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+            }
+            let admission = pair.receiver.peers[&pair.sender_id]
+                .receive_admission
+                .clone();
+            let observed = Arc::new(tokio::sync::Notify::new());
+            *admission.message_observed.lock().unwrap() = Some(observed.clone());
+            let held = admission.rejected.lock().await;
+            pair.sender
+                .channel(pair.receiver_id, label)
+                .unwrap()
+                .send_text("timely-before-admission")
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), observed.notified())
+                .await
+                .expect("the real channel poll completes before the admission wait");
+            let cutoff = tokio::time::Instant::now() + Duration::from_secs(1);
+            // The actual receive-admission mutex holds publication beyond cutoff.
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(2)).await;
+            drop(held);
+            let received_at = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let EngineEvent::ChannelMessage {
+                        text,
+                        label: actual,
+                        received_at,
+                        ..
+                    } = pair.receiver_events.recv().await.unwrap()
+                    {
+                        assert_eq!(text, "timely-before-admission");
+                        assert_eq!(actual, label);
+                        break received_at;
+                    }
+                }
+            })
+            .await
+            .expect("the admitted gameplay receipt publishes after the wait");
+            assert!(tokio::time::Instant::now() >= cutoff);
+            assert!(
+                received_at < cutoff,
+                "role={initiator_receives} label={label}: publication cannot replace arrival time"
+            );
+            tokio::time::resume();
+            pair.cleanup().await;
+        }
     }
 }

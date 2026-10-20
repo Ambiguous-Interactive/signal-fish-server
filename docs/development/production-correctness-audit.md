@@ -5807,3 +5807,96 @@ matrix covers both roles, both labels, and timely, late, and logical-replacement
 histories. No production change was needed. The root source-policy scan also
 required an explicit empty/disconnected result when draining the new close
 control; all six scanner controls pass in `f21a24a2`.
+
+### F103 — Browser payload normalization can reject timely gameplay input
+
+Issue [#1073](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1073),
+found at `96becaa8` while investigating #889. The engine decodes binary channel
+input and computes its UTF-8 size before the orchestrator checks the receipt
+window. A probe entering the raw callback before cutoff can finish normalization
+after cutoff and lose its receipt credit.
+
+The red-first `run-cutoff.test.ts` history enters at 1099 ms, advances the clock
+to 1101 ms during normalization, and fails against the 1100 ms cutoff. The
+repair captures monotonic time at callback entry and passes it to the existing
+strict receipt-window check. The matrix covers text and binary input, both
+required labels, and arrivals before, exactly at, and after cutoff. Exact and
+late input remain ineligible. Logical ownership, authoritative replacement,
+terminal-link checks, and backlog accounting retain their existing behavior.
+The focused matrix, full browser tests, and typecheck pass. Independent review
+finds no blocking issue. These histories prove a deadline defect, not the
+historical missing-inbound cause in #889.
+
+### F104 — Native receive admission can replace gameplay arrival time
+
+Issue [#1074](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1074),
+found at `96becaa8` under #826 and #889. The channel poller records receipt time
+only when it publishes an engine event. Shared admission checks can suspend
+between the completed channel poll and publication. A timely probe can thus
+receive a late timestamp and fail the existing receipt cutoff.
+
+Baseline `e06bccfa` fails the real-pair admission history. The test holds the
+actual receive-admission mutex, sends a required probe, and waits for an
+explicit completed-poll notification. It advances monotonic time past cutoff,
+then releases admission. The repair captures time immediately after the poll;
+run `94ab80b5` passes both roles and both required labels. The clock is paused
+only after real transport delivery reaches the held admission seam. Existing
+client receipt controls cover exact/late cutoff and logical ownership; this
+history pins the engine timestamp at its source. Independent review finds no
+blocking issue. It does not establish socket arrival time before channel poll,
+or identify the historical #889 cause.
+
+### F105 — Remote stream reset can overtake accepted channel input
+
+Issue [#1075](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1075),
+found at `96becaa8` under #826 and #889. The RTC endpoint moves a remote reset
+closure onto its lifecycle event queue while prior accepted input remains on
+its read queue. The wrapper polls lifecycle events first. Its registered
+channel consumer can therefore receive closure before earlier input.
+
+The red core history feeds an accepted payload and an ordered SCTP stream-reset
+completion through the channel handler, then pumps the peer pipeline. Polling
+public lifecycle output before data reproduces the inversion. The repair routes
+remote closure through the same read pipeline as input. Both required delivery
+modes retain exact payload-before-close order. The existing stream-reuse history
+now requires old input, old closure, and new-channel input in that order.
+Nine expanded reset, reuse, opening, and statistics controls pass in `08f6949a`.
+The repair also routes opening through the ordered data-read path. The wrapper
+maps opening and closure to its existing callbacks. It stops a core drain at
+closure and flushes the old registered receiver before consuming later lifetime
+markers. If a late capacity recheck clears the pending close, the driver resumes
+core reads before waiting again. Otherwise a replacement open could wait for an
+unrelated socket or timer wake. The wrapper controls cover marker registration
+and the actual read-drain boundary under a full receiver queue.
+
+Published replacement qualification in #912 must retain this order; ordinary
+exchange alone does not prove it. The async wrapper API retains its existing
+opening and closure events; the private patched core uses ordered read markers.
+
+A separate attempted live history pauses the receiving reactor, sends input,
+and immediately closes the sender channel. It loses the input both before and
+after this repair. Sender closing progress does not prove transmission, so that
+history cannot qualify F105. Its source and both logs remain local under
+`progress/session-487/`. Issue [#1076](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1076)
+tracks the separate sender-boundary investigation.
+These bounded findings do not identify the historical #853 or #889 causes.
+
+External SDK assessment reads the current sibling README files through the
+GitHub connector. Rust and .NET provide signaling and relay without these
+WebRTC engines. Godot uses its own GDScript and Godot mesh. These fixes change
+private reference-client arrival accounting and the vendored native stack.
+They change no server messages, session ordering, or SDK behavior, so no SDK
+migration is required.
+
+Final qualification `e8a4e3c9` passes the real browser mesh, native retry, and
+native room restore cells. Server, native executable, browser CLI, and page
+bundle hashes match before and after all three cells. All seven endpoint streams
+remain local under `progress/session-487/interop-final/`. These live checks
+qualify ordinary interoperability; the controlled histories establish the
+specific receipt and ordering defects above. Native final `f4f3601d` passes
+eight controls for arrival time, admitted receipt retention, retry, local close,
+ended streams, and terminal sibling input. Wrapper `36a4e2d8` passes all 40
+peer-module controls. Removing only the wrapper lifetime drain boundary fails
+the slow-receiver history; restored `ccc27377` passes. Root, native, RTC, and
+wrapper strict lint, browser build/typecheck/format, and document checks pass.
+Hosted current-head checks and feedback remain merge gates.

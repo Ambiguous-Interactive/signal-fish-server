@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve timely reference-client gameplay receipts when payload decoding or receive admission crosses the deadline
+  (#1073, #1074).
+- Deliver final native gameplay input before reporting a remote data-channel reset (#1075).
 - Preserve timely native gameplay receipts through link loss, negotiation timeout, and ordinary retry (#1070).
 - Report native channel loss before a remote reset completes so relay fallback can proceed (#1071).
 - Preserve server transport-status order when library callers report concurrent changes (#1068).

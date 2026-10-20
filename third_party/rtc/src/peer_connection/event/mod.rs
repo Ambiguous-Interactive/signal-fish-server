@@ -89,22 +89,19 @@
 //!
 //! ## Handling data channels
 //!
-//! ```
-//! use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCDataChannelEvent};
+//! Channel opening, input, and graceful closure share the ordered data-read path.
+//! Consume these messages from `RTCPeerConnection::poll_data_read`.
 //!
-//! # fn handle_events(event: RTCPeerConnectionEvent) {
-//! match event {
-//!     RTCPeerConnectionEvent::OnDataChannel(dc_event) => {
-//!         match dc_event {
-//!             RTCDataChannelEvent::OnOpen(channel_id) => {
-//!                 println!("Data channel opened: {:?}", channel_id);
-//!             }
-//!             RTCDataChannelEvent::OnClose(channel_id) => {
-//!                 println!("Data channel closed: {:?}", channel_id);
-//!             }
-//!             _ => {}
-//!         }
+//! ```
+//! use rtc::peer_connection::message::RTCMessage;
+//!
+//! # fn handle_message(message: RTCMessage) {
+//! match message {
+//!     RTCMessage::DataChannelOpened(id) => println!("Data channel opened: {id:?}"),
+//!     RTCMessage::DataChannelMessage(id, payload) => {
+//!         println!("Channel {id:?} received {} bytes", payload.data.len());
 //!     }
+//!     RTCMessage::DataChannelClosed(id) => println!("Data channel closed: {id:?}"),
 //!     _ => {}
 //! }
 //! # }
@@ -457,34 +454,24 @@ pub enum RTCPeerConnectionEvent {
     /// See [connectionstatechange](https://www.w3.org/TR/webrtc/#event-connectionstatechange)
     OnConnectionStateChangeEvent(RTCPeerConnectionState),
 
-    /// Fired when a new data channel is received from the remote peer.
+    /// A data-channel error, buffer notification, or transport-level closure.
     ///
-    /// This event is triggered when the remote peer creates a data channel.
-    /// The application should handle the data channel events (OnOpen, OnMessage, etc.)
-    /// by polling and matching on the channel ID.
+    /// Normal channel opening and graceful closure use
+    /// [`RTCMessage::DataChannelOpened`](crate::peer_connection::message::RTCMessage::DataChannelOpened)
+    /// and [`RTCMessage::DataChannelClosed`](crate::peer_connection::message::RTCMessage::DataChannelClosed)
+    /// on the ordered data-read path. The async wrapper maps those markers to
+    /// the corresponding channel callbacks.
     ///
     /// # Examples
     ///
     /// ```
     /// # use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCDataChannelEvent};
     /// # fn handle_event(event: RTCPeerConnectionEvent) {
-    /// match event {
-    ///     RTCPeerConnectionEvent::OnDataChannel(dc_event) => {
-    ///         match dc_event {
-    ///             RTCDataChannelEvent::OnOpen(channel_id) => {
-    ///                 println!("New data channel: {:?}", channel_id);
-    ///             }
-    ///             _ => {}
-    ///         }
-    ///     }
-    ///     _ => {}
+    /// if let RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnError(id)) = event {
+    ///     eprintln!("Data channel error: {id:?}");
     /// }
     /// # }
     /// ```
-    ///
-    /// # Specification
-    ///
-    /// See [datachannel](https://www.w3.org/TR/webrtc/#event-datachannel)
     OnDataChannel(RTCDataChannelEvent),
 
     /// Fired when a new media track is received from the remote peer.

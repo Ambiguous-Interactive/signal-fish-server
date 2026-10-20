@@ -29,6 +29,9 @@ Timely receipts remain valid through decoding and queued processing.
 Late receipts keep the criterion unpaid. The client still validates and reports
 late frames. Existing successful holds and active linger windows still apply.
 
+Data-channel receipts use the raw channel callback time before text decoding
+and UTF-8 size checks. Decoding cannot turn timely input into a late receipt.
+
 The client drains input admitted within the active run window before deciding
 success at the run cutoff or exit linger. Queued membership changes, plans,
 and channel callbacks can add new gameplay work. Late input does not extend

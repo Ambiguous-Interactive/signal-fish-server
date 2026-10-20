@@ -20,6 +20,8 @@
 //   both sides, no ICE check pair ever forms and the pair deterministically
 //   never connects.
 
+import { monotonicNowMs } from '../shared/deadline.js';
+
 /** Label of the ordered, reliable data channel (commands / critical events). */
 export const RELIABLE_LABEL = 'reliable';
 /** Label of the unordered, no-retransmit channel (movement / state). */
@@ -55,6 +57,7 @@ export interface EngineCallbacks {
     label: string,
     text: string,
     textBytes: number,
+    arrivedAt: number,
   ): boolean | void;
 }
 
@@ -497,6 +500,8 @@ export class Engine {
       queueMicrotask(notifyOpen);
     }
     channel.onmessage = (event: MessageEvent<unknown>) => {
+      // Receipt timing belongs to raw arrival, before UTF-8 normalization.
+      const arrivedAt = monotonicNowMs();
       const link = this.peers.get(peer);
       if (
         link !== callbackLink ||
@@ -534,6 +539,7 @@ export class Engine {
           label,
           text,
           textBytes,
+          arrivedAt,
         ) === false
       ) {
         rejectMessage('incoming data-channel message backlog exhausted');
