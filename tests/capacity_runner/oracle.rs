@@ -1680,7 +1680,7 @@ impl StreamCoverage {
         }
         if self.ranges.len() == 1 {
             self.inline = self.ranges.pop_first();
-            self.ranges = BTreeMap::new();
+            // Keep the empty root to reuse it across fragment/repair cycles.
         }
         true
     }
@@ -2044,7 +2044,7 @@ mod coverage_tests {
     // #775/#636: ordered receipt coverage needs no tree nodes.
     // A repaired hole must return to inline storage too.
     #[test]
-    fn contiguous_coverage_stays_inline_and_reclaims_fragmented_storage() {
+    fn contiguous_coverage_stays_inline_across_fragmentation_and_repair() {
         for descending in [false, true] {
             let mut coverage = StreamCoverage::default();
             for offset in 0..100_000 {
@@ -2089,6 +2089,16 @@ mod coverage_tests {
         assert!(fragmented.insert(2, 2));
         assert!(fragmented.ranges.is_empty());
         assert_eq!(fragmented.inline, Some((1, 100_000)));
+        for cycle in 0..2_000 {
+            let base = 100_000 + cycle * 3;
+            for seq in [base + 1, base + 3, base + 2] {
+                assert!(fragmented.insert(seq, seq));
+            }
+            assert_eq!(fragmented.inline, Some((1, base + 3)));
+            assert!(fragmented.ranges.is_empty());
+            assert!(!fragmented.insert(base + 2, base + 4));
+            assert_eq!(fragmented.above(base).covered, 3);
+        }
     }
 
     /// Compare the old independent position-set and unique-window rules on
