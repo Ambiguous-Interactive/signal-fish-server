@@ -176,6 +176,42 @@ impl<'a> DataChannelHandler<'a> {
         Ok(())
     }
 
+    /// Apply the connected procedure to one local channel, including channels
+    /// created after the association connected. A repeated call does not reopen
+    /// the channel or move its original DCEP deadline.
+    pub(crate) fn dial_channel(
+        &mut self,
+        now: Instant,
+        association_handle: usize,
+        id: RTCDataChannelId,
+    ) -> Result<()> {
+        if self.initialize_channel(now, association_handle, id)? {
+            self.emit_data_channel_opened(now, TransportContext::default(), id)?;
+        }
+        Ok(())
+    }
+
+    fn initialize_channel(
+        &mut self,
+        now: Instant,
+        association_handle: usize,
+        id: RTCDataChannelId,
+    ) -> Result<bool> {
+        self.ctx.observe(now);
+        let dc = self
+            .data_channels
+            .get_mut(&id)
+            .ok_or(Error::ErrDataChannelNotExisted)?;
+        if dc.ready_state != RTCDataChannelState::Connecting || dc.data_channel.is_some() {
+            return Ok(false);
+        }
+        dc.dial(association_handle)?;
+        if !dc.negotiated {
+            dc.handshake_deadline = self.dcep_handshake_timeout.map(|timeout| now + timeout);
+        }
+        Ok(dc.negotiated)
+    }
+
     fn retire_undialed_channel(&mut self, now: Instant, id: RTCDataChannelId) {
         if let Some(mut dc) = self.data_channels.remove(&id) {
             dc.ready_state = RTCDataChannelState::Closed;
@@ -587,26 +623,18 @@ impl<'a>
                         self.retire_undialed_channel(now, id);
                         continue;
                     }
-                    if self
-                        .data_channels
-                        .get_mut(&id)
-                        .is_some_and(|dc| dc.dial(association_handle).is_err())
-                    {
-                        self.retire_undialed_channel(now, id);
-                        continue;
+                    match self.initialize_channel(now, association_handle, id) {
+                        Ok(true) => opened.push(id),
+                        Ok(false) => {}
+                        Err(_) => {
+                            self.retire_undialed_channel(now, id);
+                            continue;
+                        }
                     }
                     let data_channel_internal = self
                         .data_channels
                         .get_mut(&id)
                         .ok_or(Error::ErrDataChannelNotExisted)?;
-                    if data_channel_internal.negotiated {
-                        opened.push(data_channel_internal.id);
-                    } else {
-                        // In-band channels have a DCEP handshake to complete; arm a
-                        // deadline so a lost ACK cannot leave them Connecting forever.
-                        data_channel_internal.handshake_deadline =
-                            self.dcep_handshake_timeout.map(|timeout| now + timeout);
-                    }
 
                     let data_channel = data_channel_internal
                         .data_channel
@@ -624,7 +652,6 @@ impl<'a>
                         });
                     }
                 }
-
                 for id in opened {
                     self.emit_data_channel_opened(now, TransportContext::default(), id)?;
                 }

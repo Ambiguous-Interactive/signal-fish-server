@@ -639,3 +639,137 @@ async fn connected_peer_ice_uses_a_fresh_bounded_operation_window() {
         remote.remove_peer(state.my_id).await.unwrap();
     }
 }
+
+// Regression #1087: setup failure resolves fallback before the P2P deadline.
+#[tokio::test]
+async fn initial_pair_creation_failure_reports_fallback_and_recovers() {
+    for (initiate, sibling_connected) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(tcp).await.unwrap()
+        });
+        let (ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let mut server_ws = server.await.unwrap();
+        let cli = Cli::parse_from([
+            "reference-native",
+            "--server-url",
+            &url,
+            "--create-room",
+            "--disable-mdns",
+            "--p2p-timeout-secs",
+            "30",
+            "--run-for-secs",
+            "60",
+        ]);
+        let peer = PlayerId::from_u128(2);
+        let healthy = PlayerId::from_u128(4);
+        let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+        state.webrtc_plan_seen = true;
+        state.current_session_generation = Some(SessionGeneration::from_u128(3));
+        state.establish_pair(healthy, false).await.unwrap();
+        let mut sibling = if sibling_connected {
+            let (remote, opens, _) = super::retry_tests::open_physical_pair_with_events(
+                &mut state,
+                &mut server_ws,
+                healthy,
+                None,
+            )
+            .await;
+            for event in opens {
+                state.handle_engine_event(event).await.unwrap();
+            }
+            assert_eq!(state.transport_status, Some(true));
+            Some(remote)
+        } else {
+            None
+        };
+        state.last_ice_servers = vec![signal_fish_server::protocol::IceServer {
+            urls: vec!["invalid:ice-endpoint".into()],
+            username: None,
+            credential: None,
+        }];
+        state.establish_pair(peer, initiate).await.unwrap();
+        assert!(
+            !state.engine.is_paired(peer),
+            "invalid configuration fails setup"
+        );
+        assert!(
+            state.engine.is_paired(healthy),
+            "another peer remains paired"
+        );
+        assert!(state.expected_peers.contains(&peer));
+        assert!(!state.p2p_deadline.unwrap().is_due(Instant::now()));
+        assert_eq!(
+            state.transport_status,
+            Some(sibling_connected),
+            "report current availability now"
+        );
+        state.send_message(&ClientMessage::Ping).await.unwrap();
+        let reports = tokio::time::timeout(Duration::from_secs(1), async {
+            let mut reports = Vec::new();
+            loop {
+                let frame = server_ws.next().await.unwrap().unwrap();
+                let message: ClientMessage =
+                    serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                match message {
+                    ClientMessage::TransportStatus { connected, .. } => reports.push(connected),
+                    ClientMessage::Ping => return reports,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            reports,
+            vec![sibling_connected],
+            "failed peer cannot clear a healthy sibling"
+        );
+        state.last_ice_servers.clear();
+        state.request_pair_retry(peer, 1).await.unwrap();
+        let (mut remote, opens, mut receipts) = super::retry_tests::open_physical_pair_with_events(
+            &mut state,
+            &mut server_ws,
+            peer,
+            None,
+        )
+        .await;
+        for event in opens {
+            state.handle_engine_event(event).await.unwrap();
+        }
+        assert_eq!(state.transport_status, Some(true));
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            state
+                .engine
+                .channel(peer, label)
+                .unwrap()
+                .send_text("fresh-gameplay")
+                .await
+                .unwrap();
+        }
+        let mut labels = BTreeSet::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while labels.len() < 2 {
+                if let EngineEvent::ChannelMessage { label, text, .. } =
+                    receipts.recv().await.unwrap()
+                {
+                    assert_eq!(text, "fresh-gameplay");
+                    assert!(labels.insert(label));
+                }
+            }
+        })
+        .await
+        .expect("fresh retry channels carry gameplay");
+        assert!(state.engine.is_paired(healthy));
+        state.engine.remove_peer(peer).await.unwrap();
+        state.engine.remove_peer(healthy).await.unwrap();
+        remote.remove_peer(state.my_id).await.unwrap();
+        if let Some(remote) = &mut sibling {
+            remote.remove_peer(state.my_id).await.unwrap();
+        }
+    }
+}

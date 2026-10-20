@@ -6149,3 +6149,100 @@ room-restore histories after the complete F109 repair. The server, final native
 executable, browser CLI, and browser page hashes match before and after all three
 cells. Endpoint event streams remain local under
 `progress/session-489/interop-delivery/`.
+
+### F110 — Duplicate fixed IDs replace native gameplay channel ownership
+
+Baseline `fe85dd81`. Finding [#1085](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1085)
+continues A20 and replacement qualification #912. Public native RTC creation
+inserted an occupied fixed SID into the registry. The reverse index then named
+the new channel while the original handle remained live. Incoming data and
+reset completion could reach the wrong channel.
+
+The original code fails
+`create_data_channel_failure_duplicate_fixed_sid_preserves_original_owner`:
+a second fixed-SID creation succeeds before connection. The repair checks the
+registry's authoritative ownership before insertion and returns
+`ErrStreamAlreadyExist`. It preserves closing and closed reservations until
+their actual release. A repeated failed call cannot replace the owner.
+
+The control covers both roles, pre-connection and connected creation, all four
+channel states, and fixed, automatically assigned, and remotely accepted
+owners. Remote owners come from a real DCEP OPEN decode. It verifies retained
+identity, label, state, registry size, and fresh-handle reuse after release.
+These are core ownership controls, not a claim about the historical failures
+in #853 or #889. Retained paired-wire exchange and reset controls remain
+required before publication.
+
+### F111 — Channels created after connection skip native startup outcomes
+
+Baseline `fe85dd81`. Finding [#1086](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1086)
+continues A20 and #912. Public creation after SCTP connection called the raw
+channel dial operation. It skipped both the negotiated channel's open marker
+and statistics, and the in-band channel's configured DCEP deadline.
+
+Independent original-code controls fail for the missing open marker and missing
+handshake deadline. The repair shares channel initialization with deferred
+startup. It preserves disabled timeouts and the first deadline across repeated
+connected events. Negotiated startup publishes one open marker and one opened
+statistics record. The marker enters the existing ordered data queue.
+
+Adversarial review found that a marker left in the private handler would still
+be invisible to the wrapper's event-first data polling. Public creation now
+pumps the read pipeline after successful initialization. The regression creates
+two consecutive negotiated channels without new input or a new negotiation
+notification, polls events first, and then reads the ordered public data queue.
+It verifies exact open identity and no duplicate marker. Review also found
+creation during an association handshake could dial too early. The repair
+requires an established association. A real pending-handshake control checks
+that neither channel type opens or starts its DCEP deadline before connection.
+
+Wrapper review found two related boundaries. The wrapper now acquires the core
+and event-sender map before creating a channel, then samples the runtime clock.
+Creation and local receiver registration have no intervening await. This keeps
+the driver from announcing a local channel as remote, prevents cancellation
+from leaving an unregistered channel, and anchors its deadline after idle or
+lock contention. Both locks release before the driver wake.
+
+Independent old-code controls fail for cancellation while the sender map is
+blocked and for a marker timestamp from a core clock 60 seconds behind the
+runtime. The ownership control also routes one open marker and first gameplay
+message through the production driver to the returned local receiver, with no
+remote announcement or duplicate open. The clock control proves wrapper clock
+refresh; the RTC controls separately prove configured timeout and ACK behavior.
+
+Both roles, enabled and disabled deadlines, timeout closure, actual paired-wire
+payload delivery, DCEP ACK, and stream reuse remain qualification controls.
+This work does not qualify a replacement release or complete #912.
+
+### F112 — Initial negotiation failure delays reference-client fallback
+
+Baseline `fe85dd81`. Finding [#1087](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1087)
+continues A20. The browser removes a failed initial link before its queued PC
+callback runs. The orchestrator discards the old generation and only logs the
+failed operation. The native orchestrator likewise waited for an expired
+setup deadline or a formerly connected peer before reporting a removed link.
+Both clients could wait the full P2P window to report relay fallback despite
+an already known creation failure.
+
+The browser regression fails before the repair with a frozen clock before the
+P2P deadline. The native regression fails with unresolved status after an
+invalid ICE configuration rejects the real peer builder. The repairs resolve
+the current availability as soon as the initial operation fails. The native
+path retains its no-live-link guard, so an ordinary malformed signal on a live
+connection does not imply transport loss.
+
+Browser controls cover failed and closed PC state, rejected offer creation,
+and rejected local description, with and without a connected sibling. They
+retain healthy signaling and relay receipts and complete a fresh tagged retry.
+Native controls cover both roles, connected and connecting siblings, preserved
+logical obligation, a future setup deadline, exact socket status frames, and
+real retry recovery with gameplay on both required channel labels.
+The original timeouts and exchange requirements remain unchanged.
+
+Current Rust SDK documentation states that it has no WebRTC backend. The .NET
+SDK supplies signaling and relay only. Godot uses its own
+`WebRTCMultiplayerPeer` mesh. These changes affect only reference implementations
+and their private RTC copy; they change no server message, SDK source, or SDK
+migration requirement. The fresh SDK README assessment used the connected
+GitHub app. Keep historical #853/#889 and the broad #826 audit open: these
+controls do not identify the cause of those past failures.

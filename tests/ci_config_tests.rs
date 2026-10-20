@@ -32340,6 +32340,7 @@ fn test_native_client_platform_matrix_live_smoke_and_ipv6_proof_are_pinned() {
         ("rtc", "stream_reset_"),
         ("rtc", "data_channel::registry::tests"),
         ("rtc", "create_data_channel_failure_"),
+        ("rtc", "post_connected_channel_"),
         ("rtc", "deferred_channel_failures_"),
         ("rtc", "stream_count_boundary"),
         ("rtc-sctp", "reset"),

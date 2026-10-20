@@ -935,6 +935,9 @@ fn split_transmit(transmit: TransportMessage<Payload>) -> Vec<TransportMessage<P
 }
 
 #[cfg(test)]
+pub(crate) use tests::established_test_association;
+
+#[cfg(test)]
 mod tests {
     //! Coverage for the batch-drain teardown-safety flush.
     //!
@@ -1006,6 +1009,15 @@ mod tests {
     /// Run the SCTP handshake to completion and return the established pair. The
     /// shuttle plays the role the ICE handler plays in production: it rewrites each
     /// datagram's source address for the receiving endpoint.
+    pub(crate) fn established_test_association(role: RTCDtlsRole) -> Association {
+        let pair = establish();
+        if role == RTCDtlsRole::Client {
+            pair.client_conn
+        } else {
+            pair.server_conn
+        }
+    }
+
     fn establish() -> Established {
         establish_with_stream_count(u16::MAX)
     }
@@ -1447,6 +1459,11 @@ mod tests {
             1
         );
         let fresh = pc.create_data_channel("fresh", Some(options)).unwrap().id();
+        assert_eq!(
+            pc.data_channels.get(&fresh).unwrap().handshake_deadline,
+            Some(pc.pipeline_context.now + Duration::from_secs(30)),
+            "a channel created after connect must keep the DCEP timeout"
+        );
         assert!(fresh > excess);
         assert_eq!(pc.data_channels.get(&fresh).unwrap().stream_id, Some(sid));
         for tick in 40..50 {
@@ -1457,6 +1474,11 @@ mod tests {
         assert_eq!(
             pc.data_channel(fresh).unwrap().ready_state(),
             RTCDataChannelState::Open
+        );
+        assert_eq!(
+            pc.data_channels.get(&fresh).unwrap().handshake_deadline,
+            None,
+            "the paired DCEP ACK must clear the post-connected deadline"
         );
         pc.data_channel(fresh)
             .unwrap()
@@ -1508,8 +1530,9 @@ mod tests {
     // Regression #1079: use the final SID from a real negotiated stream count.
     #[test]
     fn stream_count_boundary_channel_sends_payload_on_paired_wire() {
-        use crate::data_channel::internal::RTCDataChannelInternal;
+        use crate::data_channel::RTCDataChannelInit;
         use crate::peer_connection::RTCPeerConnectionBuilder;
+        use crate::peer_connection::message::RTCMessage;
         for count in 1..=4 {
             let role = if count % 2 == 1 {
                 RTCDtlsRole::Client
@@ -1544,27 +1567,52 @@ mod tests {
                     client_ctx(now, sender_ep, sender_ch, sender);
                 let negotiated = pc.sctp_transport().max_channels();
                 assert_eq!(negotiated, Some(count));
+                pc.dtls_transport_mut().dtls_role = role;
                 let parity = if role == RTCDtlsRole::Client { 0 } else { 1 };
                 let mut id = 0;
-                for _ in (parity..count).step_by(2) {
-                    id = pc.data_channels.insert(RTCDataChannelInternal {
-                        ordered,
-                        max_retransmits: (!ordered).then_some(0),
-                        negotiated: true,
-                        ready_state: crate::data_channel::RTCDataChannelState::Connecting,
-                        ..Default::default()
-                    });
+                let mut expected_opened = Vec::new();
+                for sid in (parity..count).step_by(2) {
+                    id = pc
+                        .create_data_channel(
+                            "post-connected-boundary",
+                            Some(RTCDataChannelInit {
+                                ordered,
+                                max_retransmits: (!ordered).then_some(0),
+                                negotiated: Some(sid),
+                                ..Default::default()
+                            }),
+                        )
+                        .unwrap()
+                        .id();
+                    expected_opened.push(id);
                 }
-                pc.data_channels
-                    .assign_stream_ids(role, negotiated)
-                    .unwrap();
                 let sid = pc.data_channels.get(&id).unwrap().stream_id.unwrap();
                 assert_eq!(sid, count - 1);
-                pc.data_channels
-                    .get_mut(&id)
-                    .unwrap()
-                    .dial(sender_ch.0)
-                    .unwrap();
+                assert!(matches!(
+                    pc.create_data_channel(
+                        "duplicate-boundary",
+                        Some(RTCDataChannelInit {
+                            negotiated: Some(sid),
+                            ..Default::default()
+                        })
+                    ),
+                    Err(Error::ErrStreamAlreadyExist)
+                ));
+                assert_eq!(
+                    pc.data_channels.handle_of_stream(&sid),
+                    Some(id),
+                    "rejected duplicate must preserve the original wire route"
+                );
+                let mut opened = Vec::new();
+                while let Some(message) = pc.poll_read() {
+                    if let RTCMessage::DataChannelOpened(id) = message.message {
+                        opened.push(id);
+                    }
+                }
+                assert_eq!(
+                    opened, expected_opened,
+                    "post-connected negotiated channels publish open before payload"
+                );
                 pc.data_channel(id)
                     .unwrap()
                     .send_text(now, "boundary-gameplay")

@@ -2328,6 +2328,98 @@ mod tests {
     use crate::data_channel::RTCDataChannelMessage;
     use crate::runtime::channel;
 
+    // Regression #1086: the driver must not observe a local channel before registration.
+    #[cfg(any(feature = "crypto-ring", feature = "crypto-aws-lc-rs"))]
+    #[test]
+    fn local_channel_registration_fences_driver_and_preserves_returned_receiver() {
+        use crate::data_channel::DataChannel;
+        use crate::peer_connection::{
+            PeerConnection, PeerConnectionEventHandler, PeerConnectionImpl,
+        };
+        use crate::runtime::Mutex;
+        use std::sync::atomic::AtomicUsize;
+        struct Announcements(AtomicUsize);
+        #[async_trait::async_trait]
+        impl PeerConnectionEventHandler for Announcements {
+            async fn on_data_channel(&self, _: Arc<dyn DataChannel>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let runtime = crate::runtime::default_runtime().unwrap();
+        runtime.block_on(Box::pin(async {
+            let (mut inner, _events) = crate::peer_connection::new_test_peer_connection().await;
+            let announcements = Arc::new(Announcements(AtomicUsize::new(0)));
+            Arc::get_mut(&mut inner).unwrap().handler = announcements.clone();
+            let pc = PeerConnectionImpl {
+                inner: inner.clone(),
+                driver_handle: Mutex::new(None),
+                driver_stopped: Mutex::new(None),
+            };
+            // A cancelled waiter must leave no unregistered core channel.
+            let registration = inner.data_channel_events_tx.lock().await;
+            {
+                let cancelled = pc.create_data_channel("cancelled", None);
+                futures::pin_mut!(cancelled);
+                assert!(cancelled.as_mut().now_or_never().is_none());
+            }
+            drop(registration);
+            assert!(
+                inner.core.lock().await.data_channel(0).is_none(),
+                "cancellation before registration must not leave an orphan channel"
+            );
+            let registration = inner.data_channel_events_tx.lock().await;
+            let creation = pc.create_data_channel("local", None);
+            futures::pin_mut!(creation);
+            assert!(creation.as_mut().now_or_never().is_none());
+            assert!(
+                inner.core.try_lock().is_none(),
+                "the driver cannot observe an unregistered local channel"
+            );
+            drop(registration);
+            let dc = creation.await.unwrap();
+            let mut driver = PeerConnectionDriver::<SocketAddr>::new(
+                inner,
+                Vec::new(),
+                Vec::new(),
+                MulticastDnsMode::Disabled,
+                Vec::new(),
+                RTCIceTransportPolicy::All,
+                rtc::crypto::default_provider().unwrap(),
+                false,
+                None,
+            );
+            driver
+                .handle_rtc_message(TaggedRTCMessage {
+                    now: runtime.now(),
+                    message: RTCMessage::DataChannelOpened(dc.id()),
+                })
+                .await;
+            driver
+                .handle_rtc_message(TaggedRTCMessage {
+                    now: runtime.now(),
+                    message: RTCMessage::DataChannelMessage(
+                        dc.id(),
+                        RTCDataChannelMessage {
+                            is_string: true,
+                            data: BytesMut::from("first-gameplay"),
+                        },
+                    ),
+                })
+                .await;
+            assert_eq!(
+                announcements.0.load(Ordering::SeqCst),
+                0,
+                "a locally created channel must not be announced as remote"
+            );
+            assert!(matches!(dc.poll().await, Some(DataChannelEvent::OnOpen)));
+            assert!(
+                matches!(dc.poll().await, Some(DataChannelEvent::OnMessage(message))
+                if message.data == b"first-gameplay"[..])
+            );
+            assert!(dc.poll().now_or_never().is_none(), "no duplicate open");
+        }));
+    }
+
     // A slow old receiver must leave the next lifetime's markers in the core.
     #[cfg(any(feature = "crypto-ring", feature = "crypto-aws-lc-rs"))]
     #[test]

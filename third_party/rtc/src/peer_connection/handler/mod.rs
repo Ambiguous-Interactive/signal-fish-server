@@ -284,7 +284,7 @@ impl RTCPeerConnection {
         }
     }
 
-    fn pump_reads(&mut self, msg: Option<TaggedRTCMessageInternal>) {
+    pub(super) fn pump_reads(&mut self, msg: Option<TaggedRTCMessageInternal>) {
         let mut intermediate_routs = VecDeque::<TaggedRTCMessageInternal>::new();
 
         if let Some(msg) = msg {

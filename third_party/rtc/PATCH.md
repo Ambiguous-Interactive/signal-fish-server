@@ -117,3 +117,18 @@ sends, closed statistics, reset/reuse, and fresh links. Boundary controls inspec
 DATA before RECONFIG and the reset's sender TSN. See
 [#1076](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1076).
 Published replacement qualification in #912 must retain these controls.
+
+Public creation rejects an occupied fixed stream ID before registry insertion.
+The original owner keeps gameplay routing and reset ownership until it retires.
+Controls cover fixed, automatically assigned, and accepted channels before and
+after connection, including closing reservations and reuse after release.
+See [#1085](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1085).
+
+Channels created after SCTP connects use the same initialization as deferred
+channels. Channels created during the SCTP handshake wait until it completes. Negotiated channels publish one ordered open marker and opened
+statistics. In-band channels keep the configured DCEP timeout, including when
+an ACK never arrives. Repeated connected events do not renew that deadline.
+Controls cover both roles, disabled timeouts, public event-first consumers,
+paired-wire payloads, and stream reuse.
+See [#1086](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1086).
+Published replacement qualification in #912 must retain these controls.
