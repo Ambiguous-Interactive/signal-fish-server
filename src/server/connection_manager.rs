@@ -153,6 +153,7 @@ pub(crate) struct ClientConnection {
 /// its restored id after it acquires the gate.
 #[derive(Debug)]
 pub(crate) struct ClientLifecycle {
+    transport_reports: tokio::sync::Mutex<()>,
     gate: Arc<tokio::sync::Mutex<()>>,
     player_id: std::sync::Mutex<PlayerId>,
     admission_pending: std::sync::atomic::AtomicBool,
@@ -165,6 +166,7 @@ pub(crate) struct ClientLifecycle {
 impl ClientLifecycle {
     fn new(player_id: PlayerId) -> Self {
         Self {
+            transport_reports: tokio::sync::Mutex::new(()),
             gate: Arc::new(tokio::sync::Mutex::new(())),
             player_id: std::sync::Mutex::new(player_id),
             admission_pending: std::sync::atomic::AtomicBool::new(false),
@@ -173,6 +175,13 @@ impl ClientLifecycle {
             #[cfg(test)]
             lock_attempt_notify: tokio::sync::Notify::new(),
         }
+    }
+
+    /// Serialize transport reports through queue admission without holding the
+    /// lifecycle gate during backpressure. Leave and reconnect remain free to
+    /// invalidate the old report while its recipients wait for capacity.
+    pub(crate) async fn lock_transport_reports(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.transport_reports.lock().await
     }
 
     pub(crate) async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {

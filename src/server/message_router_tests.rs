@@ -749,6 +749,142 @@ async fn transport_status_delivery_does_not_block_concurrent_leave() {
     );
 }
 
+// Issue #826: concurrent public-library calls must preserve transport transitions.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn concurrent_transport_reports_publish_in_acceptance_order() {
+    for (first_connected, cancel_first) in
+        [(true, false), (false, false), (true, true), (false, true)]
+    {
+        let server = create_test_server().await;
+        let mut peers = Vec::new();
+        let mut room_code = None;
+        for name in ["observer", "reporter"] {
+            let (sender, mut receiver) = mpsc::channel(16);
+            let player = server
+                .connection_manager
+                .register_client(
+                    sender,
+                    crate::coordination::ConnectionCloseSignal::detached(),
+                    "127.0.0.1:50160".parse().unwrap(),
+                    server.instance_id,
+                )
+                .await
+                .unwrap();
+            server.set_client_protocol(
+                &player,
+                NegotiatedProtocol {
+                    version: 3,
+                    transports: vec![Transport::Relay, Transport::WebRtc],
+                    topologies: vec![Topology::Relay, Topology::Mesh],
+                },
+            );
+            server
+                .handle_client_message(
+                    &player,
+                    ClientMessage::JoinRoom {
+                        game_name: "concurrent-status".to_string(),
+                        room_code: room_code.clone(),
+                        player_name: name.to_string(),
+                        max_players: Some(2),
+                        supports_authority: Some(false),
+                        relay_transport: None,
+                        password: None,
+                        join_only: None,
+                    },
+                )
+                .await;
+            let joined = next_routed_test_message(&mut receiver, "RoomJoined").await;
+            let ServerMessage::RoomJoined(payload) = joined.as_ref() else {
+                panic!("expected RoomJoined: {joined:?}");
+            };
+            room_code = Some(payload.room_code.clone());
+            peers.push((player, receiver));
+        }
+        let (reporter, _reporter_rx) = peers.pop().unwrap();
+        let (_, mut observer_rx) = peers.pop().unwrap();
+        drain_until_routed_player_joined(&mut observer_rx, reporter, "reporter join").await;
+
+        let pause = super::message_router::arm_transport_status_delivery_pause(reporter);
+        let first_server = Arc::clone(&server);
+        let first = tokio::spawn(async move {
+            first_server
+                .handle_client_message(
+                    &reporter,
+                    ClientMessage::TransportStatus {
+                        transport: Transport::WebRtc,
+                        connected: first_connected,
+                    },
+                )
+                .await;
+        });
+        timeout(Duration::from_secs(1), pause.reached.notified())
+            .await
+            .unwrap();
+        /* The serial socket reader cannot exercise concurrent library dispatch. */
+        super::message_router::disarm_transport_status_delivery_pause(&reporter);
+        let second = server.handle_client_message(
+            &reporter,
+            ClientMessage::TransportStatus {
+                transport: Transport::WebRtc,
+                connected: !first_connected,
+            },
+        );
+        tokio::pin!(second);
+        let second_finished = futures_util::poll!(second.as_mut()).is_ready();
+        if cancel_first {
+            first.abort();
+            assert!(first.await.unwrap_err().is_cancelled());
+        } else {
+            pause.release.notify_one();
+            first.await.unwrap();
+        }
+        if !second_finished {
+            second.await;
+        }
+        let expected_reports = if cancel_first {
+            vec![!first_connected]
+        } else {
+            vec![first_connected, !first_connected]
+        };
+        for expected in expected_reports {
+            let message =
+                next_routed_test_message(&mut observer_rx, "ordered transport report").await;
+            assert!(
+                matches!(message.as_ref(), ServerMessage::PeerTransportStatus {
+                peer_id, transport: Transport::WebRtc, connected,
+            } if *peer_id == reporter && *connected == expected),
+                "first={first_connected}, canceled={cancel_first}, expected={expected}, observed={message:?}"
+            );
+        }
+        assert_eq!(
+            server.client_transport_status(&reporter),
+            Some((Transport::WebRtc, !first_connected))
+        );
+        server
+            .handle_client_message(
+                &reporter,
+                ClientMessage::TransportStatus {
+                    transport: Transport::WebRtc,
+                    connected: !first_connected,
+                },
+            )
+            .await;
+        let observer_outcome = observer_rx.try_recv();
+        assert!(
+            matches!(observer_outcome, Err(mpsc::error::TryRecvError::Empty)),
+            "a duplicate report must stay silent"
+        );
+        assert_eq!(
+            server
+                .metrics
+                .transport_status_fanout
+                .load(Ordering::Relaxed),
+            if cancel_first { 1 } else { 2 }
+        );
+    }
+}
+
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn join_room_request_is_forwarded_to_room_service() {

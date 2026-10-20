@@ -480,14 +480,9 @@ const PING_INTERVAL: Duration = Duration::from_secs(10);
 /// conformance driver is for.
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// One-shot drain grace applied when the pong deadline first expires. The
-/// deadline check runs at the top of the loop, BEFORE the select reads the
-/// socket, so a `Pong` that already arrived could be declared missing
-/// without ever being read (deadline and frame ready in the same wake). The
-/// extension guarantees at least one more read pass — and because the timer
-/// branch is then no longer ready, a pending frame wins that select
-/// deterministically.
+/// One-shot extension before a final bounded socket poll for server liveness.
 const PONG_DRAIN_GRACE: Duration = Duration::from_secs(1);
+const MAX_KEEPALIVE_CONTROL_FRAMES: usize = 256;
 
 /// A failure that terminates the run with a specific exit code.
 #[derive(Debug)]
@@ -1473,7 +1468,7 @@ struct Orchestrator<'a> {
     /// no answer is outstanding.
     pong_deadline: Option<Instant>,
     /// Whether the one-shot [`PONG_DRAIN_GRACE`] extension was applied to the
-    /// current deadline (the second expiry is fatal).
+    /// current deadline (the second expiry checks ready input before failure).
     pong_grace_applied: bool,
 }
 
@@ -1923,10 +1918,19 @@ impl Orchestrator<'_> {
         // stale `Pong` can never clear the deadline of a newer, still-pending
         // ping (the answer arrives while nothing is pending and is a no-op).
         //
-        // The first deadline expiry only arms the drain grace
-        // (see PONG_DRAIN_GRACE): a `Pong` already sitting in the socket
-        // buffer gets one guaranteed read pass — the deadline check runs
-        // before the `select!` reads the socket — before the miss is fatal.
+        if self.pong_deadline.is_some_and(|at| now >= at) && self.pong_grace_applied {
+            use futures_util::{FutureExt, StreamExt};
+
+            for _ in 0..MAX_KEEPALIVE_CONTROL_FRAMES {
+                let Some(frame) = self.ws.next().now_or_never() else {
+                    break;
+                };
+                self.handle_server_input(frame, Instant::now()).await?;
+                if self.pong_deadline.is_none() {
+                    break;
+                }
+            }
+        }
         if self.pong_deadline.is_some_and(|at| now >= at) {
             if self.pong_grace_applied {
                 return Err(FatalError::connection(format!(

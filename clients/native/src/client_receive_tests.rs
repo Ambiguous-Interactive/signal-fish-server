@@ -1539,3 +1539,206 @@ async fn delayed_remote_channel_admission_preserves_early_exchange_probes() {
         remote.remove_peer(me).await.unwrap();
     }
 }
+
+// Regression #1067: retry work must not hide a timely queued Pong.
+#[tokio::test]
+async fn queued_liveness_survives_negotiation_during_pong_drain_grace() {
+    use crate::engine::NegotiationHold;
+    use std::sync::Arc;
+    use tokio_tungstenite::tungstenite::protocol::{
+        frame::{
+            coding::{Data, OpCode},
+            Frame,
+        },
+        Role,
+    };
+
+    let (ws, mut server_ws) = crate::socket_tests::websocket_pair().await;
+    let cli = Cli::parse_from([
+        "reference-native",
+        "--server-url",
+        "ws://127.0.0.1",
+        "--create-room",
+        "--disable-mdns",
+        "--p2p-retry-count",
+        "1",
+    ]);
+    let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+    state.current_session_generation = Some(SessionGeneration::from_u128(3));
+    state.next_ping_at = Instant::now();
+    assert!(state.process_timers().await.unwrap().is_none());
+    let ping = server_ws.next().await.unwrap().unwrap();
+    let ping: ClientMessage = serde_json::from_str(ping.to_text().unwrap()).unwrap();
+    assert!(matches!(ping, ClientMessage::Ping));
+    let mut queued = Vec::new();
+    Frame::message(
+        serde_json::to_vec(&ServerMessage::Pong).unwrap(),
+        OpCode::Data(Data::Text),
+        true,
+    )
+    .format(&mut queued)
+    .unwrap();
+    state.ws = tokio_tungstenite::WebSocketStream::from_partially_read(
+        state.ws.into_inner(),
+        queued,
+        Role::Client,
+        None,
+    )
+    .await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    state.engine.negotiation_hold = Some(NegotiationHold {
+        step: "route",
+        entered: entered.clone(),
+        release: release.clone(),
+    });
+    tokio::time::pause();
+    let clock_guard = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    let peer = PlayerId::from_u128(2);
+    state.expected_peers.insert(peer);
+    state.pair_roles.insert(peer, false);
+    state.p2p_deadline = Some(Deadline::after(
+        Instant::now(),
+        PONG_TIMEOUT + Duration::from_secs(10),
+    ));
+    state.p2p_retry_at = state.pong_deadline;
+    tokio::time::advance(PONG_TIMEOUT).await;
+    let mut pairing = Box::pin(state.process_timers());
+    tokio::select! {
+        _ = entered.notified() => {},
+        result = &mut pairing => panic!("pairing ended before hold: {result:?}"),
+    }
+    tokio::time::advance(PONG_DRAIN_GRACE + Duration::from_millis(1)).await;
+    release.notify_one();
+    assert!(pairing.await.unwrap().is_none());
+    assert!(state.pong_grace_applied);
+    assert_eq!(state.pair_retry_attempts.get(&peer), Some(&1));
+    assert!(state
+        .process_timers()
+        .await
+        .expect("read the queued timely Pong before keepalive failure")
+        .is_none());
+    let renewed_deadline = state
+        .pong_deadline
+        .expect("new Ping retains its own response debt");
+    assert_eq!(
+        renewed_deadline,
+        checked_deadline(Instant::now(), PONG_TIMEOUT)
+    );
+    assert!(!state.pong_grace_applied);
+    assert!(state.process_timers().await.unwrap().is_none());
+    assert_eq!(state.pong_deadline, Some(renewed_deadline));
+    clock_guard.abort();
+    tokio::time::resume();
+    state.engine.negotiation_hold = None;
+    state.engine.remove_peer(peer).await.unwrap();
+}
+
+#[tokio::test]
+async fn keepalive_final_poll_preserves_frame_errors_and_bounded_control_work() {
+    use tokio_tungstenite::tungstenite::protocol::{
+        frame::{
+            coding::{Data, OpCode},
+            Frame,
+        },
+        Role,
+    };
+
+    for (kind, prefix) in [
+        ("pong", 0),
+        ("pong", 32),
+        ("relay", 32),
+        ("missing", 0),
+        ("control", 32),
+        ("control", MAX_KEEPALIVE_CONTROL_FRAMES),
+        ("malformed", 32),
+        ("close", 32),
+        ("pong", MAX_KEEPALIVE_CONTROL_FRAMES),
+    ] {
+        let (ws, _server_ws) = crate::socket_tests::websocket_pair().await;
+        let cli = Cli::parse_from([
+            "reference-native",
+            "--server-url",
+            "ws://127.0.0.1",
+            "--create-room",
+        ]);
+        let peer = PlayerId::from_u128(2);
+        let mut state = super::tests::fixture_orchestrator(&cli, ws, PlayerId::from_u128(1));
+        let mut queued = Vec::new();
+        for _ in 0..prefix {
+            Frame::pong(Vec::new()).format(&mut queued).unwrap();
+        }
+        match kind {
+            "pong" | "relay" => {
+                let message = if kind == "pong" {
+                    ServerMessage::Pong
+                } else {
+                    ServerMessage::GameData {
+                        from_player: peer,
+                        data: json!({"relay_msg":"during pairing"}),
+                        seq: None,
+                        epoch: None,
+                        class: None,
+                        key: None,
+                    }
+                };
+                Frame::message(
+                    serde_json::to_vec(&message).unwrap(),
+                    OpCode::Data(Data::Text),
+                    true,
+                )
+                .format(&mut queued)
+                .unwrap();
+            }
+            "malformed" => {
+                Frame::message(b"invalid-json".to_vec(), OpCode::Data(Data::Text), true)
+                    .format(&mut queued)
+                    .unwrap();
+            }
+            "close" => {
+                Frame::close(None).format(&mut queued).unwrap();
+            }
+            _ => {}
+        }
+        state.ws = tokio_tungstenite::WebSocketStream::from_partially_read(
+            state.ws.into_inner(),
+            queued,
+            Role::Client,
+            None,
+        )
+        .await;
+        state.pong_deadline = Some(Instant::now());
+        state.pong_grace_applied = true;
+        let result = state.process_timers().await;
+        if matches!(kind, "pong" | "relay") && prefix < MAX_KEEPALIVE_CONTROL_FRAMES {
+            assert!(result.unwrap().is_none(), "{kind}/{prefix}");
+            assert!(state.pong_deadline.is_none(), "{kind}/{prefix}");
+            assert_eq!(state.relay_received_from.contains(&peer), kind == "relay");
+        } else {
+            let error = result.expect_err(&format!("{kind}/{prefix}"));
+            assert_eq!(
+                error.code,
+                if kind == "malformed" {
+                    EXIT_PROTOCOL_ERROR
+                } else {
+                    EXIT_CONNECTION_ERROR
+                }
+            );
+            if kind == "close" {
+                assert!(
+                    error.message.contains("websocket closed by server"),
+                    "{error:?}"
+                );
+            } else if kind != "malformed" {
+                assert!(
+                    error.message.contains("server did not answer Ping"),
+                    "{error:?}"
+                );
+            }
+        }
+    }
+}

@@ -3,7 +3,7 @@ import { EXIT_CRITERIA_UNMET, type RunConfig } from '../shared/types.js';
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
-// Regressions #1011/#1027/#1029/#1033: delayed wakes cannot pay expired exchange debt.
+// Regressions #1011/#1027/#1029/#1033/#1066: admit timely receipts across physical timeout.
 for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
   [
     'fallback',
@@ -18,6 +18,12 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
     'late-received-unreliable',
     'queued-received-reliable',
     'queued-received-unreliable',
+    'queued-expired-reliable',
+    'queued-expired-unreliable',
+    'queued-expired-late-reliable',
+    'queued-expired-late-unreliable',
+    'queued-replanned-reliable',
+    'queued-replanned-unreliable',
     'queued-retired-reliable',
     'queued-retired-unreliable',
     'recovered-received-reliable',
@@ -297,6 +303,9 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
           scenario !== `live-received-${label}` &&
           scenario !== `late-received-${label}` &&
           scenario !== `queued-received-${label}` &&
+          scenario !== `queued-expired-${label}` &&
+          scenario !== `queued-expired-late-${label}` &&
+          scenario !== `queued-replanned-${label}` &&
           scenario !== `queued-retired-${label}` &&
           scenario !== `recovered-received-${label}`
         )
@@ -324,7 +333,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
         );
         continue;
       }
-      if (!live)
+      if (!live || scenario.startsWith('queued-expired-'))
         socket.deliver('Signal', {
           from: peer,
           generation: me,
@@ -449,13 +458,41 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
         assert(outputHeld, 'the prior input handler waits for output acknowledgment');
       }
       now = 1099;
+      if (scenario.startsWith('queued-replanned-')) {
+        socket.deliver('SessionPlan', {
+          generation: latePeer,
+          topology: 'mesh',
+          transport: 'webrtc',
+          fallback: 'relay',
+          ice_servers: [],
+          peers: [{ player_id: peer, initiate: false }],
+        });
+      }
       if (scenario.startsWith('queued-retired-')) {
         socket.deliver('PlayerLeft', { player_id: peer, epoch: 1, final_seq: 0 });
       }
-      channel!.onmessage?.({
-        data: JSON.stringify({ from: peer, channel: channel!.label, seq: 0 }),
-      });
+      if (!scenario.startsWith('queued-expired-late-'))
+        channel!.onmessage?.({
+          data: JSON.stringify({ from: peer, channel: channel!.label, seq: 0 }),
+        });
       if (scenario.startsWith('queued-')) now = 1101;
+      if (scenario.startsWith('queued-expired-')) {
+        for (const [id, timer] of [...timers])
+          if (timer.at <= now) {
+            timers.delete(id);
+            timer.callback();
+          }
+        assert(connection.closed, 'the concurrent operation expires before output drains');
+        const before = events.filter((event) => event['event'] === 'channel_message').length;
+        // An old browser handler can still be delivered after physical teardown.
+        channel!.onmessage?.({
+          data: JSON.stringify({ from: peer, channel: channel!.label, seq: 0 }),
+        });
+        assert(
+          events.filter((event) => event['event'] === 'channel_message').length === before,
+          'a post-timeout callback cannot publish a new receipt',
+        );
+      }
       holdOutput = false;
       releaseOutput();
       await turn();
@@ -465,9 +502,25 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
         await turn();
       }
       assert(
-        result === (scenario.startsWith('queued-retired-') ? EXIT_CRITERIA_UNMET : 0),
-        `${scenario}: pre-cutoff arrival retains only current-link exchange evidence; observed ${result}`,
+        result ===
+          (scenario.startsWith('queued-retired-') ||
+          scenario.startsWith('queued-replanned-') ||
+          scenario.startsWith('queued-expired-late-')
+            ? EXIT_CRITERIA_UNMET
+            : 0),
+        `${scenario}: pre-cutoff receipt survives only physical retirement; observed ${result}`,
       );
+      if (scenario.startsWith('queued-expired-')) {
+        assert(
+          events.filter(
+            (event) =>
+              event['event'] === 'channel_message' &&
+              event['label'] === channel!.label &&
+              event['text'] === JSON.stringify({ from: peer, channel: channel!.label, seq: 0 }),
+          ).length === (scenario.startsWith('queued-expired-late-') ? 0 : 1),
+          'publish only the timely receipt exactly once after output drains',
+        );
+      }
       continue;
     }
     if (scenario.startsWith('recovered-')) {
