@@ -3643,7 +3643,8 @@ change. An unsorted artifact still requires storage proportional to sends.
 
 The registered synthetic profile uses 16 peers and 100, 1,000, or 5,000 sends
 per peer. It evaluates the complete reliable fan-out oracle without sockets.
-Each size has three fresh baseline/candidate pairs in AB, BA, AB order.
+Each size has three fresh pairs. The first and third run the baseline first;
+the second runs the candidate first.
 All 18 processes succeeded. Every paired full summary is identical.
 
 | Recipient receipts | Baseline median peak RSS KiB | Candidate median peak RSS KiB |
