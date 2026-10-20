@@ -45,6 +45,11 @@ interface TransportObservation extends TransportState {
   elapsedMs: number;
 }
 
+interface ChannelDiagnostics {
+  receipts: { raw: number; admitted: number; rejected: number; discarded: number };
+  error: { errorDetail: RTCErrorDetailType; sctpCauseCode: number | null } | null;
+}
+
 /** Callbacks from engine-owned browser event handlers to the orchestrator. */
 export interface EngineCallbacks {
   onLocalCandidate(peer: string, generation: number, candidateJson: string): void;
@@ -91,6 +96,7 @@ export class Engine {
   private readonly callbacks: EngineCallbacks;
   private readonly peers = new Map<string, PeerLink>();
   private nextGeneration = 0;
+  private readonly channelDiagnostics = new WeakMap<RTCDataChannel, ChannelDiagnostics>();
 
   constructor(crippled: boolean, callbacks: EngineCallbacks) {
     this.crippled = crippled;
@@ -322,9 +328,15 @@ export class Engine {
             channel === undefined
               ? null
               : {
+                  id: channel.id,
                   readyState: channel.readyState,
                   bufferedAmount: channel.bufferedAmount,
                   openObserved: link.openLabels.has(label),
+                  receipts: { ...this.channelDiagnostics.get(channel)?.receipts },
+                  error:
+                    this.channelDiagnostics.get(channel)?.error === null
+                      ? null
+                      : { ...this.channelDiagnostics.get(channel)?.error },
                 },
           ];
         }),
@@ -477,6 +489,17 @@ export class Engine {
     channel: RTCDataChannel,
   ): void {
     const label = channel.label;
+    const diagnostics: ChannelDiagnostics = {
+      receipts: { raw: 0, admitted: 0, rejected: 0, discarded: 0 },
+      error: null,
+    };
+    this.channelDiagnostics.set(channel, diagnostics);
+    const count = (kind: keyof ChannelDiagnostics['receipts']) => {
+      diagnostics.receipts[kind] = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        diagnostics.receipts[kind] + 1,
+      );
+    };
     channel.binaryType = 'arraybuffer';
     // A remotely announced channel may already be open at registration time
     // (the announce task and the open transition race); notify exactly once
@@ -503,23 +526,28 @@ export class Engine {
       // Receipt timing belongs to raw arrival, before UTF-8 normalization.
       const arrivedAt = monotonicNowMs();
       const link = this.peers.get(peer);
-      if (
-        link !== callbackLink ||
-        !this.usableLink(peer, link) ||
-        link.channels.get(label) !== channel
-      ) {
+      if (link !== callbackLink || link.channels.get(label) !== channel) {
         return;
       }
+      count('raw');
+      // Publish the discarded classification before a terminal observer can
+      // snapshot and retire this link. A usable link has no callback here.
+      const previousDiscarded = diagnostics.receipts.discarded;
+      count('discarded');
+      if (!this.usableLink(peer, link)) return;
+      diagnostics.receipts.discarded = previousDiscarded;
       // Preflight allocations; UTF-16 length bounds UTF-8 length from below.
       const data = event.data;
       if (
         (typeof data === 'string' && data.length > MAX_CHANNEL_MESSAGE_BYTES) ||
         (data instanceof ArrayBuffer && data.byteLength > MAX_CHANNEL_MESSAGE_BYTES)
       ) {
+        count('rejected');
         rejectMessage('incoming data-channel message exceeds 65536 bytes');
         return;
       }
       if (typeof data !== 'string' && !(data instanceof ArrayBuffer)) {
+        count('rejected');
         rejectMessage('incoming data-channel message has an unsupported type');
         return;
       }
@@ -529,6 +557,7 @@ export class Engine {
           : new TextDecoder('utf-8', { ignoreBOM: true }).decode(data);
       const textBytes = new TextEncoder().encode(text).byteLength;
       if (textBytes > MAX_CHANNEL_MESSAGE_BYTES) {
+        count('rejected');
         rejectMessage('incoming data-channel message exceeds 65536 bytes');
         return;
       }
@@ -542,7 +571,10 @@ export class Engine {
           arrivedAt,
         ) === false
       ) {
+        count('rejected');
         rejectMessage('incoming data-channel message backlog exhausted');
+      } else {
+        count('admitted');
       }
     };
     // A required data channel can fail while the peer connection itself stays
@@ -563,7 +595,22 @@ export class Engine {
     };
     channel.onclosing = notifyClosed;
     channel.onclose = notifyClosed;
-    channel.onerror = notifyClosed;
+    channel.onerror = (event) => {
+      if (
+        this.peers.get(peer) !== callbackLink ||
+        callbackLink.channels.get(label) !== channel ||
+        callbackLink.terminal
+      )
+        return;
+      const error = (event as RTCErrorEvent | undefined)?.error;
+      if (error !== undefined) {
+        diagnostics.error = {
+          errorDetail: error.errorDetail,
+          sctpCauseCode: error.sctpCauseCode,
+        };
+      }
+      notifyClosed();
+    };
     if (channel.readyState === 'closing' || channel.readyState === 'closed') {
       queueMicrotask(notifyClosed);
     }

@@ -1,5 +1,6 @@
 use crate::data_channel::RTCDataChannelId;
 use crate::data_channel::internal::RTCDataChannelInternal;
+use crate::data_channel::state::RTCDataChannelState;
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
 use crate::peer_connection::transport::sctp::SCTP_MAX_CHANNELS;
 use sctp::StreamId;
@@ -84,6 +85,16 @@ impl DataChannelRegistry {
         self.channels.contains_key(handle)
     }
 
+    pub(crate) fn remove(&mut self, handle: &RTCDataChannelId) -> Option<RTCDataChannelInternal> {
+        let channel = self.channels.remove(handle)?;
+        if let Some(stream_id) = channel.stream_id
+            && self.by_stream.get(&stream_id) == Some(handle)
+        {
+            self.by_stream.remove(&stream_id);
+        }
+        Some(channel)
+    }
+
     /// The handle of the channel occupying `stream_id`, if any.
     pub(crate) fn handle_of_stream(&self, stream_id: &StreamId) -> Option<RTCDataChannelId> {
         self.by_stream.get(stream_id).copied()
@@ -124,7 +135,9 @@ impl DataChannelRegistry {
         let mut handles: Vec<_> = self
             .channels
             .values()
-            .filter(|dc| dc.stream_id.is_none())
+            .filter(|dc| {
+                dc.stream_id.is_none() && dc.ready_state == RTCDataChannelState::Connecting
+            })
             .map(|dc| dc.id)
             .collect();
         handles.sort_unstable();
@@ -161,7 +174,8 @@ impl DataChannelRegistry {
         role: RTCDtlsRole,
         max_channels: Option<StreamId>,
     ) -> Result<()> {
-        let mut next: StreamId = match role {
+        // A cursor must also represent exhaustion after SID 65534.
+        let mut next: u32 = match role {
             RTCDtlsRole::Client => 0,
             RTCDtlsRole::Server => 1,
             // Never guess a parity.
@@ -172,19 +186,21 @@ impl DataChannelRegistry {
         // may be created before the association exists, and until it connects there is nothing
         // to bound against. This matches W3C §6.1.1.3, which applies the limit at the connected
         // procedure rather than at creation.
-        let max = max_channels.unwrap_or(SCTP_MAX_CHANNELS);
+        let max = u32::from(max_channels.unwrap_or(SCTP_MAX_CHANNELS));
 
         for handle in self.pending_stream_id_handles() {
             // Skip ids already claimed — by an out-of-band channel the application pinned, or
             // by one the peer opened first. Carrying the cursor across iterations rather than
             // restarting the scan keeps this a single pass.
-            while next < max.saturating_sub(1) && self.stream_id_in_use(&next) {
+            // `max` is a count: every SID strictly below it is valid.
+            // The bound proves that each cast below fits the wire SID type.
+            while next < max && self.stream_id_in_use(&(next as StreamId)) {
                 next += 2;
             }
-            if next >= max.saturating_sub(1) {
+            if next >= max {
                 return Err(Error::ErrMaxDataChannelID);
             }
-            self.assign_stream_id(handle, next);
+            self.assign_stream_id(handle, next as StreamId);
             next += 2;
         }
 
@@ -221,5 +237,120 @@ impl DataChannelRegistry {
         let mut channels: Vec<_> = self.channels.drain().map(|(_, channel)| channel).collect();
         channels.sort_by_key(|channel| channel.id);
         channels
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connecting_channel() -> RTCDataChannelInternal {
+        RTCDataChannelInternal {
+            ready_state: RTCDataChannelState::Connecting,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn failed_creation_removal_releases_only_its_own_stream() {
+        let mut registry = DataChannelRegistry::new();
+        let pending = registry.insert(connecting_channel());
+        assert_eq!(registry.remove(&pending).unwrap().id, pending);
+        assert!(registry.remove(&pending).is_none());
+        let original = registry.insert(RTCDataChannelInternal {
+            stream_id: Some(2),
+            ..Default::default()
+        });
+        let current = registry.insert(RTCDataChannelInternal {
+            stream_id: Some(2),
+            ..Default::default()
+        });
+        registry.remove(&original).unwrap();
+        assert_eq!(registry.handle_of_stream(&2), Some(current));
+        registry.remove(&current).unwrap();
+        assert!(!registry.stream_id_in_use(&2));
+        assert!(registry.is_empty());
+    }
+
+    // Regression #1079: the negotiated count includes SID max - 1.
+    #[test]
+    fn negotiated_stream_count_admits_every_valid_role_stream() {
+        for max in 0..=6 {
+            for (role, parity) in [(RTCDtlsRole::Client, 0), (RTCDtlsRole::Server, 1)] {
+                let mut registry = DataChannelRegistry::new();
+                for expected in (parity..max).step_by(2) {
+                    let handle = registry.insert(connecting_channel());
+                    assert!(
+                        registry.assign_stream_ids(role, Some(max)).is_ok(),
+                        "role={role:?}, count={max}, expected SID={expected}"
+                    );
+                    assert_eq!(registry.get(&handle).unwrap().stream_id, Some(expected));
+                }
+                let extra = registry.insert(connecting_channel());
+                for _ in 0..2 {
+                    assert!(matches!(
+                        registry.assign_stream_ids(role, Some(max)),
+                        Err(Error::ErrMaxDataChannelID)
+                    ));
+                    assert_eq!(registry.get(&extra).unwrap().stream_id, None);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_pending_channels_do_not_consume_stream_capacity() {
+        for state in [RTCDataChannelState::Closing, RTCDataChannelState::Closed] {
+            let mut registry = DataChannelRegistry::new();
+            let terminal = registry.insert(RTCDataChannelInternal {
+                ready_state: state,
+                ..Default::default()
+            });
+            let live = registry.insert(connecting_channel());
+            registry
+                .assign_stream_ids(RTCDtlsRole::Client, Some(1))
+                .unwrap();
+            assert_eq!(registry.get(&terminal).unwrap().stream_id, None);
+            assert_eq!(registry.get(&live).unwrap().stream_id, Some(0));
+        }
+    }
+
+    #[test]
+    fn full_stream_range_exhausts_without_overflow_and_reuses_final_sid() {
+        for (role, max_channels) in [
+            (RTCDtlsRole::Client, Some(u16::MAX)),
+            (RTCDtlsRole::Server, Some(u16::MAX)),
+            (RTCDtlsRole::Client, None),
+            (RTCDtlsRole::Server, None),
+        ] {
+            let mut registry = DataChannelRegistry::new();
+            let parity = if role == RTCDtlsRole::Client { 0 } else { 1 };
+            let mut final_handle = 0;
+            let mut final_sid = 0;
+            for sid in (parity..u16::MAX).step_by(2) {
+                final_handle = registry.insert(connecting_channel());
+                final_sid = sid;
+            }
+            registry.assign_stream_ids(role, max_channels).unwrap();
+            assert_eq!(
+                registry.get(&final_handle).unwrap().stream_id,
+                Some(final_sid)
+            );
+            let pending = registry.insert(connecting_channel());
+            assert!(matches!(
+                registry.assign_stream_ids(role, max_channels),
+                Err(Error::ErrMaxDataChannelID)
+            ));
+            assert_eq!(
+                registry.remove_by_stream(&final_sid).unwrap().id,
+                final_handle
+            );
+            registry.assign_stream_ids(role, max_channels).unwrap();
+            assert_eq!(registry.get(&pending).unwrap().stream_id, Some(final_sid));
+            assert!(
+                pending > final_handle,
+                "a reused stream needs a fresh handle"
+            );
+        }
     }
 }

@@ -49,6 +49,41 @@ DTLS shutdown, timeout/reset, active records, and closure order.
 See [#919](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/919).
 Published replacement qualification in #912 must retain these controls.
 
+Deferred local channel setup fails each unavailable channel separately.
+Valid channels still dial and keep their first DCEP deadline across repeated
+connected events. Closed undialed channels release their reservations before
+assignment. Fixed IDs must fit the negotiated stream count.
+Public creation rejects reserved SID 65535 before registration and checks a
+fixed SID against an already connected transport before registration.
+Failed handles retire with one ordered close and one closed statistics record.
+Known stream IDs remain in those summaries.
+The delta changes `src/data_channel/registry.rs` and
+`src/peer_connection/handler/datachannel.rs`, plus
+`src/peer_connection/mod.rs` for public creation checks.
+Controls cover both roles, both required modes, closed pending channels,
+fixed IDs, overflow, repeated connection events, paired-wire DCEP and payload
+delivery, reset, and fresh stream reuse.
+See [#1081](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1081).
+Published replacement qualification in #912 must retain these controls.
+
+Failed local channel creation removes its new registry entry before returning
+the error. It releases a stream index only while the same handle owns that
+index. Failed handles remain retired. Repeated exhaustion and successful
+replacement controls cover both DTLS roles, including the final valid stream.
+See [#1080](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1080).
+Published replacement qualification in #912 must retain this rollback.
+
+Stream allocation treats the negotiated stream count as an exclusive bound.
+Both DTLS roles can allocate the last valid SID of their parity.
+A wider cursor prevents overflow at the end of the 16-bit SID range.
+The delta changes `src/data_channel/registry.rs`.
+Controls cover small counts, the full range, the unknown-count fallback,
+occupied SIDs, repeated exhaustion, and final-SID reuse with a fresh handle.
+A paired SCTP control negotiates counts 1 through 4 and receives payload sent
+through the RTC pipeline on the final SID in both required delivery modes.
+See [#1079](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1079).
+Published replacement qualification in #912 must retain these controls.
+
 Local close queues `RTCMessage::DataChannelClosing` behind input already queued
 for the application. Repeated close queues no duplicate. The wrapper can report
 pair loss while the channel waits for the remote SCTP reset. The delta changes

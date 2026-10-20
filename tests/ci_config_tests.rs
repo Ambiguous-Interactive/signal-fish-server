@@ -32326,28 +32326,38 @@ fn test_native_client_platform_matrix_live_smoke_and_ipv6_proof_are_pinned() {
         }),
         "the interop job must still run the suite via scripts/run-webrtc-interop.sh"
     );
-    // ...and that script must still run the WHOLE suite. A token blocklist is
-    // not enough — `--test=interop_e2e`, `-- --skip ipv6_only`, `-p`, and an
-    // added earlier `cargo test` line all narrow it past such a list — so pin
-    // the native invocation exactly, alongside the separate vendor control.
+    // Pin full logical commands: continuation lines contain the mandatory
+    // vendor selectors, and the final client command must run the WHOLE suite.
     let runner = read_live_file(&root.join("scripts/run-webrtc-interop.sh"));
-    let suite_commands: Vec<&str> = runner
-        .lines()
-        .map(str::trim)
+    let suite_commands: Vec<String> = shell_logical_lines(&runner)
+        .into_iter()
         .filter(|line| line.contains("cargo test"))
         .collect();
+    let mut expected_commands: Vec<String> = [
+        ("webrtc", "peer_connection::"),
+        ("rtc", "statistics"),
+        ("rtc", "remote_dcep_"),
+        ("rtc", "stream_reset_"),
+        ("rtc", "data_channel::registry::tests"),
+        ("rtc", "create_data_channel_failure_"),
+        ("rtc", "deferred_channel_failures_"),
+        ("rtc", "stream_count_boundary"),
+        ("rtc-sctp", "reset"),
+    ]
+    .into_iter()
+    .map(|(package, selector)| {
+        format!(
+            r#"cargo test --locked --manifest-path "${{REPO_ROOT}}/third_party/{package}/Cargo.toml" --target-dir "${{CLIENT_DIR}}/target" --lib {selector}"#
+        )
+    })
+    .collect();
+    expected_commands.push(
+        r#"SIGNAL_FISH_SERVER_BIN="${SERVER_BIN}" cargo test --locked "${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"}""#.to_owned(),
+    );
     assert_eq!(
-        suite_commands,
-        vec![
-            r#"cargo test --locked --manifest-path "${REPO_ROOT}/third_party/webrtc/Cargo.toml" \"#,
-            r#"cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \"#,
-            r#"cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \"#,
-            r#"cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \"#,
-            r#"cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \"#,
-            r#"SIGNAL_FISH_SERVER_BIN="${SERVER_BIN}" cargo test --locked "${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"}""#
-        ],
-        "the interop runner must run the WHOLE client suite as exactly one \
-         unnarrowed `cargo test`; any narrowing silently drops the \
+        suite_commands, expected_commands,
+        "the interop runner must execute each mandatory vendor selector and \
+         exactly one unnarrowed whole client suite; narrowing drops live \
          multi-process cells, including the IPv6 proof"
     );
     // That pinned line expands an array, so pin the array too: `(--lib)` on an

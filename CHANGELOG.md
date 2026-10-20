@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Find a published live room by application, game, and room code beyond the session-list limit (#992).
 - Report reference-client peer and channel state at P2P timeouts, incomplete gameplay exchange timeouts,
   and before failed links are removed, including bounded browser state history and SDP, ICE, and DTLS progress
-  (#853, #889, #1019).
+  plus browser receipt admission counts and SCTP error details (#853, #889, #1019).
 
 ### Changed
 
@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep valid native channels opening when another deferred channel fails or closes before connection (#1081).
+- Allow native data channels to use the last valid stream ID within the negotiated limit (#1079).
+- Release failed native channel creations so a later channel can reuse a free stream (#1080).
 - Send accepted native gameplay input before closing its data channel (#1076).
 - Preserve timely reference-client gameplay receipts when payload decoding or receive admission crosses the deadline
   (#1073, #1074).

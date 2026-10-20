@@ -175,6 +175,21 @@ impl<'a> DataChannelHandler<'a> {
         }
         Ok(())
     }
+
+    fn retire_undialed_channel(&mut self, now: Instant, id: RTCDataChannelId) {
+        if let Some(mut dc) = self.data_channels.remove(&id) {
+            dc.ready_state = RTCDataChannelState::Closed;
+            dc.handshake_deadline = None;
+            if !dc.close_emitted {
+                self.stats
+                    .get_or_create_data_channel(id, &dc.label, &dc.protocol);
+                if let Some(stream_id) = dc.stream_id {
+                    self.stats.set_data_channel_stream_id(id, stream_id);
+                }
+            }
+            self.announce_closed(now, dc, Some(TransportContext::default()));
+        }
+    }
 }
 
 impl<'a>
@@ -531,46 +546,82 @@ impl<'a>
                 // the DTLS role is resolved and the negotiated stream count is known. This is
                 // the first moment a stream id can be chosen correctly, and therefore the
                 // moment it is chosen at all (RFC 8832 §6).
-                self.data_channels
-                    .assign_stream_ids(self.dtls_role, self.max_channels)?;
+                let mut undialed: Vec<_> = self
+                    .data_channels
+                    .values()
+                    .filter(|dc| dc.data_channel.is_none())
+                    .map(|dc| dc.id)
+                    .collect();
+                undialed.sort_unstable();
+                // A channel closed before connect owns no transport to reset.
+                for &id in &undialed {
+                    if self.data_channels.get(&id).is_some_and(|dc| {
+                        matches!(
+                            dc.ready_state,
+                            RTCDataChannelState::Closing | RTCDataChannelState::Closed
+                        )
+                    }) {
+                        self.retire_undialed_channel(now, id);
+                    }
+                }
+                match self
+                    .data_channels
+                    .assign_stream_ids(self.dtls_role, self.max_channels)
+                {
+                    Ok(()) | Err(Error::ErrMaxDataChannelID) => {}
+                    Err(error) => return Err(error),
+                }
 
                 // Out-of-band negotiated channels have no DCEP handshake, so they are
                 // open immediately and fire the open event here. In-band channels stay
                 // connecting until their `DATA_CHANNEL_ACK` arrives in `handle_read`.
                 let mut opened = Vec::new();
-                for data_channel_internal in self.data_channels.values_mut() {
-                    // Only dial channels that have not been dialed yet. An in-band channel stays
-                    // Connecting after dialing, so the ready_state guard alone does not
-                    // exclude it from a second SCTPHandshakeComplete.
-                    if data_channel_internal.ready_state == RTCDataChannelState::Connecting
-                        && data_channel_internal.data_channel.is_none()
+                for id in undialed {
+                    let Some(dc) = self.data_channels.get(&id) else {
+                        continue;
+                    };
+                    if dc
+                        .stream_id
+                        .is_none_or(|sid| sid >= self.max_channels.unwrap_or(u16::MAX))
                     {
-                        data_channel_internal.dial(association_handle)?;
+                        self.retire_undialed_channel(now, id);
+                        continue;
+                    }
+                    if self
+                        .data_channels
+                        .get_mut(&id)
+                        .is_some_and(|dc| dc.dial(association_handle).is_err())
+                    {
+                        self.retire_undialed_channel(now, id);
+                        continue;
+                    }
+                    let data_channel_internal = self
+                        .data_channels
+                        .get_mut(&id)
+                        .ok_or(Error::ErrDataChannelNotExisted)?;
+                    if data_channel_internal.negotiated {
+                        opened.push(data_channel_internal.id);
+                    } else {
+                        // In-band channels have a DCEP handshake to complete; arm a
+                        // deadline so a lost ACK cannot leave them Connecting forever.
+                        data_channel_internal.handshake_deadline =
+                            self.dcep_handshake_timeout.map(|timeout| now + timeout);
+                    }
 
-                        if data_channel_internal.negotiated {
-                            opened.push(data_channel_internal.id);
-                        } else {
-                            // In-band channels have a DCEP handshake to complete; arm a
-                            // deadline so a lost ACK cannot leave them Connecting forever.
-                            data_channel_internal.handshake_deadline =
-                                self.dcep_handshake_timeout.map(|timeout| now + timeout);
-                        }
+                    let data_channel = data_channel_internal
+                        .data_channel
+                        .as_mut()
+                        .ok_or(Error::ErrDataChannelNotExisted)?;
 
-                        let data_channel = data_channel_internal
-                            .data_channel
-                            .as_mut()
-                            .ok_or(Error::ErrDataChannelNotExisted)?;
-
-                        while let Some(data_channel_message) = data_channel.poll_write() {
-                            debug!("send data channel message from handle_event");
-                            self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
-                                now,
-                                transport: TransportContext::default(),
-                                message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(
-                                    data_channel_message,
-                                )),
-                            });
-                        }
+                    while let Some(data_channel_message) = data_channel.poll_write() {
+                        debug!("send data channel message from handle_event");
+                        self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
+                            now,
+                            transport: TransportContext::default(),
+                            message: RTCMessageInternal::Dtls(DTLSMessage::Sctp(
+                                data_channel_message,
+                            )),
+                        });
                     }
                 }
 
@@ -756,6 +807,114 @@ mod tests {
             max_retransmits: None,
             negotiated: Some(stream_id),
         })
+    }
+
+    #[test]
+    fn deferred_channel_failures_isolate_overflow_for_both_roles() {
+        let mut observations = Vec::new();
+        for role in [RTCDtlsRole::Client, RTCDtlsRole::Server] {
+            let now = Instant::now();
+            let mut ctx = DataChannelHandlerContext::new(now);
+            let (mut channels, ids) = registry(vec![
+                RTCDataChannelInternal::new(DataChannelParameters::default()),
+                RTCDataChannelInternal::new(DataChannelParameters::default()),
+            ]);
+            let mut stats = RTCStatsAccumulator::new();
+            let result = {
+                let mut handler = DataChannelHandler::new(
+                    &mut ctx,
+                    &mut channels,
+                    &mut stats,
+                    Some(Duration::from_secs(30)),
+                    role,
+                    Some(2),
+                );
+                handler.handle_event(TaggedRTCEventInternal {
+                    now,
+                    event: RTCEventInternal::SCTPHandshakeComplete(0),
+                })
+            };
+            let first = channels.get(&ids[0]).unwrap();
+            observations.push((
+                role,
+                result,
+                first.stream_id,
+                first.data_channel.is_some(),
+                first.handshake_deadline == Some(now + Duration::from_secs(30)),
+                channels.contains(&ids[1]),
+                stats.peer_connection.data_channels_closed,
+            ));
+        }
+        // Drive both roles before asserting, so a client failure cannot hide the server history.
+        eprintln!("isolated deferred overflow: {observations:?}");
+        for (role, result, sid, dialed, deadline, excess, closed) in observations {
+            assert!(result.is_ok(), "role={role:?}: {result:?}");
+            assert_eq!(sid, Some(if role == RTCDtlsRole::Client { 0 } else { 1 }));
+            assert!(dialed && deadline && !excess, "role={role:?}");
+            assert_eq!(closed, 1);
+        }
+    }
+
+    #[test]
+    fn deferred_channel_failures_keep_valid_fixed_ids_and_close_invalid_id_once() {
+        for role in [RTCDtlsRole::Client, RTCDtlsRole::Server] {
+            let now = Instant::now();
+            let mut ctx = DataChannelHandlerContext::new(now);
+            let (mut channels, ids) = registry(vec![
+                negotiated_channel(0),
+                negotiated_channel(1),
+                negotiated_channel(2),
+            ]);
+            let mut stats = RTCStatsAccumulator::new();
+            {
+                let mut handler = DataChannelHandler::new(
+                    &mut ctx,
+                    &mut channels,
+                    &mut stats,
+                    None,
+                    role,
+                    Some(2),
+                );
+                for _ in 0..2 {
+                    handler
+                        .handle_event(TaggedRTCEventInternal {
+                            now,
+                            event: RTCEventInternal::SCTPHandshakeComplete(0),
+                        })
+                        .unwrap();
+                }
+            }
+            assert_eq!(stats.peer_connection.data_channels_opened, 2);
+            assert_eq!(stats.peer_connection.data_channels_closed, 1);
+            for &id in &ids[..2] {
+                assert_eq!(
+                    channels.get(&id).unwrap().ready_state,
+                    RTCDataChannelState::Open
+                );
+            }
+            assert!(!channels.contains(&ids[2]));
+            let notifications: Vec<_> = ctx
+                .read_outs
+                .iter()
+                .filter_map(|message| {
+                    if let RTCMessageInternal::Dtls(DTLSMessage::DataChannel(event)) =
+                        &message.message
+                    {
+                        Some((event.data_channel_id, event.data_channel_event.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(
+                notifications,
+                vec![
+                    (ids[2], DataChannelEvent::Close),
+                    (ids[0], DataChannelEvent::Open),
+                    (ids[1], DataChannelEvent::Open),
+                ]
+            );
+        }
     }
 
     /// A registry seeded with `channels`, returning it alongside their handles in the order

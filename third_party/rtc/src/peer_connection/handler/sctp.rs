@@ -1007,7 +1007,14 @@ mod tests {
     /// shuttle plays the role the ICE handler plays in production: it rewrites each
     /// datagram's source address for the receiving endpoint.
     fn establish() -> Established {
+        establish_with_stream_count(u16::MAX)
+    }
+
+    fn establish_with_stream_count(max_streams: u16) -> Established {
         let now = Instant::now();
+        let transport_config = TransportConfig::default()
+            .with_max_num_inbound_streams(max_streams)
+            .with_max_num_outbound_streams(max_streams);
 
         let mut client_ep = Endpoint::new(
             client_addr(),
@@ -1019,15 +1026,11 @@ mod tests {
             server_addr(),
             TransportProtocol::UDP,
             EndpointConfig::default().into(),
-            Some(ServerConfig::new(TransportConfig::default()).into()),
+            Some(ServerConfig::new(transport_config.clone()).into()),
         );
 
         let (client_ch, mut client_conn) = client_ep
-            .connect(
-                now,
-                ClientConfig::new(TransportConfig::default()),
-                server_addr(),
-            )
+            .connect(now, ClientConfig::new(transport_config), server_addr())
             .expect("client connect");
 
         let mut server_conns: HashMap<AssociationHandle, Association> = HashMap::new();
@@ -1090,6 +1093,509 @@ mod tests {
             server_ep,
             server_ch,
             server_conn,
+        }
+    }
+
+    #[test]
+    fn deferred_channel_failures_reserved_stream_id_is_rejected_before_connect() {
+        use crate::data_channel::RTCDataChannelInit;
+        use crate::peer_connection::RTCPeerConnectionBuilder;
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .build(Instant::now())
+            .unwrap();
+        for _ in 0..3 {
+            assert!(matches!(
+                pc.create_data_channel(
+                    "reserved",
+                    Some(RTCDataChannelInit {
+                        negotiated: Some(u16::MAX),
+                        ..Default::default()
+                    })
+                ),
+                Err(Error::ErrMaxDataChannelID)
+            ));
+            assert!(pc.data_channels.is_empty());
+            assert!(!pc.data_channels.stream_id_in_use(&u16::MAX));
+        }
+        assert!(pc.create_data_channel("ordinary", None).is_ok());
+    }
+
+    fn connected_creation_fixed_id_history(role: RTCDtlsRole) {
+        use crate::data_channel::RTCDataChannelInit;
+        use crate::peer_connection::RTCPeerConnectionBuilder;
+        let now = Instant::now();
+        let pair = establish_with_stream_count(2);
+        let (endpoint, handle, association) = if role == RTCDtlsRole::Client {
+            (pair.client_ep, pair.client_ch, pair.client_conn)
+        } else {
+            (pair.server_ep, pair.server_ch, pair.server_conn)
+        };
+        let mut pc = RTCPeerConnectionBuilder::new().build(now).unwrap();
+        pc.dtls_transport_mut().dtls_role = role;
+        pc.pipeline_context.sctp_handler_context = client_ctx(now, endpoint, handle, association);
+        assert_eq!(pc.sctp_transport().max_channels(), Some(2));
+        for sid in [2, u16::MAX, 2] {
+            assert!(
+                matches!(
+                    pc.create_data_channel(
+                        "invalid",
+                        Some(RTCDataChannelInit {
+                            negotiated: Some(sid),
+                            ..Default::default()
+                        })
+                    ),
+                    Err(Error::ErrMaxDataChannelID)
+                ),
+                "role={role:?}, sid={sid}"
+            );
+            assert!(pc.data_channels.is_empty());
+            assert!(!pc.data_channels.stream_id_in_use(&sid));
+        }
+        let mut valid = Vec::new();
+        for sid in [0, 1] {
+            let id = pc
+                .create_data_channel(
+                    "valid-fixed",
+                    Some(RTCDataChannelInit {
+                        negotiated: Some(sid),
+                        ..Default::default()
+                    }),
+                )
+                .unwrap()
+                .id();
+            valid.push(id);
+            assert_eq!(pc.data_channels.handle_of_stream(&sid), Some(id));
+            assert!(pc.data_channels.get(&id).unwrap().data_channel.is_some());
+            let before = pc.data_channels.len();
+            assert!(matches!(
+                pc.create_data_channel(
+                    "still-invalid",
+                    Some(RTCDataChannelInit {
+                        negotiated: Some(2),
+                        ..Default::default()
+                    })
+                ),
+                Err(Error::ErrMaxDataChannelID)
+            ));
+            assert_eq!(pc.data_channels.len(), before);
+            assert_eq!(pc.data_channels.handle_of_stream(&sid), Some(id));
+        }
+        assert_eq!(pc.data_channels.len(), 2);
+        assert_eq!(pc.data_channels.handle_of_stream(&0), Some(valid[0]));
+        assert_eq!(pc.data_channels.handle_of_stream(&1), Some(valid[1]));
+        assert!(pc.data_channels.pending_stream_id_handles().is_empty());
+    }
+
+    #[test]
+    fn deferred_channel_failures_connected_creation_rejects_fixed_ids_client() {
+        connected_creation_fixed_id_history(RTCDtlsRole::Client);
+    }
+
+    #[test]
+    fn deferred_channel_failures_connected_creation_rejects_fixed_ids_server() {
+        connected_creation_fixed_id_history(RTCDtlsRole::Server);
+    }
+
+    // Regression #1081: a failed deferred channel cannot stall another channel.
+    fn deferred_channel_failure_history(role: RTCDtlsRole, ordered: bool) {
+        use crate::data_channel::{RTCDataChannelInit, RTCDataChannelState};
+        use crate::peer_connection::message::RTCMessage;
+        use crate::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+
+        fn forward(
+            sender: &mut RTCPeerConnection,
+            receiver: &mut RTCPeerConnection,
+            source: SocketAddr,
+            now: Instant,
+        ) -> Vec<RTCMessage> {
+            sender.pipeline_context.observe(now);
+            receiver.pipeline_context.observe(now);
+            sender.get_sctp_handler().handle_timeout(now).unwrap();
+            while let Some(message) = sender.get_endpoint_handler().poll_write() {
+                sender
+                    .get_datachannel_handler()
+                    .handle_write(message)
+                    .unwrap();
+            }
+            while let Some(message) = sender.get_datachannel_handler().poll_write() {
+                sender.get_sctp_handler().handle_write(message).unwrap();
+            }
+            while let Some(message) = sender.get_sctp_handler().poll_write() {
+                if let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = message.message {
+                    receiver
+                        .get_sctp_handler()
+                        .handle_read(TaggedRTCMessageInternal {
+                            now,
+                            transport: TransportContext {
+                                peer_addr: source,
+                                ..Default::default()
+                            },
+                            message: RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)),
+                        })
+                        .unwrap();
+                }
+            }
+            let mut output = Vec::new();
+            while let Some(message) = receiver.poll_read() {
+                output.push(message.message);
+            }
+            output
+        }
+
+        let now = Instant::now();
+        let pair = establish_with_stream_count(2);
+        let (sender_ep, sender_ch, sender, receiver_ep, receiver_ch, receiver, source, remote) =
+            if role == RTCDtlsRole::Client {
+                (
+                    pair.client_ep,
+                    pair.client_ch,
+                    pair.client_conn,
+                    pair.server_ep,
+                    pair.server_ch,
+                    pair.server_conn,
+                    client_addr(),
+                    server_addr(),
+                )
+            } else {
+                (
+                    pair.server_ep,
+                    pair.server_ch,
+                    pair.server_conn,
+                    pair.client_ep,
+                    pair.client_ch,
+                    pair.client_conn,
+                    server_addr(),
+                    client_addr(),
+                )
+            };
+        let sid = if role == RTCDtlsRole::Client { 0 } else { 1 };
+        let mut pc = RTCPeerConnectionBuilder::new().build(now).unwrap();
+        let closed = pc
+            .create_data_channel("closed-before-connect", None)
+            .unwrap()
+            .id();
+        pc.data_channel(closed).unwrap().close().unwrap();
+        let closed_fixed = pc
+            .create_data_channel(
+                "closed-fixed",
+                Some(RTCDataChannelInit {
+                    negotiated: Some(sid),
+                    ..Default::default()
+                }),
+            )
+            .unwrap()
+            .id();
+        pc.data_channel(closed_fixed).unwrap().close().unwrap();
+        let invalid = pc
+            .create_data_channel(
+                "out-of-range",
+                Some(RTCDataChannelInit {
+                    negotiated: Some(2),
+                    ..Default::default()
+                }),
+            )
+            .unwrap()
+            .id();
+        // Exercise defensive connect-time validation even though the public API
+        // now rejects the reserved value before inserting a pending channel.
+        let invalid_max =
+            pc.data_channels
+                .insert(crate::data_channel::internal::RTCDataChannelInternal::new(
+                    crate::data_channel::parameters::DataChannelParameters {
+                        label: "invalid-max".to_owned(),
+                        negotiated: Some(u16::MAX),
+                        ..Default::default()
+                    },
+                ));
+        let options = RTCDataChannelInit {
+            ordered,
+            max_retransmits: (!ordered).then_some(0),
+            ..Default::default()
+        };
+        let valid = pc
+            .create_data_channel("valid", Some(options.clone()))
+            .unwrap()
+            .id();
+        let excess = pc.create_data_channel("excess", None).unwrap().id();
+        pc.dtls_transport_mut().dtls_role = role;
+        pc.pipeline_context.sctp_handler_context = client_ctx(now, sender_ep, sender_ch, sender);
+        assert_eq!(pc.sctp_transport().max_channels(), Some(2));
+        for observed in [now, now + Duration::from_secs(1)] {
+            pc.get_datachannel_handler()
+                .handle_event(TaggedRTCEventInternal {
+                    now: observed,
+                    event: RTCEventInternal::SCTPHandshakeComplete(sender_ch.0),
+                })
+                .unwrap();
+            let dc = pc.data_channels.get(&valid).unwrap();
+            assert_eq!(dc.stream_id, Some(sid));
+            assert!(
+                dc.data_channel.is_some(),
+                "role={role:?}, ordered={ordered}"
+            );
+            assert_eq!(dc.handshake_deadline, Some(now + Duration::from_secs(30)));
+            assert_eq!(
+                pc.pipeline_context
+                    .stats
+                    .peer_connection
+                    .data_channels_closed,
+                5
+            );
+            for id in [closed, closed_fixed, invalid, invalid_max, excess] {
+                assert!(!pc.data_channels.contains(&id));
+                assert_eq!(
+                    pc.pipeline_context
+                        .stats
+                        .data_channels
+                        .get(&id)
+                        .unwrap()
+                        .state,
+                    RTCDataChannelState::Closed
+                );
+            }
+            for (id, stream_id) in [(invalid, 2), (invalid_max, u16::MAX)] {
+                assert_eq!(
+                    pc.pipeline_context
+                        .stats
+                        .data_channels
+                        .get(&id)
+                        .unwrap()
+                        .data_channel_identifier,
+                    stream_id
+                );
+            }
+        }
+        let mut closed_ids = Vec::new();
+        while let Some(message) = pc.poll_read() {
+            if let RTCMessage::DataChannelClosed(id) = message.message {
+                closed_ids.push(id);
+            }
+        }
+        assert_eq!(
+            closed_ids,
+            vec![closed, closed_fixed, invalid, invalid_max, excess]
+        );
+        assert_eq!(
+            pc.pipeline_context
+                .stats
+                .peer_connection
+                .data_channels_opened,
+            0
+        );
+        let mut other = RTCPeerConnectionBuilder::new().build(now).unwrap();
+        other.dtls_transport_mut().dtls_role = if role == RTCDtlsRole::Client {
+            RTCDtlsRole::Server
+        } else {
+            RTCDtlsRole::Client
+        };
+        other.pipeline_context.sctp_handler_context =
+            client_ctx(now, receiver_ep, receiver_ch, receiver);
+        let mut sender_output = Vec::new();
+        let mut receiver_output = Vec::new();
+        for tick in 0..10 {
+            let observed = now + Duration::from_secs(2) + Duration::from_millis(tick * 100);
+            receiver_output.extend(forward(&mut pc, &mut other, source, observed));
+            sender_output.extend(forward(&mut other, &mut pc, remote, observed));
+        }
+        assert_eq!(
+            sender_output
+                .iter()
+                .filter(|m| matches!(m,
+                    RTCMessage::DataChannelOpened(id) if *id == valid))
+                .count(),
+            1
+        );
+        assert_eq!(
+            pc.data_channel(valid).unwrap().ready_state(),
+            RTCDataChannelState::Open
+        );
+        assert_eq!(
+            pc.data_channels.get(&valid).unwrap().handshake_deadline,
+            None
+        );
+        pc.data_channel(valid)
+            .unwrap()
+            .send_text(now + Duration::from_secs(3), "survives-deferred-overflow")
+            .unwrap();
+        for tick in 10..20 {
+            let observed = now + Duration::from_secs(2) + Duration::from_millis(tick * 100);
+            receiver_output.extend(forward(&mut pc, &mut other, source, observed));
+            sender_output.extend(forward(&mut other, &mut pc, remote, observed));
+        }
+        assert_eq!(
+            receiver_output
+                .iter()
+                .filter(|m| matches!(m,
+                    RTCMessage::DataChannelMessage(_, message)
+                    if message.data == b"survives-deferred-overflow"[..]))
+                .count(),
+            1
+        );
+        pc.data_channel(valid).unwrap().close().unwrap();
+        for tick in 20..40 {
+            let observed = now + Duration::from_secs(2) + Duration::from_millis(tick * 100);
+            receiver_output.extend(forward(&mut pc, &mut other, source, observed));
+            sender_output.extend(forward(&mut other, &mut pc, remote, observed));
+        }
+        assert!(!pc.data_channels.stream_id_in_use(&sid));
+        assert_eq!(
+            sender_output
+                .iter()
+                .filter(|m| matches!(m,
+                    RTCMessage::DataChannelClosed(id) if *id == valid))
+                .count(),
+            1
+        );
+        let fresh = pc.create_data_channel("fresh", Some(options)).unwrap().id();
+        assert!(fresh > excess);
+        assert_eq!(pc.data_channels.get(&fresh).unwrap().stream_id, Some(sid));
+        for tick in 40..50 {
+            let observed = now + Duration::from_secs(2) + Duration::from_millis(tick * 100);
+            receiver_output.extend(forward(&mut pc, &mut other, source, observed));
+            sender_output.extend(forward(&mut other, &mut pc, remote, observed));
+        }
+        assert_eq!(
+            pc.data_channel(fresh).unwrap().ready_state(),
+            RTCDataChannelState::Open
+        );
+        pc.data_channel(fresh)
+            .unwrap()
+            .send_text(now + Duration::from_secs(7), "fresh-stream")
+            .unwrap();
+        for tick in 50..60 {
+            let observed = now + Duration::from_secs(2) + Duration::from_millis(tick * 100);
+            receiver_output.extend(forward(&mut pc, &mut other, source, observed));
+            sender_output.extend(forward(&mut other, &mut pc, remote, observed));
+        }
+        assert_eq!(receiver_output.iter().filter(|m| matches!(m,
+                    RTCMessage::DataChannelMessage(_, message) if message.data == b"fresh-stream"[..])).count(), 1);
+        assert_eq!(
+            pc.pipeline_context
+                .stats
+                .peer_connection
+                .data_channels_closed,
+            6
+        );
+        pc.get_datachannel_handler()
+            .handle_event(TaggedRTCEventInternal {
+                now: now + Duration::from_secs(8),
+                event: RTCEventInternal::DTLSClosed,
+            })
+            .unwrap();
+        assert_eq!(
+            pc.pipeline_context
+                .stats
+                .peer_connection
+                .data_channels_closed,
+            7
+        );
+    }
+
+    #[test]
+    fn deferred_channel_failures_client_preserves_valid_channel_and_paired_wire_reuse() {
+        for ordered in [true, false] {
+            deferred_channel_failure_history(RTCDtlsRole::Client, ordered);
+        }
+    }
+
+    #[test]
+    fn deferred_channel_failures_server_preserves_valid_channel_and_paired_wire_reuse() {
+        for ordered in [true, false] {
+            deferred_channel_failure_history(RTCDtlsRole::Server, ordered);
+        }
+    }
+
+    // Regression #1079: use the final SID from a real negotiated stream count.
+    #[test]
+    fn stream_count_boundary_channel_sends_payload_on_paired_wire() {
+        use crate::data_channel::internal::RTCDataChannelInternal;
+        use crate::peer_connection::RTCPeerConnectionBuilder;
+        for count in 1..=4 {
+            let role = if count % 2 == 1 {
+                RTCDtlsRole::Client
+            } else {
+                RTCDtlsRole::Server
+            };
+            for ordered in [true, false] {
+                let now = Instant::now();
+                let pair = establish_with_stream_count(count);
+                let (sender_ep, sender_ch, sender, mut receiver_ep, mut receiver, source) =
+                    if role == RTCDtlsRole::Client {
+                        (
+                            pair.client_ep,
+                            pair.client_ch,
+                            pair.client_conn,
+                            pair.server_ep,
+                            pair.server_conn,
+                            client_addr(),
+                        )
+                    } else {
+                        (
+                            pair.server_ep,
+                            pair.server_ch,
+                            pair.server_conn,
+                            pair.client_ep,
+                            pair.client_conn,
+                            server_addr(),
+                        )
+                    };
+                let mut pc = RTCPeerConnectionBuilder::new().build(now).unwrap();
+                pc.pipeline_context.sctp_handler_context =
+                    client_ctx(now, sender_ep, sender_ch, sender);
+                let negotiated = pc.sctp_transport().max_channels();
+                assert_eq!(negotiated, Some(count));
+                let parity = if role == RTCDtlsRole::Client { 0 } else { 1 };
+                let mut id = 0;
+                for _ in (parity..count).step_by(2) {
+                    id = pc.data_channels.insert(RTCDataChannelInternal {
+                        ordered,
+                        max_retransmits: (!ordered).then_some(0),
+                        negotiated: true,
+                        ready_state: crate::data_channel::RTCDataChannelState::Connecting,
+                        ..Default::default()
+                    });
+                }
+                pc.data_channels
+                    .assign_stream_ids(role, negotiated)
+                    .unwrap();
+                let sid = pc.data_channels.get(&id).unwrap().stream_id.unwrap();
+                assert_eq!(sid, count - 1);
+                pc.data_channels
+                    .get_mut(&id)
+                    .unwrap()
+                    .dial(sender_ch.0)
+                    .unwrap();
+                pc.data_channel(id)
+                    .unwrap()
+                    .send_text(now, "boundary-gameplay")
+                    .unwrap();
+                while let Some(message) = pc.get_endpoint_handler().poll_write() {
+                    pc.get_datachannel_handler().handle_write(message).unwrap();
+                }
+                while let Some(message) = pc.get_datachannel_handler().poll_write() {
+                    pc.get_sctp_handler().handle_write(message).unwrap();
+                }
+                let mut received = Vec::new();
+                while let Some(message) = pc.get_sctp_handler().poll_write() {
+                    if let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = message.message {
+                        if let Some((_, DatagramEvent::AssociationEvent(event))) =
+                            receiver_ep.handle(now, source, None, raw.freeze())
+                        {
+                            receiver.handle_event(event);
+                        }
+                        if let Ok(mut stream) = receiver.stream(sid) {
+                            while let Some(message) = stream.read_sctp().unwrap() {
+                                received.push(message.to_payload(64).unwrap());
+                            }
+                        }
+                    }
+                }
+                assert_eq!(
+                    received,
+                    vec![Bytes::from_static(b"boundary-gameplay")],
+                    "count={count}, role={role:?}, ordered={ordered}"
+                );
+            }
         }
     }
 

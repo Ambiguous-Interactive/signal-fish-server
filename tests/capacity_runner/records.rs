@@ -7,8 +7,7 @@
 //! delivery class, so "replay the artifacts" and "summarize the run" are
 //! literally the same code path.
 
-use std::collections::BTreeMap;
-#[cfg(test)]
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::Mutex;
 #[cfg(test)]
@@ -40,6 +39,98 @@ pub struct SentEvent {
     pub phase: Phase,
 }
 
+/// A receipt identity shared within one collected or replayed run.
+/// Serialization stays a JSON string, including names outside the run roster.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+// Arc<String> keeps each stored name to one pointer; Arc<str> needs two.
+// Live tasks allocate once per peer identity. The replay pool shares exact names.
+pub struct ReceiptName(Arc<String>);
+
+impl ReceiptName {
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl From<String> for ReceiptName {
+    fn from(name: String) -> Self {
+        Self(Arc::new(name))
+    }
+}
+
+impl From<&str> for ReceiptName {
+    fn from(name: &str) -> Self {
+        name.to_string().into()
+    }
+}
+
+impl std::ops::Deref for ReceiptName {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::borrow::Borrow<str> for ReceiptName {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl<T: AsRef<str> + ?Sized> PartialEq<T> for ReceiptName {
+    fn eq(&self, other: &T) -> bool {
+        self.as_str() == other.as_ref()
+    }
+}
+
+impl std::fmt::Display for ReceiptName {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl serde::Serialize for ReceiptName {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ReceiptName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self::from)
+    }
+}
+
+/// Replay-only names. Live tasks clone their recipient and registry names
+/// directly, without a pool lookup or duplicate-string cleanup in the log.
+#[derive(Default)]
+pub(super) struct ReceiptNames(BTreeSet<ReceiptName>);
+
+impl ReceiptNames {
+    fn intern(&mut self, name: String) -> ReceiptName {
+        if let Some(shared) = self.0.get(name.as_str()) {
+            return shared.clone();
+        }
+        let shared = ReceiptName::from(name);
+        self.0.insert(shared.clone());
+        shared
+    }
+
+    pub(super) fn share(&mut self, receipt: ReceiptEvent<String>) -> ReceiptEvent {
+        ReceiptEvent {
+            recipient: self.intern(receipt.recipient),
+            sender: self.intern(receipt.sender),
+            seq: receipt.seq,
+            epoch: receipt.epoch,
+            server_seq: receipt.server_seq,
+            received_us: receipt.received_us,
+            application_bytes: receipt.application_bytes,
+            encoded_frame_body_bytes: receipt.encoded_frame_body_bytes,
+        }
+    }
+}
+
 /// One delivery a recipient task actually read off the socket.
 ///
 /// `seq` is the sender-stamped ledger sequence (unique across the whole run,
@@ -47,9 +138,9 @@ pub struct SentEvent {
 /// per-`(sender, epoch)` relay stamps read off the v3 wire frame — the
 /// stream-identity pair the oracle validates.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ReceiptEvent {
-    pub recipient: String,
-    pub sender: String,
+pub struct ReceiptEvent<Name = ReceiptName> {
+    pub recipient: Name,
+    pub sender: Name,
     pub seq: u64,
     pub epoch: u32,
     pub server_seq: u64,
@@ -771,6 +862,70 @@ impl RunRecords {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #775: replay must share exact names without changing arbitrary evidence.
+    #[test]
+    fn replay_name_sharing_preserves_unknown_unicode_duplicates_and_run_lifetimes() {
+        let log = EventLog::new();
+        let known: ReceiptName = "r0p1".into();
+        let unknown: ReceiptName = "未知\"\\\n".into();
+        for (recipient, sender, seq) in [
+            (known.clone(), unknown.clone(), 7),
+            (known.clone(), unknown.clone(), 7),
+            (unknown.clone(), known.clone(), 2),
+        ] {
+            log.push_receipt(ReceiptEvent {
+                recipient,
+                sender,
+                seq,
+                epoch: 3,
+                server_seq: 9,
+                received_us: 42,
+                application_bytes: 96,
+                encoded_frame_body_bytes: 250,
+            });
+        }
+        let collected = log.take_records();
+        let output = tempfile::tempdir().expect("artifacts");
+        crate::artifacts::write_deliveries(output.path(), &collected).expect("write records");
+        let first = crate::artifacts::read_records(output.path()).expect("read records");
+        let second = crate::artifacts::read_records(output.path()).expect("read another run");
+        for replayed in [&first, &second] {
+            assert_eq!(
+                serde_json::to_vec(&collected).unwrap(),
+                serde_json::to_vec(replayed).unwrap()
+            );
+            assert_eq!(replayed.receipts.len(), 3);
+            assert_eq!(replayed.receipts[0].sender.as_str(), "未知\"\\\n");
+            assert_eq!(replayed.receipts[0].seq, replayed.receipts[1].seq);
+            assert!(Arc::ptr_eq(
+                &replayed.receipts[0].sender.0,
+                &replayed.receipts[2].recipient.0
+            ));
+            assert!(Arc::ptr_eq(
+                &replayed.receipts[0].recipient.0,
+                &replayed.receipts[2].sender.0
+            ));
+        }
+        assert!(!Arc::ptr_eq(
+            &first.receipts[0].sender.0,
+            &second.receipts[0].sender.0
+        ));
+        let weak = Arc::downgrade(&collected.receipts[0].sender.0);
+        drop(unknown);
+        drop(collected);
+        assert!(
+            weak.upgrade().is_none(),
+            "the log must not retain a name pool"
+        );
+        assert!(std::mem::size_of::<ReceiptEvent>() < std::mem::size_of::<ReceiptEvent<String>>());
+        let original: ReceiptEvent<String> =
+            serde_json::from_value(serde_json::to_value(&first.receipts[0]).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&first.receipts[0]).unwrap(),
+            serde_json::to_vec(&original).unwrap()
+        );
+    }
 
     fn timing_receipt(seq: u64) -> ReceiptEvent {
         ReceiptEvent {
