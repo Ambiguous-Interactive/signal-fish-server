@@ -221,7 +221,7 @@ mod tests {
     use crate::peer_connection::RTCPeerConnectionBuilder;
     use datachannel::message::Message;
     use datachannel::message::message_channel_open::{ChannelType, DataChannelOpen};
-    use shared::marshal::Marshal;
+    use shared::marshal::{Marshal, Unmarshal};
 
     // Regression #1075: remote reset cannot overtake input accepted on the same stream.
     #[test]
@@ -294,6 +294,81 @@ mod tests {
         Ok(())
     }
 
+    // Regression #1076: the endpoint queue owns accepted writes until the driver runs.
+    #[test]
+    fn stream_reset_accepted_send_precedes_local_close_in_sctp_write_order() -> Result<()> {
+        use crate::peer_connection::message::internal::{DTLSMessage, RTCMessageInternal};
+        for (ordered, negotiated) in [(true, true), (false, true), (true, false), (false, false)] {
+            let now = Instant::now();
+            let mut pc = RTCPeerConnectionBuilder::new().build(now)?;
+            let mut dc = RTCDataChannelInternal::new(DataChannelParameters {
+                ordered,
+                max_retransmits: (!ordered).then_some(0),
+                negotiated: negotiated.then_some(0),
+                ..Default::default()
+            });
+            dc.stream_id = Some(0);
+            dc.dial(0)?;
+            if negotiated {
+                while dc.data_channel.as_mut().unwrap().poll_write().is_some() {}
+            }
+            let id = pc.data_channels.insert(dc);
+            pc.data_channel(id)
+                .unwrap()
+                .send_text(now, "final-before-reset")?;
+            assert_eq!(pc.data_channel(id).unwrap().outstanding_bytes(), 18);
+            pc.data_channel(id).unwrap().close()?;
+            pc.data_channel(id).unwrap().close()?;
+            assert_eq!(
+                pc.data_channel(id).unwrap().ready_state(),
+                RTCDataChannelState::Closing
+            );
+            assert!(
+                pc.data_channel(id)
+                    .unwrap()
+                    .send_text(now, "too-late")
+                    .is_err()
+            );
+            while let Some(msg) = pc.get_endpoint_handler().poll_write() {
+                pc.get_datachannel_handler().handle_write(msg)?;
+            }
+            let mut output = Vec::new();
+            while let Some(msg) = pc.get_datachannel_handler().poll_write() {
+                if let RTCMessageInternal::Dtls(DTLSMessage::Sctp(message)) = msg.message {
+                    output.push(message);
+                }
+            }
+            output.retain(|message| {
+                message.ppi != PayloadProtocolIdentifier::Dcep
+                    || !matches!(
+                        Message::unmarshal(&mut &message.payload[..]),
+                        Ok(Message::DataChannelThreshold(_))
+                    )
+            });
+            if !negotiated {
+                assert_eq!(output[0].ppi, PayloadProtocolIdentifier::Dcep);
+                assert!(matches!(
+                    Message::unmarshal(&mut &output[0].payload[..])?,
+                    Message::DataChannelOpen(_)
+                ));
+                output.remove(0);
+            }
+            assert_eq!(output.len(), 2, "one accepted message and one reset");
+            assert_eq!(
+                output[0].ppi,
+                PayloadProtocolIdentifier::String,
+                "ordered={ordered}: accepted payload must reach SCTP before reset; output={output:?}"
+            );
+            assert_eq!(&output[0].payload[..], b"final-before-reset");
+            assert_eq!(output[1].ppi, PayloadProtocolIdentifier::Dcep);
+            assert!(matches!(
+                Message::unmarshal(&mut &output[1].payload[..])?,
+                Message::DataChannelClose(_)
+            ));
+        }
+        Ok(())
+    }
+
     #[test]
     fn stream_reset_local_close_stays_closing_and_repeated_close_queues_one_reset() -> Result<()> {
         let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
@@ -322,6 +397,15 @@ mod tests {
             RTCDataChannelState::Closing
         );
         pc.data_channel(id).unwrap().close()?;
+        while let Some(msg) = pc.get_endpoint_handler().poll_write() {
+            pc.get_datachannel_handler().handle_write(msg)?;
+        }
+        // The handler drains preceding DATA, then its reset on poll_write.
+        let mut writes = Vec::new();
+        while let Some(msg) = pc.get_datachannel_handler().poll_write() {
+            writes.push(msg);
+        }
+        assert_eq!(writes.len(), 1, "repeated close requests one reset");
         let dc = pc
             .data_channels
             .get_mut(&id)
@@ -329,7 +413,10 @@ mod tests {
             .data_channel
             .as_mut()
             .unwrap();
-        assert!(dc.poll_write().is_some(), "first close requests reset");
+        assert!(
+            dc.poll_write().is_none(),
+            "reset already drained by handler"
+        );
         assert!(
             dc.poll_write().is_none(),
             "repeated close requests no second reset"

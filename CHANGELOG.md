@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Send accepted native gameplay input before closing its data channel (#1076).
 - Preserve timely reference-client gameplay receipts when payload decoding or receive admission crosses the deadline
   (#1073, #1074).
 - Deliver final native gameplay input before reporting a remote data-channel reset (#1075).

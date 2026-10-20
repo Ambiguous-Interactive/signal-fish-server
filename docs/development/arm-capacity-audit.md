@@ -3628,3 +3628,50 @@ Enabled observations add clock reads and bookkeeping. They do not identify
 socket readiness or a stall cause. Ordinary runs omit the option from config
 JSON and allocate no observation buffer. Delivery records and replay stay
 unchanged. Compare matched instrumented binaries before attributing a delay.
+
+### C3 borrowed send indexes
+
+Session 488 addresses part of
+[#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775)
+and [#636](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/636).
+The payload-size and latency joins each built a tree entry per completed send.
+Canonical records already have sender/sequence order. The joins now borrow
+that slice and search it directly. Unsorted artifacts use a stable vector of
+borrowed pointers. Duplicate keys retain the last original event, including
+its phase and intended time. Raw sends, receipts, and replay verdicts do not
+change. An unsorted artifact still requires storage proportional to sends.
+
+The registered synthetic profile uses 16 peers and 100, 1,000, or 5,000 sends
+per peer. It evaluates the complete reliable fan-out oracle without sockets.
+Each size has three fresh baseline/candidate pairs in AB, BA, AB order.
+All 18 processes succeeded. Every paired full summary is identical.
+
+| Recipient receipts | Baseline median peak RSS KiB | Candidate median peak RSS KiB |
+| --- | ---: | ---: |
+| 24,000 | 15,376 | 15,456 |
+| 240,000 | 51,720 | 51,148 |
+| 1,200,000 | 215,248 | 209,512 |
+
+The largest cohort reduces median peak RSS by 5,736 KiB (2.7%). Its median
+user CPU time changes from 7.543 to 6.520 seconds and wall time from 7.756 to
+7.266 seconds. The host is shared, and scoped lint overlaps later trials.
+These timings describe this cohort; they do not establish a timing bound or
+identify the live scheduling cause in
+[#1009](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1009).
+The smallest cohort increases peak RSS by 80 KiB; no universal memory decrease
+is claimed. Both executables use the existing debug synthetic probe.
+Baseline SHA-256 is
+`cf4d3bc8d4c86faf524d575947a830c6e6910bd92907c9dc54d99ec96d74c512`;
+candidate SHA-256 is
+`48196a34b7b5bfb72bc95416329035d9ba347494eebc33d9ba07fff6ca4242a7`.
+Registration, all attempts, the controller, and raw outputs remain local under
+`progress/session-488/capacity-send-index/`.
+
+Focused controls compare arbitrary ordering, duplicate keys, warm-up and
+measured phases, unknown sends, and empty inputs with independent tree-based
+references. Existing exact missing, duplicate, ordering, misroute, gap, and
+replay checks remain. Six final controls pass in `0799a076`, including real
+reliable relay, lossy pressure, and room replacement with exact replay.
+This change does not alter the live collector, workload, lag bound, or run
+duration. It does not bound all retained records or demonstrate the planned
+ten-minute cell. Issues #775 and #1009 remain open.

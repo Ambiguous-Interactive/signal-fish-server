@@ -1391,6 +1391,102 @@ mod tests {
         );
     }
 
+    // Regression #1076: inspect the complete accepted-write -> SCTP wire boundary.
+    #[test]
+    fn stream_reset_accepted_send_then_close_transmits_data_before_reset() {
+        use crate::data_channel::{
+            internal::RTCDataChannelInternal, parameters::DataChannelParameters,
+        };
+        use crate::peer_connection::RTCPeerConnectionBuilder;
+        for ordered in [true, false] {
+            let now = Instant::now();
+            let mut established = establish();
+            let ch = established.client_ch;
+            let mut pc = RTCPeerConnectionBuilder::new().build(now).unwrap();
+            pc.pipeline_context.sctp_handler_context =
+                client_ctx(now, established.client_ep, ch, established.client_conn);
+            pc.pipeline_context
+                .sctp_handler_context
+                .sctp_transport
+                .sctp_associations
+                .get_mut(&ch)
+                .unwrap()
+                .open_stream(0, PayloadProtocolIdentifier::String)
+                .unwrap()
+                .set_reliability_params(
+                    !ordered,
+                    if ordered {
+                        sctp::ReliabilityType::Reliable
+                    } else {
+                        sctp::ReliabilityType::Rexmit
+                    },
+                    0,
+                )
+                .unwrap();
+            established
+                .server_conn
+                .open_stream(0, PayloadProtocolIdentifier::String)
+                .unwrap();
+            let mut dc = RTCDataChannelInternal::new(DataChannelParameters {
+                ordered,
+                max_retransmits: (!ordered).then_some(0),
+                negotiated: Some(0),
+                ..Default::default()
+            });
+            dc.dial(ch.0).unwrap();
+            while dc.data_channel.as_mut().unwrap().poll_write().is_some() {}
+            let id = pc.data_channels.insert(dc);
+            pc.data_channel(id)
+                .unwrap()
+                .send_text(now, "final-before-reset")
+                .unwrap();
+            pc.data_channel(id).unwrap().close().unwrap();
+            // Use the production handlers, retaining raw SCTP before DTLS encrypts it.
+            while let Some(message) = pc.get_endpoint_handler().poll_write() {
+                pc.get_datachannel_handler().handle_write(message).unwrap();
+            }
+            while let Some(message) = pc.get_datachannel_handler().poll_write() {
+                pc.get_sctp_handler().handle_write(message).unwrap();
+            }
+            let mut wire = Vec::new();
+            while let Some(message) = pc.get_sctp_handler().poll_write() {
+                if let RTCMessageInternal::Dtls(DTLSMessage::Raw(raw)) = message.message {
+                    wire.push(raw.freeze());
+                }
+            }
+            let kinds: Vec<_> = wire.iter().map(|raw| raw[12]).collect();
+            eprintln!(
+                "ordered={ordered}: outstanding={}, wire_chunk_types={kinds:?}",
+                pc.data_channel(id).unwrap().outstanding_bytes()
+            );
+            assert_eq!(kinds, vec![0, 130], "DATA must precede RECONFIG");
+            assert_eq!(
+                &wire[1][16..18],
+                &13u16.to_be_bytes(),
+                "outgoing SSN reset request"
+            );
+            assert_eq!(
+                &wire[0][16..20],
+                &wire[1][28..32],
+                "reset sender_last_tsn includes accepted DATA"
+            );
+            let mut received = Vec::new();
+            for raw in wire {
+                if let Some((_, DatagramEvent::AssociationEvent(event))) =
+                    established.server_ep.handle(now, client_addr(), None, raw)
+                {
+                    established.server_conn.handle_event(event);
+                }
+                if let Ok(mut stream) = established.server_conn.stream(0) {
+                    while let Some(message) = stream.read_sctp().unwrap() {
+                        received.push(message.to_payload(64).unwrap());
+                    }
+                }
+            }
+            assert_eq!(received, vec![Bytes::from_static(b"final-before-reset")]);
+        }
+    }
+
     // Regression #872: a local close must not release its SID while reset
     // packets are withheld. Drive the real SCTP association without clocks or IO.
     #[test]

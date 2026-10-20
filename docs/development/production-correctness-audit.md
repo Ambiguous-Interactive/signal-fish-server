@@ -5900,3 +5900,105 @@ peer-module controls. Removing only the wrapper lifetime drain boundary fails
 the slow-receiver history; restored `ccc27377` passes. Root, native, RTC, and
 wrapper strict lint, browser build/typecheck/format, and document checks pass.
 Hosted current-head checks and feedback remain merge gates.
+
+### A20 — First-open browser input and same-stream reset
+
+Session 488 adds a discriminator for open
+[#853](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/853)
+and [#889](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/889).
+A real Chromium endpoint sends on each channel's first open event. It does not
+wait for the receiving reference engine to announce the channel or form the
+pair. The engine records raw message events and admitted callbacks separately.
+The matrix covers both offerer roles and both required labels. It then sends a
+final probe and either closes immediately or waits for an application receipt
+acknowledgement before closing that same stream.
+
+All eight histories pass. In all four engine-answerer histories, both first
+sends precede receiver channel registration. All 16 first-open probes and eight
+final probes reach raw receipt and engine admission. Final admission precedes
+pair loss in every history. The assertions require reliable receipt; they
+allow absent no-retransmit input. Any observed raw receipt before pair loss
+must cross admission exactly once. A raw callback after pair loss cannot pay
+receipt debt. Both required handles become unusable after the reset.
+
+Two temporary in-memory bundle faults qualify these controls. Dropping
+first-open callbacks fails the reliable-admission assertion. Dropping only
+unreliable first-open callbacks fails the final per-label admission assertion.
+The real channel suite passes all 23 controls after restoring the bundle.
+The browser engine source remains unchanged. Its SHA-256 is
+`d291acde9b4f515a1c6a5219943af5d2a0a100b930e04273a30d297f28d374db`.
+Raw capture and fault logs remain local under `progress/interop-diagnosis-*`.
+
+This qualifies browser channel registration and input/reset admission on these
+bounded Chromium-to-Chromium histories. It supplies a browser comparison for
+[#1076](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1076).
+It does not reproduce the historical browser/native failures, exclude a native
+DCEP or transport failure, or establish unreliable delivery on a lossy path.
+Issues #853 and #889 remain open. Replacement qualification in
+[#912](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/912)
+must retain startup and same-stream reset evidence separately from ordinary
+mesh exchange.
+
+### F106 — Local channel close overtakes accepted native sends
+
+Issue [#1076](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1076),
+found at `b2a9911b` under the unfinished #826/#889 investigation. A native
+`send_text` accepts `final-before-reset`, then the application closes that
+channel while only the remote reactor is paused. The receiver later closes
+without the payload. Its received-message count remains zero.
+
+The endpoint retains accepted writes until the driver runs. Local close
+previously inserted a DCEP close directly into the lower data-channel queue.
+The later endpoint drain appended the accepted payload behind that marker.
+SCTP processed close first and skipped the payload on its non-writable stream.
+The core red history records close before payload. The paired SCTP red history
+retains 18 outstanding bytes and emits only RECONFIG (chunk type 130), with no
+DATA packet.
+This establishes a sender-boundary cause for this reproduction, beyond the
+previous receiver-only zero-count observation. The red logs remain local in
+`progress/session-488/send-close-{core,wire,native}-red.log`.
+
+Local close now inserts its marker in the same endpoint FIFO as accepted
+writes. Public state becomes Closing immediately, repeated close remains a
+no-op, and further core sends fail. The lower reset follows accepted payloads.
+The wire control now emits DATA then RECONFIG. Its reset last-TSN includes that
+DATA, and the paired receiving SCTP stream reads the exact payload. Both
+required delivery modes pass. The core matrix also retains in-band DCEP OPEN
+before accepted payload and reset while its acknowledgement is pending.
+Six final RTC controls pass in `42ead198`, including repeated/unconnected
+close, late-ACK rejection, and stream reservation/reuse after reset completion.
+
+The original live history is retained as an eight-case matrix: both native
+offerer roles, both required channel modes, and pending versus acknowledged
+sends. Pending sends retain 18 outstanding bytes while the receiver is paused;
+acknowledged controls drain to zero before close. Each receiver reports the
+exact payload before closure, with one message and 18 bytes in its closed
+statistics. Send-after-close fails and duplicate close adds no second reset.
+Each case also establishes a fresh link and delivers new input. Three final
+native controls pass in `b0c4f44f`, including the matrix and existing local
+Closing/remote-close histories. Independent reviewers found no remaining
+production issue after the DCEP-pending control was added.
+
+This repair changes the private vendored native stack. Rust and .NET SDKs
+explicitly provide signaling/relay without this WebRTC backend. Godot uses
+its own GDScript/Godot mesh. Current external README inspection confirms these
+scopes. No server wire, SDK API, or migration changes are required.
+[#912](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/912)
+remains open: a published replacement must preserve this accepted-send/reset
+boundary as well as the prior reset/reuse and lifecycle ordering controls.
+These histories do not identify the historical #853/#889 causes or promise
+no-retransmit delivery across packet loss.
+
+Final interoperability run `48f7b492` passes the real browser mesh, native retry,
+and native room-restore cells. All four executable/bundle hashes match before
+and after the complete run. Seven endpoint event streams remain local under
+`progress/session-488/interop-final/`. The first passing run `eba77aa8` used an
+incorrect pre-build registration: enabling the browser-interop feature rebuilt
+the native executable after its initial hash was recorded. That attempt is
+retained but does not qualify a fixed-artifact cohort. The final run uses the
+already-built feature set and passes the matching-hash check. This correction
+is not evidence of a repaired transport failure.
+The final hosted RTC filter also passes all eight reset controls in `7a790ccc`,
+including both new accepted-send controls, queued input order, stream reopen,
+and the parked-reader recovery path. The new names match the existing
+`stream_reset_` hosted filter, so CI will execute their full bodies.

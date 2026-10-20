@@ -348,19 +348,61 @@ impl GapViolations {
     }
 }
 
+/// Borrow canonical sender/sequence order directly. Arbitrary artifact order
+/// uses a stable pointer sort, preserving the former map's last-key-wins rule.
+/// No receipt or raw send evidence is changed by this lookup index.
+enum SendIndex<'a> {
+    Ordered(&'a [SentEvent]),
+    Reordered(Vec<&'a SentEvent>),
+}
+
+impl<'a> SendIndex<'a> {
+    fn new(sent: &'a [SentEvent]) -> Self {
+        if sent.is_sorted_by_key(|event| (event.sender.as_str(), event.seq)) {
+            return Self::Ordered(sent);
+        }
+        let mut ordered: Vec<_> = sent.iter().collect();
+        ordered.sort_by_key(|event| (event.sender.as_str(), event.seq));
+        Self::Reordered(ordered)
+    }
+
+    fn get(&self, sender: &str, seq: u64) -> Option<&'a SentEvent> {
+        fn find<'a>(
+            count: usize,
+            event_at: impl Fn(usize) -> &'a SentEvent,
+            sender: &str,
+            seq: u64,
+        ) -> Option<&'a SentEvent> {
+            let mut left = 0;
+            let mut right = count;
+            while left < right {
+                let middle = left + (right - left) / 2;
+                let event = event_at(middle);
+                if (event.sender.as_str(), event.seq) <= (sender, seq) {
+                    left = middle + 1;
+                } else {
+                    right = middle;
+                }
+            }
+            let event = event_at(left.checked_sub(1)?);
+            ((event.sender.as_str(), event.seq) == (sender, seq)).then_some(event)
+        }
+        match self {
+            Self::Ordered(sent) => find(sent.len(), |index| &sent[index], sender, seq),
+            Self::Reordered(sent) => find(sent.len(), |index| sent[index], sender, seq),
+        }
+    }
+}
+
 /// One-way latency samples over the measured window, per recipient: for
 /// every receipt, the receipt time minus the intended send time of the same
 /// `(sender, seq)` delivery. Single source for the summary percentiles (run
 /// total and per recipient) and the histogram artifact, so they can never
 /// disagree.
 pub fn latency_pairs(records: &RunRecords) -> impl Iterator<Item = (&str, u64)> {
-    let sent_by_key: BTreeMap<(&str, u64), &SentEvent> = records
-        .sent
-        .iter()
-        .map(|event| ((event.sender.as_str(), event.seq), event))
-        .collect();
+    let sent_by_key = SendIndex::new(&records.sent);
     records.receipts.iter().filter_map(move |receipt| {
-        let sent = sent_by_key.get(&(receipt.sender.as_str(), receipt.seq))?;
+        let sent = sent_by_key.get(receipt.sender.as_str(), receipt.seq)?;
         (sent.phase == Phase::Measured).then(|| {
             (
                 receipt.recipient.as_str(),
@@ -608,11 +650,7 @@ fn payload_size_evidence(
     expected_application_bytes: u32,
     reasons: &mut Vec<InvalidReason>,
 ) -> PayloadBytes {
-    let phases: BTreeMap<(&str, u64), Phase> = records
-        .sent
-        .iter()
-        .map(|sent| ((sent.sender.as_str(), sent.seq), sent.phase))
-        .collect();
+    let sent_by_key = SendIndex::new(&records.sent);
     let mut evidence = PayloadBytes::default();
     let mut mismatches = (0_u64, None);
     let mut invalid_bodies = (0_u64, None);
@@ -667,7 +705,10 @@ fn payload_size_evidence(
         );
     }
     for receipt in &records.receipts {
-        let direction = match phases.get(&(receipt.sender.as_str(), receipt.seq)) {
+        let direction = match sent_by_key
+            .get(receipt.sender.as_str(), receipt.seq)
+            .map(|sent| sent.phase)
+        {
             Some(Phase::Warmup) => &mut evidence.warmup.egress,
             Some(Phase::Measured) => &mut evidence.measured.egress,
             None => &mut evidence.unmatched_egress,
@@ -1618,6 +1659,133 @@ fn percentile_of_sorted(sorted: &[u64], numerator: u64, denominator: u64) -> u64
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
+
+    #[test]
+    fn send_joins_preserve_duplicate_phase_latency_and_unmatched_receipts() {
+        let context = crate::unit_context();
+        let base = crate::complete_records(&context.plans);
+        for phase in [Phase::Warmup, Phase::Measured] {
+            for reverse in [false, true] {
+                let mut records = base.clone();
+                let mut duplicate = records.sent[0].clone();
+                duplicate.phase = phase;
+                duplicate.intended_us = 1;
+                duplicate.epoch = 99; // Ledger joins intentionally ignore epoch.
+                records.sent.push(duplicate);
+                // Retain receipt evidence whose send is absent from the ledger.
+                records.sent.retain(|sent| sent.seq != 1);
+                if reverse {
+                    records.sent.reverse();
+                }
+                let expected: BTreeMap<_, _> = records
+                    .sent
+                    .iter()
+                    .map(|sent| ((sent.sender.as_str(), sent.seq), sent))
+                    .collect();
+                let expected_latency: Vec<_> = records
+                    .receipts
+                    .iter()
+                    .filter_map(|receipt| {
+                        let sent = expected.get(&(receipt.sender.as_str(), receipt.seq))?;
+                        (sent.phase == Phase::Measured).then_some((
+                            receipt.recipient.as_str(),
+                            receipt.received_us.saturating_sub(sent.intended_us),
+                        ))
+                    })
+                    .collect();
+                assert_eq!(
+                    latency_pairs(&records).collect::<Vec<_>>(),
+                    expected_latency
+                );
+                let mut warmup = DirectionBytes::default();
+                let mut measured = DirectionBytes::default();
+                let mut unmatched = DirectionBytes::default();
+                for receipt in &records.receipts {
+                    let direction = match expected.get(&(receipt.sender.as_str(), receipt.seq)) {
+                        Some(sent) if sent.phase == Phase::Warmup => &mut warmup,
+                        Some(_) => &mut measured,
+                        None => &mut unmatched,
+                    };
+                    assert!(!direction
+                        .record(receipt.application_bytes, receipt.encoded_frame_body_bytes));
+                }
+                let mut reasons = Vec::new();
+                let actual = payload_size_evidence(&records, 96, &mut reasons);
+                assert!(reasons.is_empty(), "{reasons:?}");
+                for (actual, expected) in [
+                    (actual.warmup.egress, warmup),
+                    (actual.measured.egress, measured),
+                    (actual.unmatched_egress, unmatched),
+                ] {
+                    assert_eq!(
+                        serde_json::to_value(actual).unwrap(),
+                        serde_json::to_value(expected).unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_send_index_borrows_without_per_send_storage() {
+        // Issue #775: exact ledger joins must not rebuild a node per send.
+        let context = crate::unit_context();
+        let records = crate::complete_records(&context.plans);
+        assert!(matches!(
+            SendIndex::new(&records.sent),
+            SendIndex::Ordered(_)
+        ));
+        assert!(matches!(SendIndex::new(&[]), SendIndex::Ordered(_)));
+    }
+
+    #[test]
+    fn send_index_matches_map_for_arbitrary_order_and_duplicate_keys() {
+        let context = crate::unit_context();
+        let base = crate::complete_records(&context.plans).sent;
+        for order in 0..3 {
+            let mut sent = base.clone();
+            let mut duplicate = sent[0].clone();
+            duplicate.intended_us = u64::MAX;
+            duplicate.phase = Phase::Warmup;
+            sent.push(duplicate);
+            let mut boundary = sent[0].clone();
+            boundary.sender = "未知".into();
+            boundary.seq = u64::MAX;
+            sent.push(boundary);
+            match order {
+                0 => {}
+                1 => sent.reverse(),
+                _ => sent.sort_by_key(|event| (event.sender.clone(), event.seq)),
+            }
+            let expected: BTreeMap<_, _> = sent
+                .iter()
+                .map(|event| ((event.sender.as_str(), event.seq), event))
+                .collect();
+            let index = SendIndex::new(&sent);
+            if order == 2 {
+                assert!(matches!(index, SendIndex::Ordered(_)));
+            }
+            for ((sender, seq), event) in &expected {
+                assert!(std::ptr::eq(
+                    index.get(sender, *seq).expect("recorded key"),
+                    *event
+                ));
+            }
+            for sender in ["", "unknown", "r0p0", "未知"] {
+                for seq in [0, 1, u64::MAX] {
+                    assert_eq!(
+                        index.get(sender, seq).map(|event| event.intended_us),
+                        expected.get(&(sender, seq)).map(|event| event.intended_us),
+                        "sender={sender:?} seq={seq} order={order}",
+                    );
+                }
+            }
+            assert_eq!(
+                SendIndex::new(&[]).get("unknown", 0).map(|event| event.seq),
+                None
+            );
+        }
+    }
 
     // Issue #775: the old per-position set retained a node per receipt.
     #[test]
