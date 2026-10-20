@@ -6372,3 +6372,48 @@ handler event seam; this control does not qualify wire `close_notify` parsing.
 The rebuilt native/browser restore, retry, and three-player mesh histories pass
 in Nextest run `c1bfffae-8fca-4e75-b7a5-beb0b66e57d3`. Hosted full interop remains
 a separate qualification gate.
+
+### F116 — Setup acknowledgments release unsent native gameplay credit
+
+Baseline `26b80054`. Finding [#1095](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1095)
+continues A20, [#826](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/826),
+and native replacement qualification [#912](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/912).
+RTC charges accepted application payload bytes at the public send boundary.
+SCTP reports physical DATA payload bytes when acknowledged or abandoned.
+DCEP setup and empty-message filler bytes enter only the latter count.
+Subtracting that count from application debt can release queued gameplay
+credit before the peer acknowledges any gameplay.
+
+The new `transport_control_ack_preserves_pending_gameplay_accounting` control
+fails on the baseline: a real paired SCTP acknowledgment for an earlier DCEP
+message changes pending gameplay debt from 22 to 21. Gameplay remains in the
+RTC write queue. The setup acknowledgment cannot pay that debt. A final negative control
+uses valid marshaled DCEP OPEN and the unchanged final regression: restoring
+physical-byte forwarding leaves 2 bytes charged instead of 22. Byte-exact
+restoration of the repair passes the same test.
+
+The repair retains the physical SCTP release count and adds a separate
+application release count at the DATA chunk boundary. Only ordinary text and
+binary PPIDs pay application debt. DCEP and empty-message PPIDs do not.
+Cumulative acknowledgment, selective acknowledgment, and abandonment retain
+the same stream-generation checks and physical-buffer release behavior.
+RTC forwards the application count to its synchronous send counter.
+
+This changes the private native reference-client dependency graph. The Rust
+external client's current Cargo manifest has no native RTC dependency; games
+supply the backend. The .NET SDK provides signaling and relay. The Godot client
+uses engine `WebRTCMultiplayerPeer`. None uses this vendored graph. The server
+wire and SDK contracts stay unchanged. The finding does not explain historical
+establishment or mesh-receipt failures in #853 or #889.
+
+The green RTC history covers valid DCEP OPEN and ACK, empty text and binary,
+and ordinary binary release. Earlier setup acknowledgment leaves 22 queued
+gameplay bytes charged; the gameplay acknowledgment later releases them all.
+The SCTP control covers fragmented text and binary, selective acknowledgment
+before an earlier DCEP message, duplicate acknowledgment, abandonment,
+and an unsent fragmented tail. Its separate wire totals include empty fillers.
+All 36 SCTP reset and nine RTC reset controls pass. Both native blocked-send
+closure controls pass. Strict native and direct RTC/SCTP production lint pass.
+Independent code review has no unresolved finding. The rebuilt native/browser
+restore, retry, and three-player mesh histories pass in Nextest run
+`af20d0f7-11f3-47a4-8778-bf1910a32e41`. Hosted full qualification is separate.

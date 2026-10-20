@@ -89,6 +89,10 @@ echo "==> Verifying RTC channel reset ordering"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib stream_reset_
 
+echo "==> Verifying RTC application send accounting"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib transport_control_ack_preserves_pending_gameplay_accounting
+
 echo "==> Verifying RTC negotiated stream allocation"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib data_channel::registry::tests
@@ -105,6 +109,10 @@ cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc/Cargo.toml" \
 echo "==> Verifying the local SCTP stream reset repair"
 cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
     --target-dir "${CLIENT_DIR}/target" --lib reset
+
+echo "==> Verifying SCTP application byte release accounting"
+cargo test --locked --manifest-path "${REPO_ROOT}/third_party/rtc-sctp/Cargo.toml" \
+    --target-dir "${CLIENT_DIR}/target" --lib data_channel_credit_tracks_ppid
 
 echo "==> Running the reference-client test suite (unit + multi-process interop)"
 SIGNAL_FISH_SERVER_BIN="${SERVER_BIN}" cargo test --locked "${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"}"

@@ -108,8 +108,8 @@ impl<'de> serde::Deserialize<'de> for ReceiptName {
 pub(super) struct ReceiptNames(BTreeSet<ReceiptName>);
 
 impl ReceiptNames {
-    fn intern(&mut self, name: String) -> ReceiptName {
-        if let Some(shared) = self.0.get(name.as_str()) {
+    fn intern(&mut self, name: &str) -> ReceiptName {
+        if let Some(shared) = self.0.get(name) {
             return shared.clone();
         }
         let shared = ReceiptName::from(name);
@@ -117,9 +117,9 @@ impl ReceiptNames {
         shared
     }
 
-    pub(super) fn share_sent(&mut self, sent: SentEvent<String>) -> SentEvent {
+    pub(super) fn share_sent(&mut self, sent: SentEvent<impl AsRef<str>>) -> SentEvent {
         SentEvent {
-            sender: self.intern(sent.sender),
+            sender: self.intern(sent.sender.as_ref()),
             room: sent.room,
             seq: sent.seq,
             epoch: sent.epoch,
@@ -131,10 +131,10 @@ impl ReceiptNames {
         }
     }
 
-    pub(super) fn share(&mut self, receipt: ReceiptEvent<String>) -> ReceiptEvent {
+    pub(super) fn share(&mut self, receipt: ReceiptEvent<impl AsRef<str>>) -> ReceiptEvent {
         ReceiptEvent {
-            recipient: self.intern(receipt.recipient),
-            sender: self.intern(receipt.sender),
+            recipient: self.intern(receipt.recipient.as_ref()),
+            sender: self.intern(receipt.sender.as_ref()),
             seq: receipt.seq,
             epoch: receipt.epoch,
             server_seq: receipt.server_seq,

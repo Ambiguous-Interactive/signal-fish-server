@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep native send-buffer counts correct when setup or empty messages are acknowledged (#1095).
 - Deliver accepted native gameplay before reporting transport-driven data-channel closure (#1093).
 - Reject native gameplay sends until the data-channel handshake completes (#1091).
 - Release blocked native sends when their data channel closes and report closure before buffer pressure (#1088).
