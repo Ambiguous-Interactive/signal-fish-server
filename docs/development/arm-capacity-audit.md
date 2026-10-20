@@ -3794,3 +3794,36 @@ remains open. Retained records still grow with offered work, so
 [#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775)
 also remains open. Full registrations, all five artifact hashes per run, and
 raw results remain under the local source-sharing experiment directories.
+
+### Borrow canonical oracle ledgers instead of copying each send
+
+Session 491 continues [#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775)
+from `de067ca8`. The oracle copied one ledger sequence and one completion
+time per send after the collector had already sorted the original sends.
+The new relay blocks borrow contiguous sender/epoch slices. Arbitrary
+artifact order uses sorted references. Completion floors read the same events,
+so the second per-send copy is removed in both layouts.
+
+The focused regression uses the real collection and artifact round trip.
+An independent exhaustive comparison covers 4,096 interleaved stream layouts,
+duplicate and gapped ledger values, extreme integers, and completion times
+that disagree with sequence order. Existing delivery and churn checks remain.
+
+A registered fixed-binary cohort runs 16 senders at 100, 1,000, and 5,000
+sends each, with full fan-out. Three alternating baseline/candidate pairs at
+each size produce 18 successful processes. All nine complete summary pairs
+match exactly. Median process peak RSS is:
+
+| Recipient receipts | Baseline KiB | Candidate KiB |
+| --- | ---: | ---: |
+| 24,000 | 13,388 | 13,456 |
+| 240,000 | 28,840 | 28,524 |
+| 1,200,000 | 97,380 | 96,040 |
+
+The largest cell reduces median peak RSS by 1.38%. Its median resident bytes
+after oracle evaluation change from 99,831,808 to 98,336,768. The smallest cell
+shows the measurement floor. Shared-host timings are mixed; this is no speed
+claim. The registration, all attempts, hashes, and raw samples remain in
+`/tmp/capacity-ledger-evidence/` for this session. This cohort does not repeat
+the full ten-minute workload or establish a generator-stall cause. Retained
+records still grow with offered work; #775 and #1009 remain open.

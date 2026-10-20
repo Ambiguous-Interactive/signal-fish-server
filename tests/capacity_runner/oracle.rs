@@ -394,6 +394,75 @@ impl<'a> SendIndex<'a> {
     }
 }
 
+/// A sender incarnation's exact ledger, in sequence order. Canonical runs
+/// borrow raw events; arbitrary artifact order retains sorted pointers.
+enum RelayBlock<'a> {
+    Borrowed(&'a [SentEvent]),
+    Indexed(Vec<&'a SentEvent>),
+}
+
+impl<'a> RelayBlock<'a> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Borrowed(events) => events.len(),
+            Self::Indexed(events) => events.len(),
+        }
+    }
+
+    fn get(&self, index: usize) -> Option<&'a SentEvent> {
+        match self {
+            Self::Borrowed(events) => events.get(index),
+            Self::Indexed(events) => events.get(index).copied(),
+        }
+    }
+
+    fn completed_by(&self, at_us: u64) -> usize {
+        match self {
+            Self::Borrowed(events) => events.iter().filter(|event| event.sent_us <= at_us).count(),
+            Self::Indexed(events) => events.iter().filter(|event| event.sent_us <= at_us).count(),
+        }
+    }
+}
+
+fn relay_blocks(sent: &[SentEvent]) -> BTreeMap<(&str, u32), RelayBlock<'_>> {
+    let mut blocks = BTreeMap::new();
+    let mut start = 0;
+    while start < sent.len() {
+        let key = (sent[start].sender.as_str(), sent[start].epoch);
+        let mut end = start + 1;
+        while end < sent.len() && (sent[end].sender.as_str(), sent[end].epoch) == key {
+            end += 1;
+        }
+        let chunk = &sent[start..end];
+        match blocks.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(if chunk.is_sorted_by_key(|event| event.seq) {
+                    RelayBlock::Borrowed(chunk)
+                } else {
+                    RelayBlock::Indexed(chunk.iter().collect())
+                });
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let block = entry.get_mut();
+                if let RelayBlock::Borrowed(events) = block {
+                    *block = RelayBlock::Indexed(events.iter().collect());
+                }
+                if let RelayBlock::Indexed(events) = block {
+                    events.extend(chunk);
+                }
+            }
+        }
+        start = end;
+    }
+    for block in blocks.values_mut() {
+        if let RelayBlock::Indexed(events) = block {
+            // Stable order preserves original evidence for duplicate keys.
+            events.sort_by_key(|event| event.seq);
+        }
+    }
+    blocks
+}
+
 /// One-way latency samples over the measured window, per recipient: for
 /// every receipt, the receipt time minus the intended send time of the same
 /// `(sender, seq)` delivery. Single source for the summary percentiles (run
@@ -516,7 +585,7 @@ struct ChurnView {
 fn churn_views(
     records: &RunRecords,
     roster: &[(String, u32)],
-    sent_times: &BTreeMap<(&str, u32), Vec<u64>>,
+    blocks: &BTreeMap<(&str, u32), RelayBlock<'_>>,
 ) -> (BTreeMap<String, ChurnView>, Vec<String>) {
     let room_of: BTreeMap<&str, u32> = roster
         .iter()
@@ -616,14 +685,9 @@ fn churn_views(
                                 // at or before this rejoin.
                                 if let Some(epochs) = view.adopted.get(member).cloned() {
                                     for old in epochs {
-                                        let completed = sent_times
+                                        let completed = blocks
                                             .get(&(member.as_str(), old))
-                                            .map(|times| {
-                                                times
-                                                    .iter()
-                                                    .filter(|sent_us| **sent_us <= *at_us)
-                                                    .count()
-                                            })
+                                            .map(|block| block.completed_by(*at_us))
                                             .unwrap_or(0);
                                         let completed =
                                             u64::try_from(completed).unwrap_or(u64::MAX);
@@ -872,28 +936,7 @@ pub fn summarize(
     // `1 <= server_seq <= block.len()` — the bound the misroute checks
     // enforce; the ledger position (`block[server_seq - 1]`) pairs the
     // stream coordinates with the sender-stamped ledger sequence.
-    let mut blocks: BTreeMap<(&str, u32), Vec<u64>> = BTreeMap::new();
-    for sent in &records.sent {
-        blocks
-            .entry((sent.sender.as_str(), sent.epoch))
-            .or_default()
-            .push(sent.seq);
-    }
-    for block in blocks.values_mut() {
-        block.sort_unstable();
-    }
-    // Per-stream send completion times (ledger-seq order = send order), the
-    // basis for deriving an absent member's owed floor: the server cannot
-    // deliver a freshly seated recipient any frame fanned out before its
-    // seat, so a member missing from the rejoin snapshot owes exactly the
-    // sends that completed after it.
-    let sent_times: BTreeMap<(&str, u32), Vec<u64>> =
-        records.sent.iter().fold(BTreeMap::new(), |mut acc, sent| {
-            acc.entry((sent.sender.as_str(), sent.epoch))
-                .or_default()
-                .push(sent.sent_us);
-            acc
-        });
+    let blocks = relay_blocks(&records.sent);
     let sender_epochs: BTreeMap<&str, BTreeSet<u32>> =
         blocks
             .keys()
@@ -939,7 +982,7 @@ pub fn summarize(
     // per-member `(epoch, seq tail)` raises the stream's owed floor ("a
     // recipient owes no GameData at or below this sequence in the paired
     // epoch"), covering the away window loudly.
-    let (views, unresolved) = churn_views(records, roster, &sent_times);
+    let (views, unresolved) = churn_views(records, roster, &blocks);
     for player_id in unresolved {
         reasons.push(InvalidReason::UnresolvedSenderIdentity { player_id });
     }
@@ -1006,7 +1049,7 @@ pub fn summarize(
             .checked_sub(1)
             .and_then(|index| usize::try_from(index).ok())
             .and_then(|index| blocks.get(&(sender, epoch))?.get(index))
-            .is_some_and(|seq| *seq == receipt.seq);
+            .is_some_and(|event| event.seq == receipt.seq);
         if !ledger_matches || stale || below_floor {
             stream.misrouted.record(receipt.server_seq);
         }
@@ -1659,6 +1702,111 @@ fn percentile_of_sorted(sorted: &[u64], numerator: u64, denominator: u64) -> u64
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
+
+    // Issue #775: canonical ledgers must not retain a pointer per send.
+    #[test]
+    fn relay_blocks_borrow_canonical_slices_across_epochs() {
+        let context = crate::unit_context();
+        let mut records = crate::complete_records(&context.plans);
+        records
+            .sent
+            .sort_by_key(|event| (event.sender.clone(), event.seq));
+        // Gapped and duplicate sequence values still borrow. No arithmetic
+        // sequence assumption may discard malformed evidence.
+        records.sent[0].seq = 0;
+        records.sent[1].seq = 0;
+        let first_sender = records.sent[0].sender.clone();
+        for event in records
+            .sent
+            .iter_mut()
+            .skip(2)
+            .take_while(|event| event.sender == first_sender)
+        {
+            event.epoch = 2;
+        }
+        records
+            .sent
+            .iter_mut()
+            .take_while(|event| event.sender == first_sender)
+            .last()
+            .unwrap()
+            .seq = u64::MAX;
+        // Live tasks append out of order. The collector sorts the final
+        // ledger, and its exact JSONL replay must keep the borrowing path.
+        let log = crate::records::EventLog::new();
+        for event in records.sent.iter().rev() {
+            log.push_sent(event.clone());
+        }
+        let collected = log.take_records();
+        let output = tempfile::tempdir().expect("ledger artifacts");
+        crate::artifacts::write_deliveries(output.path(), &collected).unwrap();
+        let replayed = crate::artifacts::read_records(output.path()).unwrap();
+        for records in [&records, &collected, &replayed] {
+            let blocks = relay_blocks(&records.sent);
+            for block in blocks.values() {
+                assert!(matches!(block, RelayBlock::Borrowed(_)));
+                for index in 0..block.len() {
+                    assert!(records
+                        .sent
+                        .iter()
+                        .any(|event| std::ptr::eq(event, block.get(index).unwrap())));
+                }
+                assert!(block.get(block.len()).is_none());
+                assert!(block.get(usize::MAX).is_none());
+            }
+        }
+        assert!(relay_blocks(&[]).is_empty());
+    }
+
+    #[test]
+    fn relay_blocks_match_independent_sorted_ledgers_and_completion_counts() {
+        let context = crate::unit_context();
+        let base = crate::complete_records(&context.plans).sent[0].clone();
+        // Exhaustively interleave senders, epochs, duplicate/gapped sequences,
+        // and completion times that disagree with ledger order.
+        for mut encoded in 0_u32..4096 {
+            let mut sent = Vec::new();
+            for index in 0..6 {
+                let digit = encoded % 4;
+                encoded /= 4;
+                let mut event = base.clone();
+                event.sender = if digit % 2 == 0 { "未知" } else { "other" }.into();
+                event.epoch = digit / 2;
+                event.seq = [0, 7, 7, u64::MAX][(index + digit as usize) % 4];
+                event.sent_us = [u64::MAX, 10, 0][index % 3];
+                sent.push(event);
+            }
+            let mut expected: BTreeMap<_, Vec<_>> = BTreeMap::new();
+            for event in &sent {
+                expected
+                    .entry((event.sender.as_str(), event.epoch))
+                    .or_default()
+                    .push(event);
+            }
+            for events in expected.values_mut() {
+                events.sort_by_key(|event| event.seq);
+            }
+            let actual = relay_blocks(&sent);
+            assert_eq!(actual.len(), expected.len());
+            for (key, events) in expected {
+                let block = &actual[&key];
+                assert_eq!(block.len(), events.len());
+                for (index, event) in events.iter().enumerate() {
+                    assert!(std::ptr::eq(block.get(index).unwrap(), *event));
+                }
+                for cutoff in [0, 9, 10, u64::MAX] {
+                    assert_eq!(
+                        block.completed_by(cutoff),
+                        events
+                            .iter()
+                            .filter(|event| event.sent_us <= cutoff)
+                            .count()
+                    );
+                }
+                assert!(block.get(events.len()).is_none());
+            }
+        }
+    }
 
     #[test]
     fn send_joins_preserve_duplicate_phase_latency_and_unmatched_receipts() {

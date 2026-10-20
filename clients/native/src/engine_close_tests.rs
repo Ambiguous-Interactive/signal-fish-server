@@ -720,3 +720,352 @@ async fn immediate_send_then_close_with_remote_reactor_paused() {
         }
     }
 }
+
+async fn backpressure_pair(
+    limit: Option<usize>,
+    initiator_sends: bool,
+) -> (LivePair, Arc<PausableReactor>) {
+    let (sender_tx, sender_events) = mpsc::unbounded_channel();
+    let (receiver_tx, receiver_events) = mpsc::unbounded_channel();
+    let settings = EngineSettings {
+        disable_mdns: true,
+        ..EngineSettings::default()
+    };
+    let remote_runtime = PausableReactor::new();
+    let mut sender = Engine::new(settings, sender_tx).unwrap();
+    let mut receiver = Engine::new(settings, receiver_tx).unwrap();
+    sender.send_buffer_limit = limit;
+    receiver.send_buffer_limit = limit;
+    if initiator_sends {
+        receiver.runtime = remote_runtime.clone();
+    } else {
+        sender.runtime = remote_runtime.clone();
+    }
+    let mut pair = LivePair {
+        sender,
+        receiver,
+        sender_events,
+        receiver_events,
+        sender_id: PlayerId::from_u128(0x1088),
+        receiver_id: PlayerId::from_u128(0x1089),
+    };
+    pair.negotiate().await;
+    if !initiator_sends {
+        std::mem::swap(&mut pair.sender, &mut pair.receiver);
+        std::mem::swap(&mut pair.sender_id, &mut pair.receiver_id);
+        std::mem::swap(&mut pair.sender_events, &mut pair.receiver_events);
+    }
+    (pair, remote_runtime)
+}
+
+fn assert_channel_closed(result: webrtc::error::Result<()>) {
+    assert!(
+        matches!(result, Err(webrtc::error::Error::ErrDataChannelClosed)),
+        "terminal channel must return typed Closed, got {result:?}"
+    );
+}
+
+// Regression #1088: a full channel must release every kind of sender on local close.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_channel_local_close_releases_senders_before_remote_reset() {
+    for initiator_sends in [true, false] {
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            for limit in [1, 8] {
+                let (mut pair, remote_runtime) =
+                    backpressure_pair(Some(limit), initiator_sends).await;
+                let channel = pair.sender.channel(pair.receiver_id, label).unwrap();
+                remote_runtime.pause().await;
+                let accepted = "a".repeat(limit);
+                channel.send_text(&accepted).await.unwrap();
+                assert_eq!(channel.outstanding_bytes().await.unwrap(), limit);
+                assert!(matches!(
+                    channel.try_send_text("x").await,
+                    Err(webrtc::error::Error::ErrSendBufferFull)
+                ));
+                assert!(matches!(
+                    channel.try_send(b"x".as_slice().into()).await,
+                    Err(webrtc::error::Error::ErrSendBufferFull)
+                ));
+                let writable = channel.writable();
+                let binary = channel.send(b"blocked-binary".as_slice().into());
+                let text = channel.send_text("blocked-text");
+                tokio::pin!(writable, binary, text);
+                /*
+                 * Poll all three before closing to prove each future reached
+                 * the capacity wait.
+                 */
+                assert!(futures_util::poll!(&mut writable).is_pending());
+                assert!(futures_util::poll!(&mut binary).is_pending());
+                assert!(futures_util::poll!(&mut text).is_pending());
+                channel.close().await.unwrap();
+                assert_eq!(
+                    channel.ready_state().await.unwrap(),
+                    rtc::data_channel::RTCDataChannelState::Closing
+                );
+                assert_eq!(
+                    channel.outstanding_bytes().await.unwrap(),
+                    limit,
+                    "close preserves already accepted payload until reciprocal reset"
+                );
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    let (ready, binary, text) = tokio::join!(&mut writable, &mut binary, &mut text);
+                    for result in [ready, binary, text] {
+                        assert_channel_closed(result);
+                    }
+                })
+                .await
+                .expect("local closing releases senders while the remote reactor remains paused");
+                assert_channel_closed(channel.try_send_text("x").await);
+                assert_channel_closed(channel.try_send(b"x".as_slice().into()).await);
+                let sibling_label = if label == RELIABLE_LABEL {
+                    UNRELIABLE_LABEL
+                } else {
+                    RELIABLE_LABEL
+                };
+                let sibling = pair
+                    .sender
+                    .channel(pair.receiver_id, sibling_label)
+                    .unwrap();
+                assert_eq!(
+                    sibling.ready_state().await.unwrap(),
+                    rtc::data_channel::RTCDataChannelState::Open
+                );
+                sibling.try_send_text("sibling").await.unwrap();
+                remote_runtime.resume();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    let mut received = 0;
+                    loop {
+                        match pair.receiver_events.recv().await.unwrap() {
+                            EngineEvent::ChannelMessage {
+                                label: received_label,
+                                text,
+                                ..
+                            } if received_label == label => {
+                                assert_eq!(text, accepted);
+                                received += 1;
+                            }
+                            EngineEvent::ChannelClosed { label: closed, .. } if closed == label => {
+                                assert_eq!(received, 1, "accepted input arrives once before close");
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    while !matches!(
+                        channel.outstanding_bytes().await,
+                        Ok(0) | Err(webrtc::error::Error::ErrDataChannelClosed)
+                    ) {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("reset preserves accepted input and releases outstanding bytes");
+                /*
+                 * The engine stops gameplay admission after required-channel loss.
+                 * Transport stats still prove the sibling delivered independently.
+                 */
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        let reports = pair.receiver.peers[&pair.sender_id]
+                            .pc
+                            .get_stats(std::time::Instant::now(), StatsSelector::None)
+                            .await;
+                        if reports.iter().any(|entry| {
+                            matches!(entry,
+                            RTCStatsReportEntry::DataChannel(stats)
+                            if stats.label == sibling_label && stats.messages_received == 1
+                                && stats.bytes_received == 7
+                                && stats.state == rtc::data_channel::RTCDataChannelState::Open)
+                        }) {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("closing one transport channel leaves its sibling able to deliver");
+                assert_channel_closed(channel.writable().await);
+                pair.sender.remove_peer(pair.receiver_id).await.unwrap();
+                pair.receiver.remove_peer(pair.sender_id).await.unwrap();
+                pair.negotiate().await;
+                let fresh = pair.sender.channel(pair.receiver_id, label).unwrap();
+                fresh.try_send_text("fresh").await.unwrap();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if let EngineEvent::ChannelMessage {
+                            label: received_label,
+                            text,
+                            ..
+                        } = pair.receiver_events.recv().await.unwrap()
+                        {
+                            assert_eq!((received_label.as_str(), text.as_str()), (label, "fresh"));
+                            break;
+                        }
+                    }
+                })
+                .await
+                .expect("fresh link delivers after terminal backpressure");
+                pair.cleanup().await;
+            }
+        }
+    }
+}
+
+// Regression #1088: default and zero (unlimited) limits still obey channel state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unlimited_channel_writable_rejects_local_closing_and_remote_closed() {
+    for limit in [None, Some(0), Some(usize::MAX)] {
+        for initiator_sends in [true, false] {
+            let (pair, remote_runtime) = backpressure_pair(limit, initiator_sends).await;
+            let channel = pair
+                .sender
+                .channel(pair.receiver_id, RELIABLE_LABEL)
+                .unwrap();
+            let remote = pair
+                .receiver
+                .channel(pair.sender_id, RELIABLE_LABEL)
+                .unwrap();
+            channel.writable().await.unwrap();
+            remote_runtime.pause().await;
+            channel.close().await.unwrap();
+            assert_eq!(
+                channel.ready_state().await.unwrap(),
+                rtc::data_channel::RTCDataChannelState::Closing
+            );
+            assert_channel_closed(channel.writable().await);
+            remote_runtime.resume();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !matches!(
+                    remote.ready_state().await,
+                    Ok(rtc::data_channel::RTCDataChannelState::Closed)
+                        | Err(webrtc::error::Error::ErrDataChannelClosed)
+                ) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("remote observes channel reset");
+            assert_channel_closed(remote.writable().await);
+            pair.cleanup().await;
+        }
+    }
+}
+
+// Regression #1088: reciprocal reset must release senders blocked on the other peer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_channel_remote_reset_releases_senders() {
+    for initiator_sends in [true, false] {
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            for limit in [1, 8] {
+                let (pair, remote_runtime) = backpressure_pair(Some(limit), initiator_sends).await;
+                let channel = pair.sender.channel(pair.receiver_id, label).unwrap();
+                let remote = pair.receiver.channel(pair.sender_id, label).unwrap();
+                remote_runtime.pause().await;
+                channel.send_text(&"a".repeat(limit)).await.unwrap();
+                assert_eq!(channel.outstanding_bytes().await.unwrap(), limit);
+                let writable = channel.writable();
+                let binary = channel.send(b"blocked-binary".as_slice().into());
+                let text = channel.send_text("blocked-text");
+                tokio::pin!(writable, binary, text);
+                assert!(futures_util::poll!(&mut writable).is_pending());
+                assert!(futures_util::poll!(&mut binary).is_pending());
+                assert!(futures_util::poll!(&mut text).is_pending());
+                remote.close().await.unwrap();
+                assert_eq!(
+                    remote.ready_state().await.unwrap(),
+                    rtc::data_channel::RTCDataChannelState::Closing
+                );
+                remote_runtime.resume();
+                /*
+                 * An ACK can free capacity before reset arrives. Keep the
+                 * caller suspended until the public state proves terminal reset,
+                 * then re-poll its already pending operations.
+                 */
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !matches!(
+                        channel.ready_state().await,
+                        Ok(rtc::data_channel::RTCDataChannelState::Closed)
+                            | Err(webrtc::error::Error::ErrDataChannelClosed)
+                    ) {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("remote reset reaches the local public channel state");
+
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    let (ready, binary, text) = tokio::join!(&mut writable, &mut binary, &mut text);
+                    for result in [ready, binary, text] {
+                        assert_channel_closed(result);
+                    }
+                })
+                .await
+                .expect("remote channel reset releases all blocked senders");
+                assert!(matches!(
+                    channel.ready_state().await,
+                    Ok(rtc::data_channel::RTCDataChannelState::Closed)
+                        | Err(webrtc::error::Error::ErrDataChannelClosed)
+                ));
+                assert!(
+                    matches!(
+                        channel.outstanding_bytes().await,
+                        Ok(0) | Err(webrtc::error::Error::ErrDataChannelClosed)
+                    ),
+                    "reset releases byte accounting or removes the retired channel"
+                );
+                assert_channel_closed(channel.try_send_text("x").await);
+                assert_channel_closed(channel.try_send(b"x".as_slice().into()).await);
+                pair.cleanup().await;
+            }
+        }
+    }
+}
+
+// Regression #1088: buffer checks preserve Connecting and peer close/Drop semantics.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn channel_capacity_checks_preserve_connecting_and_peer_shutdown() {
+    struct NoopHandler;
+    #[async_trait]
+    impl PeerConnectionEventHandler for NoopHandler {}
+    for limit in [0, 1, usize::MAX] {
+        for drop_peer in [false, true] {
+            let pc = PeerConnectionBuilder::new()
+                .with_udp_addrs(vec!["127.0.0.1:0"])
+                .with_handler(Arc::new(NoopHandler))
+                .with_data_channel_send_buffer_limit(limit)
+                .build()
+                .await
+                .unwrap();
+            let channel = pc.create_data_channel(RELIABLE_LABEL, None).await.unwrap();
+            assert_eq!(
+                channel.ready_state().await.unwrap(),
+                rtc::data_channel::RTCDataChannelState::Connecting
+            );
+            channel.writable().await.unwrap();
+            for result in [
+                channel.send_text("before-open").await,
+                channel.send(b"before-open".as_slice().into()).await,
+                channel.try_send_text("before-open").await,
+                channel.try_send(b"before-open".as_slice().into()).await,
+            ] {
+                assert!(
+                    matches!(result, Err(webrtc::error::Error::ErrDataChannelNotOpen)),
+                    "Connecting sends preserve typed NotOpen: {result:?}"
+                );
+            }
+            if !drop_peer {
+                pc.close().await.unwrap();
+            }
+            drop(pc);
+            tokio::time::timeout(Duration::from_secs(2), async {
+                assert_channel_closed(channel.writable().await);
+                assert_channel_closed(channel.send_text("after-shutdown").await);
+                assert_channel_closed(channel.send(b"after-shutdown".as_slice().into()).await);
+                assert_channel_closed(channel.try_send_text("after-shutdown").await);
+                assert_channel_closed(channel.try_send(b"after-shutdown".as_slice().into()).await);
+            })
+            .await
+            .expect("peer close and Drop terminate all capacity operations");
+        }
+    }
+}

@@ -308,16 +308,17 @@ impl DataChannelImpl {
         }
     }
 
-    /// Park until the driver signals send-buffer progress, or a 50 ms liveness backstop
-    /// fires. Called only on the slow path, when [`writable`](DataChannel::writable) finds
-    /// the buffer at/over the limit.
-    ///
-    /// Holds no lock while waiting: the driver applies SCTP buffer releases (acknowledged
-    /// or abandoned bytes) to the per-channel `outstanding_bytes` counter and then wakes
-    /// `data_channel_backpressure`, so a blocked sender re-checks and proceeds as soon as
-    /// the peer acknowledges data. The 50 ms timeout is a lost-wakeup / liveness backstop
-    /// — and, for a peer that never acks, the sender correctly stays blocked (bounding
-    /// send-side memory) while still re-checking `closing` so `close()`/`Drop` release it.
+    async fn wait_for_send_buffer(&self) -> Result<()> {
+        if self.inner.closing.load(Ordering::Acquire) {
+            return Err(Error::ErrDataChannelClosed);
+        }
+        /* Unbounded sends check channel state under the enqueue lock. */
+        if self.inner.data_channel_send_buffer_limit != usize::MAX {
+            self.writable().await?;
+        }
+        Ok(())
+    }
+
     async fn await_send_capacity(&self) {
         futures::select! {
             _ = self.inner.data_channel_backpressure.notified().fuse() => {}
@@ -465,12 +466,7 @@ impl DataChannel for DataChannelImpl {
 
     // Contract (blocking behaviour, errors, example) is documented on `DataChannel::send`.
     async fn send(&self, data: BytesMut) -> Result<()> {
-        // Await capacity, then enqueue. `writable()` is a no-op unless a send-buffer limit
-        // is configured; when one is, it blocks until the channel's outstanding bytes fall
-        // below it. It also returns ErrDataChannelClosed terminally on a closing connection,
-        // so a caller blocked on a stalled peer is released by close()/Drop rather than
-        // buffering unboundedly. Mirrors tokio::mpsc::Sender::send.
-        self.writable().await?;
+        self.wait_for_send_buffer().await?;
         {
             let mut peer_connection = self.inner.core.lock().await;
             let mut dc = peer_connection
@@ -487,8 +483,7 @@ impl DataChannel for DataChannelImpl {
 
     // Contract is documented on `DataChannel::send_text`.
     async fn send_text(&self, text: &str) -> Result<()> {
-        // Await capacity, then enqueue — see `send` for the rationale.
-        self.writable().await?;
+        self.wait_for_send_buffer().await?;
         {
             let mut peer_connection = self.inner.core.lock().await;
             let mut dc = peer_connection
@@ -502,36 +497,26 @@ impl DataChannel for DataChannelImpl {
     }
 
     async fn writable(&self) -> Result<()> {
-        // Terminal on a closing/closed connection: once close()/Drop stops the driver it no
-        // longer drains outstanding_bytes, so waiting could never make progress. Return
-        // ErrDataChannelClosed at once (mirrors send()-after-close in the browser).
-        if self.inner.closing.load(Ordering::Acquire) {
-            return Err(Error::ErrDataChannelClosed);
-        }
         let limit = self.inner.data_channel_send_buffer_limit;
-        // Unbounded (the default): every send is admitted, so the channel is always
-        // writable — skip locking the core entirely. This is what keeps `send`/`send_text`
-        // non-blocking and lock-once on the default path.
-        if limit == usize::MAX {
-            return Ok(());
-        }
         loop {
             if self.inner.closing.load(Ordering::Acquire) {
                 return Err(Error::ErrDataChannelClosed);
             }
             {
                 let mut peer_connection = self.inner.core.lock().await;
-                let outstanding = peer_connection
+                let dc = peer_connection
                     .data_channel(self.id)
-                    .ok_or(Error::ErrDataChannelClosed)?
-                    .outstanding_bytes();
-                // Below the limit ⇒ writable. An empty buffer (`0 < limit`) also passes, so
-                // a lone message larger than the limit can still be sent rather than
-                // blocking forever.
-                if outstanding < limit {
+                    .ok_or(Error::ErrDataChannelClosed)?;
+                if matches!(
+                    dc.ready_state(),
+                    RTCDataChannelState::Closing | RTCDataChannelState::Closed
+                ) {
+                    return Err(Error::ErrDataChannelClosed);
+                }
+                if limit == usize::MAX || dc.outstanding_bytes() < limit {
                     return Ok(());
                 }
-            } // release the core lock before parking
+            }
             self.await_send_capacity().await;
         }
     }
@@ -550,6 +535,12 @@ impl DataChannel for DataChannelImpl {
             let mut dc = peer_connection
                 .data_channel(self.id)
                 .ok_or(Error::ErrDataChannelClosed)?;
+            if matches!(
+                dc.ready_state(),
+                RTCDataChannelState::Closing | RTCDataChannelState::Closed
+            ) {
+                return Err(Error::ErrDataChannelClosed);
+            }
             let outstanding = dc.outstanding_bytes();
             // Reject once the message would push outstanding bytes past the limit — but
             // always admit onto an empty buffer, so a lone message larger than the limit can
@@ -576,6 +567,12 @@ impl DataChannel for DataChannelImpl {
             let mut dc = peer_connection
                 .data_channel(self.id)
                 .ok_or(Error::ErrDataChannelClosed)?;
+            if matches!(
+                dc.ready_state(),
+                RTCDataChannelState::Closing | RTCDataChannelState::Closed
+            ) {
+                return Err(Error::ErrDataChannelClosed);
+            }
             let outstanding = dc.outstanding_bytes();
             if outstanding != 0 && outstanding.saturating_add(text.len()) > limit {
                 return Err(Error::ErrSendBufferFull);
@@ -617,6 +614,7 @@ impl DataChannel for DataChannelImpl {
                 .close()?;
         }
 
+        self.inner.data_channel_backpressure.notify_waiters();
         self.inner.wake_writes().await;
         Ok(())
     }
