@@ -320,6 +320,16 @@ Each entry includes `elapsedMs`, measured from creation of this physical link
 with the monotonic browser clock and rounded to milliseconds. The initial state
 is recorded; repeated observations add no entries. Events and diagnostic reads
 record changes, so the history can show transient progress before a timeout.
+Each required channel also reports its SCTP stream `id` and `receipts` counters.
+`raw` counts current-channel message callbacks. `admitted` counts callbacks that
+pass validation and return from the Engine consumer without a backlog rejection.
+`rejected` counts input-size, input-type, and backlog failures. `discarded` counts
+callbacks fenced by terminal transport state. Admission is recorded after the
+consumer returns, so a diagnostic called inside that consumer can see one raw
+callback still in progress. These counts do not prove application-level receipt
+or SCTP packet delivery. An `error` object records the browser's `errorDetail`
+and `sctpCauseCode` when a channel error supplies them; otherwise it is `null`.
+Counters saturate at the largest safe integer. A replacement channel starts fresh.
 A replacement link starts a new history. The history contains no SDP, candidate
 addresses, or message payloads. Browser events can combine state changes, so
 these observations do not prove a failure cause. Retain both endpoint logs and

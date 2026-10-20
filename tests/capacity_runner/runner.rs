@@ -44,7 +44,7 @@ use crate::diagnostics;
 use crate::oracle::{self, InvalidReason, OutcomeSummary};
 use crate::records::{
     ChurnEvent, ChurnPhase, DisconnectEvent, DisconnectObservation, EventLog, GapEvent,
-    ReceiptEvent, RunRecords, SentEvent, UnsupportedNoticeEvent,
+    ReceiptEvent, ReceiptName, RunRecords, SentEvent, UnsupportedNoticeEvent,
 };
 use crate::schedule::{build_run_shape, ScheduledSend, SenderPlan};
 use crate::websocket_test_helpers;
@@ -75,7 +75,7 @@ pub type WsReceiver = futures_util::stream::SplitStream<WsStream>;
 /// receiving tasks resolve every inbound frame's `from_player` through
 /// here, which classifies deliveries exactly even across a rejoin storm.
 /// `pub(crate)` for the deterministic inbound-classification controls.
-pub(crate) type SenderRegistry = Arc<std::sync::Mutex<BTreeMap<String, (String, u32)>>>;
+pub(crate) type SenderRegistry = Arc<std::sync::Mutex<BTreeMap<String, (ReceiptName, u32)>>>;
 
 /// The result of one completed run.
 #[derive(Debug)]
@@ -685,7 +685,14 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
 
     // The registry is complete only after every peer task is done: record
     // it once, before the snapshot the artifacts write.
-    log.set_registry(registry.lock().expect("sender registry poisoned").clone());
+    log.set_registry(
+        registry
+            .lock()
+            .expect("sender registry poisoned")
+            .iter()
+            .map(|(id, (name, epoch))| (id.clone(), (name.to_string(), *epoch)))
+            .collect(),
+    );
     let records = log.take_records();
     let evidence_finished_us = micros(epoch.elapsed());
     let bound_us = micros(config.generator_lag_bound);
@@ -1324,6 +1331,7 @@ async fn peer_task(
     hold_reads_for: Option<Duration>,
     never_read: bool,
 ) {
+    let receipt_recipient = ReceiptName::from(recipient.as_str());
     let first_measured = plan.sends.first_measured_seq();
     // This peer's incarnation index: 1 on the first connection, +1 on every
     // rejoin. It — not the server's per-connection epoch — is the stream
@@ -1332,7 +1340,7 @@ async fn peer_task(
     registry
         .lock()
         .expect("sender registry")
-        .insert(initial.2, (recipient.clone(), incarnation));
+        .insert(initial.2, (receipt_recipient.clone(), incarnation));
     // The first join's snapshot tails are not recorded: every member's
     // stream is empty at the initial join (joins complete before the first
     // scheduled send), which is the oracle's default floor.
@@ -1377,10 +1385,10 @@ async fn peer_task(
                 {
                     Ok((next_sink, next_rx, player_id, tails)) => {
                         incarnation += 1;
-                        registry
-                            .lock()
-                            .expect("sender registry")
-                            .insert(player_id.to_string(), (recipient.clone(), incarnation));
+                        registry.lock().expect("sender registry").insert(
+                            player_id.to_string(),
+                            (receipt_recipient.clone(), incarnation),
+                        );
                         // The snapshot tails are recorded UNRESOLVED
                         // (`PlayerId`, tail): the oracle resolves them
                         // against the registry recorded at end of run, so
@@ -1562,7 +1570,7 @@ async fn peer_task(
                     match event {
                         SessionEvent::Frame(Some(frame)) => {
                             if !handle_inbound(
-                                &recipient,
+                                &receipt_recipient,
                                 frame,
                                 &registry,
                                 epoch,
@@ -1592,7 +1600,7 @@ async fn peer_task(
                 SessionEvent::Quiescence => return,
                 SessionEvent::Send(SendOutcome::TransportFailed) => {
                     drain_after_failed_write(
-                        &recipient,
+                        &receipt_recipient,
                         &mut rx,
                         &registry,
                         epoch,
@@ -1639,7 +1647,7 @@ fn failed_transport_write(log: &EventLog, sender: &str, detail: String) -> SendO
 // A failed write stops outbound work; inbound evidence still belongs to this run.
 #[allow(clippy::too_many_arguments)]
 async fn drain_after_failed_write<R>(
-    recipient: &str,
+    recipient: &ReceiptName,
     reader: &mut R,
     registry: &SenderRegistry,
     epoch: Instant,
@@ -1702,7 +1710,7 @@ async fn drain_after_failed_write<R>(
 /// session ended. `pub(crate)` for the deterministic inbound-classification
 /// controls in the runner's suite.
 pub(crate) async fn handle_inbound(
-    recipient: &str,
+    recipient: &ReceiptName,
     frame: Result<Message, tokio_tungstenite::tungstenite::Error>,
     registry: &SenderRegistry,
     epoch: Instant,
@@ -1764,7 +1772,7 @@ pub(crate) async fn handle_inbound(
                             return true;
                         };
                         log.push_receipt(ReceiptEvent {
-                            recipient: recipient.to_string(),
+                            recipient: recipient.clone(),
                             sender,
                             seq: ledger_seq,
                             epoch: sender_incarnation,
@@ -1818,7 +1826,7 @@ pub(crate) async fn handle_inbound(
                     };
                     log.push_gap(GapEvent {
                         recipient: recipient.to_string(),
-                        sender,
+                        sender: sender.to_string(),
                         // The report's epoch is the sender's per-connection
                         // stream; the runner's incarnation index is the
                         // stream identity (one join per connection, so the
@@ -2271,6 +2279,65 @@ mod session_poll_tests {
                 encode_application_frame(data, None, None, true).expect("opaque frame");
             assert_eq!(bytes, count_u64(reference_body.len()));
             assert_eq!(frame, Message::Binary(reference_body.into()));
+        }
+    }
+
+    #[tokio::test]
+    async fn inbound_receipts_share_task_and_registry_names_at_source() {
+        use signal_fish_server::protocol::PlayerId;
+        let player = PlayerId::new_v4();
+        let recipient: ReceiptName = "r0p1".into();
+        let sender: ReceiptName = "r0p0".into();
+        let registry: SenderRegistry = Arc::new(std::sync::Mutex::new(BTreeMap::from([(
+            player.to_string(),
+            (sender.clone(), 1),
+        )])));
+        let epoch = Instant::now();
+        let log = Arc::new(EventLog::new());
+        for seq in 0..3 {
+            let frame = serde_json::to_string(&ServerMessage::GameData {
+                from_player: player,
+                data: ledger_application_data(&sender, seq, 96).expect("ledger"),
+                seq: Some(seq + 1),
+                epoch: Some(1),
+                class: None,
+                key: None,
+            })
+            .expect("frame");
+            assert!(
+                handle_inbound(
+                    &recipient,
+                    Ok(Message::Text(frame.into())),
+                    &registry,
+                    epoch,
+                    &log,
+                    ExperimentContext {
+                        active: false,
+                        opaque_sender: false
+                    }
+                )
+                .await
+            );
+        }
+        let records = log.take_records();
+        assert_eq!(records.receipts.len(), 3);
+        for receipt in &records.receipts {
+            assert_eq!(
+                receipt.recipient.as_ptr(),
+                recipient.as_ptr(),
+                "recipient must share task storage"
+            );
+            assert_eq!(
+                receipt.sender.as_ptr(),
+                registry
+                    .lock()
+                    .unwrap()
+                    .get(&player.to_string())
+                    .unwrap()
+                    .0
+                    .as_ptr(),
+                "sender must share registry storage"
+            );
         }
     }
 
@@ -2765,7 +2832,7 @@ mod session_poll_tests {
             let player = PlayerId::new_v4();
             let registry = Arc::new(std::sync::Mutex::new(BTreeMap::from([(
                 player.to_string(),
-                ("r0p1".to_string(), 1),
+                ("r0p1".into(), 1),
             )])));
             let log = Arc::new(EventLog::new());
             if declared_kill {
@@ -2831,7 +2898,7 @@ mod session_poll_tests {
                 SessionEvent::Send(SendOutcome::TransportFailed)
             ));
             drain_after_failed_write(
-                "r0p0",
+                &"r0p0".into(),
                 &mut reader,
                 &registry,
                 epoch,
@@ -2999,7 +3066,7 @@ mod session_poll_tests {
             server.send(frame(0)).await.expect("queue initial inbound");
             let registry = Arc::new(std::sync::Mutex::new(BTreeMap::from([(
                 player.to_string(),
-                ("r0p1".to_string(), 1),
+                ("r0p1".into(), 1),
             )])));
             let log = Arc::new(EventLog::new());
             let plan = crate::unit_context().plans.remove(0);
@@ -3285,7 +3352,7 @@ mod session_poll_tests {
                     .lock()
                     .expect("registry")
                     .values()
-                    .any(|identity| identity == &("r0p0".to_string(), 2)));
+                    .any(|identity| identity == &("r0p0".into(), 2)));
                 assert_eq!(records.receipts[3].received_us, 3_002_000);
             }
             let output = tempfile::tempdir().expect("event artifacts");
@@ -3366,7 +3433,7 @@ mod session_poll_tests {
         let player = PlayerId::new_v4();
         let registry = Arc::new(std::sync::Mutex::new(BTreeMap::from([(
             player.to_string(),
-            ("r0p0".to_string(), 1),
+            ("r0p0".into(), 1),
         )])));
         let log = Arc::new(EventLog::new());
         let epoch = Instant::now();
@@ -3403,7 +3470,7 @@ mod session_poll_tests {
             };
             assert!(
                 handle_inbound(
-                    "r0p1",
+                    &"r0p1".into(),
                     frame,
                     &registry,
                     epoch,

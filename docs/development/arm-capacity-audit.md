@@ -3676,3 +3676,88 @@ reliable relay, lossy pressure, and room replacement with exact replay.
 This change does not alter the live collector, workload, lag bound, or run
 duration. It does not bound all retained records or demonstrate the planned
 ten-minute cell. Issues #775 and #1009 remain open.
+
+### C3 receipt names shared at the source
+
+Session 489 changes the collection seam for
+[#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775).
+Each peer task creates one shared receipt name before arming. The sender
+registry holds the same name. Each receipt clones the task's recipient name
+and its resolved registry sender name. The log stores those names directly.
+It adds no name-pool lookup, duplicate-string cleanup, or lock. This differs
+from the deferred collector-pooling experiment above. Replay alone pools exact
+names, including unknown names and escaped Unicode. The artifact fields and
+arrival order stay unchanged.
+
+The source-sharing control first fails on the original String collector.
+It then checks that each receipt uses the task and registry string storage.
+Other controls check separate replay pools, retained duplicate and unknown
+names, exact String serialization, and release after record transfer. Raw
+records and other oracle state still grow with offered work. This change
+alone does not establish a workload-wide memory bound or explain the historical
+stalls in [#1009](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1009).
+
+A preceding fixed-chunk experiment was rejected. It retained all receipt
+addresses and capped unused receipt slots below 4,096. It did not reduce
+measured RSS. Three fresh pairs per size and mode used 24,000, 240,000, and
+1,200,000 receipts, with collection and replay in separate processes. All 42
+processes, including six fixture producers, succeeded. Full summaries matched.
+Fixture JSONL bytes matched at every size. At 1,200,000 receipts, median peak
+RSS changed from 209,516 to 210,628 KiB for collection and from 209,328 to
+210,536 KiB for replay. The smallest peaks reached the controller's inherited
+high-water floor near 17,256 KiB and do not support a small-workload comparison.
+The shared ARM64 WSL2 host ran debug binaries without local builds or tests
+during that cohort. Registration, all attempts, fixtures, hashes, and the
+rejected patch remain local under `progress/session-489/capacity/`.
+
+The new source-sharing profile uses the original String binary and a separate
+fixed candidate. Both collection fixtures create the same 16-peer reliable
+fan-out. The candidate shares one source name per peer before appending
+receipts. These fixtures exclude socket decoding and admission. Each size has
+separate fresh collection and replay processes. The 24,000- and 240,000-receipt
+sizes use three pairs each. The 1,200,000-receipt size uses five pairs. Pair
+order alternates. All 50 processes succeed, including six fixture producers.
+All 22 measured full-summary pairs match. Fixture JSONL bytes match at all
+three sizes. No local builds or tests overlap these shared-host debug runs.
+
+| Receipts | Collection RSS KiB, original → shared | Replay RSS KiB, original → shared |
+| --- | ---: | ---: |
+| 24,000 | 12,488 → 10,540 | 13,468 → 12,076 |
+| 240,000 | 47,764 → 25,556 | 48,800 → 27,092 |
+| 1,200,000 | 204,764 → 92,552 | 205,792 → 94,096 |
+
+These medians measure Linux resident memory after collection or reading,
+before the oracle. At 1,200,000 receipts, median `wait4` peak RSS changes from
+209,380 to 97,276 KiB for collection and from 209,328 to 96,868 KiB for replay.
+Candidate ranges are 97,164–97,276 and 96,788–97,132 KiB. The 24,000-receipt
+`wait4` peaks reach the inherited controller floor at 17,184 KiB; they do not
+measure the small-workload peak reduction.
+
+| Largest mode | Process wall seconds, original → shared | Process CPU seconds, original → shared |
+| --- | ---: | ---: |
+| Collection | 5.210 → 5.489 | 5.071 → 5.383 |
+| Replay | 28.345 → 31.394 | 21.597 → 23.514 |
+
+These process medians include startup and the oracle. They are not isolated
+receipt-ingestion costs. Replay retains a memory/CPU tradeoff. Shared-host
+variation and five pairs do not establish a throughput or overhead bound.
+Original binary SHA-256 is
+`b5c3fadf3f2be0f9de9aa0cb603f846e882c225eef4ab3cbf25df99cd0651f46`.
+Candidate SHA-256 is
+`eea4af294e30779c084e635f5b8a771154fec531742855025b025d296502b1d3`.
+Both hashes remain unchanged after the cohort. Registration, every attempt,
+fixture hashes, and raw results remain local under
+`progress/session-489/capacity/source-sharing/`. The synthetic result does not
+qualify the full default-path long workload. That requires its original
+120-second warm-up, 600-second measurement, and 250,000 us lag bound.
+
+Follow the matching long-run evidence in
+[#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775).
+The registered order is shared-name candidate, then original collector. Each
+uses the original 16-player reliable v3 JSON workload: 60 sends/s per player,
+96 application bytes, seed 1, 120 seconds of warm-up, 600 seconds of measurement,
+a 250 ms generator-lag bound, and one-second metrics samples. Receipt timing
+instrumentation stays off. Each owes 691,232 sends and 10,368,480 deliveries.
+Generator and server use CPUs 0–7; the external observer uses CPUs 8–11. No local
+builds or tests overlap either attempt. Both attempts, failed or valid, remain
+recorded. A successful test exit proves replay equality, not workload validity.

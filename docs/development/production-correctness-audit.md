@@ -6002,3 +6002,150 @@ The final hosted RTC filter also passes all eight reset controls in `7a790ccc`,
 including both new accepted-send controls, queued input order, stream reopen,
 and the parked-reader recovery path. The new names match the existing
 `stream_reset_` hosted filter, so CI will execute their full bodies.
+
+### F107 — Native channel allocation rejects the final valid stream
+
+Issue [#1079](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1079),
+found at `99e867d8` under #826 and #912. The RTC registry treated the negotiated
+stream count minus one as an exclusive bound. A DTLS client with one stream
+could not use stream zero. A DTLS server with two streams could not use stream
+one. Both identifiers are valid: the transport reports a count, not a final ID.
+
+The registry now compares against the exclusive count. A wider cursor can step
+past the last valid 16-bit ID without wrapping. True red controls fail at the
+small and full-range boundaries. Green controls cover counts zero through six,
+both DTLS roles, occupied streams, repeated exhaustion, the full 65,535-stream
+count, the unknown-count fallback, and final-stream reuse with a fresh handle.
+The upstream count type cannot represent 65,536.
+
+A paired SCTP history negotiates actual stream counts one through four and
+passes the reported count into the production RTC allocation and send pipeline.
+All eight cells deliver exact payloads on their highest role-valid stream:
+ordered reliable and unordered zero-retransmit modes. Restoring the old bound
+makes the count-one history fail before delivery. These are paired SCTP/RTC
+histories; they do not model the complete ICE/DTLS low-count handshake.
+The retained eight RTC reset controls and 36 SCTP reset controls also pass.
+
+### F108 — Failed native channel creation keeps an inaccessible channel
+
+Issue [#1080](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1080),
+found while reviewing F107. The public creation method inserted its registry
+entry before allocating and dialing its stream. A later error returned no
+handle but retained that entry. Future allocation could assign a freed stream
+to the failed, inaccessible channel before the requested replacement.
+
+The red history fills valid even streams and requests another channel. Creation
+returns the expected exhaustion error, but the registry grows from 32,768 to
+32,769 channels. The repair removes the newly inserted entry on allocation or
+dial failure. Its stream index is removed only if that handle still owns it.
+Existing channels and the monotonic handle counter remain intact.
+
+The green history repeats exhaustion three times without a retained pending
+channel, frees the final valid stream, and successfully dials its replacement.
+Both DTLS roles pass. A separate removal control covers unassigned entries,
+assigned streams, repeat removal, and a reverse index owned by another handle.
+The public-creation history uses the existing association-present test seam;
+it is not a complete peer handshake. Explicit hosted selectors run allocation,
+paired-wire, and creation rollback controls.
+
+F107 and F108 change only the private reference-client RTC stack. Current Rust
+and .NET SDK documentation excludes this WebRTC backend; Godot uses its own
+GDScript/Godot mesh. No signaling wire or external SDK migration changes are
+required. Published replacement qualification in
+[#912](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/912)
+must retain both repairs and the earlier reset, delivery, and statistics controls.
+The source copies remain necessary. These findings do not identify the
+historical #853/#889 failures or complete the broader #826 audit.
+
+### A20 — Browser receipt admission diagnostics
+
+Session 489 adds new failure evidence for open
+[#853](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/853)
+and [#889](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/889).
+Snapshots now report each selected channel's stream ID and bounded counts for
+raw callbacks, accepted callbacks, rejected input, and terminal discards.
+Structured browser RTC errors retain their detail and SCTP cause code.
+Weak channel keys retain no retired handle or message history. Replacement and
+stale-callback controls keep evidence within the selected channel incarnation.
+
+Loss callbacks see the triggering rejection or discard before teardown. A
+snapshot called inside the message consumer can observe admission in progress:
+acceptance is counted after that consumer returns. These counters establish
+Engine callback admission, not SCTP packet statistics or application receipt.
+The browser README defines that boundary.
+
+Both labels pass size, type, backlog, prior-terminal, and live-terminal controls.
+Five independent omissions of diagnostic capture fail their intended assertions.
+All 24 real Chromium controls pass. A reliable-channel history admits small text
+and exactly 65,536 binary bytes, then rejects a 65,537-byte message. Its loss
+callback records three raw callbacks, two admissions, one rejection, and zero
+discards before removing the peer. The other label retains zero callbacks.
+Structured RTC error capture has controlled event coverage; the real Chromium
+run produces no SCTP error.
+
+The historical browser/native failures remain unexplained. These diagnostics
+help distinguish a missing callback from rejected or discarded input without
+changing exchange success, terminal admission, delivery modes, or deadlines.
+
+The final fixed-artifact native/browser cohort `8d5ab819` passes mesh, native
+retry, and native room-restore histories. The server, native executable, browser
+CLI, and browser page hashes match before and after the run. Both endpoint event
+streams remain local under `progress/session-489/interop/`. These passes qualify
+the current artifacts; they do not explain the historical failures.
+
+### F109 — Deferred channel failure prevents valid native channels from opening
+
+Issue [#1081](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1081),
+found while sweeping the F107/F108 creation paths. The SCTP connected handler
+assigned every pending stream before dialing any channel. One excess pending
+channel returned an allocation error and stopped that procedure. A valid channel
+could retain its assigned stream without DCEP output or a handshake deadline.
+The [WebRTC connected procedure](https://www.w3.org/TR/webrtc/#rtcsctptransport-connected-procedure)
+requires failing the affected channel while continuing the others.
+
+An initial real paired-SCTP probe negotiates a stream count of two. Two deferred
+client channels require the same role's single available stream. The handler
+returns an allocation error after assigning stream zero to the first channel.
+That channel has no dial, deadline, or outgoing data. A later isolated control
+records the same cause independently for both DTLS roles before asserting.
+Restoring the old connected procedure makes that control and both complete
+role histories fail. Production source hashes match before and after the
+controlled temporary restoration.
+
+The connected procedure now retires closed channels that have no lower
+transport before assigning streams. It closes each unallocatable or invalid
+fixed-ID channel independently and continues valid channel setup. Closed
+summaries retain known configured IDs and lifetime totals. Existing closure
+notifications are not repeated. Repeated connected events neither redial a
+channel nor renew its original DCEP deadline.
+
+The class sweep also reaches already-connected public creation. Reserved stream
+ID 65,535 and fixed IDs outside a known negotiated count are rejected without
+retaining a new channel. Before the count is known, ordinary fixed IDs can
+still be created; the connected procedure checks them against the negotiated
+count later. Negotiated fixed IDs have no in-band DTLS parity restriction.
+
+The retained controls separate fixed-ID admission from clean overflow. Complete
+paired histories cover both roles and both required modes, local closes before
+connection, invalid fixed IDs, exact single closure and statistics, repeated
+connected events, unchanged deadlines, DCEP completion, gameplay receipt,
+reset, and fresh stream reuse. These exercise actual paired SCTP and production
+RTC handlers. They do not model a complete low-stream-count ICE/DTLS handshake
+or identify the historical browser/native failures. Published replacement work
+in [#912](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/912)
+must retain these creation-state and delivery controls.
+
+All seven creation-state controls pass on the final source. The old public
+fixed-ID guard path separately fails the reserved-ID control and each connected
+role control. The old deferred procedure separately fails both paired role
+histories and the isolated overflow control. The four registry controls, eight
+RTC reset controls, public rollback control, paired boundary control, and closed
+statistics control remain green. RTC production and native all-target strict
+lint also pass. Closure statistics prove configured IDs and state/counts here;
+they do not establish that an invalid channel ever occupied a wire stream.
+
+The final native/browser cohort `7d878730` passes mesh, native retry, and native
+room-restore histories after the complete F109 repair. The server, final native
+executable, browser CLI, and browser page hashes match before and after all three
+cells. Endpoint event streams remain local under
+`progress/session-489/interop-delivery/`.

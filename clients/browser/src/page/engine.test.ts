@@ -1154,3 +1154,149 @@ for (const path of ['offer', 'answer'] as const) {
 console.error(
   'ok - early ICE preserves media bindings, order, and SDP after candidate rejection',
 );
+
+// Issues #853/#889: separate raw browser callbacks from Engine admission.
+for (const label of [RELIABLE_LABEL, UNRELIABLE_LABEL]) {
+  for (const rejection of ['size', 'type', 'backlog', 'terminal', 'live-terminal'] as const) {
+    const originalPc = globalThis.RTCPeerConnection;
+    let connection!: Connection;
+    let admit = true;
+    let admitted = 0;
+    let losses = 0;
+    let lossSnapshot: ReturnType<typeof snapshot> | null = null;
+    class Channel {
+      readonly id = 17;
+      readonly ordered = label === RELIABLE_LABEL;
+      readonly maxRetransmits = this.ordered ? null : 0;
+      readonly maxPacketLifeTime = null;
+      readyState = 'open';
+      bufferedAmount = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: unknown }) => void) | null = null;
+      onerror:
+        ((event?: { error?: { errorDetail: string; sctpCauseCode: number } }) => void) | null =
+        null;
+      constructor(readonly label: string) {}
+      close() {
+        this.readyState = 'closed';
+      }
+    }
+    class Connection {
+      connectionState = 'connected';
+      ondatachannel: ((event: { channel: Channel }) => void) | null = null;
+      constructor() {
+        connection = this;
+      }
+      close() {}
+    }
+    interface Receipts {
+      raw: number;
+      admitted: number;
+      rejected: number;
+      discarded: number;
+    }
+    const engine = new Engine(false, {
+      onLocalCandidate: () => {},
+      onPcState: () => {},
+      onChannelOpen: () => {},
+      onChannelClosed: () => {
+        losses += 1;
+        lossSnapshot = snapshot();
+      },
+      onChannelMessage: () => {
+        if (!admit) return false;
+        admitted += 1;
+        return true;
+      },
+    });
+    const snapshot = () =>
+      engine.diagnosticSnapshot('peer') as {
+        channels: Record<string, { id: number; receipts: Receipts; error: object | null }>;
+      };
+    try {
+      globalThis.RTCPeerConnection = Connection as unknown as typeof RTCPeerConnection;
+      await engine.pairWith('peer', false, []);
+      const channel = new Channel(label);
+      connection.ondatachannel?.({ channel });
+      await Promise.resolve();
+      assert(snapshot().channels[label]?.id === 17, `${label}: retain SCTP stream ID`);
+      assert(
+        JSON.stringify(snapshot().channels[label]?.receipts) ===
+          JSON.stringify({ raw: 0, admitted: 0, rejected: 0, discarded: 0 }),
+        `${label}: fresh registration has no receipt evidence`,
+      );
+      channel.onmessage?.({ data: 'valid' });
+      channel.onmessage?.({ data: new TextEncoder().encode('valid binary').buffer });
+      assert(admitted === 2, `${label}: both input forms reach the application`);
+      const copied = snapshot().channels[label]!.receipts;
+      copied.raw = 999;
+      assert(
+        snapshot().channels[label]?.receipts.raw === 2,
+        'snapshots cannot change retained counters',
+      );
+      if (rejection === 'terminal') {
+        channel.onerror?.({ error: { errorDetail: 'sctp-failure', sctpCauseCode: 12 } });
+        assert(
+          JSON.stringify(snapshot().channels[label]?.error) ===
+            JSON.stringify({ errorDetail: 'sctp-failure', sctpCauseCode: 12 }),
+          'retain structured SCTP failure before loss callback tears down the link',
+        );
+      } else if (rejection === 'backlog') admit = false;
+      else if (rejection === 'live-terminal') channel.readyState = 'closed';
+      channel.onmessage?.({
+        data:
+          rejection === 'size' ? 'x'.repeat(65537) : rejection === 'type' ? {} : 'not admitted',
+      });
+      assert(
+        JSON.stringify(snapshot().channels[label]?.receipts) ===
+          JSON.stringify({
+            raw: 3,
+            admitted: 2,
+            rejected: rejection.endsWith('terminal') ? 0 : 1,
+            discarded: rejection.endsWith('terminal') ? 1 : 0,
+          }),
+        `${label}/${rejection}: distinguish callbacks, admissions, validation/backlog rejection, and terminal discard`,
+      );
+      assert(losses === 1, `${label}/${rejection}: preserve one terminal failure`);
+      const atLoss = (lossSnapshot as ReturnType<typeof snapshot> | null)?.channels[label];
+      assert(
+        atLoss?.receipts.raw === (rejection === 'terminal' ? 2 : 3) &&
+          atLoss?.receipts.rejected === (rejection.endsWith('terminal') ? 0 : 1) &&
+          atLoss?.receipts.discarded === (rejection === 'live-terminal' ? 1 : 0),
+        `${label}/${rejection}: loss observer sees the triggering receipt before teardown`,
+      );
+      if (rejection === 'terminal') {
+        assert(
+          JSON.stringify(atLoss?.error) ===
+            JSON.stringify({ errorDetail: 'sctp-failure', sctpCauseCode: 12 }),
+          'loss observer sees the SCTP error before teardown',
+        );
+      }
+      const retired = channel;
+      engine.removePeer('peer');
+      await engine.pairWith('peer', false, []);
+      const fresh = new Channel(label);
+      connection.ondatachannel?.({ channel: fresh });
+      await Promise.resolve();
+      retired.onmessage?.({ data: 'retired' });
+      retired.onerror?.({ error: { errorDetail: 'sctp-failure', sctpCauseCode: 13 } });
+      assert(
+        snapshot().channels[label]?.receipts.raw === 0 &&
+          snapshot().channels[label]?.error === null,
+        `${label}: old callbacks cannot contaminate replacement evidence`,
+      );
+      admit = true;
+      fresh.onmessage?.({ data: 'fresh' });
+      assert(
+        snapshot().channels[label]?.receipts.admitted === 1,
+        `${label}: replacement counts start fresh`,
+      );
+    } finally {
+      engine.removePeer('peer');
+      globalThis.RTCPeerConnection = originalPc;
+    }
+  }
+}
+console.error(
+  'ok - browser diagnostics distinguish raw receipt, admission, rejection, and SCTP failure',
+);

@@ -1917,6 +1917,8 @@ impl RTCPeerConnection {
     /// Returns an error if:
     /// - The peer connection is closed (`ErrConnectionClosed`)
     /// - The label or sub-protocol exceeds the length the DCEP OPEN message can carry
+    /// - The stream ID is reserved or outside the negotiated range, or no free ID remains
+    ///   (`ErrMaxDataChannelID`)
     ///
     /// # Specification
     ///
@@ -1976,6 +1978,17 @@ impl RTCPeerConnection {
         // here — see `assign_stream_ids`.
         params.negotiated = options.negotiated;
 
+        // Fixed IDs must fit the public SID range and any negotiated stream count.
+        if params.negotiated.is_some_and(|sid| {
+            sid == u16::MAX
+                || self
+                    .sctp_transport()
+                    .max_channels()
+                    .is_some_and(|max| sid >= max)
+        }) {
+            return Err(Error::ErrMaxDataChannelID);
+        }
+
         // The registry assigns the handle. Note this happens before any dial: the channel is
         // addressable from the moment it exists, whether or not it has a stream id yet.
         let id = self
@@ -2002,17 +2015,23 @@ impl RTCPeerConnection {
             && matches!(dtls_role, RTCDtlsRole::Client | RTCDtlsRole::Server)
         {
             let max_channels = self.sctp_transport().max_channels();
-            self.data_channels
-                .assign_stream_ids(dtls_role, max_channels)?;
-
-            let data_channel = self
-                .data_channels
-                .get_mut(&id)
-                .ok_or(Error::ErrDataChannelNotExisted)?;
-            if data_channel.ready_state == RTCDataChannelState::Connecting
-                && data_channel.data_channel.is_none()
-            {
-                data_channel.dial(handle.0)?;
+            let result = (|| {
+                self.data_channels
+                    .assign_stream_ids(dtls_role, max_channels)?;
+                let data_channel = self
+                    .data_channels
+                    .get_mut(&id)
+                    .ok_or(Error::ErrDataChannelNotExisted)?;
+                if data_channel.ready_state == RTCDataChannelState::Connecting
+                    && data_channel.data_channel.is_none()
+                {
+                    data_channel.dial(handle.0)?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                self.data_channels.remove(&id);
+                return Err(error);
             }
         }
 
@@ -2786,6 +2805,54 @@ mod tests {
             Some(0),
             "the DTLS client must take an even stream id (RFC 8832 §6)"
         );
+    }
+
+    // Regression #1080: failed creation cannot reserve a later replacement's stream.
+    #[test]
+    fn create_data_channel_failure_releases_registry_and_allows_stream_reuse() {
+        for (role, parity) in [(RTCDtlsRole::Client, 0), (RTCDtlsRole::Server, 1)] {
+            let mut pc = RTCPeerConnectionBuilder::new()
+                .build(Instant::now())
+                .unwrap();
+            pc.dtls_transport_mut().dtls_role = role;
+            pc.sctp_transport_mut()
+                .sctp_associations
+                .insert(AssociationHandle(0), sctp::Association::default());
+            let mut final_sid = 0;
+            for sid in (parity..u16::MAX).step_by(2) {
+                pc.data_channels.insert(RTCDataChannelInternal {
+                    stream_id: Some(sid),
+                    ..Default::default()
+                });
+                final_sid = sid;
+            }
+            let original_count = pc.data_channels.len();
+            for _ in 0..3 {
+                assert!(matches!(
+                    pc.create_data_channel("exhausted", None),
+                    Err(Error::ErrMaxDataChannelID)
+                ));
+                assert_eq!(
+                    pc.data_channels.len(),
+                    original_count,
+                    "a failed creation must not leave an inaccessible pending channel"
+                );
+                assert!(pc.data_channels.pending_stream_id_handles().is_empty());
+            }
+            pc.data_channels.remove_by_stream(&final_sid).unwrap();
+            let replacement = pc.create_data_channel("replacement", None).unwrap().id();
+            assert!(
+                replacement >= original_count + 3,
+                "failed handles stay retired"
+            );
+            let channel = pc.data_channels.get(&replacement).unwrap();
+            assert_eq!(channel.stream_id, Some(final_sid));
+            assert!(
+                channel.data_channel.is_some(),
+                "replacement must dial normally"
+            );
+            assert_eq!(pc.data_channels.len(), original_count);
+        }
     }
 
     /// The mirror of the case above: with no resolved DTLS role there is no correct parity, so

@@ -148,8 +148,23 @@ try {
               !events.includes('close'),
             'one pair connection and no rejection callbacks',
           );
+          const snapshot = engine.diagnosticSnapshot('peer');
+          for (const channel of [reliable, unreliable]) {
+            const diagnostic = snapshot.channels[channel.label];
+            check(
+              Number.isInteger(diagnostic.id) &&
+                diagnostic.id >= 0 &&
+                diagnostic.receipts.raw === 1 &&
+                diagnostic.receipts.admitted === 1 &&
+                diagnostic.receipts.rejected === 0 &&
+                diagnostic.receipts.discarded === 0 &&
+                diagnostic.error === null,
+              `count raw/admitted callbacks for ${channel.label}: ${JSON.stringify(diagnostic)}`,
+            );
+          }
           return {
             name,
+            receiptDiagnostics: snapshot.channels,
             rejectedMode: {
               ordered: rejected.ordered,
               maxRetransmits: rejected.maxRetransmits,
@@ -243,6 +258,85 @@ try {
     }, label);
     console.error(`ok - Chromium closed-before-registration ${JSON.stringify(evidence)}`);
   }
+  // Real Chromium diagnostics must capture a rejected callback before link teardown.
+  {
+    const evidence = await page.evaluate(async () => {
+      const NativeConnection = globalThis.RTCPeerConnection;
+      let receiver;
+      globalThis.RTCPeerConnection = class extends NativeConnection {
+        constructor(configuration) {
+          super(configuration);
+          receiver = this;
+        }
+      };
+      const deadline = Date.now() + 10000;
+      const until = async (condition, message) => {
+        while (!condition()) {
+          if (Date.now() >= deadline) throw new Error(`receipt diagnostic: ${message}`);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      };
+      const admitted = [];
+      let loss;
+      const engine = new channelEngine.Engine(false, {
+        onLocalCandidate: () => {},
+        onPcState: () => {},
+        onChannelOpen: (peer, _generation, label) => engine.noteChannelOpen(peer, label),
+        onChannelClosed: (peer, _generation, label, reason) => {
+          loss = { label, reason, snapshot: engine.diagnosticSnapshot(peer) };
+          engine.removePeer(peer);
+        },
+        onChannelMessage: (_peer, _generation, label, _text, bytes) => {
+          admitted.push({ label, bytes });
+          return true;
+        },
+      });
+      const sender = new NativeConnection();
+      try {
+        await engine.pairWith('peer', false, []);
+        globalThis.RTCPeerConnection = NativeConnection;
+        const reliable = sender.createDataChannel('reliable');
+        sender.createDataChannel('unreliable', { ordered: false, maxRetransmits: 0 });
+        await sender.setLocalDescription(await sender.createOffer());
+        await until(() => sender.iceGatheringState === 'complete', 'offer ICE');
+        await engine
+          .handleOffer('peer', sender.localDescription.sdp)
+          .then((sdp) => sender.setRemoteDescription({ type: 'answer', sdp }));
+        // Complete responder ICE is optional here: sender SDP already carries candidates.
+        await until(
+          () =>
+            reliable.readyState === 'open' &&
+            engine.channel('peer', 'reliable')?.readyState === 'open',
+          'reliable opens',
+        );
+        reliable.send('small');
+        reliable.send(new Uint8Array(65536));
+        await until(() => admitted.length === 2, 'exact-limit text/binary admission');
+        reliable.send('x'.repeat(65537));
+        await until(() => loss !== undefined, 'oversized raw callback reports loss');
+        const diagnostic = loss.snapshot.channels.reliable;
+        if (
+          diagnostic.receipts.raw !== 3 ||
+          diagnostic.receipts.admitted !== 2 ||
+          diagnostic.receipts.rejected !== 1 ||
+          diagnostic.receipts.discarded !== 0 ||
+          loss.reason !== 'incoming data-channel message exceeds 65536 bytes' ||
+          engine.diagnosticSnapshot('peer') !== null ||
+          admitted[1]?.bytes !== 65536
+        )
+          throw new Error(`receipt diagnostic mismatch: ${JSON.stringify({ loss, admitted })}`);
+        return { admitted, loss };
+      } finally {
+        globalThis.RTCPeerConnection = NativeConnection;
+        engine.removePeer('peer');
+        sender.close();
+      }
+    });
+    console.error(
+      `ok - Chromium raw receipt and rejection diagnostics ${JSON.stringify(evidence)}`,
+    );
+  }
+
   // Audits #853/#889: distinguish raw receipt, engine admission, and same-stream reset.
   for (const initiate of [false, true])
     for (const label of ['reliable', 'unreliable'])
