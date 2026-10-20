@@ -3888,10 +3888,20 @@ change before the independent workload-budget addition. Its 18 measured
 processes also passed, with all full summaries and fixture bytes equal. The
 final complete candidate cohort, registration, all raw observations, hold
 record, and fixture hashes remain under `/tmp/session492-replay-final/`.
-No live long cell was repeated. Neither cohort resolves #1009 or qualifies a
-server capacity point. Both #775 and the broader #636 campaign remain open.
+These synthetic cohorts do not repeat a live long cell. Neither cohort
+resolves #1009 or qualifies a server capacity point. Both #775 and the broader #636 campaign remain open.
 
 Final-cohort executable SHA-256:
 
 - baseline: `e0610fe7ba6908e088b44a8f690ff0d00d6517c34d7a580432739b8fca947a4e`.
 - candidate: `e7ca09e6b0094caf3dec4c0b6b81a41cd416c3d3197b16684ce331e732354961`.
+
+A separate single full-workload qualification attempt is registered under
+`progress/session-492/long/`. It retains the unchanged long shape, lag bound,
+diagnostics-OFF path, and 1-Hz internal samples. The planned record budget is
+32,000,000. The fixed generator and owned server use cores 0–7. A separate
+1-Hz observer on cores 8–11 records process and thread scheduling counters,
+wait channels, clock samples, and host pressure. The host remains shared.
+There is no replacement attempt or matched baseline comparison. The complete
+outcome and any overlap are recorded on #775 and #1009; a pass cannot explain
+the historical stalls.
