@@ -3050,10 +3050,7 @@ impl Orchestrator<'_> {
     ) -> Result<anyhow::Result<Option<String>>, FatalError> {
         let deadline = self.negotiation_deadline(peer);
         let result = self.engine.negotiate(peer, operation, deadline).await;
-        if result.is_err()
-            && !self.engine.is_paired(peer)
-            && (self.connected_pairs.contains(&peer) || deadline.is_due(Instant::now()))
-        {
+        if result.is_err() && !self.engine.is_paired(peer) {
             self.handle_peer_transport_loss(peer, "negotiation failed")
                 .await?;
         }
@@ -3168,8 +3165,7 @@ impl Orchestrator<'_> {
             }
             Ok(None) => {}
             Err(error) => {
-                // A single failed pair is not fatal: the p2p timeout resolves
-                // the overall status and the relay floor still carries data.
+                // Negotiation failure resolves this peer's fallback status.
                 emit(&Event::Error {
                     message: format!("pairing with {peer} failed: {error:#}"),
                 });

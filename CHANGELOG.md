@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve existing native gameplay channels when a new channel requests an occupied stream ID (#1085).
+- Open native channels created after connection and close stalled handshakes at the configured deadline (#1086).
+- Report reference-client relay fallback immediately when initial peer negotiation fails (#1087).
 - Keep valid native channels opening when another deferred channel fails or closes before connection (#1081).
 - Allow native data channels to use the last valid stream ID within the negotiated limit (#1079).
 - Release failed native channel creations so a later channel can reuse a free stream (#1080).

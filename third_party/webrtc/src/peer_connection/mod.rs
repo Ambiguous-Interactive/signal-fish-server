@@ -1356,21 +1356,26 @@ impl PeerConnection for PeerConnectionImpl {
         label: &str,
         options: Option<RTCDataChannelInit>,
     ) -> Result<Arc<dyn DataChannel>> {
-        // Create the data channel via the core
-        let channel_id = {
-            let mut core = self.inner.core.lock().await;
-            let rtc_dc = core.create_data_channel(label, options)?;
-            rtc_dc.id()
-        };
-
         let (evt_tx, evt_rx) = channel(DRIVER_TO_DATA_CHANNEL_EVENT_CHANNEL_CAPACITY);
-        {
+        let channel_id = {
+            /*
+                Fence the driver until the local receiver owns every open event.
+                Acquire both locks before creation so cancellation during lock
+                contention cannot leave an unregistered core channel.
+            */
+            let mut core = self.inner.core.lock().await;
             let mut data_channels = self.inner.data_channel_events_tx.lock().await;
-            // Racing a `close()` that has already ended the streams: leave this one ended too.
+            /*
+                Sample after contention: an idle core must not shorten a new
+                channel's DCEP timeout by using its previous input timestamp.
+            */
+            core.handle_timeout(self.inner.runtime.now())?;
+            let channel_id = core.create_data_channel(label, options)?.id();
             if !self.inner.is_closing() {
                 data_channels.insert(channel_id, evt_tx);
             }
-        }
+            channel_id
+        };
 
         self.inner.wake_writes().await;
 
@@ -1679,6 +1684,29 @@ mod tests {
                 result.is_err(),
                 "build() must surface the driver's bind failure"
             );
+        }));
+    }
+
+    // Regression #1086: creation after idle must use the runtime's current clock.
+    #[test]
+    fn create_data_channel_refreshes_core_clock_after_idle() {
+        let rt = default_runtime().expect("test requires a runtime feature");
+        rt.block_on(Box::pin(async {
+            let (inner, _driver_events) = new_test_peer_connection().await;
+            let old = rt.now() - Duration::from_secs(60);
+            *inner.core.lock().await = RTCPeerConnectionBuilder::new().build(old).unwrap();
+            let pc = PeerConnectionImpl {
+                inner: inner.clone(), driver_handle: Mutex::new(None), driver_stopped: Mutex::new(None),
+            };
+            let before = rt.now();
+            let dc = pc.create_data_channel("after-idle", None).await.unwrap();
+            let after = rt.now();
+            dc.close().await.unwrap();
+            let mut core = inner.core.lock().await;
+            let closing = core.poll_data_read().expect("close publishes an ordered marker");
+            assert!(matches!(closing.message, rtc::peer_connection::message::RTCMessage::DataChannelClosing(id) if id == dc.id()));
+            assert!(closing.now >= before && closing.now <= after,
+                "creation must refresh the core clock before it can arm a DCEP deadline: old={old:?}, marker={:?}, creation={before:?}..={after:?}", closing.now);
         }));
     }
 

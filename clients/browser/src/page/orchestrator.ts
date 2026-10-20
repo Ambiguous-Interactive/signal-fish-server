@@ -2176,9 +2176,11 @@ class Orchestrator {
       if (error instanceof FatalError && error.code === EXIT_CONNECTION_ERROR) throw error;
       this.assertActive();
       if (this.peerTasks.get(peer)?.token !== taskToken) return;
-      // A single failed pair is not fatal: the p2p timeout resolves the
-      // overall status and the relay floor still carries data.
       this.emit({ event: 'error', message: `pairing with ${peer} failed: ${describe(error)}` });
+      // Initial offer cleanup can remove the link before its queued terminal
+      // callback runs. Resolve the observed loss here instead of waiting for
+      // the P2P timeout; other peer links and relay traffic remain active.
+      this.handlePeerTransportLoss(peer, 'initial negotiation failed');
     }
     if (
       this.currentSessionGeneration !== sessionGeneration ||

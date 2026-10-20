@@ -55,3 +55,15 @@ when SCTP reuses a stream. The production driver control checks registered
 receiver delivery and replacement registration. See
 [#1075](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1075).
 Published replacement qualification in #912 must retain these controls.
+
+Local channel creation holds the core and event-sender map together until its
+receiver is registered. The driver cannot announce that local channel as a
+remote channel or deliver its open event to a replacement receiver. Cancellation
+while registration waits leaves no core channel. Creation samples the runtime
+clock after both locks are acquired and advances the core before dialing, so an
+idle core cannot shorten a new DCEP deadline. The retained controls force map
+contention, cancel a waiter, route one open and the first gameplay message to
+the returned receiver, and check a public marker's timestamp after an idle gap.
+The RTC controls separately verify configured deadlines and DCEP ACK handling.
+See [#1086](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1086).
+Published replacement qualification in #912 must retain these controls.

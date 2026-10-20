@@ -254,7 +254,6 @@ pub mod transport;
 use crate::data_channel::init::RTCDataChannelInit;
 use crate::data_channel::parameters::DataChannelParameters;
 use crate::data_channel::registry::DataChannelRegistry;
-use crate::data_channel::state::RTCDataChannelState;
 use crate::data_channel::{RTCDataChannel, RTCDataChannelId, internal::RTCDataChannelInternal};
 use crate::media_stream::track::MediaStreamTrack;
 use crate::peer_connection::configuration::media_engine::MediaEngine;
@@ -1919,6 +1918,7 @@ impl RTCPeerConnection {
     /// - The label or sub-protocol exceeds the length the DCEP OPEN message can carry
     /// - The stream ID is reserved or outside the negotiated range, or no free ID remains
     ///   (`ErrMaxDataChannelID`)
+    /// - The fixed stream ID already belongs to another channel (`ErrStreamAlreadyExist`)
     ///
     /// # Specification
     ///
@@ -1989,6 +1989,13 @@ impl RTCPeerConnection {
             return Err(Error::ErrMaxDataChannelID);
         }
 
+        if params
+            .negotiated
+            .is_some_and(|sid| self.data_channels.stream_id_in_use(&sid))
+        {
+            return Err(Error::ErrStreamAlreadyExist);
+        }
+
         // The registry assigns the handle. Note this happens before any dial: the channel is
         // addressable from the moment it exists, whether or not it has a stream id yet.
         let id = self
@@ -1997,7 +2004,9 @@ impl RTCPeerConnection {
 
         // https://www.w3.org/TR/webrtc/#peer-to-peer-data-api (Step #23)
         // Open the channel's data transport immediately when an SCTP association already
-        // exists. The DTLS role is necessarily resolved by then, so a stream id can be
+        // has connected. A pending SCTP handshake must still use the connected
+        // procedure, so it cannot announce an open or start a DCEP timeout early.
+        // The DTLS role is necessarily resolved by then, so a stream id can be
         // assigned right here rather than waiting for a connected procedure that has passed.
         //
         // The role guard is not redundant with the association check. In practice an
@@ -2009,24 +2018,22 @@ impl RTCPeerConnection {
         if let Some(handle) = self
             .sctp_transport()
             .sctp_associations
-            .keys()
-            .next()
-            .copied()
+            .iter()
+            .find_map(|(handle, association)| (!association.is_handshaking()).then_some(*handle))
             && matches!(dtls_role, RTCDtlsRole::Client | RTCDtlsRole::Server)
         {
             let max_channels = self.sctp_transport().max_channels();
             let result = (|| {
                 self.data_channels
                     .assign_stream_ids(dtls_role, max_channels)?;
-                let data_channel = self
-                    .data_channels
-                    .get_mut(&id)
-                    .ok_or(Error::ErrDataChannelNotExisted)?;
-                if data_channel.ready_state == RTCDataChannelState::Connecting
-                    && data_channel.data_channel.is_none()
-                {
-                    data_channel.dial(handle.0)?;
-                }
+                let now = self.pipeline_context.now;
+                self.get_datachannel_handler()
+                    .dial_channel(now, handle.0, id)?;
+                /*
+                    Event-first consumers drain the public data queue directly.
+                    Publish this open without waiting for unrelated input or events.
+                */
+                self.pump_reads(None);
                 Ok(())
             })();
             if let Err(error) = result {
@@ -2502,6 +2509,7 @@ mod tests {
     use crate::data_channel::state::RTCDataChannelState;
     use crate::peer_connection::configuration::setting_engine::SctpMaxMessageSize;
     use crate::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+    use crate::peer_connection::handler::sctp::established_test_association;
     use crate::peer_connection::transport::RTCIceComponent;
     use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
     use sctp::AssociationHandle;
@@ -2783,9 +2791,10 @@ mod tests {
         // after `prepare_transport` has settled the role. Without it there is no correct
         // stream-id parity to pick and the channel would rightly defer (RFC 8832 §6).
         pc.dtls_transport_mut().dtls_role = RTCDtlsRole::Client;
-        pc.sctp_transport_mut()
-            .sctp_associations
-            .insert(AssociationHandle(0), sctp::Association::default());
+        pc.sctp_transport_mut().sctp_associations.insert(
+            AssociationHandle(0),
+            established_test_association(RTCDtlsRole::Client),
+        );
 
         let _dc = pc.create_data_channel("test", None).unwrap();
 
@@ -2807,6 +2816,328 @@ mod tests {
         );
     }
 
+    // Regression #1085: a fixed SID must keep its original channel owner.
+    #[test]
+    fn create_data_channel_failure_duplicate_fixed_sid_preserves_original_owner() {
+        use sansio::Protocol;
+        for connected in [false, true] {
+            for role in [RTCDtlsRole::Client, RTCDtlsRole::Server] {
+                for origin in ["fixed", "automatic", "remote"] {
+                    for state in [
+                        RTCDataChannelState::Connecting,
+                        RTCDataChannelState::Open,
+                        RTCDataChannelState::Closing,
+                        RTCDataChannelState::Closed,
+                    ] {
+                        let mut pc = RTCPeerConnectionBuilder::new()
+                            .build(Instant::now())
+                            .unwrap();
+                        if connected {
+                            pc.dtls_transport_mut().dtls_role = role;
+                            pc.sctp_transport_mut()
+                                .sctp_associations
+                                .insert(AssociationHandle(0), established_test_association(role));
+                        }
+                        let owner = match origin {
+                            "fixed" => pc
+                                .create_data_channel(
+                                    "gameplay",
+                                    Some(RTCDataChannelInit {
+                                        negotiated: Some(2),
+                                        ..Default::default()
+                                    }),
+                                )
+                                .unwrap()
+                                .id(),
+                            "automatic" => {
+                                let id = pc.create_data_channel("gameplay", None).unwrap().id();
+                                pc.data_channels.assign_stream_ids(role, None).unwrap();
+                                id
+                            }
+                            _ => {
+                                let mut announced =
+                                    RTCDataChannelInternal::new(DataChannelParameters {
+                                        label: "gameplay".into(),
+                                        ..Default::default()
+                                    });
+                                announced.stream_id = Some(2);
+                                announced.dial(0).unwrap();
+                                let open = announced
+                                    .data_channel
+                                    .as_mut()
+                                    .unwrap()
+                                    .poll_write()
+                                    .unwrap();
+                                let accepted =
+                                    RTCDataChannelInternal::accept(0, 2, open.ppi, &open.payload)
+                                        .unwrap();
+                                pc.data_channels.insert(accepted)
+                            }
+                        };
+                        let sid = pc.data_channels.get(&owner).unwrap().stream_id.unwrap();
+                        let options = RTCDataChannelInit {
+                            negotiated: Some(sid),
+                            ..Default::default()
+                        };
+                        pc.data_channels.get_mut(&owner).unwrap().ready_state = state;
+                        for _ in 0..3 {
+                            assert!(
+                                matches!(
+                                    pc.create_data_channel("duplicate", Some(options.clone())),
+                                    Err(Error::ErrStreamAlreadyExist)
+                                ),
+                                "connected={connected} role={role:?} origin={origin} state={state:?}"
+                            );
+                            assert_eq!(pc.data_channels.len(), 1);
+                            assert_eq!(pc.data_channels.handle_of_stream(&sid), Some(owner));
+                            assert_eq!(pc.data_channels.get(&owner).unwrap().label, "gameplay");
+                            assert_eq!(pc.data_channels.get(&owner).unwrap().ready_state, state);
+                        }
+                        pc.data_channels.remove(&owner).unwrap();
+                        let replacement =
+                            pc.create_data_channel("fresh", Some(options)).unwrap().id();
+                        assert_ne!(replacement, owner);
+                        assert_eq!(pc.data_channels.handle_of_stream(&sid), Some(replacement));
+                    }
+                }
+            }
+        }
+    }
+
+    // Regression #1086: an association entry does not prove SCTP is connected.
+    #[test]
+    fn post_connected_channel_pending_association_defers_until_connected() {
+        use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEventInternal};
+        use sansio::Protocol;
+        use shared::TransportProtocol;
+        use std::net::SocketAddr;
+        for role in [RTCDtlsRole::Client, RTCDtlsRole::Server] {
+            for negotiated in [None, Some(3)] {
+                let now = Instant::now();
+                let mut endpoint = sctp::Endpoint::new(
+                    "127.0.0.1:4444".parse::<SocketAddr>().unwrap(),
+                    TransportProtocol::UDP,
+                    sctp::EndpointConfig::default().into(),
+                    None,
+                );
+                let (handle, association) = endpoint
+                    .connect(
+                        now,
+                        sctp::ClientConfig::default(),
+                        "127.0.0.1:5555".parse().unwrap(),
+                    )
+                    .unwrap();
+                assert!(association.is_handshaking());
+                let mut pc = RTCPeerConnectionBuilder::new().build(now).unwrap();
+                pc.dtls_transport_mut().dtls_role = role;
+                pc.sctp_transport_mut()
+                    .sctp_associations
+                    .insert(handle, association);
+                let id = pc
+                    .create_data_channel(
+                        "pending-transport",
+                        Some(RTCDataChannelInit {
+                            negotiated,
+                            ..Default::default()
+                        }),
+                    )
+                    .unwrap()
+                    .id();
+                let dc = pc.data_channels.get(&id).unwrap();
+                assert!(
+                    dc.data_channel.is_none(),
+                    "role={role:?} negotiated={negotiated:?}: must defer dial during SCTP handshake"
+                );
+                assert_eq!(dc.ready_state, RTCDataChannelState::Connecting);
+                assert!(dc.handshake_deadline.is_none());
+                while pc.poll_event().is_some() {}
+                assert!(pc.poll_data_read().is_none());
+                assert_eq!(
+                    pc.pipeline_context
+                        .stats
+                        .peer_connection
+                        .data_channels_opened,
+                    0
+                );
+                pc.sctp_transport_mut()
+                    .sctp_associations
+                    .insert(handle, established_test_association(role));
+                pc.get_datachannel_handler()
+                    .handle_event(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::SCTPHandshakeComplete(handle.0),
+                    })
+                    .unwrap();
+                assert!(pc.data_channels.get(&id).unwrap().data_channel.is_some());
+                let opened = pc.poll_read().map(|message| message.message);
+                assert_eq!(opened.is_some(), negotiated.is_some());
+                if let Some(opened) = opened {
+                    assert!(
+                        matches!(opened, crate::peer_connection::message::RTCMessage::DataChannelOpened(event_id) if event_id == id)
+                    );
+                }
+                assert_eq!(
+                    pc.data_channel(id).unwrap().ready_state(),
+                    if negotiated.is_some() {
+                        RTCDataChannelState::Open
+                    } else {
+                        RTCDataChannelState::Connecting
+                    }
+                );
+                assert_eq!(
+                    pc.data_channels.get(&id).unwrap().handshake_deadline,
+                    negotiated
+                        .is_none()
+                        .then_some(now + std::time::Duration::from_secs(30))
+                );
+            }
+        }
+    }
+
+    // Regression #1086: late negotiated channels must reach event-first consumers.
+    #[test]
+    fn post_connected_channel_negotiated_announces_open_once() {
+        use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEventInternal};
+        use crate::peer_connection::message::RTCMessage;
+        use sansio::Protocol;
+        for role in [RTCDtlsRole::Client, RTCDtlsRole::Server] {
+            let now = Instant::now();
+            let mut pc = RTCPeerConnectionBuilder::new().build(now).unwrap();
+            pc.dtls_transport_mut().dtls_role = role;
+            pc.sctp_transport_mut()
+                .sctp_associations
+                .insert(AssociationHandle(0), established_test_association(role));
+            // Leave negotiation-needed latched between creations. Neither channel
+            // can depend on another input packet or a new negotiation event.
+            for (opened_count, sid) in [(1, 2), (2, 3)] {
+                let id = pc
+                    .create_data_channel(
+                        "late-negotiated",
+                        Some(RTCDataChannelInit {
+                            negotiated: Some(sid),
+                            ..Default::default()
+                        }),
+                    )
+                    .unwrap()
+                    .id();
+                assert_eq!(
+                    pc.data_channel(id).unwrap().ready_state(),
+                    RTCDataChannelState::Open
+                );
+                while let Some(event) = pc.poll_event() {
+                    assert!(
+                        !matches!(event, RTCPeerConnectionEvent::OnDataChannel(_)),
+                        "channel lifecycle stays in the ordered data queue"
+                    );
+                }
+                assert!(
+                    matches!(pc.poll_data_read().map(|m| m.message),
+                    Some(RTCMessage::DataChannelOpened(event_id)) if event_id == id),
+                    "role={role:?} sid={sid}: event-first consumer must see the open marker without I/O"
+                );
+                assert!(pc.poll_data_read().is_none());
+                assert_eq!(
+                    pc.pipeline_context
+                        .stats
+                        .peer_connection
+                        .data_channels_opened,
+                    opened_count
+                );
+                assert_eq!(
+                    pc.pipeline_context.stats.data_channels[&id].state,
+                    RTCDataChannelState::Open
+                );
+                assert_eq!(
+                    pc.pipeline_context.stats.data_channels[&id].data_channel_identifier,
+                    sid
+                );
+                assert!(
+                    pc.data_channels
+                        .get(&id)
+                        .unwrap()
+                        .handshake_deadline
+                        .is_none()
+                );
+            }
+            pc.get_datachannel_handler()
+                .handle_event(TaggedRTCEventInternal {
+                    now: now + std::time::Duration::from_secs(1),
+                    event: RTCEventInternal::SCTPHandshakeComplete(0),
+                })
+                .unwrap();
+            while pc.poll_event().is_some() {}
+            assert!(pc.poll_data_read().is_none());
+            assert_eq!(
+                pc.pipeline_context
+                    .stats
+                    .peer_connection
+                    .data_channels_opened,
+                2
+            );
+        }
+    }
+
+    // Regression #1086: direct creation must arm the same deadline as startup.
+    #[test]
+    fn post_connected_channel_in_band_arms_and_obeys_handshake_timeout() {
+        use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEventInternal};
+        use sansio::Protocol;
+        for role in [RTCDtlsRole::Client, RTCDtlsRole::Server] {
+            for timeout in [None, Some(std::time::Duration::from_secs(3))] {
+                let now = Instant::now();
+                let settings = SettingEngineBuilder::new()
+                    .with_dcep_handshake_timeout(timeout)
+                    .build();
+                let mut pc = RTCPeerConnectionBuilder::new()
+                    .with_setting_engine(settings)
+                    .build(now)
+                    .unwrap();
+                pc.dtls_transport_mut().dtls_role = role;
+                pc.sctp_transport_mut()
+                    .sctp_associations
+                    .insert(AssociationHandle(0), established_test_association(role));
+                let id = pc.create_data_channel("late-in-band", None).unwrap().id();
+                assert_eq!(
+                    pc.data_channels.get(&id).unwrap().handshake_deadline,
+                    timeout.map(|delay| now + delay),
+                    "role={role:?}: direct dial must arm timeout"
+                );
+                assert_eq!(
+                    pc.data_channel(id).unwrap().ready_state(),
+                    RTCDataChannelState::Connecting
+                );
+                assert!(pc.get_datachannel_handler().poll_read().is_none());
+                pc.get_datachannel_handler()
+                    .handle_event(TaggedRTCEventInternal {
+                        now: now + std::time::Duration::from_secs(1),
+                        event: RTCEventInternal::SCTPHandshakeComplete(0),
+                    })
+                    .unwrap();
+                assert_eq!(
+                    pc.data_channels.get(&id).unwrap().handshake_deadline,
+                    timeout.map(|delay| now + delay),
+                    "duplicate connected event must not postpone deadline"
+                );
+                pc.get_datachannel_handler()
+                    .handle_timeout(now + std::time::Duration::from_secs(3))
+                    .unwrap();
+                let expected = if timeout.is_some() {
+                    RTCDataChannelState::Closed
+                } else {
+                    RTCDataChannelState::Connecting
+                };
+                assert_eq!(pc.data_channel(id).unwrap().ready_state(), expected);
+                assert_eq!(
+                    pc.pipeline_context
+                        .stats
+                        .peer_connection
+                        .data_channels_closed,
+                    u32::from(timeout.is_some())
+                );
+            }
+        }
+    }
+
     // Regression #1080: failed creation cannot reserve a later replacement's stream.
     #[test]
     fn create_data_channel_failure_releases_registry_and_allows_stream_reuse() {
@@ -2817,7 +3148,7 @@ mod tests {
             pc.dtls_transport_mut().dtls_role = role;
             pc.sctp_transport_mut()
                 .sctp_associations
-                .insert(AssociationHandle(0), sctp::Association::default());
+                .insert(AssociationHandle(0), established_test_association(role));
             let mut final_sid = 0;
             for sid in (parity..u16::MAX).step_by(2) {
                 pc.data_channels.insert(RTCDataChannelInternal {
@@ -2863,9 +3194,10 @@ mod tests {
         let mut pc = RTCPeerConnectionBuilder::new()
             .build(Instant::now())
             .unwrap();
-        pc.sctp_transport_mut()
-            .sctp_associations
-            .insert(AssociationHandle(0), sctp::Association::default());
+        pc.sctp_transport_mut().sctp_associations.insert(
+            AssociationHandle(0),
+            established_test_association(RTCDtlsRole::Client),
+        );
 
         let dc = pc.create_data_channel("test", None).unwrap();
         let id = dc.id();
