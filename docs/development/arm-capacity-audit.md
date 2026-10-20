@@ -3761,3 +3761,36 @@ instrumentation stays off. Each owes 691,232 sends and 10,368,480 deliveries.
 Generator and server use CPUs 0–7; the external observer uses CPUs 8–11. No local
 builds or tests overlap either attempt. Both attempts, failed or valid, remain
 recorded. A successful test exit proves replay equality, not workload validity.
+
+The original pair and one final candidate attempt completed with exact replay
+and unchanged generator/server hashes. The final attempt was registered at
+04:41:36 UTC, before the baseline outcome, with the same workload and no extra
+retries. All three histories remain recorded:
+
+| Attempt | Workload result | Sent | Unsent | Receipts |
+| --- | --- | ---: | ---: | ---: |
+| First shared candidate, `3e53637f-3412-4d6b-b9b7-c93993a7332d` | Invalid: generator lag | 97,619 | 593,613 | 1,464,285 |
+| Original collector, `c14fbdea-0fa6-479f-bcb5-fd9eab84c7cb` | Valid | 691,232 | 0 | 10,368,480 |
+| Final shared candidate, `8cf0fac7-6bf0-4222-8a49-2427fc4f65a5` | Valid | 691,232 | 0 | 10,368,480 |
+
+Each run has zero outstanding deliveries and gap coverage. The first candidate
+crosses the 250,000 us lag bound near second 101.7, with a 1,030,410 us maximum.
+Its partial memory result is excluded from comparison. The valid baseline and
+final candidate have maximum send lags of 245,331 and 178,668 us.
+
+For the two complete valid runs, `wait4` peak RSS changes from 2,428,800 to
+789,612 KiB, a 67.49% reduction. Process wall time changes from 1,239.238 to
+1,170.714 seconds and CPU time from 1,288.634 to 1,226.872 seconds. These are
+one full-work sample each on the shared debug host. They include artifact and
+oracle work, and owned-server work in the resource totals. They do not prove
+a throughput gain or an isolated receipt-ingestion cost.
+
+Source sharing passes this full-work qualification. One of two candidate
+attempts is valid; this does not establish a stall repair or a reliability
+bound. The failed candidate has a concurrent server CPU burst. The valid
+baseline also has a smaller burst. One-second samples cannot establish a
+cause; [#1009](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1009)
+remains open. Retained records still grow with offered work, so
+[#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775)
+also remains open. Full registrations, all five artifact hashes per run, and
+raw results remain under the local source-sharing experiment directories.
