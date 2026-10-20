@@ -2368,3 +2368,130 @@ async fn deferred_exchange_respects_observed_loss_before_close_dispatch() {
         "observed-loss histories failed: {failures:#?}"
     );
 }
+
+// Regression #1097 / audit #826: incarnation changes re-arm queued sibling sends.
+#[tokio::test]
+async fn deferred_exchange_obeys_rearmed_incarnation_gates() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    for gate in ["exchange", "unreliable", "none"] {
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            let (ws, mut server_ws) = crate::socket_tests::websocket_pair().await;
+            let directory = tempfile::tempdir().unwrap();
+            let release = directory.path().join("release");
+            let mut cli = Cli::parse_from([
+                "native",
+                "--server-url",
+                "ws://unused.invalid",
+                "--create-room",
+                "--disable-mdns",
+                "--exchange",
+            ]);
+            match gate {
+                "exchange" => cli.exchange_release_file = Some(release.clone()),
+                "unreliable" => {
+                    let first_release = directory.path().join("reliable-release");
+                    std::fs::write(&first_release, b"go").unwrap();
+                    cli.exchange_release_file = Some(first_release);
+                    cli.unreliable_exchange_release_file = Some(release.clone());
+                }
+                _ => {}
+            }
+            let me = PlayerId::from_u128(1);
+            let sibling = PlayerId::from_u128(2);
+            let returning = PlayerId::from_u128(3);
+            let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
+            state.current_session_generation = Some(SessionGeneration::from_u128(3));
+            state.exchange_released = true;
+            state.unreliable_exchange_released = true;
+            state.establish_pair(sibling, true).await.unwrap();
+            let (mut remote, opens, mut remote_events) =
+                open_physical_pair_with_events(&mut state, &mut server_ws, sibling, None).await;
+            for event in opens {
+                state.handle_engine_event(event).await.unwrap();
+            }
+            state.deferred_exchange.retain(|send| send.label == label);
+            assert_eq!(state.deferred_exchange.len(), 1);
+            let sends = Arc::new(AtomicUsize::new(0));
+            let send_count = sends.clone();
+            state.exchange_send_hook = Some(Box::new(move |channel, text| {
+                if serde_json::from_str::<serde_json::Value>(&text).unwrap()["channel"] == label {
+                    send_count.fetch_add(1, Ordering::SeqCst);
+                }
+                Box::pin(async move { channel.send_text(&text).await })
+            }));
+
+            state.members_seen.insert(returning);
+            state
+                .handle_server_message(ServerMessage::PlayerJoined {
+                    player: serde_json::from_value(json!({
+                        "id": returning, "name": "returning", "is_authority": false,
+                        "is_ready": false, "connected_at": "2026-10-10T00:00:00Z",
+                        "connection_info": null,
+                    }))
+                    .unwrap(),
+                })
+                .await
+                .unwrap();
+            state.ice_gathering_complete.insert(sibling);
+            if gate == "unreliable" {
+                state.process_exchange_gate(Instant::now()).await.unwrap();
+            }
+            while !state.deferred_exchange.is_empty() {
+                state.process_deferred_exchange().await.unwrap();
+            }
+            let held = gate == "exchange" || (gate == "unreliable" && label == UNRELIABLE_LABEL);
+            assert_eq!(
+                sends.load(Ordering::SeqCst),
+                usize::from(!held),
+                "{gate}/{label}: a re-armed release gate must prevent a queued physical send"
+            );
+            assert_eq!(state.exchange_ledger.has_sent(sibling, label), !held);
+
+            // Exercise the real release path: skipped work must be queued again.
+            std::fs::write(&release, b"go").unwrap();
+            state.ice_gathering_complete.insert(sibling);
+            if gate == "unreliable" {
+                assert!(state.exchange_ledger.has_sent(sibling, RELIABLE_LABEL));
+                state
+                    .exchange_ledger
+                    .note_received(sibling, RELIABLE_LABEL.into());
+                state
+                    .process_unreliable_exchange_gate(Instant::now())
+                    .await
+                    .unwrap();
+            } else {
+                state.process_exchange_gate(Instant::now()).await.unwrap();
+            }
+            while !state.deferred_exchange.is_empty() {
+                state.process_deferred_exchange().await.unwrap();
+            }
+            assert!(
+                state.exchange_ledger.has_sent(sibling, label),
+                "{gate}/{label}: release restores skipped debt"
+            );
+            assert_eq!(
+                sends.load(Ordering::SeqCst),
+                1,
+                "{gate}/{label}: release sends each probe once"
+            );
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let EngineEvent::ChannelMessage {
+                        label: received, ..
+                    } = remote_events.recv().await.unwrap()
+                    {
+                        if received == label {
+                            break;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("the released probe reaches the real remote channel");
+            remote.remove_peer(me).await.unwrap();
+            state.engine.remove_peer(sibling).await.unwrap();
+        }
+    }
+}
