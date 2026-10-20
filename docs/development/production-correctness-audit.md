@@ -5699,3 +5699,100 @@ streams remain in local `progress/session-485/interop`. These are integration
 checks; the controlled histories above establish the three specific defects.
 Root and native strict lint, browser tests/typecheck/format, document checks,
 and all 51 source-policy controls pass. Hosted CI and review remain merge gates.
+
+### F101 — Native physical retirement discards admitted gameplay evidence
+
+Issue [#1070](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1070),
+found at `71093de2` while investigating #889. The native engine publishes a
+required-label gameplay receipt with its arrival time and queue permit. A
+negotiation timeout or physical loss removes the link before the orchestrator
+handles that receipt. The old physical-generation check discards the event,
+although the logical peer obligation and original receipt window still apply.
+
+Baseline run `84a36c5f` rejects both timely channel labels after loss and timeout.
+The repair retains a constant-size generation interval per logical peer so
+admitted message events survive physical retirement and ordinary retry. Other
+event kinds still require the current physical generation. Authoritative plan
+replacement, departure, fresh incarnation, and room restore invalidate old
+pending receipts. Arrival cutoffs and exchange payload validation stay intact.
+
+Run `8c6b1271` passes the strengthened receipt matrix and a real WebRTC history.
+The matrix interleaves another peer's generation before retry, rejects old
+lifecycle events, and accepts fresh receipts after logical invalidation. The
+real history receives both required probes from a live remote engine, retains
+the published events and queue permits, expires negotiation, and then processes
+those receipts after physical removal. These histories prove this failure mode;
+they do not establish the historical #889 cause.
+
+### A12 follow-up — Retain browser establishment state transitions
+
+Open #853 records an establishment failure whose endpoint evidence cannot show
+which browser transition occurred before the final failure. The reference
+browser now retains the newest 32 observed signaling, ICE gathering, ICE
+connection, and peer-connection state changes per physical link. Observations
+use relative monotonic milliseconds. Duplicate observations add no entries;
+old-link callbacks cannot alter a replacement's history. Timeout and loss
+snapshots include this history before teardown.
+
+The negative baseline lacks the history and fails the new control. The repaired
+browser suite checks chronology, all four callbacks, the exact retention bound,
+snapshot mutation isolation, replacement, and terminal-state visibility before
+loss callbacks. History-only callbacks add no orchestrator tasks. The longest
+realistic history serializes to 5,505 UTF-16 units, below the CLI diagnostic cap.
+Browser events can combine state changes; this is an observation history, not a
+proof of the historical failure cause. #853 remains open.
+
+External SDK assessment reads the current sibling README files through the
+GitHub connector. Rust provides signaling and relay without a WebRTC backend;
+.NET also scopes itself to signaling and relay. Godot uses its own GDScript and
+engine mesh. None imports the private reference engines or vendored RTC stack.
+These reference-client changes require no SDK migration or wire change.
+
+### F102 — Native local closing waits for reciprocal reset before fallback
+
+Issue [#1071](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1071),
+found at `71093de2` during #826. The RTC layer defines a closing event but does
+not produce it on local close. The native poller also ignores that event.
+A required channel can therefore remain logically connected while its stream
+waits for the remote SCTP reset to complete.
+
+Baseline `095403d1` connects real peer engines, pauses only the remote reactor,
+closes a local required channel, and receives no pair-loss event while reset
+is held. The repaired history `df302193` covers both initiator roles and both
+required labels. It receives one loss event while the channel is still Closing,
+fences sibling sends and input, resumes the remote reactor, and rejects any
+duplicate loss notification. Existing peer-shutdown and ended-stream controls
+also pass.
+
+RTC now queues local closing behind previously published channel input. Local
+reset completion follows the same read queue instead of overtaking it through
+the separate event queue. The wrapper forwards final close through its existing
+closure handler. Core control `cddcedfd` injects immediate reciprocal completion
+and observes input, closing, then final close, with one reset after two close
+calls. The wrapper retains FIFO for registered receivers. Its missing-receiver
+cleanup distinguishes a first registration still in flight from a dropped
+receiver after announcement. The latter can release queued input at closing
+without waiting for reset. The former retains its original input history.
+
+These controls establish the local established-channel failure mode. They do
+not prove the historical #853 or #889 causes. The broader #826 audit and
+published-package replacement qualification #912 remain open.
+
+The same review found that closing before SCTP exists reaches Closed directly
+and has no reciprocal reset to supply its final notification. Baseline
+`c26c0e5a` fails that history. The repair publishes closing then closed, records
+one lifetime closure and closed summary, and suppresses later teardown
+notification. Run `669a548d` passes both in-band and explicitly negotiated
+pre-SCTP cases plus the established reset-order control. The wrapper's 25 driver
+controls pass after a causal negative check for announced receiver cleanup;
+the original pre-registration retention control stays unchanged.
+
+Final native run `6e325b8d` passes receipt, held-reset, and loss-snapshot controls.
+Live qualification `01e07010` passes the three-player browser mesh, native retry,
+and native room restore. Server, native executable, browser CLI, and page bundle
+hashes match before and after all three cells. All seven endpoint streams remain
+in local `progress/session-486/interop`. Initial run `63541ce3` also passed, but
+Cargo relinked the native executable before the tests; that attempt is retained
+separately and is not the fixed-artifact qualification. Root and native strict
+lint, browser build/typecheck/format, and document checks pass. Hosted CI and
+review remain publication gates.

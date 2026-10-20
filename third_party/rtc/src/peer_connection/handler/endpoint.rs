@@ -127,6 +127,14 @@ impl<'a> EndpointHandler<'a> {
         message: ApplicationMessage,
     ) -> Result<()> {
         match message.data_channel_event {
+            DataChannelEvent::ClosedAfterLocalClose => {
+                self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
+                    now,
+                    transport: transport_context,
+                    message: RTCMessageInternal::Dtls(DTLSMessage::DataChannel(message)),
+                });
+                Ok(())
+            }
             DataChannelEvent::Open => {
                 self.handle_datachannel_open(now, transport_context, message.data_channel_id)
             }

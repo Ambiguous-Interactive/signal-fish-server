@@ -227,7 +227,7 @@ pub enum EngineEvent {
         generation: u64,
         label: String,
     },
-    /// A required data channel closed or became unreadable.
+    /// A required data channel started closing, closed, or became unreadable.
     ChannelClosed {
         peer: PlayerId,
         generation: u64,
@@ -414,6 +414,7 @@ pub struct Engine {
     message_budget: Arc<MessageQueueBudget>,
     peers: HashMap<PlayerId, PeerLink>,
     next_generation: u64,
+    receipt_generations: HashMap<PlayerId, (u64, u64)>,
     /// Routing answers for the current ICE endpoints, resolved once per set
     /// rather than once per pair.
     ///
@@ -444,6 +445,7 @@ impl Engine {
             message_budget: Arc::new(MessageQueueBudget::default()),
             peers: HashMap::new(),
             next_generation: 0,
+            receipt_generations: HashMap::new(),
             ice_route_sources: None,
         })
     }
@@ -476,6 +478,16 @@ impl Engine {
     pub fn is_current_event(&self, event: &EngineEvent) -> bool {
         let (peer, generation) = event.peer_generation();
         self.is_current_generation(peer, generation)
+    }
+
+    pub(crate) fn owns_pending_receipt(&self, peer: PlayerId, generation: u64) -> bool {
+        self.receipt_generations
+            .get(&peer)
+            .is_some_and(|(first, last)| (*first..=*last).contains(&generation))
+    }
+
+    pub(crate) fn invalidate_pending_receipts(&mut self, peer: PlayerId) {
+        self.receipt_generations.remove(&peer);
     }
 
     pub(crate) async fn negotiate(
@@ -633,6 +645,10 @@ impl Engine {
             channel_tasks: Vec::with_capacity(2),
         };
         self.peers.insert(peer, link);
+        self.receipt_generations
+            .entry(peer)
+            .and_modify(|(_, last)| *last = generation)
+            .or_insert((generation, generation));
         let result = async {
             if !initiate {
                 return Ok(None);
@@ -1592,13 +1608,11 @@ fn spawn_channel_event_loop(
                     tracing::warn!(%peer, channel = %label, "data channel became unreadable");
                     break;
                 }
-                DataChannelEvent::OnClose => {
+                DataChannelEvent::OnClosing | DataChannelEvent::OnClose => {
                     admission.terminal.store(true, Ordering::Relaxed);
                     break;
                 }
-                DataChannelEvent::OnClosing
-                | DataChannelEvent::OnBufferedAmountLow
-                | DataChannelEvent::OnBufferedAmountHigh => {}
+                DataChannelEvent::OnBufferedAmountLow | DataChannelEvent::OnBufferedAmountHigh => {}
                 // The 0.21 event enum is `#[non_exhaustive]`; unknown future
                 // driver events stay visible no-ops instead of failing the
                 // client build.

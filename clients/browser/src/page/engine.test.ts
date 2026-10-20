@@ -483,6 +483,151 @@ for (const path of ['offer', 'answer'] as const) {
 }
 console.error('ok - browser phase snapshots distinguish SDP, ICE, DTLS, and SCTP progress');
 
+// Regression #853: final states alone hide transient establishment progress.
+{
+  const originalPc = globalThis.RTCPeerConnection;
+  const originalPerformance = globalThis.performance;
+  let now = 1000;
+  let connection!: Connection;
+  class Connection {
+    connectionState = 'new';
+    signalingState = 'stable';
+    iceConnectionState = 'new';
+    iceGatheringState = 'new';
+    onconnectionstatechange: (() => void) | null = null;
+    oniceconnectionstatechange: (() => void) | null = null;
+    onicegatheringstatechange: (() => void) | null = null;
+    onsignalingstatechange: (() => void) | null = null;
+    constructor() {
+      connection = this;
+    }
+    close(): void {
+      this.connectionState = 'closed';
+      this.onconnectionstatechange?.();
+    }
+  }
+  interface Observation {
+    elapsedMs: number;
+    connectionState: string;
+    signalingState: string;
+    iceConnectionState: string;
+    iceGatheringState: string;
+  }
+  try {
+    globalThis.RTCPeerConnection = Connection as unknown as typeof RTCPeerConnection;
+    globalThis.performance = { now: () => now } as Performance;
+    let failureHistory: Observation[] = [];
+    let pcNotifications = 0;
+    const engine = new Engine(false, {
+      onLocalCandidate: () => {},
+      onPcState: (_peer, _generation, state) => {
+        pcNotifications += 1;
+        if (state === 'failed') failureHistory = history();
+      },
+      onChannelOpen: () => {},
+      onChannelClosed: () => {},
+      onChannelMessage: () => {},
+    });
+    const history = () =>
+      (engine.diagnosticSnapshot('peer') as { transportStateHistory: Observation[] })
+        .transportStateHistory;
+    await engine.pairWith('peer', false, []);
+    assert(history().length === 1 && history()[0]?.elapsedMs === 0, 'record initial state');
+    now += 5;
+    connection.signalingState = 'have-remote-offer';
+    connection.onsignalingstatechange?.();
+    now += 5;
+    connection.iceGatheringState = 'gathering';
+    connection.onicegatheringstatechange?.();
+    now += 5;
+    connection.iceConnectionState = 'checking';
+    connection.oniceconnectionstatechange?.();
+    assert(pcNotifications === 0, 'history-only events enqueue no orchestrator work');
+    now += 5;
+    connection.connectionState = 'connecting';
+    connection.onconnectionstatechange?.();
+    const sequence = history();
+    assert(
+      sequence.length === 5 &&
+        sequence.map((entry) => entry.elapsedMs).join(',') === '0,5,10,15,20' &&
+        sequence[1]?.signalingState === 'have-remote-offer' &&
+        sequence[2]?.iceGatheringState === 'gathering' &&
+        sequence[3]?.iceConnectionState === 'checking' &&
+        sequence[4]?.connectionState === 'connecting',
+      'retain each observed transport transition with time since this link started',
+    );
+    now += 5;
+    connection.onconnectionstatechange?.();
+    connection.oniceconnectionstatechange?.();
+    connection.onicegatheringstatechange?.();
+    connection.onsignalingstatechange?.();
+    assert(history().length === 5, 'repeated events and snapshots do not add observations');
+    sequence[0]!.connectionState = 'mutated';
+    sequence.pop();
+    assert(
+      history().length === 5 && history()[0]?.connectionState === 'new',
+      'snapshot callers cannot mutate retained history',
+    );
+    now += 5;
+    connection.iceConnectionState = 'connected';
+    // A diagnostic can run before the corresponding browser event arrives.
+    assert(history()[5]?.elapsedMs === 30, 'snapshot captures a pending state event');
+    connection.oniceconnectionstatechange?.();
+    assert(history().length === 6, 'later event deduplicates the snapshot observation');
+    for (let index = 0; index < 70; index++) {
+      now += 1;
+      connection.iceConnectionState = index % 2 === 0 ? 'disconnected' : 'connected';
+      connection.oniceconnectionstatechange?.();
+    }
+    const bounded = history();
+    assert(JSON.stringify(bounded).length < 7000, 'full history fits the diagnostic limit');
+    assert(
+      bounded.length === 32 && bounded[0]?.elapsedMs === 69 && bounded[31]?.elapsedMs === 100,
+      'retain exactly the newest 32 observations without resetting relative time',
+    );
+    now += 5;
+    connection.connectionState = 'failed';
+    connection.onconnectionstatechange?.();
+    assert(
+      failureHistory.at(-1)?.connectionState === 'failed' &&
+        failureHistory.at(-1)?.elapsedMs === 105,
+      'failure callback sees the terminal observation before teardown',
+    );
+    const retired = connection;
+    const notificationsBeforeRetirement = pcNotifications;
+    engine.removePeer('peer');
+    retired.oniceconnectionstatechange?.();
+    retired.onicegatheringstatechange?.();
+    retired.onsignalingstatechange?.();
+    assert(engine.diagnosticSnapshot('peer') === null, 'retired events cannot restore a link');
+    now += 100;
+    await engine.pairWith('peer', false, []);
+    retired.connectionState = 'connected';
+    retired.iceConnectionState = 'failed';
+    retired.signalingState = 'closed';
+    retired.iceGatheringState = 'complete';
+    retired.onconnectionstatechange?.();
+    retired.oniceconnectionstatechange?.();
+    retired.onicegatheringstatechange?.();
+    retired.onsignalingstatechange?.();
+    assert(
+      pcNotifications === notificationsBeforeRetirement &&
+        history().length === 1 &&
+        history()[0]?.elapsedMs === 0 &&
+        history()[0]?.connectionState === 'new' &&
+        history()[0]?.iceConnectionState === 'new',
+      'replacement history starts fresh and ignores every old transport callback',
+    );
+    engine.removePeer('peer');
+  } finally {
+    globalThis.RTCPeerConnection = originalPc;
+    globalThis.performance = originalPerformance;
+  }
+}
+console.error(
+  'ok - browser transport history preserves bounded, isolated establishment progress',
+);
+
 // Regressions #1046/#1051: failure is terminal before application callbacks drain.
 for (const failure of [
   'channel-error',

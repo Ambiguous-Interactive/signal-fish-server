@@ -1742,3 +1742,234 @@ async fn keepalive_final_poll_preserves_frame_errors_and_bounded_control_work() 
         }
     }
 }
+
+#[tokio::test]
+async fn admitted_exchange_receipts_survive_physical_retirement_only() {
+    let mut failures = Vec::new();
+    for retirement in ["loss", "timeout", "replacement", "departure", "incarnation"] {
+        for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+            for late in [false, true] {
+                let (ws, _server_ws) = crate::socket_tests::websocket_pair().await;
+                let cli = Cli::parse_from([
+                    "reference-native",
+                    "--server-url",
+                    "ws://unused.invalid",
+                    "--create-room",
+                    "--exchange",
+                ]);
+                let me = PlayerId::from_u128(1);
+                let peer = PlayerId::from_u128(2);
+                let other = PlayerId::from_u128(3);
+                let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
+                state.engine.pair_with(peer, false, &[]).await.unwrap();
+                state.expected_peers.insert(peer);
+                state.exchange_ledger.note_connected(peer);
+                let received_at = Instant::now();
+                state.run_deadline = (received_at + Duration::from_secs(10)).into();
+                let receipt = |generation, received_at| EngineEvent::ChannelMessage {
+                    peer,
+                    generation,
+                    label: label.into(),
+                    text: json!({"from": peer, "channel": label, "seq": 0}).to_string(),
+                    queue_permit: crate::engine::MessageQueuePermit::for_test(),
+                    received_at,
+                };
+                let event = receipt(
+                    1,
+                    if late {
+                        received_at + Duration::from_secs(11)
+                    } else {
+                        received_at
+                    },
+                );
+                match retirement {
+                    "loss" => state
+                        .handle_peer_transport_loss(peer, "controlled loss")
+                        .await
+                        .unwrap(),
+                    "timeout" => {
+                        let result = state
+                            .engine
+                            .negotiate(
+                                peer,
+                                Negotiation::Candidate(String::new()),
+                                received_at.into(),
+                            )
+                            .await;
+                        assert!(result.is_err());
+                    }
+                    "replacement" => state.prepare_retained_pair_replacement(peer).await,
+                    "departure" => state.remove_pair_obligation(peer).await,
+                    "incarnation" => state.reset_peer_exchange_incarnation(peer).await,
+                    _ => unreachable!(),
+                }
+                // A different peer takes generation 2 before this peer retries.
+                // Queued receipts must retain their original peer ownership.
+                state.engine.pair_with(other, false, &[]).await.unwrap();
+                state.engine.pair_with(peer, false, &[]).await.unwrap();
+                state.expected_peers.insert(peer);
+                state.exchange_ledger.note_connected(peer);
+                assert!(state.engine.is_current_generation(peer, 3));
+                assert!(!state.engine.owns_pending_receipt(other, 1));
+                assert!(!state.engine.owns_pending_receipt(peer, 4));
+                state.handle_engine_event(event).await.unwrap();
+                let observed = state
+                    .exchange_ledger
+                    .received
+                    .get(&peer)
+                    .is_some_and(|labels| labels.contains(label));
+                let expected = !late && matches!(retirement, "loss" | "timeout");
+                if observed != expected {
+                    failures.push(format!("{retirement}/{label}/late={late}: received={observed}, expected={expected}"));
+                }
+                // Keeping receipt history must not revive old lifecycle work.
+                state
+                    .handle_engine_event(EngineEvent::IceGatheringComplete {
+                        peer,
+                        generation: 1,
+                    })
+                    .await
+                    .unwrap();
+                assert!(!state.ice_gathering_complete.contains(&peer));
+                state
+                    .handle_engine_event(EngineEvent::ChannelClosed {
+                        peer,
+                        generation: 1,
+                        label: label.into(),
+                    })
+                    .await
+                    .unwrap();
+                assert!(state.engine.is_current_generation(peer, 3));
+                // Logical invalidation must permit fresh physical receipts.
+                state
+                    .handle_engine_event(receipt(3, received_at))
+                    .await
+                    .unwrap();
+                assert!(state.exchange_ledger.received[&peer].contains(label));
+                state.engine.remove_peer(peer).await.unwrap();
+                state.engine.remove_peer(other).await.unwrap();
+                state.remove_pair_obligation(peer).await;
+                state.remove_pair_obligation(other).await;
+                assert!(!state.engine.owns_pending_receipt(peer, 1));
+                assert!(!state.engine.owns_pending_receipt(peer, 3));
+                assert!(!state.engine.owns_pending_receipt(other, 2));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "admitted receipt histories: {failures:#?}"
+    );
+}
+
+#[tokio::test]
+async fn live_admitted_exchange_receipts_survive_negotiation_timeout() {
+    use crate::engine::{Engine, EngineSettings};
+
+    let (ws, _server_ws) = crate::socket_tests::websocket_pair().await;
+    let cli = Cli::parse_from([
+        "reference-native",
+        "--server-url",
+        "ws://unused.invalid",
+        "--create-room",
+        "--exchange",
+        "--disable-mdns",
+    ]);
+    let me = PlayerId::from_u128(1);
+    let peer = PlayerId::from_u128(2);
+    let mut state = super::tests::fixture_orchestrator(&cli, ws, me);
+    let (sender_tx, mut sender_rx) = mpsc::unbounded_channel();
+    let mut sender = Engine::new(
+        EngineSettings {
+            disable_mdns: true,
+            ..EngineSettings::default()
+        },
+        sender_tx,
+    )
+    .unwrap();
+    let offer = sender.pair_with(me, true, &[]).await.unwrap().unwrap();
+    state.engine.pair_with(peer, false, &[]).await.unwrap();
+    let answer = state.engine.handle_offer(peer, offer).await.unwrap();
+    sender.handle_answer(me, answer).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let mut sender_connected = false;
+        let mut receiver_connected = false;
+        while !sender_connected || !receiver_connected {
+            tokio::select! {
+                event = sender_rx.recv() => match event.unwrap() {
+                    EngineEvent::LocalCandidate { candidate_json, .. } => {
+                        state.engine.handle_remote_candidate(peer, &candidate_json).await.unwrap();
+                    }
+                    EngineEvent::RemoteChannel { label, channel, .. } => {
+                        sender.store_remote_channel(me, label, channel).await;
+                    }
+                    EngineEvent::ChannelOpen { label, .. } => {
+                        sender_connected |= sender.note_channel_open(me, &label).await;
+                    }
+                    _ => {}
+                },
+                event = state.engine_rx.recv() => match event.unwrap() {
+                    EngineEvent::LocalCandidate { candidate_json, .. } => {
+                        sender.handle_remote_candidate(me, &candidate_json).await.unwrap();
+                    }
+                    EngineEvent::RemoteChannel { label, channel, .. } => {
+                        state.engine.store_remote_channel(peer, label, channel).await;
+                    }
+                    EngineEvent::ChannelOpen { label, .. } => {
+                        receiver_connected |= state.engine.note_channel_open(peer, &label).await;
+                    }
+                    _ => {}
+                },
+            }
+        }
+    })
+    .await
+    .expect("real peer engines open both channels");
+    state.expected_peers.insert(peer);
+    state.exchange_ledger.note_connected(peer);
+    state.run_deadline = (Instant::now() + Duration::from_secs(30)).into();
+    for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+        sender
+            .channel(me, label)
+            .unwrap()
+            .send_text(&json!({"from": peer, "channel": label, "seq": 0}).to_string())
+            .await
+            .unwrap();
+    }
+    // Hold real published callbacks, including their shared queue permits,
+    // until the connection has been physically removed by a timeout.
+    let receipts = tokio::time::timeout(Duration::from_secs(15), async {
+        let mut receipts = Vec::new();
+        while receipts.len() < 2 {
+            match state.engine_rx.recv().await.unwrap() {
+                event @ EngineEvent::ChannelMessage { .. } => receipts.push(event),
+                EngineEvent::ChannelClosed { .. } | EngineEvent::ChannelReceiveRejected { .. } => {
+                    panic!("healthy link closed before its receipts were admitted");
+                }
+                _ => {}
+            }
+        }
+        receipts
+    })
+    .await
+    .expect("both remote exchange messages reach the engine queue");
+    assert!(state.exchange_ledger.received.is_empty());
+    assert!(state
+        .engine
+        .negotiate(
+            peer,
+            Negotiation::Candidate(String::new()),
+            Instant::now().into(),
+        )
+        .await
+        .is_err());
+    assert!(!state.engine.is_paired(peer));
+    for event in receipts {
+        assert!(!state.engine.is_current_event(&event));
+        state.handle_engine_event(event).await.unwrap();
+    }
+    assert!(state.exchange_ledger.received[&peer].contains(RELIABLE_LABEL));
+    assert!(state.exchange_ledger.received[&peer].contains(UNRELIABLE_LABEL));
+    sender.remove_peer(me).await.unwrap();
+    state.remove_pair_obligation(peer).await;
+}

@@ -48,3 +48,15 @@ use this policy. Regression histories cover ordered and legacy stream events,
 DTLS shutdown, timeout/reset, active records, and closure order.
 See [#919](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/919).
 Published replacement qualification in #912 must retain these controls.
+
+Local close queues `RTCMessage::DataChannelClosing` behind input already queued
+for the application. Repeated close queues no duplicate. The wrapper can report
+pair loss while the channel waits for the remote SCTP reset. The delta changes
+`src/data_channel/mod.rs`, `internal.rs`, `src/peer_connection/message/`,
+and `src/peer_connection/handler/`.
+Local reset completion follows the closing marker in the same data queue.
+A close before SCTP connects queues both markers immediately and counts the
+closure once. Later transport teardown adds no duplicate notification or count.
+The retained controls check input order, one notification, and a held reciprocal
+reset in the native engine. See [#1071](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1071).
+Replacement qualification in #912 must retain these controls.

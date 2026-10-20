@@ -311,8 +311,16 @@ of the current physical link before teardown. The browser reports signaling,
 ICE gathering, ICE connection, DTLS, SCTP, and required-channel states. It also
 reports whether the remote description was applied, how many remote candidates
 were admitted, and how many still wait for that description. An absent SCTP or
-DTLS transport is `null`. These values describe one observation, not a failure
-cause. Retain both endpoint logs and server logs to compare a failed exchange.
+DTLS transport is `null`. `transportStateHistory` retains the newest 32 observed
+changes to signaling, ICE gathering, ICE connection, and peer-connection states.
+Each entry includes `elapsedMs`, measured from creation of this physical link
+with the monotonic browser clock and rounded to milliseconds. The initial state
+is recorded; repeated observations add no entries. Events and diagnostic reads
+record changes, so the history can show transient progress before a timeout.
+A replacement link starts a new history. The history contains no SDP, candidate
+addresses, or message payloads. Browser events can combine state changes, so
+these observations do not prove a failure cause. Retain both endpoint logs and
+server logs to compare a failed exchange.
 
 - **`SIGNAL_FISH_BROWSER_CLI is not set` panic:** run `npm ci && npm run build` here and export
   `SIGNAL_FISH_BROWSER_CLI=<repo>/clients/browser/dist/cli.js`, or just use

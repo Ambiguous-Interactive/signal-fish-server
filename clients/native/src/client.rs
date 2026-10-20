@@ -2899,7 +2899,9 @@ impl Orchestrator<'_> {
 
     async fn handle_engine_event(&mut self, event: EngineEvent) -> Result<(), FatalError> {
         let (event_peer, generation) = event.peer_generation();
-        if !self.engine.is_current_event(&event) {
+        let pending_receipt = matches!(event, EngineEvent::ChannelMessage { .. })
+            && self.engine.owns_pending_receipt(event_peer, generation);
+        if !pending_receipt && !self.engine.is_current_event(&event) {
             tracing::debug!(%event_peer, generation, "discarding stale peer-link callback");
             return Ok(());
         }
@@ -3022,6 +3024,7 @@ impl Orchestrator<'_> {
     /// intact: the replacement is a transport generation of the same planned
     /// peer obligation, not a second gameplay peer.
     async fn prepare_retained_pair_replacement(&mut self, peer: PlayerId) {
+        self.engine.invalidate_pending_receipts(peer);
         self.selected_pair_evidence.clear(peer);
         self.connected_pairs.remove(&peer);
         self.p2p_reconnected_pairs.remove(&peer);
@@ -3292,6 +3295,7 @@ impl Orchestrator<'_> {
     }
 
     async fn remove_pair_obligation(&mut self, peer: PlayerId) {
+        self.engine.invalidate_pending_receipts(peer);
         self.expected_peers.remove(&peer);
         self.pending_pair_directives.remove(&peer);
         self.pair_roles.remove(&peer);
@@ -3590,6 +3594,7 @@ impl Orchestrator<'_> {
 
     /// A returning member must exchange fresh traffic through any harness gates.
     async fn reset_peer_exchange_incarnation(&mut self, player_id: PlayerId) {
+        self.engine.invalidate_pending_receipts(player_id);
         self.exchange_ledger.reset_incarnation(player_id);
         if self.expected_peers.contains(&player_id) {
             self.prepare_retained_pair_replacement(player_id).await;

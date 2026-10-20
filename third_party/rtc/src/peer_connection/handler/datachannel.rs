@@ -108,7 +108,16 @@ impl<'a> DataChannelHandler<'a> {
         let channel_id = dc.id;
         self.stats.peer_connection.on_data_channel_closed();
         self.stats.mark_data_channel_closed(channel_id);
-        if let Some(transport) = transport {
+        if dc.ready_state == RTCDataChannelState::Closing {
+            self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
+                now,
+                transport: transport.unwrap_or_default(),
+                message: RTCMessageInternal::Dtls(DTLSMessage::DataChannel(ApplicationMessage {
+                    data_channel_id: channel_id,
+                    data_channel_event: DataChannelEvent::ClosedAfterLocalClose,
+                })),
+            });
+        } else if let Some(transport) = transport {
             self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
                 now,
                 transport,

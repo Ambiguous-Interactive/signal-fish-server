@@ -233,6 +233,18 @@ mod tests {
         dc.dial(0)?;
         while dc.data_channel.as_mut().unwrap().poll_write().is_some() {}
         let id = pc.data_channels.insert(dc);
+        pc.pipeline_context.data_read_outs.push_back(
+            crate::peer_connection::message::TaggedRTCMessage {
+                now: Instant::now(),
+                message: crate::peer_connection::message::RTCMessage::DataChannelMessage(
+                    id,
+                    crate::data_channel::RTCDataChannelMessage {
+                        is_string: true,
+                        data: bytes::BytesMut::from("before-close"),
+                    },
+                ),
+            },
+        );
         pc.data_channel(id).unwrap().close()?;
         assert_eq!(
             pc.data_channel(id).unwrap().ready_state(),
@@ -251,6 +263,114 @@ mod tests {
             dc.poll_write().is_none(),
             "repeated close requests no second reset"
         );
+        pc.get_datachannel_handler().handle_event(
+            crate::peer_connection::event::TaggedRTCEventInternal {
+                now: Instant::now(),
+                event: crate::peer_connection::event::RTCEventInternal::SCTPStreamClosed(0, 0),
+            },
+        )?;
+        while let Some(event) = pc.poll_event() {
+            assert!(
+                !matches!(event,
+                    crate::peer_connection::event::RTCPeerConnectionEvent::OnDataChannel(
+                        crate::peer_connection::event::RTCDataChannelEvent::OnClose(event_id)
+                    ) if event_id == id
+                ),
+                "immediate reset must not overtake queued closing and input"
+            );
+        }
+        assert!(matches!(
+            pc.poll_read().unwrap().message,
+            crate::peer_connection::message::RTCMessage::DataChannelMessage(event_id, _)
+                if event_id == id
+        ));
+        assert!(matches!(
+            pc.poll_data_read().unwrap().message,
+            crate::peer_connection::message::RTCMessage::DataChannelClosing(event_id)
+                if event_id == id
+        ));
+        assert!(matches!(
+            pc.poll_data_read().unwrap().message,
+            crate::peer_connection::message::RTCMessage::DataChannelClosed(event_id)
+                if event_id == id
+        ));
+        assert!(
+            pc.poll_data_read().is_none(),
+            "repeated close publishes no duplicate"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unconnected_local_close_reports_both_terminal_markers_once() -> Result<()> {
+        for negotiated in [None, Some(0)] {
+            let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
+            let id = pc
+                .create_data_channel(
+                    "unconnected",
+                    Some(crate::data_channel::RTCDataChannelInit {
+                        negotiated,
+                        ..Default::default()
+                    }),
+                )?
+                .id();
+            assert!(pc.data_channels.get(&id).unwrap().data_channel.is_none());
+            pc.data_channel(id).unwrap().close()?;
+            pc.data_channel(id).unwrap().close()?;
+            assert_eq!(
+                pc.data_channel(id).unwrap().ready_state(),
+                RTCDataChannelState::Closed
+            );
+            assert!(matches!(pc.poll_data_read().unwrap().message,
+                crate::peer_connection::message::RTCMessage::DataChannelClosing(event_id) if event_id == id));
+            assert!(
+                matches!(pc.poll_data_read().expect("no SCTP reset can provide the final close").message,
+                crate::peer_connection::message::RTCMessage::DataChannelClosed(event_id) if event_id == id)
+            );
+            assert!(pc.poll_data_read().is_none());
+            assert_eq!(
+                pc.pipeline_context
+                    .stats
+                    .peer_connection
+                    .data_channels_opened,
+                0
+            );
+            assert_eq!(
+                pc.pipeline_context
+                    .stats
+                    .peer_connection
+                    .data_channels_closed,
+                1
+            );
+            assert_eq!(
+                pc.pipeline_context.stats.data_channels[&id].state,
+                RTCDataChannelState::Closed
+            );
+            pc.get_datachannel_handler().handle_event(
+                crate::peer_connection::event::TaggedRTCEventInternal {
+                    now: Instant::now(),
+                    event: crate::peer_connection::event::RTCEventInternal::DTLSClosed,
+                },
+            )?;
+            assert!(
+                pc.poll_read().is_none(),
+                "transport cleanup adds no duplicate close"
+            );
+            while let Some(event) = pc.poll_event() {
+                assert!(!matches!(event,
+                    crate::peer_connection::event::RTCPeerConnectionEvent::OnDataChannel(
+                        crate::peer_connection::event::RTCDataChannelEvent::OnClose(event_id)
+                    ) if event_id == id));
+            }
+            assert!(pc.data_channels.get(&id).is_none());
+            assert_eq!(
+                pc.pipeline_context
+                    .stats
+                    .peer_connection
+                    .data_channels_closed,
+                1
+            );
+        }
         Ok(())
     }
 

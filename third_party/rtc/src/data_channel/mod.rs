@@ -421,7 +421,32 @@ impl RTCDataChannel<'_> {
                 return Ok(());
             }
             dc.ready_state = RTCDataChannelState::Closing;
-            dc.close()
+            dc.close()?;
+            let closed_immediately = dc.ready_state == RTCDataChannelState::Closed;
+            if closed_immediately {
+                dc.close_emitted = true;
+                let stats = &mut self.peer_connection.pipeline_context.stats;
+                stats.peer_connection.on_data_channel_closed();
+                stats.get_or_create_data_channel(self.id, &dc.label, &dc.protocol);
+                stats.mark_data_channel_closed(self.id);
+            }
+            self.peer_connection
+                .pipeline_context
+                .data_read_outs
+                .push_back(TaggedRTCMessage {
+                    now: self.peer_connection.pipeline_context.now,
+                    message: RTCMessage::DataChannelClosing(self.id),
+                });
+            if closed_immediately {
+                self.peer_connection
+                    .pipeline_context
+                    .data_read_outs
+                    .push_back(TaggedRTCMessage {
+                        now: self.peer_connection.pipeline_context.now,
+                        message: RTCMessage::DataChannelClosed(self.id),
+                    });
+            }
+            Ok(())
         } else {
             Err(Error::ErrDataChannelClosed)
         }

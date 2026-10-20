@@ -290,7 +290,7 @@ until the pipe drains, closes, or the process exits.
 | `local_candidate` | `peer`, `candidate_type`, `address`, `port`, `protocol` | Native-only: a gathered local ICE candidate was advertised to `peer`, reported after the relay so the set describes what the remote side can see. `candidate_type` ∈ `host`/`srflx`/`prflx`/`relay`. The relay-only TURN cell requires every entry to be `relay`, and the IPv6 cell requires every entry to be an IPv6 host; without it, a session that gathers nothing reports only "no candidate pairs" |
 | `pc_state` | `peer`, `state` | RTCPeerConnection state transition (informational) |
 | `channel_open` | `peer`, `label` | One data channel reached open (`label` ∈ `reliable`/`unreliable`) |
-| `channel_closed` | `peer`, `label` | A required data channel closed or became unreadable; the unusable pair is removed and relay fallback remains live |
+| `channel_closed` | `peer`, `label` | A required data channel started closing, closed, or became unreadable; the unusable pair is removed and relay fallback remains live |
 | `channel_message_sent` | `peer`, `label`, `text` | An `--exchange` message was sent |
 | `channel_message` | `peer`, `label`, `text` | A data-channel text message arrived |
 | `p2p_pair_connected` | `peer` | Both channels first opened for this logical peer obligation |
@@ -333,6 +333,11 @@ Relay receipt criteria use the time when the client observes a complete frame.
 Timely receipts remain valid through decoding and queued processing.
 Late receipts keep the criterion unpaid. The client still validates and reports
 late frames. Existing successful holds and active linger windows still apply.
+
+Data-channel receipts keep their engine publication time and logical peer
+ownership through physical loss, negotiation timeout, and ordinary retry.
+A newer authoritative plan, departure, or fresh incarnation invalidates queued
+old-link receipts. The original receipt cutoff still applies.
 
 Deferred exchange sends let the client read signaling between channel attempts.
 A stalled send keeps its unmet exchange criteria and triggers relay fallback
