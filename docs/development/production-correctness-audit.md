@@ -6351,7 +6351,7 @@ The new `stream_reset_transport_close_preserves_queued_gameplay_before_close`
 control fails on the baseline with `close overtook input`. It opens a public
 peer channel, accepts a payload through the data-channel handler, queues
 transport closure, and drains public events before data. The repair routes
-all channel-close announcements through the ordered read queue. Local
+transport-driven channel-close announcements through the ordered read queue. Local
 `Closing` still uses its distinct completion marker. Closure statistics and
 duplicate suppression retain their existing behavior.
 
