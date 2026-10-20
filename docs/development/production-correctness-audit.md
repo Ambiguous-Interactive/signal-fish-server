@@ -6246,3 +6246,59 @@ and their private RTC copy; they change no server message, SDK source, or SDK
 migration requirement. The fresh SDK README assessment used the connected
 GitHub app. Keep historical #853/#889 and the broad #826 audit open: these
 controls do not identify the cause of those past failures.
+
+### F113 — Native channel closure leaves send-capacity waiters blocked
+
+Baseline `de067ca8`. Finding [#1088](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1088)
+continues A20, [#826](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/826),
+and replacement qualification [#912](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/912).
+The async wrapper checked peer-connection closure and outstanding bytes but
+ignored the individual channel state. A locally closed channel could retain
+accepted bytes until its reciprocal reset. Its connection and sibling channel
+remained live, so blocked sends could wait indefinitely. Nonblocking sends
+reported buffer pressure before consulting the terminal channel state. With
+an unlimited buffer, `writable()` returned success on a closing channel.
+
+Real paired native controls configure the public send-buffer limit, pause the
+remote reactor, and fill one channel. They explicitly poll `writable`, binary
+send, and text send to pending before closing only that channel. Original code
+returns `ErrSendBufferFull` from a terminal nonblocking send, times out waiting
+for all three blocking operations, and returns success from unlimited
+`writable()`. The repair checks terminal channel state before capacity and
+notifies waiters after local close. Unbounded sends retain one core lock and
+use the core's existing terminal send check. The original limits and accepted
+payload remain unchanged. These controls prove terminal results after repolling;
+they do not isolate notifier latency from the existing 50 ms liveness backstop.
+
+The controls distinguish transport sibling continuity from reference-engine
+pair policy: the wrapper keeps the sibling open, while the engine deliberately
+stops gameplay admission after a required-channel loss. Outstanding accepted
+input must reach the remote before its close marker, and its retained byte
+count must return to zero. Fresh-link gameplay remains a separate control.
+This finding does not identify the historical #853/#889 failure causes or
+qualify a published replacement for the private WebRTC dependency.
+
+### A20 — Fragmented browser gameplay through same-stream reset
+
+Baseline `de067ca8`. This qualification continues
+[#853](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/853)
+and [#889](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/889).
+Earlier first-open/reset controls used small messages. The expanded real
+Chromium histories send three distinct 65,536-byte messages, as text or binary,
+through both channel labels and offerer roles. Multibyte UTF-8 content reaches
+the existing receive-size boundary and requires SCTP fragmentation. Immediate
+reset and application-acknowledged reset remain separate histories.
+
+The assertions compare the full body at raw receipt and engine admission,
+check message type and channel identity, retain reliable ordering, reject
+duplicate delivery, and require one pair-loss event. Immediate-reset histories allow unreliable loss. Acknowledged controls
+require all receipts before reset. Any raw receipt before pair loss must cross
+admission exactly once. Unexpected bodies, types, and cross-label traffic cannot count as allowed
+loss. Separate in-memory faults remove large text/binary admission or corrupt
+and misroute unreliable input. Each must fail its intended assertion.
+
+The 40 real Chromium controls pass. All 48 large messages were observed at
+both receipt seams in this cohort. These results qualify this fragmentation
+boundary, not the historical native/browser establishment or three-player
+mesh failure. The historical issues remain open, and this Chromium-only
+comparison does not qualify the native SCTP implementation.

@@ -340,191 +340,259 @@ try {
   // Audits #853/#889: distinguish raw receipt, engine admission, and same-stream reset.
   for (const initiate of [false, true])
     for (const label of ['reliable', 'unreliable'])
-      for (const acknowledge of [false, true]) {
-        const evidence = await page.evaluate(
-          async ({ initiate, label, acknowledge }) => {
-            const events = [];
-            const check = (condition, message) => {
-              if (!condition)
-                throw new Error(
-                  `${JSON.stringify({ initiate, label, acknowledge })}: ${message}; ${JSON.stringify(events)}`,
-                );
-            };
-            const deadline = performance.now() + 10000;
-            const until = async (condition) => {
-              while (!condition()) {
-                check(performance.now() < deadline, 'timed out');
-                await new Promise((resolve) => setTimeout(resolve, 10));
-              }
-            };
-            const NativeConnection = globalThis.RTCPeerConnection;
-            const observe = (channel) => {
-              channel.addEventListener('message', ({ data }) =>
-                events.push(`raw:${channel.label}:${data}`),
-              );
-              channel.addEventListener('closing', () =>
-                events.push(`closing:${channel.label}`),
-              );
-              channel.addEventListener('close', () => events.push(`close:${channel.label}`));
-              events.push(`registered:${channel.label}:${channel.readyState}`);
-              return channel;
-            };
-            let receiver;
-            globalThis.RTCPeerConnection = class extends NativeConnection {
-              constructor(configuration) {
-                super(configuration);
-                receiver = this;
-                this.addEventListener('datachannel', ({ channel }) => observe(channel));
-              }
-              createDataChannel(...args) {
-                return observe(super.createDataChannel(...args));
-              }
-            };
-            const engine = new channelEngine.Engine(false, {
-              onLocalCandidate: () => {},
-              onPcState: () => {},
-              onChannelOpen: (peer, _generation, name) => {
-                events.push(`engine-open:${name}`);
-                engine.noteChannelOpen(peer, name);
-              },
-              onChannelClosed: (_peer, _generation, name) => events.push(`loss:${name}`),
-              onChannelMessage: (_peer, _generation, name, text) =>
-                events.push(`admitted:${name}:${text}`),
-            });
-            const remote = new NativeConnection();
-            const channels = [];
-            const startChannel = (channel) => {
-              channels.push(channel);
-              let sent = false;
-              const sendOnOpen = () => {
-                if (sent || channel.readyState !== 'open') return;
-                sent = true;
-                events.push(`sender-open:${channel.label}`);
-                channel.send('first-open');
-                events.push(`first-sent:${channel.label}`);
+      for (const acknowledge of [false, true])
+        for (const payloadMode of ['probe', 'fragmented-text', 'fragmented-binary']) {
+          const evidence = await page.evaluate(
+            async ({ initiate, label, acknowledge, payloadMode }) => {
+              const events = [];
+              const check = (condition, message) => {
+                if (!condition)
+                  throw new Error(
+                    `${JSON.stringify({ initiate, label, acknowledge, payloadMode })}: ${message}; ${JSON.stringify(events)}`,
+                  );
               };
-              channel.addEventListener('open', sendOnOpen);
-              sendOnOpen();
-            };
-            remote.ondatachannel = ({ channel }) => startChannel(channel);
-            try {
-              const offer = await engine.pairWith('peer', initiate, []);
-              globalThis.RTCPeerConnection = NativeConnection;
-              if (initiate) {
-                await until(() => receiver.iceGatheringState === 'complete');
-                await remote.setRemoteDescription(receiver.localDescription);
-                await remote.setLocalDescription(await remote.createAnswer());
-                await until(() => remote.iceGatheringState === 'complete');
-                await engine.handleAnswer('peer', remote.localDescription.sdp);
-              } else {
-                startChannel(remote.createDataChannel('reliable'));
-                startChannel(
-                  remote.createDataChannel('unreliable', {
-                    ordered: false,
-                    maxRetransmits: 0,
-                  }),
+              const deadline = performance.now() + 10000;
+              const until = async (condition) => {
+                while (!condition()) {
+                  check(performance.now() < deadline, 'timed out');
+                  await new Promise((resolve) => setTimeout(resolve, 10));
+                }
+              };
+              // Maximum-size messages require SCTP fragmentation. Keep payloads
+              // out of evidence and compare the full decoded value at both seams.
+              const payloads =
+                payloadMode === 'probe'
+                  ? ['before-reset']
+                  : Array.from({ length: 3 }, (_, index) => `${index}:` + 'λ'.repeat(32767));
+              const invalidReceipts = [];
+              const receiptName = (data, raw = false, receivedLabel = label) => {
+                if (typeof data !== 'string' && !(data instanceof ArrayBuffer)) {
+                  invalidReceipts.push('unsupported input type');
+                  return 'invalid';
+                }
+                const text = typeof data === 'string' ? data : new TextDecoder().decode(data);
+                const index = payloads.indexOf(text);
+                if (index >= 0) {
+                  if (receivedLabel !== label) invalidReceipts.push('wrong channel label');
+                  if (
+                    raw &&
+                    (payloadMode === 'fragmented-binary') !== data instanceof ArrayBuffer
+                  )
+                    invalidReceipts.push('wrong wire type');
+                  return `payload-${index}`;
+                }
+                if (text === 'first-open' && typeof data === 'string') return text;
+                invalidReceipts.push('unexpected message body');
+                return 'invalid';
+              };
+              const NativeConnection = globalThis.RTCPeerConnection;
+              const observe = (channel) => {
+                channel.addEventListener('message', ({ data }) =>
+                  events.push(`raw:${channel.label}:${receiptName(data, true, channel.label)}`),
                 );
-                await remote.setLocalDescription(await remote.createOffer());
-                await until(() => remote.iceGatheringState === 'complete');
-                const answer = await engine.handleOffer('peer', remote.localDescription.sdp);
-                await until(() => receiver.iceGatheringState === 'complete');
-                await remote.setRemoteDescription(receiver.localDescription);
-                check(typeof answer === 'string', 'the answer path completed');
-              }
-              check(initiate === (typeof offer === 'string'), 'exercise the intended offerer');
-              await until(
-                () =>
-                  channels.length === 2 &&
-                  channels.every(
-                    (channel) =>
-                      channel.readyState === 'open' &&
-                      engine.channel('peer', channel.label)?.readyState === 'open',
+                channel.addEventListener('closing', () =>
+                  events.push(`closing:${channel.label}`),
+                );
+                channel.addEventListener('close', () => events.push(`close:${channel.label}`));
+                events.push(`registered:${channel.label}:${channel.readyState}`);
+                return channel;
+              };
+              let receiver;
+              globalThis.RTCPeerConnection = class extends NativeConnection {
+                constructor(configuration) {
+                  super(configuration);
+                  receiver = this;
+                  this.addEventListener('datachannel', ({ channel }) => observe(channel));
+                }
+                createDataChannel(...args) {
+                  return observe(super.createDataChannel(...args));
+                }
+              };
+              const engine = new channelEngine.Engine(false, {
+                onLocalCandidate: () => {},
+                onPcState: () => {},
+                onChannelOpen: (peer, _generation, name) => {
+                  events.push(`engine-open:${name}`);
+                  engine.noteChannelOpen(peer, name);
+                },
+                onChannelClosed: (_peer, _generation, name) => events.push(`loss:${name}`),
+                onChannelMessage: (_peer, _generation, name, text) =>
+                  events.push(`admitted:${name}:${receiptName(text, false, name)}`),
+              });
+              const remote = new NativeConnection();
+              const channels = [];
+              const startChannel = (channel) => {
+                channels.push(channel);
+                let sent = false;
+                const sendOnOpen = () => {
+                  if (sent || channel.readyState !== 'open') return;
+                  sent = true;
+                  events.push(`sender-open:${channel.label}`);
+                  channel.send('first-open');
+                  events.push(`first-sent:${channel.label}`);
+                };
+                channel.addEventListener('open', sendOnOpen);
+                sendOnOpen();
+              };
+              remote.ondatachannel = ({ channel }) => startChannel(channel);
+              try {
+                const offer = await engine.pairWith('peer', initiate, []);
+                globalThis.RTCPeerConnection = NativeConnection;
+                if (initiate) {
+                  await until(() => receiver.iceGatheringState === 'complete');
+                  await remote.setRemoteDescription(receiver.localDescription);
+                  await remote.setLocalDescription(await remote.createAnswer());
+                  await until(() => remote.iceGatheringState === 'complete');
+                  await engine.handleAnswer('peer', remote.localDescription.sdp);
+                } else {
+                  startChannel(remote.createDataChannel('reliable'));
+                  startChannel(
+                    remote.createDataChannel('unreliable', {
+                      ordered: false,
+                      maxRetransmits: 0,
+                    }),
+                  );
+                  await remote.setLocalDescription(await remote.createOffer());
+                  await until(() => remote.iceGatheringState === 'complete');
+                  const answer = await engine.handleOffer('peer', remote.localDescription.sdp);
+                  await until(() => receiver.iceGatheringState === 'complete');
+                  await remote.setRemoteDescription(receiver.localDescription);
+                  check(typeof answer === 'string', 'the answer path completed');
+                }
+                check(
+                  initiate === (typeof offer === 'string'),
+                  'exercise the intended offerer',
+                );
+                await until(
+                  () =>
+                    channels.length === 2 &&
+                    channels.every(
+                      (channel) =>
+                        channel.readyState === 'open' &&
+                        engine.channel('peer', channel.label)?.readyState === 'open',
+                    ),
+                );
+                // Send from each endpoint's first usable channel event, without
+                // waiting for the receiver to announce or form the pair (#853).
+                await until(() => events.includes('raw:reliable:first-open'));
+                check(
+                  events.includes('admitted:reliable:first-open'),
+                  'first reliable probe crosses engine admission',
+                );
+                const channel = channels.find((channel) => channel.label === label);
+                check(
+                  payloads.every(
+                    (payload) =>
+                      new TextEncoder().encode(payload).length ===
+                      (payloadMode === 'probe' ? 12 : 65536),
                   ),
-              );
-              // Send from each endpoint's first usable channel event, without
-              // waiting for the receiver to announce or form the pair (#853).
-              await until(() => events.includes('raw:reliable:first-open'));
-              check(
-                events.includes('admitted:reliable:first-open'),
-                'first reliable probe crosses engine admission',
-              );
-              const channel = channels.find((channel) => channel.label === label);
-              channel.send('before-reset');
-              events.push(`sent:${label}`);
-              if (acknowledge) {
-                // An application acknowledgement supplies a causal delivery boundary.
-                let acknowledged = false;
-                channel.addEventListener('message', ({ data }) => {
-                  if (data === 'ack') acknowledged = true;
-                });
-                await until(() => events.includes(`admitted:${label}:before-reset`));
-                engine.channel('peer', label).send('ack');
-                await until(() => acknowledged);
-                events.push(`acknowledged:${label}`);
+                  'exact accepted message boundary',
+                );
+                for (const payload of payloads)
+                  channel.send(
+                    payloadMode === 'fragmented-binary'
+                      ? new TextEncoder().encode(payload)
+                      : payload,
+                  );
+                events.push(`sent:${label}`);
+                if (acknowledge) {
+                  // This control requires all receipts before reset, including
+                  // no-retransmit input, to supply a causal delivery boundary.
+                  let acknowledged = false;
+                  channel.addEventListener('message', ({ data }) => {
+                    if (data === 'ack') acknowledged = true;
+                  });
+                  await until(() =>
+                    payloads.every((_, index) =>
+                      events.includes(`admitted:${label}:payload-${index}`),
+                    ),
+                  );
+                  engine.channel('peer', label).send('ack');
+                  await until(() => acknowledged);
+                  events.push(`acknowledged:${label}`);
+                }
+                channel.close();
+                events.push(`reset:${label}`);
+                await until(() => events.includes(`close:${label}`));
+                check(
+                  invalidReceipts.length === 0,
+                  `reject changed bodies or wire types: ${JSON.stringify(invalidReceipts)}`,
+                );
+                const loss = events.indexOf(`loss:${label}`);
+                for (const name of ['reliable', 'unreliable']) {
+                  const firstRaw = events.indexOf(`raw:${name}:first-open`);
+                  const firstAdmitted = events.indexOf(`admitted:${name}:first-open`);
+                  check(
+                    events.filter((event) => event === `first-sent:${name}`).length === 1,
+                    'one first-open send per label',
+                  );
+                  check(
+                    events.filter((event) => event === `raw:${name}:first-open`).length <= 1 &&
+                      events.filter((event) => event === `admitted:${name}:first-open`)
+                        .length <= 1,
+                    'first-open receipt and admission are unique',
+                  );
+                  check(
+                    firstRaw >= 0 && firstRaw < loss
+                      ? firstAdmitted > firstRaw && firstAdmitted < loss
+                      : firstAdmitted < 0,
+                    'only first-open receipts before pair loss reach engine admission',
+                  );
+                }
+                for (let index = 0; index < payloads.length; index += 1) {
+                  const raw = events.indexOf(`raw:${label}:payload-${index}`);
+                  const admitted = events.indexOf(`admitted:${label}:payload-${index}`);
+                  // No-retransmit delivery is optional. Every raw receipt before loss
+                  // must cross engine admission; reliable same-stream sends must arrive.
+                  check(
+                    label !== 'reliable' || (raw >= 0 && raw < loss),
+                    'reliable send survives same-stream reset',
+                  );
+                  check(
+                    raw >= 0 && raw < loss ? admitted > raw && admitted < loss : admitted < 0,
+                    'only raw receipts before pair loss reach engine admission',
+                  );
+                  check(
+                    events.filter((event) => event === `raw:${label}:payload-${index}`)
+                      .length <= 1 &&
+                      events.filter((event) => event === `admitted:${label}:payload-${index}`)
+                        .length === (raw >= 0 && raw < loss ? 1 : 0),
+                    'one admission per raw receipt',
+                  );
+                }
+                if (label === 'reliable') {
+                  const rawOrder = events.filter((event) =>
+                    event.startsWith(`raw:${label}:payload-`),
+                  );
+                  check(
+                    JSON.stringify(rawOrder) ===
+                      JSON.stringify(
+                        payloads.map((_, index) => `raw:${label}:payload-${index}`),
+                      ),
+                    'reliable fragments reassemble in send order',
+                  );
+                }
+                check(
+                  events.filter((event) => event === `loss:${label}`).length === 1,
+                  'one pair loss',
+                );
+                check(
+                  ['reliable', 'unreliable'].every(
+                    (name) => engine.channel('peer', name) === undefined,
+                  ),
+                  'reset fences both labels',
+                );
+                return { initiate, label, acknowledge, payloadMode, events };
+              } finally {
+                globalThis.RTCPeerConnection = NativeConnection;
+                engine.removePeer('peer');
+                remote.close();
               }
-              channel.close();
-              events.push(`reset:${label}`);
-              await until(() => events.includes(`close:${label}`));
-              const raw = events.indexOf(`raw:${label}:before-reset`);
-              const admitted = events.indexOf(`admitted:${label}:before-reset`);
-              const loss = events.indexOf(`loss:${label}`);
-              for (const name of ['reliable', 'unreliable']) {
-                const firstRaw = events.indexOf(`raw:${name}:first-open`);
-                const firstAdmitted = events.indexOf(`admitted:${name}:first-open`);
-                check(
-                  events.filter((event) => event === `first-sent:${name}`).length === 1,
-                  'one first-open send per label',
-                );
-                check(
-                  events.filter((event) => event === `raw:${name}:first-open`).length <= 1 &&
-                    events.filter((event) => event === `admitted:${name}:first-open`).length <=
-                      1,
-                  'first-open receipt and admission are unique',
-                );
-                check(
-                  firstRaw >= 0 && firstRaw < loss
-                    ? firstAdmitted > firstRaw && firstAdmitted < loss
-                    : firstAdmitted < 0,
-                  'only first-open receipts before pair loss reach engine admission',
-                );
-              }
-              // No-retransmit delivery is optional. Every raw receipt before loss
-              // must cross engine admission; reliable same-stream sends must arrive.
-              check(
-                label !== 'reliable' || (raw >= 0 && raw < loss),
-                'reliable send survives same-stream reset',
-              );
-              check(
-                raw >= 0 && raw < loss ? admitted > raw && admitted < loss : admitted < 0,
-                'only raw receipts before pair loss reach engine admission',
-              );
-              check(
-                events.filter((event) => event === `raw:${label}:before-reset`).length <= 1 &&
-                  events.filter((event) => event === `admitted:${label}:before-reset`)
-                    .length === (raw >= 0 && raw < loss ? 1 : 0),
-                'one admission per raw receipt',
-              );
-              check(
-                events.filter((event) => event === `loss:${label}`).length === 1,
-                'one pair loss',
-              );
-              check(
-                ['reliable', 'unreliable'].every(
-                  (name) => engine.channel('peer', name) === undefined,
-                ),
-                'reset fences both labels',
-              );
-              return { initiate, label, acknowledge, events };
-            } finally {
-              globalThis.RTCPeerConnection = NativeConnection;
-              engine.removePeer('peer');
-              remote.close();
-            }
-          },
-          { initiate, label, acknowledge },
-        );
-        console.error(`ok - Chromium same-stream send/reset ${JSON.stringify(evidence)}`);
-      }
+            },
+            { initiate, label, acknowledge, payloadMode },
+          );
+          console.error(`ok - Chromium same-stream send/reset ${JSON.stringify(evidence)}`);
+        }
   // Regression #999: embedded candidates must preserve deterministic relay fallback.
   for (const crippled of [false, true])
     for (const path of ['offer', 'answer'])

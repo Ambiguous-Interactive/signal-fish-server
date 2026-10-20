@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Release blocked native sends when their data channel closes and report closure before buffer pressure (#1088).
 - Preserve existing native gameplay channels when a new channel requests an occupied stream ID (#1085).
 - Open native channels created after connection and close stalled handshakes at the configured deadline (#1086).
 - Report reference-client relay fallback immediately when initial peer negotiation fails (#1087).

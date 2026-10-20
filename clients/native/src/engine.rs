@@ -410,6 +410,8 @@ macro_rules! negotiation_checkpoint {
 pub struct Engine {
     #[cfg(test)]
     pub(crate) negotiation_hold: Option<NegotiationHold>,
+    #[cfg(test)]
+    send_buffer_limit: Option<usize>,
     settings: EngineSettings,
     runtime: Arc<dyn Runtime>,
     events: mpsc::UnboundedSender<EngineEvent>,
@@ -441,6 +443,8 @@ impl Engine {
         Ok(Self {
             #[cfg(test)]
             negotiation_hold: None,
+            #[cfg(test)]
+            send_buffer_limit: None,
             settings,
             runtime,
             events,
@@ -622,17 +626,20 @@ impl Engine {
             local_udp_addrs,
             self.ice_route_sources(ice_servers).await,
         )?;
-        let pc: Arc<dyn PeerConnection> = Arc::new(
-            PeerConnectionBuilder::new()
-                .with_configuration(config)
-                .with_setting_engine(setting_engine.build())
-                .with_handler(handler)
-                .with_runtime(self.runtime.clone())
-                .with_udp_addrs(udp_addrs)
-                .build()
-                .await
-                .context("create peer connection")?,
-        );
+        let builder = PeerConnectionBuilder::new()
+            .with_configuration(config)
+            .with_setting_engine(setting_engine.build())
+            .with_handler(handler)
+            .with_runtime(self.runtime.clone())
+            .with_udp_addrs(udp_addrs);
+        #[cfg(test)]
+        let builder = if let Some(limit) = self.send_buffer_limit {
+            builder.with_data_channel_send_buffer_limit(limit)
+        } else {
+            builder
+        };
+        let pc: Arc<dyn PeerConnection> =
+            Arc::new(builder.build().await.context("create peer connection")?);
         negotiation_checkpoint!(negotiation_hold, "build");
         let link = PeerLink {
             generation,
