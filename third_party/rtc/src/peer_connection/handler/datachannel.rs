@@ -96,6 +96,8 @@ impl<'a> DataChannelHandler<'a> {
     /// The event names the channel by handle, as every application-facing event does; the
     /// stream id was only how SCTP referred to it. A channel already closed by handshake timeout
     /// has already fired `OnClose` and been counted, so it is not announced twice.
+    /// All other closures share the read queue with prior application input,
+    /// including transport events without a packet address.
     fn announce_closed(
         &mut self,
         now: Instant,
@@ -117,21 +119,14 @@ impl<'a> DataChannelHandler<'a> {
                     data_channel_event: DataChannelEvent::ClosedAfterLocalClose,
                 })),
             });
-        } else if let Some(transport) = transport {
+        } else {
             self.ctx.read_outs.push_back(TaggedRTCMessageInternal {
                 now,
-                transport,
+                transport: transport.unwrap_or_default(),
                 message: RTCMessageInternal::Dtls(DTLSMessage::DataChannel(ApplicationMessage {
                     data_channel_id: channel_id,
                     data_channel_event: DataChannelEvent::Close,
                 })),
-            });
-        } else {
-            self.ctx.event_outs.push_back(TaggedRTCEventInternal {
-                now,
-                event: RTCEventInternal::RTCPeerConnectionEvent(
-                    RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnClose(channel_id)),
-                ),
             });
         }
     }

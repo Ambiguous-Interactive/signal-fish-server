@@ -141,3 +141,12 @@ sends and terminal closure. Negotiated channels retain immediate opening.
 The reset-order control now completes its in-band handshake before sending.
 See [#1091](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1091).
 Published replacement qualification in #912 must retain these controls.
+
+DTLS teardown and legacy SCTP closure events queue channel close markers beside
+prior application input. Event-first consumers cannot receive channel closure
+before that input. The control covers already-open negotiated and in-band
+channels, both required modes, both closure paths, duplicate closure, and closed
+statistics. It does not establish delivery across an independent failed peer
+connection. The delta changes `src/peer_connection/handler/datachannel.rs` and
+`mod.rs`. See [#1093](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1093).
+Published replacement qualification in #912 must retain these controls.

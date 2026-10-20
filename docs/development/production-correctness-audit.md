@@ -6336,3 +6336,39 @@ clients do not use this patched dependency. The Rust manifest at `da8f2d16`
 has no RTC dependency. The .NET project at `e467c871` has no package dependency.
 Godot's mesh at `2a74de36` uses engine `WebRTCPeerConnection` objects. Server
 messages, schemas, ordering, and capability negotiation are unchanged.
+
+### F115 — Transport-driven native channel closure overtakes accepted gameplay
+
+Baseline `dac8e4ae`. Finding [#1093](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1093)
+continues A20, [#826](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/826),
+and replacement qualification [#912](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/912).
+Modern SCTP reset completion queues channel closure beside accepted input.
+The legacy SCTP stream-close event and DTLS shutdown instead used a separate
+lifecycle queue. An event-first consumer could receive `OnClose` before the
+last gameplay payload already accepted into the data-read queue.
+
+The new `stream_reset_transport_close_preserves_queued_gameplay_before_close`
+control fails on the baseline with `close overtook input`. It opens a public
+peer channel, accepts a payload through the data-channel handler, queues
+transport closure, and drains public events before data. The repair routes
+all channel-close announcements through the ordered read queue. Local
+`Closing` still uses its distinct completion marker. Closure statistics and
+duplicate suppression retain their existing behavior.
+
+The claim concerns channel notifications and input already accepted by RTC.
+It does not promise delivery after arbitrary transport loss or identify the
+historical #853/#889 causes. The Rust external client at `da8f2d16` supplies
+its own WebRTC backend. The .NET SDK at `e467c871` provides signaling and relay.
+Godot at `2a74de36` uses engine `WebRTCPeerConnection` objects. None uses this
+private reference-client dependency. Server protocol and capability negotiation
+remain unchanged.
+
+The green regression covers negotiated channels and actual in-band DCEP ACK,
+ordered reliable and unordered zero-retry channels, legacy SCTP and DTLS
+closure, one closed-statistics count, registry retirement, and duplicate
+closure. All nine selected RTC reset controls and 113 statistics controls pass.
+Independent review found no unresolved issue. DTLS closure enters through the
+handler event seam; this control does not qualify wire `close_notify` parsing.
+The rebuilt native/browser restore, retry, and three-player mesh histories pass
+in Nextest run `c1bfffae-8fca-4e75-b7a5-beb0b66e57d3`. Hosted full interop remains
+a separate qualification gate.
