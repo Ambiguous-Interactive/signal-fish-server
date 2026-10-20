@@ -32,7 +32,7 @@ use crate::diagnostics;
 
 use crate::config::{micros, ExternalHostEvidence, RunConfig};
 use crate::oracle::{summarize, OutcomeSummary};
-use crate::records::RunRecords;
+use crate::records::{DeliveryEvent, RunRecords};
 use crate::schedule::build_run_shape;
 
 /// Bump on any breaking artifact shape change (the audit contract requires
@@ -553,6 +553,63 @@ pub fn read_intervals(output_dir: &Path) -> Result<Vec<IntervalSample>, String> 
     Ok(samples)
 }
 
+fn read_delivery_event(line: &[u8], path: &Path) -> Result<DeliveryEvent<String>, String> {
+    if let Ok(event) = serde_json::from_slice(line) {
+        return Ok(event);
+    }
+    /* Preserve historical last-key-wins decoding and error messages. */
+    let value: Value = serde_json::from_slice(line)
+        .map_err(|error| format!("parse a {} line: {error}", path.display()))?;
+    let kind = value
+        .get("event_kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{} line missing event_kind", path.display()))?
+        .to_string();
+    match kind.as_str() {
+        "sent" => Ok(DeliveryEvent::Sent(
+            serde_json::from_value(value).map_err(|error| format!("parse sent event: {error}"))?,
+        )),
+        "receipt" => Ok(DeliveryEvent::Receipt(
+            serde_json::from_value(value)
+                .map_err(|error| format!("parse receipt event: {error}"))?,
+        )),
+        "gap" => Ok(DeliveryEvent::Gap(
+            serde_json::from_value(value).map_err(|error| format!("parse gap event: {error}"))?,
+        )),
+        "unsupported_notice" => Ok(DeliveryEvent::UnsupportedNotice(
+            serde_json::from_value(value)
+                .map_err(|error| format!("parse unsupported_notice event: {error}"))?,
+        )),
+        "disconnect" => Ok(DeliveryEvent::Disconnect(
+            serde_json::from_value(value)
+                .map_err(|error| format!("parse disconnect event: {error}"))?,
+        )),
+        "churn" => Ok(DeliveryEvent::Churn(
+            serde_json::from_value(value).map_err(|error| format!("parse churn event: {error}"))?,
+        )),
+        "join_failure" => Ok(DeliveryEvent::JoinFailure {
+            detail: value
+                .get("detail")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "join_failure line missing detail".to_string())?
+                .to_string(),
+        }),
+        "fault" => Ok(DeliveryEvent::Fault(
+            serde_json::from_value(value).map_err(|error| format!("parse fault event: {error}"))?,
+        )),
+        "registry" => {
+            let senders = value
+                .get("senders")
+                .ok_or_else(|| "registry line missing senders".to_string())?;
+            Ok(DeliveryEvent::Registry {
+                senders: serde_json::from_value(senders.clone())
+                    .map_err(|error| format!("parse registry senders: {error}"))?,
+            })
+        }
+        other => Err(format!("unknown deliveries event kind {other:?}")),
+    }
+}
+
 /// Read the deliveries event log back from an output directory.
 pub fn read_records(output_dir: &Path) -> Result<RunRecords, String> {
     let path = output_dir.join(DELIVERIES_FILE);
@@ -561,59 +618,16 @@ pub fn read_records(output_dir: &Path) -> Result<RunRecords, String> {
     let mut records = RunRecords::default();
     let mut receipt_names = crate::records::ReceiptNames::default();
     visit_jsonl(BufReader::new(file), &path, |line| {
-        let value: Value = serde_json::from_slice(line)
-            .map_err(|error| format!("parse a {} line: {error}", path.display()))?;
-        let kind = value
-            .get("event_kind")
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("{} line missing event_kind", path.display()))?
-            .to_string();
-        match kind.as_str() {
-            "sent" => records.sent.push(
-                serde_json::from_value(value)
-                    .map_err(|error| format!("parse sent event: {error}"))?,
-            ),
-            "receipt" => records.receipts.push(
-                receipt_names.share(
-                    serde_json::from_value(value)
-                        .map_err(|error| format!("parse receipt event: {error}"))?,
-                ),
-            ),
-            "gap" => records.gaps.push(
-                serde_json::from_value(value)
-                    .map_err(|error| format!("parse gap event: {error}"))?,
-            ),
-            "unsupported_notice" => records.unsupported_notices.push(
-                serde_json::from_value(value)
-                    .map_err(|error| format!("parse unsupported_notice event: {error}"))?,
-            ),
-            "disconnect" => records.disconnects.push(
-                serde_json::from_value(value)
-                    .map_err(|error| format!("parse disconnect event: {error}"))?,
-            ),
-            "churn" => records.churn.push(
-                serde_json::from_value(value)
-                    .map_err(|error| format!("parse churn event: {error}"))?,
-            ),
-            "join_failure" => records.join_failures.push(
-                value
-                    .get("detail")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "join_failure line missing detail".to_string())?
-                    .to_string(),
-            ),
-            "fault" => records.faults.push(
-                serde_json::from_value(value)
-                    .map_err(|error| format!("parse fault event: {error}"))?,
-            ),
-            "registry" => {
-                let senders = value
-                    .get("senders")
-                    .ok_or_else(|| "registry line missing senders".to_string())?;
-                records.registry = serde_json::from_value(senders.clone())
-                    .map_err(|error| format!("parse registry senders: {error}"))?;
-            }
-            other => return Err(format!("unknown deliveries event kind {other:?}")),
+        match read_delivery_event(line, &path)? {
+            DeliveryEvent::Sent(event) => records.sent.push(event),
+            DeliveryEvent::Receipt(event) => records.receipts.push(receipt_names.share(event)),
+            DeliveryEvent::Gap(event) => records.gaps.push(event),
+            DeliveryEvent::UnsupportedNotice(event) => records.unsupported_notices.push(event),
+            DeliveryEvent::Disconnect(event) => records.disconnects.push(event),
+            DeliveryEvent::Churn(event) => records.churn.push(event),
+            DeliveryEvent::JoinFailure { detail } => records.join_failures.push(detail),
+            DeliveryEvent::Fault(event) => records.faults.push(event),
+            DeliveryEvent::Registry { senders } => records.registry = senders,
         }
         Ok(())
     })?;
@@ -729,6 +743,14 @@ mod tests {
             .events()
             .map(|event| serde_json::to_vec(&event).expect("event"))
             .collect();
+        for line in &lines {
+            let direct: DeliveryEvent<String> =
+                serde_json::from_slice(line).expect("canonical events use direct typed decoding");
+            assert_eq!(
+                serde_json::to_value(&direct).expect("direct event"),
+                serde_json::from_slice::<Value>(line).expect("original event")
+            );
+        }
         let kinds: std::collections::BTreeSet<_> = lines
             .iter()
             .map(|line| {

@@ -6302,3 +6302,37 @@ both receipt seams in this cohort. These results qualify this fragmentation
 boundary, not the historical native/browser establishment or three-player
 mesh failure. The historical issues remain open, and this Chromium-only
 comparison does not qualify the native SCTP implementation.
+
+### F114 — Allocated native channels accept gameplay before DCEP acknowledgment
+
+Baseline `76a372fb`. Finding [#1091](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1091)
+continues A20, [#826](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/826),
+and replacement qualification [#912](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/912).
+The native RTC core checked for a missing SCTP stream but did not reject
+`Connecting` channels with an allocated stream. Stream creation precedes the
+remote DCEP ACK. A public send could return success and charge outstanding
+bytes before the channel opened. The existing wrapper pre-open control covered
+only the earlier state with no allocated stream.
+
+The new regression dials a real data-channel object and retains its
+`Connecting` state with an allocated stream. Baseline text send returns
+`Ok(())`, which fails the expected typed `ErrDataChannelNotOpen` assertion.
+The repair requires `Open` before both text and binary sends. The control covers
+both required delivery modes, checks zero queued gameplay and zero charged
+bytes on rejection, processes an actual DCEP ACK through the channel handler,
+and verifies post-ACK sends and typed closure. The reset-order control now
+processes that ACK before admitting its final gameplay payload. Its negotiated
+channels still open without a DCEP ACK.
+
+The focused RTC reset controls and existing native capacity/closure controls
+pass. The rebuilt native/browser restore history also passes in run
+`ac4eb69d-aa85-4eee-b4d5-76dfdedcb7b6` (3.357 seconds). Its initial invocation
+omitted the required executable paths and failed before spawning a server;
+that setup failure remains in the session log. Full hosted interop remains a
+separate qualification gate. This finding
+does not identify the historical #853 or #889 causes. It changes only the
+private native reference-client stack. The Rust, .NET, and Godot external
+clients do not use this patched dependency. The Rust manifest at `da8f2d16`
+has no RTC dependency. The .NET project at `e467c871` has no package dependency.
+Godot's mesh at `2a74de36` uses engine `WebRTCPeerConnection` objects. Server
+messages, schemas, ordering, and capability negotiation are unchanged.

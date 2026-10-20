@@ -3827,3 +3827,81 @@ claim. The registration, all attempts, hashes, and raw samples remain in
 `/tmp/capacity-ledger-evidence/` for this session. This cohort does not repeat
 the full ten-minute workload or establish a generator-stall cause. Retained
 records still grow with offered work; #775 and #1009 remain open.
+
+### Planned record admission and direct replay decoding
+
+Session 492 continues [#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775)
+and [#636](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/636)
+from `76a372fb`. The runner now checks the full planned send count plus
+same-room recipient deliveries before allocating peer plans, writing artifacts,
+or opening connections. Warm-up traffic counts toward the budget. The default
+`planned_record_budget` is 32,000,000 records. Set
+`CAPACITY_RUNNER_PLANNED_RECORD_BUDGET` to a positive integer to select another
+budget for a provisioned host. A refusal prints the required count and selected
+budget. It does not trim the offered workload.
+
+The unchanged one-room, 16-player, 60-send/s, 120-second warm-up plus 600-second
+measurement shape needs 11,059,712 planned records and fits the default. The
+999-room shape needs 11,048,652,288 and is refused. Controls compare the cost
+with the actual lazy schedules, exercise exact admission boundaries, and reject
+count overflow and invalid clocks. Removing the budget guard fails the boundary
+control. A runner control reserves an ephemeral listener and proves that
+budget refusal opens no connection and creates no output directory. Old
+manifests omit the default field and keep their serialized bytes. Custom
+budgets round-trip in the config.
+
+This is an explicit workload budget, not an RSS limit or a bound on unexpected
+receipts and other events. Raw records and validation state still grow with
+accepted work. Hosts must choose a budget that fits their memory. Streaming
+retention and the large-workload memory qualification remain open in #775.
+
+Replay now decodes normal event lines directly into their typed event. It
+avoids the intermediate JSON object tree. A fallback keeps historical
+last-key-wins behavior and error messages. All nine event kinds retain their
+wire representation. Unknown and Unicode identities, duplicate receipts, raw
+arrival order, malformed lines, and exact live reliable/lossy replay remain
+covered. Collection, schedules, offered work, lag bounds, and oracle verdicts
+are unchanged by this decoder change.
+
+A final fixed-binary cohort retained all 18 measured replay processes and six
+fixture producers. Three alternating pairs ran at each size with 16 senders.
+All nine full-summary pairs matched. Baseline and candidate producer JSONL
+bytes matched at all three sizes. The fixtures were hashed in chunks and
+reused read-only. Executable hashes matched before and after the cohort.
+
+| Receipts | Baseline / candidate wall, s | Baseline / candidate CPU, s | Baseline / candidate peak RSS, KiB |
+| --- | ---: | ---: | ---: |
+| 24,000 | 0.268 / 0.200 | 0.268 / 0.199 | 13,840 / 14,696 |
+| 240,000 | 3.289 / 2.462 | 3.277 / 2.438 | 28,944 / 29,804 |
+| 1,200,000 | 16.751 / 12.364 | 16.740 / 12.323 | 96,452 / 97,140 |
+
+At 1.2 million receipts, median whole-process wall time fell 26.2% and CPU
+time fell 26.4%. Peak RSS increased 688 KiB. This is a replay-cost improvement,
+not a retained-memory reduction. Times include startup, reading, oracle
+evaluation, and output. The shared ARM64 WSL2 host and debug profile limit
+transfer to production. No local builds or tests overlapped measured replays.
+Fixture creation overlapped native validation; the controller was held before
+the first measured replay until validation finished.
+
+The initial cohort remains under `/tmp/session492-replay/`. It used the replay
+change before the independent workload-budget addition. Its 18 measured
+processes also passed, with all full summaries and fixture bytes equal. The
+final complete candidate cohort, registration, all raw observations, hold
+record, and fixture hashes remain under `/tmp/session492-replay-final/`.
+These synthetic cohorts do not repeat a live long cell. Neither cohort
+resolves #1009 or qualifies a server capacity point. Both #775 and the broader #636 campaign remain open.
+
+Final-cohort executable SHA-256:
+
+- baseline: `e0610fe7ba6908e088b44a8f690ff0d00d6517c34d7a580432739b8fca947a4e`.
+- candidate: `e7ca09e6b0094caf3dec4c0b6b81a41cd416c3d3197b16684ce331e732354961`.
+
+A separate single full-workload qualification attempt is registered under
+`progress/session-492/long/`. It retains the unchanged long shape, lag bound,
+diagnostics-OFF path, and 1-Hz internal samples. The planned record budget is
+32,000,000. The fixed generator and owned server use cores 0–7. A separate
+1-Hz observer on cores 8–11 records process and thread scheduling counters,
+wait channels, clock samples, and host pressure. The host remains shared.
+There is no replacement attempt or matched baseline comparison. The complete
+outcome and any overlap are recorded on #775 and #1009; a pass cannot explain
+the historical stalls.

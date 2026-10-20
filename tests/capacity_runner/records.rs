@@ -804,9 +804,9 @@ pub struct RunRecords {
 /// [`RunRecords`] exactly.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event_kind", rename_all = "snake_case")]
-pub enum DeliveryEvent {
+pub enum DeliveryEvent<Name = ReceiptName> {
     Sent(SentEvent),
-    Receipt(ReceiptEvent),
+    Receipt(ReceiptEvent<Name>),
     Gap(GapEvent),
     UnsupportedNotice(UnsupportedNoticeEvent),
     Disconnect(DisconnectEvent),
