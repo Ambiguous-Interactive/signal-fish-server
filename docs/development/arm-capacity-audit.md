@@ -4729,6 +4729,10 @@ not a server throughput or relay-latency improvement. The change cannot
 explain the in-run stalls in #1009 or #795. Retained records still grow with
 workload. This isolated probe does not qualify the full ten-minute cell.
 
+This cohort uses the [initial session commit](https://github.com/Ambiguous-Interactive/signal-fish-server/commit/e14895832677286d51cfd0bf7295eff5b1ca64f7)
+with Tokio 1.54.0. The synchronous sort does not start the async runtime.
+The later 1.54.1 patch is validated separately.
+
 Reproduce with the release capacity-runner executable and `--ignored --exact
 records::tests::generator_send_sort_memory_profile --nocapture`, setting
 `CAPACITY_SORT_PROBE_SENDS` and `CAPACITY_SORT_PROBE_COMPACT=0` or `1`.

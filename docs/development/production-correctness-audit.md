@@ -6776,6 +6776,11 @@ a required reliable first text fails the existing 30-second deadline in
 30.30 seconds. Final validation is recorded in the session PR. Raw commands,
 outputs, and source hashes remain in local `progress/session-505/`.
 
+After Tokio 1.54.1 replaces the withdrawn 1.54.0, the control passes again.
+Both selective faults still fail their intended assertions, and the helper
+is restored byte for byte. This does not establish a cause for either
+historical failure.
+
 An earlier two-send burst delivered seven of eight messages in one history.
 The native-to-browser second unreliable binary message was absent at the
 browser's raw callback. Browser counts were reliable 2 and unreliable 1,
@@ -6790,5 +6795,5 @@ exercise signaling-server membership or repair either historical failure.
 It injects no packet loss and does not make unreliable delivery a protocol
 guarantee. The campaigns remain open for their full scope. The native
 reference library now exposes its existing local diagnostic snapshot for
-library callers. Server behavior and wire values stay the same. External
-Rust, .NET, and Godot clients are unaffected and need no migration.
+library callers. The server protocol and configuration stay the same.
+External Rust, .NET, and Godot clients need no migration.
