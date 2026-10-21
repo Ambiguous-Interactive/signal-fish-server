@@ -539,6 +539,9 @@ the physical link was already removed. The snapshot does not wait for the
 WebRTC driver. Compare both endpoints and their `pc_state` events when
 investigating a failed connection.
 
+Library callers can read the same local snapshot with
+`Engine::diagnostic_snapshot(peer)`.
+
 Each required channel also reports physical-generation `receipts` counts:
 `raw` counts complete messages returned by the driver poll; `admitted` counts
 successful publication to the client's event queue; `rejected` counts messages

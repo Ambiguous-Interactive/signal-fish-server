@@ -4699,3 +4699,48 @@ per-peer tails, u32::MAX counts, and the wide fallback beyond that boundary.
 The standalone runner changes no server message or external client API.
 Rust, .NET, and Godot need no migration. Raw record memory still grows with
 workload. The full ten-minute memory proof and historical stalls remain open.
+
+### Send-sort memory after collection (session 505, #775, #636)
+
+`EventLog::take_records` previously stable-sorted 64-byte send records.
+It now groups their original positions by sender, sorts sequence numbers
+only within disordered groups, and moves the records through permutation
+cycles. Ordered sender streams need one index per send plus sender ranges.
+Small inputs use the original sort. The grouping walk also falls back to
+the original sort when sender count exceeds `max(16, sends / 16)`, dropping
+its map before sorting. Disordered groups can need stable-sort scratch.
+No universal allocator-size or peak-RSS bound is claimed.
+
+The ignored `records::tests::generator_send_sort_memory_profile` control
+compares both paths in the same executable. Each process creates the same
+interleaved streams from 256 senders. Three fresh trials alternate execution
+order per path and size. Final optimized measurements run without local
+build or browser-test overlap on the shared ARM64 Linux host.
+
+| Sends | Old peak RSS (KiB) | New peak RSS (KiB) | Old sort (µs) | New sort (µs) |
+| ---: | ---: | ---: | ---: | ---: |
+| 100,000 | 17,728 | 11,364 | 15,112 | 17,823 |
+| 1,000,000 | 98,880 | 74,600 | 150,951 | 297,044 |
+| 4,000,000 | 380,208 | 286,272 | 824,109 | 1,625,551 |
+
+These are medians. At one and four million sends, peak RSS falls about 25%,
+while post-run sorting takes about twice as long. This is a memory tradeoff,
+not a server throughput or relay-latency improvement. The change cannot
+explain the in-run stalls in #1009 or #795. Retained records still grow with
+workload. This isolated probe does not qualify the full ten-minute cell.
+
+This cohort uses the [initial session commit](https://github.com/Ambiguous-Interactive/signal-fish-server/commit/e14895832677286d51cfd0bf7295eff5b1ca64f7)
+with Tokio 1.54.0. The synchronous sort does not start the async runtime.
+The later 1.54.1 patch is validated separately.
+
+Reproduce with the release capacity-runner executable and `--ignored --exact
+records::tests::generator_send_sort_memory_profile --nocapture`, setting
+`CAPACITY_SORT_PROBE_SENDS` and `CAPACITY_SORT_PROBE_COMPACT=0` or `1`.
+Raw attempts, superseded experiments, commands, and final binary hashes
+remain in local `progress/capacity-sort/`.
+
+Differential controls compare all serialized fields with the original stable
+sort across 4,096 duplicate and Unicode histories. They also cover sorted
+input, zero and small inputs, high sender counts, duplicate evidence through
+the real collector, unchanged receipt order, JSONL round-trip, and a second
+empty drain. The runner changes no server behavior or external client API.

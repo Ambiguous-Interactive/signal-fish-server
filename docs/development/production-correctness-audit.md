@@ -6746,3 +6746,54 @@ first-open sends, or a published dependency replacement. The broader A20 audit
 and all linked campaigns remain open. This internal qualification changes no
 server behavior, protocol schema, or external Rust, .NET, and Godot client
 contract. Those clients need no migration.
+
+### A20 — Fragmented first-open Chromium/native delivery
+
+The [baseline](https://github.com/Ambiguous-Interactive/signal-fish-server/commit/19e3d99b4c3a99d1e76f525d43add656aeebc516)
+leaves cross-runtime fragmented sends at first channel open unqualified.
+This control advances [#826](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/826),
+[#853](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/853),
+and [#889](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/889).
+
+`fragmented_first_open_crosses_chromium_native_in_both_roles` uses the real
+native and browser engines with Chromium 156.0.8078.4 and Playwright 1.64.1.
+Four independent histories cover both offerer roles and text versus binary.
+Each endpoint sends one message on each required label at that label's first
+open callback, before pair bookkeeping. Each distinct body contains exactly
+65,536 UTF-8 bytes with multibyte characters. Both encodings are the actual
+first send on their fresh channels. The histories require 16 complete
+application receipts, totaling 1,048,576 bytes.
+
+Assertions check full content, byte counts, native peer and physical generation,
+exact labels, duplicate receipts and opens, pair completion,
+and per-label raw/admitted/rejected/discarded counters at both engines.
+Failures retain open and receipt progress plus both engine snapshots. Browser
+callback errors fail the control. The helper closes Chromium before exit.
+
+The revised control passes all four histories in 7.03 seconds. Temporary
+same-size corruption fails the full-body assertion in 1.55 seconds. Omitting
+a required reliable first text fails the existing 30-second deadline in
+30.30 seconds. Final validation is recorded in the session PR. Raw commands,
+outputs, and source hashes remain in local `progress/session-505/`.
+
+After Tokio 1.54.1 replaces the withdrawn 1.54.0, the control passes again.
+Both selective faults still fail their intended assertions, and the helper
+is restored byte for byte. This does not establish a cause for either
+historical failure.
+
+An earlier two-send burst delivered seven of eight messages in one history.
+The native-to-browser second unreliable binary message was absent at the
+browser's raw callback. Browser counts were reliable 2 and unreliable 1,
+with no admission rejection. Native counts were 2 on each label. Both links
+remained open. This is compatible with allowed unreliable loss; it does not
+establish the loss mechanism or explain either historical failure. The
+revised test qualifies first sends, not that burst. The failed attempt is
+retained as `first-open-unreliable-burst-absence.log`.
+
+The test bridges SDP and ICE directly through its helper pipe. It does not
+exercise signaling-server membership or repair either historical failure.
+It injects no packet loss and does not make unreliable delivery a protocol
+guarantee. The campaigns remain open for their full scope. The native
+reference library now exposes its existing local diagnostic snapshot for
+library callers. The server protocol and configuration stay the same.
+External Rust, .NET, and Godot clients need no migration.

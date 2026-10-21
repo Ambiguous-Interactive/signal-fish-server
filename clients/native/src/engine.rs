@@ -1006,9 +1006,12 @@ impl Engine {
         }
     }
 
-    /// Local observations for a timed-out link, without waiting on its driver.
+    /// Local link observations for diagnostics and interop controls, without
+    /// waiting on the driver. Returns null for an unknown peer; otherwise it
+    /// includes the generation, per-label registration, observed opens, and
+    /// raw/admitted/rejected/discarded receipt counts.
     /// An observed open callback does not establish current channel state.
-    pub(crate) fn diagnostic_snapshot(&self, peer: PlayerId) -> serde_json::Value {
+    pub fn diagnostic_snapshot(&self, peer: PlayerId) -> serde_json::Value {
         let Some(link) = self.peers.get(&peer) else {
             return serde_json::Value::Null;
         };

@@ -80,12 +80,18 @@
 //!     player restores its room after a completed browser/native exchange;
 //!     both members exchange fresh messages on both replacement channels.
 //!
+//! 13. `fragmented_first_open_crosses_chromium_native_in_both_roles` — both
+//!     engines send maximum-size text and binary gameplay at each first open
+//!     callback; both offerer roles preserve exact receipts on both labels.
+//!
 //! Scenario assertions are copies of the native suite's
 //! (`tests/interop_e2e.rs`) — deliberately NOT shared, so this feature-gated
 //! target never forces edits to the always-on native suite. Scenarios are
 //! serialized behind a mutex for the same robustness reasons (each spawns 4+
 //! OS processes, here including 1-2 Chromium instances).
 
+#[path = "browser_first_open/mod.rs"]
+mod browser_first_open;
 mod harness;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -107,7 +113,7 @@ use base64::Engine as _;
 static SCENARIO_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Number of scenarios queueing behind [`SCENARIO_SERIAL`] (keep in sync with
 /// the scenarios that acquire `SCENARIO_SERIAL` in this file).
-const SCENARIO_COUNT: u64 = 29;
+const SCENARIO_COUNT: u64 = 30;
 /// Generous ceiling for ONE scenario in a fully degraded run: server spawn
 /// (up to 3 attempts x 15 s health deadline = 45 s) plus one client wave
 /// hard-bounded by `--max-runtime-secs 90`, with the rest absorbing Chromium
