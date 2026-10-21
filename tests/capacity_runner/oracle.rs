@@ -46,6 +46,11 @@ pub struct GapViolation {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InvalidReason {
+    /// Recorded sends differ from the declared deterministic workload.
+    InvalidScheduledSends {
+        count: u64,
+        first: ScheduledSendViolation,
+    },
     /// A GameData frame lacked a usable ledger or registered sender identity.
     /// Its observed bytes remain raw evidence even though delivery pairing failed.
     UnidentifiedGameData {
@@ -142,6 +147,25 @@ pub enum InvalidReason {
         count: u64,
         bound: u64,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScheduledSendViolation {
+    pub sender: String,
+    pub seq: u64,
+    pub mismatch: SendPlanMismatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SendPlanMismatch {
+    UnknownSender,
+    UnscheduledSequence,
+    Duplicate,
+    Room,
+    IntendedTime,
+    Phase,
+    UnannouncedEpoch { epoch: u32 },
 }
 
 /// Per-recipient accounting, in roster order.
@@ -363,6 +387,17 @@ struct SenderSends<'a> {
 }
 
 impl<'a> SendIndex<'a> {
+    fn sorted_events(&self) -> impl Iterator<Item = &'a SentEvent> + '_ {
+        let (senders, reordered) = match self {
+            Self::Ordered(senders) => (senders.as_slice(), &[][..]),
+            Self::Reordered(events) => (&[][..], events.as_slice()),
+        };
+        senders
+            .iter()
+            .flat_map(|sender| sender.events.iter())
+            .chain(reordered.iter().copied())
+    }
+
     fn new(sent: &'a [SentEvent]) -> Self {
         if sent.is_sorted_by_key(|event| (event.sender.as_str(), event.seq)) {
             let sender_count = usize::from(!sent.is_empty())
@@ -430,6 +465,81 @@ impl<'a> SendIndex<'a> {
             Self::Reordered(sent) => find(sent.len(), |index| sent[index], sender, seq),
         }
     }
+}
+
+fn scheduled_send_evidence(
+    plans: &[SenderPlan],
+    records: &RunRecords,
+    reasons: &mut Vec<InvalidReason>,
+) -> u64 {
+    let plans: BTreeMap<_, _> = plans
+        .iter()
+        .map(|plan| (plan.name.as_str(), plan))
+        .collect();
+    let rejoined_epochs: BTreeSet<_> = records
+        .churn
+        .iter()
+        .filter_map(|event| {
+            let epoch = event.epoch?;
+            (event.phase == ChurnPhase::Rejoined && epoch > 1)
+                .then_some((event.recipient.as_str(), epoch))
+        })
+        .collect();
+    let index = SendIndex::new(&records.sent);
+    let mut previous_key = None;
+    let mut covered = false;
+    let mut completed = 0;
+    let mut count = 0;
+    let mut first = None;
+    for event in index.sorted_events() {
+        let key = (event.sender.as_str(), event.seq);
+        let duplicate = previous_key == Some(key);
+        if !duplicate {
+            covered = false;
+        }
+        previous_key = Some(key);
+        let mismatch = match plans.get(event.sender.as_str()) {
+            None => Some(SendPlanMismatch::UnknownSender),
+            Some(plan) => match usize::try_from(event.seq)
+                .ok()
+                .and_then(|seq| plan.sends.get(seq))
+            {
+                None => Some(SendPlanMismatch::UnscheduledSequence),
+                Some(_) if event.room != plan.room => Some(SendPlanMismatch::Room),
+                Some(send) if event.intended_us != send.intended_us => {
+                    Some(SendPlanMismatch::IntendedTime)
+                }
+                Some(send) if event.phase != send.phase => Some(SendPlanMismatch::Phase),
+                Some(_)
+                    if event.epoch != 1
+                        && !rejoined_epochs.contains(&(event.sender.as_str(), event.epoch)) =>
+                {
+                    Some(SendPlanMismatch::UnannouncedEpoch { epoch: event.epoch })
+                }
+                Some(_) => None,
+            },
+        };
+        if mismatch.is_none() && !covered {
+            completed += 1;
+            covered = true;
+        }
+        if let Some(mismatch) = if duplicate {
+            Some(SendPlanMismatch::Duplicate)
+        } else {
+            mismatch
+        } {
+            count += 1;
+            first.get_or_insert_with(|| ScheduledSendViolation {
+                sender: event.sender.to_string(),
+                seq: event.seq,
+                mismatch,
+            });
+        }
+    }
+    if let Some(first) = first {
+        reasons.push(InvalidReason::InvalidScheduledSends { count, first });
+    }
+    completed
 }
 
 /// A sender incarnation's exact ledger, in sequence order. Canonical runs
@@ -949,17 +1059,10 @@ pub fn summarize(
 
     let total_scheduled: u64 = plans.iter().map(|plan| count_u64(plan.sends.len())).sum();
     let total_sent: u64 = count_u64(records.sent.len());
-    let total_unsent = total_scheduled.saturating_sub(total_sent);
+    let completed = scheduled_send_evidence(plans, records, &mut reasons);
+    let total_unsent = total_scheduled.saturating_sub(completed);
 
-    // Generator lag over completed sends.
-    let mut lags: Vec<u64> = records
-        .sent
-        .iter()
-        .map(|event| event.sent_us.saturating_sub(event.intended_us))
-        .collect();
-    lags.sort_unstable();
-    let max_lag = lags.last().copied().unwrap_or(0);
-    let lag_p99 = percentile_of_sorted(&lags, 99, 100);
+    let (max_lag, lag_p99) = generator_lag_stats(&records.sent);
     if max_lag > generator_lag_bound_us {
         reasons.push(InvalidReason::GeneratorSaturated {
             max_lag_us: max_lag,
@@ -1768,21 +1871,138 @@ impl StreamCoverage {
     }
 }
 
-/// Nearest-rank percentile of an ascending-sorted sample list, computed in
-/// exact integer arithmetic: `rank = ceil(count * numerator / denominator)`.
-fn percentile_of_sorted(sorted: &[u64], numerator: u64, denominator: u64) -> u64 {
-    if sorted.is_empty() {
-        return 0;
+/// Exact maximum and nearest-rank p99 with fixed storage, including u64 stalls.
+fn generator_lag_stats(sent: &[SentEvent]) -> (u64, u64) {
+    let lag = |event: &SentEvent| event.sent_us.saturating_sub(event.intended_us);
+    let mut minimum = u64::MAX;
+    let mut maximum = 0;
+    for event in sent {
+        let value = lag(event);
+        minimum = minimum.min(value);
+        maximum = maximum.max(value);
     }
-    let count = u64::try_from(sorted.len()).unwrap_or(u64::MAX);
-    let rank = (count * numerator).div_ceil(denominator);
-    let index = usize::try_from(rank).unwrap_or(1).clamp(1, sorted.len());
-    sorted[index - 1]
+    if sent.is_empty() || minimum == maximum {
+        return (maximum, maximum);
+    }
+    let mut rank = sent.len() - sent.len() / 100;
+    let mut prefix = 0;
+    let highest_byte = (u64::BITS - 1 - maximum.leading_zeros()) / 8;
+    for byte in (0..=highest_byte).rev() {
+        let shift = byte * 8;
+        let mask = u64::MAX.checked_shl(shift + 8).unwrap_or(0);
+        let mut buckets = [0_usize; 256];
+        for event in sent {
+            let value = lag(event);
+            if value & mask == prefix {
+                let digit =
+                    usize::from(value.to_le_bytes()[usize::try_from(byte).expect("u64 byte")]);
+                buckets[digit] += 1;
+            }
+        }
+        for (digit, count) in buckets.into_iter().enumerate() {
+            if rank > count {
+                rank -= count;
+            } else {
+                prefix |= u64::try_from(digit).expect("byte digit") << shift;
+                break;
+            }
+        }
+    }
+    (maximum, prefix)
 }
 
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
+
+    #[test]
+    fn bounded_lag_statistics_match_sorted_nearest_rank_for_full_u64_values() {
+        let base = crate::complete_records(&crate::unit_context().plans).sent[0].clone();
+        for count in [0, 1, 2, 99, 100, 101, 199, 200, 201, 1000] {
+            for distribution in 0..7 {
+                let sent = lag_probe_records(&base, count, distribution);
+                let mut expected: Vec<_> = sent
+                    .iter()
+                    .map(|event| event.sent_us.saturating_sub(event.intended_us))
+                    .collect();
+                expected.sort_unstable();
+                let maximum = expected.last().copied().unwrap_or(0);
+                let percentile = if expected.is_empty() {
+                    0
+                } else {
+                    expected[(99 * expected.len()).div_ceil(100) - 1]
+                };
+                assert_eq!(
+                    generator_lag_stats(&sent),
+                    (maximum, percentile),
+                    "count={count}, distribution={distribution}"
+                );
+            }
+        }
+        for constant in [0, 5, u64::MAX] {
+            let mut event = base.clone();
+            event.intended_us = 0;
+            event.sent_us = constant;
+            assert_eq!(generator_lag_stats(&vec![event; 101]), (constant, constant));
+        }
+    }
+
+    fn lag_probe_records(base: &SentEvent, count: usize, distribution: u8) -> Vec<SentEvent> {
+        let mut state = 1_u64;
+        (0..count)
+            .map(|index| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let mut event = base.clone();
+                event.intended_us = if index % 7 == 0 { u64::MAX } else { 0 };
+                event.sent_us = match distribution {
+                    0 => 5,
+                    1 => u64::try_from(index).expect("sample index"),
+                    2 => u64::try_from(count - index).expect("sample index"),
+                    3 => state % 1_000_000,
+                    4 => state,
+                    5 => [
+                        0,
+                        u64::MAX,
+                        1,
+                        u64::MAX - 1,
+                        1 << 63,
+                        255,
+                        256,
+                        65535,
+                        65536,
+                    ][index % 9],
+                    _ => 0x1234_ffff_0000 | (state % 65536),
+                };
+                event
+            })
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "exact lag CPU and memory probe; run in a fresh process"]
+    fn generator_lag_statistics_profile() {
+        let count = std::env::var("CAPACITY_LAG_PROBE_COUNT")
+            .unwrap_or_else(|_| "1000000".into())
+            .parse()
+            .expect("sample count");
+        assert!((1..=4_000_000).contains(&count));
+        let distribution = std::env::var("CAPACITY_LAG_PROBE_DISTRIBUTION")
+            .unwrap_or_else(|_| "3".into())
+            .parse()
+            .expect("sample distribution");
+        let base = crate::complete_records(&crate::unit_context().plans).sent[0].clone();
+        let sent = lag_probe_records(&base, count, distribution);
+        let started = std::time::Instant::now();
+        let stats = generator_lag_stats(&sent);
+        let elapsed = started.elapsed();
+        println!(
+            "LAG_PROFILE {}",
+            serde_json::json!({"count": count, "distribution": distribution, "maximum": stats.0, "p99": stats.1, "elapsed_us": elapsed.as_micros()})
+        );
+        std::hint::black_box(sent);
+    }
 
     // #636: recipient lookup must retain exact stream order and all malformed
     // evidence while avoiding a scan of other recipients' streams.

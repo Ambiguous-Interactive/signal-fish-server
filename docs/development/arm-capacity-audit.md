@@ -4374,3 +4374,67 @@ The binaries, six raw outputs, medians, measured reader function, and rejected
 follow-up patch remain under local `progress/session-497/`. The follow-up adds
 first-error ordering controls and a prefix shortcut; it is not the measured
 candidate and is also discarded. The baseline reader remains unchanged.
+
+### Session 498: exact lag percentiles with bounded temporary memory
+
+New work advances [#636](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/636)
+and [#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775).
+The oracle previously copied every completed send's lag into a vector and
+sorted it. It now finds the exact nearest-rank p99 with a 256-bucket radix
+selection over borrowed sends. At most eight byte passes follow the extrema
+scan. Temporary bucket storage stays fixed as the workload grows. Maximum
+lag, saturating subtraction, and nearest-rank semantics remain exact, including
+zero samples and full-width `u64` stalls. The rank calculation also avoids
+multiplying the sample count by 99.
+
+The isolated unoptimized ARM64 probe uses one million raw send events. Six
+baseline and six candidate fresh processes run per distribution, with paired
+trial order reversed on alternate trials. No agent build or test overlaps this
+36-process cohort. The host remains shared. Every maximum and p99 pair matches.
+
+| Lag distribution | Sort median, us | Radix median, us | Sort peak RSS median, KiB | Radix peak RSS median, KiB |
+| --- | ---: | ---: | ---: | ---: |
+| Two values, 0 and 5 | 77,451.5 | 20,391 | 79,772 | 71,904 |
+| Seeded values below one million, plus zero | 431,614 | 27,420 | 79,772 | 71,904 |
+| Seeded full-width u64 values, plus zero | 447,660.5 | 53,108 | 79,772 | 71,900 |
+
+For the middle distribution, median lag evaluation time falls 93.6% and child
+peak RSS falls about 7.7 MiB. A separate quiet growth cohort uses three trials
+per implementation and size. It retains the same generator and distribution.
+
+| Samples | Sort median, us | Radix median, us | Sort peak RSS median, KiB | Radix peak RSS median, KiB |
+| ---: | ---: | ---: | ---: | ---: |
+| 100,000 | 32,394 | 2,096 | 16,540 | 15,712 |
+| 4,000,000 | 1,917,849 | 104,704 | 290,716 | 259,292 |
+
+No agent builds or tests overlap those 12 growth trials. The earlier growth
+attempts overlapped a scoped build and remain separate in local artifacts.
+All attempts are retained. The maximum and p99 match in every paired cohort.
+An additional 18 fresh processes compare complete full-fanout oracle summaries:
+2 peers with 5,000 sends each, 16 peers with 1,000, and 64 peers with 100.
+All six full summary JSON values match within each workload. Both implementations
+include the same new send-plan validation; the comparison isolates lag selection.
+It is not a comparison of all session changes against main.
+
+Build the capacity test target and run the ignored
+`oracle::coverage_tests::generator_lag_statistics_profile` test in a fresh
+process. `CAPACITY_LAG_PROBE_COUNT` selects 1 through 4,000,000 samples;
+`CAPACITY_LAG_PROBE_DISTRIBUTION` selects 0, 3, or 4 for the table rows.
+The baseline replaces only `generator_lag_stats` with the previous collect,
+sort, and exact-rank calculation. Binary SHA-256 values are:
+
+- Baseline `/tmp/capacity498-sort`:
+  `fbcc778d4c96c0661903c16ad169e8e3ab7ef7af05f132c07eab85785bcaee15`.
+- Candidate `/tmp/capacity498-radix`:
+  `380a6e018ee2d63297f76114f9cef9f925b86f192f51af330e58a6202e258413`.
+
+Raw outputs, child `wait4` peak RSS, full summaries, cohort JSON, and source
+snapshots remain under local `progress/session-498/`. Later controls add explicit
+u64 extrema and common-prefix values; the measured selection function is
+unchanged. The companion F119 finding in the production correctness audit
+records the new send-plan and incarnation repairs.
+
+These are generator validation measurements, not server throughput or a full
+long-cell memory bound. Event retention and other validation structures still
+grow with the workload. The original ten-minute offered workload, exact delivery
+checks, and 250 ms generator bound remain required. #775 and #1009 stay open.
