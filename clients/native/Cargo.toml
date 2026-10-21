@@ -26,7 +26,7 @@ async-trait = "0.1.92"
 if-addrs = "0.15.0"
 
 # Async runtime & WebSocket wire layer.
-tokio = { version = "1.53.3", features = [
+tokio = { version = "1.54.0", features = [
     "rt-multi-thread",
     "macros",
     "time",
@@ -70,7 +70,7 @@ browser-interop = []
 [dev-dependencies]
 # The interop harness spawns the server binary + N client binaries as real
 # child processes; `process` mirrors the root crate's test-only tokio features.
-tokio = { version = "1.53.3", features = ["process", "test-util"] }
+tokio = { version = "1.54.0", features = ["process", "test-util"] }
 tempfile = "3.27.0"
 # The harness compares player UUIDs for the deterministic offerer assertion
 # (PlayerId is a uuid::Uuid alias in the server crate; lib code never needs

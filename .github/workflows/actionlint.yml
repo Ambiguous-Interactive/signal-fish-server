@@ -59,7 +59,7 @@ jobs:
           echo "$RUNNER_TEMP/actionlint-bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/actionlint-bin/actionlint" -version
       - name: Install ShellCheck
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.29
         with:
           tool: shellcheck@0.11.0
           fallback: none

@@ -160,7 +160,7 @@ jobs:
           components: miri, rust-src
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           # Isolate the nightly safety build cache (distinct toolchain/RUSTFLAGS) from the
           # stable CI caches; the "-v2" epoch busted older caches that predate this split.
@@ -264,7 +264,7 @@ jobs:
           toolchain: nightly-2026-08-01
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           # Isolate the nightly safety build cache (distinct toolchain/RUSTFLAGS) from the
           # stable CI caches; the "-v2" epoch busted older caches that predate this split.

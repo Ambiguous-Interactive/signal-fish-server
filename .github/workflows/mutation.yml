@@ -113,13 +113,13 @@ jobs:
           sudo apt-get install -y --no-install-recommends mold clang
 
       - name: Cache cargo build (warm + save the shared mutants cache)
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           # Shared with the mutants shards below so they restore THIS warm target/.
           shared-key: "mutants"
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.29
         with:
           tool: cargo-mutants@27.1.0
 
@@ -128,7 +128,7 @@ jobs:
         # .config/nextest.toml decides whether a nonterminating mutant is a
         # caught mutant or an outer-timeout; its semantics must stay stable,
         # and the baseline green-gate depends on every lib test fitting it.
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.29
         with:
           tool: cargo-nextest@0.9.148
 
@@ -246,7 +246,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends mold clang
 
       - name: Cache cargo build (restore the warm shared cache)
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           shared-key: "mutants"
           # The baseline job owns the save; shards restore only (avoids 41 shards
@@ -254,13 +254,13 @@ jobs:
           save-if: false
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.29
         with:
           tool: cargo-mutants@27.1.0
 
       - name: Install cargo-nextest
         # Pinned, same reason as the baseline job above.
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.29
         with:
           tool: cargo-nextest@0.9.148
 

@@ -36,7 +36,7 @@ chrono = "0.4.45"
 # The state-machine targets drive the async in-process server core; each input
 # runs on a fresh current-thread runtime so background tasks cannot accumulate
 # across libFuzzer iterations.
-tokio = { version = "1.53.3", features = ["rt", "sync", "time"] }
+tokio = { version = "1.54.0", features = ["rt", "sync", "time"] }
 uuid = { version = "1.28.0", features = ["v4"] }
 
 [dependencies.signal-fish-server]

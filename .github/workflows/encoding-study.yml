@@ -52,7 +52,7 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           components: clippy, rustfmt
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           workspaces: benches/encoding
           save-if: >-
@@ -99,7 +99,7 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           workspaces: benches/encoding
           save-if: >-

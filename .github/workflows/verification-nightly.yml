@@ -137,11 +137,11 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.29
         with:
           tool: cargo-nextest@0.9.148
       - name: Run relay delivery soak
@@ -253,14 +253,14 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           workspaces: |
             .
             clients/native
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.29
         with:
           tool: cargo-nextest@0.9.148
       - name: Build the native reference client
@@ -417,12 +417,12 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-nextest
         id: install-nextest
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.29
         with:
           tool: cargo-nextest@0.9.148
       # --run-ignored all: the PR-lane profiles (already covered by the ci.yml
@@ -605,7 +605,7 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install Java runtime
