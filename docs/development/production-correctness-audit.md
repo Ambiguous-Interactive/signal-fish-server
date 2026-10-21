@@ -54,7 +54,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial; two ordered concurrent unready/start histories and recovery checked in session 456; concurrent join/start histories in session 471; concurrent departure/start histories in session 474 |
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial; concurrent transfer/start and host election checked in session 483 |
 | A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31 |
-| A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471 |
+| A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471; backpressured signal/departure ordering in session 502 |
 | A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial; concurrent library transport-status publication in F100 |
 | A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial |
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
@@ -99,6 +99,41 @@ baseline. It maps audit ownership; it does not certify these operations.
 | `TransferAuthority` | A09, A11 | Eligible live member, replay/publication order, transport-host independence |
 
 ## Bounded histories without a confirmed defect
+
+### A11 — Session 502 signal admission and target departure
+
+At the [base commit](https://github.com/Ambiguous-Interactive/signal-fish-server/commit/ba65aa23087e3be0a9b4d6f60d14363a31b1bb63),
+a new bounded history tests the interval after targeted Signal routing validation
+and before queue admission. The target queue is full.
+The test polls the real handler until its backpressure counter increases, then
+runs an ordinary `LeaveRoom` through the message router. The existing lifecycle
+attempt notification establishes that the leave worker has started. On the
+current-thread runtime it acquires its uncontested lifecycle and reaches the
+room gate before yielding. Both the target's stored membership and its local
+assignment remain intact while the signal waits for queue capacity.
+
+Draining the queue permits the exact original Signal, then RoomLeft and the
+incumbent's PlayerLeft. A new signal to the departed target is rejected.
+An ordinary rejoin increases the target epoch, and a fresh signal reaches it.
+The history uses real coordinator delivery and room operations. It adds no
+production pause hook, clock sleep, or synthetic epoch mutation. It covers
+in-process queue admission; it does not establish socket-write ordering or
+all reconnect schedules.
+
+Temporarily removing only the signal room-gate acquisition fails the membership
+assertion in Nextest `173f648d-9777-45e7-aeed-7680bdc8c557`: LeaveRoom clears
+the target assignment while Signal still waits. Production source is restored.
+The initial complete history passes in Nextest `8b22737f-b2b1-45db-ad68-15485d0e7d08`.
+Final restored-source Nextest `f137c2a2-923d-4387-8a03-653fd9d3d7c4` passes the new
+history and both existing signal room-gate controls.
+
+The suspected replacement race is not a confirmed defect. Signal retains the
+room gate through delivery. Ordinary leave takes that gate before clearing
+membership, and reconnect takes it before identity reassignment. A seated
+WebRTC connection cannot renegotiate its protocol in place. A test-only epoch
+bump after validation would therefore bypass the production synchronization.
+This control narrows A11 coverage under open #826. It changes no runtime,
+wire, client API, or configuration behavior and needs no client migration.
 
 ### A08/A11/A20 — Session 484 endpoint, negotiation, and mesh-debt histories
 

@@ -4612,3 +4612,90 @@ found no correctness issues.
 Raw event memory still grows with offered work. These synthetic measurements
 do not prove the planned ten-minute C3 workload, a full memory bound, or the
 cause of historical generator stalls. Keep #775, #795, and #1009 open.
+
+### Production JSON sizing allocations (session 502, #636)
+
+The production `canonical_json_len` helper serialized JSON into a temporary
+vector and discarded it after measuring its length. The replacement runs the
+same serializer through a checked byte counter. Gameplay payloads, opaque
+signaling values, and peer metadata retain the same byte sizes, limits, and
+serialization-error result. This changes no wire schema or client API.
+
+The retained `relay_allocations` control calls the actual production helper
+through the existing allocation-tracking feature. Fixture creation stays
+outside each measured region. The isolated comparison also uses exact source
+extractions of the old and new helpers, with optimized serde_json 1.0.154,
+Rust 1.94.0, and matching default serializer features on ARM64.
+
+| Payload string bytes | Old allocated bytes per call | New allocated bytes per call |
+| ---: | ---: | ---: |
+| 96 | 256 | 0 |
+| 1,024 | 2,072 | 0 |
+| 16,384 | 32,792 | 0 |
+| 65,536 | 131,096 | 0 |
+
+Every old call makes one allocation and one or two reallocations. Every new
+call makes zero allocations and reallocations. CPU measurements use a separate
+uninstrumented driver: five fresh process pairs alternate old/new execution
+order on CPU 0, with 100,000 calls per cohort. Timings remain mixed on this
+shared host. The 16 KiB cohort has two slower pairs and a 0.51% increase in
+its separately computed candidate median. Earlier instrumented timings can
+inflate allocation costs and are retained only as exploratory evidence.
+The allocation reduction is the primary result; these samples establish no
+universal CPU speedup or server throughput improvement.
+Reproduce the allocation gate with
+`cargo bench --locked --bench relay_allocations --features allocation-tracking`.
+Exact source snapshots, optimized probe source, raw process results, commands,
+and initial attempts remain in local `progress/session-502/runtime/`.
+Differential controls cover Unicode, escaping, scalars, nested and large values,
+Direct and custom metadata, invalid map keys, and partial serializer failures.
+Existing exact-limit and over-limit consumer controls retain accepted and
+rejected gameplay, signaling, and metadata behavior. External Rust, .NET, and
+Godot clients consume identical wire values and require no migration.
+
+### Compact recipient latency histograms (session 502, #775)
+
+The capacity summary retained a u64 HDR counter for every latency bucket of
+every measured recipient. It now uses u32 counters when the largest complete
+raw-arrival count at one roster peer fits u32. The existing arrival walk sums
+all streams before validation exclusions, including duplicate, opaque,
+unknown-sender, invalid-epoch, and misrouted records. This adds one scalar bound
+and no event scan or map. Every per-peer bucket is bounded by that count.
+Larger per-peer evidence retains u64 counters. The aggregate always uses u64.
+
+The bound is per recipient, so it also applies when total fan-out exceeds
+u32::MAX. The planned 999-room, 16-player, 60-send/s, 720-second shape owes
+648,000 deliveries per recipient, despite its 10,357,632,000 total deliveries.
+This is a bound calculation, not an execution of that workload.
+
+The ignored `generator_recipient_latency_memory_profile` control constructs
+1,000, 4,000, and 16,000 recipient accumulators in separate fresh processes.
+Each records the same 4,096 samples from zero to 1,027,845 microseconds.
+Wide and compact modes share one executable and preserve exact sample totals,
+maxima, and percentile checksums. These are isolated histogram measurements;
+raw event retention, socket load, and the full summary are outside this probe.
+
+| Recipients | Old bucket bytes | New bucket bytes |
+| ---: | ---: | ---: |
+| 1,000 | 90,112,000 | 45,056,000 |
+| 4,000 | 360,448,000 | 180,224,000 |
+| 16,000 | 1,441,792,000 | 720,896,000 |
+
+Reproduce with the capacity-runner test executable, `--ignored --exact
+oracle::coverage_tests::generator_recipient_latency_memory_profile --nocapture`,
+`CAPACITY_LATENCY_PROBE_PEERS`, and `CAPACITY_LATENCY_PROBE_COMPACT=0` or `1`.
+Three fresh trials per width alternate in wide/compact/compact/wide/wide/compact
+order. Median peak RSS falls from 106,812 to 59,544 KiB at 1,000 peers,
+397,640 to 210,456 KiB at 4,000 peers, and 1,557,192 to 811,928 KiB at
+16,000 peers. Raw attempts, script, executable hash, and process resource
+measurements remain in local `progress/session-502/hdr-memory/`. Concurrent
+builds limit CPU and whole-process memory comparisons; bucket byte counts
+are exact for this cohort.
+
+Differential controls compare compact and wide latency summaries and complete
+verdicts, preserve raw records, and replay exported artifacts. They cover
+empty and malformed histories, unmatched and duplicate sends, invalid arrivals,
+per-peer tails, u32::MAX counts, and the wide fallback beyond that boundary.
+The standalone runner changes no server message or external client API.
+Rust, .NET, and Godot need no migration. Raw record memory still grows with
+workload. The full ten-minute memory proof and historical stalls remain open.

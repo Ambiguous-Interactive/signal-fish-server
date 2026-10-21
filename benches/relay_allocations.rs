@@ -682,7 +682,28 @@ fn assert_database_metrics_reuse_game_names() {
     });
 }
 
+fn assert_payload_sizing_does_not_allocate() {
+    use signal_fish_server::server::allocation_benchmark::canonical_json_len;
+
+    for payload_bytes in [96, 1_024, 16_384, 65_536] {
+        let payload = serde_json::json!({
+            "payload": "a".repeat(payload_bytes),
+            "escaped": "quotes\", slash\\, newline\n, 雪 😀",
+        });
+        let expected = serde_json::to_vec(&payload).expect("canonical JSON").len();
+        let region = Region::new(GLOBAL);
+        let actual = canonical_json_len(std::hint::black_box(&payload));
+        let stats = region.change();
+        assert_eq!(actual, expected);
+        assert_eq!(stats.allocations, 0, "payload sizing allocated a buffer");
+        assert_eq!(stats.reallocations, 0, "payload sizing grew a buffer");
+        assert_eq!(stats.bytes_allocated, 0);
+        eprintln!("canonical_json_len payload_bytes={payload_bytes}: {stats:?}");
+    }
+}
+
 fn main() {
+    assert_payload_sizing_does_not_allocate();
     assert_database_metrics_reuse_game_names();
     assert_steady_state_timing_records_do_not_allocate();
     println!(
