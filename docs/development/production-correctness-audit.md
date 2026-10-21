@@ -102,8 +102,9 @@ baseline. It maps audit ownership; it does not certify these operations.
 
 ### A11 — Session 502 signal admission and target departure
 
-At `ba65aa23`, a new bounded history tests the interval after targeted Signal
-routing validation and before queue admission. The target queue is full.
+At the [base commit](https://github.com/Ambiguous-Interactive/signal-fish-server/commit/ba65aa23087e3be0a9b4d6f60d14363a31b1bb63),
+a new bounded history tests the interval after targeted Signal routing validation
+and before queue admission. The target queue is full.
 The test polls the real handler until its backpressure counter increases, then
 runs an ordinary `LeaveRoom` through the message router. The existing lifecycle
 attempt notification establishes that the leave worker has started. On the
