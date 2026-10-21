@@ -1859,6 +1859,9 @@ impl ResponseTimeTracker {
         let lowest = self.lowest_discernible_micros;
         let highest = self.highest_trackable_micros;
         let significant = self.significant_figures;
+        if let Some(histogram) = self.operations.get_mut(operation) {
+            return histogram.record(micros, highest);
+        }
         let histogram = self
             .operations
             .entry(operation.to_string())
@@ -1983,6 +1986,32 @@ pub struct DashboardCacheMetrics {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn response_time_tracker_reuses_operations_and_preserves_sample_bounds() {
+        let mut tracker = ResponseTimeTracker::with_bounds(1, 10_000, 3);
+        assert!(tracker.get_latency_metrics("missing").is_none());
+        for operation in ["websocket_ping_rtt", "", "房间延迟"] {
+            // Each lookup uses a distinct owned string with identical contents.
+            for (micros, clamped) in [(0, false), (500, false), (10_000, false), (20_000, true)] {
+                let name = operation.to_owned();
+                assert_eq!(
+                    tracker.add_sample(&name, Duration::from_micros(micros)),
+                    clamped,
+                    "operation={operation:?}, micros={micros}"
+                );
+            }
+            let metrics = tracker
+                .get_latency_metrics(operation)
+                .expect("known operation");
+            assert_eq!(metrics.sample_count, 4);
+            assert_eq!(metrics.min_ms, Some(0.0));
+            assert!(metrics
+                .max_ms
+                .is_some_and(|value| (10.0..10.01).contains(&value)));
+        }
+        assert_eq!(tracker.operations.len(), 3);
+    }
 
     // -----------------------------------------------------------------------
     // E. Metrics atomic tests

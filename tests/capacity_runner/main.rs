@@ -2186,8 +2186,8 @@ fn opaque_leaks_preserve_gap_overlap_duplicate_and_order_checks() {
         match case {
             "isolated" => {}
             "gap" => records.gaps.push(GapEvent {
-                recipient: key.recipient.clone(),
-                sender: key.sender.clone(),
+                recipient: key.recipient.clone().into(),
+                sender: key.sender.clone().into(),
                 epoch: 1,
                 from_seq: 1,
                 to_seq: 1,
@@ -2836,8 +2836,8 @@ fn an_out_of_order_stream_invalidates_the_run() {
 /// from `sender` (the server stamps 1-based, so ledger `seq` is `seq + 1`).
 fn gap_for(recipient: &str, sender: &str, seq: u64, reason: DeliveryGapReason) -> GapEvent {
     GapEvent {
-        recipient: recipient.to_string(),
-        sender: sender.to_string(),
+        recipient: recipient.into(),
+        sender: sender.into(),
         epoch: 1,
         from_seq: seq + 1,
         to_seq: seq + 1,
@@ -3278,8 +3278,8 @@ fn experiment_complete_records(plans: &[SenderPlan]) -> RunRecords {
         }
         for send in &opaque.sends {
             log.push_gap(GapEvent {
-                recipient: plan.name.clone(),
-                sender: opaque.name.clone(),
+                recipient: plan.name.clone().into(),
+                sender: opaque.name.clone().into(),
                 epoch: 1,
                 from_seq: send.seq + 1,
                 to_seq: send.seq + 1,
@@ -4968,7 +4968,7 @@ fn replacement_records(plans: &[SenderPlan], churn: &ChurnPlan) -> RunRecords {
                 })
                 .count() as u64;
             let seat_id = format!("id-{earlier}b");
-            tails.insert(seat_id.clone(), (seat_id, tail));
+            tails.insert((*earlier).to_string(), (seat_id, tail));
         }
         log.push_churn(records::ChurnEvent {
             recipient: (*name).to_string(),
@@ -5279,6 +5279,34 @@ async fn a_reconnect_burst_delivers_every_stream_exactly_once_across_the_storm()
         serde_json::to_value(&replayed).expect("serialize replay"),
         serde_json::to_value(&outcome.summary).expect("serialize summary"),
         "replaying the artifacts must reproduce the outcome summary"
+    );
+
+    let mut records = records;
+    let snapshot = records
+        .churn
+        .iter_mut()
+        .find(|event| event.phase == records::ChurnPhase::Rejoined && !event.tails.is_empty())
+        .expect("real rejoin snapshot");
+    let (member, (player_id, _)) = snapshot.tails.first_key_value().unwrap();
+    let member = member.clone();
+    let wrong_id = records
+        .registry
+        .iter()
+        .find(|(_, (registered, _))| registered != &member)
+        .map(|(id, _)| id.clone())
+        .expect("another registered member");
+    assert_ne!(player_id, &wrong_id);
+    snapshot.tails.get_mut(&member).unwrap().0 = wrong_id;
+    artifacts::write_deliveries(output.path(), &records).expect("write malformed snapshot");
+    let invalid = artifacts::replay(output.path()).expect("replay malformed snapshot");
+    assert!(!invalid.valid);
+    assert!(
+        invalid.reasons.iter().any(|reason| matches!(reason,
+            oracle::InvalidReason::InvalidSnapshotTails { first, .. }
+            if matches!(first.mismatch, oracle::SnapshotTailMismatch::WrongPlayer { .. })
+        )),
+        "{:?}",
+        invalid.reasons
     );
 }
 

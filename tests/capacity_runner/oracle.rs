@@ -51,6 +51,11 @@ pub enum InvalidReason {
         count: u64,
         first: ScheduledSendViolation,
     },
+    /// A rejoin snapshot cannot prove its member identity or stream tail.
+    InvalidSnapshotTails {
+        count: u64,
+        first: SnapshotTailViolation,
+    },
     /// A GameData frame lacked a usable ledger or registered sender identity.
     /// Its observed bytes remain raw evidence even though delivery pairing failed.
     UnidentifiedGameData {
@@ -166,6 +171,40 @@ pub enum SendPlanMismatch {
     IntendedTime,
     Phase,
     UnannouncedEpoch { epoch: u32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SnapshotTailViolation {
+    pub recipient: String,
+    pub member: String,
+    pub player_id: String,
+    pub mismatch: SnapshotTailMismatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotTailMismatch {
+    UnknownRecipient,
+    ForeignMember,
+    UnknownPlayerId,
+    WrongPlayer {
+        registered_member: String,
+    },
+    InvalidEpoch,
+    UnannouncedEpoch {
+        epoch: u32,
+    },
+    TailBeforeScheduledSend {
+        epoch: u32,
+        tail: u64,
+        intended_us: u64,
+        snapshot_us: u64,
+    },
+    TailBeyondSends {
+        epoch: u32,
+        tail: u64,
+        sent: u64,
+    },
 }
 
 /// Per-recipient accounting, in roster order.
@@ -357,8 +396,8 @@ impl GapViolations {
     fn record_violation(&mut self, gap: &GapEvent, detail: String) {
         self.count += 1;
         self.first.get_or_insert(GapViolation {
-            recipient: gap.recipient.clone(),
-            sender: gap.sender.clone(),
+            recipient: gap.recipient.to_string(),
+            sender: gap.sender.to_string(),
             detail,
         });
     }
@@ -855,6 +894,93 @@ fn churn_views(
     (views, unresolved)
 }
 
+fn snapshot_tail_evidence(
+    records: &RunRecords,
+    roster: &[(String, u32)],
+    blocks: &BTreeMap<(&str, u32), RelayBlock<'_>>,
+    reasons: &mut Vec<InvalidReason>,
+) {
+    let rooms: BTreeMap<_, _> = roster
+        .iter()
+        .map(|(name, room)| (name.as_str(), *room))
+        .collect();
+    let rejoined_epochs: BTreeSet<_> = records
+        .churn
+        .iter()
+        .filter_map(|event| {
+            (event.phase == ChurnPhase::Rejoined)
+                .then_some((event.recipient.as_str(), event.epoch?))
+        })
+        .collect();
+    let mut count = 0;
+    let mut first = None;
+    for event in records
+        .churn
+        .iter()
+        .filter(|event| event.phase == ChurnPhase::Rejoined)
+    {
+        for (member, (player_id, tail)) in &event.tails {
+            let mismatch = match rooms.get(event.recipient.as_str()) {
+                None => Some(SnapshotTailMismatch::UnknownRecipient),
+                Some(room) if rooms.get(member.as_str()) != Some(room) => {
+                    Some(SnapshotTailMismatch::ForeignMember)
+                }
+                Some(_) => match records.registry.get(player_id) {
+                    None => Some(SnapshotTailMismatch::UnknownPlayerId),
+                    Some((registered_member, _)) if registered_member != member => {
+                        Some(SnapshotTailMismatch::WrongPlayer {
+                            registered_member: registered_member.clone(),
+                        })
+                    }
+                    Some((_, 0)) => Some(SnapshotTailMismatch::InvalidEpoch),
+                    Some((_, epoch))
+                        if *epoch > 1 && !rejoined_epochs.contains(&(member.as_str(), *epoch)) =>
+                    {
+                        Some(SnapshotTailMismatch::UnannouncedEpoch { epoch: *epoch })
+                    }
+                    Some((_, epoch)) => {
+                        let sent = blocks
+                            .get(&(member.as_str(), *epoch))
+                            .map_or(0, |block| count_u64(block.len()));
+                        if *tail > sent {
+                            Some(SnapshotTailMismatch::TailBeyondSends {
+                                epoch: *epoch,
+                                tail: *tail,
+                                sent,
+                            })
+                        } else {
+                            tail.checked_sub(1)
+                                .and_then(|index| usize::try_from(index).ok())
+                                .and_then(|index| {
+                                    blocks.get(&(member.as_str(), *epoch))?.get(index)
+                                })
+                                .filter(|send| send.intended_us > event.at_us)
+                                .map(|send| SnapshotTailMismatch::TailBeforeScheduledSend {
+                                    epoch: *epoch,
+                                    tail: *tail,
+                                    intended_us: send.intended_us,
+                                    snapshot_us: event.at_us,
+                                })
+                        }
+                    }
+                },
+            };
+            if let Some(mismatch) = mismatch {
+                count += 1;
+                first.get_or_insert_with(|| SnapshotTailViolation {
+                    recipient: event.recipient.clone(),
+                    member: member.clone(),
+                    player_id: player_id.clone(),
+                    mismatch,
+                });
+            }
+        }
+    }
+    if let Some(first) = first {
+        reasons.push(InvalidReason::InvalidSnapshotTails { count, first });
+    }
+}
+
 /// Validate every raw event before delivery filtering, including duplicates,
 /// misroutes, warm-up records, and receipt keys absent from the send ledger.
 fn payload_size_evidence(
@@ -1078,6 +1204,7 @@ pub fn summarize(
     // enforce; the ledger position (`block[server_seq - 1]`) pairs the
     // stream coordinates with the sender-stamped ledger sequence.
     let blocks = relay_blocks(&records.sent);
+    snapshot_tail_evidence(records, roster, &blocks, &mut reasons);
     let sender_epochs: BTreeMap<&str, BTreeSet<u32>> =
         blocks
             .keys()
@@ -1914,6 +2041,208 @@ fn generator_lag_stats(sent: &[SentEvent]) -> (u64, u64) {
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
+
+    #[test]
+    fn snapshot_evidence_rejects_wrong_members_identities_and_impossible_tails() {
+        let (context, churn) = crate::churn_context(DeliveryClass::Reliable);
+        let baseline = crate::churned_records(&context, &churn);
+        let summarize = |records: &RunRecords| {
+            summarize(
+                &context.plans,
+                &context.roster,
+                records,
+                1_000,
+                96,
+                context.delivery_class,
+                &churn,
+                None,
+            )
+        };
+        assert!(summarize(&baseline).valid);
+        for mutation in [
+            "wrong_player",
+            "foreign_member",
+            "unknown_foreign_id",
+            "unknown_member_id",
+            "excess_tail",
+            "zero_epoch",
+            "unannounced_epoch",
+            "future_tail",
+        ] {
+            let mut records = baseline.clone();
+            let rejoin = records
+                .churn
+                .iter_mut()
+                .find(|event| event.phase == ChurnPhase::Rejoined)
+                .unwrap();
+            let (member, mismatch) = match mutation {
+                "wrong_player" => {
+                    rejoin.tails.get_mut("r0p0").unwrap().0 = "id-r0p2".into();
+                    (
+                        "r0p0",
+                        SnapshotTailMismatch::WrongPlayer {
+                            registered_member: "r0p2".into(),
+                        },
+                    )
+                }
+                "foreign_member" => {
+                    rejoin.tails.insert("foreign".into(), ("id-r0p2".into(), 0));
+                    ("foreign", SnapshotTailMismatch::ForeignMember)
+                }
+                "unknown_foreign_id" => {
+                    rejoin
+                        .tails
+                        .insert("foreign".into(), ("unrecorded".into(), 0));
+                    ("foreign", SnapshotTailMismatch::ForeignMember)
+                }
+                "unknown_member_id" => {
+                    rejoin.tails.get_mut("r0p0").unwrap().0 = "unrecorded".into();
+                    ("r0p0", SnapshotTailMismatch::UnknownPlayerId)
+                }
+                "excess_tail" => {
+                    rejoin.tails.get_mut("r0p0").unwrap().1 = u64::MAX;
+                    (
+                        "r0p0",
+                        SnapshotTailMismatch::TailBeyondSends {
+                            epoch: 1,
+                            tail: u64::MAX,
+                            sent: 0,
+                        },
+                    )
+                }
+                "zero_epoch" => {
+                    records.registry.get_mut("id-r0p0").unwrap().1 = 0;
+                    ("r0p0", SnapshotTailMismatch::InvalidEpoch)
+                }
+                "unannounced_epoch" => {
+                    records.registry.get_mut("id-r0p0").unwrap().1 = u32::MAX;
+                    (
+                        "r0p0",
+                        SnapshotTailMismatch::UnannouncedEpoch { epoch: u32::MAX },
+                    )
+                }
+                "future_tail" => {
+                    rejoin.tails.get_mut("r0p1").unwrap().1 = 1;
+                    (
+                        "r0p1",
+                        SnapshotTailMismatch::TailBeforeScheduledSend {
+                            epoch: 2,
+                            tail: 1,
+                            intended_us: records
+                                .sent
+                                .iter()
+                                .find(|send| send.epoch == 2)
+                                .unwrap()
+                                .intended_us,
+                            snapshot_us: rejoin.at_us,
+                        },
+                    )
+                }
+                _ => unreachable!(),
+            };
+            let rejoin = records
+                .churn
+                .iter()
+                .find(|event| event.phase == ChurnPhase::Rejoined)
+                .unwrap();
+            let expected = InvalidReason::InvalidSnapshotTails {
+                count: 1,
+                first: SnapshotTailViolation {
+                    recipient: rejoin.recipient.clone(),
+                    member: member.into(),
+                    player_id: rejoin.tails[member].0.clone(),
+                    mismatch,
+                },
+            };
+            let expected_summary = serde_json::to_value(summarize(&records)).unwrap();
+            for reverse in [false, true] {
+                if reverse {
+                    records.sent.reverse();
+                    records.churn.reverse();
+                }
+                let output = tempfile::tempdir().unwrap();
+                crate::artifacts::write_deliveries(output.path(), &records).unwrap();
+                let replayed = crate::artifacts::read_records(output.path()).unwrap();
+                assert_eq!(
+                    serde_json::to_value(&records).unwrap(),
+                    serde_json::to_value(&replayed).unwrap()
+                );
+                for evidence in [&records, &replayed] {
+                    let summary = summarize(evidence);
+                    assert!(!summary.valid, "{mutation}");
+                    assert!(
+                        summary.reasons.contains(&expected),
+                        "{mutation}: {:?}",
+                        summary.reasons
+                    );
+                    assert_eq!(
+                        serde_json::to_value(summary).unwrap(),
+                        expected_summary,
+                        "{mutation}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_evidence_accepts_write_completion_and_rejoin_timestamp_inversions() {
+        let (context, churn) = crate::churn_context(DeliveryClass::Reliable);
+        for inversion in ["write_completion", "epoch_announcement"] {
+            let mut records = crate::churned_records(&context, &churn);
+            let (snapshot_us, player_id, tail) = match inversion {
+                "write_completion" => {
+                    let send = records
+                        .sent
+                        .iter_mut()
+                        .find(|send| send.epoch == 1)
+                        .unwrap();
+                    let snapshot_us = send.intended_us + 1;
+                    // The server can include the frame before the writer task
+                    // records completion of its write.
+                    send.sent_us = snapshot_us + 1;
+                    let seq = send.seq;
+                    records
+                        .receipts
+                        .retain(|receipt| receipt.recipient != "r0p0" || receipt.seq != seq);
+                    (snapshot_us, "id-r0p1", 1)
+                }
+                "epoch_announcement" => {
+                    let announcement = records
+                        .churn
+                        .iter()
+                        .find(|event| {
+                            event.recipient == "r0p1" && event.phase == ChurnPhase::Rejoined
+                        })
+                        .unwrap();
+                    // The other seat can observe this incarnation before the
+                    // member's task records its own completed rejoin.
+                    (announcement.at_us - 1, "id-r0p1b", 0)
+                }
+                _ => unreachable!(),
+            };
+            records.churn.push(crate::records::ChurnEvent {
+                recipient: "r0p0".into(),
+                phase: ChurnPhase::Rejoined,
+                at_us: snapshot_us,
+                epoch: Some(2),
+                tails: BTreeMap::from([("r0p1".into(), (player_id.into(), tail))]),
+            });
+            // The replay ledger need not arrive in sender or sequence order.
+            records.sent.reverse();
+            let summary = summarize(
+                &context.plans,
+                &context.roster,
+                &records,
+                1_000,
+                96,
+                context.delivery_class,
+                &churn,
+                None,
+            );
+            assert!(summary.valid, "{inversion}: {:?}", summary.reasons);
+        }
+    }
 
     #[test]
     fn bounded_lag_statistics_match_sorted_nearest_rank_for_full_u64_values() {

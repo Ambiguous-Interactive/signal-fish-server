@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce memory allocation when recording server response and WebSocket round-trip timings (#636).
 - **Breaking:** Require Rust 1.94.0 or newer to build from source with the current dependencies.
 - **Breaking:** Rust library callers using `EncryptionError::Base64Decode` must use base64 0.23.
 - **Breaking:** Opaque reference-client sends now include an application sender header; upgrade both probe clients (#678).

@@ -102,7 +102,7 @@ impl<'de> serde::Deserialize<'de> for ReceiptName {
     }
 }
 
-/// Replay-only send and receipt names. Live tasks clone their peer and registry names
+/// Replay-only send, receipt, and gap names. Live tasks clone their peer and registry names
 /// directly, without a pool lookup or duplicate-string cleanup in the log.
 #[derive(Default)]
 pub(super) struct ReceiptNames(BTreeSet<ReceiptName>);
@@ -128,6 +128,17 @@ impl ReceiptNames {
             application_bytes: sent.application_bytes,
             encoded_frame_body_bytes: sent.encoded_frame_body_bytes,
             phase: sent.phase,
+        }
+    }
+
+    pub(super) fn share_gap(&mut self, gap: GapEvent<impl AsRef<str>>) -> GapEvent {
+        GapEvent {
+            recipient: self.intern(gap.recipient.as_ref()),
+            sender: self.intern(gap.sender.as_ref()),
+            epoch: gap.epoch,
+            from_seq: gap.from_seq,
+            to_seq: gap.to_seq,
+            reason: gap.reason,
         }
     }
 
@@ -208,10 +219,10 @@ pub enum DisconnectObservation {
 /// with the contract reason. The oracle maps the range onto the sender's
 /// ledger stream (`server seq = ledger seq + 1`) and checks exact coverage.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct GapEvent {
-    pub recipient: String,
+pub struct GapEvent<Name = ReceiptName> {
+    pub recipient: Name,
     /// Peer name resolved from the report's `from_player` id.
-    pub sender: String,
+    pub sender: Name,
     pub epoch: u32,
     pub from_seq: u64,
     pub to_seq: u64,
@@ -865,7 +876,7 @@ pub struct RunRecords {
 pub enum DeliveryEvent<Name = ReceiptName> {
     Sent(SentEvent<Name>),
     Receipt(ReceiptEvent<Name>),
-    Gap(GapEvent),
+    Gap(GapEvent<Name>),
     UnsupportedNotice(UnsupportedNoticeEvent),
     Disconnect(DisconnectEvent),
     Churn(ChurnEvent),
@@ -1133,6 +1144,98 @@ mod tests {
             serde_json::to_vec(&first.receipts[0]).unwrap(),
             serde_json::to_vec(&original).unwrap()
         );
+    }
+
+    // A lossy run may retain one omission for every attempted delivery. Keep
+    // this probe separate from oracle scratch to measure retained gap evidence.
+    #[test]
+    #[ignore = "gap memory profile; run in a fresh process"]
+    fn generator_gap_memory_profile() {
+        fn measure<Name: Clone>(recipient: Name, sender: Name, count: usize) {
+            let gaps: Vec<_> = (0..count)
+                .map(|seq| GapEvent {
+                    recipient: recipient.clone(),
+                    sender: sender.clone(),
+                    epoch: 1,
+                    from_seq: u64::try_from(seq).expect("sequence") + 1,
+                    to_seq: u64::try_from(seq).expect("sequence") + 1,
+                    reason: signal_fish_server::protocol::DeliveryGapReason::LatestSuperseded,
+                })
+                .collect();
+            println!(
+                "gap_count={} gap_bytes={} retained_rss={:?}",
+                gaps.len(),
+                std::mem::size_of::<GapEvent<Name>>(),
+                crate::diagnostics::resident_memory_bytes(std::process::id())
+            );
+            std::hint::black_box(gaps);
+        }
+        let count = std::env::var("CAPACITY_GAP_PROBE_EVENTS")
+            .unwrap_or_else(|_| "100000".into())
+            .parse::<usize>()
+            .expect("gap count");
+        assert!((1..=2_000_000).contains(&count));
+        if std::env::var_os("CAPACITY_GAP_PROBE_STRING_NAMES").is_some() {
+            measure("r0p1".to_string(), "r0p0".to_string(), count);
+        } else {
+            measure(ReceiptName::from("r0p1"), ReceiptName::from("r0p0"), count);
+        }
+    }
+
+    #[test]
+    fn gap_names_share_send_identities_without_changing_evidence() {
+        let mut names = ReceiptNames::default();
+        let mut records = RunRecords::default();
+        for (recipient, sender, from_seq, to_seq) in [
+            ("r0p1", "未知\"\\\n", 1, 7),
+            ("r0p1", "未知\"\\\n", 1, 7),
+            ("未知\"\\\n", "r0p1", u64::MAX, 2),
+        ] {
+            let event = GapEvent {
+                recipient,
+                sender,
+                epoch: 42,
+                from_seq,
+                to_seq,
+                reason: signal_fish_server::protocol::DeliveryGapReason::LatestSuperseded,
+            };
+            let expected = serde_json::to_vec(&event).unwrap();
+            let shared = names.share_gap(event);
+            assert_eq!(serde_json::to_vec(&shared).unwrap(), expected);
+            records.gaps.push(shared);
+        }
+        records.sent.push(names.share_sent(SentEvent {
+            sender: "未知\"\\\n",
+            room: 0,
+            seq: 0,
+            epoch: 42,
+            intended_us: 0,
+            sent_us: 1,
+            application_bytes: 96,
+            encoded_frame_body_bytes: 150,
+            phase: Phase::Measured,
+        }));
+        let output = tempfile::tempdir().expect("gap artifacts");
+        crate::artifacts::write_deliveries(output.path(), &records).expect("write gaps");
+        let replayed = crate::artifacts::read_records(output.path()).expect("replay gaps");
+        assert_eq!(
+            serde_json::to_vec(&records).unwrap(),
+            serde_json::to_vec(&replayed).unwrap()
+        );
+        assert_eq!(replayed.gaps.len(), 3);
+        assert!(Arc::ptr_eq(
+            &replayed.sent[0].sender.0,
+            &replayed.gaps[0].sender.0
+        ));
+        assert!(Arc::ptr_eq(
+            &replayed.gaps[0].recipient.0,
+            &replayed.gaps[1].recipient.0
+        ));
+        assert!(Arc::ptr_eq(
+            &replayed.gaps[0].sender.0,
+            &replayed.gaps[2].recipient.0
+        ));
+        assert!(std::mem::size_of::<GapEvent>() < std::mem::size_of::<GapEvent<String>>());
     }
 
     fn timing_receipt(seq: u64) -> ReceiptEvent {
