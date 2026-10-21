@@ -348,18 +348,40 @@ impl GapViolations {
     }
 }
 
-/// Borrow canonical sender/sequence order directly. Arbitrary artifact order
+/// Borrow canonical sends in sender blocks, with direct offsets for contiguous
+/// sequences and binary search for sparse or repeated keys. Arbitrary artifact order
 /// uses a stable pointer sort, preserving the former map's last-key-wins rule.
 /// No receipt or raw send evidence is changed by this lookup index.
 enum SendIndex<'a> {
-    Ordered(&'a [SentEvent]),
+    Ordered(Vec<SenderSends<'a>>),
     Reordered(Vec<&'a SentEvent>),
+}
+
+struct SenderSends<'a> {
+    events: &'a [SentEvent],
+    contiguous: bool,
 }
 
 impl<'a> SendIndex<'a> {
     fn new(sent: &'a [SentEvent]) -> Self {
         if sent.is_sorted_by_key(|event| (event.sender.as_str(), event.seq)) {
-            return Self::Ordered(sent);
+            let sender_count = usize::from(!sent.is_empty())
+                + sent
+                    .windows(2)
+                    .filter(|pair| pair[0].sender != pair[1].sender)
+                    .count();
+            let mut senders = Vec::with_capacity(sender_count);
+            let mut remaining = sent;
+            while let Some(first) = remaining.first() {
+                let end = remaining.partition_point(|event| event.sender == first.sender);
+                let (events, rest) = remaining.split_at(end);
+                let contiguous = events
+                    .windows(2)
+                    .all(|pair| pair[0].seq.checked_add(1) == Some(pair[1].seq));
+                senders.push(SenderSends { events, contiguous });
+                remaining = rest;
+            }
+            return Self::Ordered(senders);
         }
         let mut ordered: Vec<_> = sent.iter().collect();
         ordered.sort_by_key(|event| (event.sender.as_str(), event.seq));
@@ -388,7 +410,23 @@ impl<'a> SendIndex<'a> {
             ((event.sender.as_str(), event.seq) == (sender, seq)).then_some(event)
         }
         match self {
-            Self::Ordered(sent) => find(sent.len(), |index| &sent[index], sender, seq),
+            Self::Ordered(senders) => {
+                let index = senders
+                    .binary_search_by(|block| block.events[0].sender.as_str().cmp(sender))
+                    .ok()?;
+                let block = &senders[index];
+                if block.contiguous {
+                    let offset = usize::try_from(seq.checked_sub(block.events[0].seq)?).ok()?;
+                    block.events.get(offset)
+                } else {
+                    find(
+                        block.events.len(),
+                        |index| &block.events[index],
+                        sender,
+                        seq,
+                    )
+                }
+            }
             Self::Reordered(sent) => find(sent.len(), |index| sent[index], sender, seq),
         }
     }
@@ -1917,6 +1955,45 @@ mod coverage_tests {
             SendIndex::Ordered(_)
         ));
         assert!(matches!(SendIndex::new(&[]), SendIndex::Ordered(_)));
+    }
+
+    #[test]
+    fn sender_blocks_match_map_at_holes_duplicates_and_sequence_limits() {
+        let context = crate::unit_context();
+        let template = crate::complete_records(&context.plans).sent.remove(0);
+        let values = [0, 1, 2, u64::MAX - 1, u64::MAX];
+        for &first in &values {
+            for &second in &values {
+                for &third in &values {
+                    let mut sent = Vec::new();
+                    for sender in ["", "r0p0", "未知"] {
+                        for seq in [first, second, third] {
+                            let mut event = template.clone();
+                            event.sender = sender.into();
+                            event.seq = seq;
+                            sent.push(event);
+                        }
+                    }
+                    sent.sort_by_key(|event| (event.sender.clone(), event.seq));
+                    let expected: BTreeMap<_, _> = sent
+                        .iter()
+                        .map(|event| ((event.sender.as_str(), event.seq), event))
+                        .collect();
+                    let index = SendIndex::new(&sent);
+                    for sender in ["", "missing", "r0p0", "未知"] {
+                        for seq in values {
+                            let actual = index.get(sender, seq);
+                            let expected = expected.get(&(sender, seq)).copied();
+                            assert_eq!(
+                                actual.map(std::ptr::from_ref),
+                                expected.map(std::ptr::from_ref),
+                                "sender={sender:?} seq={seq} ledger={first},{second},{third}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

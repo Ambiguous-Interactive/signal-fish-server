@@ -6450,3 +6450,42 @@ separate unreliable gate, and no gate. It verifies unsent debt while held,
 exactly one send after release, and an actual remote channel receipt. The
 independent source and regression review has no open finding. Hosted full
 interop remains a separate qualification gate.
+
+### F118 — Physical timeout discards admitted browser gameplay payloads
+
+Baseline `47236332`. Finding [#1099](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1099)
+continues A20 and [#826](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/826).
+The browser engine admits an ordinary data-channel payload while output blocks
+the orchestrator queue. The P2P deadline removes the physical link before the
+handler runs. The old handler checks the removed generation and drops the
+payload. Only recognized exchange probes held a logical receipt owner through
+physical timeout. This loses ordinary gameplay input already accepted from the
+current membership.
+
+Every admitted payload now captures the logical receipt owner. Physical timeout
+and ordinary retry preserve this owner. Peer departure, a new incarnation, and
+authoritative replacement invalidate it. The engine still rejects callbacks
+from retired physical generations before queue admission. Queue count and byte
+bounds, arrival deadlines, and exact exchange criteria remain in force.
+
+The controlled run-cutoff history fails on the baseline at
+`queued-expired-reliable` with the new ordinary-payload assertion. This is a
+new ordinary-input gap, distinct from the prior exchange-probe repair in F99.
+It does not explain the historical establishment or mesh-receipt incidents in
+[#853](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/853)
+or [#889](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/889).
+
+This repair changes the private browser reference orchestrator. The external
+Rust SDK uses an application-supplied WebRTC backend; .NET supplies signaling and relay;
+Godot uses engine WebRTC mesh objects. None imports this orchestrator or the
+capacity oracle. All three clients are unaffected and need no migration.
+
+The final controlled history passes both required labels with exchange enabled
+and disabled. It uses text on the reliable channel and binary input on the
+unreliable channel. It requires exactly one pre-timeout ordinary payload and
+no payload from a post-timeout callback. Departure and authoritative generation
+replacement discard queued input. Browser tests, strict type checks, formatting,
+and independent adversarial review pass. Rebuilt real Chromium/native restore,
+pair retry, and three-player browser mesh controls pass in Nextest runs
+`0b4a40b2` and `3726e41e`. These bounded controls do not reproduce either
+historical incident. Hosted interop remains a separate qualification gate.

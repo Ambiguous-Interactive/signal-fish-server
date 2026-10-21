@@ -885,7 +885,8 @@ class Orchestrator {
           this.config.exchange &&
           this.exchangeWindowOpen(arrivedAt) &&
           isExchangeProbe(peer, label, text);
-        const receiptOwner = exchangeReceipt ? this.exchangeLedger.receiptOwner(peer) : null;
+        /* Membership owns all admitted payloads across physical teardown. */
+        const receiptOwner = this.exchangeLedger.receiptOwner(peer);
         let receiptPending = exchangeReceipt;
         if (receiptPending) this.pendingExchangeReceipts += 1;
         this.pendingChannelMessages += 1;
@@ -897,11 +898,7 @@ class Orchestrator {
               this.pendingExchangeReceipts -= 1;
             }
             /* Physical timeout preserves evidence admitted for the current membership. */
-            if (
-              receiptOwner !== null
-                ? !this.exchangeLedger.ownsReceipt(peer, receiptOwner)
-                : !this.engine.isCurrentGeneration(peer, generation)
-            ) {
+            if (!this.exchangeLedger.ownsReceipt(peer, receiptOwner)) {
               return;
             }
             if (exchangeReceipt) {

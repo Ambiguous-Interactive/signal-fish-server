@@ -2003,7 +2003,14 @@ fn generator_memory_profile_on_complete_fanout() {
     let records = match std::env::var_os("CAPACITY_MEMORY_PROBE_REPLAY_DIR") {
         Some(path) => artifacts::read_records(std::path::Path::new(&path))
             .expect("read memory probe artifact"),
-        None => complete_records(&plans),
+        None => {
+            let log = if std::env::var_os("CAPACITY_MEMORY_PROBE_PLANNED_CAPACITY").is_some() {
+                EventLog::for_plans(&plans, false).expect("reserve probe records")
+            } else {
+                EventLog::new()
+            };
+            complete_records_into(&plans, log)
+        }
     };
     if let Some(path) = std::env::var_os("CAPACITY_MEMORY_PROBE_WRITE_DIR") {
         artifacts::write_deliveries(std::path::Path::new(&path), &records)
@@ -2036,6 +2043,10 @@ fn generator_memory_profile_on_complete_fanout() {
         serde_json::json!({
             "sends_per_peer": sends,
             "receipts": records.receipts.len(),
+            "sent_capacity": records.sent.capacity(),
+            "receipt_capacity": records.receipts.capacity(),
+            "retained_event_capacity_bytes": records.sent.capacity() * std::mem::size_of::<SentEvent>()
+                + records.receipts.capacity() * std::mem::size_of::<ReceiptEvent>(),
             "collected_rss_bytes": collected_rss,
             "after_oracle_rss_bytes": diagnostics::resident_memory_bytes(std::process::id()),
             "oracle_elapsed_us": elapsed.as_micros(),
@@ -5828,7 +5839,10 @@ fn unit_context_with_experiment() -> UnitContext {
 /// The complete, valid event set for `plans`: every scheduled send emitted
 /// 5 µs late, delivered to every co-room peer 3 µs later, in order.
 fn complete_records(plans: &[SenderPlan]) -> RunRecords {
-    let log = EventLog::new();
+    complete_records_into(plans, EventLog::new())
+}
+
+fn complete_records_into(plans: &[SenderPlan], log: EventLog) -> RunRecords {
     for plan in plans {
         let sent_name = ReceiptName::from(plan.name.as_str());
         for send in &plan.sends {

@@ -131,6 +131,11 @@ receiving channel in `channel`, and numeric `seq` zero. Only the required
 fields are allowed. Invalid traffic still emits `channel_message` and cannot
 satisfy the receive criterion.
 
+An admitted data-channel payload keeps its `channel_message` event through a
+physical-link timeout or retry, even when output delays its handler. This also
+applies without `--exchange`. A peer departure, new incarnation, or authoritative
+plan replacement discards queued input from the previous membership or link.
+
 When a peer reconnects or rejoins, `--exchange` requires fresh sends and receipts on both
 data channels. Completed exchanges for other peers remain valid. A transport
 rebuild alone does not reset the exchange. Each replacement link sends the probes

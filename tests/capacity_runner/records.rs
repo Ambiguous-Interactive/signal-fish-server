@@ -15,7 +15,7 @@ use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::oracle::InvalidReason;
-use crate::schedule::Phase;
+use crate::schedule::{Phase, SenderPlan};
 
 /// One send a sender task actually completed (it left this process).
 ///
@@ -502,6 +502,50 @@ impl EventLog {
         log
     }
 
+    pub fn for_plans(plans: &[SenderPlan], receipt_timings: bool) -> Result<Self, String> {
+        let mut members_by_room = BTreeMap::<u32, usize>::new();
+        for plan in plans {
+            *members_by_room.entry(plan.room).or_default() += 1;
+        }
+        let (sent, receipts) =
+            plans
+                .iter()
+                .try_fold((0_usize, 0_usize), |(sent, receipts), plan| {
+                    let fanout = members_by_room[&plan.room] - 1;
+                    let planned_receipts = plan
+                        .sends
+                        .len()
+                        .checked_mul(fanout)
+                        .ok_or_else(|| "planned receipt capacity overflows".to_string())?;
+                    Ok::<_, String>((
+                        sent.checked_add(plan.sends.len())
+                            .ok_or_else(|| "planned send capacity overflows".to_string())?,
+                        receipts
+                            .checked_add(planned_receipts)
+                            .ok_or_else(|| "planned receipt capacity overflows".to_string())?,
+                    ))
+                })?;
+        Self::with_planned_capacity(sent, receipts, receipt_timings)
+    }
+
+    fn with_planned_capacity(
+        sent: usize,
+        receipts: usize,
+        receipt_timings: bool,
+    ) -> Result<Self, String> {
+        let mut log = Self::with_receipt_timings(receipt_timings);
+        let state = log.state.get_mut().expect("new event log");
+        state
+            .sent
+            .try_reserve_exact(sent)
+            .map_err(|error| format!("reserve {sent} planned sends: {error}"))?;
+        state
+            .receipts
+            .try_reserve_exact(receipts)
+            .map_err(|error| format!("reserve {receipts} planned receipts: {error}"))?;
+        Ok(log)
+    }
+
     pub fn set_workload_epoch(&self, epoch: Instant) {
         let Some(start) = self.receipt_timing_start else {
             return;
@@ -876,6 +920,97 @@ impl RunRecords {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn planned_event_capacity_covers_each_room_without_changing_receipts() {
+        let context = crate::unit_context();
+        for count in [0, 1, 4] {
+            for split_room in [false, true] {
+                for timings in [false, true] {
+                    let mut plans = context.plans[..count].to_vec();
+                    if split_room {
+                        if let Some(first) = plans.first_mut() {
+                            first.room = 1;
+                        }
+                    }
+                    let expected = crate::complete_records(&plans);
+                    let log = EventLog::for_plans(&plans, timings).expect("planned log");
+                    let initial = {
+                        let state = log.state.lock().unwrap();
+                        assert!(state.sent.capacity() >= expected.sent.len());
+                        assert!(state.receipts.capacity() >= expected.receipts.len());
+                        assert_eq!(state.receipt_timings.is_some(), timings);
+                        (state.sent.capacity(), state.receipts.capacity())
+                    };
+                    for event in &expected.sent {
+                        log.push_sent(event.clone());
+                    }
+                    for event in &expected.receipts {
+                        log.push_receipt(event.clone());
+                    }
+                    {
+                        let state = log.state.lock().unwrap();
+                        assert_eq!((state.sent.capacity(), state.receipts.capacity()), initial);
+                    }
+                    assert_eq!(
+                        serde_json::to_vec(&log.take_records()).unwrap(),
+                        serde_json::to_vec(&expected).unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn planned_event_capacity_preserves_excess_events_and_faults() {
+        let context = crate::unit_context();
+        let mut expected = crate::complete_records(&context.plans);
+        let log = EventLog::for_plans(&context.plans, false).expect("planned log");
+        let mut extra = expected.receipts[0].clone();
+        extra.recipient = "未知".into();
+        expected.receipts.extend([extra.clone(), extra]);
+        let mut extra = expected.sent[0].clone();
+        extra.seq = u64::MAX;
+        expected.sent.push(extra);
+        expected
+            .sent
+            .sort_by(|a, b| (&a.sender, a.seq).cmp(&(&b.sender, b.seq)));
+        expected.faults.push(InvalidReason::ServerTerminated);
+        for event in &expected.sent {
+            log.push_sent(event.clone());
+        }
+        for event in &expected.receipts {
+            log.push_receipt(event.clone());
+        }
+        for fault in &expected.faults {
+            log.push_fault(fault.clone());
+        }
+        let actual = log.take_records();
+        assert_eq!(
+            serde_json::to_vec(&actual).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+        let output = tempfile::tempdir().expect("excess event artifacts");
+        crate::artifacts::write_deliveries(output.path(), &actual).expect("write excess events");
+        let replayed = crate::artifacts::read_records(output.path()).expect("replay excess events");
+        assert_eq!(
+            serde_json::to_vec(&replayed).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn planned_event_capacity_overflow_returns_an_error() {
+        for (sent, receipts, expected) in [
+            (usize::MAX, 0, "planned sends"),
+            (0, usize::MAX, "planned receipts"),
+        ] {
+            let error = EventLog::with_planned_capacity(sent, receipts, false)
+                .err()
+                .expect("impossible capacity must fail");
+            assert!(error.contains(expected), "{error}");
+        }
+    }
 
     // #775: send retention must not allocate a name for every ledger row.
     #[test]

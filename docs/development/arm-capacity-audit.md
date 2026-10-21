@@ -4076,3 +4076,208 @@ Executable SHA-256:
 
 - baseline: `242ac8deb75ce83e69458d821249b0f1ea47eebd486ab23fd2ec81dd5d1485cb`.
 - candidate: `a6b463bfbeb15b901307cf61d13612fd2f7a8f524383d8b5ce415e1f0b1f9679`.
+
+### Index contiguous sender ledgers by sequence offset
+
+Session 496 advances [#636](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/636)
+and the oracle evaluation work in [#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775)
+from `47236332`. Each payload and latency receipt lookup previously searched
+all sends by sender and sequence. Canonical ledgers now borrow one block per
+sender. The index checks that each block has consecutive sequences before
+using a checked sequence offset. Sparse or repeated sequences use binary
+search. Unordered artifacts retain the stable pointer sort and last-key-wins
+lookup. Raw events, offered work, budgets, and all delivery rules stay the same.
+
+This cohort measures the index-only stage. The final combined-source cohort
+appears below and supplies the final executable comparison.
+
+The registered ARM64 Linux debug cohort uses 16 senders, 80,000 sends, and
+1,200,000 receipts per process. Its order is baseline, candidate, candidate,
+baseline, baseline, candidate. All six complete summary JSON values match.
+The medians are:
+
+| Measure | Baseline | Candidate |
+| --- | ---: | ---: |
+| Oracle time | 3.283446 s | 2.445362 s |
+| Process wall time | 3.624131 s | 2.906843 s |
+| Process peak RSS | 92,048 KiB | 91,980 KiB |
+
+Oracle time falls 25.5% in this cohort. The index adds 24 bytes per sender
+on this host, plus one vector header. The 68 KiB RSS difference does not
+show a material memory reduction. Processes collect synthetic events and
+run the full oracle. They do not use sockets or decode replay artifacts.
+The shared host limits timing claims. This change does not prove a live
+capacity point or bound retained event memory for the long workload.
+Both issues remain open.
+
+Seven focused send-index, payload, and latency controls pass. The new control
+compares 125 three-sequence ledgers with an independent map. It checks holes,
+duplicates, zero, sequence limits, unknown names, and empty and Unicode sender
+names. The existing arbitrary-order control checks the exact selected event.
+Scoped strict clippy passes. Independent source review has no open finding.
+The baseline measurements establish the performance comparison; the existing
+semantics have no failing baseline correctness control.
+
+Registration, six raw process outputs, complete summaries, source copies, and
+focused-check logs remain under `/tmp/capacity-496/`. Two exploratory process
+runs are retained separately and excluded from the registered medians.
+Source SHA-256:
+
+- baseline: `07e76e57a5004ef9b823a3cd05a03cf76b9ab953c3783557271d04a7a8509736`.
+- candidate: `5faa16a006b4bbfbca9194211e0ddd3d033655442691651c545e09487206ca3c`.
+
+Executable SHA-256:
+
+- baseline: `a6b463bfbeb15b901307cf61d13612fd2f7a8f524383d8b5ce415e1f0b1f9679`.
+- candidate: `54ae58a842391121874fd4aa188a0c277540f552579997150a85567e8c970fb0`.
+
+### New original-shape Linux generator stall
+
+Session 496 records a new [#1009](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1009)
+history before the planned-event reservation change. The earlier session 492
+already completed this workload; this attempt is a new failure observation,
+not its first qualification.
+
+Run `f9c81149-feb8-4bb0-8fa0-0c6a89f34085` uses one room, 16 players,
+60 sends/s per player, 96-byte application data, seed 1, reliable v3 JSON,
+120 seconds of warm-up, and 600 seconds of measurement. Four runtime workers,
+the 250,000 us lag bound, diagnostics-off collection, and 1 Hz internal samples
+stay unchanged. The 32M planned-record budget admits the full offered work.
+No local build or test overlaps collection, artifact writing, or replay.
+The WSL2 ARM64 host remains shared and unconstrained.
+
+| Result | Observed value |
+| --- | ---: |
+| Scheduled sends | 691,232 |
+| Completed sends | 349,178 |
+| Unsent sends | 342,054 |
+| Receipts | 5,237,670 |
+| Outstanding deliveries | 0 |
+| Largest raw before-write lag | 738,551 us |
+| Largest completed-send lag | 334,008 us |
+| Process wall time, including artifacts and replay | 936.413 s |
+| Wait4 peak RSS | 384,220 KiB |
+
+The two lag reasons invalidate the run. All completed sends have their 15
+expected receipts. Exact full-summary replay passes; exit zero only confirms
+that replay check and does not make this a valid capacity result. Eighteen
+raw lag records retain the observed wake and write boundaries around workload
+363.7 seconds. The summary's completed-send lag excludes before-write refusals;
+the raw refusal maximum stays in its separate invalidation reason.
+
+A separate 100 ms observer retains generator process and thread scheduling
+counters, CPU/RSS, and host CPU/memory pressure. Sampling and worker CPU
+activity continue in the broad observed stall window. There is no exact
+workload-epoch anchor in this diagnostics-off attempt. The samples do not
+prove a process-wide pause, allocator stall, lock delay, or runtime cause.
+The failed history remains unresolved. A partial run's RSS does not bound
+the full workload.
+
+Registration, raw lag output, process samples, artifacts, and replay evidence
+remain in local `progress/session-496/`. The generator is
+`54ae58a842391121874fd4aa188a0c277540f552579997150a85567e8c970fb0`;
+the server is
+`019fd6d4677bd0b7748792962e03f59d41112325f3505efe38a8b2e9048c14e5`.
+Both executable hashes stay unchanged through completion. This is no server
+capacity point or repair of the historical generator stalls.
+
+### Reserve the admitted raw-event workload before connecting
+
+Session 496 also advances [#775](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775)
+by reserving the planned send and receipt vectors before creating the output
+directory or starting the server and clients. The runner computes checked
+counts from the actual schedules and each room's roster. It uses fallible
+exact reservations. A reservation error stops the attempt before networking.
+Expected appends need no vector growth. Extra deliveries, unknown names,
+duplicates, and faults remain raw evidence. Extra events can still grow the
+vectors. Lossy or aborted runs can leave more unused space early in a run.
+This change does not impose a strict process memory bound.
+
+Two registered three-pair cohorts use the same 80,000 sends and 1,200,000
+receipts as the index-only stage. Each process collects through `EventLog`
+and runs the complete oracle. All full summary JSON values match within
+and across both cohorts. Source changes were frozen before these cohorts.
+The final combined comparison uses the original baseline and the final
+executable with reservations enabled:
+
+| Median measure | Original baseline | Final candidate |
+| --- | ---: | ---: |
+| Oracle time | 3.797522 s | 2.975124 s |
+| Process wall time | 4.170876 s | 3.379875 s |
+| Process peak RSS | 92,140 KiB | 92,392 KiB |
+
+The median oracle time is 21.7% lower. One candidate process takes 4.289501 s
+in the oracle, which is slower than all three baseline processes. The shared
+host and this spread limit the timing claim to the recorded cohort.
+The earlier index-only cohort is separate and is not pooled into this result.
+
+The second cohort uses the same final executable with only the synthetic
+probe's planned-capacity selector changed. Its unreserved/reserved order is
+unreserved, reserved, reserved, unreserved, unreserved, reserved. The selector
+affects collection only; live runs always reserve their planned capacity.
+Every process records these vector capacities:
+
+| Retained raw-event allocation | Unreserved | Reserved |
+| --- | ---: | ---: |
+| Send slots | 131,072 | 80,000 |
+| Receipt slots | 2,097,152 | 1,200,000 |
+| Slot bytes | 142,606,336 | 81,920,000 |
+
+Reservations reduce allocated vector slot bytes by 60,686,336 bytes (42.6%)
+for this complete workload. This measure excludes names, allocator overhead,
+oracle state, and server state. Median peak RSS changes from 92,348 to
+92,428 KiB. Unused vector slots need not occupy resident pages, so this
+experiment shows no physical RSS gain. It does not prove a long live memory
+bound or explain historical generator stalls.
+
+Ten focused controls and scoped strict clippy pass. With reservations bypassed,
+the new planned-capacity control fails before collection because the vectors
+have no reserved slots. The restored code passes empty, single-player,
+split-room, receipt-timing, excess-event replay, and impossible-capacity cases.
+The excess-event control keeps duplicates, unknown recipients, and fault
+records byte-for-byte through replay.
+
+Final executable SHA-256:
+`278bae5df84397fa51bb1065241e89bc284b8e9df78dec6548634ae7073b4889`.
+The baseline executable is the same `a6b463bf` binary identified above.
+Registrations, all twelve raw process outputs and summaries, exact source
+hashes and copies, and red-green and lint logs remain under
+`/tmp/capacity-496/final-combined/`, `/tmp/capacity-496/reservation-isolated/`,
+and their parent directory. The full long workload already passed in session
+492. These new synthetic results do not repeat or extend that qualification.
+
+### Final reservation workload attempt remains generator-limited
+
+The final frozen reservation executable attempts the same complete workload
+in run `1a6cecda-4191-45b5-8ce2-e54882a14263`. This is a separate qualification attempt,
+not a controlled causal comparison with the first run. No local build or test
+overlaps collection, artifact writing, or replay. The server executable and
+all registered workload inputs remain unchanged.
+
+| Result | Observed value |
+| --- | ---: |
+| Scheduled sends | 691,232 |
+| Completed sends | 679,460 |
+| Unsent sends | 11,772 |
+| Receipts | 10,191,900 |
+| Outstanding deliveries | 0 |
+| Raw before-write refusal lag | 256,218 us |
+| Largest completed-send lag | 247,926 us |
+| Process wall time, including artifacts and replay | 1,154.690 s |
+| Wait4 peak RSS | 724,952 KiB |
+
+One sender refuses sequence 31,430 at workload 523.834 seconds because its
+wake exceeds the original 250,000 us lag bound. The run remains invalid.
+All completed sends have their 15 expected receipts. Exact full-summary
+artifact replay passes. Both executable hashes stay unchanged. This result
+does not complete the original workload or establish a full process memory
+bound. It shows that planned vector reservation alone does not remove
+generator saturation.
+
+The external 100 ms observer adds clock samples, task wait channels, and file
+size and modification times to its process and host data. These observations
+do not establish an allocator, lock, runtime, or host cause. No further attempt
+runs in this session. Both failed histories remain authoritative and
+[#1009](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1009)
+stays open. Registration, raw samples, all artifacts, and replay evidence
+remain under local `progress/session-496/reserved/`.
