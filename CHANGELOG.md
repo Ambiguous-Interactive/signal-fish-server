@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Expose native reference-client channel receipt diagnostics through the engine API.
+
 ## [0.12.0] - 2026-10-21
 
 ### Added

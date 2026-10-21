@@ -840,10 +840,59 @@ impl EventLog {
             faults: std::mem::take(&mut state.faults),
             registry: std::mem::take(&mut state.registry),
         };
+        sort_sent_events(&mut records.sent);
         records
-            .sent
-            .sort_by(|a, b| (&a.sender, a.seq).cmp(&(&b.sender, b.seq)));
-        records
+    }
+}
+
+fn sort_sent_events(events: &mut [SentEvent]) {
+    if events.is_sorted_by_key(|event| (event.sender.as_str(), event.seq)) {
+        return;
+    }
+    if events.len() <= 32 {
+        events.sort_by(|a, b| (&a.sender, a.seq).cmp(&(&b.sender, b.seq)));
+        return;
+    }
+    let maximum_grouped_senders = (events.len() / 16).max(16);
+    let mut sender_ranges: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    for event in events.iter() {
+        sender_ranges.entry(event.sender.as_str()).or_default().1 += 1;
+        if sender_ranges.len() > maximum_grouped_senders {
+            drop(sender_ranges);
+            events.sort_by(|a, b| (&a.sender, a.seq).cmp(&(&b.sender, b.seq)));
+            return;
+        }
+    }
+    let mut offset = 0;
+    for (next, count) in sender_ranges.values_mut() {
+        *next = offset;
+        offset += *count;
+    }
+    let mut source_positions = vec![0_usize; events.len()];
+    for (position, event) in events.iter().enumerate() {
+        let (next, _) = sender_ranges
+            .get_mut(event.sender.as_str())
+            .expect("every sender was counted");
+        source_positions[*next] = position;
+        *next += 1;
+    }
+    for (end, count) in sender_ranges.values() {
+        let positions = &mut source_positions[end - count..*end];
+        if !positions.is_sorted_by_key(|&position| events[position].seq) {
+            positions.sort_by_key(|&position| events[position].seq);
+        }
+    }
+    for start in 0..source_positions.len() {
+        let mut destination = start;
+        loop {
+            let source = source_positions[destination];
+            source_positions[destination] = destination;
+            if source == start {
+                break;
+            }
+            events.swap(destination, source);
+            destination = source;
+        }
     }
 }
 
@@ -931,6 +980,164 @@ impl RunRecords {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_send_sort_matches_stable_sort_with_duplicate_keys() {
+        let context = crate::unit_context();
+        let base = crate::complete_records(&context.plans).sent[0].clone();
+        for encoded in 0_u32..4096 {
+            let mut events = Vec::new();
+            for repetition in 0..6 {
+                let mut digits = encoded;
+                for position in 0..6 {
+                    let digit = digits % 4;
+                    digits /= 4;
+                    let mut event = base.clone();
+                    event.sender = if digit < 2 { "other" } else { "未知" }.into();
+                    event.seq = if digit % 2 == 0 { 0 } else { u64::MAX };
+                    event.sent_us = repetition * 6 + position;
+                    events.push(event);
+                }
+            }
+            let mut expected = events.clone();
+            expected.sort_by(|a, b| (&a.sender, a.seq).cmp(&(&b.sender, b.seq)));
+            sort_sent_events(&mut events);
+            assert_eq!(
+                serde_json::to_value(&events).unwrap(),
+                serde_json::to_value(&expected).unwrap(),
+                "input {encoded}"
+            );
+            sort_sent_events(&mut events);
+            assert_eq!(
+                serde_json::to_value(&events).unwrap(),
+                serde_json::to_value(&expected).unwrap(),
+                "already sorted input {encoded}"
+            );
+        }
+        for count in [0, 1, 2, 16, 32] {
+            let mut events: Vec<_> = (0..count)
+                .rev()
+                .map(|seq| {
+                    let mut event = base.clone();
+                    event.seq = seq;
+                    event
+                })
+                .collect();
+            sort_sent_events(&mut events);
+            assert_eq!(
+                events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+                (0..count).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn sparse_sender_sort_matches_stable_order_with_single_and_repeated_keys() {
+        let context = crate::unit_context();
+        let base = crate::complete_records(&context.plans).sent[0].clone();
+        for sender_count in [17, 64, 1024] {
+            for repetitions in [1, 2] {
+                let mut events = Vec::new();
+                for sender in (0..sender_count).rev() {
+                    for duplicate in 0..repetitions {
+                        let mut event = base.clone();
+                        event.sender = format!("未知-{sender:04}").into();
+                        event.seq = u64::MAX;
+                        event.sent_us = duplicate;
+                        events.push(event);
+                    }
+                }
+                let mut expected = events.clone();
+                expected.sort_by(|a, b| (&a.sender, a.seq).cmp(&(&b.sender, b.seq)));
+                sort_sent_events(&mut events);
+                assert_eq!(
+                    serde_json::to_value(&events).unwrap(),
+                    serde_json::to_value(&expected).unwrap(),
+                    "senders={sender_count}, repetitions={repetitions}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compact_send_collection_preserves_duplicate_evidence_and_replay() {
+        let context = crate::unit_context();
+        let mut expected = crate::complete_records(&context.plans);
+        let mut duplicate = expected.sent[0].clone();
+        duplicate.sent_us = u64::MAX;
+        expected.sent.push(duplicate);
+        expected.sent.reverse();
+        let log = EventLog::new();
+        for event in &expected.sent {
+            log.push_sent(event.clone());
+        }
+        for event in &expected.receipts {
+            log.push_receipt(event.clone());
+        }
+        expected
+            .sent
+            .sort_by(|a, b| (&a.sender, a.seq).cmp(&(&b.sender, b.seq)));
+        let actual = log.take_records();
+        assert_eq!(
+            serde_json::to_value(&actual).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        let output = tempfile::tempdir().expect("send order artifacts");
+        crate::artifacts::write_deliveries(output.path(), &actual).unwrap();
+        let replayed = crate::artifacts::read_records(output.path()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&replayed).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert!(log.take_records().sent.is_empty());
+    }
+
+    #[test]
+    #[ignore = "isolated send sorting memory profile; run in a fresh process"]
+    fn generator_send_sort_memory_profile() {
+        let count = std::env::var("CAPACITY_SORT_PROBE_SENDS")
+            .unwrap_or_else(|_| "1000000".into())
+            .parse::<usize>()
+            .expect("send count");
+        assert!((1..=4000000).contains(&count));
+        let compact = std::env::var("CAPACITY_SORT_PROBE_COMPACT").as_deref() == Ok("1");
+        let context = crate::unit_context();
+        let base = crate::complete_records(&context.plans).sent[0].clone();
+        let names: Vec<ReceiptName> = (0..256)
+            .map(|index| format!("peer-{index:03}").into())
+            .collect();
+        let mut events = Vec::with_capacity(count);
+        for position in 0..count {
+            let mut event = base.clone();
+            event.sender = names[position % names.len()].clone();
+            event.seq = u64::try_from(position / names.len()).unwrap();
+            event.sent_us = u64::try_from(position).unwrap();
+            events.push(event);
+        }
+        let collected_rss = crate::diagnostics::resident_memory_bytes(std::process::id());
+        let started = Instant::now();
+        if compact {
+            sort_sent_events(&mut events);
+        } else {
+            events.sort_by(|a, b| (&a.sender, a.seq).cmp(&(&b.sender, b.seq)));
+        }
+        let elapsed_us = started.elapsed().as_micros();
+        assert!(events.is_sorted_by_key(|event| (event.sender.as_str(), event.seq)));
+        for event in &events {
+            let original = usize::try_from(event.sent_us).unwrap();
+            assert_eq!(event.sender, names[original % names.len()]);
+            assert_eq!(event.seq, u64::try_from(original / names.len()).unwrap());
+        }
+        println!(
+            "SEND_SORT_PROFILE {}",
+            serde_json::json!({
+                "sends": count, "compact": compact, "collected_rss_bytes": collected_rss,
+                "event_bytes": std::mem::size_of::<SentEvent>(),
+                "elapsed_us": elapsed_us,
+            })
+        );
+        std::hint::black_box(events);
+    }
 
     #[test]
     fn planned_event_capacity_covers_each_room_without_changing_receipts() {
