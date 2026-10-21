@@ -335,9 +335,9 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
             config.output_dir.display()
         ));
     }
+    let log = Arc::new(EventLog::for_plans(&plans, config.receipt_timings)?);
     std::fs::create_dir_all(&config.output_dir)
         .map_err(|error| format!("create output dir {}: {error}", config.output_dir.display()))?;
-    let log = Arc::new(EventLog::with_receipt_timings(config.receipt_timings));
 
     // Server: spawn the compiled binary or connect to an external endpoint.
     let server_slot: Arc<tokio::sync::Mutex<Option<ServerProcess>>> =

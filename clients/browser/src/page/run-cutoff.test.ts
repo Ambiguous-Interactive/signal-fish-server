@@ -4,8 +4,9 @@ function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 // Regressions #1011/#1027/#1029/#1033/#1066: admit timely receipts across physical timeout.
+// Regression #1099: admitted gameplay payloads survive physical timeout, with or without exchange.
 // Regression #1073, audit #853/#889: raw arrival owns the cutoff across UTF-8 decoding.
-for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
+for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff, exchange] of (
   [
     'fallback',
     'paid',
@@ -65,7 +66,12 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
           : scenario.startsWith('late-')
             ? [1100, 1101]
             : [1100]
-      ).map((cutoff) => [scenario, timerOrder, p2pTimeoutSecs, cutoff] as const),
+      ).flatMap((cutoff) =>
+        (scenario === 'queued-expired-reliable' || scenario === 'queued-expired-unreliable'
+          ? [true, false]
+          : [true]
+        ).map((exchange) => [scenario, timerOrder, p2pTimeoutSecs, cutoff, exchange] as const),
+      ),
     ),
   ),
 )) {
@@ -272,7 +278,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
       serverUrl: 'ws://mock.invalid/v3/ws',
       createRoom: true,
       joinCode: null,
-      peers: linger ? 3 : 2,
+      peers: linger || !exchange ? 3 : 2,
       maxPlayers: null,
       expectTotalPeers: null,
       leaveOnGameStart: false,
@@ -280,7 +286,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
       playerName: 'test',
       appId: 'test',
       platform: 'test',
-      exchange: true,
+      exchange,
       relayPayload: null,
       crippleIce: false,
       p2pTimeoutSecs,
@@ -504,6 +510,18 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
           }
         }
         channel!.onmessage?.({ data });
+        if (
+          scenario.startsWith('queued-expired-') ||
+          scenario.startsWith('queued-replanned-') ||
+          scenario.startsWith('queued-retired-')
+        ) {
+          channel!.onmessage?.({
+            data:
+              channel!.label === 'reliable'
+                ? 'gameplay-before-retirement'
+                : new TextEncoder().encode('gameplay-before-retirement').buffer,
+          });
+        }
         if (scenario.startsWith('queued-decoded-'))
           assert(now === 1101, 'UTF-8 normalization completes after the run cutoff');
         TextEncoder.prototype.encode = originalEncode;
@@ -522,6 +540,7 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
         channel!.onmessage?.({
           data: JSON.stringify({ from: peer, channel: channel!.label, seq: 0 }),
         });
+        channel!.onmessage?.({ data: 'gameplay-after-retirement' });
         assert(
           events.filter((event) => event['event'] === 'channel_message').length === before,
           'a post-timeout callback cannot publish a new receipt',
@@ -537,13 +556,18 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
       }
       assert(
         result ===
-          ((scenario.startsWith('queued-decoded-') && cutoff >= 1100) ||
+          (!exchange ||
+          (scenario.startsWith('queued-decoded-') && cutoff >= 1100) ||
           scenario.startsWith('queued-retired-') ||
           scenario.startsWith('queued-replanned-') ||
           scenario.startsWith('queued-expired-late-')
             ? EXIT_CRITERIA_UNMET
             : 0),
         `${scenario}: pre-cutoff receipt survives only physical retirement; observed ${result}`,
+      );
+      assert(
+        !events.some((event) => event['text'] === 'gameplay-after-retirement'),
+        'a retired callback cannot mint gameplay input',
       );
       if (scenario.startsWith('queued-expired-')) {
         assert(
@@ -554,6 +578,24 @@ for (const [scenario, timerOrder, p2pTimeoutSecs, cutoff] of (
               event['text'] === JSON.stringify({ from: peer, channel: channel!.label, seq: 0 }),
           ).length === (scenario.startsWith('queued-expired-late-') ? 0 : 1),
           'publish only the timely receipt exactly once after output drains',
+        );
+      }
+      if (
+        scenario.startsWith('queued-expired-') ||
+        scenario.startsWith('queued-replanned-') ||
+        scenario.startsWith('queued-retired-')
+      ) {
+        assert(
+          events.filter(
+            (event) =>
+              event['event'] === 'channel_message' &&
+              event['text'] === 'gameplay-before-retirement',
+          ).length ===
+            (scenario.startsWith('queued-expired-') &&
+            !scenario.startsWith('queued-expired-late-')
+              ? 1
+              : 0),
+          `${scenario}: admitted gameplay payload survives physical retirement and respects membership replacement`,
         );
       }
       continue;
