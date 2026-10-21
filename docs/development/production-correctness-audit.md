@@ -6531,3 +6531,51 @@ Godot uses its own engine WebRTC objects. Their sources do not import this
 engine. The external clients need no migration. Broader A20 coverage and
 [#826](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/826)
 remain open.
+
+### F119 — Capacity send ledgers can bypass the declared workload
+
+Session 498 confirms [#1102](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1102)
+at `62e8ded6`, under open audit #826. The capacity oracle validates deliveries
+against recorded sends, but it does not validate those sends against the declared
+schedule. It subtracts raw send-row count from planned count to find unsent work.
+A changed room, phase, intended time, sequence, or duplicate replacing another
+sequence can therefore produce a valid verdict for a different workload.
+Changing a phase can also exclude measured latency samples.
+
+Nextest `9aacbe24-3d28-4d92-861f-69b610559de0` fails the new negative control:
+all five corrupt histories remain valid. Delivery ledger keys are changed with
+send keys where required, so this is distinct from a receipt-pairing failure.
+A later adversarial audit confirms an additional false-valid boundary. All
+sends can name epoch zero or an unannounced epoch. The completeness loop has
+no adopted stream for those sends. Nextest
+`c563ae24-b638-4fa8-93a5-cdff16a576e4` accepts all six histories for epochs
+0, 2, and `u32::MAX`, with either complete receipts or no receipts at all.
+No server delivery defect or historical generator-stall cause is established.
+
+The repair compares every recorded send with the deterministic sender schedule.
+It rejects unknown senders, unplanned sequence keys, duplicate keys across
+incarnations, and room, phase, or intended-time differences. A send must use
+initial epoch 1 or a nonzero later epoch recorded by that sender's rejoin.
+The unsent count now uses distinct matching sends. Extra and malformed rows
+remain in raw send totals, byte evidence, and latency evidence. They cannot
+replace missing planned work. Canonical send blocks are borrowed; arbitrary
+row order uses the existing stable pointer index. Validation stores only peer
+and rejoin lookups plus the current key, rather than a key per send.
+
+Nextest `88de3a99-8679-4049-a876-f502b014d5f8` passes exact reason and unsent-count
+controls, raw artifact round trips, reversed send order, both invalid-epoch
+receipt histories, and valid reconnect, room-replacement, and snapshot-tail
+controls. The valid warm-up fixtures now build real warm-up schedules instead
+of changing the phase of measured sends. A real socket history and its public
+artifact replay reject changed room and phase metadata. Earlier live replay
+and reconnect controls pass in `ccb8f922-f115-402a-aec1-8d51e6921091`.
+Final incarnation-aware all-feature live replay and reconnect controls pass in
+`1746b5be-442a-49ac-b840-158c0b88e13c`. All ten focused all-feature controls
+pass in `288d018d-d682-4a8d-863f-e55788ae2296`. Strict all-target, all-feature
+clippy, formatting, and the panic, timeout, and clock source scans pass.
+
+The change affects the standalone capacity runner and its verdicts. It changes
+no server wire message, library API, client runtime, or dependency. Rust, .NET,
+and Godot clients do not consume this test-target oracle and need no migration.
+The broader audit, long-workload memory proof, and historical incidents remain
+open. This finding does not certify arbitrary churn-event histories.

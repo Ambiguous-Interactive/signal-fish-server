@@ -2359,10 +2359,10 @@ fn rejoined_receipt_ledger_cannot_name_a_previous_epoch_send() {
     }
 }
 
-/// The public artifact replay path must reject both false-valid histories.
+/// The public artifact replay path must reject false-valid delivery and send ledgers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial]
-async fn artifact_replay_rejects_unknown_recipients_and_wrong_ledger_ids() {
+async fn artifact_replay_rejects_invalid_delivery_and_send_ledgers() {
     let output = tempfile::tempdir().expect("replay output");
     let config = RunConfig {
         output_dir: output.path().to_path_buf(),
@@ -2414,6 +2414,42 @@ async fn artifact_replay_rejects_unknown_recipients_and_wrong_ledger_ids() {
                 + replay.payload_bytes.unmatched_egress.application.samples,
             config::count_u64(records.receipts.len())
         );
+    }
+    for mismatch in [
+        oracle::SendPlanMismatch::Room,
+        oracle::SendPlanMismatch::Phase,
+    ] {
+        let mut records = original.clone();
+        let sent = &mut records.sent[0];
+        match mismatch {
+            oracle::SendPlanMismatch::Room => sent.room += 1,
+            oracle::SendPlanMismatch::Phase => {
+                sent.phase = match sent.phase {
+                    schedule::Phase::Warmup => schedule::Phase::Measured,
+                    schedule::Phase::Measured => schedule::Phase::Warmup,
+                };
+            }
+            _ => unreachable!(),
+        }
+        let first = oracle::ScheduledSendViolation {
+            sender: sent.sender.to_string(),
+            seq: sent.seq,
+            mismatch,
+        };
+        artifacts::write_deliveries(output.path(), &records).expect("write changed send plan");
+        let replay = artifacts::replay(output.path()).expect("replay changed send plan");
+        assert!(!replay.valid, "{mismatch:?}");
+        assert!(
+            replay
+                .reasons
+                .contains(&oracle::InvalidReason::InvalidScheduledSends { count: 1, first }),
+            "{:?}",
+            replay.reasons
+        );
+        assert_eq!(replay.totals.unsent, 1);
+        assert_eq!(replay.totals.sent, outcome.summary.totals.sent);
+        assert_eq!(replay.totals.receipts, outcome.summary.totals.receipts);
+        assert_eq!(replay.totals.outstanding, 0);
     }
     artifacts::write_deliveries(output.path(), &original).expect("restore original history");
     let replay = artifacts::replay(output.path()).expect("replay original history");
@@ -2481,19 +2517,24 @@ fn unknown_recipient_deliveries_are_misroutes() {
 
 #[test]
 fn warmup_only_deliveries_have_empty_latency_statistics() {
-    let context = unit_context();
-    let mut records = complete_records(&context.plans);
-    for sent in &mut records.sent {
-        sent.phase = schedule::Phase::Warmup;
-    }
+    let mut config = scenario_config(Encoding::V3Json);
+    config.warmup = Duration::from_millis(400);
+    config.duration = Duration::ZERO;
+    config.send_rate_per_sender = 10.0;
+    let (plans, churn) = build_run_shape(&config).expect("warmup plan");
+    let roster = plans
+        .iter()
+        .map(|plan| (plan.name.clone(), plan.room))
+        .collect::<Vec<_>>();
+    let records = complete_records(&plans);
     let summary = oracle::summarize(
-        &context.plans,
-        &context.roster,
+        &plans,
+        &roster,
         &records,
         1000,
         96,
         DeliveryClass::Reliable,
-        &ChurnPlan::default(),
+        &churn,
         None,
     );
     assert!(
@@ -2527,7 +2568,13 @@ fn scheduled_latency_includes_generator_delay_in_every_view() {
         DeliveryClass::Volatile,
     ] {
         for delay in [0, 40_000, 80_000, 70_000_000] {
-            let context = unit_context_with_class(class);
+            let mut context = unit_context_with_class(class);
+            let mut config = scenario_config(Encoding::V3Json);
+            config.warmup = Duration::from_millis(400);
+            config.duration = Duration::ZERO;
+            config.send_rate_per_sender = 10.0;
+            let (warmup_plans, _) = build_run_shape(&config).expect("warmup sender plan");
+            context.plans[0].sends = warmup_plans[0].sends.clone();
             let mut records = complete_records(&context.plans);
             for sent in &mut records.sent {
                 sent.sent_us += delay + 20;
@@ -2536,12 +2583,6 @@ fn scheduled_latency_includes_generator_delay_in_every_view() {
                 receipt.received_us += delay;
                 if receipt.sender == "r0p0" {
                     receipt.received_us += 1_000;
-                }
-            }
-            // Exclude one sender's warm-up frames from all latency views.
-            for sent in &mut records.sent {
-                if sent.sender == "r0p0" {
-                    sent.phase = schedule::Phase::Warmup;
                 }
             }
             let samples = oracle::latency_samples(&records);
@@ -5803,6 +5844,160 @@ struct UnitContext {
     roster: Vec<(String, u32)>,
     delivery_class: DeliveryClass,
     experiment: Option<Experiment>,
+}
+
+#[test]
+fn unannounced_send_epochs_cannot_hide_delivery_obligations() {
+    let context = unit_context();
+    for epoch in [0, 2, u32::MAX] {
+        for delivered in [false, true] {
+            let mut records = complete_records(&context.plans);
+            for sent in &mut records.sent {
+                sent.epoch = epoch;
+            }
+            if delivered {
+                for receipt in &mut records.receipts {
+                    receipt.epoch = epoch;
+                }
+            } else {
+                records.receipts.clear();
+            }
+            let summary = oracle::summarize(
+                &context.plans,
+                &context.roster,
+                &records,
+                1000,
+                96,
+                DeliveryClass::Reliable,
+                &ChurnPlan::default(),
+                None,
+            );
+            assert!(!summary.valid, "epoch={epoch}, delivered={delivered}");
+            assert!(
+                summary
+                    .reasons
+                    .contains(&oracle::InvalidReason::InvalidScheduledSends {
+                        count: 16,
+                        first: oracle::ScheduledSendViolation {
+                            sender: "r0p0".into(),
+                            seq: 0,
+                            mismatch: oracle::SendPlanMismatch::UnannouncedEpoch { epoch },
+                        },
+                    }),
+                "{:?}",
+                summary.reasons
+            );
+            assert_eq!(summary.totals.unsent, 16);
+            assert_eq!(summary.totals.sent, 16);
+        }
+    }
+}
+
+#[test]
+fn send_plan_corruption_cannot_be_valid_capacity_evidence() {
+    use oracle::SendPlanMismatch;
+    for (mutation, mismatch, count, unsent) in [
+        ("room", SendPlanMismatch::Room, 1, 1),
+        ("phase", SendPlanMismatch::Phase, 1, 1),
+        ("intended_time", SendPlanMismatch::IntendedTime, 1, 1),
+        ("sequence", SendPlanMismatch::UnscheduledSequence, 4, 4),
+        ("duplicate", SendPlanMismatch::Duplicate, 1, 1),
+        ("unknown_sender", SendPlanMismatch::UnknownSender, 1, 1),
+        ("cross_epoch_duplicate", SendPlanMismatch::Duplicate, 1, 1),
+    ] {
+        let context = unit_context();
+        let mut records = complete_records(&context.plans);
+        let sender = records.sent[0].sender.clone();
+        match mutation {
+            "room" => records.sent[0].room += 1,
+            "phase" => records.sent[0].phase = schedule::Phase::Warmup,
+            "intended_time" => records.sent[0].intended_us += 1,
+            "unknown_sender" => records.sent[0].sender = "absent".into(),
+            "sequence" => {
+                for sent in &mut records.sent {
+                    if sent.sender == sender {
+                        sent.seq += 100;
+                    }
+                }
+                for receipt in &mut records.receipts {
+                    if receipt.sender == sender {
+                        receipt.seq += 100;
+                    }
+                }
+            }
+            "duplicate" | "cross_epoch_duplicate" => {
+                records.sent[1].seq = records.sent[0].seq;
+                records.sent[1].intended_us = records.sent[0].intended_us;
+                if mutation == "cross_epoch_duplicate" {
+                    records.sent[1].epoch = 2;
+                    records.churn.push(records::ChurnEvent {
+                        recipient: sender.to_string(),
+                        phase: records::ChurnPhase::Rejoined,
+                        at_us: 0,
+                        epoch: Some(2),
+                        tails: BTreeMap::new(),
+                    });
+                }
+                for receipt in &mut records.receipts {
+                    if receipt.sender == sender && receipt.server_seq == 2 {
+                        receipt.seq = 0;
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+        let expected = oracle::InvalidReason::InvalidScheduledSends {
+            count,
+            first: oracle::ScheduledSendViolation {
+                sender: if mutation == "unknown_sender" {
+                    "absent".to_string()
+                } else {
+                    sender.to_string()
+                },
+                seq: if mutation == "sequence" { 100 } else { 0 },
+                mismatch,
+            },
+        };
+        let raw_sent_count = config::count_u64(records.sent.len());
+        let mut baseline = None;
+        for reverse in [false, true] {
+            if reverse {
+                records.sent.reverse();
+            }
+            let output = tempfile::tempdir().expect("send ledger artifacts");
+            artifacts::write_deliveries(output.path(), &records).expect("write raw ledger");
+            let replayed = artifacts::read_records(output.path()).expect("read raw ledger");
+            for evidence in [&records, &replayed] {
+                let summary = oracle::summarize(
+                    &context.plans,
+                    &context.roster,
+                    evidence,
+                    1_000_000,
+                    96,
+                    DeliveryClass::Reliable,
+                    &ChurnPlan::default(),
+                    None,
+                );
+                assert!(!summary.valid, "{mutation}");
+                assert!(
+                    summary.reasons.contains(&expected),
+                    "{mutation}: {:?}",
+                    summary.reasons
+                );
+                assert_eq!(summary.totals.sent, raw_sent_count, "{mutation}");
+                assert_eq!(summary.totals.unsent, unsent, "{mutation}");
+                assert!(summary
+                    .reasons
+                    .contains(&oracle::InvalidReason::UnsentWork { count: unsent }));
+                let value = serde_json::to_value(summary).expect("summary JSON");
+                if let Some(baseline) = &baseline {
+                    assert_eq!(&value, baseline, "{mutation}");
+                } else {
+                    baseline = Some(value);
+                }
+            }
+        }
+    }
 }
 
 fn unit_context() -> UnitContext {
