@@ -4438,3 +4438,36 @@ These are generator validation measurements, not server throughput or a full
 long-cell memory bound. Event retention and other validation structures still
 grow with the workload. The original ten-minute offered workload, exact delivery
 checks, and 250 ms generator bound remain required. #775 and #1009 stay open.
+
+### Shared gap identity storage (session 499, #775)
+
+Lossy cells still retained two owned names for every omission. The live gap
+collector now clones the existing shared recipient and registry sender names.
+Replay uses the same name pool as sends and receipts. A gap row shrinks from
+72 to 40 bytes on this ARM64 host. The JSON fields, malformed ranges, unknown
+names, duplicates, and arrival order remain exact. Live and replay tests verify
+that gap names share their send or receipt identity storage.
+
+The isolated debug probe retains exact synthetic gap vectors in fresh child
+processes. The old representation uses `String`; the candidate uses shared
+names. Both vectors have the same count and field values. Retained process RSS
+includes the executable and allocator overhead. It does not measure oracle
+scratch or the rest of a live capacity run.
+
+| Gap records | Old retained RSS (bytes) | Shared retained RSS (bytes) |
+| --- | ---: | ---: |
+| 10,000 | 7,864,320 | 7,098,368 |
+| 100,000 | 23,117,824 | 10,690,560 |
+| 1,000,000 | 142,499,840 | 46,698,496 |
+
+The one-million-row child retains about 67% less RSS. Raw measurements remain
+in local `progress/session-499/gap-memory-debug.log`. Reproduce with
+`CAPACITY_GAP_PROBE_EVENTS` and optionally `CAPACITY_GAP_PROBE_STRING_NAMES=1`
+when running ignored `records::tests::generator_gap_memory_profile` in a fresh
+capacity-runner test process. Exact gap/replay controls and the real lossy
+pressure control pass in all-feature Nextest
+`28da1fdc-6a95-4681-b48d-1d4be875a145`. Independent adversarial review has no
+open finding.
+The full ten-minute cell, historical generator stalls, and the complete
+workload memory bound remain unproved. This result does not close #775 or
+establish a server capacity point.

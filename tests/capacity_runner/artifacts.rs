@@ -627,7 +627,7 @@ fn append_delivery_event(
     match event {
         DeliveryEvent::Sent(event) => records.sent.push(names.share_sent(event)),
         DeliveryEvent::Receipt(event) => records.receipts.push(names.share(event)),
-        DeliveryEvent::Gap(event) => records.gaps.push(event),
+        DeliveryEvent::Gap(event) => records.gaps.push(names.share_gap(event)),
         DeliveryEvent::UnsupportedNotice(event) => records.unsupported_notices.push(event),
         DeliveryEvent::Disconnect(event) => records.disconnects.push(event),
         DeliveryEvent::Churn(event) => records.churn.push(event),
@@ -749,10 +749,18 @@ mod tests {
             for event in [
                 DeliveryEvent::Sent(records.sent[0].clone()),
                 DeliveryEvent::Receipt(records.receipts[0].clone()),
+                DeliveryEvent::Gap(crate::records::GapEvent {
+                    recipient: "r0p1".into(),
+                    sender: "r0p0".into(),
+                    epoch: 1,
+                    from_seq: 1,
+                    to_seq: 7,
+                    reason: signal_fish_server::protocol::DeliveryGapReason::LatestSuperseded,
+                }),
             ] {
                 let mut value = serde_json::to_value(event).expect("event");
                 value["sender"] = name.into();
-                if value["event_kind"] == "receipt" {
+                if value["event_kind"] == "receipt" || value["event_kind"] == "gap" {
                     value["recipient"] = name.into();
                 }
                 let mut line = serde_json::to_vec(&value).expect("replay line");
@@ -767,7 +775,8 @@ mod tests {
                 let names = match &borrowed {
                     DeliveryEvent::Sent(event) => vec![&event.sender],
                     DeliveryEvent::Receipt(event) => vec![&event.sender, &event.recipient],
-                    _ => unreachable!("fixture only contains sends and receipts"),
+                    DeliveryEvent::Gap(event) => vec![&event.sender, &event.recipient],
+                    _ => unreachable!("fixture only contains sends, receipts, and gaps"),
                 };
                 for decoded in names {
                     assert_eq!(decoded.as_ref(), name);
@@ -870,6 +879,7 @@ mod tests {
         for event in [
             DeliveryEvent::Sent(expected.sent[0].clone()),
             DeliveryEvent::Receipt(expected.receipts[0].clone()),
+            DeliveryEvent::Gap(expected.gaps[0].clone()),
         ] {
             let mut raw = serde_json::to_string(&event).expect("event");
             raw.pop();
@@ -878,7 +888,7 @@ mod tests {
             let actual = read_records(output.path()).expect("last identity wins");
             let mut value = serde_json::to_value(event).expect("expected event");
             value["sender"] = "最终".into();
-            if value["event_kind"] == "receipt" {
+            if value["event_kind"] == "receipt" || value["event_kind"] == "gap" {
                 value["recipient"] = "最终".into();
             }
             assert_eq!(

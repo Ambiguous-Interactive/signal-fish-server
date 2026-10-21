@@ -4,6 +4,17 @@ use std::hint::black_box;
 use std::time::Duration;
 
 fn bench_response_time_tracker(c: &mut Criterion) {
+    c.bench_function("response_time_tracker_record_existing", |b| {
+        let mut tracker = ResponseTimeTracker::new();
+        tracker.add_sample("websocket_ping_rtt", Duration::from_millis(1));
+        b.iter(|| {
+            black_box(tracker.add_sample(
+                black_box("websocket_ping_rtt"),
+                black_box(Duration::from_micros(750)),
+            ));
+        });
+    });
+
     c.bench_function("response_time_tracker_record", |b| {
         b.iter(|| {
             let mut tracker = ResponseTimeTracker::new();

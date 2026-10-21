@@ -1826,8 +1826,8 @@ pub(crate) async fn handle_inbound(
                         continue;
                     };
                     log.push_gap(GapEvent {
-                        recipient: recipient.to_string(),
-                        sender: sender.to_string(),
+                        recipient: recipient.clone(),
+                        sender,
                         // The report's epoch is the sender's per-connection
                         // stream; the runner's incarnation index is the
                         // stream identity (one join per connection, so the
@@ -3420,6 +3420,16 @@ mod session_poll_tests {
             assert_eq!(records.gaps.len(), 1);
             assert_eq!((records.gaps[0].from_seq, records.gaps[0].to_seq), (4, 4));
             assert_eq!(records.gaps[0].reason, DeliveryGapReason::VolatileDropped);
+            assert_eq!(
+                records.gaps[0].sender.as_ptr(),
+                records.receipts[0].sender.as_ptr(),
+                "live gap sender must share the registry identity"
+            );
+            assert_eq!(
+                records.gaps[0].recipient.as_ptr(),
+                records.receipts[0].recipient.as_ptr(),
+                "live gap recipient must share the task identity"
+            );
             assert!(records.receipts[..3]
                 .iter()
                 .all(|receipt| receipt.received_us == 2_002_000));

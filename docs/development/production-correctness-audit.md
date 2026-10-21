@@ -6579,3 +6579,38 @@ no server wire message, library API, client runtime, or dependency. Rust, .NET,
 and Godot clients do not consume this test-target oracle and need no migration.
 The broader audit, long-workload memory proof, and historical incidents remain
 open. This finding does not certify arbitrary churn-event histories.
+
+### F120 — Capacity rejoin snapshots can name the wrong stream
+
+Session 499 confirms [#1104](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1104)
+at `5a7db157`, under open audit #826. The snapshot resolver reads the registry
+incarnation without checking its player name. It also ignores foreign snapshot
+members and accepts tails beyond the recorded send ledger. Five independently
+malformed snapshots still receive a valid verdict in Nextest
+`42640965-230e-49a2-9b07-ec951c11d4a0`.
+
+The repair validates every recorded rejoin tail against the roster and registry.
+The member must belong to the recipient's room and match the registered name.
+Its epoch must be nonzero and any later incarnation must have a recorded rejoin.
+Its tail cannot exceed that incarnation's send ledger or reach a send scheduled
+after the snapshot. The validator uses intended send time because a snapshot
+can include data before the sender records its completed socket write. A
+snapshot may also precede another task's recorded rejoin time. Both valid
+inversions remain covered. Missing snapshot members remain legal under the
+existing concurrent-join race.
+
+Eight malformed histories now assert their exact invalidation reason. Reversed
+send/churn order and raw artifact round trips preserve the same summary. The
+room-replacement fixture now keys tails by member name, matching the real
+runner; its former player-ID key silently bypassed snapshot-floor validation.
+Focused reconnect, replacement, and snapshot controls pass in Nextest
+`f999822c-e483-42b9-bac0-67ed179302bc`. Independent adversarial review has no
+open finding. Real-socket reconnect and two-wave room replacement, including public artifact
+replay of a changed snapshot identity, pass in all-feature Nextest
+`ce169648-2153-4ddd-a08c-a1cf7566c503`. Final hosted checks are recorded
+in the session PR.
+
+This finding affects the standalone capacity oracle. It establishes no server
+delivery defect and changes no server wire message or client API. Rust, .NET,
+and Godot clients do not consume this test-target oracle and need no migration.
+Arbitrary churn-event validation and broader A01–A22 coverage remain open.

@@ -1,4 +1,4 @@
-//! Allocation baseline for the relay fan-out and classified outbound queue.
+//! Allocation baselines for relay fan-out, outbound queues, and latency metrics.
 //!
 //! Run explicitly:
 //!
@@ -17,7 +17,7 @@ use signal_fish_server::coordination::allocation_benchmark::{
 use signal_fish_server::coordination::{
     ClientDeliveryHandle, ConnectionCloseSignal, MessageCoordinator,
 };
-use signal_fish_server::metrics::ServerMetrics;
+use signal_fish_server::metrics::{ResponseTimeTracker, ServerMetrics};
 use signal_fish_server::protocol::{
     DeliveryClass, GameDataEncoding, LobbyState, PlayerId, RoomId, ServerMessage,
     SpectatorJoinedPayload,
@@ -618,7 +618,29 @@ fn print_sample(scope: &str, room_size: usize, recipients: usize, relays: usize,
     );
 }
 
+fn assert_steady_state_timing_records_do_not_allocate() {
+    let mut tracker = ResponseTimeTracker::new();
+    let operation = String::from("websocket_ping_rtt");
+    tracker.add_sample(&operation, Duration::from_millis(1));
+    let region = Region::new(GLOBAL);
+    for sample in 0..4_096 {
+        std::hint::black_box(tracker.add_sample(&operation, Duration::from_micros(sample)));
+    }
+    let stats = region.change();
+    assert_eq!(
+        stats.allocations, 0,
+        "existing timing operation must reuse its name"
+    );
+    assert_eq!(
+        stats.reallocations, 0,
+        "bounded timing samples must reuse the histogram"
+    );
+    assert_eq!(stats.bytes_allocated, 0);
+    eprintln!("response_time_tracker steady-state: {stats:?}");
+}
+
 fn main() {
+    assert_steady_state_timing_records_do_not_allocate();
     println!(
         "scope,room_size,recipients,relays,deliveries,delivery_handle_clones,allocations,reallocations,\
          deallocations,bytes_allocated,allocation_ops_per_relay,bytes_per_relay,\
