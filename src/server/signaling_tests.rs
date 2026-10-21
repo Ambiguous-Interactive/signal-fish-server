@@ -1905,6 +1905,164 @@ async fn signal_dispatch_waits_for_room_plan_publication_gate() {
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
+async fn backpressured_signal_finishes_before_target_leave_and_rejoin() {
+    let server = create_test_server().await;
+    let (alice, mut alice_rx) = register_client(&server).await;
+    let (bob, mut bob_rx) = register_client(&server).await;
+    for player in [alice, bob] {
+        server.set_client_protocol(&player, v3_webrtc());
+    }
+    let room_id = create_db_room(&server, alice).await;
+    server
+        .database
+        .add_player_to_room(&room_id, player_info(bob, "Bob"))
+        .await
+        .expect("add target member");
+    for player in [alice, bob] {
+        server
+            .connection_manager
+            .assign_client_to_room(&player, room_id)
+            .await;
+    }
+    let original_epoch = server.connection_manager.game_data_epoch(&bob).unwrap();
+    let room_code = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .code;
+    for _ in 0..bob_rx.max_capacity() {
+        server
+            .message_coordinator
+            .send_to_player(&bob, Arc::new(ServerMessage::Pong))
+            .await
+            .expect("fill target queue");
+    }
+    let signal = server.handle_signal(&alice, bob, json!({"Offer": "before-leave"}));
+    tokio::pin!(signal);
+    assert!(futures_util::poll!(&mut signal).is_pending());
+    assert_eq!(
+        server
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed),
+        1,
+        "the signal must reach actual queue backpressure after routing validation"
+    );
+
+    let lifecycle = server.connection_manager.client_lifecycle(&bob).unwrap();
+    let attempts = lifecycle.lock_attempt_count_for_test();
+    let leaving_server = Arc::clone(&server);
+    let leave = tokio::spawn(async move {
+        leaving_server
+            .handle_client_message(&bob, ClientMessage::LeaveRoom)
+            .await;
+    });
+    timeout(
+        Duration::from_secs(1),
+        lifecycle.wait_for_lock_attempt_after_for_test(attempts),
+    )
+    .await
+    .expect("ordinary leave must reach its lifecycle");
+    // This current-thread worker holds its lifecycle and reaches the room gate
+    // before yielding. The target cannot leave while signal admission is parked.
+    assert_eq!(server.get_client_room(&bob).await, Some(room_id));
+    assert!(server
+        .database
+        .get_room_players(&room_id)
+        .await
+        .unwrap()
+        .iter()
+        .any(|player| player.id == bob));
+    assert!(!leave.is_finished());
+    for _ in 0..bob_rx.max_capacity() {
+        assert!(matches!(
+            recv(&mut bob_rx).await.as_ref(),
+            ServerMessage::Pong
+        ));
+    }
+    signal.await;
+    assert!(
+        matches!(recv(&mut bob_rx).await.as_ref(), ServerMessage::Signal {from, signal, ..}
+        if *from == alice && signal == &json!({"Offer": "before-leave"}))
+    );
+    timeout(Duration::from_secs(1), leave)
+        .await
+        .expect("leave completes after admission")
+        .expect("leave worker succeeds");
+    assert!(matches!(
+        recv(&mut bob_rx).await.as_ref(),
+        ServerMessage::RoomLeft
+    ));
+    assert!(
+        matches!(recv(&mut alice_rx).await.as_ref(), ServerMessage::PlayerLeft {player_id, ..}
+        if *player_id == bob)
+    );
+    assert_eq!(server.get_client_room(&bob).await, None);
+    server
+        .handle_signal(&alice, bob, json!({"Offer": "after-leave"}))
+        .await;
+    assert_eq!(
+        error_code(recv(&mut alice_rx).await.as_ref()),
+        Some(ErrorCode::SignalTargetNotFound)
+    );
+    let departed_queue = bob_rx.try_recv();
+    assert!(matches!(
+        departed_queue,
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+
+    server
+        .handle_join_room(
+            &bob,
+            "webrtc-game".into(),
+            Some(room_code),
+            "Bob".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    assert!(matches!(
+        recv(&mut bob_rx).await.as_ref(),
+        ServerMessage::RoomJoined(_)
+    ));
+    for receiver in [&mut alice_rx, &mut bob_rx] {
+        loop {
+            let rejoin_event = receiver.try_recv();
+            let message = match rejoin_event {
+                Ok(message) => message,
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => panic!("rejoined queue closed"),
+            };
+            assert!(
+                matches!(message.as_ref(),
+                ServerMessage::PlayerJoined { player } if player.id == bob)
+                    || matches!(message.as_ref(), ServerMessage::LobbyStateChanged {
+                    lobby_state: LobbyState::Lobby, ready_players, all_ready: false
+                } if ready_players.is_empty()),
+                "unexpected rejoin event: {message:?}"
+            );
+        }
+    }
+    assert_eq!(server.get_client_room(&bob).await, Some(room_id));
+    assert!(server.connection_manager.game_data_epoch(&bob).unwrap() > original_epoch);
+    server
+        .handle_signal(&alice, bob, json!({"Offer": "after-rejoin"}))
+        .await;
+    assert!(
+        matches!(recv(&mut bob_rx).await.as_ref(), ServerMessage::Signal {from, signal, ..}
+        if *from == alice && signal == &json!({"Offer": "after-rejoin"}))
+    );
+    assert_silent(&mut alice_rx).await;
+    assert_silent(&mut bob_rx).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
 async fn signal_waiting_on_plan_gate_cannot_cross_target_incarnations() {
     let server = create_test_server().await;
     let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;

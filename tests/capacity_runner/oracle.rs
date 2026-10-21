@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use hdrhistogram::Histogram;
+use hdrhistogram::{Counter, Histogram};
 
 use crate::config::{count_u64, DeliveryClass, Experiment};
 use crate::records::{ChurnPhase, GapEvent, RunRecords, SentEvent};
@@ -815,21 +815,21 @@ pub fn latency_samples(records: &RunRecords) -> Vec<u64> {
 }
 
 /// Streaming latency statistics retain HDR buckets and the exact raw maximum.
-struct LatencyAccumulator {
-    histogram: Histogram<u64>,
+struct LatencyAccumulator<T: Counter = u64> {
+    histogram: Histogram<T>,
     max_us: u64,
 }
 
-impl Default for LatencyAccumulator {
+impl<T: Counter> Default for LatencyAccumulator<T> {
     fn default() -> Self {
         Self {
-            histogram: Histogram::<u64>::new(3).expect("latency histogram precision"),
+            histogram: Histogram::<T>::new(3).expect("latency histogram precision"),
             max_us: 0,
         }
     }
 }
 
-impl LatencyAccumulator {
+impl<T: Counter> LatencyAccumulator<T> {
     fn record(&mut self, sample: u64) {
         self.histogram
             .record(sample)
@@ -846,6 +846,45 @@ impl LatencyAccumulator {
             max_us: self.max_us,
         }
     }
+}
+
+fn compact_latency_count(receipts: u64) -> bool {
+    u32::try_from(receipts).is_ok()
+}
+
+/// Preserve each recipient's tail while bounding each histogram counter by
+/// the caller's proven sample limit. The aggregate still uses u64 counters.
+fn recipient_latency_statistics<T: Counter>(
+    records: &RunRecords,
+    member_names: &BTreeSet<&str>,
+    per_recipient: &mut [RecipientOutcome],
+    maximum_recipient_receipts: u64,
+) -> LatencyStats {
+    assert!(
+        T::from_u64(maximum_recipient_receipts).is_some(),
+        "latency counter must fit every raw receipt"
+    );
+    let mut latency = LatencyAccumulator::<u64>::default();
+    let mut latency_by_recipient: BTreeMap<&str, LatencyAccumulator<T>> = BTreeMap::new();
+    for (recipient, sample) in latency_pairs(records) {
+        latency.record(sample);
+        // Misrouted receipts remain in the aggregate. Allocate recipient
+        // buckets only for roster peers with measured receipts.
+        if let Some(&recipient) = member_names.get(recipient) {
+            latency_by_recipient
+                .entry(recipient)
+                .or_default()
+                .record(sample);
+        }
+    }
+    for outcome in per_recipient {
+        outcome.latency_us = latency_by_recipient
+            .get(outcome.recipient.as_str())
+            .map(LatencyAccumulator::stats)
+            .unwrap_or_default();
+    }
+
+    latency.stats()
 }
 
 /// The shared histogram for summary percentiles and the artifact. Grow the
@@ -1606,6 +1645,7 @@ pub fn summarize(
     let mut leaked = Category::default();
 
     let mut per_recipient = Vec::new();
+    let mut maximum_recipient_receipts = 0_u64;
     for (recipient, room) in roster {
         let view = views
             .get(recipient.as_str())
@@ -1642,7 +1682,10 @@ pub fn summarize(
         // that epoch, not outlive its stream (the sender rejoined past it),
         // and never repeat what the rejoin snapshot already accounted.
         let mut received_by_sender: BTreeMap<&str, u64> = BTreeMap::new();
+        let mut recipient_receipts = 0_u64;
         for ((_, sender, epoch), stream) in recipient_arrivals(&arrivals, recipient) {
+            // Count malformed, duplicate, opaque, and misrouted arrivals too.
+            recipient_receipts += stream.total;
             if stream.total == 0 {
                 continue;
             }
@@ -1680,6 +1723,8 @@ pub fn summarize(
                 .misrouted
                 .append_to(&mut misrouted, recipient, sender, *epoch);
         }
+
+        maximum_recipient_receipts = maximum_recipient_receipts.max(recipient_receipts);
 
         // (b) Per-owed-stream completeness: duplicates, arrival order, and
         // the class's omission contract, over every `(sender, epoch)` stream
@@ -1782,27 +1827,25 @@ pub fn summarize(
         per_recipient.push(outcome);
     }
 
-    // Per-recipient latency tails: one starved room must be visible in the
-    // summary, not smoothed away by the run aggregate.
-    let mut latency = LatencyAccumulator::default();
-    let mut latency_by_recipient: BTreeMap<&str, LatencyAccumulator> = BTreeMap::new();
-    for (recipient, sample) in latency_pairs(records) {
-        latency.record(sample);
-        // Misrouted receipts remain in the aggregate. Allocate recipient
-        // buckets only for roster peers with measured receipts.
-        if let Some(&recipient) = member_names.get(recipient) {
-            latency_by_recipient
-                .entry(recipient)
-                .or_default()
-                .record(sample);
-        }
-    }
-    for outcome in &mut per_recipient {
-        outcome.latency_us = latency_by_recipient
-            .get(outcome.recipient.as_str())
-            .map(LatencyAccumulator::stats)
-            .unwrap_or_default();
-    }
+    // Every recipient bucket is bounded by all raw arrivals at that peer,
+    // including duplicates and misroutes. Unknown peers have no histogram.
+    // This bound remains small even when room fan-out makes total receipts
+    // exceed u32::MAX. Larger per-peer evidence retains u64 counters.
+    let latency_us = if compact_latency_count(maximum_recipient_receipts) {
+        recipient_latency_statistics::<u32>(
+            records,
+            &member_names,
+            &mut per_recipient,
+            maximum_recipient_receipts,
+        )
+    } else {
+        recipient_latency_statistics::<u64>(
+            records,
+            &member_names,
+            &mut per_recipient,
+            maximum_recipient_receipts,
+        )
+    };
 
     if let Some(reason) =
         missing.into_reason(|count, first| InvalidReason::MissingDeliveries { count, first })
@@ -1943,7 +1986,7 @@ pub fn summarize(
             gap_covered: total_gap_covered,
         },
         per_recipient,
-        latency_us: latency.stats(),
+        latency_us,
         generator_lag_us: LagStats {
             max_us: max_lag,
             p99_us: lag_p99,
@@ -2216,6 +2259,175 @@ fn generator_lag_stats(sent: &[SentEvent]) -> (u64, u64) {
 #[cfg(test)]
 mod coverage_tests {
     use super::*;
+
+    #[test]
+    fn compact_recipient_latency_matches_wide_counts_and_preserves_raw_evidence() {
+        let context = crate::unit_context();
+        let mut records = crate::complete_records(&context.plans);
+        for (index, receipt) in records.receipts.iter_mut().enumerate() {
+            receipt.received_us = [0, 8, 500_000, 180_000_008, u64::MAX][index % 5];
+        }
+        let mut extra = records.receipts[0].clone();
+        extra.recipient = "unknown-recipient".into();
+        records
+            .receipts
+            .extend([extra, records.receipts[0].clone()]);
+        let mut malformed = records.receipts[0].clone();
+        malformed.epoch = u32::MAX;
+        malformed.server_seq = 0;
+        records.receipts.push(malformed.clone());
+        malformed.recipient = malformed.sender.clone();
+        records.receipts.push(malformed.clone());
+        malformed.sender = "unknown-sender".into();
+        let mut unplanned = records.sent[0].clone();
+        unplanned.sender = malformed.sender.clone();
+        records.sent.push(unplanned);
+        records.receipts.push(malformed);
+        let before = serde_json::to_value(&records).expect("raw records");
+        let baseline = summarize(
+            &context.plans,
+            &context.roster,
+            &records,
+            1000,
+            96,
+            DeliveryClass::Reliable,
+            &ChurnPlan::default(),
+            None,
+        );
+        let members = context
+            .roster
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let mut compact_peers = baseline.per_recipient.clone();
+        let mut wide_peers = compact_peers.clone();
+        let compact = recipient_latency_statistics::<u32>(
+            &records,
+            &members,
+            &mut compact_peers,
+            count_u64(records.receipts.len()),
+        );
+        let wide = recipient_latency_statistics::<u64>(
+            &records,
+            &members,
+            &mut wide_peers,
+            count_u64(records.receipts.len()),
+        );
+        assert_eq!(
+            serde_json::to_value(compact).unwrap(),
+            serde_json::to_value(wide).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(compact_peers).unwrap(),
+            serde_json::to_value(wide_peers).unwrap()
+        );
+        let mut legacy = baseline.clone();
+        legacy.latency_us = recipient_latency_statistics::<u64>(
+            &records,
+            &members,
+            &mut legacy.per_recipient,
+            count_u64(records.receipts.len()),
+        );
+        assert_eq!(
+            serde_json::to_value(&baseline).unwrap(),
+            serde_json::to_value(&legacy).unwrap()
+        );
+        let output = tempfile::tempdir().expect("latency replay");
+        crate::artifacts::write_deliveries(output.path(), &records).expect("write latency events");
+        let replayed = crate::artifacts::read_records(output.path()).expect("read latency events");
+        let replay_summary = summarize(
+            &context.plans,
+            &context.roster,
+            &replayed,
+            1000,
+            96,
+            DeliveryClass::Reliable,
+            &ChurnPlan::default(),
+            None,
+        );
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap(),
+            serde_json::to_value(replay_summary).unwrap()
+        );
+        assert_eq!(before, serde_json::to_value(&replayed).unwrap());
+        assert_eq!(before, serde_json::to_value(&records).unwrap());
+        for records in [&records, &RunRecords::default()] {
+            let compact = recipient_latency_statistics::<u32>(
+                records,
+                &BTreeSet::new(),
+                &mut [],
+                count_u64(records.receipts.len()),
+            );
+            let wide = recipient_latency_statistics::<u64>(
+                records,
+                &BTreeSet::new(),
+                &mut [],
+                count_u64(records.receipts.len()),
+            );
+            assert_eq!(
+                serde_json::to_value(compact).unwrap(),
+                serde_json::to_value(wide).unwrap()
+            );
+        }
+
+        // A full narrow bucket remains exact at the inclusive safety bound.
+        // More raw rows at one peer select u64 before any histogram exists.
+        assert!(compact_latency_count(0));
+        assert!(compact_latency_count(u64::from(u32::MAX)));
+        assert!(!compact_latency_count(u64::from(u32::MAX) + 1));
+        let mut narrow = Histogram::<u32>::new(3).unwrap();
+        let mut wide = Histogram::<u64>::new(3).unwrap();
+        narrow.record_n(8, u32::MAX).unwrap();
+        wide.record_n(8, u64::from(u32::MAX)).unwrap();
+        assert_eq!(narrow.len(), wide.len());
+        assert_eq!(narrow.value_at_quantile(0.99), wide.value_at_quantile(0.99));
+    }
+
+    #[test]
+    #[ignore = "recipient HDR memory profile; run in a fresh process"]
+    fn generator_recipient_latency_memory_profile() {
+        let peers = std::env::var("CAPACITY_LATENCY_PROBE_PEERS")
+            .unwrap_or_else(|_| "1000".into())
+            .parse::<usize>()
+            .expect("peer count");
+        assert!((1..=16000).contains(&peers));
+        let compact = std::env::var("CAPACITY_LATENCY_PROBE_COMPACT").as_deref() == Ok("1");
+        fn measure<T: Counter>(peers: usize) {
+            let started = std::time::Instant::now();
+            let mut histograms: Vec<LatencyAccumulator<T>> =
+                (0..peers).map(|_| LatencyAccumulator::default()).collect();
+            for histogram in &mut histograms {
+                // Sweep low and high buckets, including a long-tail sample.
+                for sample in 0..4096 {
+                    histogram.record(sample * 251);
+                }
+            }
+            let mut checksum = 0_u64;
+            let mut bucket_bytes = 0_usize;
+            for histogram in &histograms {
+                let stats = histogram.stats();
+                assert_eq!(stats.samples, 4096);
+                assert_eq!(stats.max_us, 4095 * 251);
+                checksum += stats.p50_us + stats.p95_us + stats.p99_us + stats.samples;
+                bucket_bytes += histogram.histogram.distinct_values() * std::mem::size_of::<T>();
+            }
+            println!(
+                "RECIPIENT_LATENCY_PROFILE {}",
+                serde_json::json!({
+                    "peers": peers, "counter_bytes": std::mem::size_of::<T>(),
+                    "bucket_bytes": bucket_bytes, "checksum": checksum,
+                    "rss_bytes": crate::diagnostics::resident_memory_bytes(std::process::id()),
+                    "elapsed_us": started.elapsed().as_micros(),
+                })
+            );
+            std::hint::black_box(histograms);
+        }
+        if compact {
+            measure::<u32>(peers);
+        } else {
+            measure::<u64>(peers);
+        }
+    }
 
     #[test]
     fn churn_evidence_cannot_replace_planned_disconnects_with_rejoins() {

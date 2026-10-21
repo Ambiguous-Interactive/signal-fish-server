@@ -45,11 +45,28 @@ pub(crate) fn local_initiates(local: PlayerId, remote: PlayerId) -> bool {
 /// the measure the per-payload byte caps (`security.max_signal_bytes`,
 /// `security.max_connection_info_bytes`, the relay byte budget) enforce.
 ///
-/// `serde_json::to_vec` over a `serde_json::Value` can only fail for maps with
-/// non-string keys, which `Value` cannot represent, so the error arm is purely
-/// defensive: treat an unserializable payload as oversized rather than relay it.
+/// Count the same serializer output without allocating a temporary payload.
+/// Treat serialization or byte-count overflow as oversized.
 pub(crate) fn canonical_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
-    serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len())
+    #[derive(Default)]
+    struct ByteCount(usize);
+
+    impl std::io::Write for ByteCount {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .ok_or_else(|| std::io::Error::other("JSON byte count overflows"))?;
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut count = ByteCount::default();
+    serde_json::to_writer(&mut count, value).map_or(usize::MAX, |()| count.0)
 }
 
 impl EnhancedGameServer {
@@ -844,5 +861,69 @@ impl EnhancedGameServer {
         let _ = self
             .send_error_to_player(player_id, message.into(), Some(error_code))
             .await;
+    }
+}
+
+#[cfg(test)]
+mod json_length_tests {
+    use super::canonical_json_len;
+    use crate::protocol::ConnectionInfo;
+    use serde::Serialize;
+    use serde_json::json;
+
+    #[test]
+    fn canonical_json_length_preserves_payload_and_metadata_bytes() {
+        let mut values = vec![
+            serde_json::Value::Null,
+            json!([true, false, u64::MAX, i64::MIN, -0.0, 1.25e100]),
+            json!(""),
+            json!({"escaped\"key": [null, "quotes\", slash\\, newline\n, 雪 😀"]}),
+            json!({"control": (0_u8..32).map(char::from).collect::<String>()}),
+        ];
+        for size in [96, 1_024, 16_384, 65_536] {
+            values.push(json!({"payload": "a".repeat(size), "nested": [{"seq": 42}]}));
+        }
+        for (index, value) in values.into_iter().enumerate() {
+            assert_eq!(
+                canonical_json_len(&value),
+                serde_json::to_vec(&value).expect("canonical payload").len(),
+                "payload cohort {index}"
+            );
+            let metadata = ConnectionInfo::Custom { data: value };
+            assert_eq!(
+                canonical_json_len(&metadata),
+                serde_json::to_vec(&metadata)
+                    .expect("canonical metadata")
+                    .len(),
+                "metadata cohort {index}"
+            );
+        }
+        let direct = ConnectionInfo::Direct {
+            host: "host-雪.example".into(),
+            port: u16::MAX,
+        };
+        assert_eq!(
+            canonical_json_len(&direct),
+            serde_json::to_vec(&direct).expect("direct metadata").len()
+        );
+    }
+
+    #[test]
+    fn canonical_json_length_keeps_failed_serialization_oversized() {
+        let invalid_key = std::collections::BTreeMap::from([((1, 2), "invalid JSON key")]);
+        assert!(serde_json::to_vec(&invalid_key).is_err());
+        assert_eq!(canonical_json_len(&invalid_key), usize::MAX);
+
+        struct PartialFailure;
+        impl Serialize for PartialFailure {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::SerializeSeq;
+                let mut sequence = serializer.serialize_seq(Some(2))?;
+                sequence.serialize_element("written before error")?;
+                Err(serde::ser::Error::custom("injected serializer failure"))
+            }
+        }
+        assert!(serde_json::to_vec(&PartialFailure).is_err());
+        assert_eq!(canonical_json_len(&PartialFailure), usize::MAX);
     }
 }

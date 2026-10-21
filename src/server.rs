@@ -497,6 +497,11 @@ pub(crate) enum OwnedRoomOperationPanicPoint {
 #[doc(hidden)]
 pub mod allocation_benchmark {
     pub use super::game_data::broadcast_game_data_with;
+
+    /// Measure the production payload-sizing path without starting a server.
+    pub fn canonical_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
+        super::signaling::canonical_json_len(value)
+    }
 }
 
 // Removed unused imports

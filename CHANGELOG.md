@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Remove temporary payload allocation when measuring JSON gameplay, signaling, and peer metadata bytes (#636).
 - Reduce dashboard room-query allocations and release room locks before percentile sorting (#636).
 - Reduce the cost of average timing queries in the Rust library (#636).
 - Reduce memory allocation when recording server response and WebSocket round-trip timings (#636).
