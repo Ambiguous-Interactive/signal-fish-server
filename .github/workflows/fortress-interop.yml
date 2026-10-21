@@ -53,7 +53,7 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           components: clippy, rustfmt
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2.9.2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           workspaces: |
             .
@@ -90,7 +90,7 @@ jobs:
         with:
           toolchain: ${{ steps.deny-msrv.outputs.version }}
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2.87.28
+        uses: taiki-e/install-action@v2.87.29
         with:
           tool: cargo-deny@0.20.2
       - name: Run cargo-deny (Fortress fixture)
